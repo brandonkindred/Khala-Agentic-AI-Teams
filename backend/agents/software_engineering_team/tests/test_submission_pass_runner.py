@@ -1,0 +1,577 @@
+"""Tests for the shared submission-pass runner (bisect recovery, no char caps)."""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Dict, List
+
+import code_review_agent.submission_pass_runner as runner_mod
+import pytest
+from code_review_agent.submission_pass_runner import (
+    FileBatch,
+    _call_agent,
+    _is_overflow_shaped,
+    run_submission_pass,
+)
+from strands.types.exceptions import ContextWindowOverflowException, MaxTokensReachedException
+
+from llm_service import LLMTruncatedError
+from llm_service.clients.dummy import DummyLLMClient
+
+
+def _paths_prompt(batch: FileBatch) -> str:
+    return "PATHS:" + ",".join(path for path, _ in batch.items)
+
+
+def _patch_via_reasoning_json(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Any,
+) -> None:
+    """Stub ``run_agent_via_reasoning`` to invoke ``handler(reasoning_prompt)`` -> dict."""
+
+    def _fake(**kwargs: Any) -> Any:
+        data = handler(kwargs["reasoning_prompt"])
+        if isinstance(data, BaseException):
+            raise data
+        return kwargs["parse"](json.dumps(data))
+
+    monkeypatch.setattr(runner_mod, "run_agent_via_reasoning", _fake)
+
+
+def test_call_agent_delegates_to_run_agent_via_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[dict[str, Any]] = []
+
+    def _fake(**kwargs: Any) -> dict[str, str]:
+        seen.append(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(runner_mod, "run_agent_via_reasoning", _fake)
+    sentinel_tools = [{"name": "list_files"}]
+    result = _call_agent(
+        object(),
+        "reasoning sys",
+        "format json",
+        sentinel_tools,
+        "user prompt",
+        json.loads,
+    )
+    assert result == {"ok": True}
+    assert len(seen) == 1
+    assert seen[0]["reasoning_system_prompt"] == "reasoning sys"
+    assert seen[0]["formatting_instructions"] == "format json"
+    assert seen[0]["reasoning_prompt"] == "user prompt"
+    assert seen[0]["tools"] == sentinel_tools
+    assert seen[0]["reasoning_think"] is True
+
+
+class _FailIfAsked(DummyLLMClient):
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        raise AssertionError(f"must not call the LLM, got prompt: {prompt!r}")
+
+
+def test_call_agent_records_each_reasoning_model_turn(monkeypatch) -> None:
+    """A tool-using reasoning pass with two assistant messages must record
+    each as its own transcript call, not one collapsed conversation blob."""
+    from llm_service import llm_attribution
+
+    class _Agent:
+        messages = [
+            {"role": "user", "content": [{"text": "user prompt"}]},
+            {"role": "assistant", "content": [{"toolUse": {"name": "read_file"}}]},
+            {"role": "user", "content": [{"toolResult": {"status": "success"}}]},
+            {"role": "assistant", "content": [{"text": "done"}]},
+        ]
+
+    def _fake(**kwargs: Any) -> str:
+        on_agent = kwargs.get("on_reasoning_agent")
+        if on_agent is not None:
+            on_agent(_Agent())
+        on_fmt = kwargs.get("on_formatting")
+        if on_fmt is not None:
+            on_fmt("format prompt", '{"ok": true}')
+        return kwargs["parse"]('{"ok": true}')
+
+    captured: List[Any] = []
+    monkeypatch.setattr(runner_mod, "run_agent_via_reasoning", _fake)
+    monkeypatch.setattr(
+        runner_mod,
+        "record_transcript_entry",
+        lambda *args, **kwargs: captured.append((args, kwargs)),
+    )
+
+    with llm_attribution(job_id="job-1"):
+        runner_mod._call_agent(
+            object(),
+            "system prompt",
+            "format json as an object",
+            [],
+            "user prompt",
+            parse=lambda raw: raw,
+            pass_label="architecture",
+            batch_target="batch 1/1",
+        )
+
+    assert len(captured) == 3
+    first_response = json.loads(captured[0][0][3])
+    second_response = json.loads(captured[1][0][3])
+    assert first_response["role"] == "assistant"
+    assert "toolUse" in (first_response.get("content") or [{}])[0]
+    assert second_response["role"] == "assistant"
+    assert captured[2][0][2] == "format prompt"
+
+
+def test_call_agent_records_full_conversation_in_transcript(monkeypatch) -> None:
+    """The transcript records the reasoning ``agent.messages`` conversation and
+    a separate formatting-pass entry (format prompt + JSON reply). This call
+    site is tool-using (``tools`` may be non-empty), so recording only the
+    final text would silently drop any intermediate tool-loop turns.
+
+    Stubs ``run_agent_via_reasoning`` so this assertion does not depend on a
+    live Strands Agent, and so it still holds when the session-wide
+    ``submission_pass_two_call_client`` autouse stub is loaded (as in CI
+    pytest-xdist).
+    """
+    from llm_service import llm_attribution
+
+    class _Agent:
+        messages = [
+            {"role": "user", "content": [{"text": "user prompt"}]},
+            {"role": "assistant", "content": [{"text": "reply"}]},
+        ]
+
+    def _fake(**kwargs: Any) -> str:
+        on_agent = kwargs.get("on_reasoning_agent")
+        if on_agent is not None:
+            on_agent(_Agent())
+        on_fmt = kwargs.get("on_formatting")
+        if on_fmt is not None:
+            on_fmt("format prompt", '{"ok": true}')
+        return kwargs["parse"]('{"ok": true}')
+
+    captured: List[Any] = []
+    monkeypatch.setattr(runner_mod, "run_agent_via_reasoning", _fake)
+    monkeypatch.setattr(
+        runner_mod,
+        "record_transcript_entry",
+        lambda *args, **kwargs: captured.append((args, kwargs)),
+    )
+
+    with llm_attribution(job_id="job-1"):
+        result = runner_mod._call_agent(
+            object(),
+            "system prompt",
+            "format json as an object",
+            [],
+            "user prompt",
+            parse=lambda raw: raw,
+            pass_label="architecture",
+            batch_target="batch 1/1",
+        )
+
+    assert isinstance(result, str) and result  # parse() got the final text, unchanged
+    assert len(captured) == 2
+    stage, target, prompt, response = captured[0][0]
+    assert stage == "architecture"
+    assert target == "batch 1/1"
+    assistant = json.loads(response)
+    assert assistant["role"] == "assistant"
+    assert "user prompt" in prompt or "user" in prompt
+    fmt_stage, fmt_target, fmt_prompt, fmt_response = captured[1][0]
+    assert fmt_stage == "architecture"
+    assert fmt_target == "batch 1/1"
+    assert fmt_prompt == "format prompt"
+    assert fmt_response == '{"ok": true}'
+    from code_review_agent.via_reasoning import formatting_system_prompt_with_untrusted_guard
+
+    assert captured[1][1]["system_prompt"] == formatting_system_prompt_with_untrusted_guard(None)
+
+
+def test_call_agent_records_each_formatting_continuation_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """on_formatting may fire once per continuation HTTP turn; each pair must
+    become its own transcript entry rather than overwriting a single slot."""
+    from llm_service import llm_attribution
+
+    class _Agent:
+        messages = [{"role": "user", "content": [{"text": "user prompt"}]}]
+
+    def _fake(**kwargs: Any) -> str:
+        on_agent = kwargs.get("on_reasoning_agent")
+        if on_agent is not None:
+            on_agent(_Agent())
+        on_fmt = kwargs.get("on_formatting")
+        if on_fmt is not None:
+            on_fmt("format prompt", '{"approved":')
+            on_fmt("Please continue.", " true}")
+        return kwargs["parse"]('{"approved": true}')
+
+    captured: List[Any] = []
+    monkeypatch.setattr(runner_mod, "run_agent_via_reasoning", _fake)
+    monkeypatch.setattr(
+        runner_mod,
+        "record_transcript_entry",
+        lambda *args, **kwargs: captured.append((args, kwargs)),
+    )
+
+    with llm_attribution(job_id="job-1"):
+        runner_mod._call_agent(
+            object(),
+            "system prompt",
+            "format json as an object",
+            [],
+            "user prompt",
+            parse=lambda raw: raw,
+            pass_label="architecture",
+            batch_target="batch 1/1",
+        )
+
+    assert len(captured) == 3
+    assert captured[1][0][2] == "format prompt"
+    assert captured[1][0][3] == '{"approved":'
+    assert captured[2][0][2] == "Please continue."
+    assert captured[2][0][3] == " true}"
+    from code_review_agent.via_reasoning import formatting_system_prompt_with_untrusted_guard
+
+    assert captured[1][1]["system_prompt"] == formatting_system_prompt_with_untrusted_guard(None)
+    assert captured[2][1]["system_prompt"] == formatting_system_prompt_with_untrusted_guard(None)
+
+
+def test_call_agent_records_formatting_turn_start_times(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """duration_ms for each formatting turn ends at the next turn's start;
+    only the last turn uses the ``finally`` timestamp. Sharing one end time
+    would make the first continuation include every later model call."""
+    from llm_service import llm_attribution
+
+    class _Agent:
+        messages = [{"role": "user", "content": [{"text": "user prompt"}]}]
+
+    clock = {"t": 1000.0}
+
+    def _now() -> float:
+        return clock["t"]
+
+    def _fake(**kwargs: Any) -> str:
+        on_agent = kwargs.get("on_reasoning_agent")
+        if on_agent is not None:
+            on_agent(_Agent())
+        on_start = kwargs.get("on_formatting_start")
+        if on_start is not None:
+            clock["t"] = 1010.0
+            on_start()
+        on_fmt = kwargs.get("on_formatting")
+        if on_fmt is not None:
+            clock["t"] = 1030.0
+            on_fmt("format prompt", '{"approved":')
+            on_fmt("Please continue.", " true}")
+        clock["t"] = 1035.0
+        return kwargs["parse"]('{"approved": true}')
+
+    captured: List[Any] = []
+    monkeypatch.setattr(runner_mod.time, "monotonic", _now)
+    monkeypatch.setattr(runner_mod, "run_agent_via_reasoning", _fake)
+    monkeypatch.setattr(
+        runner_mod,
+        "record_transcript_entry",
+        lambda *args, **kwargs: captured.append((args, kwargs)),
+    )
+
+    with llm_attribution(job_id="job-1"):
+        runner_mod._call_agent(
+            object(),
+            "system prompt",
+            "format json as an object",
+            [],
+            "user prompt",
+            parse=lambda raw: raw,
+            pass_label="architecture",
+            batch_target="batch 1/1",
+        )
+
+    assert captured[1][1]["duration_ms"] == 20000.0
+    assert captured[2][1]["duration_ms"] == 5000.0
+
+
+def test_two_call_client_stub_invokes_on_reasoning_agent(monkeypatch) -> None:
+    """The session-wide submission-pass stub must still fire on_reasoning_agent
+    so transcript recording is not silently skipped under pytest-xdist."""
+    from tests.submission_pass_two_call_client import (
+        wire_run_agent_via_reasoning_for_test_clients,
+    )
+
+    seen: List[Any] = []
+    wire_run_agent_via_reasoning_for_test_clients(monkeypatch, runner_mod)
+    result = runner_mod.run_agent_via_reasoning(
+        model=DummyLLMClient(),
+        reasoning_prompt="user prompt",
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
+        parse=lambda raw: raw,
+        on_reasoning_agent=lambda agent: seen.append(agent.messages),
+    )
+    assert isinstance(result, str) and result
+    assert len(seen) == 1
+    assert seen[0][0]["role"] == "user"
+
+
+def test_is_overflow_shaped_classifies_known_and_unknown_exceptions() -> None:
+    assert _is_overflow_shaped(ContextWindowOverflowException("x")) is True
+    assert _is_overflow_shaped(MaxTokensReachedException("x")) is True
+    assert (
+        _is_overflow_shaped(LLMTruncatedError("x", partial_content="", finish_reason="length"))
+        is True
+    )
+    assert _is_overflow_shaped(RuntimeError("x")) is False
+    assert _is_overflow_shaped(json.JSONDecodeError("bad", "doc", 0)) is False
+
+
+def test_is_overflow_shaped_matches_provider_prompt_too_large_messages() -> None:
+    """Generic 4xx wrappers that name context/prompt length must recover."""
+    from llm_service.interface import LLMPermanentError
+
+    assert _is_overflow_shaped(LLMPermanentError("prompt is too long for the model")) is True
+    assert _is_overflow_shaped(RuntimeError("Request exceeds the context window")) is True
+    wrapped = LLMPermanentError("bad request")
+    wrapped.__cause__ = ValueError("input too long: 200000 tokens")
+    assert _is_overflow_shaped(wrapped) is True
+    assert _is_overflow_shaped(LLMPermanentError("invalid api key")) is False
+
+
+def test_returns_empty_and_makes_no_call_for_empty_changed_files() -> None:
+    result = run_submission_pass(
+        _FailIfAsked(),
+        changed_files=[],
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
+        build_prompt=_paths_prompt,
+        tools=[],
+        parse=json.loads,
+    )
+    assert result == []
+
+
+def test_single_call_inlines_full_changed_file_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_batches: List[FileBatch] = []
+
+    def build_prompt(batch: FileBatch) -> str:
+        seen_batches.append(batch)
+        return _paths_prompt(batch)
+
+    def _handler(prompt: str) -> Any:
+        return {"paths": prompt.replace("PATHS:", "")}
+
+    _patch_via_reasoning_json(monkeypatch, _handler)
+
+    files = [("a.py", "aaaa"), ("b.py", "bbbb"), ("c.py", "cccc")]
+    result = run_submission_pass(
+        DummyLLMClient(),
+        changed_files=files,
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
+        build_prompt=build_prompt,
+        tools=[],
+        parse=json.loads,
+    )
+    assert result == [{"paths": "a.py,b.py,c.py"}]
+    assert len(seen_batches) == 1
+    assert seen_batches[0].items == files
+    assert seen_batches[0].is_partial is False
+
+
+def test_build_prompt_receives_full_file_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_content: List[str] = []
+
+    def build_prompt(batch: FileBatch) -> str:
+        for _path, content in batch.items:
+            seen_content.append(content)
+        return "ok"
+
+    _patch_via_reasoning_json(monkeypatch, lambda _p: {"ok": True})
+
+    big = "X" * 50_000
+    run_submission_pass(
+        DummyLLMClient(),
+        changed_files=[("big.py", big)],
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
+        build_prompt=build_prompt,
+        tools=[],
+        parse=json.loads,
+    )
+    assert seen_content == [big]
+
+
+def test_reactive_bisect_recovers_multi_file_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_batches: List[FileBatch] = []
+
+    def build_prompt(batch: FileBatch) -> str:
+        seen_batches.append(batch)
+        return _paths_prompt(batch)
+
+    def _handler(prompt: str) -> Any:
+        paths = prompt.replace("PATHS:", "")
+        if "," in paths:
+            raise MaxTokensReachedException("too large")
+        return {"file": paths}
+
+    _patch_via_reasoning_json(monkeypatch, _handler)
+
+    files = [("a.py", "aaaa"), ("b.py", "bbbb")]
+    result = run_submission_pass(
+        DummyLLMClient(),
+        changed_files=files,
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
+        build_prompt=build_prompt,
+        tools=[],
+        parse=json.loads,
+    )
+    assert result == [{"file": "a.py"}, {"file": "b.py"}]
+    assert [b.is_partial for b in seen_batches] == [False, True, True]
+
+
+def test_provider_prompt_too_large_message_triggers_bisect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_service.interface import LLMPermanentError
+
+    seen_batches: List[FileBatch] = []
+
+    def build_prompt(batch: FileBatch) -> str:
+        seen_batches.append(batch)
+        return _paths_prompt(batch)
+
+    def _handler(prompt: str) -> Any:
+        paths = prompt.replace("PATHS:", "")
+        if "," in paths:
+            raise LLMPermanentError("prompt is too long for the model context")
+        return {"file": paths}
+
+    _patch_via_reasoning_json(monkeypatch, _handler)
+
+    files = [("a.py", "aaaa"), ("b.py", "bbbb")]
+    result = run_submission_pass(
+        DummyLLMClient(),
+        changed_files=files,
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
+        build_prompt=build_prompt,
+        tools=[],
+        parse=json.loads,
+    )
+    assert result == [{"file": "a.py"}, {"file": "b.py"}]
+    assert [b.is_partial for b in seen_batches] == [False, True, True]
+
+
+def test_single_file_overflow_skips_without_truncating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: List[str] = []
+
+    def _handler(prompt: str) -> Any:
+        calls.append(prompt)
+        raise MaxTokensReachedException("always too large")
+
+    _patch_via_reasoning_json(monkeypatch, _handler)
+
+    files = [("only.py", "X" * 200)]
+    result = run_submission_pass(
+        DummyLLMClient(),
+        changed_files=files,
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
+        build_prompt=lambda batch: "LEN:" + str(len(batch.items[0][1])),
+        tools=[],
+        parse=json.loads,
+    )
+    assert result == []
+    # No content shrink — one attempt with full length, then skip.
+    assert calls == ["LEN:200"]
+
+
+def test_non_overflow_failure_skips_without_bisect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def _handler(_prompt: str) -> Any:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("malformed json")
+
+    _patch_via_reasoning_json(monkeypatch, _handler)
+
+    result = run_submission_pass(
+        DummyLLMClient(),
+        changed_files=[("a.py", "a"), ("b.py", "b")],
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
+        build_prompt=_paths_prompt,
+        tools=[],
+        parse=json.loads,
+    )
+    assert result == []
+    assert calls == 1
+
+
+def test_context_window_overflow_bisects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _handler(prompt: str) -> Any:
+        paths = prompt.replace("PATHS:", "")
+        if "," in paths:
+            raise ContextWindowOverflowException("context")
+        return {"file": paths}
+
+    _patch_via_reasoning_json(monkeypatch, _handler)
+
+    result = run_submission_pass(
+        DummyLLMClient(),
+        changed_files=[("a.py", "a"), ("b.py", "b")],
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
+        build_prompt=_paths_prompt,
+        tools=[],
+        parse=json.loads,
+    )
+    assert result == [{"file": "a.py"}, {"file": "b.py"}]
+
+
+def test_bisect_continues_past_former_depth_cap_to_isolate_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multi-file batches must keep splitting until each leaf is one file.
+
+    A fixed depth-4 cap would leave 2-file leaves for a 32-file submission and
+    drop them all when every multi-file call overflows.
+    """
+
+    def _handler(prompt: str) -> Any:
+        paths = prompt.replace("PATHS:", "")
+        if "," in paths:
+            raise MaxTokensReachedException("too large")
+        return {"file": paths}
+
+    _patch_via_reasoning_json(monkeypatch, _handler)
+
+    files = [(f"f{i:02d}.py", "x") for i in range(32)]
+    result = run_submission_pass(
+        DummyLLMClient(),
+        changed_files=files,
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
+        build_prompt=_paths_prompt,
+        tools=[],
+        parse=json.loads,
+    )
+    assert [row["file"] for row in result] == [path for path, _ in files]

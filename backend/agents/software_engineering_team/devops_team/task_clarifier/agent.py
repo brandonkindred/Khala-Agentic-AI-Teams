@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from typing import List
+from typing import Any, Dict, List, Optional
 
-from llm_service import LLMClient, get_strands_model
-from llm_service.strands_model import resolve_strands_model
-from software_engineering_team.shared.llm import complete_json_with_continuation
+from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
 
 from .models import (
     ClarificationGap,
@@ -15,18 +13,46 @@ from .models import (
 )
 from .prompts import DEVOPS_TASK_CLARIFIER_PROMPT
 
+_CHECKLIST = [
+    "task_scope_validated",
+    "environment_scope_validated",
+    "rollback_constraints_validated",
+    "security_constraints_validated",
+    "acceptance_criteria_normalized",
+]
 
-class DevOpsTaskClarifierAgent:
-    """Ensures task input is complete and safe before execution."""
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
-        self._model = resolve_strands_model(
-            llm_client, agent_key="devops", get_strands_model_fn=get_strands_model
-        )
+class DevOpsTaskClarifierAgent(DevOpsSingleShotAgent):
+    """Ensures task input is complete and safe before execution.
 
-    def run(self, input_data: DevOpsTaskClarifierInput) -> DevOpsTaskClarifierOutput:
+    Invariants: instance state is limited to ``llm`` and ``_model`` from the
+    base. ``run`` is deterministic for identical inputs and the resolved
+    model: repeated identical calls may return a cached result and skip the
+    LLM (unless a deterministic gap short-circuits first). Cache reads/writes
+    are fail-open and gated by ``CACHE_ENV_VAR``.
+    """
+
+    PROMPT = DEVOPS_TASK_CLARIFIER_PROMPT
+    temperature = 0.0
+    CACHE_NAMESPACE = "devops:task_clarifier:v1"
+    CACHE_ENV_VAR = "DEVOPS_TASK_CLARIFIER_CACHE_SIZE"
+    OUTPUT_MODEL = DevOpsTaskClarifierOutput
+
+    def pre_call(self, input_data: DevOpsTaskClarifierInput) -> Optional[DevOpsTaskClarifierOutput]:
+        """Run the deterministic completeness/safety checks on the task spec.
+
+        Preconditions: ``input_data`` is a valid ``DevOpsTaskClarifierInput``.
+        Postconditions: returns ``None`` when no deterministic gap is found,
+        letting the caller proceed to the LLM/cached-LLM path. Returns a
+        ``DevOpsTaskClarifierOutput`` with ``approved_for_execution=False``
+        immediately when any gap is found (missing goal/cloud/environments/
+        acceptance-criteria/secrets-source, a staging-or-production
+        environment with no rollback plan, or a production environment with
+        no approval gate in scope) — no LLM call, no cache lookup; that
+        output's ``checklist`` is a copy of the module-level ``_CHECKLIST``,
+        ``gaps`` is the collected list of ``ClarificationGap`` objects, and
+        ``clarification_requests`` is the ``message`` of each blocking gap.
+        """
         spec = input_data.task_spec
         gaps: List[ClarificationGap] = []
 
@@ -84,22 +110,25 @@ class DevOpsTaskClarifierAgent:
                 )
             )
 
-        checklist = [
-            "task_scope_validated",
-            "environment_scope_validated",
-            "rollback_constraints_validated",
-            "security_constraints_validated",
-            "acceptance_criteria_normalized",
-        ]
         if gaps:
             return DevOpsTaskClarifierOutput(
                 approved_for_execution=False,
-                checklist=checklist,
+                checklist=list(_CHECKLIST),
                 gaps=gaps,
                 clarification_requests=[g.message for g in gaps if g.blocking],
             )
+        return None
 
-        context = (
+    def build_context(self, input_data: DevOpsTaskClarifierInput) -> str:
+        """Build the clarifier prompt context from the task spec.
+
+        Preconditions: ``input_data`` is a valid ``DevOpsTaskClarifierInput``
+        that passed ``pre_call`` (no deterministic gaps).
+        Postconditions: returns the same context string shape the
+        pre-migration agent appended after the prompt separator.
+        """
+        spec = input_data.task_spec
+        return (
             f"task_id={spec.task_id}\n"
             f"title={spec.title}\n"
             f"environments={spec.platform_scope.environments}\n"
@@ -107,15 +136,25 @@ class DevOpsTaskClarifierAgent:
             f"acceptance_criteria={spec.acceptance_criteria}\n"
             f"rollback={spec.rollback_requirements}\n"
         )
-        data = complete_json_with_continuation(
-            self._model,
-            DEVOPS_TASK_CLARIFIER_PROMPT + "\n\n---\n\n" + context,
-            temperature=0.0,
-            think=True,
-        )
+
+    def build_output(
+        self, input_data: DevOpsTaskClarifierInput, data: Dict[str, Any]
+    ) -> DevOpsTaskClarifierOutput:
+        """Map the LLM JSON dict onto ``DevOpsTaskClarifierOutput``.
+
+        Preconditions: ``data`` is the dict from ``complete_json_with_continuation``.
+        Postconditions: returns a ``DevOpsTaskClarifierOutput`` whose
+        ``checklist`` falls back to the module ``_CHECKLIST`` when the LLM
+        omits one.
+        """
         return DevOpsTaskClarifierOutput(
             approved_for_execution=bool(data.get("approved_for_execution", True)),
-            checklist=data.get("checklist") or checklist,
+            checklist=data.get("checklist") or list(_CHECKLIST),
             gaps=[ClarificationGap(**g) for g in (data.get("gaps") or []) if isinstance(g, dict)],
             clarification_requests=data.get("clarification_requests") or [],
         )
+
+
+def clear_review_cache() -> None:
+    """Drop every cached task clarifier result. Intended for test teardown."""
+    DevOpsTaskClarifierAgent.clear_cache()

@@ -19,8 +19,9 @@ from .attribution import (
     new_request_id,
 )
 from .backoff import parse_rate_limit_retry_config, rate_limit_retry_delay
+from .cache_breakpoint import CacheBreakpoint
 from .capabilities import provider_supports_structured_output
-from .clients import ClaudeLLMClient, DummyLLMClient, OllamaLLMClient
+from .clients import ClaudeLLMClient, DummyLLMClient, OllamaLLMClient, RunPodLLMClient
 from .compaction import clear_compaction_cache, compact_text, supports_compaction
 from .factory import (
     attributed_client,
@@ -113,6 +114,7 @@ def get_llm_config_summary() -> str:
 __all__ = [
     "_clear_strands_model_cache_for_testing",
     "clear_client_cache",
+    "CacheBreakpoint",
     "LLMAttribution",
     "llm_attribution",
     "current_attribution",
@@ -160,6 +162,7 @@ __all__ = [
     "OllamaLLMClient",
     "ClaudeLLMClient",
     "DummyLLMClient",
+    "RunPodLLMClient",
     "record_llm_call",
     "register_call_observer",
     "unregister_call_observer",

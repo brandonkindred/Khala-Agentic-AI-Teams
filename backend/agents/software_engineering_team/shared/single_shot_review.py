@@ -2,8 +2,9 @@
 Shared single-shot LLM review call: model resolution + one validated call.
 
 Single-shot review agents (a security/QA/lint-style check that sends one
-prompt and expects one JSON reply — as opposed to the multi-chunk
-orchestration in ``shared/llm_review.py``) each hand-roll the same two steps:
+prompt and expects one JSON reply — as opposed to the multi-chunk,
+coordinator-backed orchestration in ``shared.v2_review.run_coordinator_llm_review``)
+each hand-roll the same two steps:
 resolve an ``LLMClient`` for their ``agent_key`` when the caller didn't
 already inject one, then call it and turn the JSON reply into a result. That
 resolution step is duplicated by hand at nearly every such agent's call site

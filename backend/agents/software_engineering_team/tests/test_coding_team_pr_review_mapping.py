@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -23,11 +24,16 @@ from software_engineering_team.github_source.pr_review_mapping import (
     choose_event,
     format_comment_body,
     format_issue_comment,
+    format_numbered_source_line,
+    format_removed_excerpt,
     inline_comment_to_timeline_body,
     is_within_diff,
     map_issues_to_comments,
+    numbered_line_width,
+    parse_removed_lines,
     parse_valid_lines,
     render_annotated_hunks,
+    render_removed_hunks,
     split_review_comments,
 )
 
@@ -93,37 +99,199 @@ def test_parse_valid_lines_ignores_lines_before_first_hunk() -> None:
     assert parse_valid_lines(patch) == {1}
 
 
+def test_parse_removed_lines_deletion_only_hunk() -> None:
+    patch = "@@ -10,3 +10,0 @@\n-alpha\n-beta\n-gamma"
+    assert parse_removed_lines(patch) == {10, 11, 12}
+    assert parse_valid_lines(patch, added_only=True) == set()
+
+
+def test_format_removed_excerpt_clips_deleted_text() -> None:
+    patch = "@@ -2,2 +2,0 @@\n-keep this\n-drop that"
+    excerpt = format_removed_excerpt(patch)
+    assert "L2: keep this" in excerpt
+    assert "L3: drop that" in excerpt
+
+
 # ---------------------------------------------------------------------------
 # render_annotated_hunks
 # ---------------------------------------------------------------------------
 
 
+def _gutter_and_source(line: str) -> tuple[str, str]:
+    """Split one numbered review line into ``(gutter, source)``.
+
+    Accepts either the ``N: `` or ``N| `` gutter, with an optional leading
+    ``+``/``>`` change-surface marker column, so this helper can describe the
+    alignment contract independently of the separator or marker.
+    """
+    match = re.match(r"^([+>]?[ ]*\d+(?:: |\| ))(.*)$", line)
+    assert match is not None, f"expected a numbered gutter, got {line!r}"
+    return match.group(1), match.group(2)
+
+
 def test_render_annotated_hunks_single_hunk() -> None:
     patch = "@@ -1,2 +1,3 @@\n ctx\n+added\n more"
-    assert render_annotated_hunks(patch) == "1: ctx\n2: added\n3: more"
+    # Added line 2 carries a ``+`` marker; context lines 1/3 carry a space. The
+    # marker sits before the number, so the rendered numbers are unchanged.
+    assert render_annotated_hunks(patch) == " 1| ctx\n+2| added\n 3| more"
+
+
+def test_render_annotated_hunks_aligns_source_columns_across_digit_widths() -> None:
+    """A 4-space hanging indent must stay 4 columns when line numbers cross 9→10.
+
+    Unpadded ``9: `` (3 chars) vs ``10: `` (4 chars) shifts every later source
+    column by one, so ``        'bar',`` looks like a 5-space hang — the
+    false "inconsistent leading whitespace" finding on continuation arguments.
+    """
+    patch = "@@ -9,2 +9,3 @@\n     foo(\n+        'bar',\n     )"
+    lines = render_annotated_hunks(patch).splitlines()
+    gutters, sources = zip(*(_gutter_and_source(line) for line in lines))
+    assert list(sources) == ["    foo(", "        'bar',", "    )"]
+    assert len({len(g) for g in gutters}) == 1
+    # The argument's extra indent is exactly one 4-space hang, not 5.
+    assert sources[1].index("'") - sources[0].index("f") == 4
+
+
+def test_render_annotated_hunks_preserves_call_argument_hanging_indent() -> None:
+    """Continuation arguments keep their source indent after the gutter.
+
+    Regression: the reviewer flagged ``append_review_transcript_entries(\n        "j1",``
+    as extra leading whitespace on the string argument. The hanging indent is
+    real, legal Python; only the numbered rendering made it look irregular.
+    """
+    patch = (
+        "@@ -149,3 +149,5 @@ def test_flush() -> None:\n"
+        '     record_review_start("j1", "o", "r", 7, "u", "alice")\n'
+        "+    append_review_transcript_entries(\n"
+        '+        "j1",\n'
+        "+    )\n"
+    )
+    lines = render_annotated_hunks(patch).splitlines()
+    gutters, sources = zip(*(_gutter_and_source(line) for line in lines))
+    assert sources[1] == "    append_review_transcript_entries("
+    assert sources[2] == '        "j1",'
+    assert len({len(g) for g in gutters}) == 1
+    assert sources[2].index('"') - sources[1].index("a") == 4
 
 
 def test_render_annotated_hunks_omits_removed_lines() -> None:
     patch = "@@ -1,3 +1,2 @@\n keep\n-deleted\n+replacement"
     # Removed line has no new-file position and is dropped; numbering stays aligned.
-    assert render_annotated_hunks(patch) == "1: keep\n2: replacement"
+    # Context line 1 gets a space marker; the added replacement line 2 gets ``+``.
+    assert render_annotated_hunks(patch) == " 1| keep\n+2| replacement"
 
 
 def test_render_annotated_hunks_separates_multiple_hunks() -> None:
     patch = "@@ -1,1 +1,2 @@\n a\n+b\n@@ -10,1 +11,2 @@\n c\n+d"
-    assert render_annotated_hunks(patch) == "1: a\n2: b\n...\n11: c\n12: d"
+    # Added lines 2/12 carry ``+``; context lines 1/11 carry a space; the bare
+    # ``...`` inter-hunk gap is never marked.
+    assert render_annotated_hunks(patch) == "  1| a\n+ 2| b\n...\n 11| c\n+12| d"
 
 
 def test_render_annotated_hunks_empty_patch() -> None:
     assert render_annotated_hunks("") == ""
 
 
+def test_numbered_line_width_empty_and_widest() -> None:
+    assert numbered_line_width([]) == 1
+    assert numbered_line_width([9]) == 1
+    assert numbered_line_width([9, 10]) == 2
+    assert numbered_line_width([99, 100]) == 3
+
+
+def test_format_numbered_source_line_equal_gutter_width() -> None:
+    width = numbered_line_width([9, 10])
+    nine = format_numbered_source_line(9, "    foo(", width=width)
+    ten = format_numbered_source_line(10, "        'bar',", width=width)
+    g9, s9 = _gutter_and_source(nine)
+    g10, s10 = _gutter_and_source(ten)
+    assert s9 == "    foo("
+    assert s10 == "        'bar',"
+    assert len(g9) == len(g10)
+    assert s10.index("'") - s9.index("f") == 4
+
+
+def test_format_numbered_source_line_marker_preserves_number() -> None:
+    # A marker adds a single leading column but must not change the rendered
+    # number: the marked and un-marked lines cite the same number, and a marked
+    # touched line and a marked context line keep equal gutter widths.
+    width = numbered_line_width([9, 10])
+    plain = format_numbered_source_line(9, "foo", width=width)
+    touched = format_numbered_source_line(9, "foo", width=width, marker="+")
+    context = format_numbered_source_line(10, "bar", width=width, marker=" ")
+    assert plain == " 9| foo"
+    assert touched == "+ 9| foo"
+    assert context == " 10| bar"
+    # The digit run recovered from each variant is identical (9), regardless of
+    # the marker column.
+    for rendered, expected in ((plain, 9), (touched, 9), (context, 10)):
+        gutter, _ = _gutter_and_source(rendered)
+        assert int(re.search(r"\d+", gutter).group()) == expected
+
+
 def test_render_annotated_hunks_lines_align_with_valid_lines() -> None:
-    # Every commentable (added) line must appear in the rendered output with its number.
-    patch = "@@ -5,2 +5,3 @@\n keep\n+new1\n+new2"
+    # Every commentable line appears with its correct number; added lines carry a
+    # ``+`` marker and context lines a space, and the numbers align 1:1 with
+    # parse_valid_lines so a cited line maps to a real location. Two hunks so the
+    # bare ``...`` inter-hunk gap row (which carries no marker/number) is also
+    # exercised and confirmed to be skipped, not mismatched as a numbered line.
+    patch = "@@ -5,2 +5,3 @@\n keep\n+new1\n+new2\n@@ -20,1 +21,2 @@\n c\n+d"
     rendered = render_annotated_hunks(patch)
-    for line in parse_valid_lines(patch):
-        assert f"{line}: " in rendered
+    by_number = {}
+    for ln in rendered.splitlines():
+        if ln == "...":
+            continue
+        m = re.match(r"^([+> ])[ ]*(\d+)\| ", ln)
+        assert m is not None, f"expected a marked numbered gutter, got {ln!r}"
+        by_number[int(m.group(2))] = m.group(1)
+    added = parse_valid_lines(patch, added_only=True)
+    assert added == {6, 7, 22}
+    # Every valid (added + context) line is rendered exactly once...
+    assert set(by_number) == parse_valid_lines(patch) == {5, 6, 7, 21, 22}
+    # ...added lines marked ``+``, context lines marked with a space.
+    for number, marker in by_number.items():
+        assert marker == ("+" if number in added else " ")
+
+
+# ---------------------------------------------------------------------------
+# render_removed_hunks
+# ---------------------------------------------------------------------------
+
+
+def test_render_removed_hunks_single_hunk() -> None:
+    patch = "@@ -1,3 +1,2 @@\n keep\n-deleted\n+replacement"
+    # Old-file side: context line, then the removed line; the added
+    # replacement has no old-file position and is omitted.
+    assert render_removed_hunks(patch) == "keep\ndeleted"
+
+
+def test_render_removed_hunks_omits_added_lines() -> None:
+    patch = "@@ -1,2 +1,3 @@\n ctx\n+added\n more"
+    # No removed lines in this hunk; only the two context rows survive.
+    assert render_removed_hunks(patch) == "ctx\nmore"
+
+
+def test_render_removed_hunks_deletion_only_hunk() -> None:
+    patch = "@@ -10,3 +10,0 @@\n-alpha\n-beta\n-gamma"
+    assert render_removed_hunks(patch) == "alpha\nbeta\ngamma"
+
+
+def test_render_removed_hunks_separates_multiple_hunks() -> None:
+    patch = "@@ -1,2 +1,1 @@\n a\n-b\n@@ -10,2 +11,1 @@\n c\n-d"
+    assert render_removed_hunks(patch) == "a\nb\n...\nc\nd"
+
+
+def test_render_removed_hunks_empty_patch() -> None:
+    assert render_removed_hunks("") == ""
+    assert render_removed_hunks(None) == ""
+
+
+def test_render_removed_hunks_no_gutter_unlike_render_annotated_hunks() -> None:
+    # replaced_content mirrors full_content's plain-body shape, not the
+    # pre_numbered N| -gutter shape used for hunk_files.
+    patch = "@@ -5,2 +5,2 @@\n keep\n-old line\n+new line"
+    assert render_removed_hunks(patch) == "keep\nold line"
+    assert "|" not in render_removed_hunks(patch)
 
 
 # ---------------------------------------------------------------------------
@@ -716,6 +884,7 @@ def _open_issue(number: int, title: str, body: str = "") -> Issue:
         state="open",
         html_url=f"https://x/issues/{number}",
         labels=(),
+        id=number,
     )
 
 

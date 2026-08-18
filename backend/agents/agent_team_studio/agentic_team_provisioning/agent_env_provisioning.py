@@ -27,6 +27,8 @@ import time
 import uuid
 from typing import TYPE_CHECKING
 
+from agent_platform.registry.manifest_projection import slug
+
 if TYPE_CHECKING:
     from agent_team_studio.agentic_team_provisioning.assistant.store import AgenticTeamStore
     from agent_team_studio.agentic_team_provisioning.models import ProcessDefinition
@@ -48,11 +50,6 @@ _LOCK_RETRY_INITIAL_S = 5.0
 _LOCK_RETRY_MAX_S = 60.0
 
 
-def _slug(s: str, max_len: int = 40) -> str:
-    t = re.sub(r"[^a-zA-Z0-9]+", "-", (s or "").strip().lower()).strip("-")
-    return (t[:max_len] if t else "agent").rstrip("-")
-
-
 def make_provisioning_agent_id(
     team_id: str,
     process_id: str,
@@ -62,8 +59,8 @@ def make_provisioning_agent_id(
     """Stable id for agent_provisioning_team (alphanumeric + hyphens, bounded length)."""
     tid = re.sub(r"[^a-zA-Z0-9]", "", team_id)[:12]
     pid = re.sub(r"[^a-zA-Z0-9]", "", process_id)[:10]
-    sid = _slug(step_id, 28)
-    an = _slug(agent_name, 36)
+    sid = slug(step_id, 28)
+    an = slug(agent_name, 36)
     raw = f"at-{tid}-{pid}-{sid}-{an}"
     return raw[:120]
 

@@ -1,5 +1,11 @@
 """Tests for roster validation."""
 
+from __future__ import annotations
+
+import pytest
+
+from agent_platform.registry.models import AgentManifest, CognitionSpec, SourceInfo
+from agent_team_studio.agentic_team_provisioning.manifest_generation import manifest_agent_id
 from agent_team_studio.agentic_team_provisioning.models import (
     AgenticTeam,
     AgenticTeamAgent,
@@ -13,18 +19,66 @@ from agent_team_studio.agentic_team_provisioning.models import (
 )
 from agent_team_studio.agentic_team_provisioning.roster_validation import validate_roster
 
+_TEAM_ID = "t1"
+_SOURCE = SourceInfo(entrypoint="pkg.mod:Agent")
 
-def _agent(name: str, *, full: bool = True) -> AgenticTeamAgent:
+
+class _FakeRegistry:
+    def __init__(self) -> None:
+        self._by_id: dict[str, AgentManifest] = {}
+
+    def get(self, agent_id: str, *, conn=None) -> AgentManifest | None:
+        return self._by_id.get(agent_id)
+
+    def register(self, manifest: AgentManifest, source_path=None, *, require_persist: bool = False, conn=None) -> None:
+        del source_path, require_persist
+        self._by_id[manifest.id] = manifest
+
+
+@pytest.fixture
+def registry(monkeypatch: pytest.MonkeyPatch) -> _FakeRegistry:
+    reg = _FakeRegistry()
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: reg)
+    return reg
+
+
+def _register(registry: _FakeRegistry, manifest: AgentManifest) -> None:
+    registry.register(manifest)
+
+
+def _agent(registry: _FakeRegistry, name: str, *, full: bool = True) -> AgenticTeamAgent:
+    manifest_id = manifest_agent_id(_TEAM_ID, name)
     if full:
-        return AgenticTeamAgent(
-            agent_name=name,
-            role=f"{name} role",
-            skills=["s1"],
-            capabilities=["c1"],
-            tools=["t1"],
-            expertise=["e1"],
+        _register(
+            registry,
+            AgentManifest(
+                id=manifest_id,
+                team=_TEAM_ID,
+                name=name,
+                summary=f"{name} role",
+                tags=["s1"],
+                cognition=CognitionSpec(tools=["t1"]),
+                source=_SOURCE,
+            ),
         )
-    return AgenticTeamAgent(agent_name=name, role=f"{name} role")
+    else:
+        _register(
+            registry,
+            AgentManifest(
+                id=manifest_id,
+                team="",
+                name=name,
+                summary=f"{name} role",
+                tags=[],
+                cognition=None,
+                source=_SOURCE,
+            ),
+        )
+    return AgenticTeamAgent(
+        agent_name=name,
+        source="generated",
+        manifest_id=manifest_id,
+    )
 
 
 def _process(name: str, step_agents: list[str], process_id: str = "p1") -> ProcessDefinition:
@@ -47,17 +101,17 @@ def _process(name: str, step_agents: list[str], process_id: str = "p1") -> Proce
 
 def _team(agents: list[AgenticTeamAgent], processes: list[ProcessDefinition]) -> AgenticTeam:
     return AgenticTeam(
-        team_id="t1",
+        team_id=_TEAM_ID,
         name="T",
         agents=agents,
         processes=processes,
     )
 
 
-def test_fully_staffed():
+def test_fully_staffed(registry: _FakeRegistry) -> None:
     result = validate_roster(
         _team(
-            agents=[_agent("A"), _agent("B")],
+            agents=[_agent(registry, "A"), _agent(registry, "B")],
             processes=[_process("P1", ["A", "B"])],
         )
     )
@@ -67,10 +121,10 @@ def test_fully_staffed():
     assert result.process_count == 1
 
 
-def test_unrostered_agent():
+def test_unrostered_agent(registry: _FakeRegistry) -> None:
     result = validate_roster(
         _team(
-            agents=[_agent("A")],
+            agents=[_agent(registry, "A")],
             processes=[_process("P1", ["A", "Ghost"])],
         )
     )
@@ -80,10 +134,10 @@ def test_unrostered_agent():
     assert any("Ghost" in g.detail for g in result.gaps)
 
 
-def test_unused_agent():
+def test_unused_agent(registry: _FakeRegistry) -> None:
     result = validate_roster(
         _team(
-            agents=[_agent("A"), _agent("Extra")],
+            agents=[_agent(registry, "A"), _agent(registry, "Extra")],
             processes=[_process("P1", ["A"])],
         )
     )
@@ -93,7 +147,7 @@ def test_unused_agent():
     assert any("Extra" in g.detail for g in result.gaps)
 
 
-def test_unstaffed_step():
+def test_unstaffed_step(registry: _FakeRegistry) -> None:
     proc = ProcessDefinition(
         process_id="p1",
         name="P",
@@ -102,15 +156,15 @@ def test_unstaffed_step():
         output=ProcessOutput(description="done", destination="out"),
         status=ProcessStatus.DRAFT,
     )
-    result = validate_roster(_team(agents=[_agent("A")], processes=[proc]))
+    result = validate_roster(_team(agents=[_agent(registry, "A")], processes=[proc]))
     assert result.is_fully_staffed is False
     assert any(g.category == "unstaffed_step" for g in result.gaps)
 
 
-def test_incomplete_profile():
+def test_incomplete_profile(registry: _FakeRegistry) -> None:
     result = validate_roster(
         _team(
-            agents=[_agent("A", full=False)],
+            agents=[_agent(registry, "A", full=False)],
             processes=[_process("P1", ["A"])],
         )
     )
@@ -118,19 +172,40 @@ def test_incomplete_profile():
     assert any(g.category == "incomplete_profile" for g in result.gaps)
 
 
-def test_no_agents_no_processes():
+def test_depth_does_not_require_capabilities(registry: _FakeRegistry) -> None:
+    """Manifest projection never fills capabilities; depth uses skills/tools/expertise only."""
+    manifest_id = manifest_agent_id(_TEAM_ID, "A")
+    _register(
+        registry,
+        AgentManifest(
+            id=manifest_id,
+            team=_TEAM_ID,
+            name="A",
+            summary="role",
+            tags=["s1"],
+            cognition=CognitionSpec(tools=["t1"]),
+            source=_SOURCE,
+        ),
+    )
+    agent = AgenticTeamAgent(agent_name="A", source="generated", manifest_id=manifest_id)
+    result = validate_roster(_team(agents=[agent], processes=[_process("P1", ["A"])]))
+    assert result.is_fully_staffed is True
+    assert result.gaps == []
+
+
+def test_no_agents_no_processes() -> None:
     result = validate_roster(_team(agents=[], processes=[]))
     assert result.is_fully_staffed is True
     assert "no agents and no processes" in result.summary
 
 
-def test_agents_but_no_processes():
-    result = validate_roster(_team(agents=[_agent("A")], processes=[]))
+def test_agents_but_no_processes(registry: _FakeRegistry) -> None:
+    result = validate_roster(_team(agents=[_agent(registry, "A")], processes=[]))
     assert result.is_fully_staffed is True
     assert "no processes" in result.summary
 
 
-def test_processes_but_no_agents():
+def test_processes_but_no_agents() -> None:
     result = validate_roster(_team(agents=[], processes=[_process("P1", ["A"])]))
     assert result.is_fully_staffed is False
     assert "no agents" in result.summary

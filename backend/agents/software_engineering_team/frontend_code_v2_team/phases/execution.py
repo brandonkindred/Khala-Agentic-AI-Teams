@@ -27,8 +27,13 @@ from typing import Any, Callable, Dict, List, Optional
 from strands import Agent
 
 from llm_service import LLMClient
+from llm_service.strands_model import (
+    LlmRunner,
+    resolve_text_mode_strands_model,
+)
+from shared.dev_models.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.agent_review import AgentReviewCache
-from software_engineering_team.shared.models import ReviewContext, SystemArchitecture, Task
+from software_engineering_team.shared.phases.dbc_phase import run_dbc_comments_review
 from software_engineering_team.shared.phases.execution import (
     GatedExecutionConfig,
     GateOutcome,
@@ -36,10 +41,6 @@ from software_engineering_team.shared.phases.execution import (
     _run_general_microtask_impl,
     run_execution_impl,
     run_gated_execution_impl,
-)
-from software_engineering_team.shared.strands_model import (
-    LlmRunner,
-    resolve_text_mode_strands_model,
 )
 
 from .. import models as _models
@@ -450,6 +451,16 @@ GATE_CONFIG = GatedExecutionConfig(
     run_security_gate=_security_gate,
     run_batch_coding_fixes=_run_batch_coding_fixes,
     run_documentation_self_review=_run_documentation_self_review,
+    # DbC comments self-review: a non-blocking, best-effort step that inserts
+    # Design-by-Contract comments into a completed microtask's files after the
+    # review-gate cycles pass and before Documentation. The shared reusable
+    # reviewer is assigned directly (not via a lazy wrapper): it lives in the
+    # shared package with no circular-import constraint, and callers rely on it
+    # being this exact callable. Gated at the call site by `enable_dbc_comments`.
+    # Frontend's non-Python files have no AST-level insertion safety net of their
+    # own, so the shared phase's post-insertion build-verification revert is the
+    # sole guard against a bad DbC edit reaching a commit here.
+    run_dbc_self_review=run_dbc_comments_review,
     status_code_review=MicrotaskStatus.IN_REVIEW,
     status_qa=MicrotaskStatus.IN_REVIEW,
     status_security=MicrotaskStatus.IN_REVIEW,

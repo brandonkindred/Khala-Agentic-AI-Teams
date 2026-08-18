@@ -32,12 +32,15 @@ from software_engineering_team.shared.team_lead_base import TeamLeadSharedState
 from software_engineering_team.task_graph import TaskGraphService
 from software_engineering_team.team_routing import (
     _BACKEND_V2_STACK_SPEC,
+    _DEVOPS_ROUTING_ENV,
+    _DEVOPS_STACK_SPEC,
+    _DEVOPS_TEAM_ALIASES,
     _quality_gate_agent_type,
     _target_matches_agent,
     _team_key,
     _v2_team_kind_for_stack,
 )
-from software_engineering_team.worker_factory import _v2_text_mode_llm
+from software_engineering_team.worker_factory import _devops_raw_llm_client, _v2_text_mode_llm
 
 GIT_UTILS = "shared.git.git_utils"
 
@@ -1531,6 +1534,52 @@ def test_quality_gates_skip_with_warning_when_no_engine_provider(tmp_path):
     assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
 
 
+def test_quality_gates_skipped_for_devops_worker(tmp_path):
+    """DevOps runs its own internal gates; the generic build/lint gate must never
+    touch a devops worker's output -- prove it by making the provider raise if called."""
+
+    class _RaisingProvider:
+        def run_build_verification(self, *a, **k):
+            raise AssertionError("build verification must not run for a devops worker")
+
+        def run_linting(self, *a, **k):
+            raise AssertionError("linting must not run for a devops worker")
+
+    devops_worker = StubWorker("devops_worker")
+    devops_worker.team_kind = "devops"
+    graph = TaskGraphService(job_id="j1")
+    swarm = CodingTeamSwarm(
+        tech_lead=StubTechLead(approved=True),
+        workers=[devops_worker],
+        graph=graph,
+        path=Path(tmp_path),
+        agent_ids=["devops_worker"],
+        llm_getter=lambda k: None,
+        engine_provider=_RaisingProvider(),
+    )
+    swarm._worktrees = _FakeWorktreeManager(swarm.path, ["devops_worker"])
+    swarm._worktrees.prepare()
+    graph.add_task("t1", title="T1", target_team="devops")
+    graph.assign_task_to_agent("t1", "devops_worker")
+
+    ok = swarm._run_quality_gates(
+        devops_worker, graph.get_task("t1"), lambda **kw: None, worktree_path=Path(tmp_path)
+    )
+
+    assert ok is True
+
+
+def test_quality_gates_run_normally_for_worker_without_team_kind_attr(tmp_path):
+    """A worker with no team_kind attribute at all (e.g. a minimal duck-typed stub)
+    still runs the normal gate path -- getattr defaults to None, not "devops"."""
+    swarm, graph = _make_real_swarm(tmp_path, _gate_provider(build_ok=True))
+    assert not hasattr(swarm.workers[0], "team_kind")
+
+    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
+
+    assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
+
+
 def test_quality_gate_build_failure_returns_for_revision(tmp_path):
     swarm, graph = _make_real_swarm(tmp_path, _gate_provider(build_ok=False))
 
@@ -1774,7 +1823,11 @@ def test_pinned_agent_reserved_before_unrelated_tech_lead_assignment(tmp_path):
 
 
 def test_assignment_normalizes_backend_owned_target_aliases(tmp_path):
-    """Backend-owned target aliases such as devops route to the backend v2 worker."""
+    """Backend-owned target aliases such as devops route to the backend v2 worker.
+
+    This documents CODING_TEAM_DEVOPS_ROUTING's default-OFF behavior — see
+    test_devops_aliases_route_to_devops_when_flag_on for the flag-enabled case.
+    """
 
     class AssignDevOpsTL(StubTechLead):
         def run_assignments(self, agent_ids, ready_tasks, free_agents):
@@ -1857,6 +1910,106 @@ def test_team_key_accepts_compact_v2_labels() -> None:
     assert _team_key("myfrontend") == "myfrontend"
 
 
+# ----------------------------------------------------- CODING_TEAM_DEVOPS_ROUTING
+
+
+@pytest.mark.parametrize("alias", sorted(_DEVOPS_TEAM_ALIASES))
+def test_devops_aliases_stay_backend_when_flag_off(monkeypatch, alias) -> None:
+    monkeypatch.delenv(_DEVOPS_ROUTING_ENV, raising=False)
+    assert _team_key(alias) == "backend_v2"
+
+
+@pytest.mark.parametrize("alias", sorted(_DEVOPS_TEAM_ALIASES))
+def test_devops_aliases_route_to_devops_when_flag_on(monkeypatch, alias) -> None:
+    monkeypatch.setenv(_DEVOPS_ROUTING_ENV, "1")
+    assert _team_key(alias) == "devops"
+
+
+@pytest.mark.parametrize("value", ["", "0", "false", "off", "maybe"])
+def test_devops_flag_falsy_values_stay_off(monkeypatch, value) -> None:
+    monkeypatch.setenv(_DEVOPS_ROUTING_ENV, value)
+    assert _team_key("devops") == "backend_v2"
+
+
+def test_target_matches_devops_worker_when_flag_on(monkeypatch) -> None:
+    monkeypatch.setenv(_DEVOPS_ROUTING_ENV, "1")
+    assert _target_matches_agent("infra", "devops") is True
+    assert _target_matches_agent("devops", "backend_v2") is False
+
+
+def test_ensure_target_team_stack_specs_adds_devops_stack_when_flag_on(monkeypatch) -> None:
+    monkeypatch.setenv(_DEVOPS_ROUTING_ENV, "1")
+    graph = TaskGraphService(job_id="j1")
+    graph.add_task("deploy", title="Deploy service", target_team="devops")
+
+    stacks = orch_mod._ensure_target_team_stack_specs([], graph.get_tasks())
+
+    assert dict(_DEVOPS_STACK_SPEC) in stacks
+    assert not any(s.get("name") == "backend_v2" for s in stacks)
+
+
+def test_ensure_target_team_stack_specs_does_not_add_devops_stack_when_flag_off(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv(_DEVOPS_ROUTING_ENV, raising=False)
+    graph = TaskGraphService(job_id="j1")
+    graph.add_task("deploy", title="Deploy service", target_team="devops")
+
+    stacks = orch_mod._ensure_target_team_stack_specs([], graph.get_tasks())
+
+    assert dict(_BACKEND_V2_STACK_SPEC) in stacks
+    assert not any(s.get("name") == "devops" for s in stacks)
+
+
+def test_worker_team_key_for_devops_worker() -> None:
+    """A worker with a fixed ``team_kind == "devops"`` reports the "devops"
+    scheduler key directly, ungated -- such a worker can only ever be
+    constructed when the routing flag is already on (see worker_factory)."""
+    from types import SimpleNamespace
+
+    worker = SimpleNamespace(team_kind="devops", stack_spec=None)
+    assert orch_mod._worker_team_key(worker) == "devops"
+
+
+def test_v2_team_kind_for_stack_devops(monkeypatch) -> None:
+    monkeypatch.setenv(_DEVOPS_ROUTING_ENV, "1")
+    assert _v2_team_kind_for_stack(StackSpec(name="devops", tools_services=[])) == "devops"
+    monkeypatch.delenv(_DEVOPS_ROUTING_ENV, raising=False)
+    assert _v2_team_kind_for_stack(StackSpec(name="devops", tools_services=[])) == "backend"
+
+
+def test_backend_stack_with_devops_tooling_stays_backend_when_flag_on(monkeypatch) -> None:
+    """A backend-named stack that merely lists IaC/CI tools among its
+    tools_services must not be misrouted to a devops worker -- devops routing
+    is explicit-label-only (_BACKEND_HINTS is untouched)."""
+    monkeypatch.setenv(_DEVOPS_ROUTING_ENV, "1")
+    spec = StackSpec(name="platform", tools_services=["Terraform", "CI/CD"])
+    assert _v2_team_kind_for_stack(spec) == "backend"
+
+
+def test_devops_assignment_end_to_end_flag_on(tmp_path, monkeypatch) -> None:
+    """A target_team="devops" task lands on the devops worker and no other,
+    once CODING_TEAM_DEVOPS_ROUTING is enabled."""
+    monkeypatch.setenv(_DEVOPS_ROUTING_ENV, "1")
+
+    class AssignDevOpsTL(StubTechLead):
+        def run_assignments(self, agent_ids, ready_tasks, free_agents):
+            return {"assignments": [{"agent_id": "devops_worker", "task_id": "provision"}]}
+
+    devops_worker = StubWorker("devops_worker")
+    devops_worker.team_kind = "devops"
+    workers = [StubWorker("frontend_v2"), StubWorker("backend_v2"), devops_worker]
+    swarm, graph = _make_swarm(tmp_path, AssignDevOpsTL(approved=True), workers)
+    graph.add_task("provision", title="Provision infra", target_team="devops")
+
+    swarm._assign_tasks(graph.get_tasks(), ["frontend_v2", "backend_v2", "devops_worker"])
+
+    task = graph.get_task("provision")
+    assert task.assigned_agent_id == "devops_worker"
+    assert graph.get_task_for_agent("frontend_v2") is None
+    assert graph.get_task_for_agent("backend_v2") is None
+
+
 def test_assign_tasks_survives_assignment_error(tmp_path):
     """A transient assign_task_to_agent error is logged and skipped, not propagated."""
 
@@ -1929,7 +2082,11 @@ def test_assignment_fails_task_with_unrecognized_target_team(tmp_path, caplog):
 
 
 def test_target_match_normalizes_raw_v2_agent_ids() -> None:
-    """Raw worker IDs with suffixes still compare by their canonical v2 team."""
+    """Raw worker IDs with suffixes still compare by their canonical v2 team.
+
+    ``devops`` -> ``backend_v2_worker_1`` documents CODING_TEAM_DEVOPS_ROUTING's
+    default-OFF behavior.
+    """
     assert _target_matches_agent("frontend_v2", "frontend-v2-worker-2") is True
     assert _target_matches_agent("devops", "backend_v2_worker_1") is True
     assert _target_matches_agent("frontend_v2", "backend_v2_worker_1") is False
@@ -1984,28 +2141,26 @@ def test_v2_team_kind_accepts_backend_alias_stack_names(stack_name: str) -> None
 
 
 @pytest.mark.parametrize("stack_name", ["default", "Senior Software Engineer"])
-def test_v2_team_kind_accepts_legacy_default_stack_names(stack_name: str) -> None:
-    """Legacy generic stack names now route to backend v2 after removing the Senior SWE worker."""
-    assert _v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) == "backend"
+def test_v2_team_kind_no_longer_repairs_legacy_default_stack_names(stack_name: str) -> None:
+    """Legacy generic stack names no longer silently route to backend v2 (issue #5487 policy):
+    an unrecognized persisted name is unclassified, same as any other unknown stack."""
+    assert _v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) is None
 
 
-def test_legacy_default_stack_spec_is_repaired_to_backend_v2() -> None:
-    """Persisted pre-v2 fallback stacks are replaced with the backend v2 team."""
+def test_legacy_default_stack_spec_is_no_longer_repaired() -> None:
+    """Persisted pre-v2 fallback stacks pass through unchanged instead of being silently
+    rewritten to backend_v2 (issue #5487 fail-fast policy)."""
     stacks = orch_mod._ensure_target_team_stack_specs(
         [{"name": "default", "tools_services": ["legacy"]}],
         [],
     )
 
-    assert stacks == [
-        {
-            "name": "backend_v2",
-            "tools_services": ["Java", "Python", "Node.js", "Databases", "APIs", "DevOps"],
-        }
-    ]
+    assert stacks == [{"name": "default", "tools_services": ["legacy"]}]
 
 
-def test_resume_with_legacy_default_stack_builds_backend_v2_worker(tmp_path, monkeypatch):
-    """Old persisted jobs with a default stack still resume after the legacy worker removal."""
+def test_resume_with_legacy_default_stack_fails_fast(tmp_path, monkeypatch):
+    """Resuming a job with a legacy default/Senior-SWE stack fails clearly instead of being
+    silently rewritten to backend_v2 (issue #5487 policy)."""
 
     class ExplodingTL:
         def __init__(self, llm):
@@ -2014,23 +2169,7 @@ def test_resume_with_legacy_default_stack_builds_backend_v2_worker(tmp_path, mon
         def run_plan_to_task_graph(self, plan_input):
             raise AssertionError("planning must not run on resume")
 
-    captured_specs: List[str] = []
-
-    class StubSwarm:
-        def __init__(self, *a, **k):
-            self.graph = k["graph"]
-            self.aborted = False
-
-        def run(self, **kw):
-            pass
-
-    def _build_worker(agent_id, spec, llm_getter, engine_provider, **kwargs):
-        captured_specs.append(spec.name)
-        return StubWorker(agent_id)
-
     monkeypatch.setattr(orch_mod, "TechLeadAgent", ExplodingTL)
-    monkeypatch.setattr(orch_mod, "_build_implementation_worker", _build_worker)
-    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
     snapshot = {
         "task_graph_snapshot": [
@@ -2050,8 +2189,8 @@ def test_resume_with_legacy_default_stack_builds_backend_v2_worker(tmp_path, mon
         get_llm=lambda key: None,
     )
 
-    assert captured_specs == ["backend_v2"]
-    assert any(update.get("stack_specs") == [_BACKEND_V2_STACK_SPEC] for update in updates)
+    assert updates[-1]["status"] == "failed"
+    assert "default" in updates[-1]["error"]
 
 
 def test_backend_v2_worker_uses_injected_llm_getter():
@@ -2190,6 +2329,43 @@ def test_v2_text_mode_llm_clone_failure_without_client_uses_default(monkeypatch)
     assert result is not broken
 
 
+def test_devops_raw_llm_client_passes_through_none_and_llm_client():
+    """None and a real LLMClient instance are returned unchanged -- nothing to unwrap."""
+    from llm_service.clients.dummy import DummyLLMClient
+
+    assert _devops_raw_llm_client(None) is None
+    client = DummyLLMClient()
+    assert _devops_raw_llm_client(client) is client
+
+
+def test_devops_raw_llm_client_unwraps_public_client_accessor():
+    """A wrapper exposing a public ``client`` property (LLMClientModel's shape)
+    unwraps to that underlying client."""
+    from types import SimpleNamespace
+
+    raw = object()
+    wrapper = SimpleNamespace(client=raw)
+    assert _devops_raw_llm_client(wrapper) is raw
+
+
+def test_devops_raw_llm_client_falls_back_to_private_client_attribute():
+    """A wrapper with only a private ``_client`` attribute still unwraps."""
+    from types import SimpleNamespace
+
+    raw = object()
+    wrapper = SimpleNamespace(_client=raw)
+    assert _devops_raw_llm_client(wrapper) is raw
+
+
+def test_devops_raw_llm_client_passes_through_opaque_handle_unchanged():
+    """A handle with neither a client nor _client attribute is returned as-is,
+    rather than raising -- DevOps agents assert non-None at their own boundary."""
+    from types import SimpleNamespace
+
+    opaque = SimpleNamespace(something_else=True)
+    assert _devops_raw_llm_client(opaque) is opaque
+
+
 def test_frontend_v2_worker_uses_injected_llm_getter():
     """Frontend v2 worker construction must honor the coding-team LLM injection path."""
     captured_keys: List[str] = []
@@ -2215,6 +2391,89 @@ def test_frontend_v2_worker_uses_injected_llm_getter():
 
     assert captured_keys == ["frontend"]
     assert worker.team_lead.llm == "frontend-client"
+
+
+def test_build_implementation_worker_returns_devops_worker_when_flag_on(monkeypatch) -> None:
+    """A devops stack builds a DevOpsTeamWorker directly, bypassing CodeEngineProvider
+    (no v2 text-mode coercion; a plain non-wrapper handle passes through unchanged --
+    see test_build_implementation_worker_devops_unwraps_strands_model for the
+    Strands-model-unwrap case)."""
+    monkeypatch.setenv(_DEVOPS_ROUTING_ENV, "1")
+    from software_engineering_team.devops_team_worker import DevOpsTeamWorker
+
+    captured_keys: List[str] = []
+
+    def _llm_getter(key: str) -> str:
+        captured_keys.append(key)
+        return f"{key}-client"
+
+    worker = orch_mod._build_implementation_worker(
+        "devops_worker",
+        StackSpec(name="devops", tools_services=["Terraform"]),
+        _llm_getter,
+        engine_provider=None,  # proves the provider is genuinely bypassed
+    )
+
+    assert isinstance(worker, DevOpsTeamWorker)
+    assert worker.team_kind == "devops"
+    assert captured_keys == ["devops"]
+    assert worker.team_lead.llm == "devops-client"
+
+
+def test_build_implementation_worker_devops_unwraps_strands_model(monkeypatch) -> None:
+    """The production llm_getter path returns a Strands-wrapped LLMClientModel, not a
+    raw LLMClient. Two DevOps specialist agents (DevSecOpsReviewAgent, ChangeReviewAgent)
+    call complete_json directly and need the raw client -- passing the wrapper through
+    unchanged would AttributeError deep inside those calls and silently fail/fail-open
+    the security_review/change_review gates. _build_implementation_worker must unwrap it
+    via the model's public ``client`` accessor before constructing DevOpsTeamLeadAgent."""
+    monkeypatch.setenv(_DEVOPS_ROUTING_ENV, "1")
+
+    class _FakeStrandsModel:
+        """Stands in for llm_service.strands_adapter.LLMClientModel: wraps a raw
+        client and exposes it via a public ``client`` property, but does NOT itself
+        expose complete_json (matching the Strands Model protocol, not LLMClient)."""
+
+        def __init__(self, client: Any) -> None:
+            self._client = client
+
+        @property
+        def client(self) -> Any:
+            return self._client
+
+    raw_client = object()  # stand-in for a real llm_service.LLMClient instance
+    strands_model = _FakeStrandsModel(raw_client)
+
+    worker = orch_mod._build_implementation_worker(
+        "devops_worker",
+        StackSpec(name="devops", tools_services=["Terraform"]),
+        lambda key: strands_model,
+        engine_provider=None,
+    )
+
+    assert worker.team_lead.llm is raw_client
+    assert worker.team_lead.llm is not strands_model
+
+
+def test_build_implementation_worker_devops_stack_is_backend_when_flag_off() -> None:
+    """The same stack, with the flag off, resolves to an ordinary backend V2TeamWorker."""
+
+    class _FakeLead:
+        def __init__(self, llm):
+            self.llm = llm
+
+    class _FakeProvider:
+        def build_implementation_team_lead(self, team_kind, llm):
+            return _FakeLead(llm)
+
+    worker = orch_mod._build_implementation_worker(
+        "devops_worker",
+        StackSpec(name="devops", tools_services=["Terraform"]),
+        lambda key: f"{key}-client",
+        _FakeProvider(),
+    )
+
+    assert worker.team_kind == "backend"
 
 
 def test_target_team_alias_adds_missing_backend_v2_stack_spec() -> None:
@@ -3918,9 +4177,10 @@ def test_user_decisions_for_latest_answer_wins_for_same_question(tmp_path):
     assert lines == ["Which DB? → MySQL"], f"latest answer must win, got {lines}"
 
 
-def test_user_decisions_for_falls_back_to_reason_for_legacy_entry(tmp_path):
-    """A user_decision entry predating the structured 'decisions' field (resumed across an upgrade)
-    still surfaces its decision via the rendered 'reason' text, rather than being dropped."""
+def test_user_decisions_for_fails_fast_on_legacy_entry_without_decisions(tmp_path):
+    """A user_decision entry predating the structured 'decisions' field (resumed across an
+    upgrade) raises instead of being auto-parsed from its free-text 'reason' — resume of that
+    legacy shape is unsupported and must fail clearly, identifying the offending task."""
     graph = TaskGraphService(job_id="j1")
     swarm = CodingTeamSwarm(
         tech_lead=StubTechLead(approved=True),
@@ -3937,9 +4197,8 @@ def test_user_decisions_for_falls_back_to_reason_for_legacy_entry(tmp_path):
         revision_feedback=[{"source": "user_decision", "reason": "Use TLS? → Yes"}],
     )
 
-    lines = swarm._user_decisions_for(task)
-
-    assert lines == ["Use TLS? → Yes"]
+    with pytest.raises(ValueError, match="t1"):
+        swarm._user_decisions_for(task)
 
 
 def test_user_decisions_for_empty_decisions_does_not_fall_back_to_reason(tmp_path):
@@ -4001,33 +4260,6 @@ def test_user_decisions_for_handles_answer_only_lines(tmp_path):
     assert "Use TLS" in lines  # rendered as the bare answer (no "→")
     assert "Use SSL" in lines
     assert len(lines) == 2, f"identical answer-only lines must collapse, got {lines}"
-
-
-def test_user_decisions_for_legacy_multiline_reason_extracts_bullets(tmp_path):
-    """A legacy entry whose 'reason' is the full multi-line block contributes clean per-decision
-    lines (the preamble is dropped, the '- q → a' bullets are extracted), not one messy line."""
-    graph = TaskGraphService(job_id="j1")
-    swarm = CodingTeamSwarm(
-        tech_lead=StubTechLead(approved=True),
-        workers=[StubWorker("a1")],
-        graph=graph,
-        path=Path(tmp_path),
-        agent_ids=["a1"],
-        llm_getter=lambda k: None,
-    )
-    reason = (
-        "The user answered the open question(s) you raised. Implement these decisions exactly; "
-        "do not ask again:\n- Which DB? → Postgres\n- Use TLS? → Yes"
-    )
-    task = Task(
-        id="t1",
-        title="T1",
-        revision_feedback=[{"source": "user_decision", "reason": reason}],
-    )
-
-    lines = swarm._user_decisions_for(task)
-
-    assert lines == ["Which DB? → Postgres", "Use TLS? → Yes"]
 
 
 def test_review_and_merge_passes_user_decisions(tmp_path, monkeypatch):

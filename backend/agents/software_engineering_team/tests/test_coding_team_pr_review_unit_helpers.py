@@ -254,8 +254,10 @@ class TestRunningSiblingOnCheckoutUnit:
 
 
 class _FakeFile:
-    def __init__(self, filename: str) -> None:
+    def __init__(self, filename: str, patch: str = "", status: str = "modified") -> None:
         self.filename = filename
+        self.patch = patch
+        self.status = status
 
 
 class TestInferReviewLanguageUnit:
@@ -442,7 +444,7 @@ def _run_reviewer_kwargs(**overrides: Any) -> Dict[str, Any]:
         job_id="job-1",
         pr=_FakePR(),
         files=[_FakeFile("a.py")],
-        code="",
+        hunk_files=None,
         head_files=None,
         repo_reader=None,
         change_surface=None,
@@ -474,7 +476,7 @@ class TestRunReviewerUnit:
         self._patch_collaborators(monkeypatch)
         output = _FakeOutput(["issue"], "summary", "notes")
         provider = _RecordingProvider([output])
-        kwargs = _run_reviewer_kwargs(head_files={"a.py": "content"}, code="")
+        kwargs = _run_reviewer_kwargs(head_files={"a.py": "content"}, hunk_files=None)
 
         result = pr_review._run_reviewer(provider, **kwargs)
 
@@ -490,11 +492,11 @@ class TestRunReviewerUnit:
         assert "pre_existing" in call["task_requirements"]
         assert "Architectural standards" in call["task_requirements"]
 
-    def test_only_code_runs_one_hunk_call(self, monkeypatch) -> None:
+    def test_only_hunk_files_runs_one_hunk_call(self, monkeypatch) -> None:
         self._patch_collaborators(monkeypatch)
         output = _FakeOutput(["issue"], "summary", "notes")
         provider = _RecordingProvider([output])
-        kwargs = _run_reviewer_kwargs(head_files=None, code="### a.py ###\n1: x = 1")
+        kwargs = _run_reviewer_kwargs(head_files=None, hunk_files={"a.py": "1: x = 1"})
 
         result = pr_review._run_reviewer(provider, **kwargs)
 
@@ -502,7 +504,7 @@ class TestRunReviewerUnit:
         assert len(provider.calls) == 1
         call = provider.calls[0]
         assert call["pre_numbered"] is True
-        assert call["code"] == "### a.py ###\n1: x = 1"
+        assert call["files"] == {"a.py": "1: x = 1"}
         # Every attempt appends the shared diff-first focus note (previously
         # whole-file and hunk modes used separate notes).
         assert call["task_requirements"] == pr_review._diff_first_focus("PR body")
@@ -519,7 +521,9 @@ class TestRunReviewerUnit:
         whole_output = _FakeOutput(["whole-issue"], "whole summary", "")
         hunk_output = _FakeOutput(["hunk-issue"], "", "hunk notes")
         provider = _RecordingProvider([whole_output, hunk_output])
-        kwargs = _run_reviewer_kwargs(head_files={"a.py": "content"}, code="### b.py ###\n1: y = 2")
+        kwargs = _run_reviewer_kwargs(
+            head_files={"a.py": "content"}, hunk_files={"b.py": "1: y = 2"}
+        )
 
         result = pr_review._run_reviewer(provider, **kwargs)
 
@@ -535,7 +539,7 @@ class TestRunReviewerUnit:
         assert provider.calls[1]["task_requirements"] == pr_review._diff_first_focus("PR body")
         assert "pre_existing" in provider.calls[1]["task_requirements"]
         assert "Architectural standards" in provider.calls[1]["task_requirements"]
-        assert provider.calls[1]["code"] == "### b.py ###\n1: y = 2"
+        assert provider.calls[1]["files"] == {"b.py": "1: y = 2"}
         assert isinstance(result, pr_review._MergedReviewerOutput)
         assert result.issues == ["whole-issue", "hunk-issue"]
 
@@ -543,7 +547,7 @@ class TestRunReviewerUnit:
         self._patch_collaborators(monkeypatch)
         provider = _RecordingProvider([_FakeOutput([], "", "")])
         kwargs = _run_reviewer_kwargs(
-            pr=_FakePR(body=None), head_files=None, code="### a.py ###\n1: x = 1"
+            pr=_FakePR(body=None), head_files=None, hunk_files={"a.py": "1: x = 1"}
         )
 
         pr_review._run_reviewer(provider, **kwargs)
@@ -557,7 +561,9 @@ class TestRunReviewerUnit:
     def test_first_attempt_error_records_outage_and_stops(self, monkeypatch) -> None:
         outages = self._patch_collaborators(monkeypatch)
         provider = _RecordingProvider(error=RuntimeError("boom"))
-        kwargs = _run_reviewer_kwargs(head_files={"a.py": "content"}, code="### b.py ###\n1: y = 2")
+        kwargs = _run_reviewer_kwargs(
+            head_files={"a.py": "content"}, hunk_files={"b.py": "1: y = 2"}
+        )
 
         result = pr_review._run_reviewer(provider, **kwargs)
 
@@ -576,7 +582,7 @@ class TestRunReviewerUnit:
     def test_bare_exception_falls_back_to_type_name(self, monkeypatch) -> None:
         outages = self._patch_collaborators(monkeypatch)
         provider = _RecordingProvider(error=RuntimeError())
-        kwargs = _run_reviewer_kwargs(head_files={"a.py": "content"}, code="")
+        kwargs = _run_reviewer_kwargs(head_files={"a.py": "content"}, hunk_files=None)
 
         result = pr_review._run_reviewer(provider, **kwargs)
 
@@ -586,7 +592,7 @@ class TestRunReviewerUnit:
     def test_none_output_records_outage(self, monkeypatch) -> None:
         outages = self._patch_collaborators(monkeypatch)
         provider = _RecordingProvider([None])
-        kwargs = _run_reviewer_kwargs(head_files={"a.py": "content"}, code="")
+        kwargs = _run_reviewer_kwargs(head_files={"a.py": "content"}, hunk_files=None)
 
         result = pr_review._run_reviewer(provider, **kwargs)
 
@@ -596,7 +602,7 @@ class TestRunReviewerUnit:
     def test_no_sources_raises_assertion_error(self, monkeypatch) -> None:
         self._patch_collaborators(monkeypatch)
         provider = _RecordingProvider([])
-        kwargs = _run_reviewer_kwargs(head_files=None, code="")
+        kwargs = _run_reviewer_kwargs(head_files=None, hunk_files=None)
 
         with pytest.raises(AssertionError):
             pr_review._run_reviewer(provider, **kwargs)
@@ -608,7 +614,7 @@ class TestRunReviewerUnit:
         surface = ChangeSurface(blocks={"mod.py": "1: def f():\n2:     return 1"})
         kwargs = _run_reviewer_kwargs(
             head_files={"mod.py": "def f():\n    return 1\n"},
-            code="",
+            hunk_files=None,
             change_surface=surface,
         )
 
@@ -618,8 +624,7 @@ class TestRunReviewerUnit:
         assert len(provider.calls) == 1
         call = provider.calls[0]
         assert call["pre_numbered"] is True
-        assert call["code"] == surface.code
-        assert "files" not in call
+        assert call["files"] == dict(surface.blocks)
         assert call["task_requirements"] == pr_review._diff_first_focus("PR body")
         assert "pre_existing" in call["task_requirements"]
 
@@ -629,7 +634,7 @@ class TestRunReviewerUnit:
         provider = _RecordingProvider([output])
         kwargs = _run_reviewer_kwargs(
             head_files={"a.py": "content"},
-            code="",
+            hunk_files=None,
             change_surface=ChangeSurface(blocks={}),
         )
 
@@ -640,7 +645,7 @@ class TestRunReviewerUnit:
         assert provider.calls[0]["pre_numbered"] is False
         assert provider.calls[0]["files"] == {"a.py": "content"}
 
-    def test_surface_plus_hunk_code_two_prenumbred_no_files(self, monkeypatch) -> None:
+    def test_surface_plus_hunk_files_two_prenumbred_calls(self, monkeypatch) -> None:
         self._patch_collaborators(monkeypatch)
         surface_out = _FakeOutput(["s"], "s", "")
         hunk_out = _FakeOutput(["h"], "", "h")
@@ -648,7 +653,7 @@ class TestRunReviewerUnit:
         surface = ChangeSurface(blocks={"a.py": "1: a"})
         kwargs = _run_reviewer_kwargs(
             head_files={"a.py": "a\n"},
-            code="### b.py ###\n1: y = 2",
+            hunk_files={"b.py": "1: y = 2"},
             change_surface=surface,
         )
 
@@ -656,12 +661,117 @@ class TestRunReviewerUnit:
 
         assert len(provider.calls) == 2
         assert provider.calls[0]["pre_numbered"] is True
-        assert provider.calls[0]["code"] == surface.code
-        assert "files" not in provider.calls[0]
+        assert provider.calls[0]["files"] == dict(surface.blocks)
         assert provider.calls[1]["pre_numbered"] is True
-        assert provider.calls[1]["code"] == "### b.py ###\n1: y = 2"
+        assert provider.calls[1]["files"] == {"b.py": "1: y = 2"}
         assert isinstance(result, pr_review._MergedReviewerOutput)
         assert result.issues == ["s", "h"]
+
+    def test_replaced_content_derived_from_patch_forwarded_to_every_attempt(
+        self, monkeypatch
+    ) -> None:
+        self._patch_collaborators(monkeypatch)
+        whole_output = _FakeOutput(["whole-issue"], "", "")
+        hunk_output = _FakeOutput(["hunk-issue"], "", "")
+        provider = _RecordingProvider([whole_output, hunk_output])
+        patch = "@@ -1,2 +1,1 @@\n keep\n-deleted line"
+        kwargs = _run_reviewer_kwargs(
+            files=[_FakeFile("a.py", patch=patch, status="modified")],
+            head_files={"a.py": "content"},
+            hunk_files={"b.py": "1: y = 2"},
+        )
+
+        pr_review._run_reviewer(provider, **kwargs)
+
+        assert len(provider.calls) == 2
+        expected = {"a.py": "keep\ndeleted line"}
+        assert provider.calls[0]["replaced_content"] == expected
+        assert provider.calls[1]["replaced_content"] == expected
+
+    def test_added_only_patch_omits_replaced_content(self, monkeypatch) -> None:
+        self._patch_collaborators(monkeypatch)
+        output = _FakeOutput(["issue"], "", "")
+        provider = _RecordingProvider([output])
+        # Pure insertion (new file): the hunk has no old-file lines at all, so
+        # the removed-side render is "" -- distinct from a hunk that carries
+        # context lines alongside an addition, which still has a removed side.
+        patch = "@@ -0,0 +1,2 @@\n+added1\n+added2"
+        kwargs = _run_reviewer_kwargs(
+            files=[_FakeFile("a.py", patch=patch, status="modified")],
+            head_files={"a.py": "content"},
+            hunk_files=None,
+        )
+
+        pr_review._run_reviewer(provider, **kwargs)
+
+        # A patch that only adds lines has no removed-side body: replaced_content
+        # is omitted from the call entirely rather than forwarded as {}.
+        assert "replaced_content" not in provider.calls[0]
+
+    def test_no_patch_default_files_omit_replaced_content(self, monkeypatch) -> None:
+        self._patch_collaborators(monkeypatch)
+        output = _FakeOutput(["issue"], "", "")
+        provider = _RecordingProvider([output])
+        kwargs = _run_reviewer_kwargs(head_files={"a.py": "content"}, hunk_files=None)
+
+        pr_review._run_reviewer(provider, **kwargs)
+
+        assert "replaced_content" not in provider.calls[0]
+
+    def test_replaced_content_forwarded_alongside_change_surface_and_hunk(
+        self, monkeypatch
+    ) -> None:
+        """The change-surface attempt replaces the whole-file attempt (see
+        test_surface_plus_hunk_files_two_prenumbred_calls), a distinct dispatch
+        branch from the whole-file/hunk pairing covered above -- replaced_content
+        must still reach both the surface call and the hunk call."""
+        self._patch_collaborators(monkeypatch)
+        surface_out = _FakeOutput(["s"], "s", "")
+        hunk_out = _FakeOutput(["h"], "", "h")
+        provider = _RecordingProvider([surface_out, hunk_out])
+        surface = ChangeSurface(blocks={"a.py": "1: a"})
+        patch_a = "@@ -1,2 +1,1 @@\n keep\n-deleted line"
+        patch_b = "@@ -1,1 +1,2 @@\n ctx\n+added"
+        kwargs = _run_reviewer_kwargs(
+            files=[
+                _FakeFile("a.py", patch=patch_a, status="modified"),
+                _FakeFile("b.py", patch=patch_b, status="modified"),
+            ],
+            head_files={"a.py": "a\n"},
+            hunk_files={"b.py": "1: y = 2"},
+            change_surface=surface,
+        )
+
+        result = pr_review._run_reviewer(provider, **kwargs)
+
+        assert len(provider.calls) == 2
+        assert provider.calls[0]["pre_numbered"] is True
+        assert provider.calls[0]["files"] == dict(surface.blocks)
+        assert provider.calls[1]["pre_numbered"] is True
+        assert provider.calls[1]["files"] == {"b.py": "1: y = 2"}
+        expected = {"a.py": "keep\ndeleted line", "b.py": "ctx"}
+        assert provider.calls[0]["replaced_content"] == expected
+        assert provider.calls[1]["replaced_content"] == expected
+        assert isinstance(result, pr_review._MergedReviewerOutput)
+        assert result.issues == ["s", "h"]
+
+    def test_removed_status_file_omits_replaced_content(self, monkeypatch) -> None:
+        """_build_replaced_content mirrors _build_review_code's eligibility
+        filter: a file whose status is "removed" is excluded even when its
+        patch has a non-empty removed-side body."""
+        self._patch_collaborators(monkeypatch)
+        output = _FakeOutput(["issue"], "", "")
+        provider = _RecordingProvider([output])
+        patch = "@@ -1,2 +0,0 @@\n-line1\n-line2"
+        kwargs = _run_reviewer_kwargs(
+            files=[_FakeFile("a.py", patch=patch, status="removed")],
+            head_files={"a.py": "content"},
+            hunk_files=None,
+        )
+
+        pr_review._run_reviewer(provider, **kwargs)
+
+        assert "replaced_content" not in provider.calls[0]
 
 
 # ---------------------------------------------------------------------------
@@ -728,7 +838,6 @@ class TestBuildChangeSurfaceForReviewable:
         surface = pr_review._build_change_surface_for_reviewable(files, head)
         assert not surface.is_empty
         assert "mod.py" in surface.blocks
-        assert "### mod.py ###" in surface.code
 
     def test_missing_head_omits_path_empty_surface(self) -> None:
         patch = "@@ -1,2 +1,2 @@\n def f():\n-    return 0\n+    return 1\n"

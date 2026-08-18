@@ -7,6 +7,7 @@ from typing import Dict
 from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
 from software_engineering_team.shared.coding_standards import CODING_STANDARDS
+from software_engineering_team.shared.prompt_utils import JSON_OUTPUT_INSTRUCTION
 from software_engineering_team.shared.tool_agent_base import (
     BaseReviewToolAgent,
     relevant_code_for_issue,
@@ -54,8 +55,9 @@ Return a single JSON object with:
 **Approval rule:** Code is approved when there are no critical or high severity issues. Medium/low issues may be acceptable for merge but should still be listed.
 
 If no issues are found, return empty issues list. Be thorough. Each recommendation must be actionable – the coding agent should know exactly what to implement.
-
-Respond with valid JSON only. No explanatory text outside JSON.
+"""
+    + JSON_OUTPUT_INSTRUCTION
+    + """
 
 ---
 

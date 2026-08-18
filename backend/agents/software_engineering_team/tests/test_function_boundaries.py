@@ -5,6 +5,7 @@ from __future__ import annotations
 from code_review_agent.function_boundaries import (
     enclosing_construct,
     enclosing_construct_start_heuristic,
+    hunk_segment_bounds,
     iter_constructs,
     segment_containing_line,
     strip_numbered_prefixes,
@@ -206,6 +207,26 @@ def test_strip_numbered_prefixes_detects_and_strips() -> None:
     assert mapper(3) == 4242
 
 
+def test_strip_numbered_prefixes_detects_padded_pipe_gutter() -> None:
+    """Live ``N| `` gutters (width-padded across 9→10) strip to exact source indent."""
+    content = "  9|     foo(\n 10|         'bar',\n"
+    stripped, physical, mapper = strip_numbered_prefixes(content, line_number=10)
+    assert stripped == "    foo(\n        'bar',"
+    assert physical == 2
+    assert mapper is not None
+    assert mapper(1) == 9
+    assert mapper(2) == 10
+
+
+def test_strip_numbered_prefixes_ignores_indented_dict_keys() -> None:
+    """An indented ``    1: value`` dict entry is source, not a numbered gutter."""
+    content = "STATUS = {\n    1: 'v1',\n    2: 'v2',\n}\n"
+    stripped, physical, mapper = strip_numbered_prefixes(content, line_number=2)
+    assert mapper is None
+    assert stripped == content
+    assert physical == 2
+
+
 def test_strip_numbered_prefixes_preserves_inter_hunk_separators() -> None:
     """Bare ``...`` gap markers are kept so annotated hunks resolve independently."""
     content = "\n".join(
@@ -279,6 +300,44 @@ def test_segment_containing_line_returns_full_content_when_not_annotated() -> No
     assert segment_containing_line(content, 3, annotated_hunks=True) == content
 
 
+def test_hunk_segment_bounds_isolates_gap_bounded_hunk() -> None:
+    """A target line resolves to its own hunk segment's (start, end) bounds."""
+    content = "\n".join(
+        [
+            "def first():",  # 1
+            "    return 1",  # 2
+            "...",  # 3 (separator)
+            "x = 1",  # 4
+            "...",  # 5 (separator)
+            "    changed()",  # 6
+        ]
+    )
+    assert hunk_segment_bounds(content, 2, annotated_hunks=True) == (1, 2)
+    assert hunk_segment_bounds(content, 4, annotated_hunks=True) == (4, 4)
+    assert hunk_segment_bounds(content, 6, annotated_hunks=True) == (6, 6)
+
+
+def test_hunk_segment_bounds_returns_full_range_when_not_annotated() -> None:
+    """Non-annotated content (or content without gap markers) spans the whole range."""
+    content = "def foo():\n    ...\n    return 1\n"
+    lines = content.splitlines()
+    assert hunk_segment_bounds(content, 3) == (1, len(lines))
+    assert hunk_segment_bounds(content, 3, annotated_hunks=True) == (1, len(lines))
+
+
+def test_hunk_segment_bounds_returns_none_for_line_outside_every_segment() -> None:
+    """A separator-line target or an out-of-range line yields None."""
+    content = "\n".join(["x = 1", "...", "y = 2"])
+    assert hunk_segment_bounds(content, 2, annotated_hunks=True) is None
+    assert hunk_segment_bounds(content, 99, annotated_hunks=True) is None
+
+
+def test_hunk_segment_bounds_returns_none_for_empty_content() -> None:
+    """Empty content has no segments to bound."""
+    assert hunk_segment_bounds("", 1) is None
+    assert hunk_segment_bounds("", 1, annotated_hunks=True) is None
+
+
 def test_strip_numbered_prefixes_empty_content() -> None:
     """Empty content strips to empty with the original line number and no mapper."""
     stripped, physical, mapper = strip_numbered_prefixes("", line_number=1)
@@ -291,14 +350,7 @@ def test_strip_numbered_prefixes_empty_content() -> None:
 
 
 def test_iter_constructs_qualifies_methods_and_lists_all() -> None:
-    src = (
-        "class C:\n"
-        "    def m(self):\n"
-        "        return 1\n"
-        "\n"
-        "def top():\n"
-        "    return 2\n"
-    )
+    src = "class C:\n    def m(self):\n        return 1\n\ndef top():\n    return 2\n"
     constructs = iter_constructs(src)
     names = {c.name for c in constructs}
     assert names == {"C", "C.m", "top"}
@@ -339,15 +391,7 @@ def test_iter_constructs_parse_failure_returns_empty() -> None:
 
 def test_iter_constructs_annotated_hunks_skips_unparseable_sibling() -> None:
     """With annotated_hunks, an indented continuation hunk does not hide other defs."""
-    content = (
-        "def alpha():\n"
-        "    return 1\n"
-        "...\n"
-        "    changed()\n"
-        "...\n"
-        "def beta():\n"
-        "    return 2\n"
-    )
+    content = "def alpha():\n    return 1\n...\n    changed()\n...\ndef beta():\n    return 2\n"
     # Whole-file parse fails; hunk-aware listing still finds alpha and beta.
     assert iter_constructs(content) == []
     names = {c.name for c in iter_constructs(content, annotated_hunks=True)}

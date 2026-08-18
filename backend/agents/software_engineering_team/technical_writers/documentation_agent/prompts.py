@@ -1,6 +1,7 @@
 """Prompts for the Documentation agent."""
 
 from software_engineering_team.shared.coding_standards import CODING_STANDARDS
+from software_engineering_team.shared.prompt_utils import JSON_OUTPUT_INSTRUCTION
 
 DOCUMENTATION_README_PROMPT = (
     """You are an expert Technical Writer specializing in developer documentation. Your primary goal is to write clear, concise, and actionable documentation that helps users do everything they need regarding deploying, running, testing, using, and integrating with the project.
@@ -96,12 +97,13 @@ Return a single JSON object with:
 - "suggested_commit_message": string -- Conventional Commits format (e.g., "docs(readme): add API documentation and deployment instructions")
 
 Each folder README (frontend, backend, devops) must include at least: Prerequisites, Building, Running, Deployment, and how to interact with that part of the project. Use imperative mood and copy-pasteable commands.
-
-Respond with valid JSON only. No explanatory text outside JSON."""
+"""
+    + JSON_OUTPUT_INSTRUCTION
 )
 
 
-DOCUMENTATION_CONTRIBUTORS_PROMPT = """You are an expert Technical Writer. Review the project and determine if the CONTRIBUTORS.md file needs updating.
+DOCUMENTATION_CONTRIBUTORS_PROMPT = (
+    """You are an expert Technical Writer. Review the project and determine if the CONTRIBUTORS.md file needs updating.
 
 **CONTRIBUTORS.md should track:**
 - All agents/team members that contributed to the project
@@ -118,8 +120,9 @@ Return a single JSON object with:
 - "contributors_content": string -- the complete updated CONTRIBUTORS.md content (full file). If no changes needed, return the existing content unchanged.
 - "contributors_changed": boolean -- true if content was meaningfully updated
 - "summary": string -- brief description of what was updated (or "no changes needed")
-
-Respond with valid JSON only. No explanatory text outside JSON."""
+"""
+    + JSON_OUTPUT_INSTRUCTION
+)
 
 
 DOCUMENTATION_FINAL_REVIEW_SUFFIX = """

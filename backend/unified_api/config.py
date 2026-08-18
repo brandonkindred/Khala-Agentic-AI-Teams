@@ -36,7 +36,7 @@ DEFAULT_HOST = os.getenv("UNIFIED_API_HOST", "0.0.0.0")
 # Security gateway: when True (default), scan requests to team APIs before forwarding.
 SECURITY_GATEWAY_ENABLED = os.getenv("SECURITY_GATEWAY_ENABLED", "true").lower() in ("true", "1", "yes")
 
-# Agent Console sandbox reaper/worker: when True (default), the lifespan starts
+# Platform sandbox reaper/worker: when True (default), the lifespan starts
 # the sandbox idle reaper (and, when Temporal is enabled, this process's own
 # sandbox-only Temporal worker thread). Set false to run unified-api without it.
 UNIFIED_API_SANDBOX_TEMPORAL_WORKER = os.getenv("UNIFIED_API_SANDBOX_TEMPORAL_WORKER", "true").lower() in (
@@ -57,9 +57,12 @@ UNIFIED_API_TEAM_ASSISTANTS_ENABLED = os.getenv("UNIFIED_API_TEAM_ASSISTANTS_ENA
     "yes",
 )
 
-# Agent Studio Temporal worker: when True (default), the lifespan starts this
-# process's in-process Agent Studio Temporal worker thread (Agent Studio is
-# Temporal-only). Set false to run unified-api without booting it.
+# Agent Studio Temporal worker: when True (default) and Temporal is configured,
+# the lifespan starts this process's in-process Agent Studio Temporal worker
+# thread. When Temporal is not configured, the lifespan skips the worker boot
+# entirely regardless of this flag. Set false to run unified-api without
+# booting it even when Temporal is configured; authoring CRUD then uses
+# in-process AgentStudioService. Other teams' Temporal workers are unaffected.
 UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER = os.getenv("UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER", "true").lower() in (
     "true",
     "1",

@@ -230,11 +230,17 @@ def _resolve_agent_think_pin(model: str) -> "str | None":
     return level
 
 
-def resolve_think_for_model(model: str, think: "bool | str | None") -> "bool | str":
+def resolve_think_for_model(
+    model: str, think: "bool | str | None", *, response_format: str = "text"
+) -> "bool | str":
     """Resolve a caller's think request into the wire value for ``model``.
 
     Preconditions:
         - ``think`` is None, a bool, or a thinking-level string.
+        - ``response_format`` is ``"json"`` or ``"text"`` (the caller's
+          ``chat``/``complete_json`` response mode; defaults to ``"text"`` for
+          callers — e.g. the plain-text ``complete`` path — that never force
+          JSON on the wire).
     Postconditions:
         - Explicit values win: a string passes through verbatim and False
           stays False. True — or None when the global default is enabled —
@@ -249,6 +255,12 @@ def resolve_think_for_model(model: str, think: "bool | str | None") -> "bool | s
           *before* the model-default tier — but ranked below the operator's
           ``LLM_ENABLE_THINKING``/``LLM_THINKING_LEVEL`` knobs and only for a
           level the model registers.
+        - When ``think`` is None, no agent pin applies, and
+          ``response_format == "json"``: resolves to False. Extended thinking
+          competes with strict JSON decoding for the content channel (see
+          ``LLMSemanticExhaustionError.schema_forced``), so a JSON-shaped call
+          with no explicit thinking request and no deliberate per-agent pin
+          defaults to thinking off rather than the model's max tier.
     """
     if isinstance(think, str):
         return think
@@ -259,6 +271,8 @@ def resolve_think_for_model(model: str, think: "bool | str | None") -> "bool | s
         if pinned is not None:
             return pinned
         if not thinking_enabled_by_default():
+            return False
+        if response_format == "json":
             return False
     levels = KNOWN_MODEL_THINKING_LEVELS.get(model)
     if not levels:

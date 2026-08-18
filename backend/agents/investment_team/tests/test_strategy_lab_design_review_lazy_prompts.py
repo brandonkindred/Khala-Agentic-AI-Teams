@@ -61,6 +61,8 @@ if reads:
     raise SystemExit(f"import read design-review prompt files: {{reads!r}}")
 if mod._get_stop_order_semantics.cache_info().currsize != 0:
     raise SystemExit("stop-order cache warmed at import")
+if mod._get_sizing_risk_framing.cache_info().currsize != 0:
+    raise SystemExit("sizing-risk-framing cache warmed at import")
 if mod._get_system_prompt.cache_info().currsize != 0:
     raise SystemExit("system prompt cache warmed at import")
 """
@@ -101,6 +103,28 @@ def test_design_review_prompt_helpers_include_stop_order_and_body() -> None:
     assert "NOT a defect" in stop
     assert stop in prompt
     assert prompt.index(stop) > 0
+
+
+def test_design_review_prompt_helper_includes_sizing_risk_framing() -> None:
+    """Helper concatenates sizing/risk framing after the stop-order block.
+
+    Preconditions: prompt markdown files exist under strategy_lab/prompts.
+    Postconditions: sizing/risk framing text is non-empty and appears after
+    the stop-order block in the design-review system prompt.
+    """
+    from investment_team.strategy_lab.agents.design_review import (
+        _get_sizing_risk_framing,
+        _get_stop_order_semantics,
+        _get_system_prompt,
+    )
+
+    sizing = _get_sizing_risk_framing()
+    stop = _get_stop_order_semantics()
+    prompt = _get_system_prompt()
+
+    assert "per-trade loss cap" in sizing
+    assert sizing in prompt
+    assert prompt.index(sizing) > prompt.index(stop)
 
 
 def test_design_review_prompt_helpers_cache_composed_prompt(

@@ -38,7 +38,15 @@ logger = logging.getLogger(__name__)
 
 
 def set_team_mode(team_id: str, req: SetTeamModeRequest):
-    """Toggle team between development and testing mode."""
+    """Toggle a team between development and interactive testing mode.
+
+    Preconditions: ``team_id`` is a non-empty string; ``req.mode`` is a
+        ``TeamMode`` (``development`` or ``testing``).
+    Postconditions: ``200`` with ``{"team_id", "mode"}`` reflecting the mode
+        just persisted; ``404`` if the team is not found (mode unchanged).
+        The stored mode is read by ``test-chat``/``test-pipeline`` callers
+        but is not itself enforced here — this endpoint only records it.
+    """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
     team = _main._store.get_team(team_id)
@@ -49,7 +57,13 @@ def set_team_mode(team_id: str, req: SetTeamModeRequest):
 
 
 def _find_agent_in_roster(team_id: str, agent_name: str) -> AgenticTeamAgent:
-    """Look up an agent by name in the team roster."""
+    """Look up an agent by name in the team roster.
+
+    Preconditions: ``team_id`` and ``agent_name`` are non-empty strings.
+    Postconditions: returns the matching ``AgenticTeamAgent`` when
+        ``agent_name`` is on the team's roster; otherwise raises
+        ``HTTPException(404)`` and never returns.
+    """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
     agents = _main._store.list_team_agents(team_id)
@@ -60,7 +74,15 @@ def _find_agent_in_roster(team_id: str, agent_name: str) -> AgenticTeamAgent:
 
 
 def create_test_chat_session(team_id: str, req: CreateTestChatSessionRequest):
-    """Create a new chat test session for an agent."""
+    """Create a new chat test session for an agent.
+
+    Preconditions: ``team_id`` is a non-empty string; ``req.agent_name`` is
+        non-empty.
+    Postconditions: ``201`` with the newly created ``TestChatSession`` (a
+        fresh UUID ``session_id``, no messages yet); ``404`` if the team is
+        not found, or ``req.agent_name`` is not on the team's roster (no
+        session created in either case).
+    """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
     team = _main._store.get_team(team_id)
@@ -95,9 +117,10 @@ def get_test_chat_session(team_id: str, session_id: str):
         (only generated when the session has no messages yet); ``404`` if the
         session doesn't exist or belongs to a different team. If starter-prompt
         generation raises a 404 because the session's agent isn't on the
-        roster, the prompts list is empty rather than failing the request; any
-        other failure (e.g. a registry outage) propagates instead of being
-        swallowed.
+        roster, or ``LookupError`` because the linked Manifest is missing
+        (orphan ``manifest_id``), the prompts list is empty rather than failing
+        the request; any other failure (e.g. a registry 500) propagates instead
+        of being swallowed.
     """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
@@ -112,13 +135,27 @@ def get_test_chat_session(team_id: str, session_id: str):
     if not messages:
         try:
             agent_def = _main._find_agent_in_roster(team_id, session.agent_name)
+            persona = _main.resolve_persona(agent_def.manifest_id)
             prompts = generate_starter_prompts(
-                agent_def.agent_name, agent_def.role, agent_def.skills, agent_def.expertise
+                agent_def.agent_name, persona.role, persona.skills, persona.expertise
+            )
+        except LookupError as exc:
+            # Orphan manifest_id: soft-fail like list enrichment — empty prompts,
+            # not a 500 on an otherwise-valid session GET.
+            # Log via main's logger so hub-scoped warning assertions keep working.
+            _main.logger.warning(
+                "Could not generate starter prompts for session %s (agent=%s): %s",
+                session_id,
+                session.agent_name,
+                exc,
             )
         except HTTPException as exc:
+            # Only the genuine "agent not on roster" case falls back to an empty
+            # prompt list. Anything else (e.g. a registry 500) is a real failure
+            # worth surfacing to the caller, not silently swallowing.
             if exc.status_code != 404:
                 raise
-            logger.warning(
+            _main.logger.warning(
                 "Could not generate starter prompts for session %s (agent=%s): %s",
                 session_id,
                 session.agent_name,
@@ -133,7 +170,15 @@ def get_test_chat_session(team_id: str, session_id: str):
 
 
 def rename_test_chat_session(team_id: str, session_id: str, req: RenameTestChatSessionRequest):
-    """Rename a chat test session."""
+    """Rename a chat test session.
+
+    Preconditions: ``team_id`` and ``session_id`` are non-empty strings;
+        ``req.session_name`` is 1-200 characters (enforced by the request
+        model).
+    Postconditions: ``200`` with ``{"session_id", "session_name"}`` reflecting
+        the new name; ``404`` if the session is unknown or belongs to a
+        different team (name unchanged in that case).
+    """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
     session_row = _main._test_store.get_chat_session(session_id)
@@ -192,14 +237,20 @@ def send_test_chat_message(team_id: str, session_id: str, req: SendTestChatMessa
     context_parts.append(f"User: {req.content}")
     full_context = "\n\n".join(context_parts)
 
+    # Build and invoke the agent. This local test-chat path has no cognition
+    # injector (no proxy / open side channel) and no idempotency ledger, so it
+    # uses the plain runtime rather than the cognition-aware wrapper — advisory
+    # rules + memory digest are rendered on the gated sandbox invoke path, where
+    # the shim opens the channel.
     try:
+        persona = _main.resolve_persona(agent_def.manifest_id)
         agent_instance = _main._build_test_agent(
             agent_def.agent_name,
-            agent_def.role,
-            agent_def.skills,
-            agent_def.capabilities,
-            agent_def.tools,
-            agent_def.expertise,
+            persona.role,
+            persona.skills,
+            persona.capabilities,
+            persona.tools,
+            persona.expertise,
         )
         response_text = _main._call_test_agent(agent_instance, full_context)
     except Exception as exc:
@@ -219,7 +270,16 @@ def send_test_chat_message(team_id: str, session_id: str, req: SendTestChatMessa
 
 
 def export_test_chat_session(team_id: str, session_id: str):
-    """Export a chat session transcript as Markdown text."""
+    """Export a chat session transcript as Markdown text.
+
+    Preconditions: ``team_id`` and ``session_id`` are non-empty strings.
+    Postconditions: ``200`` with the transcript rendered as
+        ``text/markdown`` (heading, agent name, then each message with its
+        role label and a ✅/❌ suffix for any rated assistant message) and a
+        ``Content-Disposition: attachment`` header naming the file after
+        ``session_id``; ``404`` if the session is unknown or belongs to a
+        different team.
+    """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
     session_row = _main._test_store.get_chat_session(session_id)
@@ -248,7 +308,14 @@ def export_test_chat_session(team_id: str, session_id: str):
 
 
 def rate_test_chat_message(team_id: str, message_id: str, req: RateMessageRequest):
-    """Rate an assistant message (thumbs up/thumbs down)."""
+    """Rate an assistant message (thumbs up/thumbs down).
+
+    Preconditions: ``team_id`` and ``message_id`` are non-empty strings;
+        ``req.rating`` is a ``MessageRating``.
+    Postconditions: ``200`` with ``{"message_id", "rating"}`` reflecting the
+        rating just stored; ``404`` if no message with ``message_id`` exists
+        under ``team_id`` (rating unchanged in that case).
+    """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
     if not _main._test_store.update_message_rating(team_id, message_id, req.rating.value):
@@ -257,7 +324,13 @@ def rate_test_chat_message(team_id: str, message_id: str, req: RateMessageReques
 
 
 def get_agent_quality_scores(team_id: str):
-    """Get aggregated quality scores per agent based on chat ratings."""
+    """Get aggregated quality scores per agent based on chat ratings.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with an ``AgentQualityScore`` per agent that has
+        at least one rated message (empty if none); ``404`` if the team is
+        not found.
+    """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
     _main._get_team_or_404(team_id)
@@ -323,7 +396,19 @@ def _dispatch_pipeline_run(
 
 
 def start_pipeline_run(team_id: str, req: StartPipelineRunRequest):
-    """Start an end-to-end pipeline test run."""
+    """Start an end-to-end pipeline test run.
+
+    Preconditions: ``team_id`` is a non-empty string; ``req.process_id``
+        identifies a process already saved on the team.
+    Postconditions: ``201`` with the created ``TestPipelineRun`` (a fresh
+        UUID ``run_id``); ``404`` if the team is not found, or the team has
+        no process with ``req.process_id``. Dispatch is routed to a durable
+        Temporal workflow when Temporal is enabled, else an in-process daemon
+        thread (``_dispatch_pipeline_run``); the run row is created before
+        dispatch is attempted, and if dispatch itself raises, the run is
+        marked FAILED and the request fails with ``500`` rather than leaving
+        a run stuck in an unstarted state.
+    """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
     team = _main._store.get_team(team_id)
@@ -367,7 +452,12 @@ def start_pipeline_run(team_id: str, req: StartPipelineRunRequest):
 
 
 def list_pipeline_runs(team_id: str):
-    """List pipeline test runs for a team."""
+    """List pipeline test runs for a team.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with a ``TestPipelineRun`` per run recorded for
+        the team (empty if none); ``404`` if the team is not found.
+    """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
     _main._get_team_or_404(team_id)
@@ -376,7 +466,13 @@ def list_pipeline_runs(team_id: str):
 
 
 def get_pipeline_run(team_id: str, run_id: str):
-    """Get the current status and step results of a pipeline test run."""
+    """Get the current status and step results of a pipeline test run.
+
+    Preconditions: ``team_id`` and ``run_id`` are non-empty strings.
+    Postconditions: ``200`` with the ``TestPipelineRun``'s current status and
+        step results; ``404`` if no run with ``run_id`` exists, or it exists
+        but belongs to a different team.
+    """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
     row = _main._test_store.get_pipeline_run(run_id)
@@ -386,7 +482,21 @@ def get_pipeline_run(team_id: str, run_id: str):
 
 
 def submit_pipeline_input(team_id: str, run_id: str, req: SubmitPipelineInputRequest):
-    """Submit human input at a WAIT step to resume the pipeline."""
+    """Submit human input at a WAIT step to resume the pipeline.
+
+    Preconditions: ``team_id`` and ``run_id`` are non-empty strings;
+        ``req.input`` is non-empty (enforced by the request model).
+    Postconditions: ``200`` with the run's updated ``TestPipelineRun``;
+        ``404`` if the run is unknown or belongs to a different team; ``400``
+        if the run is not currently ``waiting_for_input``; ``409`` if the run
+        is no longer resumable (timed out, cancelled, or reaped between the
+        status check and the resume attempt — start a new run instead).
+        Dispatch mirrors how the run was started: a Temporal-owned run is
+        resumed by durably recording the input and then signaling the
+        workflow (a signal failure is logged, not raised — the resume is
+        already durably recorded and gets reconciled at the WAIT timeout);
+        otherwise the in-process pipeline runner is signaled directly.
+    """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
     row = _main._test_store.get_pipeline_run(run_id)
@@ -428,7 +538,18 @@ def submit_pipeline_input(team_id: str, run_id: str, req: SubmitPipelineInputReq
 
 
 def cancel_pipeline_run(team_id: str, run_id: str):
-    """Cancel a running or waiting pipeline test run."""
+    """Cancel a running or waiting pipeline test run.
+
+    Preconditions: ``team_id`` and ``run_id`` are non-empty strings.
+    Postconditions: ``200`` with the run's updated ``TestPipelineRun``;
+        ``404`` if the run is unknown or belongs to a different team; ``400``
+        if the run's status is not ``running`` or ``waiting_for_input``
+        (already-terminal runs can't be cancelled). Dispatch mirrors how the
+        run was started: a Temporal-owned run is marked cancelled in the
+        store and then cancelled on the workflow (a workflow-cancel failure
+        is logged, not raised — the store already reflects the cancellation);
+        otherwise the in-process pipeline runner is cancelled directly.
+    """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
     row = _main._test_store.get_pipeline_run(run_id)

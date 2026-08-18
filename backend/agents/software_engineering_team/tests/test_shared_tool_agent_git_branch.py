@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import types
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -29,9 +30,29 @@ def _inp(**kw):
         task_description="do the thing",
         feature_branch_name=None,
         current_files={},
+        build_verifier=None,
+        build_verify_label="",
+        linting_tool_agent=None,
+        lint_agent_type="",
     )
     base.update(kw)
     return types.SimpleNamespace(**base)
+
+
+def _passing_lint_agent() -> MagicMock:
+    agent = MagicMock()
+    agent.run.return_value = MagicMock(
+        execution_result=MagicMock(success=True), passed=True, linter_issues=[]
+    )
+    return agent
+
+
+def _failing_lint_agent() -> MagicMock:
+    agent = MagicMock()
+    agent.run.return_value = MagicMock(
+        execution_result=MagicMock(success=False), passed=False, linter_issues=["boom"]
+    )
+    return agent
 
 
 def _git_dir(tmp_path: Path) -> Path:
@@ -62,6 +83,111 @@ def test_deliver_existing_branch_merge_fail(tmp_path, monkeypatch):
     out = _agent().deliver(_inp(repo_path=str(tmp_path), feature_branch_name="feature/x"))
     assert out.success is False
     assert "Merge failed" in out.summary
+
+
+def test_deliver_existing_branch_gate_blocks_merge(tmp_path, monkeypatch):
+    """Regression: a failing pre-merge quality gate must skip the merge entirely."""
+    _git_dir(tmp_path)
+    monkeypatch.setattr(mod, "commit_working_tree", lambda *a, **k: (True, ""))
+    merge_calls = []
+    monkeypatch.setattr(mod, "merge_branch", lambda *a, **k: merge_calls.append(a) or (True, ""))
+    checkout_calls = []
+    monkeypatch.setattr(
+        mod, "checkout_branch", lambda *a, **k: checkout_calls.append(a) or (True, "")
+    )
+    out = _agent().deliver(
+        _inp(
+            repo_path=str(tmp_path),
+            feature_branch_name="feature/x",
+            build_verifier=lambda repo_path, label, task_id: (False, "build broke"),
+            build_verify_label="backend",
+        )
+    )
+    assert out.success is False
+    assert out.summary == "Pre-merge quality gate failed: Build failed: build broke"
+    assert merge_calls == []
+    assert checkout_calls[-1][1] == "feature/x"
+
+
+def test_deliver_existing_branch_gate_passes_autofix_commit_before_merge(tmp_path, monkeypatch):
+    """A passing gate inspects the finalized files and sweeps up any autofix
+    commit before the merge proceeds.
+
+    All four operations (finalize commit, gate's build verifier, gate's
+    linter, autofix commit, merge) are recorded into one shared, call-ordered
+    list so the assertion actually verifies ordering -- separate per-op lists
+    would pass even if an implementation ran the gate before the finalize
+    commit (inspecting stale files) or after the autofix sweep (leaving its
+    own fixes uncommitted), or merged before sweeping up the autofix commit.
+    """
+    _git_dir(tmp_path)
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        mod,
+        "commit_working_tree",
+        lambda *a, **k: calls.append(("commit_working_tree", a[1])) or (True, ""),
+    )
+    monkeypatch.setattr(
+        mod,
+        "merge_branch",
+        lambda *a, **k: calls.append(("merge_branch", "")) or (True, ""),
+    )
+    monkeypatch.setattr(mod, "delete_branch", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(mod, "checkout_branch", lambda *a, **k: (True, ""))
+
+    def _build_verifier(repo_path, label, task_id):
+        calls.append(("build_verifier", ""))
+        return True, ""
+
+    class _TracedLintAgent:
+        def run(self, inp):
+            calls.append(("linting_tool_agent.run", ""))
+            return MagicMock(execution_result=MagicMock(success=True), passed=True, linter_issues=[])
+
+    out = _agent().deliver(
+        _inp(
+            repo_path=str(tmp_path),
+            feature_branch_name="feature/x",
+            build_verifier=_build_verifier,
+            linting_tool_agent=_TracedLintAgent(),
+            lint_agent_type="backend",
+        )
+    )
+    assert out.success is True
+    assert calls == [
+        ("commit_working_tree", "chore: finalize before merge"),
+        ("build_verifier", ""),
+        ("linting_tool_agent.run", ""),
+        ("commit_working_tree", "chore: pre-merge quality gate autofix"),
+        ("merge_branch", ""),
+    ]
+
+
+def test_deliver_existing_branch_autofix_commit_failure_blocks_merge(tmp_path, monkeypatch):
+    """Regression: a genuine git failure while sweeping up the autofix commit
+    (not the common "nothing to commit" no-op, which ``commit_working_tree``
+    reports as success) must skip the merge and fail closed, mirroring the
+    gate-blocks-merge test above.
+    """
+    _git_dir(tmp_path)
+
+    def _commit_working_tree(repo_path, message):
+        if message == "chore: pre-merge quality gate autofix":
+            return False, "git commit failed: lock file exists"
+        return True, ""  # "chore: finalize before merge" keeps succeeding
+
+    monkeypatch.setattr(mod, "commit_working_tree", _commit_working_tree)
+    merge_calls = []
+    monkeypatch.setattr(mod, "merge_branch", lambda *a, **k: merge_calls.append(a) or (True, ""))
+    checkout_calls = []
+    monkeypatch.setattr(
+        mod, "checkout_branch", lambda *a, **k: checkout_calls.append(a) or (True, "")
+    )
+    out = _agent().deliver(_inp(repo_path=str(tmp_path), feature_branch_name="feature/x"))
+    assert out.success is False
+    assert out.summary == "Autofix commit failed: git commit failed: lock file exists"
+    assert merge_calls == []
+    assert checkout_calls[-1][1] == "feature/x"
 
 
 # --- fallback path (no feature_branch_name) --------------------------------
@@ -105,12 +231,138 @@ def test_deliver_fallback_merge_fail(tmp_path, monkeypatch):
         lambda self, *a, **k: (True, "feature/y"),
     )
     monkeypatch.setattr(repo_writer, "write_agent_output", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(mod, "commit_working_tree", lambda *a, **k: (True, ""))
     monkeypatch.setattr(mod, "merge_branch", lambda *a, **k: (False, "conflict"))
     monkeypatch.setattr(mod, "abort_merge", lambda *a, **k: (True, ""))
     monkeypatch.setattr(mod, "checkout_branch", lambda *a, **k: (True, ""))
     out = _agent().deliver(_inp(repo_path=str(tmp_path), current_files={"a.py": "x"}))
     assert out.success is False
     assert "Merge failed" in out.summary
+
+
+def test_deliver_fallback_gate_blocks_merge(tmp_path, monkeypatch):
+    """Regression: a failing pre-merge quality gate must skip the merge on the
+    fallback (newly-created-branch) path too, and restore development."""
+    _git_dir(tmp_path)
+    from software_engineering_team.shared import repo_writer
+
+    monkeypatch.setattr(
+        mod.GitBranchManagementToolAgent,
+        "create_feature_branch",
+        lambda self, *a, **k: (True, "feature/y"),
+    )
+    monkeypatch.setattr(repo_writer, "write_agent_output", lambda *a, **k: (True, ""))
+    merge_calls = []
+    monkeypatch.setattr(mod, "merge_branch", lambda *a, **k: merge_calls.append(a) or (True, ""))
+    checkout_calls = []
+    monkeypatch.setattr(
+        mod, "checkout_branch", lambda *a, **k: checkout_calls.append(a) or (True, "")
+    )
+    out = _agent().deliver(
+        _inp(
+            repo_path=str(tmp_path),
+            current_files={"a.py": "x"},
+            linting_tool_agent=_failing_lint_agent(),
+            lint_agent_type="backend",
+        )
+    )
+    assert out.success is False
+    assert out.summary == "Pre-merge quality gate failed: Lint failed."
+    assert merge_calls == []
+    assert checkout_calls[-1][1] == mod.DEVELOPMENT_BRANCH
+
+
+def test_deliver_fallback_gate_passes_autofix_commit_before_merge(tmp_path, monkeypatch):
+    """Passing-path trace for the fallback (newly-created-branch) path.
+
+    The failing-gate test above returns before this path's own
+    ``chore: pre-merge quality gate autofix`` commit ever runs (that code is
+    implemented separately from the existing-branch path), and
+    ``test_deliver_fallback_success`` supplies no gate at all -- so neither
+    test would catch the autofix commit being deleted or reordered relative
+    to the gate/merge on this path. Record write/gate/commit/merge into one
+    shared, call-ordered list and assert the full sequence.
+    """
+    _git_dir(tmp_path)
+    from software_engineering_team.shared import repo_writer
+
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        mod.GitBranchManagementToolAgent,
+        "create_feature_branch",
+        lambda self, *a, **k: (True, "feature/y"),
+    )
+    monkeypatch.setattr(
+        repo_writer,
+        "write_agent_output",
+        lambda *a, **k: calls.append(("write_agent_output", "")) or (True, ""),
+    )
+    monkeypatch.setattr(
+        mod,
+        "commit_working_tree",
+        lambda *a, **k: calls.append(("commit_working_tree", a[1])) or (True, ""),
+    )
+    monkeypatch.setattr(
+        mod, "merge_branch", lambda *a, **k: calls.append(("merge_branch", "")) or (True, "")
+    )
+    monkeypatch.setattr(mod, "delete_branch", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(mod, "checkout_branch", lambda *a, **k: (True, ""))
+
+    def _build_verifier(repo_path, label, task_id):
+        calls.append(("build_verifier", ""))
+        return True, ""
+
+    class _TracedLintAgent:
+        def run(self, inp):
+            calls.append(("linting_tool_agent.run", ""))
+            return MagicMock(execution_result=MagicMock(success=True), passed=True, linter_issues=[])
+
+    out = _agent().deliver(
+        _inp(
+            repo_path=str(tmp_path),
+            current_files={"a.py": "x"},
+            build_verifier=_build_verifier,
+            linting_tool_agent=_TracedLintAgent(),
+            lint_agent_type="backend",
+        )
+    )
+    assert out.success is True
+    assert calls == [
+        ("write_agent_output", ""),
+        ("build_verifier", ""),
+        ("linting_tool_agent.run", ""),
+        ("commit_working_tree", "chore: pre-merge quality gate autofix"),
+        ("merge_branch", ""),
+    ]
+
+
+def test_deliver_fallback_autofix_commit_failure_blocks_merge(tmp_path, monkeypatch):
+    """Regression: a genuine git failure while sweeping up the autofix commit
+    on the fallback (newly-created-branch) path must skip the merge and
+    restore development, mirroring the gate-blocks-merge test above."""
+    _git_dir(tmp_path)
+    from software_engineering_team.shared import repo_writer
+
+    monkeypatch.setattr(
+        mod.GitBranchManagementToolAgent,
+        "create_feature_branch",
+        lambda self, *a, **k: (True, "feature/y"),
+    )
+    monkeypatch.setattr(repo_writer, "write_agent_output", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(
+        mod, "commit_working_tree", lambda *a, **k: (False, "git commit failed: disk full")
+    )
+    merge_calls = []
+    monkeypatch.setattr(mod, "merge_branch", lambda *a, **k: merge_calls.append(a) or (True, ""))
+    checkout_calls = []
+    monkeypatch.setattr(
+        mod, "checkout_branch", lambda *a, **k: checkout_calls.append(a) or (True, "")
+    )
+    out = _agent().deliver(_inp(repo_path=str(tmp_path), current_files={"a.py": "x"}))
+    assert out.success is False
+    assert out.summary == "Autofix commit failed: git commit failed: disk full"
+    assert merge_calls == []
+    assert checkout_calls[-1][1] == mod.DEVELOPMENT_BRANCH
 
 
 def test_deliver_fallback_success(tmp_path, monkeypatch):
@@ -123,6 +375,7 @@ def test_deliver_fallback_success(tmp_path, monkeypatch):
         lambda self, *a, **k: (True, "feature/y"),
     )
     monkeypatch.setattr(repo_writer, "write_agent_output", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(mod, "commit_working_tree", lambda *a, **k: (True, ""))
     monkeypatch.setattr(mod, "merge_branch", lambda *a, **k: (True, ""))
     monkeypatch.setattr(mod, "delete_branch", lambda *a, **k: (True, ""))
     monkeypatch.setattr(mod, "checkout_branch", lambda *a, **k: (True, ""))

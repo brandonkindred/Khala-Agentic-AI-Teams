@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import contextlib
 import os
-from typing import Any, Dict, NoReturn
+from typing import Any, Dict, NoReturn, Optional
 
 import pytest
 from code_review_agent import CodeReviewAgent
@@ -47,10 +47,12 @@ from code_review_agent.temporal import phase_models as pm
 from llm_service.clients.dummy import DummyLLMClient
 
 
-def _input(
-    code: str = "### app/main.py ###\ndef foo():\n    return 1", **overrides: Any
-) -> CodeReviewInput:
-    base: Dict[str, Any] = {"code": code, "task_description": "Add foo()", "language": "python"}
+def _input(files: Optional[Dict[str, str]] = None, **overrides: Any) -> CodeReviewInput:
+    base: Dict[str, Any] = {
+        "files": files if files is not None else {"app/main.py": "def foo():\n    return 1"},
+        "task_description": "Add foo()",
+        "language": "python",
+    }
     base.update(overrides)
     return CodeReviewInput(**base)  # type: ignore[arg-type]
 
@@ -206,10 +208,14 @@ def test_review_prep_dto_fanout_width_round_trips() -> None:
 def _run_activity_pipeline(review_input: CodeReviewInput) -> CodeReviewOutput:
     """Drive the activities sequentially in-process to check coordinator parity.
 
-    Synchronous approximation of ``CodeReviewWorkflow.run`` used only to assert
-    that the activity pipeline matches ``run_coordinator``'s final verdict. It
-    does NOT replicate the workflow's concurrent tail-pass ``asyncio.gather``
-    or its deterministic ``return_exceptions`` error precedence — see
+    Synchronous approximation of ``CodeReviewWorkflow.run``'s reordered
+    (``_REORDERED_TAIL_PASSES_PATCH``) pipeline used only to assert that the
+    activity pipeline matches ``run_coordinator``'s final verdict: merged pass
+    -> ``combine_findings_activity`` over the full stream ->
+    ``filter_false_positives_activity`` over that combined set, mirroring
+    ``coordinator._run_tail_passes``'s current sequential order. It does NOT
+    replicate the workflow's concurrent map-phase ``asyncio.gather`` or its
+    deterministic ``return_exceptions`` error precedence — see
     ``test_gather_return_exceptions_reproduces_sequential_error_precedence``
     and ``test_workflow_gathers_tail_pass_activities_concurrently`` for those
     properties. Call order here does not affect the merged verdict.
@@ -237,19 +243,17 @@ def _run_activity_pipeline(review_input: CodeReviewInput) -> CodeReviewOutput:
         spec_notes += o["spec_notes"]
         approved_flags += o["approved_flags"]
     assert approved_flags, "at least one chunk reviewed"
-    verified = A.filter_false_positives_activity(
-        payload, issues, bool(payload.get("skip_false_positive_filter", False))
-    )
     merged = A.find_architecture_and_side_effect_activity(payload)
     architecture_findings = merged["architecture_findings"]
     has_architecture_findings = bool(architecture_findings)
-    if architecture_findings:
-        verified = [*verified, *architecture_findings]
     side_effect_findings = merged["side_effect_findings"]
     has_side_effect_findings = bool(side_effect_findings)
-    if side_effect_findings:
-        verified = [*verified, *side_effect_findings]
-    verified = A.consolidate_side_effect_issues_activity(payload, verified)
+    combined = A.combine_findings_activity(
+        payload, [*issues, *architecture_findings, *side_effect_findings]
+    )
+    verified = A.filter_false_positives_activity(
+        payload, combined, bool(payload.get("skip_false_positive_filter", False))
+    )
     gate = A.finalize_review_activity(
         verified, not_reviewed, prep["skipped_issues"], approved_flags
     )
@@ -289,9 +293,9 @@ def test_activity_pipeline_matches_coordinator_verdict_multi_chunk() -> None:
     # multi-file/multi-chunk path: multiple ``review_chunk_activity`` fan-outs, the
     # dedupe/reconcile reduce, and the >1-summary synthesis branch. The durable
     # pipeline's verdict must still match ``run_coordinator``'s for the same input.
-    big_1 = "### app/main.py ###\n" + ("a" * 25_000)
-    big_2 = "### app/util.py ###\n" + ("b" * 25_000)
-    review_input = _input(code=big_1 + "\n\n" + big_2)
+    big_main = "a" * 25_000
+    big_util = "b" * 25_000
+    review_input = _input(files={"app/main.py": big_main, "app/util.py": big_util})
 
     # Confirm the input really does split into more than one chunk (otherwise the
     # test would silently degrade to the single-chunk path it means to complement).
@@ -312,7 +316,7 @@ def test_activity_pipeline_matches_coordinator_verdict_multi_chunk() -> None:
 def test_prepare_activity_reports_no_code_for_empty_files() -> None:
     from code_review_agent.temporal import activities as A
 
-    prep = A.prepare_review_activity(_input(code="").model_dump(mode="json"))
+    prep = A.prepare_review_activity(_input(files={"app/main.py": ""}).model_dump(mode="json"))
     assert prep["no_code"] is True
 
 
@@ -330,7 +334,7 @@ def test_prepare_activity_single_chunk_fanout_width_is_one(
 def test_prepare_activity_compacts_architecture_overview() -> None:
     from code_review_agent.temporal import activities as A
 
-    from software_engineering_team.shared.models import SystemArchitecture
+    from shared.dev_models.models import SystemArchitecture
 
     arch = SystemArchitecture(
         overview="A small service that does one thing.",
@@ -710,7 +714,7 @@ def test_consolidation_activity_enabled_merges_same_function_issues(
     from code_review_agent.temporal import activities as A
 
     content = "def foo():\n    x = 1\n    return x\n"
-    inp = _input(code=f"### a.py ###\n{content}")
+    inp = _input(files={"a.py": content})
     payload = inp.model_dump(mode="json")
     issues = [
         {
@@ -748,6 +752,79 @@ def test_consolidation_activity_enabled_merges_same_function_issues(
     assert "foo return type changed" in side_effects[0]["description"]
     assert len(doc_issues) == 1, "non-side-effects pass through unchanged"
     assert doc_issues[0]["description"] == "stale docstring"
+
+
+def test_combine_findings_activity_merges_same_construct_near_duplicates() -> None:
+    """The pure combine activity merges co-located near-duplicate findings.
+
+    Two same-category findings anchored in the same enclosing Python construct,
+    with similar descriptions, collapse into a single representative (severity =
+    group max), while an unrelated finding in a different category passes through
+    untouched -- the durable counterpart of the thread-mode combine step.
+    """
+    from code_review_agent.temporal import activities as A
+
+    content = "def foo():\n    x = 1\n    return x\n"
+    payload = _input(files={"a.py": content}).model_dump(mode="json")
+    issues = [
+        {
+            "severity": "medium",
+            "category": "bug",
+            "file_path": "a.py",
+            "line": 2,
+            "description": "foo assigns unused local variable",
+            "suggestion": "",
+        },
+        {
+            "severity": "high",
+            "category": "bug",
+            "file_path": "a.py",
+            "line": 3,
+            "description": "foo assigns unused local variable here",
+            "suggestion": "",
+        },
+        {
+            "severity": "low",
+            "category": "documentation",
+            "file_path": "a.py",
+            "line": 1,
+            "description": "stale docstring",
+            "suggestion": "",
+        },
+    ]
+
+    result = A.combine_findings_activity(payload, issues)
+    bugs = [i for i in result if i["category"] == "bug"]
+    docs = [i for i in result if i["category"] == "documentation"]
+    assert len(bugs) == 1, "two similar same-construct findings should merge into one"
+    assert bugs[0]["severity"] == "high", "merged severity is the group max"
+    assert len(docs) == 1, "an unrelated category passes through unchanged"
+    assert docs[0]["description"] == "stale docstring"
+
+
+def test_combine_findings_activity_is_fail_safe_on_index_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An index/combination failure returns the original issues unchanged."""
+    from code_review_agent.temporal import activities as A
+
+    issues = [
+        {
+            "severity": "high",
+            "category": "bug",
+            "file_path": "a.py",
+            "line": 1,
+            "description": "boom",
+            "suggestion": "",
+        }
+    ]
+    payload = _input().model_dump(mode="json")
+
+    def _boom(*_a: Any, **_k: Any) -> NoReturn:
+        raise RuntimeError("index boom")
+
+    monkeypatch.setattr("code_review_agent.false_positive_filter.CodebaseIndex.from_input", _boom)
+    assert A.combine_findings_activity(payload, issues) == issues
 
 
 def test_finalize_activity_reconciles_minor_only_to_approved() -> None:
@@ -947,7 +1024,9 @@ def test_run_rebuilds_reader_from_repo_root_when_no_live_reader(
         return CodeReviewOutput(approved=True)
 
     monkeypatch.setattr("code_review_agent.agent.run_coordinator", _capture)
-    CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True).run(_input(repo_root=str(tmp_path)))
+    CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True).run(
+        _input(repo_root=str(tmp_path))
+    )
     assert isinstance(captured["repo_reader"], DiskRepoReader)
 
 
@@ -1310,11 +1389,12 @@ def test_workflow_and_activities_are_registered() -> None:
     present in the Temporal worker's ``WORKFLOWS``/``ACTIVITIES`` tables.
     """
     assert CodeReviewWorkflow in WORKFLOWS
-    # 9 = the pre-existing 8 plus find_architecture_and_side_effect_activity.
+    # 10 = the pre-existing 8, plus find_architecture_and_side_effect_activity,
+    # plus the pure combine_findings_activity.
     # find_architecture_and_redundancy_activity / find_side_effect_impact_activity
     # stay registered (not replaced) so a worker can still replay/execute them
     # for workflow histories recorded before the merged pass existed.
-    assert len(ACTIVITIES) == 9
+    assert len(ACTIVITIES) == 10
     names = {getattr(a, "__name__", "") for a in ACTIVITIES}
     assert "review_chunk_activity" in names
     assert "prepare_review_activity" in names
@@ -1323,6 +1403,7 @@ def test_workflow_and_activities_are_registered() -> None:
     assert "find_side_effect_impact_activity" in names
     assert "find_architecture_and_side_effect_activity" in names
     assert "consolidate_side_effect_issues_activity" in names
+    assert "combine_findings_activity" in names
 
 
 # ---------------------------------------------------------------------------
@@ -1833,6 +1914,194 @@ class _LegacyConcurrentThreeTailPassCodeReviewWorkflow:
         }
 
 
+@_legacy_wf.defn(name="CodeReviewWorkflow")
+class _LegacyPreReorderCodeReviewWorkflow:
+    """Pre-#6373 ``CodeReviewWorkflow.run``: today's concurrent merged-pass +
+    consolidation pipeline, with no tail-pass reorder.
+
+    Exists only to produce, via a real ``WorkflowEnvironment`` execution, the
+    "concurrent, merged-pass, consolidated, pre-reorder" history -- the exact
+    shape ``CodeReviewWorkflow`` produced after ``_SIDE_EFFECT_CONSOLIDATION_PATCH``
+    landed but before ``_REORDERED_TAIL_PASSES_PATCH`` existed -- see
+    ``test_workflow_replays_pre_reorder_tail_pass_history`` below, which
+    replays that history through the CURRENT ``CodeReviewWorkflow`` class to
+    prove ``_REORDERED_TAIL_PASSES_PATCH`` keeps it replaying correctly.
+    Reuses the real activities and the still-current
+    ``_ARCHITECTURE_PASS_PATCH``/``_SIDE_EFFECT_PASS_PATCH``/
+    ``_MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH``/
+    ``_SIDE_EFFECT_CONSOLIDATION_PATCH`` markers/retry policies from
+    ``temporal.workflows`` so this is a faithful, not hand-waved,
+    reproduction of the old code (mirrors
+    ``_LegacyConcurrentThreeTailPassCodeReviewWorkflow``'s identical
+    rationale for the pre-merged-pass case).
+    """
+
+    def __init__(self) -> None:
+        self._cancel_requested = False
+
+    @_legacy_wf.signal
+    def cancel(self) -> None:
+        self._cancel_requested = True
+
+    @_legacy_wf.query
+    def progress(self) -> Dict[str, Any]:
+        return {"phase": "n/a", "fraction": 0.0, "cancel_requested": self._cancel_requested}
+
+    @_legacy_wf.run
+    async def run(self, review_input: Dict[str, Any]) -> Dict[str, Any]:
+        import asyncio as _asyncio
+        from datetime import timedelta as _timedelta
+
+        A = _cr_workflows.A
+        task_queue = _cr_workflows.TASK_QUEUE
+        prep = await _legacy_wf.execute_activity(
+            A.prepare_review_activity,
+            args=[review_input],
+            task_queue=task_queue,
+            start_to_close_timeout=_timedelta(minutes=30),
+            retry_policy=_cr_workflows._DEFAULT_RETRY,
+        )
+        if prep["no_code"]:
+            return {
+                "approved": True,
+                "issues": prep["skipped_issues"],
+                "summary": "No code to review.",
+                "spec_compliance_notes": "",
+            }
+
+        chunks = prep["chunks"]
+        base_input = prep["base_input"]
+        context_fp = prep["context_fp"]
+        surface_by_path = prep["surface_by_path"]
+        fanout_width = prep.get("fanout_width", 1) or 1
+
+        def _review_one(chunk: Dict[str, Any]) -> Any:
+            return _legacy_wf.execute_activity(
+                A.review_chunk_activity,
+                args=[chunk, base_input, context_fp, surface_by_path],
+                task_queue=task_queue,
+                start_to_close_timeout=_timedelta(hours=1),
+                heartbeat_timeout=_timedelta(minutes=5),
+                retry_policy=_cr_workflows._LLM_RETRY,
+            )
+
+        assert _legacy_wf.patched(_cr_workflows._ADAPTIVE_FANOUT_PATCH)
+        semaphore = _asyncio.Semaphore(fanout_width)
+
+        async def _review_one_bounded(chunk: Dict[str, Any]) -> Any:
+            async with semaphore:
+                return await _review_one(chunk)
+
+        outcomes = await _asyncio.gather(
+            *[_review_one_bounded(chunk) for chunk in chunks], return_exceptions=True
+        )
+        first_chunk_exception = next((r for r in outcomes if isinstance(r, BaseException)), None)
+        if first_chunk_exception is not None:
+            raise first_chunk_exception
+
+        issues, not_reviewed, summaries, spec_notes, approved_flags = ([] for _ in range(5))
+        for outcome in outcomes:
+            issues.extend(outcome["issues"])
+            not_reviewed.extend(outcome["not_reviewed_issues"])
+            summaries.extend(outcome["summaries"])
+            spec_notes.extend(outcome["spec_notes"])
+            approved_flags.extend(outcome["approved_flags"])
+
+        def _verify() -> Any:
+            return _legacy_wf.execute_activity(
+                A.filter_false_positives_activity,
+                args=[
+                    review_input,
+                    issues,
+                    bool(review_input.get("skip_false_positive_filter", False)),
+                ],
+                task_queue=task_queue,
+                start_to_close_timeout=_timedelta(minutes=60),
+                retry_policy=_cr_workflows._LLM_RETRY,
+            )
+
+        def _merged_architecture_side_effect() -> Any:
+            return _legacy_wf.execute_activity(
+                A.find_architecture_and_side_effect_activity,
+                args=[review_input],
+                task_queue=task_queue,
+                start_to_close_timeout=_timedelta(minutes=30),
+                retry_policy=_cr_workflows._LLM_RETRY,
+            )
+
+        # Faithful reproduction requires calling patched() in the exact same
+        # order today's (pre-reorder) code does: _CONCURRENT_TAIL_PASSES_PATCH,
+        # then _ARCHITECTURE_PASS_PATCH / _SIDE_EFFECT_PASS_PATCH (called
+        # unconditionally though unused by this branch, purely to preserve
+        # marker call order), then _MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH,
+        # then (after the gather) _SIDE_EFFECT_CONSOLIDATION_PATCH.
+        assert _legacy_wf.patched(_cr_workflows._CONCURRENT_TAIL_PASSES_PATCH)
+        _legacy_wf.patched(_cr_workflows._ARCHITECTURE_PASS_PATCH)
+        _legacy_wf.patched(_cr_workflows._SIDE_EFFECT_PASS_PATCH)
+        assert _legacy_wf.patched(_cr_workflows._MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH)
+
+        calls = [_verify(), _merged_architecture_side_effect()]
+        results = await _asyncio.gather(*calls, return_exceptions=True)
+        verify_result, merged_result = results
+        first_exception = next((r for r in results if isinstance(r, BaseException)), None)
+        if first_exception is not None:
+            raise first_exception
+
+        verified = verify_result
+        has_architecture_findings = False
+        has_side_effect_findings = False
+        architecture_result = merged_result.get("architecture_findings") or []
+        side_effect_result = merged_result.get("side_effect_findings") or []
+        if architecture_result:
+            verified = [*verified, *architecture_result]
+            has_architecture_findings = True
+        if side_effect_result:
+            verified = [*verified, *side_effect_result]
+            has_side_effect_findings = True
+
+        assert _legacy_wf.patched(_cr_workflows._SIDE_EFFECT_CONSOLIDATION_PATCH)
+        verified = await _legacy_wf.execute_activity(
+            A.consolidate_side_effect_issues_activity,
+            args=[review_input, verified],
+            task_queue=task_queue,
+            start_to_close_timeout=_timedelta(minutes=5),
+            retry_policy=_cr_workflows._DEFAULT_RETRY,
+        )
+
+        gate = await _legacy_wf.execute_activity(
+            A.finalize_review_activity,
+            args=[verified, not_reviewed, prep["skipped_issues"], approved_flags],
+            task_queue=task_queue,
+            start_to_close_timeout=_timedelta(minutes=5),
+            retry_policy=_cr_workflows._DEFAULT_RETRY,
+        )
+        approved = gate["approved"]
+        gated_issues = gate["issues"]
+
+        if len(summaries) == 1 and not (has_architecture_findings or has_side_effect_findings):
+            summary, notes = summaries[0], (spec_notes[0] if spec_notes else "")
+        else:
+            synth = await _legacy_wf.execute_activity(
+                A.synthesize_findings_activity,
+                args=[review_input, approved, gated_issues, summaries, spec_notes],
+                task_queue=task_queue,
+                start_to_close_timeout=_timedelta(minutes=15),
+                retry_policy=_cr_workflows._DEFAULT_RETRY,
+            )
+            if synth is not None:
+                summary, notes = synth["summary"], synth["spec_compliance_notes"]
+            else:
+                summary = "\n\n".join(s for s in summaries if s.strip())
+                notes = "\n\n".join(n for n in spec_notes if n.strip())
+
+        return {
+            "approved": approved,
+            "issues": gated_issues,
+            "summary": summary,
+            "spec_compliance_notes": notes,
+        }
+
+
 @contextlib.asynccontextmanager
 async def _workflow_environment_worker(activities=None):
     """Shared ``WorkflowEnvironment`` + ``Worker`` startup/teardown for the
@@ -2053,6 +2322,7 @@ async def test_workflow_raises_cleanly_when_a_later_tail_pass_fails(
         ACTIVITIES,
         TASK_QUEUE,
         CodeReviewWorkflow,
+        combine_findings_activity,
         consolidate_side_effect_issues_activity,
         filter_false_positives_activity,
         finalize_review_activity,
@@ -2073,6 +2343,7 @@ async def test_workflow_raises_cleanly_when_a_later_tail_pass_fails(
         filter_false_positives_activity,
         _raising_merged_activity,
         consolidate_side_effect_issues_activity,
+        combine_findings_activity,
         finalize_review_activity,
         synthesize_findings_activity,
     ]
@@ -2119,6 +2390,7 @@ async def test_workflow_fails_on_map_chunk_failure_without_abandoning_siblings()
         ACTIVITIES,
         TASK_QUEUE,
         CodeReviewWorkflow,
+        combine_findings_activity,
         consolidate_side_effect_issues_activity,
         filter_false_positives_activity,
         finalize_review_activity,
@@ -2131,9 +2403,9 @@ async def test_workflow_fails_on_map_chunk_failure_without_abandoning_siblings()
     from temporalio import activity as activity_module
     from temporalio.client import WorkflowFailureError
 
-    big_1 = "### app/main.py ###\n" + ("a" * 25_000)
-    big_2 = "### app/util.py ###\n" + ("b" * 25_000)
-    review_input = _input(code=big_1 + "\n\n" + big_2)
+    big_main = "a" * 25_000
+    big_util = "b" * 25_000
+    review_input = _input(files={"app/main.py": big_main, "app/util.py": big_util})
     prep = A.prepare_review_activity(review_input.model_dump(mode="json"))
     assert len(prep["chunks"]) > 1, "expected a multi-chunk submission"
 
@@ -2164,6 +2436,7 @@ async def test_workflow_fails_on_map_chunk_failure_without_abandoning_siblings()
         filter_false_positives_activity,
         find_architecture_and_side_effect_activity,
         consolidate_side_effect_issues_activity,
+        combine_findings_activity,
         finalize_review_activity,
         synthesize_findings_activity,
     ]
@@ -2188,24 +2461,40 @@ async def test_workflow_fails_on_map_chunk_failure_without_abandoning_siblings()
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_workflow_gathers_tail_pass_activities_concurrently() -> None:
-    """The two tail-pass activities are scheduled together, not one at a time.
+    """The old tail-pass gather is still concurrent, and the new reordered
+    sequence follows it in its own, later workflow tasks.
 
     Complements ``test_workflow_executes_and_replays_without_non_determinism``:
     that test's output alone can't distinguish a concurrent ``asyncio.gather``
     from the old sequential awaits, since ``DummyLLMClient`` contributes no
     architecture/side-effect findings either way. This inspects the recorded
-    history directly: ``filter_false_positives_activity`` and
-    ``find_architecture_and_side_effect_activity`` (the merged pass) must both
-    be scheduled by the SAME workflow task
-    (``workflow_task_completed_event_id``) -- proof they were fanned out
-    together. Under the old sequential-await code, each later activity could
-    only be scheduled by a NEW workflow task triggered after the previous
-    one's ``ActivityTaskCompletedEvent``, so their scheduling events would
-    carry different ``workflow_task_completed_event_id``s.
+    history directly.
 
-    ``consolidate_side_effect_issues_activity`` is intentionally *not* part of
-    that gather (it needs the merged verified list), so this also asserts it
-    is scheduled in a later workflow task than the two concurrent passes.
+    ``_REORDERED_TAIL_PASSES_PATCH`` (see its docstring in ``workflows.py``)
+    is checked strictly after the pre-existing gates, so the old concurrent
+    gather and consolidation call remain unconditionally scheduled -- meaning
+    ``filter_false_positives_activity`` ("verify") now appears TWICE in the
+    history: once concurrently with the merged pass (the old, now-discarded
+    result), and once again, solo, over the combined findings (the new
+    branch's result). ``find_architecture_and_side_effect_activity``
+    ("merged") is still scheduled exactly once and reused by the new branch,
+    not re-invoked.
+
+    Assertions, in the order the activities must appear:
+      1. The FIRST verify call and the merged pass share a
+         ``workflow_task_completed_event_id`` (still gathered together) --
+         under the old sequential-await code, each later activity could only
+         be scheduled by a NEW workflow task triggered after the previous
+         one's ``ActivityTaskCompletedEvent``, so their scheduling events
+         would carry different ids.
+      2. ``consolidate_side_effect_issues_activity`` is scheduled in a later,
+         distinct workflow task (it needs the merged verified list, so it was
+         never part of that gather).
+      3. ``combine_findings_activity`` is scheduled after consolidation, in
+         its own task.
+      4. The SECOND verify call is scheduled after combine_findings, in yet
+         another distinct task -- proof the reordered branch runs
+         sequentially after everything above, not concurrently with it.
 
     Also replays the recorded history, the same non-determinism guard as the
     baseline test above, and marked ``integration``/skips the same way for the
@@ -2219,11 +2508,10 @@ async def test_workflow_gathers_tail_pass_activities_concurrently() -> None:
 
     review_input = _input()
     workflow_id = "code-review-workflow-concurrent-tail-passes-test"
-    tail_pass_activity_names = {
-        "code_review_verify_false_positives",
-        "code_review_merged_architecture_side_effect",
-    }
+    verify_activity_name = "code_review_verify_false_positives"
+    merged_activity_name = "code_review_merged_architecture_side_effect"
     consolidation_activity_name = "code_review_side_effect_consolidation"
+    combine_activity_name = "code_review_combine_findings"
 
     try:
         test_env = await WorkflowEnvironment.start_time_skipping()
@@ -2249,45 +2537,63 @@ async def test_workflow_gathers_tail_pass_activities_concurrently() -> None:
 
             history = await env.client.get_workflow_handle(workflow_id).fetch_history()
 
-    tail_pass_events = [
-        event
-        for event in history.events
-        if event.activity_task_scheduled_event_attributes.activity_type.name
-        in tail_pass_activity_names
-    ]
-    # A regression that skips scheduling one of the two (e.g. a stub
-    # coroutine silently replacing a real activity call) could still leave a
-    # single shared workflow_task_completed_event_id below, so the count must
-    # be checked independently of the "same task" assertion.
-    assert len(tail_pass_events) == 2, (
-        f"expected two tail-pass activity scheduled events, got {len(tail_pass_events)}"
-    )
-    scheduling_workflow_task_ids = {
-        event.activity_task_scheduled_event_attributes.workflow_task_completed_event_id
-        for event in tail_pass_events
-    }
-    assert len(scheduling_workflow_task_ids) == 1, (
-        "expected both tail-pass activities to be scheduled by the same "
-        f"workflow task (gathered together); got {scheduling_workflow_task_ids}"
-    )
-    concurrent_task_id = next(iter(scheduling_workflow_task_ids))
+    def _events_named(name: str):
+        return [
+            event
+            for event in history.events
+            if event.activity_task_scheduled_event_attributes.activity_type.name == name
+        ]
 
-    consolidation_events = [
-        event
-        for event in history.events
-        if event.activity_task_scheduled_event_attributes.activity_type.name
-        == consolidation_activity_name
-    ]
+    def _task_id(event):
+        return event.activity_task_scheduled_event_attributes.workflow_task_completed_event_id
+
+    verify_events = _events_named(verify_activity_name)
+    merged_events = _events_named(merged_activity_name)
+    consolidation_events = _events_named(consolidation_activity_name)
+    combine_events = _events_named(combine_activity_name)
+
+    # Counts checked independently of the ordering assertions below, so a
+    # regression that skips or duplicates a call can't hide behind them.
+    assert len(verify_events) == 2, (
+        f"expected two false-positive-verify scheduled events, got {len(verify_events)}"
+    )
+    assert len(merged_events) == 1, (
+        f"expected one merged architecture/side-effect scheduled event, got {len(merged_events)}"
+    )
     assert len(consolidation_events) == 1, (
         "expected one side-effect consolidation activity scheduled event, "
         f"got {len(consolidation_events)}"
     )
-    consolidation_task_id = consolidation_events[
-        0
-    ].activity_task_scheduled_event_attributes.workflow_task_completed_event_id
-    assert consolidation_task_id != concurrent_task_id, (
+    assert len(combine_events) == 1, (
+        f"expected one combine_findings scheduled event, got {len(combine_events)}"
+    )
+
+    first_verify_task_id = _task_id(verify_events[0])
+    second_verify_task_id = _task_id(verify_events[1])
+    merged_task_id = _task_id(merged_events[0])
+    consolidation_task_id = _task_id(consolidation_events[0])
+    combine_task_id = _task_id(combine_events[0])
+
+    assert first_verify_task_id == merged_task_id, (
+        "expected the first verify call and the merged pass to be scheduled "
+        f"by the same workflow task (gathered together); got "
+        f"{first_verify_task_id} vs {merged_task_id}"
+    )
+    assert consolidation_task_id != merged_task_id, (
         "expected consolidation to be scheduled after the concurrent tail-pass "
-        f"gather (different workflow task); both used task id {concurrent_task_id}"
+        f"gather (different workflow task); both used task id {merged_task_id}"
+    )
+    assert combine_task_id != consolidation_task_id, (
+        "expected combine_findings to be scheduled after consolidation "
+        f"(different workflow task); both used task id {consolidation_task_id}"
+    )
+    assert second_verify_task_id not in {merged_task_id, consolidation_task_id, combine_task_id}, (
+        "expected the second verify call (over the combined findings) to be "
+        f"scheduled in its own workflow task, after combine_findings; got "
+        f"{second_verify_task_id}"
+    )
+    assert combine_events[0].event_id < verify_events[1].event_id, (
+        "expected combine_findings to be scheduled before the second verify call"
     )
 
     await Replayer(workflows=[CodeReviewWorkflow]).replay_workflow(history)
@@ -2305,6 +2611,15 @@ async def test_workflow_tail_passes_in_flight_concurrently(
     functions: if the workflow regressed back to sequential awaiting of the
     tail passes, the first activity would block forever waiting for the
     other party (and this test would fail fast on the barrier timeout).
+
+    Under ``_REORDERED_TAIL_PASSES_PATCH``, ``filter_false_positives`` is
+    invoked a second, solo time (over the combined findings -- see that
+    gate's docstring in ``workflows.py``), with no second party to pair with
+    on the barrier. ``_filter`` below only synchronizes on its FIRST
+    invocation and returns immediately on later ones, so this test still
+    proves only the first (still-concurrent, now-discarded) call is
+    concurrent with the merged pass -- it does not assert anything about the
+    second, sequential call's timing.
     """
 
     import concurrent.futures
@@ -2343,6 +2658,8 @@ async def test_workflow_tail_passes_in_flight_concurrently(
     barrier = threading.Barrier(2, timeout=5)
     started: list[str] = []
     lock = threading.Lock()
+    filter_call_count = 0
+    filter_lock = threading.Lock()
 
     def _wait(name: str) -> None:
         with lock:
@@ -2352,10 +2669,25 @@ async def test_workflow_tail_passes_in_flight_concurrently(
     # Activities are fail-safe; this test only validates orchestration-level
     # concurrency. Sleeps are intentionally tiny (only to allow thread
     # scheduling variance without making the test slow).
-    def _filter(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
-        _wait("filter")
+    def _filter(
+        _llm: Any, _input_data: Any, issues: list[CodeReviewIssue], **_kwargs: Any
+    ) -> list[CodeReviewIssue]:
+        nonlocal filter_call_count
+        with filter_lock:
+            filter_call_count += 1
+            is_first_call = filter_call_count == 1
+        # Only the FIRST call (the old concurrent gather's) synchronizes on
+        # the barrier; the second, solo call the reordered branch makes has
+        # no second party to pair with and would otherwise time out.
+        if is_first_call:
+            _wait("filter")
         time.sleep(0.01)
-        return [filter_issue]
+        # Pass through whatever issues this call actually received (on the
+        # first, discarded call: the raw map-phase issues, typically none
+        # from DummyLLMClient; on the second, surviving call: the combined
+        # architecture/side-effect findings) plus contribute filter_issue,
+        # so nothing is silently dropped on the reordered branch's real call.
+        return [*issues, filter_issue]
 
     def _merged(*_args: Any, **_kwargs: Any) -> tuple[list[CodeReviewIssue], list[CodeReviewIssue]]:
         _wait("merged")
@@ -2370,7 +2702,6 @@ async def test_workflow_tail_passes_in_flight_concurrently(
     except RuntimeError as exc:
         pytest.skip(f"Temporal ephemeral test server unavailable (no egress?): {exc}")
 
-    barrier_aborted = False
     try:
         async with test_env as env:
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as activity_executor:
@@ -2392,9 +2723,8 @@ async def test_workflow_tail_passes_in_flight_concurrently(
         # Always abort so any stray worker threads can't leak into later
         # tests if the barrier throws early.
         barrier.abort()
-        barrier_aborted = True
 
-    assert barrier_aborted, "barrier abort should have run"
+    assert barrier.broken, "barrier should be broken after test cleanup"
     assert sorted(started) == ["filter", "merged"]
 
     descriptions = {i["description"] for i in result["issues"]}
@@ -2417,6 +2747,15 @@ async def test_workflow_aggregates_tail_pass_results_when_completed_out_of_order
     explicit event handoff (not a wall-clock sleep) and asserts that the
     merged tail-pass issue descriptions match the sequential activity
     pipeline (``_run_activity_pipeline``).
+
+    Under ``_REORDERED_TAIL_PASSES_PATCH``, ``filter_false_positives`` is
+    invoked a second, solo time by the reordered branch (see that gate's
+    docstring in ``workflows.py``) -- with no second party for the barrier
+    and no ``merged`` completion still pending, that call would otherwise
+    deadlock on ``barrier.wait()``. ``_filter`` below only synchronizes and
+    records completion on its FIRST invocation; the second call returns
+    immediately, so ``completion_order`` still reflects only the forced
+    out-of-order pairing this test exists to prove.
     """
 
     import concurrent.futures
@@ -2465,20 +2804,38 @@ async def test_workflow_aggregates_tail_pass_results_when_completed_out_of_order
 
     completion_order: list[str] = []
     lock = threading.Lock()
+    filter_call_count = 0
+    filter_call_lock = threading.Lock()
 
     def _record_completion(name: str) -> None:
         with lock:
             completion_order.append(name)
 
-    def _filter(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
-        if coordinate.is_set():
-            barrier.wait()
-            # Wait until merged has finished so filter is last — independent
-            # of thread scheduling.
-            if not merged_done.wait(timeout=5):
-                raise AssertionError("merged did not signal before filter timeout")
-        _record_completion("filter")
-        return [filter_issue]
+    def _filter(
+        _llm: Any, _input_data: Any, issues: list[CodeReviewIssue], **_kwargs: Any
+    ) -> list[CodeReviewIssue]:
+        nonlocal filter_call_count
+        with filter_call_lock:
+            filter_call_count += 1
+            is_first_call = filter_call_count == 1
+        # Only the FIRST call (the old concurrent gather's) synchronizes on
+        # the barrier/handoff and records completion; the second, solo call
+        # the reordered branch makes has no second party and no pending
+        # `merged` completion to wait on, so it returns immediately.
+        if is_first_call:
+            if coordinate.is_set():
+                barrier.wait()
+                # Wait until merged has finished so filter is last —
+                # independent of thread scheduling.
+                if not merged_done.wait(timeout=5):
+                    raise AssertionError("merged did not signal before filter timeout")
+            _record_completion("filter")
+        # Pass through whatever issues this call actually received (on the
+        # first, discarded call: the raw map-phase issues, typically none
+        # from DummyLLMClient; on the second, surviving call: the combined
+        # architecture/side-effect findings) plus contribute filter_issue,
+        # so nothing is silently dropped on the reordered branch's real call.
+        return [*issues, filter_issue]
 
     def _merged(*_args: Any, **_kwargs: Any) -> tuple[list[CodeReviewIssue], list[CodeReviewIssue]]:
         if coordinate.is_set():
@@ -2554,10 +2911,15 @@ async def test_workflow_aggregates_tail_pass_results_when_completed_out_of_order
     ]
 
     assert wf_tail_descriptions == seq_tail_descriptions
+    # Under _REORDERED_TAIL_PASSES_PATCH, the merged pass's findings are
+    # combined with the map-phase issues BEFORE the (single, surviving)
+    # false-positive filter call, so architecture/side-effect findings lead
+    # and filter_issue (contributed by that filter call over the combined
+    # set) comes last -- the reverse of the old filter-then-append order.
     assert wf_tail_descriptions == [
-        filter_issue.description,
         architecture_issue.description,
         side_effect_issue.description,
+        filter_issue.description,
     ]
 
 
@@ -2780,4 +3142,75 @@ async def test_workflow_replays_pre_merged_pass_concurrent_tail_pass_history() -
     # The property _MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH exists to
     # guard: today's CodeReviewWorkflow must still replay a concurrent,
     # pre-merged-pass history without a non-determinism error.
+    await Replayer(workflows=[CodeReviewWorkflow]).replay_workflow(legacy_history)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_workflow_replays_pre_reorder_tail_pass_history() -> None:
+    """A history recorded by today's concurrent merged-pass + consolidation
+    pipeline still replays.
+
+    ``_REORDERED_TAIL_PASSES_PATCH`` exists precisely so an in-flight
+    workflow whose history was recorded before this change --
+    ``code_review_verify_false_positives`` scheduled concurrently with
+    ``code_review_merged_architecture_side_effect``, followed by a single
+    ``code_review_side_effect_consolidation`` call, with no
+    ``code_review_combine_findings`` event at all -- keeps replaying that
+    exact command sequence instead of ``CodeReviewWorkflow`` trying to
+    schedule the new combine-then-reverify sequence in its place, which
+    would raise a non-determinism error.
+
+    Executes ``_LegacyPreReorderCodeReviewWorkflow`` (module level, above --
+    a faithful reproduction of today's pre-reorder ``run`` body, registered
+    under the same ``CodeReviewWorkflow`` workflow-type name) to produce a
+    realistic "concurrent, merged-pass, consolidated, pre-reorder" history,
+    then replays that history through the CURRENT ``CodeReviewWorkflow``
+    class with ``Replayer`` -- proving today's code still reproduces it.
+    Without the ``_REORDERED_TAIL_PASSES_PATCH`` gate, this test fails with a
+    non-determinism error. Mirrors
+    ``test_workflow_replays_pre_merged_pass_concurrent_tail_pass_history``'s
+    identical structure for the pre-merged-pass case.
+    """
+    import concurrent.futures
+
+    from code_review_agent.temporal import ACTIVITIES, TASK_QUEUE, CodeReviewWorkflow
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
+
+    review_input = _input()
+    workflow_id = "code-review-workflow-legacy-pre-reorder-history-test"
+
+    try:
+        test_env = await WorkflowEnvironment.start_time_skipping()
+    except RuntimeError as exc:
+        pytest.skip(f"Temporal ephemeral test server unavailable (no egress?): {exc}")
+
+    async with test_env as env:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as activity_executor:
+            worker = Worker(
+                env.client,
+                task_queue=TASK_QUEUE,
+                workflows=[_LegacyPreReorderCodeReviewWorkflow],
+                activities=ACTIVITIES,
+                activity_executor=activity_executor,
+                # This synthetic workflow lives in this test module, whose
+                # ordinary test-only imports are not sandbox-safe. We only
+                # need it to record a legacy history; the current workflow is
+                # still replayed below with the default sandboxed runner.
+                workflow_runner=UnsandboxedWorkflowRunner(),
+            )
+            async with worker:
+                await env.client.execute_workflow(
+                    _LegacyPreReorderCodeReviewWorkflow.run,
+                    review_input.model_dump(mode="json"),
+                    id=workflow_id,
+                    task_queue=TASK_QUEUE,
+                )
+
+            legacy_history = await env.client.get_workflow_handle(workflow_id).fetch_history()
+
+    # The property _REORDERED_TAIL_PASSES_PATCH exists to guard: today's
+    # CodeReviewWorkflow must still replay a pre-reorder history without a
+    # non-determinism error.
     await Replayer(workflows=[CodeReviewWorkflow]).replay_workflow(legacy_history)

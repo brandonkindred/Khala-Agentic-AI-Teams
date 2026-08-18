@@ -375,6 +375,43 @@ def test_mark_coding_team_job_failed_activity_updates_store(monkeypatch) -> None
     assert out["status"] == "failed"
 
 
+def test_mark_coding_team_job_cancelled_activity_updates_store(monkeypatch) -> None:
+    """Cancel terminalize activity must persist cancelled status without an error write."""
+    import software_engineering_team.api.coding_team_main as main
+    from software_engineering_team.temporal.coding_team_workflow import (
+        mark_coding_team_job_cancelled_activity,
+    )
+
+    updates: list[dict] = []
+    monkeypatch.setattr(
+        main,
+        "update_job",
+        lambda jid, **kw: updates.append({"job_id": jid, **kw}),
+    )
+    monkeypatch.setattr(
+        main,
+        "get_job",
+        lambda jid: {"job_id": jid, "status": "cancelled"},
+    )
+
+    out = mark_coding_team_job_cancelled_activity({"job_id": "job-x"})
+
+    assert updates[-1]["status"] == "cancelled"
+    assert updates[-1]["status_text"] == "Cancelled by user"
+    assert "error" not in updates[-1]
+    assert out["status"] == "cancelled"
+
+
+def test_mark_coding_team_job_cancelled_activity_rejects_missing_job_id() -> None:
+    """The job_id precondition raises ValueError (not assert, which -O strips)."""
+    from software_engineering_team.temporal.coding_team_workflow import (
+        mark_coding_team_job_cancelled_activity,
+    )
+
+    with pytest.raises(ValueError, match="non-empty job_id"):
+        mark_coding_team_job_cancelled_activity({})
+
+
 def test_github_pipeline_activity_defers_terminal_success(monkeypatch) -> None:
     """GitHub Temporal runs must keep the job non-terminal until publish.
 

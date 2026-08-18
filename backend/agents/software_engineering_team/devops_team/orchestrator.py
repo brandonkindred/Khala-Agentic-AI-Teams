@@ -8,10 +8,10 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Dict, List, Optional
 
-from llm_service import LLMClient
+from llm_service import LLMClient, get_strands_model
 from llm_service.clients.dummy import is_dummy_llm_client_wrapped
-from software_engineering_team.shared.deliver_utils import DeliverGitOps
-from software_engineering_team.shared.git_utils import (
+from llm_service.strands_model import resolve_strands_model
+from shared.git.git_utils import (
     abort_merge,
     checkout_branch,
     commit_working_tree,
@@ -21,6 +21,8 @@ from software_engineering_team.shared.git_utils import (
     get_head_sha,
     merge_branch,
 )
+from software_engineering_team.qa_agent import QAExpertAgent
+from software_engineering_team.shared.deliver_utils import DeliverGitOps
 from software_engineering_team.shared.repo_writer import write_agent_output
 from software_engineering_team.shared.team_lead_base import BaseTeamLead, TeamLeadSharedState
 
@@ -46,7 +48,6 @@ from .phases import (
     run_phase5_deliver_merge,
 )
 from .task_clarifier import DevOpsTaskClarifierAgent
-from .test_validation_agent import DevOpsTestValidationAgent
 from .tool_agents import (
     CDKExecutionToolAgent,
     CICDLintPipelineValidationToolAgent,
@@ -59,8 +60,15 @@ from .tool_agents import (
     TerraformExecutionToolAgent,
 )
 
-# Static defaults for the legacy DevOpsTaskSpec adapter (_build_legacy_spec).
-# Tuples enforce the read-only contract — callers get list(...) copies when needed.
+_NEGATION_TOKENS = frozenset({"not", "no", "non"})
+# Word tokens compatible with the former ``\\b(prod|production)\\b`` matcher.
+_WORD_TOKEN = re.compile(r"[a-z0-9_]+")
+
+# Static defaults for the DevOpsTaskSpec text-inference helpers below. Formerly
+# served only _build_legacy_spec (removed); devops_team_worker.py (the coding-team
+# handoff adapter) is now the sole consumer, via the public re-exports at the end
+# of this block. Tuples enforce the read-only contract -- callers get list(...)
+# copies when needed.
 _DEFAULT_LEGACY_CLOUD = "on-premises"
 _DEFAULT_LEGACY_APP_REPO = "application"
 _DEFAULT_LEGACY_INFRA_REPO = "platform-infra"
@@ -77,10 +85,6 @@ _DEFAULT_LEGACY_SECURITY_CONSTRAINTS = (
     "Least privilege IAM",
 )
 _DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS = ("Audit trail required",)
-
-MAX_LEGACY_TITLE_LENGTH: int = 120
-
-_NEGATION_TOKENS = frozenset({"not", "no", "non"})
 # Skippable fillers between a negation and a prod token ("not deploy to production",
 # "not in production").
 _NEGATION_INTERVENING_TOKENS = frozenset(
@@ -182,8 +186,6 @@ _PROD_ATTRIBUTE_TOKENS = frozenset(
         "traffic",  # only when paired with interruption-style attrs nearby; see helper
     }
 )
-# Word tokens compatible with the former ``\\b(prod|production)\\b`` matcher.
-_LEGACY_WORD_TOKEN = re.compile(r"[a-z0-9_]+")
 # Split so ``No. Deploy to production`` does not let ``No`` govern the next sentence.
 _LEGACY_CLAUSE_SPLIT = re.compile(r"[.!?;]+")
 _PROD_CONTEXT_LOOKAHEAD = 5
@@ -305,7 +307,7 @@ def _clause_implies_production(clause: str) -> bool:
     Postconditions: True iff a non-excluded ``prod``/``production`` token appears.
     """
     assert isinstance(clause, str), "clause must be a str"
-    tokens = _LEGACY_WORD_TOKEN.findall(clause)
+    tokens = _WORD_TOKEN.findall(clause)
     for i, token in enumerate(tokens):
         if token not in ("prod", "production"):
             continue
@@ -343,6 +345,25 @@ def _legacy_environment_from_text(combined_text: str) -> str:
     return "staging"
 
 
+# Public re-exports for reuse outside this module (see devops_team_worker.py,
+# the coding-team handoff adapter) -- the underscore-prefixed originals above
+# stay the names used within this module, so callers of this module's own API
+# are unaffected. Reusing the same tuples/regex/function objects (not copies)
+# means a change here can never silently drift out of sync with what a public
+# importer sees.
+LEGACY_WORD_TOKEN = _WORD_TOKEN
+NEGATION_TOKENS = _NEGATION_TOKENS
+legacy_environment_from_text = _legacy_environment_from_text
+DEFAULT_LEGACY_CLOUD = _DEFAULT_LEGACY_CLOUD
+DEFAULT_LEGACY_APP_REPO = _DEFAULT_LEGACY_APP_REPO
+DEFAULT_LEGACY_INFRA_REPO = _DEFAULT_LEGACY_INFRA_REPO
+DEFAULT_LEGACY_SECRETS_SOURCE = _DEFAULT_LEGACY_SECRETS_SOURCE
+DEFAULT_LEGACY_ACCEPTANCE_CRITERIA = _DEFAULT_LEGACY_ACCEPTANCE_CRITERIA
+DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS = _DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS
+DEFAULT_LEGACY_SECURITY_CONSTRAINTS = _DEFAULT_LEGACY_SECURITY_CONSTRAINTS
+DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS = _DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS
+
+
 # Fillers allowed between a negation and ``approval`` (``no formal approval``).
 _APPROVAL_INTERVENING_TOKENS = frozenset(
     {
@@ -372,7 +393,7 @@ def _scope_item_mentions_approval(item: str) -> bool:
           ``non-approval``) or when the word is absent.
     """
     assert isinstance(item, str), "item must be a str"
-    tokens = _LEGACY_WORD_TOKEN.findall(item.lower())
+    tokens = _WORD_TOKEN.findall(item.lower())
     for i, token in enumerate(tokens):
         if token != "approval":
             continue
@@ -506,7 +527,14 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         self.cicd_agent = CICDPipelineAgent(llm_client)
         self.deployment_agent = DeploymentStrategyAgent(llm_client)
         self.devsecops_review_agent = DevSecOpsReviewAgent(llm_client)
-        self.test_validation_agent = DevOpsTestValidationAgent(llm_client)
+        # Model-routing key preserved as "devops" (not QAExpertAgent's own default
+        # "qa" key) so DevOps acceptance-evidence validation keeps its own model
+        # selection independent of the code-review QA path.
+        self.qa_agent = QAExpertAgent(
+            resolve_strands_model(
+                llm_client, agent_key="devops", get_strands_model_fn=get_strands_model
+            )
+        )
         self.change_review_agent = ChangeReviewAgent(llm_client)
         self.doc_runbook_agent = DocumentationRunbookAgent(llm_client)
 
@@ -570,65 +598,6 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         self._log_pipeline_status(phase=phase, detail=detail, progress=progress, **extra)
         TeamLeadSharedState._report_status(self, phase, detail=detail, progress=progress, **extra)
 
-    @staticmethod
-    def _build_legacy_spec(
-        *,
-        task_id: str,
-        task_description: str,
-        requirements: str,
-        target_repo: Optional[Any] = None,
-    ) -> DevOpsTaskSpec:
-        """Build a ``DevOpsTaskSpec`` from the legacy free-text workflow args.
-
-        Preconditions:
-            - ``task_id`` is a non-empty string.
-            - ``task_description`` and ``requirements`` are strings (may be empty).
-        Postconditions:
-            - Returns a valid ``DevOpsTaskSpec`` using module-level defaults for
-              all fields not derivable from the arguments.
-            - ``title`` is the stripped ``task_description[:MAX_LEGACY_TITLE_LENGTH]``,
-              or the stripped ``task_id[:MAX_LEGACY_TITLE_LENGTH]`` when that
-              description slice is empty/whitespace-only.
-            - ``environment`` is inferred from the combined text of
-              ``task_description`` and ``requirements`` via
-              ``_legacy_environment_from_text``; defaults to ``\"staging\"``.
-            - Module-level ``_DEFAULT_LEGACY_*`` tuples supply acceptance
-              criteria, rollback requirements, security and compliance
-              constraints, and secret-source defaults; each call receives a
-              fresh ``list(...)`` copy of the mutable fields.
-        """
-        assert isinstance(task_id, str) and task_id, "task_id must be a non-empty string"
-        assert isinstance(task_description, str), "task_description must be a string"
-        assert isinstance(requirements, str), "requirements must be a string"
-        repo_name = (
-            target_repo.value
-            if hasattr(target_repo, "value")
-            else (str(target_repo) if target_repo else "")
-        )
-        combined_text = f"{task_description} {requirements}".lower()
-        env = _legacy_environment_from_text(combined_text)
-        return DevOpsTaskSpec(
-            task_id=task_id,
-            title=(
-                (task_description[:MAX_LEGACY_TITLE_LENGTH]).strip()
-                or (task_id[:MAX_LEGACY_TITLE_LENGTH]).strip()
-            ),
-            platform_scope={"cloud": _DEFAULT_LEGACY_CLOUD, "environments": ["dev", env]},
-            repo_context={
-                "app_repo": repo_name or _DEFAULT_LEGACY_APP_REPO,
-                "infra_repo": _DEFAULT_LEGACY_INFRA_REPO,
-                "pipeline_repo": repo_name or _DEFAULT_LEGACY_APP_REPO,
-            },
-            goal={"summary": task_description},
-            scope={"included": [requirements], "excluded": []},
-            constraints={"secrets": {"source": _DEFAULT_LEGACY_SECRETS_SOURCE}},
-            acceptance_criteria=list(_DEFAULT_LEGACY_ACCEPTANCE_CRITERIA),
-            rollback_requirements=list(_DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS),
-            security_constraints=list(_DEFAULT_LEGACY_SECURITY_CONSTRAINTS),
-            compliance_constraints=list(_DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS),
-            environment=env,
-        )
-
     def run(self, input_data: DevOpsTaskSpec) -> DevOpsCompletionPackage:
         """Execute a contract-first model run without orchestrator artifact writes.
 
@@ -655,45 +624,47 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             raise ValueError(result.failure_reason or "DevOps team run failed")
         return result.completion_package
 
-    def run_workflow(
+    def run_task(
         self,
+        task_spec: DevOpsTaskSpec,
         *,
         repo_path: Path,
-        task_description: str,
-        requirements: str,
-        target_repo: Optional[Any] = None,
         build_verifier: Optional[Any] = None,
-        task_id: str = "devops",
+        merge_to_development: bool = True,
         subdir: str = "",
     ) -> DevOpsTeamResult:
-        """Legacy adapter: repo/task free-text → ``_build_legacy_spec`` → ``_run_pipeline`` with ``write_changes=True``.
+        """Execute a structured task spec against a real repo, writing and (by default) merging changes.
+
+        This is the current structured entry point for callers that need real
+        repo I/O (unlike ``run()``, which is model-only and cannot target an
+        arbitrary checked-out repo). ``merge_to_development=False`` commits the
+        feature branch and leaves it unmerged for an external Tech Lead review
+        instead — the mode the coding-team swarm uses when dispatching a
+        ``target_team="devops"`` task from a per-task git worktree, where
+        merging back into ``development`` is not possible (the worktree runs
+        detached from it).
 
         Preconditions:
+            - ``task_spec`` is a non-None ``DevOpsTaskSpec``.
             - ``repo_path`` is a path to an existing directory initialised as a git repo.
-            - ``task_description`` and ``requirements`` are strings (may be empty).
-            - ``task_id`` is a non-empty string when provided; defaults to ``"devops"``.
             - ``build_verifier``, when provided, is callable and returns ``(bool, str)``.
         Postconditions:
             - Returns a ``DevOpsTeamResult`` reflecting the full pipeline outcome.
-            - Artifacts are written to the repo on a feature branch and merged into
-              ``development`` when the pipeline completes successfully.
+            - Artifacts are written to the repo on a feature branch; the branch is
+              merged into ``development`` when ``merge_to_development`` is ``True``
+              (the default) and left in place otherwise.
         """
+        assert task_spec is not None, "task_spec is required"
         repo_path_obj = Path(repo_path).resolve()
         assert repo_path_obj.is_dir(), f"repo_path must be an existing directory: {repo_path_obj}"
         if build_verifier is not None:
             assert callable(build_verifier), "build_verifier must be callable"
-        assert isinstance(task_id, str) and task_id, "task_id must be a non-empty string"
-        task_spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id=task_id,
-            task_description=task_description,
-            requirements=requirements,
-            target_repo=target_repo,
-        )
         return self._run_pipeline(
             repo_path=repo_path_obj,
             task_spec=task_spec,
             build_verifier=build_verifier,
             write_changes=True,
+            merge_to_development=merge_to_development,
             subdir=subdir,
         )
 
@@ -803,6 +774,7 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         task_spec: DevOpsTaskSpec,
         build_verifier: Optional[Any],
         write_changes: bool,
+        merge_to_development: bool = True,
         subdir: str = "",
     ) -> DevOpsTeamResult:
         """Sequence the 5 DevOps phases via the shared gated-phase framework.
@@ -830,6 +802,11 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
               ``success=False`` and ``failure_reason`` set.
             - Raises ``RuntimeError`` if Phase 5 returns without assigning the
               completion package (internal contract violation).
+            - ``merge_to_development`` only matters when ``write_changes=True``:
+              ``True`` (default) merges and deletes the feature branch; ``False``
+              leaves the committed feature branch in place for external review
+              (required when running from a detached per-task git worktree,
+              where merging back into ``development`` is not possible).
         Invariants:
             - ``task_spec`` is not mutated by this method or its phase closures.
         """
@@ -1000,6 +977,7 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
                 doc_runbook_agent=self.doc_runbook_agent,
                 git_ops=_git_ops(),
                 get_head_sha=get_head_sha,
+                merge_to_development=merge_to_development,
             )
             if result.blocked_result is not None:
                 return result.blocked_result

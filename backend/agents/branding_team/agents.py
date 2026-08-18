@@ -1,7 +1,10 @@
 """Agent factory functions for the branding team Strands SDK pipeline.
 
 Each function returns a configured ``strands.Agent`` instance for use as a
-node in a ``GraphBuilder`` graph.  Agents are grouped by phase.
+node in a ``GraphBuilder`` graph.  Agents are grouped by phase. Every
+``make_*`` factory renders its system prompt from an ``AgentPromptSpec``
+via ``render_agent_prompt`` — there are no hand-written prompt-builder
+paths in this module.
 
 ``BrandComplianceAgent`` is the only non-Strands class; it runs
 outside the graph as a post-processing utility.
@@ -16,8 +19,40 @@ from typing import List
 from pydantic import BaseModel
 from strands import Agent
 
-from .graphs.shared import build_agent
+from .graphs.shared import build_agent, phase_agent_key
 from .models import (
+    AUDIENCE_SEGMENTS_MAX,
+    AUDIENCE_SEGMENTS_MIN,
+    BRAND_ARCHETYPES_MAX,
+    BRAND_ARCHETYPES_MIN,
+    BRAND_IN_ACTION_MAX,
+    BRAND_IN_ACTION_MIN,
+    CHANNEL_CONTENT_TYPES_MAX,
+    CHANNEL_CONTENT_TYPES_MIN,
+    CHANNEL_DONTS_MAX,
+    CHANNEL_DONTS_MIN,
+    CHANNEL_DOS_MAX,
+    CHANNEL_DOS_MIN,
+    COLOR_PALETTE_MAX,
+    COLOR_PALETTE_MIN,
+    CORE_VALUES_MAX,
+    CORE_VALUES_MIN,
+    DIFFERENTIATION_PILLARS_MAX,
+    DIFFERENTIATION_PILLARS_MIN,
+    EDITORIAL_QUALITY_BAR_MAX,
+    EDITORIAL_QUALITY_BAR_MIN,
+    MESSAGING_PILLARS_MAX,
+    MESSAGING_PILLARS_MIN,
+    PERSONA_PROFILES_MAX,
+    PERSONA_PROFILES_MIN,
+    STYLE_DONTS_MAX,
+    STYLE_DONTS_MIN,
+    STYLE_DOS_MAX,
+    STYLE_DOS_MIN,
+    TYPOGRAPHY_SYSTEM_MAX,
+    TYPOGRAPHY_SYSTEM_MIN,
+    VOICE_PRINCIPLES_MAX,
+    VOICE_PRINCIPLES_MIN,
     ApprovalWorkflowsOutput,
     AssetWikiOutput,
     AudienceSegmentsOutput,
@@ -25,25 +60,25 @@ from .models import (
     BrandArchitectureOutput,
     BrandCheckRequest,
     BrandCheckResult,
-    BrandDiscoveryAuditOutput,
+    BrandDiscoveryAudit,
     BrandExperiencePrinciplesOutput,
     BrandGuidelinesOutput,
     BrandHealthKPIsOutput,
     BrandInActionOutput,
     BrandingMission,
+    BrandPhase,
     BrandStoryOutput,
     ChannelGuidelineOutput,
     ColorPaletteSystemOutput,
     CoreValuesOutput,
-    CreativeRefinementDecisionOutput,
-    DesignSystemDefinitionOutput,
+    CreativeRefinementDecision,
+    DesignSystemDefinition,
     DifferentiationPillarsOutput,
     EvolutionFrameworkOutput,
     IconographyOutput,
     LogoSuiteOutput,
     MessagingFrameworkOutput,
-    MoodBoardCandidatesOutput,
-    MoodBoardConceptOutput,
+    MoodBoardConcept,
     OwnershipOutput,
     PersonaProfilesOutput,
     PhotographyVideoOutput,
@@ -55,10 +90,23 @@ from .models import (
     VoiceToneOutput,
     WritingGuidelinesOutput,
 )
+from .prompt_spec import AgentPromptSpec, PromptFieldSpec, render_agent_prompt
 
 # ===================================================================
 # Phase 1 — Strategic Core  (Graph: fan-out / fan-in)
 # ===================================================================
+
+_PHASE1_AGENT_KEY = phase_agent_key(BrandPhase.STRATEGIC_CORE)
+
+
+_DISCOVERY_AUDITOR_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Brand Discovery Analyst. Given a branding mission, produce a comprehensive "
+        "brand discovery audit."
+    ),
+    structured_output=BrandDiscoveryAudit,
+    closing="Be specific and grounded in the company description and target audience provided.",
+)
 
 
 def make_discovery_auditor() -> Agent:
@@ -66,20 +114,25 @@ def make_discovery_auditor() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``discovery_auditor`` whose structured
-        output is a ``BrandDiscoveryAuditOutput`` covering current brand
-        perception, market position, SWOT, and stakeholder insights.
+        output is a ``BrandDiscoveryAudit`` covering current brand
+        perception, market position, SWOT, and stakeholder insights. The
+        agent is routed through the ``branding_strategic_core`` agent_key
+        tier.
     """
     return build_agent(
         name="discovery_auditor",
         description="Analyses current brand perception, SWOT, and stakeholder insights.",
-        system_prompt=(
-            "You are a Brand Discovery Analyst. Given a branding mission, produce a comprehensive "
-            "brand discovery audit. Include: current_brand_perception, market_position, strengths, "
-            "weaknesses, opportunities, threats, and stakeholder_insights. Be specific and grounded "
-            "in the company description and target audience provided."
-        ),
-        structured_output=BrandDiscoveryAuditOutput,
+        system_prompt=render_agent_prompt(_DISCOVERY_AUDITOR_PROMPT),
+        structured_output=BrandDiscoveryAudit,
+        agent_key=_PHASE1_AGENT_KEY,
     )
+
+
+_PURPOSE_VISION_PROMPT = AgentPromptSpec(
+    opening="You are a Purpose & Vision Writer. Given a branding mission, write three things:",
+    structured_output=PurposeVisionOutput,
+    closing="Be concise, inspiring, and specific to the company.",
+)
 
 
 def make_purpose_vision_writer() -> Agent:
@@ -88,20 +141,26 @@ def make_purpose_vision_writer() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``purpose_vision_writer`` whose
         structured output is a ``PurposeVisionOutput`` containing the
-        brand purpose, mission statement, and vision statement.
+        brand purpose, mission statement, and vision statement. The
+        agent is routed through the ``branding_strategic_core`` agent_key
+        tier.
     """
     return build_agent(
         name="purpose_vision_writer",
         description="Crafts brand purpose, mission statement, and vision statement.",
-        system_prompt=(
-            "You are a Purpose & Vision Writer. Given a branding mission, write three things:\n"
-            "1. brand_purpose — why the company exists (one sentence)\n"
-            "2. mission_statement — what the company does for its audience (one sentence)\n"
-            "3. vision_statement — the aspirational future state (one sentence)\n"
-            "Be concise, inspiring, and specific to the company."
-        ),
+        system_prompt=render_agent_prompt(_PURPOSE_VISION_PROMPT),
         structured_output=PurposeVisionOutput,
+        agent_key=_PHASE1_AGENT_KEY,
     )
+
+
+_VALUES_ARTICULATOR_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Values Articulator. Given a branding mission with optional seed values, "
+        f"produce a list of {CORE_VALUES_MIN}-{CORE_VALUES_MAX} core values."
+    ),
+    structured_output=CoreValuesOutput,
+)
 
 
 def make_values_articulator() -> Agent:
@@ -109,21 +168,28 @@ def make_values_articulator() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``values_articulator`` whose structured
-        output is a ``CoreValuesOutput`` listing 3-5 core values, each with
-        a behavioral definition and observable behaviors.
+        output is a ``CoreValuesOutput`` listing core values (count bounded by
+        ``CORE_VALUES_MIN``/``CORE_VALUES_MAX``), each with a behavioral
+        definition and observable behaviors. The agent is routed through
+        the ``branding_strategic_core`` agent_key tier.
     """
     return build_agent(
         name="values_articulator",
         description="Defines core values with behavioral definitions and observable behaviors.",
-        system_prompt=(
-            "You are a Values Articulator. Given a branding mission with optional seed values, "
-            "produce a list of 3-5 core values. For each value provide:\n"
-            "- value: the value name\n"
-            "- behavioral_definition: what this value means in practice\n"
-            "- observable_behaviors: 2-3 concrete behaviors that demonstrate this value"
-        ),
+        system_prompt=render_agent_prompt(_VALUES_ARTICULATOR_PROMPT),
         structured_output=CoreValuesOutput,
+        agent_key=_PHASE1_AGENT_KEY,
     )
+
+
+_AUDIENCE_SEGMENTER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are an Audience Segmenter. Given a branding mission, identify "
+        f"{AUDIENCE_SEGMENTS_MIN}-{AUDIENCE_SEGMENTS_MAX} target audience segments."
+    ),
+    structured_output=AudienceSegmentsOutput,
+    closing="Ground your analysis in the company description and stated target audience.",
+)
 
 
 def make_audience_segmenter() -> Agent:
@@ -131,20 +197,28 @@ def make_audience_segmenter() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``audience_segmenter`` whose structured
-        output is an ``AudienceSegmentsOutput`` describing 1-3 target
-        audience segments with pain points, goals, and decision drivers.
+        output is an ``AudienceSegmentsOutput`` describing target audience
+        segments (count bounded by ``AUDIENCE_SEGMENTS_MIN``/``AUDIENCE_SEGMENTS_MAX``)
+        with pain points, goals, and decision drivers. The agent is
+        routed through the ``branding_strategic_core`` agent_key tier.
     """
     return build_agent(
         name="audience_segmenter",
         description="Segments target audience with psychographic depth.",
-        system_prompt=(
-            "You are an Audience Segmenter. Given a branding mission, identify 1-3 target audience "
-            "segments. For each segment provide: name, description, pain_points (2-3), goals (2-3), "
-            "and decision_drivers (2-3). Ground your analysis in the company description and stated "
-            "target audience."
-        ),
+        system_prompt=render_agent_prompt(_AUDIENCE_SEGMENTER_PROMPT),
         structured_output=AudienceSegmentsOutput,
+        agent_key=_PHASE1_AGENT_KEY,
     )
+
+
+_DIFFERENTIATION_MAPPER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Differentiation Mapper. Given a branding mission with optional "
+        f"differentiators, produce {DIFFERENTIATION_PILLARS_MIN}-{DIFFERENTIATION_PILLARS_MAX} "
+        "differentiation pillars."
+    ),
+    structured_output=DifferentiationPillarsOutput,
+)
 
 
 def make_differentiation_mapper() -> Agent:
@@ -153,21 +227,28 @@ def make_differentiation_mapper() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``differentiation_mapper`` whose
         structured output is a ``DifferentiationPillarsOutput`` listing
-        2-4 differentiation pillars with proof points and competitive
-        context.
+        differentiation pillars (count bounded by ``DIFFERENTIATION_PILLARS_MIN``/
+        ``DIFFERENTIATION_PILLARS_MAX``) with proof points and competitive
+        context. The agent is routed through the ``branding_strategic_core``
+        agent_key tier.
     """
     return build_agent(
         name="differentiation_mapper",
         description="Maps competitive differentiation pillars with proof points.",
-        system_prompt=(
-            "You are a Differentiation Mapper. Given a branding mission with optional differentiators, "
-            "produce 2-4 differentiation pillars. For each pillar provide:\n"
-            "- pillar: the differentiator name\n"
-            "- proof_points: 2-3 evidence items\n"
-            "- competitive_context: how competitors fall short here"
-        ),
+        system_prompt=render_agent_prompt(_DIFFERENTIATION_MAPPER_PROMPT),
         structured_output=DifferentiationPillarsOutput,
+        agent_key=_PHASE1_AGENT_KEY,
     )
+
+
+_POSITIONING_SYNTHESIZER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Positioning Synthesizer. You receive outputs from the discovery auditor, "
+        "purpose/vision writer, values articulator, audience segmenter, and differentiation "
+        "mapper. Synthesise them into:"
+    ),
+    structured_output=PositioningOutput,
+)
 
 
 def make_positioning_synthesizer() -> Agent:
@@ -177,27 +258,29 @@ def make_positioning_synthesizer() -> Agent:
         Returns an ``Agent`` named ``positioning_synthesizer`` whose
         structured output is a ``PositioningOutput`` synthesizing the
         other Phase 1 fragments into a positioning statement and brand
-        promise.
+        promise. The agent is routed through the ``branding_strategic_core``
+        agent_key tier.
     """
     return build_agent(
         name="positioning_synthesizer",
         description="Synthesises all Phase 1 fragments into positioning statement and brand promise.",
-        system_prompt=(
-            "You are a Positioning Synthesizer. You receive outputs from the discovery auditor, "
-            "purpose/vision writer, values articulator, audience segmenter, and differentiation "
-            "mapper. Synthesise them into:\n"
-            "1. positioning_statement — a single sentence following the format: "
-            "'For [audience] who need [need], [company] is the [differentiator] that delivers "
-            "[value] because [proof].'\n"
-            "2. brand_promise — a one-sentence commitment to the customer"
-        ),
+        system_prompt=render_agent_prompt(_POSITIONING_SYNTHESIZER_PROMPT),
         structured_output=PositioningOutput,
+        agent_key=_PHASE1_AGENT_KEY,
     )
 
 
 # ===================================================================
 # Phase 2 — Narrative & Messaging  (Graph: sequential specialists)
 # ===================================================================
+
+_PHASE2_AGENT_KEY = phase_agent_key(BrandPhase.NARRATIVE_MESSAGING)
+
+
+_STORYTELLER_PROMPT = AgentPromptSpec(
+    opening="You are a Brand Storyteller. Using the strategic core output and branding mission, craft:",
+    structured_output=BrandStoryOutput,
+)
 
 
 def make_storyteller() -> Agent:
@@ -206,20 +289,33 @@ def make_storyteller() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``Storyteller`` whose structured output
         is a ``BrandStoryOutput`` containing the brand story, hero
-        narrative, and boilerplate variants.
+        narrative, and boilerplate variants. The agent is routed through
+        the ``branding_narrative_messaging`` agent_key tier.
     """
     return build_agent(
         name="Storyteller",
         description="Crafts the brand story, hero narrative, and boilerplate variants.",
-        system_prompt=(
-            "You are a Brand Storyteller. Using the strategic core output and branding mission, "
-            "craft:\n"
-            "1. brand_story — a compelling 2-3 paragraph origin/purpose story\n"
-            "2. hero_narrative — a shorter, punchy version for hero sections\n"
-            "3. boilerplate_variants — 3 versions (short/medium/long) for press and bios"
-        ),
+        system_prompt=render_agent_prompt(_STORYTELLER_PROMPT),
         structured_output=BrandStoryOutput,
+        agent_key=_PHASE2_AGENT_KEY,
     )
+
+
+_ARCHETYPE_ANALYST_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Brand Archetype Analyst. Using the brand story from Inputs from previous "
+        f"nodes and the strategic core as read-only context, select {BRAND_ARCHETYPES_MIN}-"
+        f"{BRAND_ARCHETYPES_MAX} brand archetypes (e.g. The Sage, The Creator, The Explorer) "
+        "that fit the narrative, and add:"
+    ),
+    fields=(
+        PromptFieldSpec(
+            "brand_archetypes",
+            "for each archetype: archetype (name), rationale (why this fits), and "
+            "personality_traits (3-5 traits)",
+        ),
+    ),
+)
 
 
 def make_archetype_analyst() -> Agent:
@@ -227,24 +323,37 @@ def make_archetype_analyst() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``ArchetypeAnalyst`` whose structured
-        output is a ``BrandArchetypesOutput`` selecting 1-2 brand
-        archetypes with rationale and personality traits, carrying
-        forward the prior narrative fields unchanged.
+        output is a ``BrandArchetypesOutput`` selecting brand archetypes
+        (count bounded by ``BRAND_ARCHETYPES_MIN``/``BRAND_ARCHETYPES_MAX``)
+        with rationale and personality traits — its own field only, the
+        Storyteller fragment is merged in separately by the orchestrator.
+        The agent is routed through the ``branding_narrative_messaging``
+        agent_key tier.
     """
     return build_agent(
         name="ArchetypeAnalyst",
         description="Selects brand archetypes with rationale and personality traits.",
-        system_prompt=(
-            "You are a Brand Archetype Analyst. Review the brand story from Inputs from previous "
-            "nodes and the strategic core, then select 1-2 brand archetypes "
-            "(e.g. The Sage, The Creator, The Explorer). Carry forward brand_story, hero_narrative, "
-            "and boilerplate_variants unchanged, and add for each archetype:\n"
-            "- archetype: name\n"
-            "- rationale: why this fits\n"
-            "- personality_traits: 3-5 traits"
-        ),
+        system_prompt=render_agent_prompt(_ARCHETYPE_ANALYST_PROMPT),
         structured_output=BrandArchetypesOutput,
+        agent_key=_PHASE2_AGENT_KEY,
     )
+
+
+_TAGLINE_WRITER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Tagline Writer. Using the brand story and archetypes from Inputs from "
+        "previous nodes and the strategic core as read-only context, add:"
+    ),
+    fields=(
+        PromptFieldSpec("tagline", "a memorable brand tagline (max 8 words)"),
+        PromptFieldSpec("tagline_rationale", "why this tagline works"),
+        PromptFieldSpec(
+            "elevator_pitches",
+            "three variants: tier '5-second' pitch, tier '30-second' pitch, and tier "
+            "'2-minute' pitch",
+        ),
+    ),
+)
 
 
 def make_tagline_writer() -> Agent:
@@ -252,24 +361,39 @@ def make_tagline_writer() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``TaglineWriter`` whose structured
-        output is a ``TaglineOutput`` adding a tagline, tagline
-        rationale, and elevator pitches to the prior narrative fields.
+        output is a ``TaglineOutput`` containing a tagline, tagline
+        rationale, and elevator pitches — its own fields only, merged
+        with the other five specialists' fragments by the orchestrator.
+        The agent is routed through the ``branding_narrative_messaging``
+        agent_key tier.
     """
     return build_agent(
         name="TaglineWriter",
         description="Creates tagline, tagline rationale, and elevator pitches.",
-        system_prompt=(
-            "You are a Tagline Writer. Using Inputs from previous nodes (brand story, archetypes) "
-            "and the strategic core, carry forward every prior narrative field unchanged and add:\n"
-            "1. tagline — a memorable brand tagline (max 8 words)\n"
-            "2. tagline_rationale — why this tagline works\n"
-            "3. elevator_pitches — three variants:\n"
-            "   - tier: '5-second', pitch: ...\n"
-            "   - tier: '30-second', pitch: ...\n"
-            "   - tier: '2-minute', pitch: ..."
-        ),
+        system_prompt=render_agent_prompt(_TAGLINE_WRITER_PROMPT),
         structured_output=TaglineOutput,
+        agent_key=_PHASE2_AGENT_KEY,
     )
+
+
+_MESSAGE_MAPPER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Message Mapper. Using all prior narrative fields from Inputs from previous "
+        "nodes as read-only context, add:"
+    ),
+    fields=(
+        PromptFieldSpec(
+            "messaging_framework",
+            f"{MESSAGING_PILLARS_MIN}-{MESSAGING_PILLARS_MAX} messaging pillars, each with: "
+            "pillar, key_message, and proof_points",
+        ),
+        PromptFieldSpec(
+            "audience_message_maps",
+            "one per audience segment, each with: audience_segment, primary_message, "
+            "supporting_messages, and tone_adjustments",
+        ),
+    ),
+)
 
 
 def make_message_mapper() -> Agent:
@@ -277,23 +401,35 @@ def make_message_mapper() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``MessageMapper`` whose structured
-        output is a ``MessagingFrameworkOutput`` adding a messaging
-        framework and per-segment audience message maps to the prior
-        narrative fields.
+        output is a ``MessagingFrameworkOutput`` containing a messaging
+        framework and per-segment audience message maps — its own fields
+        only, merged with the other five specialists' fragments by the
+        orchestrator. The agent is routed through the
+        ``branding_narrative_messaging`` agent_key tier.
     """
     return build_agent(
         name="MessageMapper",
         description="Builds messaging framework pillars and audience message maps.",
-        system_prompt=(
-            "You are a Message Mapper. Using all prior narrative fields from Inputs from previous "
-            "nodes, carry them forward unchanged and add:\n"
-            "1. messaging_framework — 3-4 messaging pillars, each with:\n"
-            "   - pillar, key_message, proof_points\n"
-            "2. audience_message_maps — one per audience segment, each with:\n"
-            "   - audience_segment, primary_message, supporting_messages, tone_adjustments"
-        ),
+        system_prompt=render_agent_prompt(_MESSAGE_MAPPER_PROMPT),
         structured_output=MessagingFrameworkOutput,
+        agent_key=_PHASE2_AGENT_KEY,
     )
+
+
+_PERSONA_BUILDER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Persona Builder. Using audience segments and all prior narrative fields "
+        "from Inputs from previous nodes as read-only context, create:"
+    ),
+    fields=(
+        PromptFieldSpec(
+            "persona_profiles",
+            f"{PERSONA_PROFILES_MIN}-{PERSONA_PROFILES_MAX} persona profiles, each with: name, "
+            "role, demographics, psychographics, "
+            "goals, frustrations, media_habits, jobs_to_be_done",
+        ),
+    ),
+)
 
 
 def make_persona_builder() -> Agent:
@@ -301,20 +437,43 @@ def make_persona_builder() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``PersonaBuilder`` whose structured
-        output is a ``PersonaProfilesOutput`` adding 2-3 persona profiles
-        to the prior narrative fields.
+        output is a ``PersonaProfilesOutput`` containing persona profiles
+        (count bounded by ``PERSONA_PROFILES_MIN``/``PERSONA_PROFILES_MAX``)
+        — its own field only, merged with the other five specialists'
+        fragments by the orchestrator. The agent is routed through the
+        ``branding_narrative_messaging`` agent_key tier.
     """
     return build_agent(
         name="PersonaBuilder",
         description="Creates rich persona profiles with psychographic depth.",
-        system_prompt=(
-            "You are a Persona Builder. Using audience segments and all prior narrative fields "
-            "from Inputs from previous nodes, carry those fields forward unchanged and create "
-            "2-3 persona profiles. Each persona has: name, role, demographics, psychographics, "
-            "goals, frustrations, media_habits, jobs_to_be_done."
-        ),
+        system_prompt=render_agent_prompt(_PERSONA_BUILDER_PROMPT),
         structured_output=PersonaProfilesOutput,
+        agent_key=_PHASE2_AGENT_KEY,
     )
+
+
+_VOICE_PRINCIPLES_DRAFTER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Voice Principles Drafter. Using all prior narrative fields from Inputs from "
+        "previous nodes and the mission's desired_voice as read-only context, produce "
+        "writing_guidelines:"
+    ),
+    fields=(
+        PromptFieldSpec(
+            "voice_principles",
+            f"{VOICE_PRINCIPLES_MIN}-{VOICE_PRINCIPLES_MAX} principles "
+            "(e.g. 'Use a confident, human voice')",
+        ),
+        PromptFieldSpec("style_dos", f"{STYLE_DOS_MIN}-{STYLE_DOS_MAX} writing best practices"),
+        PromptFieldSpec("style_donts", f"{STYLE_DONTS_MIN}-{STYLE_DONTS_MAX} things to avoid"),
+        PromptFieldSpec(
+            "editorial_quality_bar",
+            f"{EDITORIAL_QUALITY_BAR_MIN}-{EDITORIAL_QUALITY_BAR_MAX} quality standards every "
+            "piece must meet",
+        ),
+    ),
+    closing="\nThis is the final step in narrative development.",
+)
 
 
 def make_voice_principles_drafter() -> Agent:
@@ -322,24 +481,18 @@ def make_voice_principles_drafter() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``VoicePrinciplesDrafter`` whose
-        structured output is a ``WritingGuidelinesOutput`` adding voice
-        principles, style dos/don'ts, and an editorial quality bar to the
-        prior narrative fields — the final step in narrative development.
+        structured output is a ``WritingGuidelinesOutput`` containing voice
+        principles, style dos/don'ts, and an editorial quality bar — its own
+        field only, merged with the other five specialists' fragments by the
+        orchestrator. The final step in narrative development. The agent is
+        routed through the ``branding_narrative_messaging`` agent_key tier.
     """
     return build_agent(
         name="VoicePrinciplesDrafter",
-        description="Defines writing guidelines: voice principles, style dos/donts, editorial bar.",
-        system_prompt=(
-            "You are a Voice Principles Drafter. Using all prior narrative fields from Inputs from "
-            "previous nodes and the mission's desired_voice, carry the prior fields forward "
-            "unchanged and produce writing_guidelines:\n"
-            "1. voice_principles — 3-4 principles (e.g. 'Use a confident, human voice')\n"
-            "2. style_dos — 3-4 writing best practices\n"
-            "3. style_donts — 3-4 things to avoid\n"
-            "4. editorial_quality_bar — 3-4 quality standards every piece must meet\n\n"
-            "This is the final step in narrative development."
-        ),
+        description="Defines writing guidelines: voice principles, style dos/don'ts, editorial bar.",
+        system_prompt=render_agent_prompt(_VOICE_PRINCIPLES_DRAFTER_PROMPT),
         structured_output=WritingGuidelinesOutput,
+        agent_key=_PHASE2_AGENT_KEY,
     )
 
 
@@ -347,32 +500,29 @@ def make_voice_principles_drafter() -> Agent:
 # Phase 3 — Visual & Expressive Identity  (Graph: diverge fan-out + converge fan-out)
 # ===================================================================
 
+_PHASE3_AGENT_KEY = phase_agent_key(BrandPhase.VISUAL_IDENTITY)
+
 # --- Diverge fan-out agents ---
 
 
-def make_creative_director() -> Agent:
-    """Build the Phase 3 Creative Director agent.
+def _moodboard_conceptualist_prompt(variant: str) -> AgentPromptSpec:
+    """Build the MoodBoard Conceptualist prompt spec for one visual-direction variant.
 
+    Preconditions:
+        ``variant`` is a non-empty string.
     Postconditions:
-        Returns an ``Agent`` named ``CreativeDirector`` that collects the
-        moodboard concepts produced by the ``MoodBoardConceptualist_*``
-        Graph fan-out nodes into a unified ``MoodBoardCandidatesOutput``
-        list, preserving each concept's title, visual_direction,
-        color_story, typography_direction, and image_style. The agent does
-        not select a winner; ``converge_decider`` scores the candidates
-        and selects the winning direction.
+        Returns an ``AgentPromptSpec`` whose opening interpolates
+        ``variant.lower()`` and whose fields name the five
+        ``MoodBoardConcept`` attributes.
     """
-    return build_agent(
-        name="CreativeDirector",
-        description="Collects moodboard candidates from conceptualists into a unified list.",
-        system_prompt=(
-            "You are a Creative Director reviewing visual identity exploration. Using the three "
-            "moodboard concepts from Inputs from previous nodes, collect them into "
-            "mood_board_candidates. Preserve each concept (title, visual_direction, color_story, "
-            "typography_direction, image_style). Do not pick a winner — converge_decider selects "
-            "the winning direction."
+    assert isinstance(variant, str) and variant.strip(), "variant must be a non-empty string"
+    return AgentPromptSpec(
+        opening=(
+            f"You are a MoodBoard Conceptualist specialising in {variant.lower()} visual "
+            f"directions. Given a brand's strategic core and narrative, create a moodboard "
+            f"concept with:"
         ),
-        structured_output=MoodBoardCandidatesOutput,
+        structured_output=MoodBoardConcept,
     )
 
 
@@ -387,28 +537,35 @@ def make_moodboard_conceptualist(variant: str) -> Agent:
         Returns an ``Agent`` named ``MoodBoardConceptualist_{variant}``
         whose prompt is specialized to ``variant`` and whose output is a
         moodboard concept (title, visual direction, color story,
-        typography direction, image style) for the ``CreativeDirector``
-        node in the Phase 3 Graph.
+        typography direction, image style) that fans directly into
+        ``converge_decider`` in the Phase 3 Graph. The agent is routed
+        through the ``branding_visual_identity`` agent_key tier.
     """
     assert isinstance(variant, str) and variant.strip(), "variant must be a non-empty string"
     return build_agent(
         name=f"MoodBoardConceptualist_{variant}",
         description=f"Generates a {variant.lower()} visual direction moodboard concept.",
-        system_prompt=(
-            f"You are a MoodBoard Conceptualist specialising in {variant.lower()} visual "
-            f"directions. Given a brand's strategic core and narrative, create a moodboard concept "
-            f"with:\n"
-            f"- title: a name for this direction\n"
-            f"- visual_direction: overall aesthetic description\n"
-            f"- color_story: 3-4 color names/descriptions\n"
-            f"- typography_direction: font style recommendations\n"
-            f"- image_style: 3-4 image style descriptions"
-        ),
-        structured_output=MoodBoardConceptOutput,
+        system_prompt=render_agent_prompt(_moodboard_conceptualist_prompt(variant)),
+        structured_output=MoodBoardConcept,
+        agent_key=_PHASE3_AGENT_KEY,
     )
 
 
 # --- Post-diverge Graph nodes ---
+
+
+_CONVERGE_DECIDER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Creative Convergence Decider. You receive moodboard candidates from the "
+        "diverge phase plus the brand's strategic core and values. Score each candidate on:\n"
+        "- Audience resonance\n"
+        "- Distinctiveness vs competitors\n"
+        "- Cross-channel consistency\n"
+        "- Execution feasibility\n\n"
+        "Produce:"
+    ),
+    structured_output=CreativeRefinementDecision,
+)
 
 
 def make_converge_decider() -> Agent:
@@ -418,24 +575,25 @@ def make_converge_decider() -> Agent:
         Returns an ``Agent`` named ``converge_decider`` that scores the
         diverge-phase moodboard candidates against audience resonance,
         distinctiveness, cross-channel consistency, and feasibility, and
-        selects a winning candidate.
+        selects a winning candidate. The agent is routed through the
+        ``branding_visual_identity`` agent_key tier.
     """
     return build_agent(
         name="converge_decider",
         description="Scores moodboard candidates and selects a winner.",
-        system_prompt=(
-            "You are a Creative Convergence Decider. You receive moodboard candidates from the "
-            "diverge phase plus the brand's strategic core and values. Score each candidate on:\n"
-            "- Audience resonance\n"
-            "- Distinctiveness vs competitors\n"
-            "- Cross-channel consistency\n"
-            "- Execution feasibility\n\n"
-            "Produce: winning_candidate_title, scoring_criteria, scores_by_candidate (dict of "
-            "title→score), rationale, workshop_prompts (3 questions for stakeholders), and "
-            "decision_criteria used."
-        ),
-        structured_output=CreativeRefinementDecisionOutput,
+        system_prompt=render_agent_prompt(_CONVERGE_DECIDER_PROMPT),
+        structured_output=CreativeRefinementDecision,
+        agent_key=_PHASE3_AGENT_KEY,
     )
+
+
+_LOGO_SPECIFIER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Logo Specifier. Based on the winning moodboard direction, define a logo "
+        "suite. For each variant (primary, monochrome, icon-only, reversed), specify:"
+    ),
+    structured_output=LogoSuiteOutput,
+)
 
 
 def make_logo_specifier() -> Agent:
@@ -445,18 +603,26 @@ def make_logo_specifier() -> Agent:
         Returns an ``Agent`` named ``logo_specifier`` whose output
         defines the logo suite (primary, monochrome, icon-only,
         reversed variants) with usage rules for the winning moodboard
-        direction.
+        direction. The agent is routed through the
+        ``branding_visual_identity`` agent_key tier.
     """
     return build_agent(
         name="logo_specifier",
         description="Defines logo suite with usage rules.",
-        system_prompt=(
-            "You are a Logo Specifier. Based on the winning moodboard direction, define a logo "
-            "suite. For each variant (primary, monochrome, icon-only, reversed), specify:\n"
-            "- variant, usage_context, minimum_size, clear_space"
-        ),
+        system_prompt=render_agent_prompt(_LOGO_SPECIFIER_PROMPT),
         structured_output=LogoSuiteOutput,
+        agent_key=_PHASE3_AGENT_KEY,
     )
+
+
+_COLOR_SYSTEM_BUILDER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Color System Builder. Based on the winning moodboard direction, define "
+        f"{COLOR_PALETTE_MIN}-{COLOR_PALETTE_MAX} colors. Include primary, secondary, accent, "
+        "surface, and critical colors."
+    ),
+    structured_output=ColorPaletteSystemOutput,
+)
 
 
 def make_color_system_builder() -> Agent:
@@ -464,20 +630,28 @@ def make_color_system_builder() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``color_system_builder`` whose output
-        defines 5-7 brand colors with hex values, usage, and
-        psychological rationale for the winning moodboard direction.
+        defines brand colors (count bounded by ``COLOR_PALETTE_MIN``/
+        ``COLOR_PALETTE_MAX``) with hex values, usage, and psychological
+        rationale for the winning moodboard direction. The agent is
+        routed through the ``branding_visual_identity`` agent_key tier.
     """
     return build_agent(
         name="color_system_builder",
         description="Builds the brand color palette with psychological rationale.",
-        system_prompt=(
-            "You are a Color System Builder. Based on the winning moodboard direction, define "
-            "5-7 colors. For each: name, hex_value, usage (where to use it), and "
-            "psychological_rationale (why this color works for the brand). Include primary, "
-            "secondary, accent, surface, and critical colors."
-        ),
+        system_prompt=render_agent_prompt(_COLOR_SYSTEM_BUILDER_PROMPT),
         structured_output=ColorPaletteSystemOutput,
+        agent_key=_PHASE3_AGENT_KEY,
     )
+
+
+_TYPOGRAPHY_BUILDER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Typography Builder. Based on the winning moodboard direction, define a "
+        f"typography system with {TYPOGRAPHY_SYSTEM_MIN}-{TYPOGRAPHY_SYSTEM_MAX} type roles "
+        "(display, body, caption, code). For each:"
+    ),
+    structured_output=TypographySystemOutput,
+)
 
 
 def make_typography_builder() -> Agent:
@@ -485,19 +659,24 @@ def make_typography_builder() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``typography_builder`` whose output
-        defines a typography system of 3-4 type roles for the winning
-        moodboard direction.
+        defines a typography system for the winning moodboard direction; the
+        number of type roles is governed by ``TYPOGRAPHY_SYSTEM_MIN`` and
+        ``TYPOGRAPHY_SYSTEM_MAX``. The agent is routed through the
+        ``branding_visual_identity`` agent_key tier.
     """
     return build_agent(
         name="typography_builder",
         description="Defines the typography system.",
-        system_prompt=(
-            "You are a Typography Builder. Based on the winning moodboard direction, define a "
-            "typography system with 3-4 type roles (display, body, caption, code). For each:\n"
-            "- role, font_family, weight_range, usage_notes"
-        ),
+        system_prompt=render_agent_prompt(_TYPOGRAPHY_BUILDER_PROMPT),
         structured_output=TypographySystemOutput,
+        agent_key=_PHASE3_AGENT_KEY,
     )
+
+
+_ICONOGRAPHY_PROMPT = AgentPromptSpec(
+    opening="You are an Iconography Director. Based on the winning moodboard, define:",
+    structured_output=IconographyOutput,
+)
 
 
 def make_iconography_director() -> Agent:
@@ -506,18 +685,22 @@ def make_iconography_director() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``iconography_director`` whose output
         defines the iconography and illustration style for the winning
-        moodboard direction.
+        moodboard direction. The agent is routed through the
+        ``branding_visual_identity`` agent_key tier.
     """
     return build_agent(
         name="iconography_director",
         description="Defines iconography and illustration style.",
-        system_prompt=(
-            "You are an Iconography Director. Based on the winning moodboard, define:\n"
-            "1. iconography_style — describe the icon aesthetic (line weight, corner radius, fill)\n"
-            "2. illustration_style — describe the illustration approach (flat, isometric, etc.)"
-        ),
+        system_prompt=render_agent_prompt(_ICONOGRAPHY_PROMPT),
         structured_output=IconographyOutput,
+        agent_key=_PHASE3_AGENT_KEY,
     )
+
+
+_PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT = AgentPromptSpec(
+    opening="You are a Photography & Video Director. Based on the winning moodboard, define:",
+    structured_output=PhotographyVideoOutput,
+)
 
 
 def make_photography_video_director() -> Agent:
@@ -526,19 +709,26 @@ def make_photography_video_director() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``photography_video_director`` whose
         output defines photography direction, video direction, and
-        motion principles for the winning moodboard direction.
+        motion principles for the winning moodboard direction. The agent
+        is routed through the ``branding_visual_identity`` agent_key
+        tier.
     """
     return build_agent(
         name="photography_video_director",
         description="Defines photography direction, video direction, and motion principles.",
-        system_prompt=(
-            "You are a Photography & Video Director. Based on the winning moodboard, define:\n"
-            "1. photography_direction — shooting style, lighting, composition, subjects\n"
-            "2. video_direction — pacing, tone, visual style for video content\n"
-            "3. motion_principles — 3-4 principles for animation/motion design"
-        ),
+        system_prompt=render_agent_prompt(_PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT),
         structured_output=PhotographyVideoOutput,
+        agent_key=_PHASE3_AGENT_KEY,
     )
+
+
+_VOICE_TONE_BUILDER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Voice & Tone Builder. Using the brand narrative's writing guidelines and "
+        "the moodboard direction, define:"
+    ),
+    structured_output=VoiceToneOutput,
+)
 
 
 def make_voice_tone_builder() -> Agent:
@@ -548,21 +738,22 @@ def make_voice_tone_builder() -> Agent:
         Returns an ``Agent`` named ``voice_tone_builder`` whose output
         defines the voice/tone spectrum and language dos/don'ts, drawing
         on the brand narrative's writing guidelines and the moodboard
-        direction.
+        direction. The agent is routed through the
+        ``branding_visual_identity`` agent_key tier.
     """
     return build_agent(
         name="voice_tone_builder",
-        description="Defines voice/tone spectrum and language dos/donts.",
-        system_prompt=(
-            "You are a Voice & Tone Builder. Using the brand narrative's writing guidelines and "
-            "the moodboard direction, define:\n"
-            "1. voice_tone_spectrum — for each context (marketing, support, legal, social, "
-            "internal), specify the tone and 2-3 examples\n"
-            "2. language_dos — 4-5 approved language patterns\n"
-            "3. language_donts — 4-5 language anti-patterns"
-        ),
+        description="Defines voice/tone spectrum and language dos/don'ts.",
+        system_prompt=render_agent_prompt(_VOICE_TONE_BUILDER_PROMPT),
         structured_output=VoiceToneOutput,
+        agent_key=_PHASE3_AGENT_KEY,
     )
+
+
+_DESIGN_SYSTEM_CODIFIER_PROMPT = AgentPromptSpec(
+    opening="You are a Design System Codifier. Based on the full visual identity work, produce:",
+    structured_output=DesignSystemDefinition,
+)
 
 
 def make_design_system_codifier() -> Agent:
@@ -571,24 +762,30 @@ def make_design_system_codifier() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``design_system_codifier`` whose
         output codifies design principles, foundation tokens, and
-        component standards from the full visual identity work.
+        component standards from the full visual identity work. The
+        agent is routed through the ``branding_visual_identity``
+        agent_key tier.
     """
     return build_agent(
         name="design_system_codifier",
         description="Codifies the design system: principles, tokens, component standards.",
-        system_prompt=(
-            "You are a Design System Codifier. Based on the full visual identity work, produce:\n"
-            "1. design_principles — 3-4 guiding principles (e.g. 'Clarity over decoration')\n"
-            "2. foundation_tokens — 4-6 token categories (color, type, spacing, motion, etc.)\n"
-            "3. component_standards — 3-5 component rules (buttons, cards, navigation, etc.)"
-        ),
-        structured_output=DesignSystemDefinitionOutput,
+        system_prompt=render_agent_prompt(_DESIGN_SYSTEM_CODIFIER_PROMPT),
+        structured_output=DesignSystemDefinition,
+        agent_key=_PHASE3_AGENT_KEY,
     )
 
 
 # ===================================================================
 # Phase 4 — Experience & Channel Activation  (Graph: fan-out / fan-in)
 # ===================================================================
+
+_PHASE4_AGENT_KEY = phase_agent_key(BrandPhase.CHANNEL_ACTIVATION)
+
+
+_BRAND_EXPERIENCE_PRINCIPLER_PROMPT = AgentPromptSpec(
+    opening="You are a Brand Experience Architect. Define:",
+    structured_output=BrandExperiencePrinciplesOutput,
+)
 
 
 def make_brand_experience_principler() -> Agent:
@@ -597,19 +794,51 @@ def make_brand_experience_principler() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``brand_experience_principler`` whose
         output defines brand experience principles, signature customer
-        journey moments, and sensory elements.
+        journey moments, and sensory elements. The agent is routed
+        through the ``branding_channel_activation`` agent_key tier.
     """
     return build_agent(
         name="brand_experience_principler",
         description="Defines brand experience principles, signature moments, and sensory elements.",
-        system_prompt=(
-            "You are a Brand Experience Architect. Define:\n"
-            "1. brand_experience_principles — 3-5 principles that govern every brand touchpoint\n"
-            "2. signature_moments — 3-5 key moments in the customer journey that should feel "
-            "distinctly on-brand\n"
-            "3. sensory_elements — 2-4 sensory cues (sound, texture, scent, etc.) if applicable"
-        ),
+        system_prompt=render_agent_prompt(_BRAND_EXPERIENCE_PRINCIPLER_PROMPT),
         structured_output=BrandExperiencePrinciplesOutput,
+        agent_key=_PHASE4_AGENT_KEY,
+    )
+
+
+def _channel_guide_prompt(channel: str, description: str) -> AgentPromptSpec:
+    """Build the channel-guide prompt spec for one activation channel.
+
+    Preconditions:
+        ``channel`` and ``description`` are non-empty strings.
+    Postconditions:
+        Returns an ``AgentPromptSpec`` whose opening interpolates
+        ``channel.title()`` / ``channel``, whose fields name the six
+        ``ChannelGuidelineOutput`` attributes (``channel``'s description
+        is the quoted identifier), and whose closing is
+        ``f"Context: {description}"``.
+    """
+    assert isinstance(channel, str) and channel.strip(), "channel must be a non-empty string"
+    assert isinstance(description, str) and description.strip(), (
+        "description must be a non-empty string"
+    )
+    return AgentPromptSpec(
+        opening=(
+            f"You are a {channel.title()} Channel Specialist. Define guidelines for the "
+            f"{channel} channel:"
+        ),
+        fields=(
+            PromptFieldSpec("channel", f"'{channel}'"),
+            PromptFieldSpec("strategy", "overall approach for this channel"),
+            PromptFieldSpec("dos", f"{CHANNEL_DOS_MIN}-{CHANNEL_DOS_MAX} best practices"),
+            PromptFieldSpec("donts", f"{CHANNEL_DONTS_MIN}-{CHANNEL_DONTS_MAX} things to avoid"),
+            PromptFieldSpec(
+                "content_types",
+                f"{CHANNEL_CONTENT_TYPES_MIN}-{CHANNEL_CONTENT_TYPES_MAX} recommended content formats",
+            ),
+            PromptFieldSpec("frequency_guidance", "recommended cadence"),
+        ),
+        closing=f"Context: {description}",
     )
 
 
@@ -629,30 +858,22 @@ def _make_channel_guide(
         Returns an ``Agent`` named ``f"{channel}_guide"`` whose prompt
         embeds ``channel`` and ``description`` and whose structured
         output defines that channel's strategy, dos/don'ts, content
-        types, and cadence per ``structured_output``.
+        types, and cadence per ``structured_output``. The agent is
+        routed through the ``branding_channel_activation`` agent_key
+        tier.
     """
-    assert isinstance(channel, str) and channel.strip(), "channel must be a non-empty string"
-    assert isinstance(description, str) and description.strip(), (
-        "description must be a non-empty string"
-    )
-    assert isinstance(structured_output, type) and issubclass(structured_output, BaseModel), (
-        "structured_output must be a Pydantic BaseModel subclass"
-    )
+    if not isinstance(channel, str) or not channel.strip():
+        raise ValueError("channel must be a non-empty string")
+    if not isinstance(description, str) or not description.strip():
+        raise ValueError("description must be a non-empty string")
+    if not (isinstance(structured_output, type) and issubclass(structured_output, BaseModel)):
+        raise ValueError("structured_output must be a Pydantic BaseModel subclass")
     return build_agent(
         name=f"{channel}_guide",
         description=f"Defines brand guidelines for the {channel} channel.",
-        system_prompt=(
-            f"You are a {channel.title()} Channel Specialist. Define guidelines for the "
-            f"{channel} channel:\n"
-            f"- channel: '{channel}'\n"
-            f"- strategy: overall approach for this channel\n"
-            f"- dos: 3-4 best practices\n"
-            f"- donts: 3-4 things to avoid\n"
-            f"- content_types: 3-5 recommended content formats\n"
-            f"- frequency_guidance: recommended cadence\n"
-            f"Context: {description}"
-        ),
+        system_prompt=render_agent_prompt(_channel_guide_prompt(channel, description)),
         structured_output=structured_output,
+        agent_key=_PHASE4_AGENT_KEY,
     )
 
 
@@ -728,26 +949,37 @@ def make_internal_guide() -> Agent:
     )
 
 
+_BRAND_ARCHITECTURE_BUILDER_PROMPT = AgentPromptSpec(
+    opening="You are a Brand Architecture Specialist. Define:",
+    structured_output=BrandArchitectureOutput,
+)
+
+
 def make_brand_architecture_builder() -> Agent:
     """Build the Phase 4 Brand Architecture Specialist agent.
 
     Postconditions:
         Returns an ``Agent`` named ``brand_architecture_builder`` whose
         output defines brand architecture rules, naming conventions,
-        and a terminology glossary.
+        and a terminology glossary. The agent is routed through the
+        ``branding_channel_activation`` agent_key tier.
     """
     return build_agent(
         name="brand_architecture_builder",
         description="Defines brand architecture rules, naming conventions, and terminology.",
-        system_prompt=(
-            "You are a Brand Architecture Specialist. Define:\n"
-            "1. brand_architecture — rules for parent brand, sub-brands, product lines. Each "
-            "with: entity, relationship, naming_convention, visual_treatment\n"
-            "2. naming_conventions — 3-5 naming rules\n"
-            "3. terminology_glossary — 5-10 key terms with definitions (dict)\n"
-        ),
+        system_prompt=render_agent_prompt(_BRAND_ARCHITECTURE_BUILDER_PROMPT),
         structured_output=BrandArchitectureOutput,
+        agent_key=_PHASE4_AGENT_KEY,
     )
+
+
+_BRAND_IN_ACTION_ILLUSTRATOR_PROMPT = AgentPromptSpec(
+    opening=(
+        f"You are a Brand-in-Action Illustrator. Create {BRAND_IN_ACTION_MIN}-{BRAND_IN_ACTION_MAX} "
+        "applied examples showing correct vs incorrect brand usage:"
+    ),
+    structured_output=BrandInActionOutput,
+)
 
 
 def make_brand_in_action_illustrator() -> Agent:
@@ -755,26 +987,31 @@ def make_brand_in_action_illustrator() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``brand_in_action_illustrator`` whose
-        output produces 3-5 correct-vs-incorrect brand usage examples.
+        output produces correct-vs-incorrect brand usage examples (count
+        bounded by ``BRAND_IN_ACTION_MIN``/``BRAND_IN_ACTION_MAX``). The
+        agent is routed through the ``branding_channel_activation``
+        agent_key tier.
     """
     return build_agent(
         name="brand_in_action_illustrator",
         description="Creates brand-in-action do/don't examples.",
-        system_prompt=(
-            "You are a Brand-in-Action Illustrator. Create 3-5 applied examples showing correct "
-            "vs incorrect brand usage. Each example has:\n"
-            "- context: where this applies (e.g. 'sales deck header')\n"
-            "- correct_example: the on-brand version\n"
-            "- incorrect_example: the off-brand version\n"
-            "- rationale: why the correct version is better\n"
-        ),
+        system_prompt=render_agent_prompt(_BRAND_IN_ACTION_ILLUSTRATOR_PROMPT),
         structured_output=BrandInActionOutput,
+        agent_key=_PHASE4_AGENT_KEY,
     )
 
 
 # ===================================================================
 # Phase 5 — Governance & Evolution  (Graph: fan-out / fan-in)
 # ===================================================================
+
+_PHASE5_AGENT_KEY = phase_agent_key(BrandPhase.GOVERNANCE)
+
+
+_OWNERSHIP_DEFINER_PROMPT = AgentPromptSpec(
+    opening="You are a Brand Ownership Definer. Define:",
+    structured_output=OwnershipOutput,
+)
 
 
 def make_ownership_definer() -> Agent:
@@ -783,19 +1020,22 @@ def make_ownership_definer() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``ownership_definer`` whose output
         defines the brand ownership model and a decision authority
-        matrix.
+        matrix. The agent is routed through the ``branding_governance``
+        agent_key tier.
     """
     return build_agent(
         name="ownership_definer",
         description="Defines brand ownership model and decision authority matrix.",
-        system_prompt=(
-            "You are a Brand Ownership Definer. Define:\n"
-            "1. ownership_model — who owns the brand (paragraph)\n"
-            "2. decision_authority — a dict mapping decision types to responsible roles "
-            "(e.g. 'logo_changes': 'Brand Director', 'campaign_messaging': 'Marketing Lead')"
-        ),
+        system_prompt=render_agent_prompt(_OWNERSHIP_DEFINER_PROMPT),
         structured_output=OwnershipOutput,
+        agent_key=_PHASE5_AGENT_KEY,
     )
+
+
+_APPROVAL_WORKFLOW_DESIGNER_PROMPT = AgentPromptSpec(
+    opening="You are an Approval Workflow Designer. Define:",
+    structured_output=ApprovalWorkflowsOutput,
+)
 
 
 def make_approval_workflow_designer() -> Agent:
@@ -804,19 +1044,22 @@ def make_approval_workflow_designer() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``approval_workflow_designer`` whose
         output defines approval workflows and agency briefing
-        protocols.
+        protocols. The agent is routed through the
+        ``branding_governance`` agent_key tier.
     """
     return build_agent(
         name="approval_workflow_designer",
         description="Designs approval workflows and agency briefing protocols.",
-        system_prompt=(
-            "You are an Approval Workflow Designer. Define:\n"
-            "1. approval_workflows — 3-5 workflows, each with: asset_type, approvers (list), "
-            "sla, escalation_path\n"
-            "2. agency_briefing_protocols — 3-5 protocols for briefing external agencies"
-        ),
+        system_prompt=render_agent_prompt(_APPROVAL_WORKFLOW_DESIGNER_PROMPT),
         structured_output=ApprovalWorkflowsOutput,
+        agent_key=_PHASE5_AGENT_KEY,
     )
+
+
+_ASSET_WIKI_PLANNER_PROMPT = AgentPromptSpec(
+    opening="You are an Asset & Wiki Planner. Define:",
+    structured_output=AssetWikiOutput,
+)
 
 
 def make_asset_wiki_planner() -> Agent:
@@ -825,19 +1068,22 @@ def make_asset_wiki_planner() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``asset_wiki_planner`` whose output
         defines asset management guidance and the brand wiki backlog.
+        The agent is routed through the ``branding_governance``
+        agent_key tier.
     """
     return build_agent(
         name="asset_wiki_planner",
         description="Plans asset management and brand wiki backlog.",
-        system_prompt=(
-            "You are an Asset & Wiki Planner. Define:\n"
-            "1. asset_management_guidance — 3-5 guidelines for managing brand assets\n"
-            "2. wiki_backlog — 4-6 wiki entries, each with: title, summary, owners (list), "
-            "update_cadence. Cover: Brand North Star, Voice Playbook, Design System, Brand "
-            "Review Intake, Channel Playbook, Governance Charter."
-        ),
+        system_prompt=render_agent_prompt(_ASSET_WIKI_PLANNER_PROMPT),
         structured_output=AssetWikiOutput,
+        agent_key=_PHASE5_AGENT_KEY,
     )
+
+
+_TRAINING_PLANNER_PROMPT = AgentPromptSpec(
+    opening="You are a Training Planner. Define:",
+    structured_output=TrainingOnboardingOutput,
+)
 
 
 def make_training_planner() -> Agent:
@@ -845,17 +1091,22 @@ def make_training_planner() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``training_planner`` whose output
-        defines the brand training and onboarding plan.
+        defines the brand training and onboarding plan. The agent is
+        routed through the ``branding_governance`` agent_key tier.
     """
     return build_agent(
         name="training_planner",
         description="Plans brand training and onboarding programmes.",
-        system_prompt=(
-            "You are a Training Planner. Define training_onboarding_plan — 4-6 training "
-            "initiatives for onboarding new team members and maintaining brand literacy."
-        ),
+        system_prompt=render_agent_prompt(_TRAINING_PLANNER_PROMPT),
         structured_output=TrainingOnboardingOutput,
+        agent_key=_PHASE5_AGENT_KEY,
     )
+
+
+_KPI_DESIGNER_PROMPT = AgentPromptSpec(
+    opening="You are a Brand KPI Designer. Define:",
+    structured_output=BrandHealthKPIsOutput,
+)
 
 
 def make_kpi_designer() -> Agent:
@@ -864,20 +1115,22 @@ def make_kpi_designer() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``kpi_designer`` whose output defines
         brand health KPIs, tracking methodology, and review trigger
-        points.
+        points. The agent is routed through the ``branding_governance``
+        agent_key tier.
     """
     return build_agent(
         name="kpi_designer",
         description="Designs brand health KPIs with tracking methodology.",
-        system_prompt=(
-            "You are a Brand KPI Designer. Define:\n"
-            "1. brand_health_kpis — 4-6 KPIs, each with: metric, measurement_method, target, "
-            "review_frequency\n"
-            "2. tracking_methodology — paragraph describing the measurement approach\n"
-            "3. review_trigger_points — 3-5 events that should trigger a brand health review"
-        ),
+        system_prompt=render_agent_prompt(_KPI_DESIGNER_PROMPT),
         structured_output=BrandHealthKPIsOutput,
+        agent_key=_PHASE5_AGENT_KEY,
     )
+
+
+_EVOLUTION_FRAMER_PROMPT = AgentPromptSpec(
+    opening="You are a Brand Evolution Framer. Define:",
+    structured_output=EvolutionFrameworkOutput,
+)
 
 
 def make_evolution_framer() -> Agent:
@@ -886,19 +1139,29 @@ def make_evolution_framer() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``evolution_framer`` whose output
         defines the brand evolution framework and version control
-        cadence.
+        cadence. The agent is routed through the ``branding_governance``
+        agent_key tier.
     """
     return build_agent(
         name="evolution_framer",
         description="Defines the brand evolution framework and version control cadence.",
-        system_prompt=(
-            "You are a Brand Evolution Framer. Define:\n"
-            "1. evolution_framework — paragraph describing how the brand evolves over time\n"
-            "2. version_control_cadence — how often the brand system is formally reviewed "
-            "and versioned"
-        ),
+        system_prompt=render_agent_prompt(_EVOLUTION_FRAMER_PROMPT),
         structured_output=EvolutionFrameworkOutput,
+        agent_key=_PHASE5_AGENT_KEY,
     )
+
+
+_BRAND_RULES_CODIFIER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Brand Rules Codifier. Using the full brand context (positioning, promise, "
+        "values, narrative, visual identity), produce:"
+    ),
+    structured_output=BrandGuidelinesOutput,
+    closing=(
+        "Cover: identity usage, messaging hierarchy, approval gates, asset management, and "
+        "evolution."
+    ),
+)
 
 
 def make_brand_rules_codifier() -> Agent:
@@ -906,19 +1169,16 @@ def make_brand_rules_codifier() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``brand_rules_codifier`` whose output
-        codifies 5-8 top-level brand governance rules.
+        codifies top-level brand governance rules (count bounded by
+        ``BRAND_GUIDELINES_MIN``/``BRAND_GUIDELINES_MAX``). The agent is
+        routed through the ``branding_governance`` agent_key tier.
     """
     return build_agent(
         name="brand_rules_codifier",
         description="Codifies top-level brand governance rules.",
-        system_prompt=(
-            "You are a Brand Rules Codifier. Using the full brand context (positioning, promise, "
-            "values, narrative, visual identity), produce brand_guidelines — a list of 5-8 "
-            "governance rules that everyone in the organisation must follow. Each rule is a "
-            "single clear sentence. Cover: identity usage, messaging hierarchy, approval gates, "
-            "asset management, and evolution."
-        ),
+        system_prompt=render_agent_prompt(_BRAND_RULES_CODIFIER_PROMPT),
         structured_output=BrandGuidelinesOutput,
+        agent_key=_PHASE5_AGENT_KEY,
     )
 
 

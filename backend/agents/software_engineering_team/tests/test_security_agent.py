@@ -35,7 +35,7 @@ def test_security_agent_default_run_returns_security_output() -> None:
 
 def test_security_agent_with_context_and_architecture() -> None:
     """Optional context and architecture fields should not crash the pipeline."""
-    from software_engineering_team.shared.models import SystemArchitecture
+    from shared.dev_models.models import SystemArchitecture
 
     arch = SystemArchitecture(
         overview="Tiny microservice",

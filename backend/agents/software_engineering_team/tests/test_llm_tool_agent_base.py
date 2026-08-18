@@ -6,6 +6,8 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 from software_engineering_team.shared.llm_tool_agent_base import FallbackPayload, LlmToolAgentBase
 
 # Mirrors pytest.ini's `pythonpath = agents .` so the subprocess below can
@@ -349,14 +351,14 @@ def test_lenient_text_mode_calls_parse_review_hook(monkeypatch):
 
     def boom_extract(*args, **kwargs):
         engine_calls.append(("extract", args, kwargs))
-        raise AssertionError("extract_json_object must not be called in text mode")
+        raise AssertionError("parse_json_object must not be called in text mode")
 
     monkeypatch.setattr(
         "software_engineering_team.shared.tool_agent_base.lenient_json_object",
         boom_lenient,
     )
     monkeypatch.setattr(
-        "shared.llm_recovery.extract_json_object",
+        "software_engineering_team.shared.json_utils.parse_json_object",
         boom_extract,
         raising=False,
     )
@@ -379,7 +381,9 @@ def test_extract_success_returns_dict(monkeypatch):
         assert raw == '{"a": 1}'
         return {"a": 1}
 
-    monkeypatch.setattr("shared.llm_recovery.extract_json_object", fake_extract)
+    monkeypatch.setattr(
+        "software_engineering_team.shared.json_utils.parse_json_object", fake_extract
+    )
 
     class PlanJsonLike(LlmToolAgentBase):
         json_parse_strategy = "extract"
@@ -608,3 +612,305 @@ def test_fallback_empty_parse_empty_class_recommendations_when_missing():
     payload = NoEmptyRecs()._fallback_empty_parse()
 
     assert payload.recommendations == []
+
+
+# ---------------------------------------------------------------------------
+# opt-in caching (_cache_namespace / _cache_capacity / _cache_key /
+# _cached_invoke_llm)
+# ---------------------------------------------------------------------------
+
+
+class _CacheDemoAgent(LlmToolAgentBase):
+    cache_namespace = "test:llm-tool-agent-cache-demo:v1"
+    cache_capacity_env = "TEST_LLM_TOOL_AGENT_CACHE_DEMO_SIZE"
+
+
+@pytest.fixture(autouse=True)
+def _reset_cache_demo_namespace():
+    """Clear this module's throwaway cache namespace around every test.
+
+    ``get_shared_cache`` returns a process-wide singleton per namespace, so
+    without a reset one test's cached response (e.g. from
+    ``test_cached_invoke_llm_hit_skips_llm_call``) would leak into the next
+    test that happens to build the same (class, model, prompt) key — mirrors
+    the ``_reset_qa_review_cache`` / ``_reset_tool_agent_review_cache``
+    convention in ``conftest.py``, scoped here to this file's own demo
+    namespace instead of a production one.
+    """
+    from shared.cache import get_shared_cache
+
+    def _clear() -> None:
+        try:
+            get_shared_cache(_CacheDemoAgent.cache_namespace).clear()
+        except Exception:
+            pass
+
+    _clear()
+    yield
+    _clear()
+
+
+class _FakeModel:
+    """Minimal object ``model_fingerprint`` can extract a stable id from."""
+
+    def __init__(self, model_id: str) -> None:
+        self.model_id = model_id
+
+
+class _CountingAgentFactory:
+    """Callable ``Agent`` stand-in: records every prompt it is called with."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def __call__(self, *, model):
+        def _run(prompt: str) -> str:
+            self.calls.append(prompt)
+            return f"resp:{prompt}"
+
+        return _run
+
+
+def _patch_cache_demo_agent(monkeypatch) -> _CountingAgentFactory:
+    """Patch this module's ``Agent`` symbol (what ``_agent_factory`` resolves)."""
+    factory = _CountingAgentFactory()
+    monkeypatch.setattr(sys.modules[_CacheDemoAgent.__module__], "Agent", factory, raising=False)
+    return factory
+
+
+def test_cache_namespace_none_when_unset():
+    class NoCache(LlmToolAgentBase):
+        pass
+
+    assert NoCache()._cache_namespace() is None
+
+
+def test_cache_namespace_appends_build_id(monkeypatch):
+    monkeypatch.delenv("KHALA_CACHE_BUILD_ID", raising=False)
+    monkeypatch.setenv("KHALA_BUILD_ID", "b123")
+
+    assert _CacheDemoAgent()._cache_namespace() == "test:llm-tool-agent-cache-demo:v1:b123"
+
+
+def test_cache_namespace_unchanged_without_build_id(monkeypatch):
+    monkeypatch.delenv("KHALA_CACHE_BUILD_ID", raising=False)
+    monkeypatch.delenv("KHALA_BUILD_ID", raising=False)
+
+    assert _CacheDemoAgent()._cache_namespace() == "test:llm-tool-agent-cache-demo:v1"
+
+
+def test_cache_capacity_zero_when_capacity_env_unset():
+    class NoEnv(LlmToolAgentBase):
+        cache_namespace = "ns:v1"
+
+    assert NoEnv()._cache_capacity() == 0
+
+
+def test_cache_capacity_defaults_when_env_unset(monkeypatch):
+    monkeypatch.delenv(_CacheDemoAgent.cache_capacity_env, raising=False)
+
+    assert _CacheDemoAgent()._cache_capacity() == _CacheDemoAgent.cache_default_capacity
+
+
+def test_cache_capacity_reads_env(monkeypatch):
+    monkeypatch.setenv(_CacheDemoAgent.cache_capacity_env, "12")
+
+    assert _CacheDemoAgent()._cache_capacity() == 12
+
+
+def test_cache_capacity_clamps_negative_to_zero(monkeypatch):
+    monkeypatch.setenv(_CacheDemoAgent.cache_capacity_env, "-5")
+
+    assert _CacheDemoAgent()._cache_capacity() == 0
+
+
+def test_cache_key_stable_for_identical_inputs():
+    agent = _CacheDemoAgent()
+    model = _FakeModel("model-a")
+
+    assert agent._cache_key(model, "hello") == agent._cache_key(model, "hello")
+
+
+def test_cache_key_changes_with_prompt():
+    agent = _CacheDemoAgent()
+    model = _FakeModel("model-a")
+
+    assert agent._cache_key(model, "hello") != agent._cache_key(model, "goodbye")
+
+
+def test_cache_key_changes_with_model():
+    agent = _CacheDemoAgent()
+
+    key_a = agent._cache_key(_FakeModel("model-a"), "hello")
+    key_b = agent._cache_key(_FakeModel("model-b"), "hello")
+    assert key_a != key_b
+
+
+def test_cache_key_changes_with_agent_class():
+    class OtherCacheDemoAgent(_CacheDemoAgent):
+        pass
+
+    model = _FakeModel("model-a")
+    assert _CacheDemoAgent()._cache_key(model, "hello") != OtherCacheDemoAgent()._cache_key(
+        model, "hello"
+    )
+
+
+def test_cached_invoke_llm_hit_skips_llm_call(monkeypatch):
+    factory = _patch_cache_demo_agent(monkeypatch)
+    agent = _CacheDemoAgent()
+
+    first = agent._cached_invoke_llm(_FakeModel("model-a"), "hello")
+    second = agent._cached_invoke_llm(_FakeModel("model-a"), "hello")
+
+    assert first == second == "resp:hello"
+    assert len(factory.calls) == 1
+
+
+def test_cached_invoke_llm_miss_calls_llm_and_populates_cache(monkeypatch):
+    factory = _patch_cache_demo_agent(monkeypatch)
+    agent = _CacheDemoAgent()
+
+    first = agent._cached_invoke_llm(_FakeModel("model-a"), "hello")
+    second = agent._cached_invoke_llm(_FakeModel("model-a"), "different prompt")
+
+    assert first == "resp:hello"
+    assert second == "resp:different prompt"
+    assert len(factory.calls) == 2
+
+
+def test_cached_invoke_llm_different_model_busts_cache(monkeypatch):
+    factory = _patch_cache_demo_agent(monkeypatch)
+    agent = _CacheDemoAgent()
+
+    agent._cached_invoke_llm(_FakeModel("model-a"), "hello")
+    agent._cached_invoke_llm(_FakeModel("model-b"), "hello")
+
+    assert len(factory.calls) == 2
+
+
+def test_cached_invoke_llm_disabled_when_cache_namespace_unset(monkeypatch):
+    class NoCacheDemo(LlmToolAgentBase):
+        pass
+
+    factory = _CountingAgentFactory()
+    monkeypatch.setattr(sys.modules[NoCacheDemo.__module__], "Agent", factory, raising=False)
+    agent = NoCacheDemo()
+
+    agent._cached_invoke_llm(_FakeModel("model-a"), "hello")
+    agent._cached_invoke_llm(_FakeModel("model-a"), "hello")
+
+    assert len(factory.calls) == 2
+
+
+def test_cached_invoke_llm_disabled_via_zero_capacity_env(monkeypatch):
+    monkeypatch.setenv(_CacheDemoAgent.cache_capacity_env, "0")
+    factory = _patch_cache_demo_agent(monkeypatch)
+    agent = _CacheDemoAgent()
+
+    agent._cached_invoke_llm(_FakeModel("model-a"), "hello")
+    agent._cached_invoke_llm(_FakeModel("model-a"), "hello")
+
+    assert len(factory.calls) == 2
+
+
+def test_cached_invoke_llm_redis_unavailable_falls_back_to_memory_cache(monkeypatch):
+    """A Redis-unreachable configuration falls back to an in-process cache
+    that still produces correct (and still cache-capable) results."""
+    from shared.cache import MemoryBackend, get_shared_cache, reset_shared_cache_state
+    from shared.cache import factory as factory_mod
+
+    monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:1/0")
+    monkeypatch.setattr(factory_mod, "_build_redis_client", lambda: None)
+    reset_shared_cache_state()
+    try:
+        factory = _patch_cache_demo_agent(monkeypatch)
+        agent = _CacheDemoAgent()
+
+        assert isinstance(get_shared_cache(agent._cache_namespace()), MemoryBackend)
+
+        first = agent._cached_invoke_llm(_FakeModel("model-a"), "hello")
+        second = agent._cached_invoke_llm(_FakeModel("model-a"), "hello")
+
+        assert first == second == "resp:hello"
+        assert len(factory.calls) == 1
+    finally:
+        reset_shared_cache_state()
+
+
+def test_cached_invoke_llm_backend_error_falls_open_to_correct_result(monkeypatch):
+    """Any cache backend error (get/set/delete) must never abort the call."""
+
+    class _RaisingCache:
+        def get(self, key: str) -> None:
+            raise RuntimeError("boom")
+
+        def set(self, key: str, value: bytes, *, max_entries: int) -> None:
+            raise RuntimeError("boom")
+
+        def delete(self, key: str) -> None:
+            raise RuntimeError("boom")
+
+        def clear(self):
+            pass
+
+    monkeypatch.setattr("shared.cache.get_shared_cache", lambda namespace: _RaisingCache())
+
+    factory = _patch_cache_demo_agent(monkeypatch)
+    agent = _CacheDemoAgent()
+
+    result = agent._cached_invoke_llm(_FakeModel("model-a"), "hello")
+
+    assert result == "resp:hello"
+    assert len(factory.calls) == 1
+
+
+def test_cached_invoke_llm_corrupt_entry_is_evicted_and_recomputed(monkeypatch):
+    from shared.cache import get_shared_cache
+
+    factory = _patch_cache_demo_agent(monkeypatch)
+    agent = _CacheDemoAgent()
+    model = _FakeModel("model-a")
+
+    namespace = agent._cache_namespace()
+    key = agent._cache_key(model, "hello")
+    get_shared_cache(namespace).set(
+        key, b"\xff\xfe-not-valid-utf8", max_entries=agent._cache_capacity()
+    )
+
+    result = agent._cached_invoke_llm(model, "hello")
+
+    assert result == "resp:hello"
+    assert len(factory.calls) == 1
+
+    # The recomputed result was written back correctly: a second call hits.
+    agent._cached_invoke_llm(model, "hello")
+    assert len(factory.calls) == 1
+
+
+def test_cached_invoke_llm_llm_exception_propagates_uncached(monkeypatch):
+    """A miss that raises must propagate (preserving the fallback-tier
+    contract) and must not poison the cache with a failure."""
+
+    class _RaisingAgentFactory:
+        def __call__(self, *, model):
+            def _run(prompt: str) -> str:
+                raise RuntimeError("llm boom")
+
+            return _run
+
+    monkeypatch.setattr(
+        sys.modules[_CacheDemoAgent.__module__], "Agent", _RaisingAgentFactory(), raising=False
+    )
+    agent = _CacheDemoAgent()
+
+    try:
+        agent._cached_invoke_llm(_FakeModel("model-a"), "hello")
+        raise AssertionError("expected RuntimeError to propagate")
+    except RuntimeError as e:
+        assert str(e) == "llm boom"
+
+    from shared.cache import get_shared_cache
+
+    key = agent._cache_key(_FakeModel("model-a"), "hello")
+    assert get_shared_cache(agent._cache_namespace()).get(key) is None

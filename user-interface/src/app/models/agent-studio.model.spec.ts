@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   AGENT_STATE_LABELS,
+  STAGE_INDEX,
   STUDIO_STAGES,
   type AgentDefinition,
   type AgentState,
@@ -22,6 +23,10 @@ describe('agent-studio.model', () => {
     expect(STUDIO_STAGES.map((s) => s.key)).toEqual(['build', 'test', 'compose', 'personas']);
     // Only the final stage has no forward action.
     expect(STUDIO_STAGES[STUDIO_STAGES.length - 1].forwardLabel).toBeUndefined();
+  });
+
+  it('derives STAGE_INDEX matching STUDIO_STAGES order', () => {
+    expect(STAGE_INDEX).toEqual({ build: 0, test: 1, compose: 2, personas: 3 });
   });
 
   it('models a definition carrying the three seeded states', () => {

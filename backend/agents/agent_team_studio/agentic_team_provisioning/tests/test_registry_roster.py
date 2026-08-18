@@ -11,9 +11,13 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_registry.models import AgentManifest, CognitionSpec, SourceInfo
+from agent_platform.registry.models import AgentManifest, CognitionSpec, SourceInfo
 from agent_team_studio.agentic_team_provisioning.assistant.store import AgenticTeamStore
-from agent_team_studio.agentic_team_provisioning.models import AgenticTeamAgent
+from agent_team_studio.agentic_team_provisioning.models import (
+    AgenticTeamAgent,
+    ProcessDefinition,
+    ProcessStep,
+)
 from agent_team_studio.agentic_team_provisioning.tests._fake_postgres import install_fake_postgres
 
 _SOURCE = SourceInfo(entrypoint="pkg.mod:Agent")
@@ -46,7 +50,8 @@ class _FakeRegistry:
     def __init__(self, manifests: list[AgentManifest]) -> None:
         self._by_id = {m.id: m for m in manifests}
 
-    def get(self, agent_id: str) -> AgentManifest | None:
+    def get(self, agent_id: str, *, conn=None) -> AgentManifest | None:
+        del conn  # fake has no Postgres connection to join
         return self._by_id.get(agent_id)
 
     def manifests_with_id_prefix(
@@ -59,9 +64,14 @@ class _FakeRegistry:
         return [m for m in self._by_id.values() if m.id.startswith(prefix)]
 
     def register(
-        self, manifest: AgentManifest, source_path=None, *, require_persist: bool = False
+        self,
+        manifest: AgentManifest,
+        source_path=None,
+        *,
+        require_persist: bool = False,
+        conn=None,
     ) -> None:
-        del source_path, require_persist  # fake has no dynamic store to persist
+        del source_path, require_persist, conn  # fake has no dynamic store to persist
         self._by_id[manifest.id] = manifest
 
     def unregister(self, agent_id: str) -> bool:
@@ -85,9 +95,9 @@ def registry() -> _FakeRegistry:
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch, registry: _FakeRegistry) -> TestClient:
     install_fake_postgres(monkeypatch)
-    # The route resolves the registry via ``from agent_registry import get_registry``;
+    # The route resolves the registry via ``from agent_platform.registry import get_registry``;
     # patch the package attribute so the call picks up the shared fake.
-    monkeypatch.setattr("agent_registry.get_registry", lambda: registry)
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: registry)
     from agent_team_studio.agentic_team_provisioning.api.main import app
 
     return TestClient(app)
@@ -97,8 +107,18 @@ def _new_team() -> str:
     return AgenticTeamStore().create_team(name="Growth Pod", description="").team_id
 
 
+def _thin_gen(team_id: str, agent_name: str) -> AgenticTeamAgent:
+    from agent_team_studio.agentic_team_provisioning.manifest_generation import manifest_agent_id
+
+    return AgenticTeamAgent(
+        agent_name=agent_name,
+        source="generated",
+        manifest_id=manifest_agent_id(team_id, agent_name),
+    )
+
+
 def test_from_registry_projects_and_persists(client: TestClient) -> None:
-    """201 with the projected fields, and the agent is persisted on the roster."""
+    """201 with enriched fields, thin ref persisted on the roster."""
     team_id = _new_team()
 
     resp = client.post(
@@ -114,10 +134,26 @@ def test_from_registry_projects_and_persists(client: TestClient) -> None:
     assert body["source"] == "registry"
     assert body["manifest_id"] == "blogging.planner"
 
-    # Persisted on the roster.
+    # Persisted on the roster (thin ref only).
     roster = client.get(f"/teams/{team_id}/agents").json()
     assert [a["agent_name"] for a in roster] == ["blogging.planner"]
     assert roster[0]["source"] == "registry"
+    assert roster[0]["role"] == "Plans SEO-aware blog outlines"  # enriched list
+
+
+def test_from_registry_stores_thin_ref(client: TestClient) -> None:
+    """POST persists a thin ref; persona fields resolve only on enriched responses."""
+    team_id = _new_team()
+    resp = client.post(
+        f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"}
+    )
+    assert resp.status_code == 201
+    row = resp.json()
+    assert set(row.keys()) >= {"agent_name", "source", "manifest_id", "role"}
+
+    stored = AgenticTeamStore().list_team_agents(team_id)[0].model_dump(mode="json")
+    assert set(stored.keys()) == {"agent_name", "source", "manifest_id"}
+    assert "role" not in stored
 
 
 def test_from_registry_bare_manifest_falls_back(client: TestClient) -> None:
@@ -148,12 +184,11 @@ def test_from_registry_empty_tags_agent_added_but_flagged_sparse(
     client: TestClient, registry: _FakeRegistry
 ) -> None:
     """A manifest with NO tags and no cognition projects to a roster agent with only
-    ``expertise`` populated (skills/capabilities/tools all empty) — three missing
-    categories, which ``roster_validation`` correctly flags ``sparse_profile``. The
-    add still succeeds (201); validation honestly reports the team is not fully
-    staffed. (Studio-saved manifests always carry the 'studio' tag, so this
-    degenerate shape only arises for hand-authored / non-Studio catalog manifests —
-    and a tag-less, tool-less, capability-less agent genuinely *is* under-specified.)"""
+    ``expertise`` populated (skills/tools empty) — two of three depth categories
+    missing, which ``roster_validation`` flags ``sparse_profile``. The add still
+    succeeds (201); validation honestly reports the team is not fully staffed.
+    (``capabilities`` is excluded from depth — Manifest projection never fills it.)
+    """
     registry.register(
         AgentManifest(
             id="empty.tags",
@@ -173,7 +208,7 @@ def test_from_registry_empty_tags_agent_added_but_flagged_sparse(
     assert body["expertise"] == ["empty"]  # only expertise populated
 
     validation = client.get(f"/teams/{team_id}/roster/validation").json()
-    assert validation["is_fully_staffed"] is False  # sparse_profile: 3 categories missing
+    assert validation["is_fully_staffed"] is False  # sparse_profile: skills+tools missing
     assert any(g["category"] == "sparse_profile" for g in validation["gaps"])
 
 
@@ -330,11 +365,9 @@ def test_delete_generated_agent_unregisters_its_manifest(
     from agent_team_studio.agentic_team_provisioning.manifest_generation import build_agent_manifest
 
     team_id = _new_team()
-    gen = AgenticTeamAgent(
-        agent_name="Writer Agent", role="Writes", skills=["seo"], source="generated"
-    )
+    gen = _thin_gen(team_id, "Writer Agent")
     AgenticTeamStore().save_team_agents(team_id, [gen])
-    manifest = build_agent_manifest(team_id, gen)
+    manifest = build_agent_manifest(team_id, gen.agent_name, summary="Writes")
     registry.register(manifest)  # simulate the LLM save path's install
     assert registry.get(manifest.id) is not None
 
@@ -353,11 +386,9 @@ def test_from_registry_replacing_generated_unregisters_old_manifest(
     team_id = _new_team()
     # A generated agent already on the roster + installed in the registry, named to
     # collide with the registry manifest we'll add (_PLANNER.name).
-    gen = AgenticTeamAgent(
-        agent_name="blogging.planner", role="old", skills=["x"], source="generated"
-    )
+    gen = _thin_gen(team_id, "blogging.planner")
     AgenticTeamStore().save_team_agents(team_id, [gen])
-    old_manifest = build_agent_manifest(team_id, gen)
+    old_manifest = build_agent_manifest(team_id, gen.agent_name, summary="old")
     registry.register(old_manifest)
     assert registry.get(old_manifest.id) is not None
 
@@ -374,22 +405,18 @@ def test_from_registry_rejects_own_generated_manifest_409(
 ) -> None:
     """Re-adding *this team's own* generated manifest is rejected (409), not applied.
 
-    A generated roster row has ``manifest_id=None`` but is registered under
-    ``manifest_agent_id(team_id, name)``; the manifest-id-only "already on roster"
-    guards on the callers miss it. Without this guard the from-registry projection
-    would create a registry-source row carrying that same id, and the on_replaced
-    cleanup would unregister the very manifest it points at — leaving a roster entry
-    whose manifest no longer resolves. The endpoint must refuse, leaving the roster
-    and the registered manifest untouched.
+    A generated roster row carries ``manifest_id`` for its team-namespaced wrapper;
+    re-adding via from-registry would replace the row with a registry-source entry
+    and the on_replaced cleanup would unregister the manifest it points at — leaving
+    a roster entry whose manifest no longer resolves. The endpoint must refuse,
+    leaving the roster and the registered manifest untouched.
     """
     from agent_team_studio.agentic_team_provisioning.manifest_generation import build_agent_manifest
 
     team_id = _new_team()
-    gen = AgenticTeamAgent(
-        agent_name="Planner", role="Plans things", skills=["x"], source="generated"
-    )
+    gen = _thin_gen(team_id, "Planner")
     AgenticTeamStore().save_team_agents(team_id, [gen])
-    gen_manifest = build_agent_manifest(team_id, gen)
+    gen_manifest = build_agent_manifest(team_id, gen.agent_name, summary="Plans things")
     registry.register(gen_manifest)
 
     resp = client.post(
@@ -402,7 +429,7 @@ def test_from_registry_rejects_own_generated_manifest_409(
     assert len(roster) == 1
     assert roster[0]["agent_name"] == "Planner"
     assert roster[0]["source"] == "generated"
-    assert roster[0]["manifest_id"] is None
+    assert roster[0]["manifest_id"] == gen_manifest.id
     assert registry.get(gen_manifest.id) is not None
 
 
@@ -420,10 +447,8 @@ def test_from_registry_rejects_another_teams_generated_manifest_409(
     from agent_team_studio.agentic_team_provisioning.manifest_generation import build_agent_manifest
 
     other_team_id = _new_team()
-    other_gen = AgenticTeamAgent(
-        agent_name="Scout", role="Researches", skills=["x"], source="generated"
-    )
-    other_manifest = build_agent_manifest(other_team_id, other_gen)
+    other_gen = _thin_gen(other_team_id, "Scout")
+    other_manifest = build_agent_manifest(other_team_id, other_gen.agent_name, summary="Researches")
     registry.register(other_manifest)
 
     team_id = _new_team()  # a distinct team with a different id prefix
@@ -463,6 +488,211 @@ def test_llm_save_preserves_registry_agents(client: TestClient, registry: _FakeR
     assert roster["Writer"] == "generated"  # the new generated agent was added
 
 
+def test_llm_save_stamps_manifest_id_on_generated(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """LLM save stores thin refs with manifest_id and registers persona on the manifest."""
+    from agent_team_studio.agentic_team_provisioning.api.main import _save_agents_from_llm
+    from agent_team_studio.agentic_team_provisioning.manifest_generation import manifest_agent_id
+
+    team_id = _new_team()
+    _save_agents_from_llm(team_id, [{"agent_name": "Writer", "role": "Writes copy"}])
+
+    roster = client.get(f"/teams/{team_id}/agents").json()
+    assert len(roster) == 1
+    assert roster[0]["agent_name"] == "Writer"
+    assert roster[0]["manifest_id"] == manifest_agent_id(team_id, "Writer")
+    assert roster[0]["role"] == "Writes copy"
+    assert registry.get(roster[0]["manifest_id"]) is not None
+
+    stored = AgenticTeamStore().list_team_agents(team_id)[0].model_dump(mode="json")
+    assert stored == {
+        "agent_name": "Writer",
+        "source": "generated",
+        "manifest_id": manifest_agent_id(team_id, "Writer"),
+    }
+
+
+def test_llm_save_maps_skills_to_manifest_tags(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """LLM-emitted skills become Manifest tags and surface on enriched GET as skills."""
+    from agent_team_studio.agentic_team_provisioning.api.main import _save_agents_from_llm
+    from agent_team_studio.agentic_team_provisioning.manifest_generation import manifest_agent_id
+
+    team_id = _new_team()
+    _save_agents_from_llm(
+        team_id,
+        [
+            {
+                "agent_name": "Writer",
+                "role": "Writes copy",
+                "skills": ["seo", "headline-writing", "seo"],
+            }
+        ],
+    )
+
+    roster = client.get(f"/teams/{team_id}/agents").json()
+    assert roster[0]["skills"] == ["seo", "headline-writing"]
+    mid = manifest_agent_id(team_id, "Writer")
+    manifest = registry.get(mid)
+    assert manifest is not None
+    assert "seo" in manifest.tags
+    assert "headline-writing" in manifest.tags
+    assert "generated" in manifest.tags
+    assert manifest.tags.count("seo") == 1
+
+
+def test_llm_save_folds_tools_capabilities_expertise_into_tags(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """LLM tools/capabilities/expertise must fold into Manifest tags like legacy migrate."""
+    from agent_team_studio.agentic_team_provisioning.api.main import _save_agents_from_llm
+    from agent_team_studio.agentic_team_provisioning.manifest_generation import manifest_agent_id
+
+    team_id = _new_team()
+    _save_agents_from_llm(
+        team_id,
+        [
+            {
+                "agent_name": "Writer",
+                "role": "Writes copy",
+                "skills": ["seo"],
+                "capabilities": ["edit"],
+                "tools": ["Grammarly"],
+                "expertise": ["B2B"],
+            }
+        ],
+    )
+
+    mid = manifest_agent_id(team_id, "Writer")
+    manifest = registry.get(mid)
+    assert manifest is not None
+    for tag in ("seo", "edit", "Grammarly", "B2B"):
+        assert tag in manifest.tags
+
+    roster = client.get(f"/teams/{team_id}/agents").json()
+    skills = roster[0]["skills"]
+    for tag in ("seo", "edit", "Grammarly", "B2B"):
+        assert tag in skills
+    assert "generated" not in skills
+
+
+def test_llm_save_whitespace_only_persona_lists_preserve_prior_tags(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """Whitespace-only tools/capabilities/expertise must not wipe prior Manifest tags."""
+    from agent_team_studio.agentic_team_provisioning.api.main import _save_agents_from_llm
+    from agent_team_studio.agentic_team_provisioning.manifest_generation import manifest_agent_id
+
+    team_id = _new_team()
+    _save_agents_from_llm(
+        team_id,
+        [
+            {
+                "agent_name": "Writer",
+                "role": "Writes copy",
+                "skills": ["seo"],
+                "tools": ["Grammarly"],
+            }
+        ],
+    )
+    mid = manifest_agent_id(team_id, "Writer")
+    assert "Grammarly" in registry.get(mid).tags
+
+    _save_agents_from_llm(
+        team_id,
+        [
+            {
+                "agent_name": "Writer",
+                "role": "Writes copy",
+                "skills": ["", "  "],
+                "tools": ["  "],
+                "capabilities": [],
+                "expertise": ["   "],
+            }
+        ],
+    )
+    assert "seo" in registry.get(mid).tags
+    assert "Grammarly" in registry.get(mid).tags
+
+
+def test_llm_save_whitespace_only_skills_preserve_prior_tags(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """Whitespace-only LLM skills must omit skill_tags so prior Manifest tags survive."""
+    from agent_team_studio.agentic_team_provisioning.api.main import _save_agents_from_llm
+    from agent_team_studio.agentic_team_provisioning.manifest_generation import manifest_agent_id
+
+    team_id = _new_team()
+    _save_agents_from_llm(
+        team_id,
+        [{"agent_name": "Writer", "role": "Writes copy", "skills": ["seo"]}],
+    )
+    mid = manifest_agent_id(team_id, "Writer")
+    assert "seo" in registry.get(mid).tags
+
+    _save_agents_from_llm(
+        team_id,
+        [{"agent_name": "Writer", "role": "Writes copy", "skills": ["", "  "]}],
+    )
+    assert "seo" in registry.get(mid).tags
+    roster = client.get(f"/teams/{team_id}/agents").json()
+    assert "seo" in roster[0]["skills"]
+    assert "generated" not in roster[0]["skills"]
+
+
+def test_llm_save_explicit_empty_skills_clears_prior_tags(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """Explicit ``\"skills\": []`` must clear prior Manifest skill tags (not preserve)."""
+    from agent_team_studio.agentic_team_provisioning.api.main import _save_agents_from_llm
+    from agent_team_studio.agentic_team_provisioning.manifest_generation import (
+        manifest_agent_id,
+        skill_tags_from_manifest,
+    )
+
+    team_id = _new_team()
+    _save_agents_from_llm(
+        team_id,
+        [{"agent_name": "Writer", "role": "Writes copy", "skills": ["seo", "copy"]}],
+    )
+    mid = manifest_agent_id(team_id, "Writer")
+    assert skill_tags_from_manifest(registry.get(mid)) == ["seo", "copy"]
+
+    _save_agents_from_llm(
+        team_id,
+        [{"agent_name": "Writer", "role": "Writes copy", "skills": []}],
+    )
+    assert skill_tags_from_manifest(registry.get(mid)) == []
+    roster = client.get(f"/teams/{team_id}/agents").json()
+    assert roster[0]["skills"] == []
+
+
+def test_llm_save_whitespace_only_role_preserves_prior_summary(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """Whitespace-only LLM role must omit summaries so a prior Manifest summary survives."""
+    from agent_team_studio.agentic_team_provisioning.api.main import _save_agents_from_llm
+    from agent_team_studio.agentic_team_provisioning.manifest_generation import manifest_agent_id
+
+    team_id = _new_team()
+    _save_agents_from_llm(
+        team_id,
+        [{"agent_name": "Writer", "role": "Writes copy", "skills": ["seo"]}],
+    )
+    mid = manifest_agent_id(team_id, "Writer")
+    assert registry.get(mid).summary == "Writes copy"
+
+    _save_agents_from_llm(
+        team_id,
+        [{"agent_name": "Writer", "role": "   \t  ", "skills": ["seo"]}],
+    )
+    assert registry.get(mid).summary == "Writes copy"
+    roster = client.get(f"/teams/{team_id}/agents").json()
+    assert roster[0]["role"] == "Writes copy"
+
+
 def test_register_team_manifests_skips_registry_agents(
     client: TestClient, registry: _FakeRegistry
 ) -> None:
@@ -479,22 +709,18 @@ def test_register_team_manifests_skips_registry_agents(
     team_id = _new_team()
     # A stale generated wrapper from a prior roster (agent no longer present) must be
     # unregistered by the prefix-scoped stale-cleanup.
-    stale = build_agent_manifest(
-        team_id, AgenticTeamAgent(agent_name="OldGen", role="o", skills=["x"], source="generated")
-    )
+    stale = build_agent_manifest(team_id, "OldGen", summary="o")
     registry.register(stale)
     assert registry.get(stale.id) is not None
 
-    gen = AgenticTeamAgent(agent_name="Writer", role="w", skills=["x"], source="generated")
+    gen = _thin_gen(team_id, "Writer")
     reg = AgenticTeamAgent(
         agent_name="blogging.planner",
-        role="p",
-        skills=["seo"],
         source="registry",
         manifest_id="blogging.planner",
     )
 
-    result = register_team_manifests(team_id, [gen, reg])
+    result = register_team_manifests(team_id, [gen, reg], summaries={"Writer": "w"})
     assert result.registered is True
     assert len(result.manifests) == 1  # only the generated agent is wrapped
     # The generated wrapper is actually installed (path exercised, not swallowed).
@@ -522,9 +748,7 @@ def test_delete_agent_name_with_slash(client: TestClient) -> None:
     deletable — the :path converter matches the slash instead of 404-ing."""
     team_id = _new_team()
     name = "Backend — API/OpenAPI Specialist"
-    AgenticTeamStore().save_team_agents(
-        team_id, [AgenticTeamAgent(agent_name=name, role="Specs", skills=["openapi"])]
-    )
+    AgenticTeamStore().save_team_agents(team_id, [_thin_gen(team_id, name)])
 
     resp = client.delete(f"/teams/{team_id}/agents/{name}")
     assert resp.status_code == 204
@@ -542,9 +766,9 @@ def test_delete_unregister_failure_still_returns_204(
     from agent_team_studio.agentic_team_provisioning.manifest_generation import build_agent_manifest
 
     team_id = _new_team()
-    gen = AgenticTeamAgent(agent_name="Writer", role="w", skills=["x"], source="generated")
+    gen = _thin_gen(team_id, "Writer")
     AgenticTeamStore().save_team_agents(team_id, [gen])
-    registry.register(build_agent_manifest(team_id, gen))
+    registry.register(build_agent_manifest(team_id, gen.agent_name, summary="w"))
     registry.unregister = _raise  # cleanup blows up
 
     resp = client.delete(f"/teams/{team_id}/agents/Writer")
@@ -557,9 +781,7 @@ def test_from_registry_replace_unregister_failure_still_returns_201(
 ) -> None:
     """Same best-effort guarantee on the from-registry replace-unregister path."""
     team_id = _new_team()
-    gen = AgenticTeamAgent(
-        agent_name="blogging.planner", role="old", skills=["x"], source="generated"
-    )
+    gen = _thin_gen(team_id, "blogging.planner")
     AgenticTeamStore().save_team_agents(team_id, [gen])
     registry.unregister = _raise  # cleanup blows up
 
@@ -570,8 +792,8 @@ def test_from_registry_replace_unregister_failure_still_returns_201(
     assert resp.json()["source"] == "registry"
 
 
-def test_update_agent_edits_only_supplied_fields(client: TestClient) -> None:
-    """PUT edits the supplied fields and leaves the rest of the row untouched."""
+def test_update_roster_agent_rejects_fat_put(client: TestClient) -> None:
+    """PUT with persona fields is rejected — AgentManifest is the source of truth."""
     team_id = _new_team()
     client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
 
@@ -579,52 +801,47 @@ def test_update_agent_edits_only_supplied_fields(client: TestClient) -> None:
         f"/teams/{team_id}/agents/blogging.planner",
         json={"role": "Custom role for this team", "skills": ["custom-skill"]},
     )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["role"] == "Custom role for this team"
-    assert body["skills"] == ["custom-skill"]
-    # Untouched fields keep their projected values.
-    assert body["tools"] == ["web.search", "draft"]
-    assert body["expertise"] == ["blogging"]
-    # source/manifest_id are fixed — never changed by this route.
-    assert body["source"] == "registry"
-    assert body["manifest_id"] == "blogging.planner"
+    assert resp.status_code == 400
+    assert "AgentManifest" in resp.json()["detail"]
 
-    # Persisted.
     roster = client.get(f"/teams/{team_id}/agents").json()
-    assert roster[0]["role"] == "Custom role for this team"
+    assert roster[0]["role"] == "Plans SEO-aware blog outlines"
 
 
-def test_update_agent_edits_generated_agent(client: TestClient) -> None:
-    """A generated agent's fields (its only definition) are fully editable."""
+def test_update_roster_agent_rejects_unknown_key(client: TestClient) -> None:
+    """PUT with any non-empty body is rejected, not just the legacy persona field names.
+
+    ``UpdateAgentRequest`` declares no editable fields at all, so a key that was
+    never part of the old fat-agent contract (e.g. ``nickname``) is rejected the
+    same way a legacy persona field is — not silently dropped and treated as a
+    no-op.
+    """
     team_id = _new_team()
-    AgenticTeamStore().save_team_agents(
-        team_id, [AgenticTeamAgent(agent_name="Writer", role="Writes", skills=["seo"])]
-    )
+    client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
 
-    resp = client.put(f"/teams/{team_id}/agents/Writer", json={"tools": ["Slack API"]})
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["tools"] == ["Slack API"]
-    assert body["role"] == "Writes"  # unset field kept
-    assert body["source"] == "generated"
+    resp = client.put(
+        f"/teams/{team_id}/agents/blogging.planner",
+        json={"nickname": "not a real roster field"},
+    )
+    assert resp.status_code == 400
+    assert "AgentManifest" in resp.json()["detail"]
 
 
 def test_update_agent_unknown_agent_404(client: TestClient) -> None:
     """Editing an agent not on the roster is a 404 (roster unchanged)."""
     team_id = _new_team()
-    resp = client.put(f"/teams/{team_id}/agents/ghost", json={"role": "x"})
+    resp = client.put(f"/teams/{team_id}/agents/ghost", json={})
     assert resp.status_code == 404
 
 
 def test_update_agent_unknown_team_404(client: TestClient) -> None:
     """Editing an agent on an unknown team is a 404."""
-    resp = client.put("/teams/missing/agents/whoever", json={"role": "x"})
+    resp = client.put("/teams/missing/agents/whoever", json={})
     assert resp.status_code == 404
 
 
 def test_update_agent_empty_body_is_a_noop(client: TestClient) -> None:
-    """An empty request body changes nothing (every field is optional/unset)."""
+    """An empty request body changes nothing but returns the enriched agent."""
     team_id = _new_team()
     client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
 
@@ -635,98 +852,37 @@ def test_update_agent_empty_body_is_a_noop(client: TestClient) -> None:
     assert body["skills"] == ["studio", "seo"]
 
 
-def test_update_agent_explicit_null_role_rejected_422(client: TestClient) -> None:
-    """An explicit ``{"role": null}`` is rejected with 422 (not persisted).
-
-    Regression: ``role`` is required on ``AgenticTeamAgent`` but optional on
-    ``UpdateAgentRequest``; without re-validation, ``model_copy`` would write
-    ``role=None`` and every subsequent roster read would fail ``model_validate``.
-    The re-validated merge rejects it up front and leaves the roster unchanged.
-    """
+def test_update_agent_explicit_null_role_rejected_400(client: TestClient) -> None:
+    """An explicit ``{"role": null}`` is rejected with 400 (not persisted)."""
     team_id = _new_team()
     client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
 
     resp = client.put(f"/teams/{team_id}/agents/blogging.planner", json={"role": None})
-    assert resp.status_code == 422
+    assert resp.status_code == 400
 
-    # The roster is unchanged and still readable (no corrupt row was written).
     roster = client.get(f"/teams/{team_id}/agents").json()
     assert roster[0]["role"] == "Plans SEO-aware blog outlines"
 
 
-def test_update_generated_agent_reregisters_manifest_with_new_summary(
-    client: TestClient, registry: _FakeRegistry
-) -> None:
-    """Editing a generated agent's role refreshes its live registry manifest in place
-    (its ``summary`` = the new role), instead of leaving the stale pre-edit summary."""
-    from agent_team_studio.agentic_team_provisioning.manifest_generation import build_agent_manifest
-
-    team_id = _new_team()
-    gen = AgenticTeamAgent(
-        agent_name="Writer", role="Writes drafts", skills=["seo"], source="generated"
-    )
-    AgenticTeamStore().save_team_agents(team_id, [gen])
-    manifest = build_agent_manifest(team_id, gen)
-    registry.register(manifest)  # simulate the LLM save path's install
-    assert registry.get(manifest.id).summary == "Writes drafts"
-
-    resp = client.put(f"/teams/{team_id}/agents/Writer", json={"role": "Edits and publishes"})
-    assert resp.status_code == 200
-    # Same id (name unchanged), refreshed summary — catalog/invoke now reflect the edit.
-    assert registry.get(manifest.id).summary == "Edits and publishes"
-
-
-def test_update_registry_agent_does_not_register_a_generated_wrapper(
-    client: TestClient, registry: _FakeRegistry
-) -> None:
-    """Editing a registry-source agent must not install a generated wrapper manifest
-    for it (its manifest stays owned by the catalog)."""
-    from agent_team_studio.agentic_team_provisioning.manifest_generation import manifest_agent_id
-
-    team_id = _new_team()
-    client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
-
-    resp = client.put(
-        f"/teams/{team_id}/agents/blogging.planner", json={"role": "Team-specific role"}
-    )
-    assert resp.status_code == 200
-    assert resp.json()["source"] == "registry"
-    # No generated wrapper was registered for the registry agent's team-namespaced id.
-    assert registry.get(manifest_agent_id(team_id, "blogging.planner")) is None
-    # The original catalog manifest is untouched.
-    assert registry.get("blogging.planner") is _PLANNER
-
-
 def test_update_team_agent_merges_over_the_lock_read_row(monkeypatch: pytest.MonkeyPatch) -> None:
     """``update_team_agent`` runs ``apply_updates`` on the row read **under the lock**,
-    not a caller snapshot — so a patch that only touches ``role`` preserves fields set
-    by an intervening write (the race Codex flagged). We simulate the intervening write
-    by mutating the stored row, then confirm the merge sees the fresh value.
-    """
+    not a caller snapshot — so a concurrent patch sees the fresh stored row."""
     install_fake_postgres(monkeypatch)
     store = AgenticTeamStore()
     team_id = store.create_team(name="Pod", description="").team_id
-    store.save_team_agents(
-        team_id, [AgenticTeamAgent(agent_name="Writer", role="old", skills=["seo"])]
-    )
+    original = _thin_gen(team_id, "Writer")
+    store.save_team_agents(team_id, [original])
 
-    seen: dict[str, list[str]] = {}
+    seen: dict[str, str] = {}
 
     def _apply(current: AgenticTeamAgent) -> AgenticTeamAgent:
-        # The callback receives the CURRENT stored row (skills intact), and only
-        # patches role — skills must survive.
-        seen["skills"] = list(current.skills)
-        return current.model_copy(update={"role": "new"})
+        seen["manifest_id"] = current.manifest_id
+        return current
 
     updated = store.update_team_agent(team_id, "Writer", _apply)
     assert updated is not None
-    assert seen["skills"] == ["seo"]  # merge saw the fresh row, not an empty patch
-    assert updated.role == "new"
-    assert updated.skills == ["seo"]  # intervening-write field preserved
-    # Persisted.
-    roster = {a.agent_name: a for a in store.list_team_agents(team_id)}
-    assert roster["Writer"].role == "new"
-    assert roster["Writer"].skills == ["seo"]
+    assert seen["manifest_id"] == original.manifest_id
+    assert updated.manifest_id == original.manifest_id
 
 
 def test_update_team_agent_unknown_agent_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -751,14 +907,14 @@ def test_update_team_agent_apply_error_rolls_back(monkeypatch: pytest.MonkeyPatc
     install_fake_postgres(monkeypatch)
     store = AgenticTeamStore()
     team_id = store.create_team(name="Pod", description="").team_id
-    store.save_team_agents(team_id, [AgenticTeamAgent(agent_name="Writer", role="keep")])
+    store.save_team_agents(team_id, [_thin_gen(team_id, "Writer")])
 
     def _boom(current: AgenticTeamAgent) -> AgenticTeamAgent:
         raise ValueError("bad patch")
 
     with pytest.raises(ValueError):
         store.update_team_agent(team_id, "Writer", _boom)
-    assert store.list_team_agents(team_id)[0].role == "keep"  # unchanged
+    assert store.list_team_agents(team_id)[0].manifest_id == _thin_gen(team_id, "Writer").manifest_id
 
 
 @pytest.mark.parametrize("bad_name", ["", "   "])
@@ -792,13 +948,12 @@ def test_full_save_preserves_created_at_and_prunes(monkeypatch: pytest.MonkeyPat
     store = AgenticTeamStore()
     team_id = store.create_team(name="Pod", description="").team_id
 
-    keep = AgenticTeamAgent(agent_name="Keep", role="k", skills=["x"])
-    drop = AgenticTeamAgent(agent_name="Drop", role="d", skills=["x"])
+    keep = _thin_gen(team_id, "Keep")
+    drop = _thin_gen(team_id, "Drop")
     store.save_team_agents(team_id, [keep, drop])
     original_created = db["team_agents"][(team_id, "Keep")]["created_at"]
 
-    # Re-save: Keep survives, Drop is removed, Add is new.
-    add = AgenticTeamAgent(agent_name="Add", role="a", skills=["x"])
+    add = _thin_gen(team_id, "Add")
     store.save_team_agents(team_id, [keep, add])
 
     names = {name for (_, name) in db["team_agents"] if _ == team_id}
@@ -820,7 +975,7 @@ def test_merge_generated_agents_unknown_team_is_noop(monkeypatch: pytest.MonkeyP
     seen: list[list[str]] = []
     result = store.merge_generated_agents(
         "missing",
-        [AgenticTeamAgent(agent_name="X", role="x", skills=["y"])],
+        [_thin_gen("missing", "X")],
         on_merged=lambda ms, _conn: seen.append([m.agent_name for m in ms]),
     )
     assert result == []
@@ -830,11 +985,16 @@ def test_merge_generated_agents_unknown_team_is_noop(monkeypatch: pytest.MonkeyP
 
 def test_manifests_endpoint_returns_original_for_registry_agent(client: TestClient) -> None:
     """A registry-source roster agent advertises its *original* resolvable manifest id,
-    while a generated agent still gets the synthetic stamped wrapper."""
+    while a generated agent advertises its registered stamped wrapper (orphans omitted)."""
+    from agent_platform.registry import get_registry
+    from agent_team_studio.agentic_team_provisioning.manifest_generation import (
+        build_agent_manifest,
+    )
+
     team_id = _new_team()
     client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
-    # A generated agent alongside it (saved directly; chat path isn't exercised here).
-    gen = AgenticTeamAgent(agent_name="Writer", role="Writes", skills=["seo"], source="generated")
+    gen = _thin_gen(team_id, "Writer")
+    get_registry().register(build_agent_manifest(team_id, "Writer", summary="Writes"))
     AgenticTeamStore().add_or_replace_team_agent(team_id, gen)
 
     manifests = {
@@ -857,8 +1017,6 @@ def test_manifests_endpoint_omits_unresolvable_registry_agent(client: TestClient
         team_id,
         AgenticTeamAgent(
             agent_name="Orphan",
-            role="r",
-            skills=["x"],
             source="registry",
             manifest_id="not.in.registry",
         ),
@@ -872,6 +1030,22 @@ def test_manifests_endpoint_omits_unresolvable_registry_agent(client: TestClient
     assert names == {"blogging.planner"}  # Orphan omitted, resolvable one kept
 
 
+def test_get_team_enriches_roster_persona(client: TestClient) -> None:
+    """GET /teams/{id} nested agents include Manifest-joined persona fields."""
+    team_id = _new_team()
+    client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
+
+    resp = client.get(f"/teams/{team_id}")
+    assert resp.status_code == 200
+    agents = resp.json()["team"]["agents"]
+    assert len(agents) == 1
+    assert agents[0]["agent_name"] == "blogging.planner"
+    assert agents[0]["manifest_id"] == "blogging.planner"
+    assert agents[0]["role"] == "Plans SEO-aware blog outlines"
+    assert "seo" in agents[0]["skills"]
+    assert "web.search" in agents[0]["tools"]
+
+
 def test_merge_generated_agents_invokes_on_merged(client: TestClient) -> None:
     """``merge_generated_agents`` calls ``on_merged`` once, under the lock, with the
     merged roster — the hook the chat-save path uses to register under the lock."""
@@ -881,7 +1055,7 @@ def test_merge_generated_agents_invokes_on_merged(client: TestClient) -> None:
     store = AgenticTeamStore()
     merged = store.merge_generated_agents(
         team_id,
-        [AgenticTeamAgent(agent_name="Writer", role="w", skills=["x"])],
+        [_thin_gen(team_id, "Writer")],
         on_merged=lambda ms, _conn: seen.append([m.agent_name for m in ms]),
     )
     assert [m.agent_name for m in merged] == ["Writer"]
@@ -900,10 +1074,7 @@ def test_merge_generated_agents_passes_conn_and_propagates_on_merged_failure(
     """
     team_id = _new_team()
     store = AgenticTeamStore()
-    store.save_team_agents(
-        team_id,
-        [AgenticTeamAgent(agent_name="Prior", role="p", skills=["x"], source="generated")],
-    )
+    store.save_team_agents(team_id, [_thin_gen(team_id, "Prior")])
 
     seen_conn: list[object] = []
 
@@ -914,9 +1085,36 @@ def test_merge_generated_agents_passes_conn_and_propagates_on_merged_failure(
     with pytest.raises(RuntimeError, match="registry replace failed"):
         store.merge_generated_agents(
             team_id,
-            [AgenticTeamAgent(agent_name="New", role="n", skills=["y"])],
+            [_thin_gen(team_id, "New")],
             on_merged=_boom,
         )
 
     assert len(seen_conn) == 1
     assert seen_conn[0] is not None
+
+
+def test_recommend_agents_scores_resolved_persona(client: TestClient) -> None:
+    """Recommend handler token-overlap uses Manifest-projected skills, not stored fat fields."""
+    team_id = _new_team()
+    add = client.post(
+        f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"}
+    )
+    assert add.status_code == 201
+
+    process = ProcessDefinition(
+        process_id="p-seo",
+        name="SEO research",
+        description="Find seo keywords for the outline",
+        steps=[ProcessStep(step_id="s1", name="Keyword seo scan", description="")],
+    )
+    AgenticTeamStore().save_process(team_id, process)
+
+    resp = client.post("/processes/p-seo/steps/s1/recommend-agents")
+    assert resp.status_code == 200
+    recs = resp.json()["recommended_agents"]
+    assert len(recs) >= 1
+    top = recs[0]
+    assert top["agent_name"] == "blogging.planner"
+    assert top["role"] == "Plans SEO-aware blog outlines"
+    assert "seo" in top["skills"]
+    assert top["match_score"] >= 1.0

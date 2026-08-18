@@ -27,12 +27,14 @@ routes with a real auth dependency.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import Literal
 from urllib.parse import urlparse
 
+import httpx
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from llm_service import clear_client_cache, provider_store, runtime_config
 from llm_service import config as llm_config
@@ -101,6 +103,19 @@ def _validate_ollama_base_url_value(v: str) -> str:
     return v
 
 
+def _strip_or_none(v: str | None) -> str | None:
+    """Trim ``v`` and normalize blank input to ``None`` — the update-route sentinel
+    for "leave the stored field unchanged" — computing ``.strip()`` exactly once.
+
+    Preconditions: none. Postconditions: returns ``None`` when ``v`` is ``None`` or
+        strips to an empty string; otherwise returns the stripped string.
+    """
+    if not v:
+        return None
+    stripped = v.strip()
+    return stripped or None
+
+
 def _is_ollama_cloud_url(url: str) -> bool:
     """Return True when ``url`` points at the Ollama Cloud endpoint.
 
@@ -113,6 +128,128 @@ def _is_ollama_cloud_url(url: str) -> bool:
     """
     host = (urlparse(url.strip()).hostname or "").lower() if url and url.strip() else ""
     return host == "ollama.com" or host.endswith(".ollama.com")
+
+
+# ---------------------------------------------------------------------------
+# RunPod-specific helper functions
+# ---------------------------------------------------------------------------
+
+
+def _validate_runpod_endpoint_id(endpoint_id: str) -> str:
+    """Validate and return the endpoint_id, raising ValueError on bad format.
+
+    Only alphanumeric characters (a-zA-Z0-9) are accepted. A valid endpoint ID
+    is a non-empty string containing exclusively letters and digits — no spaces,
+    hyphens, slashes, or other special characters that would corrupt a URL path
+    segment.
+
+    Preconditions: ``endpoint_id`` is a string.
+    Postconditions: returns ``endpoint_id`` unchanged when it matches
+        ``^[a-zA-Z0-9]+$``; raises ``ValueError`` with a descriptive message
+        otherwise. Never makes network calls.
+    """
+    if not re.fullmatch(r"[a-zA-Z0-9]+", endpoint_id):
+        raise ValueError(
+            "endpoint_id must contain only alphanumeric characters (letters and digits)."
+        )
+    return endpoint_id
+
+
+def _build_runpod_base_url(endpoint_id: str) -> str:
+    """Construct the canonical RunPod OpenAI-compatible base URL for an endpoint.
+
+    Preconditions: ``endpoint_id`` is a valid alphanumeric string (caller must
+        validate first via ``_validate_runpod_endpoint_id``).
+    Postconditions: returns exactly
+        ``https://api.runpod.ai/v2/{endpoint_id}/openai/v1`` with no trailing
+        slash, no extra path segments, and no query parameters.
+    """
+    return f"https://api.runpod.ai/v2/{endpoint_id}/openai/v1"
+
+
+#: Matches the URL ``_build_runpod_base_url`` produces, capturing the endpoint_id
+#: segment. Deliberately permissive (``[^/]+``, not the stricter alphanumeric-only
+#: charset ``_validate_runpod_endpoint_id`` enforces at create time) so recovery
+#: doesn't depend on that separate, independently-changeable validation rule.
+_RUNPOD_BASE_URL_RE = re.compile(r"^https://api\.runpod\.ai/v2/([^/]+)/openai/v1/?$")
+
+
+def _extract_runpod_endpoint_id(base_url: str) -> str:
+    """Recover the endpoint_id a RunPod entry's ``base_url`` was built from.
+
+    The inverse of ``_build_runpod_base_url`` — kept beside it so a future change to
+    the canonical URL shape is a one-file edit instead of a silent cross-stack break.
+
+    Preconditions: none.
+    Postconditions: returns the captured endpoint_id when ``base_url`` matches the
+        canonical RunPod URL shape; returns ``""`` otherwise. Never raises.
+    """
+    match = _RUNPOD_BASE_URL_RE.match(base_url)
+    return match.group(1) if match else ""
+
+
+#: Wall-clock ceiling (seconds) for the RunPod reachability probe. It bounds the
+#: added latency of create/update requests that configure a RunPod provider — the
+#: handler blocks for at most this long while the probe runs. Kept short so a slow
+#: or unreachable endpoint fails fast instead of tripping client/gateway timeouts.
+_RUNPOD_PROBE_TIMEOUT_SECONDS = 5.0
+
+
+class RunPodProbeError(Exception):
+    """A RunPod reachability probe failed; carries the HTTP status a caller should
+    surface for it, without depending on FastAPI/HTTPException itself.
+
+    Kept framework-agnostic so ``_probe_runpod_endpoint`` stays usable from a CLI
+    tool or background task, not just the ``create_provider`` route.
+    """
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
+async def _probe_runpod_endpoint(endpoint_id: str, api_key: str) -> None:
+    """Send a GET to the RunPod /models endpoint to verify it is reachable.
+
+    Fires a single authenticated GET request to
+    ``https://api.runpod.ai/v2/{endpoint_id}/openai/v1/models`` with a
+    ``_RUNPOD_PROBE_TIMEOUT_SECONDS`` timeout. Used at create/update time to
+    validate that the supplied credentials work before persisting the entry.
+
+    Preconditions: ``endpoint_id`` has passed ``_validate_runpod_endpoint_id``;
+        ``api_key`` is non-empty (caller already checked).
+    Postconditions: returns ``None`` when the endpoint responds with a 2xx status.
+        On failure raises a ``RunPodProbeError`` whose ``status_code`` reflects the
+        failure class rather than always 400 (the route handler maps this to an
+        ``HTTPException``):
+
+        - a non-2xx response from RunPod is surfaced with the *remote* status code
+          (e.g. 401 for a bad key, 404 for an unknown endpoint, 5xx for a RunPod
+          server error) so the caller isn't told a valid request was malformed;
+        - a connection error or timeout — the endpoint never answered — maps to
+          503 (upstream unreachable).
+    """
+    url = f"https://api.runpod.ai/v2/{endpoint_id}/openai/v1/models"
+    try:
+        async with httpx.AsyncClient(timeout=_RUNPOD_PROBE_TIMEOUT_SECONDS) as client:
+            resp = await client.get(url, headers={"Authorization": f"Bearer {api_key}"})
+            resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        # RunPod answered with a 4xx/5xx — propagate its status code so an auth
+        # failure reads as 401, an unknown endpoint as 404, a RunPod outage as 5xx,
+        # instead of misrepresenting a remote error as a client-side 400.
+        raise RunPodProbeError(
+            status_code=e.response.status_code,
+            detail=f"RunPod endpoint returned {e.response.status_code}: {e}",
+        ) from e
+    except httpx.HTTPError as e:
+        # Connection refused/reset, DNS failure, or timeout — the endpoint never
+        # produced a response, so it is unreachable (503), not a bad request.
+        raise RunPodProbeError(
+            status_code=503,
+            detail=f"RunPod endpoint could not be reached: {e}",
+        ) from e
 
 
 class OllamaModelsResponse(BaseModel):
@@ -167,6 +304,9 @@ class LlmProviderEntryResponse(BaseModel):
     model: str
     base_url: str
     sort_order: int
+    endpoint_id: str = Field(
+        "", description="RunPod endpoint ID recovered from base_url; '' for non-RunPod entries."
+    )
     api_key_configured: bool = Field(
         False, description="True when this entry has a stored API key (the value is never returned)."
     )
@@ -191,16 +331,47 @@ class LlmProviderListResponse(BaseModel):
 class LlmProviderCreate(BaseModel):
     """Request body to add a provider to the fallback list."""
 
-    label: str = Field(..., min_length=1, description="Human-readable name, e.g. 'Anthropic API'.")
-    provider: Literal["ollama", "claude"] = Field(..., description="Provider type.")
+    label: str = Field(
+        "",
+        description=(
+            "Human-readable name, e.g. 'Anthropic API'. If omitted/empty, the route handler"
+            " defaults it to 'RunPod' for the runpod provider (this model's own default is ``\"\"``)."
+        ),
+    )
+    provider: Literal["ollama", "claude", "runpod"] = Field(..., description="Provider type.")
     model: str = Field("", description="Model id for the provider (empty = provider default).")
-    base_url: str = Field("", description="Ollama base URL (empty = default); ignored for Claude.")
+    base_url: str = Field("", description="Ollama base URL (empty = default); ignored for Claude and RunPod.")
     api_key: str = Field("", description="API key for the provider (never returned by GET).")
+    endpoint_id: str = Field("", description="RunPod endpoint ID (alphanumeric). Required when provider='runpod'.")
 
     @field_validator("base_url")
     @classmethod
-    def _validate_base_url(cls, v: str) -> str:
+    def _validate_base_url(cls, v: str, info: ValidationInfo) -> str:
+        # ``base_url`` is an Ollama-only field — it is ignored for Claude and RunPod
+        # (whose URL is derived from ``endpoint_id``). Only enforce the Ollama URL
+        # shape for an actual Ollama entry so a stray value on a non-Ollama provider
+        # doesn't 422. ``provider`` is declared first, so it's already in ``info.data``.
+        if info.data.get("provider") != "ollama":
+            return v
         return _validate_ollama_base_url_value(v)
+
+    @field_validator("endpoint_id")
+    @classmethod
+    def _validate_endpoint_id(cls, v: str, info: ValidationInfo) -> str:
+        # ``endpoint_id`` only applies to RunPod entries. For any OTHER provider, a
+        # stray value is ignored downstream, so this branch returns ``v`` completely
+        # untouched (no format check, no trimming) rather than silently normalizing a
+        # field that provider doesn't use — mirrors the sibling ``base_url``
+        # validator's skip behavior. For a RunPod entry (below), the value IS
+        # trimmed and format-checked. Presence (it's required for RunPod) stays a
+        # route-level check — that needs the provider-specific "required for RunPod"
+        # error message, not a generic 422.
+        if info.data.get("provider") != "runpod":
+            return v
+        stripped = v.strip()
+        if not stripped:
+            return stripped
+        return _validate_runpod_endpoint_id(stripped)
 
 
 class LlmProviderUpdate(BaseModel):
@@ -213,10 +384,14 @@ class LlmProviderUpdate(BaseModel):
     # No ``min_length`` here: per the contract an empty/omitted field means "leave
     # unchanged" (normalized to None in the handler), so an empty label must not 422.
     label: str | None = Field(None, description="New label; empty/omitted leaves it unchanged.")
-    provider: Literal["ollama", "claude"] | None = None
+    provider: Literal["ollama", "claude", "runpod"] | None = None
     model: str | None = None
     base_url: str | None = None
     api_key: str = Field("", description="New API key; empty leaves the stored key unchanged.")
+    endpoint_id: str = Field(
+        "",
+        description="New RunPod endpoint ID (alphanumeric). Empty/omitted leaves the stored endpoint ID and its derived base URL unchanged.",
+    )
     clear_api_key: bool = Field(
         False,
         description=(
@@ -227,7 +402,12 @@ class LlmProviderUpdate(BaseModel):
 
     @field_validator("base_url")
     @classmethod
-    def _validate_base_url(cls, v: str | None) -> str | None:
+    def _validate_base_url(cls, v: str | None, info: ValidationInfo) -> str | None:
+        # ``base_url`` is Ollama-only (ignored for Claude/RunPod). Skip the URL-shape
+        # check when the provider is explicitly non-Ollama; keep it when ``provider``
+        # is omitted (None = "unchanged"), since the stored entry may well be Ollama.
+        if info.data.get("provider") in ("claude", "runpod"):
+            return v
         return v if v is None else _validate_ollama_base_url_value(v)
 
 
@@ -250,6 +430,7 @@ def _entry_to_response(entry: provider_store.ProviderEntry) -> LlmProviderEntryR
         model=entry.model,
         base_url=entry.base_url,
         sort_order=entry.sort_order,
+        endpoint_id=_extract_runpod_endpoint_id(entry.base_url) if entry.provider == "runpod" else "",
         api_key_configured=bool(entry.api_key),
         limit_exceeded=entry.limit_exceeded,
         limit_type=entry.limit_type,
@@ -316,9 +497,16 @@ def _guard_entry_credentials(provider: str, base_url: str, effective_api_key: st
     fallback — an entry can never rely on ``LLM_CLAUDE_API_KEY`` / ``ANTHROPIC_API_KEY``
     / ``OLLAMA_API_KEY`` at call time, so it must not be allowed to persist keyless.
 
-    Preconditions: ``provider`` is ``"ollama"``/``"claude"``. Postconditions: raises
+    Preconditions: ``provider`` is ``"ollama"``/``"claude"``/``"runpod"``. Postconditions: raises
         ``HTTPException(400)`` when the required key is absent; returns otherwise.
     """
+    if provider == "runpod":
+        if not effective_api_key:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot configure a RunPod provider without an API key. Provide api_key.",
+            )
+        return
     if provider == "claude":
         if not effective_api_key:
             raise HTTPException(
@@ -360,19 +548,42 @@ async def list_providers() -> LlmProviderListResponse:
 async def create_provider(body: LlmProviderCreate) -> LlmProviderListResponse:
     """Add a provider to the end of the fallback list.
 
+    For a RunPod provider this performs a synchronous reachability probe against
+    the endpoint before persisting, so the request will wait for up to
+    ``_RUNPOD_PROBE_TIMEOUT_SECONDS`` (currently 5 s) on the network round trip
+    before returning (the event loop itself is not blocked — this is an ``await``,
+    not a blocking call).
+
     Preconditions: Postgres configured; the per-entry key guards pass. Postconditions:
-        the entry is persisted (api key encrypted) at the end of the list, caches are
-        refreshed, and the full list is returned.
+        the entry is persisted (api key encrypted, whitespace-trimmed) at the end of
+        the list, caches are refreshed, and the full list is returned.
     """
     _require_storage()
-    _guard_entry_credentials(body.provider, body.base_url, body.api_key.strip())
+    # ``endpoint_id`` is already trimmed (and, for a RunPod entry, format-validated)
+    # by the model's field validator — no need to re-strip or re-validate it here.
+    api_key = body.api_key.strip()
+    _guard_entry_credentials(body.provider, body.base_url, api_key)
+    if body.provider == "runpod":
+        if not body.endpoint_id:
+            raise HTTPException(status_code=400, detail="endpoint_id is required for RunPod.")
+        try:
+            await _probe_runpod_endpoint(body.endpoint_id, api_key)
+        except RunPodProbeError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.detail) from e
+        base_url = _build_runpod_base_url(body.endpoint_id)
+        label = body.label.strip() or "RunPod"
+    else:
+        if not body.label.strip():
+            raise HTTPException(status_code=400, detail="label must not be empty.")
+        base_url = body.base_url
+        label = body.label.strip()
     try:
         provider_store.create_entry(
-            label=body.label,
+            label=label,
             provider=body.provider,
             model=body.model,
-            base_url=body.base_url,
-            api_key=body.api_key,
+            base_url=base_url,
+            api_key=api_key,
         )
     except Exception as e:  # noqa: BLE001 - surface a clear 503 instead of an opaque 500
         logger.exception("Failed to create LLM provider entry")
@@ -412,9 +623,24 @@ async def reorder_providers(body: LlmProviderOrderUpdate) -> LlmProviderListResp
 async def update_provider(entry_id: int, body: LlmProviderUpdate) -> LlmProviderListResponse:
     """Edit one provider; omitted/empty fields keep the stored value.
 
+    Unlike ``create_provider`` this does not probe the RunPod endpoint, so it adds
+    no network latency: a new ``endpoint_id`` is only validated and used to rebuild
+    the stored base URL. For a (resulting) RunPod entry, ``base_url`` is never
+    settable directly and any value sent for it is ignored — either it is
+    recomputed from a non-empty ``endpoint_id`` (which OVERWRITES the stored
+    ``base_url`` with the canonical
+    ``https://api.runpod.ai/v2/{endpoint_id}/openai/v1``), or, when ``endpoint_id``
+    is omitted/empty on an entry that is *already* RunPod, the stored ``base_url``
+    is left untouched. Switching a non-RunPod entry to RunPod REQUIRES a non-empty
+    ``endpoint_id`` in the same request (400 otherwise) — without one there would be
+    no canonical URL to persist, matching ``create_provider``'s requirement.
+
     Preconditions: the entry exists; Postgres configured; the per-entry key guards
-        pass for the resulting (merged) provider/base_url/key. Postconditions: the
-        named fields are updated, caches refreshed, and the full list returned.
+        pass for the resulting (merged) provider/base_url/key. Postconditions:
+        provided (non-empty) fields are updated; omitted/empty fields retain their
+        stored values (a ``None`` passed through to ``provider_store.update_entry``
+        is that function's own "leave unchanged" sentinel, not a write of ``NULL``).
+        Caches are refreshed and the full list returned.
     """
     _require_storage()
     existing = provider_store.get_entry(entry_id)
@@ -424,9 +650,9 @@ async def update_provider(entry_id: int, body: LlmProviderUpdate) -> LlmProvider
     # it to None so update_entry (which treats None as unchanged) never clears a stored
     # value — mirrors the api_key handling and the single-provider PUT. Without this, a
     # client sending model:"" or base_url:"" would silently wipe the field.
-    label = body.label.strip() if (body.label and body.label.strip()) else None
-    model = body.model.strip() if (body.model and body.model.strip()) else None
-    base_url = body.base_url.strip() if (body.base_url and body.base_url.strip()) else None
+    label = _strip_or_none(body.label)
+    model = _strip_or_none(body.model)
+    base_url = _strip_or_none(body.base_url)
     # API key resolution: a non-empty api_key sets it; otherwise clear_api_key=True
     # removes it ("" for the store); otherwise leave it unchanged (None for the store).
     new_api_key = body.api_key.strip()
@@ -448,6 +674,30 @@ async def update_provider(entry_id: int, body: LlmProviderUpdate) -> LlmProvider
     else:
         effective_api_key = existing.api_key
     _guard_entry_credentials(merged_provider, merged_base_url, effective_api_key)
+    # RunPod branch: when endpoint_id is provided, validate it and reconstruct base_url.
+    # This overrides any body.base_url value (which is ignored for RunPod entries) and
+    # ensures update_entry receives a non-None base_url so the connection-affecting field
+    # change triggers limit-state clearing per requirements 2.7 and 2.8.
+    # ``body.endpoint_id`` is a plain ``str`` field (default ``""``), never ``None`` —
+    # FastAPI/Pydantic rejects a null value for it with a 422 before this code runs.
+    new_endpoint_id = body.endpoint_id.strip()
+    if merged_provider == "runpod":
+        if new_endpoint_id:
+            try:
+                _validate_runpod_endpoint_id(new_endpoint_id)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            base_url = _build_runpod_base_url(new_endpoint_id)
+        elif existing.provider != "runpod":
+            # Switching a non-RunPod entry to RunPod requires an endpoint_id, same as
+            # create_provider — otherwise the entry would persist with
+            # provider="runpod" pointed at a stale, non-RunPod base_url.
+            raise HTTPException(status_code=400, detail="endpoint_id is required for RunPod.")
+        else:
+            # Already a RunPod entry and endpoint_id wasn't touched: base_url is
+            # always derived from endpoint_id, never directly settable — ignore any
+            # stray body.base_url instead of overwriting the canonical URL with it.
+            base_url = None
     try:
         updated = provider_store.update_entry(
             entry_id,

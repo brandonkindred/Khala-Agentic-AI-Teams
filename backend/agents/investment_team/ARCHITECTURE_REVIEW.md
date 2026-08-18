@@ -17,20 +17,20 @@
 |---|---|---|---|
 | **CRITICAL-1** | LLM-Per-Bar Simulation Cost | **Resolved** | Compiled DSL executor replaced LLM-per-bar evaluation. |
 | **CRITICAL-2** | No Strands SDK Adoption | **Resolved** | `strands.Agent` is adopted natively throughout the system. |
-| **CRITICAL-3** | Prompt Injection Defenses | **Still Open** | `signal_intelligence_agent.py` still relies on a trivial regex defense. |
+| **CRITICAL-3** | Prompt Injection Defenses | **Still Open** | `signal_intelligence_agent.py` sanitizes with a control-char strip + one injection-phrase regex — still no multi-layer defense (structured encoding, tool-input validation, output monitoring). |
 | **HIGH-4** | Advisor Uses Regex, Not LLM | **Still Open** | Requires migration to local LLM for PII compliance. |
 | **HIGH-5** | Workflow Logic in API Layer | **Resolved** | Dispatch replaced by Temporal `StrategyLabBatchWorkflow`. |
 | **HIGH-6** | Distributed State Is Fragile | **Resolved** | Handled by durable Temporal workflow state. |
-| **MEDIUM-7** | Market Data Caching | **Still Open** | Needs TTL cache and integrity checks. |
-| **MEDIUM-8** | Generic Exception Handling | **Still Open** | Needs migration to specific `LLMError` hierarchy. |
+| **MEDIUM-7** | Market Data Caching | **Resolved** | Content-addressed Parquet+Postgres cache (`market_data_cache/store.py`) replaced the old in-memory TTL cache; `execution/data_quality.py` runs a full integrity/outlier validator preflight on every session. |
+| **MEDIUM-8** | Generic Exception Handling | **Still Open** | `LLMError` hierarchy now backs the Strategy Lab LLM envelope (`_llm_envelope.py`), but ~150+ bare `except Exception` clauses remain across ~40 files outside it (e.g. `api/main.py`, `market_data_service.py`, `orchestrator.py`). |
 | **MEDIUM-9** | SSE Reliability | **Still Open** | Needs `Last-Event-ID` and backpressure support. |
-| **HIGH-10** | Missing Decision Framework | **Still Open** | Investment Priority Framework not yet injected into prompts. |
+| **HIGH-10** | Missing Decision Framework | **Still Open** | No ranked priority framework exists; live design agent (`strategy_lab/agents/design.py`, `prompts/design_system.md`) has informal risk/coherence guidance but not a literal tiered framework. |
 | **HIGH-11** | Bar Evaluation Hallucination | **Resolved** | Addressed via CRITICAL-1's compiled DSL. |
-| **HIGH-12** | Lacks Decomposed Reasoning | **Still Open** | Ideation prompt requires reasoning chain restructuring. |
-| **MEDIUM-13**| Arbitrary Temperatures | **Still Open** | Requires consolidation to documented analytical/creative tiers. |
-| **MEDIUM-14**| Missing Tool Specifications | **Still Open** | Agent tools require robust docstrings and failover modes. |
+| **HIGH-12** | Lacks Decomposed Reasoning | **Resolved** | Live design agent implements ANALYZE → HYPOTHESIZE → DESIGN → FORECAST → STRESS-TEST → OUTPUT (`strategy_lab/agents/design.py:183`, `prompts/design_system.md:13-22`). |
+| **MEDIUM-13**| Arbitrary Temperatures | **Resolved** | Consolidated to a documented policy (`strategy_lab/agents/model_factory.py`): 0.0 deterministic default, 0.6 only for `strategy_design`; separate documented 0.3 reasoning-pass constant. |
+| **MEDIUM-14**| Missing Tool Specifications | **Still Open** | No `@tool` functions exist yet — Strands `Agent` is used only for single-shot structured JSON generation (`tools=[]` throughout); tool-calling was never adopted. |
 | **CRITICAL-15**| No Output Quality Gates | **Resolved** | `quality_gates/` module is now extensive. |
-| **HIGH-16** | No Convergence Detection | **Still Open** | Needs `StrategyFeedbackTracker` for batch loop metrics. |
+| **HIGH-16** | No Convergence Detection | **Resolved** | `ConvergenceTracker` (`strategy_lab/quality_gates/convergence_tracker.py`) implements Jaccard-similarity stall detection, asset-class diversity directives, and failure-repetition tracking; wired into the Temporal batch workflow. |
 
 ---
 

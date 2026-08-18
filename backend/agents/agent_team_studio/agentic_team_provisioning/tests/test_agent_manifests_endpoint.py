@@ -6,6 +6,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agent_team_studio.agentic_team_provisioning.assistant.store import AgenticTeamStore
+from agent_team_studio.agentic_team_provisioning.manifest_generation import (
+    build_agent_manifest,
+    manifest_agent_id,
+)
 from agent_team_studio.agentic_team_provisioning.models import AgenticTeamAgent
 from agent_team_studio.agentic_team_provisioning.tests._fake_postgres import install_fake_postgres
 
@@ -19,14 +23,28 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return TestClient(app)
 
 
+def _thin_generated(team_id: str, agent_name: str, *, summary: str) -> AgenticTeamAgent:
+    from agent_platform.registry import get_registry
+
+    manifest_id = manifest_agent_id(team_id, agent_name)
+    registry = get_registry()
+    if registry.get(manifest_id) is None:
+        registry.register(build_agent_manifest(team_id, agent_name, summary=summary))
+    return AgenticTeamAgent(
+        agent_name=agent_name,
+        source="generated",
+        manifest_id=manifest_id,
+    )
+
+
 def _seed_team_with_agents() -> str:
     store = AgenticTeamStore()
     team = store.create_team(name="Support", description="")
     store.save_team_agents(
         team.team_id,
         [
-            AgenticTeamAgent(agent_name="Triage Agent", role="Classifies tickets"),
-            AgenticTeamAgent(agent_name="Router Agent", role="Routes tickets"),
+            _thin_generated(team.team_id, "Triage Agent", summary="Classifies tickets"),
+            _thin_generated(team.team_id, "Router Agent", summary="Routes tickets"),
         ],
     )
     return team.team_id

@@ -26,7 +26,7 @@ from .context_discovery import (
     inject_context_answers_into_spec,
     run_context_constraints_discovery,
 )
-from .llm_io import call_llm_json, call_llm_text, parse_llm_json
+from .llm_io import call_llm_json, call_llm_text
 from .models import (
     AnalysisPhase,
     AnalysisWorkflowResult,
@@ -877,11 +877,6 @@ class ProductRequirementsAnalysisAgent:
     # ------------------------------------------------------------------
     # SOP Phase 1 & 2 methods
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _parse_llm_json(raw: str) -> Optional[dict]:
-        """Delegates to :func:`llm_io.parse_llm_json` (fence-aware JSON parse)."""
-        return parse_llm_json(raw)
 
     def _call_llm_text(self, prompt: str) -> str:
         """Delegates to :func:`llm_io.call_llm_text` with this agent's model.

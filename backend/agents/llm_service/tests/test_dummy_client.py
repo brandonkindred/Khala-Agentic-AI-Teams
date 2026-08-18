@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from llm_service import DummyLLMClient
 from llm_service.clients.dummy import (
+    _DEFAULT_DUMMY_CONTEXT_TOKENS,
     _PHASE3_SPECIALIST_REGISTRY,
     _STRIP_FILLERS,
     _STRIP_SUFFIXES,
@@ -40,6 +41,7 @@ from llm_service.clients.dummy import (
 def test_dummy_get_max_context_tokens() -> None:
     c = DummyLLMClient()
     assert c.get_max_context_tokens() == 16384
+    assert c.get_max_context_tokens() == _DEFAULT_DUMMY_CONTEXT_TOKENS
 
 
 def test_dummy_complete_returns_str() -> None:
@@ -47,6 +49,14 @@ def test_dummy_complete_returns_str() -> None:
     s = c.complete("hello", temperature=0.5)
     assert isinstance(s, str)
     assert "Dummy" in s
+
+
+def test_dummy_complete_docstring_documents_contract() -> None:
+    doc = " ".join((DummyLLMClient.complete.__doc__ or "").split()).lower()
+    assert "making a real llm call" in doc
+    assert "preconditions:" in doc
+    assert "postconditions:" in doc
+    assert "_request_count" in doc
 
 
 def test_dummy_complete_json_returns_dict() -> None:
@@ -204,13 +214,13 @@ def test_unrecognized_structured_output_model_falls_back_to_text_routing() -> No
     existing text-anchor scan (e.g. Phase 1 classes, which aren't part of
     the Phase 2 deterministic routing table).
     """
-    from branding_team.models import BrandDiscoveryAuditOutput
+    from branding_team.models import BrandDiscoveryAudit
 
     c = DummyLLMClient()
     j = c.complete_json(
         "Generate architecture_document with components and overview for the system.",
         temperature=0.0,
-        structured_output_model=BrandDiscoveryAuditOutput,
+        structured_output_model=BrandDiscoveryAudit,
     )
     assert "architecture_document" in j
 
@@ -554,95 +564,6 @@ def test_code_review_min_prompt_length_constant() -> None:
     assert CODE_REVIEW_MIN_PROMPT_LENGTH == 200
 
 
-_BRANDING_PHASE2_MODEL_CASES = [
-    (
-        "BrandStoryOutput",
-        {"brand_story", "hero_narrative", "boilerplate_variants"},
-    ),
-    (
-        "BrandArchetypesOutput",
-        {"brand_story", "hero_narrative", "boilerplate_variants", "brand_archetypes"},
-    ),
-    (
-        "TaglineOutput",
-        {
-            "brand_story",
-            "hero_narrative",
-            "boilerplate_variants",
-            "brand_archetypes",
-            "tagline",
-            "tagline_rationale",
-            "elevator_pitches",
-        },
-    ),
-    (
-        "MessagingFrameworkOutput",
-        {
-            "brand_story",
-            "hero_narrative",
-            "boilerplate_variants",
-            "brand_archetypes",
-            "tagline",
-            "tagline_rationale",
-            "elevator_pitches",
-            "messaging_framework",
-            "audience_message_maps",
-        },
-    ),
-    (
-        "PersonaProfilesOutput",
-        {
-            "brand_story",
-            "hero_narrative",
-            "boilerplate_variants",
-            "brand_archetypes",
-            "tagline",
-            "tagline_rationale",
-            "elevator_pitches",
-            "messaging_framework",
-            "audience_message_maps",
-            "persona_profiles",
-        },
-    ),
-    (
-        "WritingGuidelinesOutput",
-        {
-            "brand_story",
-            "hero_narrative",
-            "boilerplate_variants",
-            "brand_archetypes",
-            "tagline",
-            "tagline_rationale",
-            "elevator_pitches",
-            "messaging_framework",
-            "audience_message_maps",
-            "persona_profiles",
-            "writing_guidelines",
-        },
-    ),
-]
-
-
-@pytest.mark.parametrize("model_name,expected_keys", _BRANDING_PHASE2_MODEL_CASES)
-def test_branding_phase2_branches_return_cumulative_keys(
-    model_name: str, expected_keys: set[str]
-) -> None:
-    """Each Phase 2 branding specialist stub must carry forward exactly the
-    keys its predecessors introduced, plus its own — pinned by explicit
-    ``structured_output_model`` class name, not system-prompt substrings.
-    """
-    import branding_team.models as branding_models
-
-    output_model = getattr(branding_models, model_name)
-    c = DummyLLMClient()
-    j = c.complete_json(
-        "dummy prompt",
-        temperature=0.0,
-        structured_output_model=output_model,
-    )
-    assert set(j.keys()) == expected_keys
-
-
 def test_branding_phase2_branch_results_do_not_share_mutable_state() -> None:
     """Each ``complete_json`` call must hand back independent objects so
     mutating one response's nested lists/dicts can't leak into another call's
@@ -984,6 +905,111 @@ async def test_stream_unrecognized_tool_name_falls_back_to_text_scan() -> None:
             chunks.append(tool_input)
     data = json.loads(chunks[0])
     assert "architecture_document" in data
+
+
+def test_dummy_via_reasoning_analysis_alone_is_not_chunk_review_shape() -> None:
+    """Bare ANALYSIS / convert-preamble must not hijack other via-reasoning formatters."""
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "Sales notes here.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        "Return fields: status, score.\n"
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert "approved" not in j or "issues" not in j or "spec_compliance_notes" not in j
+
+
+def test_dummy_via_reasoning_chunk_review_format_markers_return_chunk_stub() -> None:
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "Review prose.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        'Required keys: "approved", "issues", "summary", "spec_compliance_notes".\n'
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert j["approved"] is True
+    assert j["issues"] == []
+    assert "spec_compliance_notes" in j
+
+
+def test_dummy_plan_critic_wins_over_analysis_delimiters() -> None:
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "Plan looks fine.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        "Schema: PlanCriticReport with status and notes.\n"
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert "notes" in j
+    assert "approved" not in j or j.get("issues") is None
+
+
+def test_dummy_via_reasoning_review_synthesis_format_returns_summary() -> None:
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "Findings look fine.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        "Return a single JSON object with exactly these keys:\n"
+        '- "summary": string — the unified review summary (non-empty).\n'
+        '- "spec_compliance_notes": string — consolidated gaps, or "".\n'
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert j["summary"].strip()
+    assert "spec_compliance_notes" in j
+    assert "approved" not in j
+
+
+def test_dummy_via_reasoning_spec_compliance_format_returns_notes_key() -> None:
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "No gaps.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        "Return a single JSON object with exactly this key:\n"
+        '- "spec_compliance_notes": string — concrete gaps, or "".\n'
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert "spec_compliance_notes" in j
+    assert "summary" not in j
+    assert "approved" not in j
+
+
+def test_dummy_via_reasoning_fpf_format_returns_verdicts() -> None:
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "Keep finding 1.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        'Required: "verdicts" list of objects.\n'
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert j == {"verdicts": []}
+
+
+def test_dummy_via_reasoning_standalone_submission_pass_returns_findings() -> None:
+    """Architecture / side-effect standalone format contracts use exactly one key."""
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "No architecture issues.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        "Return a single JSON object with exactly one key:\n"
+        '- "findings": a list of objects.\n'
+        'Return {"findings": []} when you find nothing.\n'
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert j == {"findings": []}
 
 
 @pytest.mark.asyncio

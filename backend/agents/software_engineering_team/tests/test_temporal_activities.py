@@ -12,6 +12,7 @@ import logging
 from typing import Any, Dict
 
 import pytest
+from temporalio.common import RetryPolicy
 
 
 @pytest.fixture(autouse=True)
@@ -19,89 +20,12 @@ def _autouse_patched_job_store(patched_job_store):
     return patched_job_store
 
 
-def test_run_orchestrator_activity_success(monkeypatch, tmp_path) -> None:
-    from software_engineering_team.temporal import activities
-
-    called: Dict[str, Any] = {}
-
-    def fake_run_orchestrator(
-        job_id,
-        repo_path,
-        *,
-        spec_content_override=None,
-        resolved_questions_override=None,
-        planning_only=False,
-        sprint_id=None,
-        trace_id=None,
-    ):
-        called.update(
-            job_id=job_id,
-            repo_path=repo_path,
-            spec_override=spec_content_override,
-            planning_only=planning_only,
-            sprint_id=sprint_id,
-            trace_id=trace_id,
-        )
-
-    monkeypatch.setattr(
-        "software_engineering_team.orchestrator.run_orchestrator", fake_run_orchestrator
-    )
-    activities.run_orchestrator_activity(
-        "job1", str(tmp_path), spec_content_override="x", planning_only=True
-    )
-    assert called["job_id"] == "job1"
-    assert called["planning_only"] is True
-    assert called["sprint_id"] is None
-    assert called["trace_id"]  # activity generates one when the caller passes none
-
-
-def test_run_orchestrator_activity_forwards_sprint_id(monkeypatch, tmp_path) -> None:
-    from software_engineering_team.temporal import activities
-
-    called: Dict[str, Any] = {}
-
-    def fake_run_orchestrator(
-        job_id,
-        repo_path,
-        *,
-        spec_content_override=None,
-        resolved_questions_override=None,
-        planning_only=False,
-        sprint_id=None,
-        trace_id=None,
-    ):
-        called["sprint_id"] = sprint_id
-
-    monkeypatch.setattr(
-        "software_engineering_team.orchestrator.run_orchestrator", fake_run_orchestrator
-    )
-    activities.run_orchestrator_activity("job1", str(tmp_path), sprint_id="sprint-123")
-    assert called["sprint_id"] == "sprint-123"
-
-
-def test_run_orchestrator_activity_failure_captured(
-    monkeypatch, tmp_path, patched_job_store, caplog
-) -> None:
-    from software_engineering_team.shared import job_store as js
-    from software_engineering_team.temporal import activities
-
-    js.create_job("job-x", repo_path=str(tmp_path))
-
-    def boom(*a, **kw):
-        raise RuntimeError("orchestrator crashed")
-
-    monkeypatch.setattr("software_engineering_team.orchestrator.run_orchestrator", boom)
-    caplog.set_level(logging.ERROR)
-    with pytest.raises(RuntimeError, match="orchestrator crashed"):
-        activities.run_orchestrator_activity("job-x", str(tmp_path), trace_id="fixed-trace-id")
-    job = js.get_job("job-x")
-    assert job is not None
-    assert job["status"] == js.JOB_STATUS_FAILED
-    assert "orchestrator crashed" in (job.get("error") or "")
-
-    failure_records = [r for r in caplog.records if "Orchestrator activity failed" in r.message]
-    assert failure_records, "expected the failure log to be emitted"
-    assert failure_records[-1].trace_id == "fixed-trace-id"
+def _fake_activity_info(attempt: int, maximum_attempts: int = 3):
+    return type(
+        "I",
+        (),
+        {"retry_policy": RetryPolicy(maximum_attempts=maximum_attempts), "attempt": attempt},
+    )()
 
 
 def test_retry_failed_activity_success(monkeypatch) -> None:
@@ -133,6 +57,29 @@ def test_retry_failed_activity_failure(monkeypatch, tmp_path, patched_job_store)
         activities.retry_failed_activity("j-fail")
     job = js.get_job("j-fail")
     assert job["status"] == js.JOB_STATUS_FAILED
+
+
+def test_retry_failed_activity_non_final_attempt_does_not_mark_failed(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """Mirror of the other activities' non-final-attempt tests for retry_failed_activity."""
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("rf-retry", repo_path=str(tmp_path))
+
+    monkeypatch.setattr(activities.activity, "in_activity", lambda: True)
+    monkeypatch.setattr(activities.activity, "info", lambda: _fake_activity_info(attempt=1))
+
+    def boom(_, **kw):
+        raise RuntimeError("transient retry failure")
+
+    monkeypatch.setattr("software_engineering_team.orchestrator.run_failed_tasks", boom)
+    with pytest.raises(RuntimeError, match="transient retry failure"):
+        activities.retry_failed_activity("rf-retry")
+
+    job = js.get_job("rf-retry")
+    assert job["status"] != js.JOB_STATUS_FAILED
 
 
 def test_run_frontend_code_v2_activity_failure(monkeypatch, tmp_path, patched_job_store) -> None:
@@ -167,6 +114,54 @@ def test_run_backend_code_v2_activity_failure(monkeypatch, tmp_path, patched_job
     assert job["status"] == js.JOB_STATUS_FAILED
 
 
+def test_run_frontend_code_v2_activity_non_final_attempt_does_not_mark_failed(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """On a non-final Temporal attempt, a transient failure does NOT mark the job
+    FAILED (Temporal will retry) — only the final attempt marks it, so a retry
+    that later succeeds never leaves a transient FAILED status behind."""
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("fv2-retry", repo_path=str(tmp_path))
+
+    monkeypatch.setattr(activities.activity, "in_activity", lambda: True)
+    monkeypatch.setattr(activities.activity, "info", lambda: _fake_activity_info(attempt=1))
+
+    def boom(*a, **kw):
+        raise RuntimeError("transient frontend failure")
+
+    monkeypatch.setattr(activities, "_run_frontend_code_v2_impl", boom)
+    with pytest.raises(RuntimeError, match="transient frontend failure"):
+        activities.run_frontend_code_v2_activity("fv2-retry", str(tmp_path), {"id": "t1"})
+
+    job = js.get_job("fv2-retry")
+    assert job["status"] != js.JOB_STATUS_FAILED
+
+
+def test_run_backend_code_v2_activity_non_final_attempt_does_not_mark_failed(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """Mirror of the frontend non-final-attempt test for the backend activity."""
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("bv2-retry", repo_path=str(tmp_path))
+
+    monkeypatch.setattr(activities.activity, "in_activity", lambda: True)
+    monkeypatch.setattr(activities.activity, "info", lambda: _fake_activity_info(attempt=1))
+
+    def boom(*a, **kw):
+        raise RuntimeError("transient backend failure")
+
+    monkeypatch.setattr(activities, "_run_backend_code_v2_impl", boom)
+    with pytest.raises(RuntimeError, match="transient backend failure"):
+        activities.run_backend_code_v2_activity("bv2-retry", str(tmp_path), {"id": "t1"})
+
+    job = js.get_job("bv2-retry")
+    assert job["status"] != js.JOB_STATUS_FAILED
+
+
 def test_run_product_analysis_activity_failure(monkeypatch, tmp_path, patched_job_store) -> None:
     from software_engineering_team.shared import job_store as js
     from software_engineering_team.temporal import activities
@@ -181,6 +176,29 @@ def test_run_product_analysis_activity_failure(monkeypatch, tmp_path, patched_jo
         activities.run_product_analysis_activity("pa-j", str(tmp_path), "spec")
     job = js.get_job("pa-j")
     assert job["status"] == js.JOB_STATUS_FAILED
+
+
+def test_run_product_analysis_activity_non_final_attempt_does_not_mark_failed(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """Mirror of the frontend/backend non-final-attempt tests for product analysis."""
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("pa-retry", repo_path=str(tmp_path))
+
+    monkeypatch.setattr(activities.activity, "in_activity", lambda: True)
+    monkeypatch.setattr(activities.activity, "info", lambda: _fake_activity_info(attempt=1))
+
+    def boom(*a, **kw):
+        raise RuntimeError("transient PA failure")
+
+    monkeypatch.setattr(activities, "_run_product_analysis_impl", boom)
+    with pytest.raises(RuntimeError, match="transient PA failure"):
+        activities.run_product_analysis_activity("pa-retry", str(tmp_path), "spec")
+
+    job = js.get_job("pa-retry")
+    assert job["status"] != js.JOB_STATUS_FAILED
 
 
 def test_run_frontend_code_v2_activity_happy(monkeypatch, tmp_path, patched_job_store) -> None:
@@ -247,6 +265,27 @@ def test_parse_spec_activity_exception_path(
     failure_records = [r for r in caplog.records if "parse_spec_activity failed" in r.message]
     assert failure_records, "expected the failure log to be emitted"
     assert failure_records[-1].trace_id == "parse-spec-trace-id"
+
+
+def test_parse_spec_activity_non_final_attempt_does_not_mark_failed(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """No spec file in repo → spec parser raises FileNotFoundError. On a non-final
+    Temporal attempt the job is NOT marked FAILED (Temporal will retry) — only the
+    final attempt marks it, mirroring the code-v2 activities' guard."""
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("ps-retry", repo_path=str(tmp_path))
+
+    monkeypatch.setattr(activities.activity, "in_activity", lambda: True)
+    monkeypatch.setattr(activities.activity, "info", lambda: _fake_activity_info(attempt=1))
+
+    with pytest.raises(Exception):
+        activities.parse_spec_activity("ps-retry", str(tmp_path), trace_id="parse-spec-retry")
+
+    job = js.get_job("ps-retry")
+    assert job["status"] != js.JOB_STATUS_FAILED
 
 
 def test_parse_spec_activity_with_sprint_id_matches_shared_helper_output(
@@ -381,6 +420,40 @@ def test_plan_project_activity_exception_path(monkeypatch, tmp_path, patched_job
     assert job["status"] == js.JOB_STATUS_FAILED
 
 
+def test_plan_project_activity_non_final_attempt_does_not_mark_failed(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """Mirror of test_plan_project_activity_exception_path with a non-final Temporal
+    attempt: the job is NOT marked FAILED (Temporal will retry), only re-raised."""
+    from unittest.mock import MagicMock
+
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("pp-retry", repo_path=str(tmp_path))
+
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    monkeypatch.setattr(
+        "software_engineering_team.orchestrator._get_agents",
+        lambda: {"architecture": MagicMock()},
+    )
+    monkeypatch.setattr(activities.activity, "in_activity", lambda: True)
+    monkeypatch.setattr(activities.activity, "info", lambda: _fake_activity_info(attempt=1))
+
+    def boom(*a, **kw):
+        raise RuntimeError("transient planning failure")
+
+    monkeypatch.setattr("planning_team.orchestrator.run_workflow", boom)
+    with pytest.raises(RuntimeError):
+        activities.plan_project_activity(
+            "pp-retry",
+            str(tmp_path),
+            {"spec_content": "spec", "validated_spec": "spec", "plan_dir": str(tmp_path)},
+        )
+    job = js.get_job("pp-retry")
+    assert job["status"] != js.JOB_STATUS_FAILED
+
+
 def test_plan_project_activity_wires_lazy_architecture_callback(
     monkeypatch, tmp_path, patched_job_store
 ) -> None:
@@ -464,9 +537,9 @@ def test_plan_project_activity_records_planning_run_on_success(
     """
     from unittest.mock import MagicMock
 
+    from shared.dev_models.models import ProductRequirements
     from software_engineering_team.planning_adapter import PlanningAdapterResult
     from software_engineering_team.shared import job_store as js
-    from software_engineering_team.shared.models import ProductRequirements
     from software_engineering_team.temporal import activities
 
     js.create_job("pp-success", repo_path=str(tmp_path))
@@ -603,7 +676,7 @@ def test_execute_coding_team_activity_passes_band_and_default_llm_getter(
 
     from planning_adapter import PlanningAdapterResult
 
-    from software_engineering_team.shared.models import ProductRequirements
+    from shared.dev_models.models import ProductRequirements
 
     adapter_dict = PlanningAdapterResult(
         requirements=ProductRequirements(
@@ -631,6 +704,58 @@ def test_execute_coding_team_activity_passes_band_and_default_llm_getter(
     assert "get_llm" not in captured, (
         "raw get_llm must not be injected: it bypasses the reasoning-stream getter "
         "and hands TechLeadAgent a non-strands client"
+    )
+
+
+def test_execute_coding_team_activity_stays_on_block_pause_strategy(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """RunTeamWorkflowV2's Phase 3 activity must not opt into pause_strategy="return":
+    neither RunTeamWorkflow (V1) nor RunTeamWorkflowV2 defines a submit_answers Temporal
+    signal, so a pause under "return" would raise _ActivityPauseSignal with nothing to
+    resume it — POST /run-team/{job_id}/answers only ever writes to the job store, it
+    never signals a workflow. Regression guard: this pins the "V2 HITL == V1 HITL"
+    equivalence this codebase currently relies on for job-store-poll-based resume."""
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("ec-pause-strategy", repo_path=str(tmp_path))
+
+    captured: Dict[str, Any] = {}
+
+    def fake_orchestrator(job_id, repo_path, plan_input, **kwargs):
+        captured.update(kwargs)
+
+    import software_engineering_team.coding_team_orchestrator as coding_orch
+
+    monkeypatch.setattr(coding_orch, "run_coding_team_orchestrator", fake_orchestrator)
+
+    from planning_adapter import PlanningAdapterResult
+
+    from shared.dev_models.models import ProductRequirements
+
+    adapter_dict = PlanningAdapterResult(
+        requirements=ProductRequirements(
+            title="T",
+            description="d",
+            acceptance_criteria=[],
+            constraints=[],
+            priority="medium",
+            metadata={},
+        ),
+        project_overview={},
+        open_questions=[],
+        assumptions=[],
+    ).to_dict()
+    activities.execute_coding_team_activity(
+        "ec-pause-strategy",
+        str(tmp_path),
+        {"adapter_result_dict": adapter_dict, "spec_content_for_planning": "s"},
+    )
+
+    assert captured.get("pause_strategy", "block") == "block", (
+        'execute_coding_team_activity must not pass pause_strategy="return" until '
+        "RunTeamWorkflowV2 defines a submit_answers signal to resume it"
     )
 
 
@@ -668,7 +793,7 @@ def test_adapter_result_round_trips_through_dict() -> None:
 
     from planning_adapter import PlanningAdapterResult
 
-    from software_engineering_team.shared.models import ProductRequirements
+    from shared.dev_models.models import ProductRequirements
 
     original = PlanningAdapterResult(
         requirements=ProductRequirements(
@@ -775,9 +900,9 @@ def test_execute_coding_team_activity_binds_the_passed_trace_id(
     the bound id via ``contextvars.copy_context()`` once it is bound here."""
     from planning_adapter import PlanningAdapterResult
 
+    from shared.dev_models.models import ProductRequirements
     from shared.observability import current_trace_id
     from software_engineering_team.shared import job_store as js
-    from software_engineering_team.shared.models import ProductRequirements
     from software_engineering_team.temporal import activities
 
     js.create_job("ec-trace", repo_path=str(tmp_path))

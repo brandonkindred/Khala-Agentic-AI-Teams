@@ -44,6 +44,8 @@ class MemoryBackend:
     def get(self, key: str) -> Optional[bytes]:
         """Return the cached value for ``key``, marking it recently used.
 
+        Preconditions:
+            - ``key`` is an opaque, non-empty string.
         Postconditions:
             - Returns the exact bytes previously ``set``, or ``None`` on miss.
             - Does not participate in single-flight; use ``single_flight`` for
@@ -109,6 +111,8 @@ class MemoryBackend:
     def delete(self, key: str) -> None:
         """Drop ``key`` and abandon any in-flight single-flight waiters for it.
 
+        Preconditions:
+            - ``key`` is an opaque, non-empty string.
         Postconditions:
             - Any value stored for ``key`` at the time of the call is removed.
             - Any waiter on an in-flight Future for ``key`` receives
@@ -189,6 +193,8 @@ class MemoryBackend:
     def clear(self) -> int:
         """Drop every entry and abandon all in-flight Futures.
 
+        Preconditions:
+            - None.
         Postconditions:
             - Returns the number of store entries removed at the moment the
               locked wipe ran (``0`` when empty). Emptiness is only guaranteed

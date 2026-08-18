@@ -1,0 +1,37 @@
+<h2 mat-dialog-title>Save draft</h2>
+
+<mat-dialog-content class="save-draft-dialog__content">
+  <mat-form-field appearance="outline">
+    <mat-label>Draft name</mat-label>
+    <input
+      matInput
+      [ngModel]="name()"
+      (ngModelChange)="name.set($event)"
+      [disabled]="busy()"
+      cdkFocusInitial
+    />
+  </mat-form-field>
+
+  @if (serverError()) {
+    <p class="save-draft-dialog__error" role="alert">
+      <mat-icon>error</mat-icon>
+      {{ serverError() }}
+    </p>
+  }
+</mat-dialog-content>
+
+<mat-dialog-actions align="end">
+  <button mat-button (click)="cancel()" [disabled]="busy()">Cancel</button>
+  <button
+    mat-flat-button
+    color="primary"
+    (click)="submit()"
+    [disabled]="busy() || !name().trim()"
+  >
+    @if (busy()) {
+      <mat-spinner diameter="18" />
+    } @else {
+      {{ data.draftId ? 'Update draft' : 'Save draft' }}
+    }
+  </button>
+</mat-dialog-actions>

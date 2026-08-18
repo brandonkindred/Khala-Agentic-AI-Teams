@@ -35,7 +35,7 @@ from .function_boundaries import (
     enclosing_construct,
     strip_numbered_prefixes,
 )
-from .models import CodeReviewIssue
+from .models import CodeReviewInput, CodeReviewIssue
 
 _SIDE_EFFECT_CATEGORY = "side-effects"
 
@@ -46,6 +46,43 @@ _SIDE_EFFECT_CATEGORY = "side-effects"
 # temporal/activities.py, mapping.py's cache fingerprint) imports this constant
 # rather than re-spelling the env var name, so a rename can't silently drift.
 SIDE_EFFECT_CONSOLIDATION_ENV = "CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION"
+
+# Default-on toggle for the mutation-vs-replaced-code contract sub-check inside
+# the side-effect / blast-radius pass (see side_effect_impact_pass.py): an
+# explicit ``CODE_REVIEW_MUTATION_ANALYSIS=false``/``0``/``no`` disables it (see
+# docs/ENV_VARS.md). Any other value (or unset) leaves it enabled. Defined here
+# rather than in a tail-pass module, mirroring ``SIDE_EFFECT_CONSOLIDATION_ENV``
+# immediately above: this is a neutral, side-effect-free location so the
+# low-level cache/fingerprint layer (mapping.py) never has to import a tail-pass
+# module just to read a toggle name. Every caller (side_effect_impact_pass.py,
+# merged_architecture_side_effect_pass.py, coordinator.py, mapping.py's cache
+# fingerprint) imports this constant rather than re-spelling the env var name.
+MUTATION_ANALYSIS_ENV = "CODE_REVIEW_MUTATION_ANALYSIS"
+
+
+def effective_replaced_content(
+    input_data: CodeReviewInput, mutation_on: bool
+) -> Optional[Dict[str, str]]:
+    """The before-image to show the model, gated by the mutation-analysis toggle.
+
+    Single source of truth for the "hide replaced_content entirely when the
+    toggle is off" rule, so ``side_effect_impact_pass._run_pass`` and
+    ``merged_architecture_side_effect_pass._run_pass`` share one implementation
+    instead of duplicating ``input_data.replaced_content if mutation_on else
+    None`` at each call site.
+
+    Preconditions: none.
+
+    Postconditions:
+        - Returns ``input_data.replaced_content`` unchanged when ``mutation_on``
+          is True.
+        - Returns ``None`` when ``mutation_on`` is False, regardless of whether
+          ``input_data.replaced_content`` is set -- the before-image must be
+          hidden from the model entirely in that case, not merely passed
+          through with an instruction to ignore it. Pure; never raises.
+    """
+    return input_data.replaced_content if mutation_on else None
+
 
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
@@ -246,8 +283,9 @@ def _canonical_path(shared_index: CodebaseIndex, file_path: str) -> str:
 def _merge_group(
     group: List[CodeReviewIssue],
     shared_index: CodebaseIndex,
+    category: Optional[str] = None,
 ) -> CodeReviewIssue:
-    """Merge two or more side-effect findings into one consolidated issue.
+    """Merge two or more related findings of one category into one issue.
 
     Starts from the highest-severity member's full ``model_dump()`` so any
     ``CodeReviewIssue`` fields this pass does not explicitly recompute
@@ -256,7 +294,12 @@ def _merge_group(
     recomputed from the group.
 
     Preconditions:
-        - ``len(group) >= 2``; every issue's ``category`` is ``"side-effects"``.
+        - ``len(group) >= 2``; every issue in the group shares one category.
+        - ``category`` is that shared category, or ``None`` to default to
+          ``"side-effects"`` (back-compat for the side-effect consolidation
+          caller, which only ever merges ``"side-effects"`` groups). When
+          given, it becomes the merged issue's category and drives the
+          consolidated-description label.
         - ``shared_index`` is the same index used for construct grouping, so
           path aliases (``foo.py`` vs ``app/foo.py``) resolve consistently.
 
@@ -275,11 +318,13 @@ def _merge_group(
           cited, matching a single-line issue's shape).
         - ``severity`` is the highest-ranked severity in the group
           (``critical`` > ``high`` > ``medium`` > ``low`` > ``info``).
-        - ``category`` is always ``"side-effects"``.
+        - ``category`` is ``category`` (the group's shared category), or
+          ``"side-effects"`` when ``category`` is ``None``.
         - ``description`` is the group's non-blank values with exact duplicates
           removed (order-preserving). A single surviving value is used verbatim;
           multiple values are prefixed with "Consolidated N related
-          side-effect findings:" and joined as a bulleted list. Exact (not
+          <category> findings:" (the ``side-effects`` category renders as
+          "side-effect") and joined as a bulleted list. Exact (not
           fuzzy) dedupe is intentional: near-identical wording that cites
           different callers must all survive.
         - ``suggestion`` is the group's non-blank values with exact duplicates
@@ -289,7 +334,8 @@ def _merge_group(
         - Every other ``CodeReviewIssue`` field (including ``title``) is
           copied from the highest-severity member.
     """
-    file_counts: "OrderedDict[str, int]" = OrderedDict()
+    assert shared_index is not None, "_merge_group requires a CodebaseIndex (see preconditions)"
+    file_counts: OrderedDict[str, int] = OrderedDict()
     for issue in group:
         fp = _canonical_path(shared_index, issue.file_path or "")
         if not fp:
@@ -321,12 +367,19 @@ def _merge_group(
 
     best = min(group, key=lambda i: _severity_rank(i.severity))
 
+    effective_category = category if category else _SIDE_EFFECT_CATEGORY
+    # "side-effects" reads better as "side-effect findings"; every other
+    # category is used verbatim (e.g. "logic findings", "naming findings").
+    category_label = (
+        "side-effect" if effective_category == _SIDE_EFFECT_CATEGORY else effective_category
+    )
+
     descriptions = _dedupe_exact([i.description for i in group if i.description])
     if len(descriptions) <= 1:
         description = descriptions[0] if descriptions else ""
     else:
         description = (
-            f"Consolidated {len(descriptions)} related side-effect findings:\n"
+            f"Consolidated {len(descriptions)} related {category_label} findings:\n"
             + "\n".join(f"- {d}" for d in descriptions)
         )
 
@@ -341,7 +394,7 @@ def _merge_group(
     payload.update(
         {
             "severity": best.severity,
-            "category": _SIDE_EFFECT_CATEGORY,
+            "category": effective_category,
             "file_path": majority_file,
             "line": line,
             "start_line": start_line,

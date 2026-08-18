@@ -12,10 +12,10 @@ import itertools
 import logging
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
+from shared.concurrency import parallel_map
 from shared.temporal.client import get_temporal_client
 from software_engineering_team.activity import ActivityBridge
 from software_engineering_team.api import coding_team_main as _main
@@ -43,10 +43,12 @@ from software_engineering_team.github_source import (
     inline_comment_to_timeline_body,
     is_within_diff,
     map_issues_to_comments,
+    parse_removed_lines,
     parse_valid_lines,
     partition_issues_by_existing_comments,
     proposal_from_findings,
     render_annotated_hunks,
+    render_removed_hunks,
     scrub_token_from_text,
     split_review_comments,
 )
@@ -228,9 +230,9 @@ def _infer_review_language(files: List[Any]) -> str:
 
 
 class ReviewCode(NamedTuple):
-    """Result of assembling the reviewer's ``code`` input from a PR's diff."""
+    """Result of assembling the reviewer's ``files`` input from a PR's diff."""
 
-    code: str
+    files: Dict[str, str]
     files_reviewed: int
 
 
@@ -271,6 +273,9 @@ _DIFF_FIRST_FOCUS_NOTE = (
     "6. New issues introduced by the change\n"
     "7. Does the change actually implement/fix the ticket/spec?\n"
     "8. Project style preferences\n"
+    "Line-number prefixes (`N| `) are a gutter, not source. Ignore them when judging "
+    "indentation. A continuation line indented 4 spaces past its opening `(` / `[` / `{` "
+    "is standard hanging indent (PEP 8 / ruff), not extra leading whitespace — do not flag it.\n"
     f"{_PRE_EXISTING_TAG_INSTRUCTIONS}"
 )
 
@@ -279,7 +284,7 @@ def _diff_first_focus(body: str) -> str:
     """Append the shared diff-first focus note to ``body``.
 
     Every PR reviewer attempt (change surface, whole-file fallback, or hunk
-    ``code``) gets the same note so findings stay change-scoped, the eight
+    files) gets the same note so findings stay change-scoped, the eight
     review criteria are explicit, and ``pre_existing`` tagging stays consistent.
 
     Preconditions:
@@ -327,8 +332,10 @@ def _fetch_head_files(
     complete files to check findings against.
 
     Fetches the reviewable files (per :func:`_is_whole_file_reviewable`)
-    concurrently (bounded by ``_HEAD_FETCH_PARALLELISM``), since the per-file
-    GETs are independent.
+    concurrently via :func:`shared.concurrency.parallel_map` (bounded by
+    ``_HEAD_FETCH_PARALLELISM``), since the per-file GETs are independent. This
+    also propagates the caller's contextvars (LLM attribution, trace_id) into
+    each fetch worker — a raw ``ThreadPoolExecutor`` would not.
 
     Postconditions:
         - Returns ``{filename: full_content}`` for every reviewable file whose
@@ -357,44 +364,63 @@ def _fetch_head_files(
             content = None
         return f.filename, content
 
-    workers = min(_HEAD_FETCH_PARALLELISM, len(targets))
-    if workers <= 1:
-        results = [_one(f) for f in targets]
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            results = list(executor.map(_one, targets))
+    results = parallel_map(targets, _one, max_workers=_HEAD_FETCH_PARALLELISM)
     return {name: content for name, content in results if content and content.strip()}
 
 
 def _build_review_code(files: List[Any]) -> ReviewCode:
-    """Assemble the line-annotated ``code`` input for the reviewer from the diff.
+    """Assemble the line-annotated ``files`` input for the reviewer from the diff.
 
     Renders each changed file's diff hunks (added + context lines, new-file line
     numbers) — not whole files — so the reviewer is scoped to what the PR changed
-    and cited line numbers align with the commentable-line map. Each file is wrapped
-    in a ``### path ###`` block so the reviewer's coordinator can chunk large PRs.
-    Built entirely from the already-fetched ``files`` payload (no extra requests).
+    and cited line numbers align with the commentable-line map. Each file's
+    rendered body is keyed by path so the reviewer's coordinator can chunk large
+    PRs per file. Built entirely from the already-fetched ``files`` payload (no
+    extra requests).
 
     Every reviewable changed file is included — there is no cap on file count.
     The reviewer's coordinator bounds its own per-call prompts, so a large PR is
     chunked rather than truncated.
 
     Postconditions:
-        - Returns ``ReviewCode(code, files_reviewed)`` covering every changed
+        - Returns ``ReviewCode(files, files_reviewed)`` covering every changed
           file with reviewable rendered content. Binary/removed files and files
           whose diff renders empty are not reviewable and are simply absent.
     """
-    blocks: List[str] = []
-    reviewed = 0
+    rendered_by_path: Dict[str, str] = {}
     for f in files:
         if not f.patch or f.status == _FILE_STATUS_REMOVED:
             continue
         rendered = render_annotated_hunks(f.patch)
         if not rendered:
             continue
-        blocks.append(f"### {f.filename} ###\n{rendered}")
-        reviewed += 1
-    return ReviewCode("\n\n".join(blocks), reviewed)
+        rendered_by_path[f.filename] = rendered
+    return ReviewCode(rendered_by_path, len(rendered_by_path))
+
+
+def _build_replaced_content(files: List[Any]) -> Dict[str, str]:
+    """Derive each changed file's pre-change body from its diff's removed side.
+
+    Built entirely from the already-fetched ``files`` payload (each file's
+    ``.patch``) -- no extra GitHub read. Mirrors ``_build_review_code``'s
+    eligibility filter (skip files with no patch or status == removed) so the
+    returned keyset is a subset of what ``hunk_files``/``head_files`` would
+    cover for the same PR.
+
+    Postconditions:
+        - Returns ``{path: removed-side body}`` for every changed file whose
+          removed-side rendering is non-empty. A file whose patch adds lines
+          only (no removed/context rows) is simply absent, not mapped to "".
+    """
+    replaced_by_path: Dict[str, str] = {}
+    for f in files:
+        if not f.patch or f.status == _FILE_STATUS_REMOVED:
+            continue
+        rendered = render_removed_hunks(f.patch)
+        if not rendered:
+            continue
+        replaced_by_path[f.filename] = rendered
+    return replaced_by_path
 
 
 def _build_change_surface_for_reviewable(
@@ -428,11 +454,11 @@ def _build_change_surface_for_reviewable(
 
 
 # Optional dependency: author tagging for persisted review history. Imported once
-# at module load behind a try/except so a missing/broken ``agent_console`` (or its
-# transitive deps) can never break importing this API; ``_review_author`` falls
-# back to "anonymous" when it is unavailable.
+# at module load behind a try/except so a missing/broken ``agent_platform.console``
+# (or its transitive deps) can never break importing this API; ``_review_author``
+# falls back to "anonymous" when it is unavailable.
 try:
-    from agent_console.author import resolve_author as _resolve_author  # noqa: E402
+    from agent_platform.console.author import resolve_author as _resolve_author  # noqa: E402
 except Exception:  # noqa: BLE001 - author tagging is optional, never fatal at import
     _resolve_author = None
 
@@ -442,7 +468,7 @@ def _review_author() -> str:
 
     Postconditions:
         - Returns the resolved author handle, or ``"anonymous"`` when the optional
-          ``agent_console`` author helper is unavailable or raises.
+          ``agent_platform.console`` author helper is unavailable or raises.
     """
     if _resolve_author is None:
         return "anonymous"
@@ -780,13 +806,13 @@ def _run_reviewer(
     job_id: str,
     pr: Any,
     files: List[Any],
-    code: str,
+    hunk_files: Optional[Dict[str, str]],
     head_files: Optional[Dict[str, str]] = None,
     repo_reader: Any = None,
     change_surface: Optional[ChangeSurface] = None,
 ) -> Optional[Any]:
     """Run the injected review engine over ``change_surface``, ``head_files``,
-    and/or ``code``, merging their outputs; records a failure and returns
+    and/or ``hunk_files``, merging their outputs; records a failure and returns
     ``None`` on error.
 
     The PR reviewer is an injected engine (software_engineering_team owns it);
@@ -800,28 +826,37 @@ def _run_reviewer(
     ``_diff_first_focus``) and replaces a whole-file ``head_files`` attempt;
     when the surface is empty or absent, a truthy ``head_files`` drives
     whole-file review (``pre_numbered=False``, ``_diff_first_focus``). A
-    truthy ``code`` always drives an additional diff-hunk attempt
+    non-empty ``hunk_files`` always drives an additional diff-hunk attempt
     (``pre_numbered=True``, ``_diff_first_focus``). The sources can never be
-    mixed into a single call (the underlying engine's ``files``/``code`` are
-    mutually exclusive), which is why partial-fetch PRs may need two calls
-    instead of one.
+    mixed into a single call (each attempt's ``files=`` covers disjoint
+    paths), which is why partial-fetch PRs may need two calls instead of one.
 
     Preconditions:
         - ``provider`` was resolved before the first GitHub call.
         - At least one of ``change_surface`` (non-empty), ``head_files``, or
-          ``code`` is truthy — the caller (``_run_pr_review_body``) never
+          ``hunk_files`` is truthy — the caller (``_run_pr_review_body``) never
           reaches this function otherwise (its own "nothing reviewable" guard
           returns first). A PR whose whole-file fetch fully succeeds supplies
-          only ``head_files`` (``code=""``); one whose fetch fully failed
-          supplies only ``code`` (``head_files`` falsy); one whose fetch
-          PARTIALLY failed supplies BOTH — ``head_files`` for the fetched
-          subset, ``code`` built ONLY from the files that failed to fetch — so
-          both attempts run and are merged. When admission attaches a non-empty
-          ``change_surface``, it replaces the whole-file attempt while hunk
-          ``code`` still merges when present.
+          only ``head_files`` (``hunk_files`` empty); one whose fetch fully
+          failed supplies only ``hunk_files`` (``head_files`` falsy); one whose
+          fetch PARTIALLY failed supplies BOTH — ``head_files`` for the fetched
+          subset, ``hunk_files`` built ONLY from the files that failed to
+          fetch — so both attempts run and are merged. When admission attaches
+          a non-empty ``change_surface``, it replaces the whole-file attempt
+          while ``hunk_files`` still merges when present.
         - ``repo_reader`` is None or a ``RepoReader`` handed to the false-positive
           verifier so it can confirm existing repository files outside the diff.
+        - ``job_id`` is a non-empty string identifying this review run (the
+          same id ``record_review_start`` persisted it under). Forwarded to
+          every reviewer attempt so the pipeline can bind the transcript
+          contextvar (``CodeReviewAgent.run`` -> ``llm_attribution(job_id=...)``)
+          and so job progress/outage recording stays keyed to the right job.
     Postconditions:
+        - ``replaced_content`` (each changed file's pre-change body, derived
+          once from ``files``' diff patches via ``_build_replaced_content``,
+          no extra GitHub read) is forwarded to every attempt when non-empty;
+          omitted entirely otherwise so ``CodeReviewInput.replaced_content``
+          stays at its ``None`` default.
         - On success, returns the single attempt's output unchanged when only
           one ran (identical behavior/kwargs to a single-mode dispatch for
           the all-whole-file, all-surface, and all-hunk cases). When two ran,
@@ -841,19 +876,23 @@ def _run_reviewer(
         agent="code_review",
         label=f"Reviewing PR #{pr_number}",
     )
+    replaced_content = _build_replaced_content(files)
     common = dict(
         repo_reader=repo_reader,
         task_description=f"Review pull request #{pr_number}: {pr.title}",
         language=_infer_review_language(files),
         progress_callback=pr_bridge,
+        job_id=job_id,
     )
+    if replaced_content:
+        common["replaced_content"] = replaced_content
     # One reviewer call per non-empty source; see the docstring above.
     attempts: List[Dict[str, Any]] = []
     surface = change_surface
     if surface is not None and not surface.is_empty:
         attempts.append(
             dict(
-                code=surface.code,
+                files=dict(surface.blocks),
                 pre_numbered=True,
                 task_requirements=_diff_first_focus(pr.body or ""),
             )
@@ -872,7 +911,7 @@ def _run_reviewer(
                 task_requirements=_diff_first_focus(pr.body or ""),
             )
         )
-    if code:
+    if hunk_files:
         # _build_review_code renders every line with its original line-number
         # prefix; declaring pre_numbered here (instead of letting the reviewer
         # sniff the format) keeps issue lines verbatim. Diff hunks still carry
@@ -881,13 +920,13 @@ def _run_reviewer(
         # pre-existing, unchanged code the PR never touched.
         attempts.append(
             dict(
-                code=code,
+                files=hunk_files,
                 pre_numbered=True,
                 task_requirements=_diff_first_focus(pr.body or ""),
             )
         )
     assert attempts, (
-        "caller must supply a non-empty change_surface, head_files, and/or non-empty code"
+        "caller must supply a non-empty change_surface, head_files, and/or non-empty hunk_files"
     )
 
     outputs: List[Any] = []
@@ -939,31 +978,38 @@ def _run_reviewer(
     return outputs[0] if len(outputs) == 1 else _MergedReviewerOutput(outputs)
 
 
-def _results_draining_exceptions(futures: List[Any]) -> List[Any]:
-    """Call ``result()`` on every future; re-raise the first failure after draining all.
+def _run_tasks_draining(tasks: List[Callable[[], Any]]) -> List[Any]:
+    """Run every zero-arg *tasks* concurrently; re-raise the first failure after all finish.
 
-    A generator or list-comprehension unpack stops at the first ``result()``
-    failure and leaves sibling exceptions unretrieved on the remaining futures.
+    Each task's own exception is caught inside the worker (see ``_capture``
+    below) rather than left to propagate through ``parallel_map`` itself — so
+    ``parallel_map``'s own fast-fail path (which cancels not-yet-started
+    siblings on the first exception) never triggers here. Every task always
+    runs to completion, matching the previous hand-rolled
+    ``ThreadPoolExecutor`` + drain-every-future contract this replaces.
 
     Preconditions:
-        - ``futures`` is a list of ``concurrent.futures.Future`` instances.
+        - ``tasks`` is a list of zero-arg callables, safe to invoke concurrently.
     Postconditions:
-        - Every future has had ``result()`` invoked (exceptions retrieved).
-        - Returns the ordered list of successful results when every future succeeds.
-        - Raises the first exception raised by any ``result()`` call when any
-          future fails (after every sibling has also been drained).
+        - Every task in ``tasks`` is invoked exactly once, unconditionally.
+        - Returns the tasks' results in ``tasks`` order when every task succeeds.
+        - Raises the first (by ``tasks`` order, not completion order —
+          deterministic, since every exception is captured before
+          ``parallel_map`` sees it) exception any task raised, once every task
+          has finished.
     """
-    results: List[Any] = []
-    first_error: Optional[BaseException] = None
-    for future in futures:
+
+    def _capture(fn: Callable[[], Any]) -> tuple[Any, Optional[Exception]]:
         try:
-            results.append(future.result())
-        except Exception as exc:  # noqa: BLE001 - drain siblings, then re-raise first
-            if first_error is None:
-                first_error = exc
-    if first_error is not None:
-        raise first_error
-    return results
+            return fn(), None
+        except Exception as exc:  # noqa: BLE001 - captured; re-raised below once every task has finished
+            return None, exc
+
+    outcomes = parallel_map(tasks, _capture, max_workers=len(tasks), skip_none=False)
+    for _, err in outcomes:
+        if err is not None:
+            raise err
+    return [value for value, _ in outcomes]
 
 
 def _fetch_existing_comments(client: Any, owner: str, repo: str, pr_number: int) -> List[Any]:
@@ -982,7 +1028,11 @@ def _fetch_existing_comments(client: Any, owner: str, repo: str, pr_number: int)
           semantics as the prior serial version — this lookup must never fail
           an otherwise-working review; a failure here only means findings are
           neither dropped nor cross-referenced on this run, same as a PR with
-          no existing comments at all.
+          no existing comments at all. Fanned out via
+          :func:`shared.concurrency.parallel_map` (through
+          :func:`_run_tasks_draining`), which also propagates the caller's
+          contextvars (LLM attribution, trace_id) into each fetch worker — a
+          raw ``ThreadPoolExecutor`` would not.
     """
 
     def _reviews() -> Any:
@@ -994,11 +1044,10 @@ def _fetch_existing_comments(client: Any, owner: str, repo: str, pr_number: int)
     def _issues() -> Any:
         return client.list_issue_comments(owner, repo, pr_number)
 
-    tasks = (_reviews, _resolved, _issues)
     try:
-        with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-            futures = [executor.submit(t) for t in tasks]
-            review_comments, resolved_ids, issue_comments = _results_draining_exceptions(futures)
+        review_comments, resolved_ids, issue_comments = _run_tasks_draining(
+            [_reviews, _resolved, _issues]
+        )
         return build_existing_comments(review_comments, resolved_ids, issue_comments)
     except Exception as e:  # noqa: BLE001 - this lookup is best-effort, never fails the review
         logger.warning(
@@ -1094,7 +1143,10 @@ def _fetch_pr_metadata(
           in ``get_authenticated_login`` (of any exception type) is caught
           internally and degrades ``reviewer_login`` to ``""`` (logged) — it
           only feeds the self-PR event downgrade and must never fail the
-          review.
+          review. Fanned out via :func:`shared.concurrency.parallel_map`
+          (through :func:`_run_tasks_draining`), which also propagates the
+          caller's contextvars (LLM attribution, trace_id) into each fetch
+          worker — a raw ``ThreadPoolExecutor`` would not.
     """
 
     def _get_pr() -> Any:
@@ -1114,11 +1166,115 @@ def _fetch_pr_metadata(
             )
             return ""
 
-    tasks = (_get_pr, _get_files, _get_login)
-    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-        futures = [executor.submit(t) for t in tasks]
-        pr, files, reviewer_login = _results_draining_exceptions(futures)
+    pr, files, reviewer_login = _run_tasks_draining([_get_pr, _get_files, _get_login])
     return pr, files, reviewer_login
+
+
+def _files_for_scope(mode: ReviewModeDecision) -> Dict[str, str]:
+    """Collect reviewer-visible file bodies for the scope verifier index.
+
+    Postconditions: union of ``head_files``, ``hunk_files``, and non-empty
+        change-surface blocks. Never raises.
+    """
+    files: Dict[str, str] = {}
+    files.update(mode.head_files or {})
+    files.update(mode.hunk_files or {})
+    surface = mode.change_surface
+    if surface is not None and not surface.is_empty:
+        files.update(dict(surface.blocks))
+    return files
+
+
+def _is_not_reviewed_coverage_finding(issue: Any) -> bool:
+    """True when ``issue`` is a blocking unreviewed-range coverage finding.
+
+    Those findings are merged into ``output.issues`` only when
+    ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` is set; they must not go through
+    scope verification (an unsure tag would route them to proposals and
+    defeat the fail-closed gate).
+
+    Postconditions: True iff the finding description contains
+        ``NOT_REVIEWED_FINDING_MARKER``. Never raises.
+    """
+    from software_engineering_team.code_review_agent.mapping import (
+        NOT_REVIEWED_FINDING_MARKER,
+    )
+
+    return NOT_REVIEWED_FINDING_MARKER in (getattr(issue, "description", "") or "")
+
+
+def _tag_review_issues_for_scope(
+    output: Any, mode: ReviewModeDecision, pr: Any, files: List[Any]
+) -> None:
+    """Tag out-of-scope findings before partition so they are not posted.
+
+    Preconditions: ``output`` is a successful reviewer result with ``issues``.
+        ``pr`` is the GitHub PR object used for the reviewer task text.
+        ``files`` is the PR file list (patches) from admission.
+    Postconditions: ``output.issues`` is replaced with scope-tagged copies when
+        the verifier runs; blocking "could not be reviewed" coverage findings
+        are excluded from the verifier and merged back unchanged so they cannot
+        be routed to issue proposals. On Dummy LLM / verifier failure the list
+        is left unchanged. Never raises.
+    """
+    issues = getattr(output, "issues", None) or []
+    if not issues:
+        return
+    try:
+        from llm_service import get_client
+        from software_engineering_team.code_review_agent.models import CodeReviewInput
+        from software_engineering_team.code_review_agent.scope_filter import (
+            apply_scope_verification,
+        )
+
+        genuine = [i for i in issues if not _is_not_reviewed_coverage_finding(i)]
+        if not genuine:
+            return
+        scope_files = _files_for_scope(mode)
+        input_data = None
+        if scope_files:
+            input_data = CodeReviewInput(
+                files=dict(scope_files),
+                task_description=(
+                    f"Review pull request #{getattr(pr, 'number', '')}: "
+                    f"{getattr(pr, 'title', '') or ''}"
+                ),
+                task_requirements=_diff_first_focus(getattr(pr, "body", None) or ""),
+            )
+        removed_by_path = {
+            f.filename: sorted(parse_removed_lines(getattr(f, "patch", None) or "")) for f in files
+        }
+        removed_by_path = {path: lines for path, lines in removed_by_path.items() if lines}
+        patches_by_path = {
+            f.filename: getattr(f, "patch", None) or "" for f in files if getattr(f, "filename", "")
+        }
+        tagged = apply_scope_verification(
+            get_client(),
+            issues=genuine,
+            changed_by_path=mode.changed_by_path,
+            files=scope_files,
+            repo_reader=mode.repo_reader,
+            input_data=input_data,
+            removed_by_path=removed_by_path,
+            patches_by_path=patches_by_path,
+        )
+        # apply_scope_verification preserves finding count and order, so `tagged`
+        # aligns 1:1 with `genuine`. Assert that postcondition here so a contract
+        # breach surfaces as a clear, caught failure below rather than a
+        # StopIteration raised mid-splice from next(tagged_iter).
+        assert len(tagged) == len(genuine), (
+            f"scope verification must preserve finding count: {len(tagged)} != {len(genuine)}"
+        )
+        tagged_iter = iter(tagged)
+        output.issues = [
+            i if _is_not_reviewed_coverage_finding(i) else next(tagged_iter) for i in issues
+        ]
+    except Exception as exc:  # noqa: BLE001 — tagging must never fail the review
+        logger.warning(
+            "PR review: scope verification skipped (%s: %s)",
+            type(exc).__name__,
+            scrub_token_from_text(str(exc)),
+        )
 
 
 class ReviewModeDecision(NamedTuple):
@@ -1128,7 +1284,7 @@ class ReviewModeDecision(NamedTuple):
     changed_by_path: Dict[str, List[int]]
     head_files: Dict[str, str]
     change_surface: ChangeSurface
-    code: str
+    hunk_files: Dict[str, str]
     files_reviewed: int
     repo_reader: Any
 
@@ -1148,7 +1304,7 @@ def _decide_review_mode(
     reviewable file whose head content fetches successfully is reviewed
     whole; only the files whose fetch fails fall back to hunk rendering (see
     :func:`_run_reviewer`), so one file's failed fetch never discards another
-    file's successfully-fetched whole-file body. The hunk ``code`` blob is
+    file's successfully-fetched whole-file body. ``hunk_files`` is
     built only for the files that actually need it, never unconditionally, so
     a PR whose whole-file fetch fully succeeds pays nothing for hunk
     rendering.
@@ -1164,7 +1320,7 @@ def _decide_review_mode(
     Postconditions:
         - Returns ``None`` when ``files`` is empty, when no file passes
           :func:`_is_whole_file_reviewable`, or when the total-hunk-fallback
-          branch renders empty ``code`` — in every case
+          branch renders empty ``hunk_files`` — in every case
           :func:`_complete_review_noop` has already posted the courtesy
           comment and finalized the job ``COMPLETED``; the caller must return
           immediately without further GitHub calls.
@@ -1177,17 +1333,17 @@ def _decide_review_mode(
           the surface does NOT cover (``reviewable - set(change_surface.blocks)``
           — whether its fetch failed, or fetch succeeded but the builder
           produced no usable body for it, e.g. a patch with no added lines)
-          is hunk-rendered into ``code`` here, and ``files_reviewed`` sums the
-          surfaced count plus the hunk count: no reviewable file is ever
-          covered by neither ``change_surface.blocks`` nor ``code``. When
-          ``change_surface`` is empty, the whole-file/hunk decision falls back
-          to ``head_files`` alone: every reviewable file fetched whole yields
-          ``code == ""`` and ``files_reviewed == len(head_files)``; a partial
-          fetch renders ``code`` (via :func:`_build_review_code`) ONLY from the
-          files that failed to fetch, summing both counts; a total fetch
-          failure renders ``code`` from all ``files``. ``repo_reader`` is
-          always constructed for ``pr.head_sha``, whole-file/surface success
-          or not.
+          is hunk-rendered into ``hunk_files`` here, and ``files_reviewed``
+          sums the surfaced count plus the hunk count: no reviewable file is
+          ever covered by neither ``change_surface.blocks`` nor
+          ``hunk_files``. When ``change_surface`` is empty, the whole-file/hunk
+          decision falls back to ``head_files`` alone: every reviewable file
+          fetched whole yields ``hunk_files == {}`` and
+          ``files_reviewed == len(head_files)``; a partial fetch renders
+          ``hunk_files`` (via :func:`_build_review_code`) ONLY from the files
+          that failed to fetch, summing both counts; a total fetch failure
+          renders ``hunk_files`` from all ``files``. ``repo_reader`` is always
+          constructed for ``pr.head_sha``, whole-file/surface success or not.
         - Never raises for GitHub-fetch failures (:func:`_fetch_head_files`
           degrades internally); any other exception propagates to the
           caller's outer handler.
@@ -1243,14 +1399,14 @@ def _decide_review_mode(
     # partial fetch failure must not discard the whole-file bodies
     # that DID come back.
     head_files = _fetch_head_files(client, owner, repo, files, pr.head_sha)
-    # Built before the code/files_reviewed decision below (it is a pure
+    # Built before the hunk_files/files_reviewed decision below (it is a pure
     # function of files/head_files) since _run_reviewer dispatches a
     # non-empty change_surface as PRIMARY and bypasses head_files entirely —
-    # the fallback-code decision needs to know which files that will leave
-    # uncovered, not just which files failed to fetch.
+    # the fallback-hunk_files decision needs to know which files that will
+    # leave uncovered, not just which files failed to fetch.
     change_surface = _build_change_surface_for_reviewable(files, head_files)
     missing = reviewable - set(head_files)
-    code = ""
+    hunk_files: Dict[str, str] = {}
     if not change_surface.is_empty:
         # The surface covers at least one file and will be dispatched as the
         # PRIMARY reviewer input (see _run_reviewer), replacing the
@@ -1265,7 +1421,7 @@ def _decide_review_mode(
         uncovered = reviewable - surfaced
         if uncovered:
             fallback_files = [f for f in files if f.filename in uncovered]
-            code, hunk_reviewed = _build_review_code(fallback_files)
+            hunk_files, hunk_reviewed = _build_review_code(fallback_files)
             files_reviewed = len(surfaced) + hunk_reviewed
             logger.info(
                 "PR review #%s: change surface covers %d/%d reviewable "
@@ -1286,7 +1442,7 @@ def _decide_review_mode(
         # Partial fetch, no surface at all: hunk-render ONLY the files that
         # failed to fetch whole; files that DID fetch stay in whole-file mode.
         fallback_files = [f for f in files if f.filename in missing]
-        code, hunk_reviewed = _build_review_code(fallback_files)
+        hunk_files, hunk_reviewed = _build_review_code(fallback_files)
         files_reviewed = len(head_files) + hunk_reviewed
         logger.info(
             "PR review #%s: fetched %d/%d whole files; the remaining "
@@ -1301,8 +1457,8 @@ def _decide_review_mode(
         # render every changed file's hunks (not just `reviewable`,
         # since _build_review_code applies its own equivalent filter
         # internally).
-        code, files_reviewed = _build_review_code(files)
-        if not code:
+        hunk_files, files_reviewed = _build_review_code(files)
+        if not hunk_files:
             # Belt-and-suspenders: `reviewable` is non-empty (the gate
             # above passed) but every reviewable file's diff hunk
             # happened to render blank (e.g. a hunk that only removes
@@ -1310,7 +1466,7 @@ def _decide_review_mode(
             # render_annotated_hunks to emit). _build_review_code
             # filters on the same non-removed+has-patch predicate as
             # _is_whole_file_reviewable, so this is the only place
-            # `code` can still end up empty once `reviewable` passed.
+            # `hunk_files` can still end up empty once `reviewable` passed.
             _complete_review_noop(
                 client,
                 job_id,
@@ -1334,7 +1490,7 @@ def _decide_review_mode(
         changed_by_path=changed_by_path,
         head_files=head_files,
         change_surface=change_surface,
-        code=code,
+        hunk_files=hunk_files,
         files_reviewed=files_reviewed,
         repo_reader=repo_reader,
     )
@@ -1821,13 +1977,15 @@ def _run_pr_review_body(
                 job_id,
                 pr,
                 files,
-                mode.code,
+                mode.hunk_files,
                 head_files=mode.head_files or None,
                 change_surface=mode.change_surface,
                 repo_reader=mode.repo_reader,
             )
             if output is None:
                 return
+
+            _tag_review_issues_for_scope(output, mode, pr, files)
 
             partition = _partition_review_issues(
                 output,

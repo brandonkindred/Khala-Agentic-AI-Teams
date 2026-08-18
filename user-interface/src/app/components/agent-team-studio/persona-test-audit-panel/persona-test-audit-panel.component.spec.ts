@@ -3,6 +3,7 @@ import { of, throwError } from 'rxjs';
 import { ActivatedRoute, provideRouter } from '@angular/router';
 import { vi } from 'vitest';
 import { PersonaTestingApiService } from '../../../services/persona-testing-api.service';
+import type { RunArtifacts } from '../../../models';
 import { PersonaTestAuditPanelComponent } from './persona-test-audit-panel.component';
 
 describe('PersonaTestAuditPanelComponent', () => {
@@ -43,7 +44,7 @@ describe('PersonaTestAuditPanelComponent', () => {
   };
 
   afterEach(() => {
-    component?.ngOnDestroy();
+    fixture?.destroy();
     TestBed.resetTestingModule();
   });
 
@@ -124,9 +125,28 @@ describe('PersonaTestAuditPanelComponent', () => {
 
   it('handles missing artifact fields', () => {
     buildFixture();
-    component.artifacts = { se_job_status: {} } as never;
+    component.artifacts = { se_job_status: {} } as RunArtifacts;
     expect(component.seJobProgress).toBeNull();
     expect(component.seJobTaskStates).toBeNull();
     expect(component.getTaskStatus('t1')).toBe('');
+  });
+
+  it('defaults the back link to /agent-studio', () => {
+    buildFixture();
+    fixture.detectChanges();
+    const link = fixture.nativeElement.querySelector('a.back-link') as HTMLAnchorElement;
+    expect(link.getAttribute('href')).toBe('/agent-studio');
+    expect(link.textContent).toContain('Back to Agent Studio');
+  });
+
+  it('renders a custom backLink and backLabel when provided', () => {
+    buildFixture();
+    component.backLink = '/agent-studio/persona-run/123';
+    component.backLabel = 'Back to run';
+    fixture.detectChanges();
+    const link = fixture.nativeElement.querySelector('a.back-link') as HTMLAnchorElement;
+    expect(link.getAttribute('href')).toBe('/agent-studio/persona-run/123');
+    expect(link.textContent).toContain('Back to run');
+    expect(link.textContent).not.toContain('Back to Agent Studio');
   });
 });

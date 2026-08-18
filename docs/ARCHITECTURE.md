@@ -20,6 +20,7 @@ This document describes the architecture of the Software Engineering Team — a 
 - [11. Product Delivery Loop](#11-product-delivery-loop)
 - [12. Agent Cognition Core](#12-agent-cognition-core)
 - [13. Repo Layout](#13-repo-layout)
+- [14. Unified API lifespan](#14-unified-api-lifespan)
 
 ---
 
@@ -58,7 +59,7 @@ The API also exposes `GET /run-team/{job_id}` for polling job status, `POST /run
 
 When `TEMPORAL_ADDRESS` is set (e.g. in Docker), the SE team uses **Temporal** instead of background threads:
 
-- **Workflows**: `RunTeamWorkflow`, `RetryFailedWorkflow`, `StandaloneJobWorkflow` (for frontend-code-v2, backend-code-v2, product-analysis).
+- **Workflows**: `RunTeamWorkflowV2`, `RetryFailedWorkflow`, `StandaloneJobWorkflow` (for frontend-code-v2, backend-code-v2, product-analysis).
 - **Activities**: Each workflow runs activities that call the same logic as the former thread targets (`run_orchestrator`, `run_failed_tasks`, and the standalone runners). Activities update the **job store** so the API and UI continue to poll status from the store.
 - **Worker**: A Temporal worker runs in-process (started from the unified API lifespan or when the SE API runs standalone), using task queue `software-engineering` (override with `TEMPORAL_TASK_QUEUE`).
 - **Resilience**: Progress is durable in Temporal; after a server restart, the worker reconnects and in-progress workflows continue. **Resume** is allowed for `failed` jobs as well as `pending`, `running`, and `agent_crash`, so jobs marked failed (e.g. by the stale-heartbeat monitor) can be resumed via `POST /run-team/{job_id}/resume`.
@@ -640,13 +641,17 @@ The layers, each documented in depth in `backend/agents/agent_cognition/README.m
 - **Invoke gate & facade** (`invoke_gate.py`, `context.py`, `invoke_context.py`): the run-once idempotency ledger (`claim_run`/`complete_run`/replay), lazy rollup catch-up, context load, and the marker-wrapped `{input, cognition}` ↔ `{output, cognition_writeback}` envelope consumed by the shim and the invoke proxy.
 - **Operator HITL surface**: `/api/cognition/...` routes (`unified_api/routes/cognition.py`) and the Angular **Cognition** panel in the Agent Console back the approve/reject review flow.
 
-Per-agent config travels in the manifest `CognitionSpec` block (`agent_registry/models.py`); the Agentic team stamps it onto generated agents and their runtime renders the advisory rules + digest into each LLM call. Operability and tuning env vars (`AGENT_COGNITION_SCHEDULER_INTERVAL_S`, retention, digest budget, `LLM_MODEL_cognition`, writeback cap, ledger TTL) are documented under "Configuration & operability" in `backend/agents/agent_cognition/README.md` and in `docs/ENV_VARS.md`.
+Per-agent config travels in the manifest `CognitionSpec` block (`agent_platform/registry/models.py`); the Agentic team stamps it onto generated agents and their runtime renders the advisory rules + digest into each LLM call. Operability and tuning env vars (`AGENT_COGNITION_SCHEDULER_INTERVAL_S`, retention, digest budget, `LLM_MODEL_cognition`, writeback cap, ledger TTL) are documented under "Configuration & operability" in `backend/agents/agent_cognition/README.md` and in `docs/ENV_VARS.md`.
 
 ---
 
 ## 13. Repo Layout
 
-The repository contains two independent agent systems. The software engineering team is the primary system documented above; a separate blogging agent system exists under `agents/blogging/`.
+The software engineering team is the primary system documented above; a separate blogging agent system exists under `agents/blogging/`. In-process platform code lives beside those teams, not inside them:
+
+- **Platform** — `backend/agents/agent_platform/` (registry, console, sandbox, Studio). Shared cognitive substrate is `backend/agents/agent_cognition/`. Cross-cutting infra is `backend/shared/` (`shared.postgres`, `shared.temporal`, `shared.agent_invoke`).
+- **Infra (not platform)** — Docker/environment provisioning stays in `backend/agents/agent_team_studio/agent_provisioning_team/`.
+- **Domain apps** — `backend/agents/agent_team_studio/agentic_team_provisioning/` and `backend/agents/agent_team_studio/user_agent_founder/` consume the platform; they are not members of it.
 
 ```mermaid
 flowchart TB
@@ -654,6 +659,9 @@ flowchart TB
 
     Root --> SWTeam["agents/software_engineering_team/"]
     Root --> BlogTeam["agents/blogging/"]
+    Root --> Platform["agents/agent_platform/"]
+    Root --> Studio["agents/agent_team_studio/"]
+    Root --> Shared["backend/shared/"]
 
     SWTeam --> swOrch["orchestrator.py"]
     SWTeam --> swAPI["api/"]
@@ -672,3 +680,17 @@ flowchart TB
 ```
 
 Each agent directory follows a consistent structure: `agent.py` (core logic), `models.py` (Pydantic input/output contracts), and `prompts.py` (LLM prompt templates). Shared utilities (LLM client, git operations, repo I/O, logging) live in `shared/`.
+
+---
+
+## 14. Unified API lifespan
+
+The Unified API's FastAPI `lifespan` (`backend/unified_api/main.py`) is the sole
+boot site for platform-core workers that share process-local state with this
+process's HTTP handlers (sandbox `Lifecycle`, Studio `AgentStudioService`), and
+the place that registers Postgres schemas, team-assistant mount specs, and
+container-team proxy routes. In-process platform HTTP routers
+(`app.include_router`) mount at import time, not inside `lifespan()`.
+
+The numbered step catalog, import-time router table, and worker-ownership rules
+live in [`UNIFIED_API_LIFESPAN.md`](UNIFIED_API_LIFESPAN.md).

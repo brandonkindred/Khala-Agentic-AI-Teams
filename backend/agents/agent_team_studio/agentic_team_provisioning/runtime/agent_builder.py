@@ -1,8 +1,8 @@
-"""Compile an AgenticTeamAgent roster definition into a live strands.Agent.
+"""Compile resolved persona fields into a live strands.Agent.
 
-Used by the interactive testing mode to turn declarative agent
-definitions (role, skills, capabilities, tools, expertise) into
-runnable agents that can respond to user messages.
+Used by the interactive testing mode and pipeline runner to turn
+join-at-read persona fields (role, skills, capabilities, tools, expertise)
+into runnable agents that can respond to user messages.
 
 The strands SDK is a hard dependency. The system will fail fast if it is not installed.
 """
@@ -22,6 +22,13 @@ from strands_tools import current_time, http_request, python_repl
 logger = logging.getLogger(__name__)
 
 _COMMON_TOOLS: list[Any] = [http_request, python_repl, current_time]
+
+# Plumbing tags stripped from a manifest's ``Skills:`` line at invoke time on top of
+# the ``{generated, agentic_team_provisioning}`` markers ``skill_tags_from_manifest``
+# already removes: a Studio-saved agent carries a ``"studio"`` registration stamp that
+# is not a persona skill. Stripped only here (not in the shared roster projection, whose
+# callers keep the tag), per ADR-015.
+_INVOKE_SKILL_STRIP_TAGS = frozenset({"studio"})
 
 # Registry mapping tool name strings from the roster to actual tool objects.
 TOOL_REGISTRY: dict[str, Any] = {
@@ -218,6 +225,7 @@ def call_agent_with_cognition(
     message: str,
     *,
     agent_id: str | None = None,
+    base_prompt: str | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
     """Build, invoke, and produce a writeback for one cognition-aware invoke.
 
@@ -231,9 +239,15 @@ def call_agent_with_cognition(
           episodic ``MemoryEvent``; with no channel open (or cognition
           unavailable) the prompt is unchanged, ``writeback`` is ``None``, and the
           call behaves like the legacy path.
+        * When ``base_prompt`` is ``None`` the base system prompt is composed from
+          the persona fields via :func:`build_system_prompt` (the legacy behavior);
+          when supplied it is used verbatim as the base fed to
+          :func:`render_cognition_prompt`, so a caller that has already composed a
+          manifest-bound / state-composed prompt is not double-composed.
     """
     cognition = _read_cognition_context()
-    base_prompt = build_system_prompt(agent_name, role, skills, capabilities, tools, expertise)
+    if base_prompt is None:
+        base_prompt = build_system_prompt(agent_name, role, skills, capabilities, tools, expertise)
     prompt = render_cognition_prompt(base_prompt, cognition)
     agent_instance = build_agent(
         agent_name,
@@ -254,13 +268,86 @@ def call_agent_with_cognition(
     return text, writeback
 
 
-async def invoke_generated_agent(body: Any) -> dict[str, Any]:
+def _resolve_invoke_manifest(agent_id: str | None) -> Any:
+    """Resolve the ``AgentManifest`` for an invoke id, or ``None`` (degraded path).
+
+    Preconditions:
+        * ``agent_id`` is the id to resolve, or a falsy value.
+    Postconditions:
+        * Returns ``get_registry().get(agent_id)`` for a non-blank id, else ``None``.
+          Any failure (blank id, registry/store error, missing package) degrades to
+          ``None`` so the caller falls back to pure request-body persona rather than
+          raising — the well-defined no-manifest path (a direct caller bypassing the
+          shim, or a Postgres-off unit run).
+    """
+    if not agent_id or not str(agent_id).strip():
+        return None
+    try:
+        from agent_platform.registry import get_registry
+
+        return get_registry().get(agent_id)
+    except Exception:
+        logger.debug(
+            "manifest resolution failed for %r; using request-body persona",
+            agent_id,
+            exc_info=True,
+        )
+        return None
+
+
+def _manifest_state_prompt(manifest: Any, state: str) -> str:
+    """Return the ``system_prompt`` of the manifest state whose key equals ``state``.
+
+    Preconditions:
+        * ``manifest`` is a validated ``AgentManifest`` or ``None``.
+    Postconditions:
+        * Returns the matching :class:`AgentStateSpec.system_prompt` when ``manifest``
+          carries a state keyed ``state``; otherwise ``""`` — including no manifest, an
+          empty/absent ``states`` list (legacy manifests), or an unknown ``state`` key.
+          An unknown key silently falls through to the generic composer rather than
+          raising, so a stale/typo state never fails an otherwise valid invoke.
+    """
+    if manifest is None or not getattr(manifest, "states", None):
+        return ""
+    return next((s.system_prompt for s in manifest.states if s.key == state), "")
+
+
+def _compose_base_prompt(
+    agent_name: str,
+    role: str,
+    skills: list[str],
+    capabilities: list[str],
+    expertise: list[str],
+    manifest: Any,
+    state: str,
+) -> str:
+    """Compose the base system prompt from persona fields + the manifest state prompt.
+
+    Preconditions:
+        * ``agent_name`` is non-empty; ``state`` names the desired operating state.
+    Postconditions:
+        * Returns :func:`build_system_prompt` (runtime tools always ``[]``). When the
+          selected manifest state prompt is non-blank it is appended after a blank line
+          so persona still binds (composition, not replacement). Returns the persona
+          prompt unchanged when there is no matching / non-blank state prompt.
+    """
+    base = build_system_prompt(agent_name, role, skills, capabilities, [], expertise)
+    state_prompt = _manifest_state_prompt(manifest, state).strip()
+    if state_prompt:
+        return f"{base}\n\n{state_prompt}"
+    return base
+
+
+async def invoke_generated_agent(body: Any, *, agent_id: str | None = None) -> dict[str, Any]:
     """Sandbox entrypoint for a generated agentic-team agent.
 
     A single shared callable serves every generated manifest, so the roster
     metadata travels in the request ``body`` (see
     ``models.GeneratedAgentInvokeInput``) — the dispatch shim calls this as
-    ``invoke_generated_agent(body)`` and awaits the coroutine.
+    ``invoke_generated_agent(body, agent_id=<route id>)`` and awaits the coroutine.
+    ``agent_id`` is the trusted, route-resolved manifest id the shim already looked
+    the manifest up with; the dispatch layer forwards it only because this
+    entrypoint declares the parameter (``dispatch._call_entrypoint``).
 
     **Async on purpose:** the invoke shim runs entrypoints inline on its event
     loop, and the underlying Strands model call is blocking. Running it directly
@@ -277,30 +364,37 @@ async def invoke_generated_agent(body: Any) -> dict[str, Any]:
     worker slot after the client already saw a timeout. A deadline-propagating /
     cancellable model invocation is tracked as a follow-up.
 
-    Binding caveat (tracked follow-up): the dispatch contract hands this function
-    only the request body, never the resolved manifest/agent id, so it cannot look
-    up the agent's immutable persisted roster definition. The persona *text* fields
-    are therefore taken from the (caller-controlled) body — a generated manifest
-    selects which agent is advertised, not an enforced persona. **Tools are not
-    taken from the body**: the manifest declares ``cognition.tools = []`` and tool
-    brokering isn't wired yet, so the runtime grants no tools (a caller can't
-    escalate to ``python`` / ``http_request``). Binding the manifest to its stored
-    definition lands with the cross-process invoke work.
+    Manifest binding: persona fields the request omits (``role`` / ``skills`` /
+    ``capabilities`` / ``expertise``) and ``system_prompt`` bind from the agent's
+    stored ``AgentManifest``, resolved through the trusted route-supplied ``agent_id``
+    (never a body-supplied id). "Omits" is a raw-body key-presence test: an
+    explicitly-present field — including an explicitly-cleared empty list or blank
+    string — overrides the manifest default for that invoke only, never written back.
+    An explicit ``system_prompt`` fully replaces the base prompt; a manifest-sourced
+    state prompt (selected by ``state``) is composed with the resolved persona fields
+    instead. **Tools are not taken from the body**: the manifest declares
+    ``cognition.tools = []`` and tool brokering isn't wired yet, so the runtime grants
+    no tools (a caller can't escalate to ``python`` / ``http_request``). See the
+    locked precedence contract in
+    ``system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md``.
 
     Preconditions:
-        * ``body`` is a mapping; ``agent_name`` and ``message`` are recommended
-          (both default so a malformed body never raises a ``TypeError`` at the
-          dispatch boundary).
+        * ``body`` may be any value. Non-dicts (including ``None``) coerce to
+          ``{}`` before ``GeneratedAgentInvokeInput`` validation so a malformed
+          payload never raises a ``TypeError`` at the dispatch boundary.
+          ``agent_name`` and ``message`` are recommended and default when omitted.
+        * ``agent_id`` is the trusted route id or ``None`` (direct/test callers).
     Postconditions:
-        * Reconstructs the roster agent, runs it through the cognition-aware
-          wrapper (advisory rules + memory digest from the open side channel steer
-          the invoke) off the event loop, and returns ``{"output": <response
-          text>}`` (or a marker-wrapped writeback envelope when a channel is open).
+        * Reconstructs the roster agent — binding omitted persona/state fields from
+          the resolved manifest — runs it through the cognition-aware wrapper
+          (advisory rules + memory digest from the open side channel steer the
+          invoke) off the event loop, and returns ``{"output": <response text>}``
+          (or a marker-wrapped writeback envelope when a channel is open).
     """
-    return await asyncio.to_thread(_invoke_generated_agent_sync, body)
+    return await asyncio.to_thread(_invoke_generated_agent_sync, body, agent_id)
 
 
-def _invoke_generated_agent_sync(body: Any) -> dict[str, Any]:
+def _invoke_generated_agent_sync(body: Any, agent_id: str | None = None) -> dict[str, Any]:
     """Blocking core of :func:`invoke_generated_agent` (runs in a worker thread).
 
     Validates ``body`` against the declared invoke schema before touching the
@@ -308,25 +402,78 @@ def _invoke_generated_agent_sync(body: Any) -> dict[str, Any]:
     schema, so a malformed body (e.g. ``skills`` as an int, a non-string
     ``message``) would otherwise raise deep inside prompt construction. A
     ``ValidationError`` here surfaces as a clean request error at the boundary.
+
+    Preconditions:
+        * ``body`` may be any value (coerced to ``{}`` when not a dict).
+        * ``agent_id`` is the trusted route id, or ``None`` for a direct caller.
+    Postconditions:
+        * Resolves the agent's manifest (trusted ``agent_id`` preferred; a
+          body-carried id/name is only a fallback used when nothing was threaded, so
+          the sandbox path never binds from caller-controlled identity), maps it to
+          persona defaults via :func:`persona_from_manifest`, and for each of
+          ``role`` / ``skills`` / ``capabilities`` / ``expertise`` uses the manifest
+          default unless the raw request body explicitly carries that key (per
+          ADR-015's presence test — an explicitly-cleared empty list/blank string is
+          an override, not an omission). Composes the base prompt: an explicit
+          request ``system_prompt`` is a full replacement; otherwise the persona
+          fields plus the selected manifest state prompt are composed. Invokes via
+          :func:`call_agent_with_cognition`. Runtime tools stay ``[]``. When no
+          manifest resolves, every field falls back to pure body values (today's
+          degraded path).
     """
     from agent_team_studio.agentic_team_provisioning.models import GeneratedAgentInvokeInput
+    from agent_team_studio.agentic_team_provisioning.roster_resolve import (
+        EMPTY_ROSTER_PERSONA,
+        persona_from_manifest,
+    )
 
-    spec = GeneratedAgentInvokeInput.model_validate(body if isinstance(body, dict) else {})
+    raw = body if isinstance(body, dict) else {}
+    spec = GeneratedAgentInvokeInput.model_validate(raw)
+
+    # Trusted route id wins; the body id/name is only a fallback for direct callers
+    # (tests, non-sandboxed internal callers) that never went through the shim.
+    manifest = _resolve_invoke_manifest(agent_id or spec.agent_id or spec.agent_name)
+    persona = (
+        persona_from_manifest(manifest, extra_strip_tags=_INVOKE_SKILL_STRIP_TAGS)
+        if manifest is not None
+        else EMPTY_ROSTER_PERSONA
+    )
+
+    # Explicit-override precedence (ADR-015): a field explicitly present in the raw
+    # body — regardless of value — wins over the manifest default for this invoke
+    # only (never written back). An omitted key inherits the manifest default.
+    # Presence, not truthiness, is the test: an explicitly-cleared empty list/blank
+    # string is a caller override (e.g. clearing the manifest's skills), not "fall
+    # back to the manifest".
+    role = spec.role if "role" in raw else persona.role
+    skills = spec.skills if "skills" in raw else persona.skills
+    capabilities = spec.capabilities if "capabilities" in raw else persona.capabilities
+    expertise = spec.expertise if "expertise" in raw else persona.expertise
+
+    if "system_prompt" in raw:
+        # Full replacement: the caller owns the prompt; persona fields are not
+        # spliced in a second time.
+        base_prompt = spec.system_prompt
+    else:
+        base_prompt = _compose_base_prompt(
+            spec.agent_name, role, skills, capabilities, expertise, manifest, spec.state
+        )
+
     text, writeback = call_agent_with_cognition(
         spec.agent_name,
-        spec.role,
-        spec.skills,
-        spec.capabilities,
-        # Runtime tools are NOT taken from the (caller-controlled) body: the
-        # generated manifest declares ``cognition.tools = []`` and tool brokering
-        # isn't wired for generated agents yet, so granting a body-supplied tool
-        # (e.g. ``python``/``http_request``) would hand out an unaudited
-        # code-exec/network capability that bypasses the brokered tool loop. Keep
-        # it empty until roster-bound tool brokering lands (the deferred work).
+        role,
+        skills,
+        capabilities,
+        # Runtime tools are NOT taken from the (caller-controlled) body nor from the
+        # manifest's ``cognition.tools``: tool brokering isn't wired for generated
+        # agents yet, so granting a tool (e.g. ``python``/``http_request``) would hand
+        # out an unaudited code-exec/network capability that bypasses the brokered
+        # tool loop. Keep it empty until roster-bound tool brokering lands.
         [],
-        spec.expertise,
+        expertise,
         spec.message,
         agent_id=spec.agent_id,
+        base_prompt=base_prompt,
     )
     return _shape_invoke_result(text, writeback)
 

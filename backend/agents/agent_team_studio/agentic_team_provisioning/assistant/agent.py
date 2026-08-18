@@ -1,10 +1,14 @@
-"""Process Designer Assistant — LLM-powered agent that helps users define team processes via chat."""
+"""Process Designer Assistant — LLM-powered agent that helps users define team processes via chat.
+
+The LLM reply embeds three fenced JSON blocks in otherwise free-form prose —
+``agents`` (the team roster), ``process`` (the process definition), and
+``suggestions`` (follow-up prompts) — extracted and stripped from the visible
+reply via ``agent_team_studio.assistant_kernel.fenced_json``.
+"""
 
 from __future__ import annotations
 
 import json
-import logging
-import re
 import uuid
 from typing import Optional
 
@@ -20,7 +24,7 @@ from agent_team_studio.agentic_team_provisioning.models import (
 )
 from llm_service import get_strands_model
 
-logger = logging.getLogger(__name__)
+from ...assistant_kernel import parse_fenced_json, strip_fenced_blocks
 
 _TRIGGER_MAP = {v.value: v for v in TriggerType}
 _STEP_TYPE_MAP = {v.value: v for v in StepType}
@@ -44,25 +48,28 @@ The central coordinator inside the team. It receives user requests, manages \
 and executes processes. The platform acts as the orchestrator.
 
 ### Agents pool / Roster (Agent 1 … Agent N)
-Each team maintains a **roster** — a named pool of agents. The roster is \
-validated to ensure the team is fully staffed: every skill, capability, tool, \
-and expertise area needed by the team's processes must be covered by at least \
-one rostered agent. Each agent has:
+Each team maintains a **roster** — a named pool of agents. Persisted roster \
+rows are thin refs (``agent_name``, ``source``, ``manifest_id``); persona lives \
+on the linked **AgentManifest** (source of truth). The roster is validated to \
+ensure the team is fully staffed: Manifest-projected skills, tools, and \
+expertise needed by the team's processes must be covered by at least one \
+rostered agent. When you emit an agents JSON block, include:
 - **agent_name** — stable, unique within the team; used for provisioning.
-- **role** — primary role on the team.
-- **skills** — specific skills (e.g. "data analysis", "copywriting").
-- **capabilities** — functional capabilities (e.g. "code generation", "web search").
-- **tools** — tools or integrations the agent can use (e.g. "Git", "Slack API").
-- **expertise** — domain expertise areas (e.g. "customer support", "HIPAA compliance").
+- **role** — primary role on the team (stored as Manifest summary).
+- **skills** — specific skills (e.g. "data analysis", "copywriting") → Manifest tags.
+- **capabilities** — functional capabilities (e.g. "code generation", "web search") → Manifest tags.
+- **tools** — free-text tools or integrations (e.g. "Git", "Slack API") → Manifest tags \
+  (not resolvable cognition tool ids).
+- **expertise** — domain expertise areas (e.g. "customer support", "HIPAA compliance") → Manifest tags.
 
 Each named agent is provisioned by the **Agent Provisioning** team: they \
 receive a sandboxed environment per the canonical agent anatomy (Input/Output, \
 Tools, Memory tiers, Prompts, Security Guardrails, Subagents). Use clear, \
 stable names — they participate in provisioning.
 
-**You MUST provide all six fields** for every agent. The roster is validated \
-automatically; agents missing skills/capabilities/tools/expertise will be \
-flagged as incomplete.
+**You MUST provide agent_name and role** for every agent, plus skills / \
+capabilities / tools / expertise so staffing coverage can be validated. Empty \
+persona lists are fine only when the agent truly has none yet.
 
 ### Processes pool (Process 1 … Process N)
 Each team defines one or more processes. A process has:
@@ -193,59 +200,6 @@ def _build_messages(
     return messages
 
 
-def _parse_process_json(text: str) -> Optional[dict]:
-    """Extract the ```process ... ``` JSON block from assistant response."""
-    pattern = r"```process\s*\n?(.*?)```"
-    match = re.search(pattern, text, re.DOTALL)
-    if not match:
-        return None
-    raw = match.group(1).strip()
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        logger.warning("Failed to parse process JSON from assistant response")
-        return None
-
-
-def _parse_suggestions(text: str) -> list[str]:
-    """Extract the ```suggestions ... ``` JSON block."""
-    pattern = r"```suggestions\s*\n?(.*?)```"
-    match = re.search(pattern, text, re.DOTALL)
-    if not match:
-        return []
-    try:
-        data = json.loads(match.group(1).strip())
-        if isinstance(data, list):
-            return [str(s) for s in data]
-    except json.JSONDecodeError:
-        pass
-    return []
-
-
-def _parse_agents_json(text: str) -> Optional[list]:
-    """Extract the ```agents ... ``` JSON block (array of agent dicts)."""
-    pattern = r"```agents\s*\n?(.*?)```"
-    match = re.search(pattern, text, re.DOTALL)
-    if not match:
-        return None
-    raw = match.group(1).strip()
-    try:
-        data = json.loads(raw)
-        if isinstance(data, list):
-            return data
-    except json.JSONDecodeError:
-        logger.warning("Failed to parse agents JSON from assistant response")
-    return None
-
-
-def _strip_code_blocks(text: str) -> str:
-    """Remove ```process```, ```agents```, and ```suggestions``` blocks from the visible reply."""
-    text = re.sub(r"```process\s*\n?.*?```", "", text, flags=re.DOTALL)
-    text = re.sub(r"```agents\s*\n?.*?```", "", text, flags=re.DOTALL)
-    text = re.sub(r"```suggestions\s*\n?.*?```", "", text, flags=re.DOTALL)
-    return text.strip()
-
-
 def _dict_to_process(data: dict, existing_id: Optional[str] = None) -> ProcessDefinition:
     """Convert a raw dict from the LLM into a ProcessDefinition."""
     process_id = existing_id or str(uuid.uuid4())
@@ -339,8 +293,7 @@ class ProcessDesignerAgent:
         agent = Agent(
             # response_format="text": this assistant produces a conversational
             # reply with embedded ```process / ```agents / ```suggestions code
-            # blocks that downstream parsers strip out (_parse_process_json,
-            # _parse_agents_json, _parse_suggestions, _strip_code_blocks).
+            # blocks that assistant_kernel.fenced_json extracts and strips.
             # JSON mode would force the entire response into a single object
             # and the prose + block pattern would disappear.
             model=get_strands_model("agentic_team_provisioning", response_format="text"),
@@ -350,10 +303,11 @@ class ProcessDesignerAgent:
         raw_text = str(result).strip()
 
         # Parse structured blocks
-        process_data = _parse_process_json(raw_text)
-        agents_data = _parse_agents_json(raw_text)
-        suggestions = _parse_suggestions(raw_text)
-        reply_text = _strip_code_blocks(raw_text)
+        process_data = parse_fenced_json(raw_text, "process", expected_type=dict)
+        agents_data = parse_fenced_json(raw_text, "agents", expected_type=list)
+        raw_suggestions = parse_fenced_json(raw_text, "suggestions", expected_type=list)
+        suggestions = [str(s) for s in raw_suggestions] if raw_suggestions is not None else []
+        reply_text = strip_fenced_blocks(raw_text, ["process", "agents", "suggestions"])
 
         # Build/update process definition
         updated_process: Optional[ProcessDefinition] = None

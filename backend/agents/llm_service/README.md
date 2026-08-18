@@ -260,6 +260,54 @@ unconstrained + correction-retry path via `complete_validated`).
 spec-authoring/reviewing agents (zero-trade repair, alignment fix-proposer) are not yet wired and still
 rely on the unconstrained `json_object` + prompt-embedded-schema contract.
 
+## Prompt caching (cache-control breakpoints)
+
+`llm_service.CacheBreakpoint(text)` marks a stable prompt-prefix segment (a
+spec excerpt, a persona/standards block, ...) as safe to send as a
+provider-side cached prefix. On its own it is inert — pure data, no I/O, no
+provider call. To have it actually reach the wire, a prompt builder places it
+directly in a Strands agent's structured `system_prompt_content` list, e.g.
+
+```python
+from llm_service import CacheBreakpoint
+
+agent = Agent(
+    model=model,
+    system_prompt_content=[CacheBreakpoint(stable_spec_excerpt), "\n\n" + rest_of_persona],
+)
+```
+
+`LLMClientModel.stream()` recognizes a `CacheBreakpoint` in that list and, when
+the backing client's `supports_prompt_caching()` is `True` (`ClaudeLLMClient`
+only, today), preserves it as a segment rather than flattening it — Anthropic
+then receives it as a real `cache_control: {"type": "ephemeral"}` breakpoint on
+the marked segment. For every other backing client (or when no
+`CacheBreakpoint` is present at all), the marker is flattened to its plain
+`.text` exactly as before — a documented no-op: identical output, no error.
+
+Only `system_prompt_content` is honored today; a `CacheBreakpoint` in a
+message turn, or adoption at any real prompt-builder call site, is out of
+scope for this mechanism (tracked separately).
+
+Cache-hit token accounting is recorded automatically: `LLMCallRecord` (and the
+`llm_call_records` Postgres table the usage flusher writes to) carry
+`cache_read_tokens` / `cache_creation_tokens` fields, populated from the
+Anthropic response's `cache_read_input_tokens` / `cache_creation_input_tokens`
+usage counters. Both default to `0` for providers that don't report cache
+activity, so existing records and non-Anthropic clients are unaffected.
+
+A repeated call with an identical `CacheBreakpoint`-marked `system_prompt_content`
+segment is safe to adopt: routed through the Strands adapter, it produces
+the same completion text whether or not that call happened to be
+cache-served, and is a documented no-op — never an error — on any client
+that doesn't support prompt caching. Only the `cache_read_tokens` /
+`cache_creation_tokens` telemetry counters differ; nothing else about the
+call's behavior changes. This guarantee is scoped to the
+`system_prompt_content` path: a `CacheBreakpoint` placed directly in a
+`LLMClient.chat()` message's `content` — bypassing the Strands adapter — is
+not flattened by `DummyLLMClient` or `OllamaLLMClient` and will error at the
+client boundary.
+
 ### Migration rule: keep pattern anchors in the **user** prompt
 
 `DummyLLMClient.complete_json` routes to its canned stubs by scanning the **user** prompt only (not the Strands system prompt). When migrating an agent and moving its persona to `Agent(system_prompt=...)`, the user prompt you build in `_build_user_prompt` must still include the distinctive tokens the matching dummy branch looks for — e.g. `bugs_found` + `test_plan` for the QA branch, or `integration expert` + `backend code` + `frontend code` for the Integration branch. An explicit "produce JSON with fields: foo, bar, baz" schema hint in the user prompt usually satisfies this for free. This only affects dummy-client tests; real LLMs see both prompts.

@@ -2226,6 +2226,119 @@ class TestReviewPersistence:
         )
 
 
+class TestReviewTranscript:
+    """GET /reviews/{job_id}/transcript: 200 with entries, 404s, owner/repo gate."""
+
+    def test_returns_entries_in_order(self, review_app, monkeypatch) -> None:
+        api_main = review_app["api"]
+        monkeypatch.setattr(
+            api_main,
+            "get_review",
+            lambda job_id: {"job_id": job_id, "owner": "o", "repo": "r"},
+        )
+        entries = [
+            {
+                "stage": "chunk_review",
+                "target": "a.py",
+                "model": "m",
+                "prompt": "p1",
+                "response": "r1",
+                "started_at": "2024-01-01T00:00:00+00:00",
+                "duration_ms": 10,
+            },
+            {
+                "stage": "synthesis",
+                "target": "",
+                "model": "m",
+                "prompt": "p2",
+                "response": "r2",
+                "started_at": "2024-01-01T00:00:01+00:00",
+                "duration_ms": 5,
+            },
+        ]
+        monkeypatch.setattr(api_main, "get_review_transcript", lambda job_id: entries)
+        resp = review_app["client"].get("/reviews/j1/transcript")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["job_id"] == "j1"
+        assert [e["stage"] for e in data["entries"]] == ["chunk_review", "synthesis"]
+
+    def test_404_when_review_unknown(self, review_app, monkeypatch) -> None:
+        api_main = review_app["api"]
+        monkeypatch.setattr(api_main, "get_review", lambda job_id: None)
+        resp = review_app["client"].get("/reviews/does-not-exist/transcript")
+        assert resp.status_code == 404
+
+    def test_empty_entries_when_transcript_not_yet_recorded(self, review_app, monkeypatch) -> None:
+        """A known review with no transcript row (not started, predates the
+        feature, or was served entirely from the submission-level cache) is a
+        200 with an empty list, not a 404 — the UI shows "View Transcript" for
+        any terminal review, so a legitimately-empty transcript must not error."""
+        api_main = review_app["api"]
+        monkeypatch.setattr(
+            api_main,
+            "get_review",
+            lambda job_id: {"job_id": job_id, "owner": "o", "repo": "r"},
+        )
+        monkeypatch.setattr(api_main, "get_review_transcript", lambda job_id: None)
+        resp = review_app["client"].get("/reviews/j1/transcript")
+        assert resp.status_code == 200
+        assert resp.json() == {"job_id": "j1", "entries": []}
+
+    def test_includes_unflushed_buffer_entries(self, review_app, monkeypatch) -> None:
+        """A known review whose durable row is still empty but whose final
+        drain requeued into the in-memory buffer must still return those
+        entries — the UI fetches once and would otherwise stay empty until
+        the heartbeat succeeds."""
+        from llm_service import llm_attribution
+        from software_engineering_team.code_review_agent import transcript
+
+        api_main = review_app["api"]
+        monkeypatch.setattr(
+            api_main,
+            "get_review",
+            lambda job_id: {"job_id": job_id, "owner": "o", "repo": "r"},
+        )
+        monkeypatch.setattr(api_main, "get_review_transcript", lambda job_id: None)
+        monkeypatch.setattr(transcript, "is_postgres_enabled", lambda: True)
+        transcript._reset_for_test()
+        with llm_attribution(job_id="j1"):
+            transcript.record_transcript_entry("chunk_review", "a.py", "p", "r")
+        try:
+            resp = review_app["client"].get("/reviews/j1/transcript")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert len(data["entries"]) == 1
+            assert data["entries"][0]["target"] == "a.py"
+        finally:
+            transcript._reset_for_test()
+
+    def test_409_on_owner_repo_mismatch(self, review_app, monkeypatch) -> None:
+        api_main = review_app["api"]
+        monkeypatch.setattr(
+            api_main,
+            "get_review",
+            lambda job_id: {"job_id": job_id, "owner": "o", "repo": "r"},
+        )
+        resp = review_app["client"].get(
+            "/reviews/j1/transcript", params={"owner": "other", "repo": "r"}
+        )
+        assert resp.status_code == 409
+
+    def test_owner_repo_match_is_case_insensitive(self, review_app, monkeypatch) -> None:
+        api_main = review_app["api"]
+        monkeypatch.setattr(
+            api_main,
+            "get_review",
+            lambda job_id: {"job_id": job_id, "owner": "Owner", "repo": "Repo"},
+        )
+        monkeypatch.setattr(api_main, "get_review_transcript", lambda job_id: [])
+        resp = review_app["client"].get(
+            "/reviews/j1/transcript", params={"owner": "owner", "repo": "repo"}
+        )
+        assert resp.status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # BUG CONDITION REGRESSION TESTS
 #
@@ -3184,6 +3297,236 @@ class TestFixedRunPrReview:
         assert job["status"] == "completed"
         assert job["review_summary"]["pending_issue_proposals"] == []
 
+    def test_scope_verifier_unsure_does_not_post_comment(self, review_app, monkeypatch) -> None:
+        """An unsure scope verdict fail-closes posting: no PR comment, proposal instead."""
+        from software_engineering_team.code_review_agent.models import CodeReviewIssue
+        from software_engineering_team.code_review_agent.scope_filter import (
+            ScopeVerdict,
+            apply_scope_verdicts,
+        )
+
+        def _force_unsure(
+            llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None, **_kw
+        ):
+            converted = [
+                CodeReviewIssue(
+                    severity=getattr(i, "severity", "high"),
+                    category=getattr(i, "category", "logic"),
+                    file_path=getattr(i, "file_path", ""),
+                    line=getattr(i, "line", None),
+                    description=getattr(i, "description", ""),
+                    suggestion=getattr(i, "suggestion", ""),
+                    pre_existing=bool(getattr(i, "pre_existing", False)),
+                )
+                for i in issues
+            ]
+            return apply_scope_verdicts(
+                converted,
+                changed_by_path=changed_by_path,
+                verdicts={0: ScopeVerdict(scope="unsure", confidence="low")},
+                grounded=True,
+            )
+
+        monkeypatch.setattr(
+            "software_engineering_team.code_review_agent.scope_filter.apply_scope_verification",
+            _force_unsure,
+        )
+        review_app["github"]["client"] = _FakeReviewClient()
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue(
+                    "high",
+                    line=99,
+                    file_path="a.py",
+                    description="maybe out of scope",
+                )
+            ]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        assert gh.comments == []
+        assert gh.review_comments == []
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["review_summary"]["pending_issue_proposals"]
+        assert (
+            job["review_summary"]["pending_issue_proposals"][0]["description"]
+            == "maybe out of scope"
+        )
+
+    def test_scope_verifier_omission_still_posts(self, review_app, monkeypatch) -> None:
+        """A confident omission stays a PR finding even when the path is off-diff."""
+        from software_engineering_team.code_review_agent.models import CodeReviewIssue
+        from software_engineering_team.code_review_agent.scope_filter import (
+            ScopeVerdict,
+            apply_scope_verdicts,
+        )
+
+        def _force_omission(
+            llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None, **_kw
+        ):
+            converted = [
+                CodeReviewIssue(
+                    severity=getattr(i, "severity", "high"),
+                    category=getattr(i, "category", "logic"),
+                    file_path=getattr(i, "file_path", ""),
+                    line=getattr(i, "line", None),
+                    description=getattr(i, "description", ""),
+                    suggestion=getattr(i, "suggestion", ""),
+                    pre_existing=bool(getattr(i, "pre_existing", False)),
+                )
+                for i in issues
+            ]
+            return apply_scope_verdicts(
+                converted,
+                changed_by_path=changed_by_path,
+                verdicts={0: ScopeVerdict(scope="omission", confidence="high")},
+                grounded=True,
+            )
+
+        monkeypatch.setattr(
+            "software_engineering_team.code_review_agent.scope_filter.apply_scope_verification",
+            _force_omission,
+        )
+        review_app["github"]["client"] = _FakeReviewClient()
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue(
+                    "high",
+                    line=1,
+                    file_path="missing.py",
+                    description="should have added missing.py",
+                )
+            ]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        assert any("should have added missing.py" in c[1] for c in gh.comments)
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["review_summary"]["pending_issue_proposals"] == []
+
+    def test_scope_verifier_leaves_not_reviewed_coverage_findings_untagged(
+        self, review_app, monkeypatch
+    ) -> None:
+        """Blocking unreviewed-range findings must not enter scope verification.
+
+        If they did, an unsure/fail-closed tag would route them to issue
+        proposals and they would no longer reject the PR.
+        """
+        from software_engineering_team.code_review_agent.mapping import (
+            NOT_REVIEWED_FINDING_MARKER,
+        )
+        from software_engineering_team.code_review_agent.models import CodeReviewIssue
+
+        seen: list[str] = []
+
+        def _tag_all_received_as_pre_existing(
+            llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None, **_kw
+        ):
+            seen.extend(getattr(i, "description", "") or "" for i in issues)
+            return [
+                CodeReviewIssue(
+                    severity=getattr(i, "severity", "high"),
+                    category=getattr(i, "category", "logic"),
+                    file_path=getattr(i, "file_path", ""),
+                    line=getattr(i, "line", None),
+                    description=getattr(i, "description", ""),
+                    suggestion=getattr(i, "suggestion", ""),
+                    pre_existing=True,
+                )
+                for i in issues
+            ]
+
+        monkeypatch.setattr(
+            "software_engineering_team.code_review_agent.scope_filter.apply_scope_verification",
+            _tag_all_received_as_pre_existing,
+        )
+        coverage_desc = (
+            f"This code {NOT_REVIEWED_FINDING_MARKER} automatically (TimeoutError); "
+            "a.py (lines 90-99) was not reviewed. Blocking review so unreviewed "
+            "code is not approved."
+        )
+        review_app["github"]["client"] = _FakeReviewClient()
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue(
+                    "high",
+                    line=99,
+                    file_path="a.py",
+                    description=coverage_desc,
+                ),
+                _FakeReviewIssue(
+                    "high",
+                    line=50,
+                    file_path="a.py",
+                    description="unrelated context nit",
+                ),
+            ]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        assert coverage_desc not in seen
+        assert "unrelated context nit" in seen
+        gh = review_app["github"]["client"]
+        posted = " ".join(c.get("body", "") for c in gh.review_comments)
+        posted += " ".join(body for _n, body in gh.comments)
+        for review in gh.reviews:
+            posted += " ".join(c.get("body", "") for c in review.get("comments", []))
+        assert NOT_REVIEWED_FINDING_MARKER in posted
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        proposals = job["review_summary"]["pending_issue_proposals"]
+        assert all(
+            NOT_REVIEWED_FINDING_MARKER not in (p.get("description") or "") for p in proposals
+        )
+        assert any("unrelated context nit" in (p.get("description") or "") for p in proposals)
+
+    def test_scope_verifier_receives_pr_task_text(self, review_app, monkeypatch) -> None:
+        """The PR hook must pass title/body into the verifier, not files-only input."""
+        captured: dict[str, Any] = {}
+
+        def _capture(
+            llm,
+            *,
+            issues,
+            changed_by_path,
+            files,
+            repo_reader=None,
+            input_data=None,
+            removed_by_path=None,
+            **_kw,
+        ):
+            captured["input_data"] = input_data
+            captured["changed"] = changed_by_path
+            captured["removed"] = removed_by_path
+            return list(issues)
+
+        monkeypatch.setattr(
+            "software_engineering_team.code_review_agent.scope_filter.apply_scope_verification",
+            _capture,
+        )
+        review_app["github"]["client"] = _FakeReviewClient()
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue(
+                    "high",
+                    line=99,
+                    file_path="a.py",
+                    description="maybe related",
+                )
+            ]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        data = captured.get("input_data")
+        assert data is not None
+        assert "Add feature" in (data.task_description or "")
+        assert "body" in (data.task_requirements or "")
+        # The PR hook must also thread the added/modified and deleted line maps
+        # into the verifier so scope classification has the diff to reason over.
+        assert captured.get("changed") is not None
+        assert captured.get("removed") is not None
+
 
 # ---------------------------------------------------------------------------
 # Whole-file review path (_fetch_head_files + files-mode dispatch)
@@ -3270,6 +3613,33 @@ class TestWholeFileReview:
             )
         assert out == {f"f{i}.py": f"WHOLE-f{i}.py\n" for i in range(num_files)}
 
+    def test_fetch_head_files_propagates_trace_id_into_worker_threads(self, review_app) -> None:
+        """A trace_id bound in the parent thread (shared.observability.bind_trace_id)
+        is visible inside each head-fetch worker thread. The fan-out now goes
+        through parallel_map (propagate_context=True by default), closing the
+        gap the old hand-rolled ThreadPoolExecutor left — it never copied
+        context into its worker threads, so trace_id/LLM attribution was
+        silently dropped."""
+        from shared.observability import bind_trace_id, current_trace_id
+        from software_engineering_team.api.pr_review import _fetch_head_files
+
+        seen_trace_ids: list[str] = []
+        files = [
+            PullRequestFile(f"f{i}.py", "modified", f"@@ -1 +1 @@\n+x{i}", 1, 0, None)
+            for i in range(3)
+        ]
+
+        def _contents(o, r, path, ref):
+            seen_trace_ids.append(current_trace_id())
+            return f"WHOLE-{path}\n"
+
+        with bind_trace_id("trace-abc123"):
+            out = _fetch_head_files(_file_contents_client(_contents), "o", "r", files, "sha1")
+
+        assert out == {f"f{i}.py": f"WHOLE-f{i}.py\n" for i in range(3)}
+        assert len(seen_trace_ids) == 3
+        assert all(tid == "trace-abc123" for tid in seen_trace_ids)
+
     def test_endpoint_uses_change_surface_as_primary_when_reviewable(
         self, review_app, monkeypatch
     ) -> None:
@@ -3306,11 +3676,11 @@ class TestWholeFileReview:
         )
         assert not expected_surface.is_empty, "test setup must produce a non-empty surface"
 
-        # Surface-first: pre-numbered code=, no files= dict, even though the
-        # whole-file fetch (head_content above) succeeded.
+        # Surface-first: pre-numbered files= dict, even though the whole-file
+        # fetch (head_content above) succeeded.
         assert captured["pre_numbered"] is True
-        assert captured["code"] == expected_surface.code
-        assert "files" not in captured or not captured.get("files")
+        assert captured["files"] == dict(expected_surface.blocks)
+        assert "code" not in captured or not captured.get("code")
         # repo_reader is still attached regardless of which mode dispatched.
         assert isinstance(captured["repo_reader"], GitHubRepoReader)
 
@@ -3422,14 +3792,10 @@ class TestWholeFileReview:
         # a.py went through the surface; b.py -- fetched but not surfaced --
         # must still be reviewed via hunk fallback, not dropped.
         assert len(calls) == 2
-        assert all("files" not in c for c in calls)
+        assert all(c.get("files") for c in calls)
         assert all(c["pre_numbered"] is True for c in calls)
-        surface_call = next(
-            c for c in calls if c.get("code") and "a.py" in c["code"] and "b.py" not in c["code"]
-        )
-        hunk_call = next(
-            c for c in calls if c.get("code") and "b.py" in c["code"] and "a.py" not in c["code"]
-        )
+        surface_call = next(c for c in calls if "a.py" in c["files"] and "b.py" not in c["files"])
+        hunk_call = next(c for c in calls if "b.py" in c["files"] and "a.py" not in c["files"])
         assert surface_call is not hunk_call
 
         job = review_app["jobs"].get_job(resp.json()["job_id"])
@@ -3438,7 +3804,7 @@ class TestWholeFileReview:
 
     def test_endpoint_falls_back_to_hunks_when_no_head_files(self, review_app, monkeypatch) -> None:
         gh = review_app["github"]["client"]
-        # Head fetch yields nothing -> hunk fallback (pre_numbered code blob).
+        # Head fetch yields nothing -> hunk fallback (pre_numbered files dict).
         gh.get_file_contents = lambda o, r, path, ref: None
 
         captured: dict[str, Any] = {}
@@ -3452,9 +3818,8 @@ class TestWholeFileReview:
 
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
-        assert captured.get("files") is None
         assert captured["pre_numbered"] is True
-        assert captured["code"]  # the hunk-rendered blob
+        assert captured["files"]  # the hunk-rendered per-file dict
         # Hunk mode carries the same diff-first focus note as whole-file mode.
         from software_engineering_team.api.pr_review import REVIEW_FOCUS_NOTE_PREFIX
 
@@ -3518,16 +3883,12 @@ class TestWholeFileReview:
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         # a.py covered by change surface; b.py falls back to hunks only.
-        # Both attempts are pre-numbered code= (no files=).
+        # Both attempts are pre-numbered files= (per-file dicts, disjoint paths).
         assert len(calls) == 2
-        assert all("files" not in c for c in calls)
+        assert all(c.get("files") for c in calls)
         assert all(c["pre_numbered"] is True for c in calls)
-        surface_call = next(
-            c for c in calls if c.get("code") and "a.py" in c["code"] and "b.py" not in c["code"]
-        )
-        hunk_call = next(
-            c for c in calls if c.get("code") and "b.py" in c["code"] and "a.py" not in c["code"]
-        )
+        surface_call = next(c for c in calls if "a.py" in c["files"] and "b.py" not in c["files"])
+        hunk_call = next(c for c in calls if "b.py" in c["files"] and "a.py" not in c["files"])
 
         from software_engineering_team.api.pr_review import (
             REVIEW_FOCUS_NOTE_PREFIX,
@@ -3537,10 +3898,9 @@ class TestWholeFileReview:
         assert "pre_existing" in surface_call["task_requirements"]
         assert "Architectural standards" in surface_call["task_requirements"]
         assert "diff-first" in surface_call["task_requirements"].lower()
-        assert not hunk_call.get("files")
         assert hunk_call["pre_numbered"] is True
-        assert "b.py" in hunk_call["code"]
-        assert "a.py" not in hunk_call["code"]
+        assert "b.py" in hunk_call["files"]
+        assert "a.py" not in hunk_call["files"]
         # Both calls share the same diff-first focus note (input shape differs).
         assert REVIEW_FOCUS_NOTE_PREFIX in hunk_call["task_requirements"]
         assert "pre_existing" in hunk_call["task_requirements"]
@@ -3564,8 +3924,7 @@ class TestWholeFileReview:
 
         class _SplitProvider:
             def run_pr_code_review(self, **kw: Any) -> Any:
-                code = kw.get("code") or ""
-                if "### a.py ###" in code:
+                if "a.py" in (kw.get("files") or {}):
                     return _FakeOutput(
                         issues=[
                             _FakeReviewIssue(
@@ -3721,47 +4080,30 @@ class TestParallelReviewReads:
                 7,
             )
 
-    def test_fetch_pr_metadata_awaits_all_futures_when_first_fails(
-        self, review_app, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """When get_pull_request fails, siblings that also fail must still have
-        ``result()`` called — a generator unpack stops early and leaves secondary
-        exceptions unretrieved on those futures."""
-        from concurrent.futures import ThreadPoolExecutor as _RealTPE
-
-        from software_engineering_team.api import pr_review
+    def test_fetch_pr_metadata_runs_all_fetches_when_first_fails(self, review_app) -> None:
+        """When get_pull_request fails, get_pull_request_files and
+        get_authenticated_login must still run to completion — the
+        parallel_map-based fan-out (via _run_tasks_draining) always awaits
+        every task before re-raising, same as the prior hand-rolled
+        drain-every-future contract. The first-submitted task's error
+        ("missing PR") must still be the one that propagates, not whichever
+        of the two failures happens to finish first."""
         from software_engineering_team.api.pr_review import _fetch_pr_metadata
 
-        result_calls = {"n": 0}
-        futures_seen: list[Any] = []
-
-        class _CountingExecutor(_RealTPE):
-            def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
-                fut = super().submit(fn, *args, **kwargs)
-                futures_seen.append(fut)
-                real_result = fut.result
-
-                def _counting_result(*a: Any, **kw: Any) -> Any:
-                    result_calls["n"] += 1
-                    return real_result(*a, **kw)
-
-                fut.result = _counting_result  # type: ignore[method-assign]
-                return fut
-
-        monkeypatch.setattr(pr_review, "ThreadPoolExecutor", _CountingExecutor)
+        calls: list[None] = []
 
         with pytest.raises(GitHubAPIError, match="missing PR"):
             _fetch_pr_metadata(
                 _pr_metadata_client(
                     fail_pr=GitHubAPIError(404, "missing PR"),
                     fail_files=GitHubAPIError(502, "files unavailable"),
+                    on_each=lambda: calls.append(None),
                 ),
                 "o",
                 "r",
                 7,
             )
-        assert len(futures_seen) == 3
-        assert result_calls["n"] == 3
+        assert len(calls) == 3
 
     def test_fetch_pr_metadata_get_authenticated_login_failure_degrades(self, review_app) -> None:
         """A get_authenticated_login failure must degrade to "" without blocking
@@ -3862,48 +4204,31 @@ class TestParallelReviewReads:
 
         assert _fetch_existing_comments(_FakeGitHubClient(), "o", "r", 7) == []
 
-    def test_fetch_existing_comments_awaits_all_futures_when_first_fails(
-        self, review_app, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_fetch_existing_comments_runs_all_fetches_when_first_fails(self, review_app) -> None:
         """When the first concurrent comment fetch fails, siblings that also fail
-        must still have ``result()`` called. The call still degrades to []
-        (best-effort)."""
-        from concurrent.futures import ThreadPoolExecutor as _RealTPE
-
-        from software_engineering_team.api import pr_review
+        must still run to completion — the parallel_map-based fan-out (via
+        _run_tasks_draining) always awaits every task before re-raising, same
+        as the prior hand-rolled drain-every-future contract. The call still
+        degrades to [] (best-effort)."""
         from software_engineering_team.api.pr_review import _fetch_existing_comments
 
-        result_calls = {"n": 0}
-        futures_seen: list[Any] = []
-
-        class _CountingExecutor(_RealTPE):
-            def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
-                fut = super().submit(fn, *args, **kwargs)
-                futures_seen.append(fut)
-                real_result = fut.result
-
-                def _counting_result(*a: Any, **kw: Any) -> Any:
-                    result_calls["n"] += 1
-                    return real_result(*a, **kw)
-
-                fut.result = _counting_result  # type: ignore[method-assign]
-                return fut
-
-        monkeypatch.setattr(pr_review, "ThreadPoolExecutor", _CountingExecutor)
+        calls: list[str] = []
 
         class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
+                calls.append("reviews")
                 raise GitHubAPIError(500, "reviews boom")
 
             def get_resolved_review_thread_comment_ids(self, o, r, n):
+                calls.append("resolved")
                 raise GitHubAPIError(500, "resolved boom")
 
             def list_issue_comments(self, o, r, n):
+                calls.append("issues")
                 raise GitHubAPIError(500, "issues boom")
 
         assert _fetch_existing_comments(_FakeGitHubClient(), "o", "r", 7) == []
-        assert len(futures_seen) == 3
-        assert result_calls["n"] == 3
+        assert sorted(calls) == ["issues", "resolved", "reviews"]
 
     @pytest.mark.parametrize(
         "failing_method",
@@ -4337,6 +4662,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url="https://example/issues/42",
                 labels=(),
+                id=42,
             )
         ]
         job = _run_review_with(
@@ -4363,6 +4689,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url="https://example/issues/42",
                 labels=(),
+                id=42,
             )
         ]
         job = _run_review_with(
@@ -4464,6 +4791,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url="https://example/issues/42",
                 labels=(),
+                id=42,
             )
         ]
         job = _run_review_with(
@@ -4503,6 +4831,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url=f"https://example/issues/{n}",
                 labels=(),
+                id=n,
             )
             for n in range(1, 3)
         ] + [
@@ -4513,6 +4842,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url="https://example/issues/99",
                 labels=(),
+                id=99,
             )
         ]
         job = _run_review_with(
@@ -4547,6 +4877,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url=f"https://example/issues/{n}",
                 labels=(),
+                id=n,
             )
             for n in range(1, 3)
         ] + [
@@ -4557,6 +4888,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url="https://example/issues/99",
                 labels=(),
+                id=99,
             )
         ]
         job = _run_review_with(
@@ -4625,6 +4957,7 @@ class TestDetectDuplicateProposalsUnit:
                     state="open",
                     html_url="https://example/issues/42",
                     labels=(),
+                    id=42,
                 )
             ]
         )
@@ -4748,7 +5081,7 @@ class TestDecideReviewModeUnit:
             _file_contents_client(_contents), "job1", "o", "r", 7, _mode_pr(), files
         )
         assert result is not None
-        assert result.code == ""
+        assert result.hunk_files == {}
         assert result.files_reviewed == 2
         assert set(result.head_files) == {"a.py", "b.py"}
         assert set(result.valid_by_path["a.py"]) == {1}
@@ -4776,11 +5109,11 @@ class TestDecideReviewModeUnit:
         assert result is not None
         assert not result.change_surface.is_empty
         assert "mod.py" in result.change_surface.blocks
-        # hunk-fallback code is empty because the whole-file fetch fully
+        # hunk_files is empty because the whole-file fetch fully
         # succeeded, so nothing needs hunk rendering. Which of change_surface
         # vs head_files actually gets dispatched to the reviewer is decided in
         # _run_reviewer (surface-first), not here.
-        assert result.code == ""
+        assert result.hunk_files == {}
 
     def test_partial_fetch_falls_back_to_hunks_for_the_missing_subset(self) -> None:
         from software_engineering_team.api import pr_review
@@ -4801,8 +5134,8 @@ class TestDecideReviewModeUnit:
         )
         assert result is not None
         assert set(result.head_files) == {"a.py"}
-        assert "b.py" in result.code  # missing file's hunk was rendered
-        assert "a.py" not in result.code  # fetched file's hunk was NOT rendered
+        assert "b.py" in result.hunk_files  # missing file's hunk was rendered
+        assert "a.py" not in result.hunk_files  # fetched file's hunk was NOT rendered
         assert result.files_reviewed == 2  # 1 whole + 1 hunk
         assert "b.py" not in result.change_surface.blocks
 
@@ -4844,8 +5177,8 @@ class TestDecideReviewModeUnit:
         assert "a.py" in result.change_surface.blocks
         assert "b.py" not in result.change_surface.blocks
         # b.py falls back to hunk rendering instead of being dropped.
-        assert "b.py" in result.code
-        assert "a.py" not in result.code  # surfaced file not double-rendered
+        assert "b.py" in result.hunk_files
+        assert "a.py" not in result.hunk_files  # surfaced file not double-rendered
         assert result.files_reviewed == 2  # 1 surfaced + 1 hunk
 
     def test_total_fetch_failure_renders_every_files_hunks(self) -> None:
@@ -4864,7 +5197,7 @@ class TestDecideReviewModeUnit:
         )
         assert result is not None
         assert result.head_files == {}
-        assert result.code
+        assert result.hunk_files
         assert result.files_reviewed == 1
         assert result.change_surface.is_empty
 
@@ -4902,6 +5235,217 @@ class TestDecideReviewModeUnit:
                 "status_text": "No reviewable file content",
             }
         ]
+
+
+class TestRunReviewerSurfaceFirstDefault:
+    """Epic-level regression guard: PR review must default to the change
+    surface (diff), not the whole file, whenever a usable surface exists.
+
+    ``_decide_review_mode`` attaches both ``change_surface`` and
+    ``head_files`` whenever the whole-file fetch fully succeeds (see
+    ``test_decide_review_mode_attaches_head_backed_change_surface`` above,
+    whose own comment defers this exact question to ``_run_reviewer``). This
+    class exercises ``_run_reviewer`` directly -- the one place that decision
+    is actually made -- so a future change to its
+    ``if surface... elif head_files...`` dispatch can't quietly widen back
+    into whole-file-first without a test catching it here, independent of
+    ``_decide_review_mode``/endpoint wiring (see
+    ``test_endpoint_uses_change_surface_as_primary_when_reviewable`` for the
+    complementary end-to-end happy-path coverage)."""
+
+    def test_dispatches_surface_only_and_ignores_head_files_when_both_are_supplied(
+        self,
+    ) -> None:
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.code_review_agent.change_surface import (
+            ChangeSurface,
+        )
+
+        surface_body = "1: def a():\n2:     return 1\n"
+        whole_file_body = "def a():\n    return 1\n"
+        change_surface = ChangeSurface(blocks={"a.py": surface_body})
+        head_files = {"a.py": whole_file_body}
+        files = [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+return 1", 1, 0, None)]
+
+        calls: list[dict[str, Any]] = []
+
+        class _CapProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                calls.append(dict(kw))
+                return _FakeOutput(issues=[])
+
+        result = pr_review._run_reviewer(
+            _CapProvider(),
+            object(),
+            "o",
+            "r",
+            7,
+            "job1",
+            _mode_pr(),
+            files,
+            hunk_files={},
+            head_files=head_files,
+            change_surface=change_surface,
+        )
+
+        assert result is not None
+        # Surface-first: exactly one reviewer call, not one per source --
+        # head_files must be replaced, not merged in alongside the surface.
+        assert len(calls) == 1
+        assert calls[0]["files"] == dict(change_surface.blocks)
+        assert calls[0]["pre_numbered"] is True
+        # Belt-and-suspenders: the whole-file body must never reach the
+        # reviewer through any captured kwarg.
+        assert whole_file_body not in calls[0]["files"].values()
+        assert all(whole_file_body != v for v in calls[0].values() if isinstance(v, str))
+
+
+class TestRunReviewerFallbackAndMixedMode:
+    """Epic-level regression guard: the two ``_run_reviewer`` dispatch
+    branches ``TestRunReviewerSurfaceFirstDefault`` doesn't cover --
+    whole-file-only fallback (no usable change surface) and mixed mode (a
+    surfaced subset of files plus a hunk-fallback subset dispatched and
+    merged as two calls). Complements the ``_decide_review_mode``-level
+    input-construction coverage in ``TestDecideReviewModeUnit`` and the
+    endpoint-level coverage in ``TestWholeFileReview`` by exercising the
+    actual dispatch decision in ``_run_reviewer`` directly, so a future edit
+    to its ``if surface... elif head_files...`` / ``if hunk_files...``
+    branches can't silently regress without a test catching it here."""
+
+    def test_dispatches_whole_file_only_when_change_surface_is_absent(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        head_files = {"a.py": "def a():\n    return 1\n"}
+        files = [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+return 1", 1, 0, None)]
+
+        calls: list[dict[str, Any]] = []
+
+        class _CapProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                calls.append(dict(kw))
+                return _FakeOutput(issues=[])
+
+        result = pr_review._run_reviewer(
+            _CapProvider(),
+            object(),
+            "o",
+            "r",
+            7,
+            "job1",
+            _mode_pr(),
+            files,
+            hunk_files={},
+            head_files=head_files,
+            change_surface=None,
+        )
+
+        assert result is not None
+        assert len(calls) == 1
+        assert calls[0]["files"] == head_files
+        assert calls[0]["pre_numbered"] is False
+
+    def test_dispatches_whole_file_only_when_change_surface_is_empty(self) -> None:
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.code_review_agent.change_surface import (
+            ChangeSurface,
+        )
+
+        head_files = {"a.py": "def a():\n    return 1\n"}
+        files = [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+return 1", 1, 0, None)]
+
+        calls: list[dict[str, Any]] = []
+
+        class _CapProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                calls.append(dict(kw))
+                return _FakeOutput(issues=[])
+
+        result = pr_review._run_reviewer(
+            _CapProvider(),
+            object(),
+            "o",
+            "r",
+            7,
+            "job1",
+            _mode_pr(),
+            files,
+            hunk_files={},
+            head_files=head_files,
+            change_surface=ChangeSurface(blocks={}),
+        )
+
+        assert result is not None
+        assert len(calls) == 1
+        assert calls[0]["files"] == head_files
+        assert calls[0]["pre_numbered"] is False
+
+    def test_dispatches_surface_and_hunk_attempts_for_disjoint_files_and_merges_output(
+        self,
+    ) -> None:
+        """Mixed mode: change_surface covers a.py, hunk_files covers the
+        disjoint b.py (the shape _decide_review_mode produces on a partial
+        fetch/partial-surface-coverage PR). Both attempts must run and their
+        outputs must merge -- neither file's findings may be dropped, and
+        neither call's files may bleed into the other's."""
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.code_review_agent.change_surface import (
+            ChangeSurface,
+        )
+
+        surface_body = "1: def a():\n2:     return 1\n"
+        hunk_body = "1: def b():\n2:     return 2\n"
+        change_surface = ChangeSurface(blocks={"a.py": surface_body})
+        hunk_files = {"b.py": hunk_body}
+        files = [
+            PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+return 1", 1, 0, None),
+            PullRequestFile("b.py", "modified", "@@ -1 +1 @@\n+return 2", 1, 0, None),
+        ]
+
+        surface_issue = _FakeReviewIssue("high", 1, file_path="a.py")
+        hunk_issue = _FakeReviewIssue("high", 1, file_path="b.py")
+        outputs = [
+            _FakeOutput(issues=[surface_issue], summary="surface summary", spec="surface spec"),
+            _FakeOutput(issues=[hunk_issue], summary="hunk summary", spec="hunk spec"),
+        ]
+
+        calls: list[dict[str, Any]] = []
+
+        class _CapProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                calls.append(dict(kw))
+                return outputs[len(calls) - 1]
+
+        result = pr_review._run_reviewer(
+            _CapProvider(),
+            object(),
+            "o",
+            "r",
+            7,
+            "job1",
+            _mode_pr(),
+            files,
+            hunk_files=hunk_files,
+            head_files=None,
+            change_surface=change_surface,
+        )
+
+        assert result is not None
+        assert len(calls) == 2
+        # Surface attempt dispatches first, covering only a.py.
+        assert calls[0]["files"] == {"a.py": surface_body}
+        assert calls[0]["pre_numbered"] is True
+        # Hunk attempt dispatches second, covering only b.py -- disjoint from
+        # the surface attempt's files.
+        assert calls[1]["files"] == hunk_files
+        assert calls[1]["pre_numbered"] is True
+        # Merged output: surface issues before hunk issues, per
+        # _MergedReviewerOutput's documented contract; neither call's
+        # narrative text is dropped.
+        assert result.issues == [surface_issue, hunk_issue]
+        assert "surface summary" in result.summary
+        assert "hunk summary" in result.summary
+        assert "surface spec" in result.spec_compliance_notes
+        assert "hunk spec" in result.spec_compliance_notes
 
 
 class TestPartitionReviewIssuesUnit:

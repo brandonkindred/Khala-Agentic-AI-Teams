@@ -310,3 +310,21 @@ export interface CreateReviewIssuesResponse {
    * `issue_url`/`issue_number`). */
   proposals: PendingIssueProposal[];
 }
+
+/** One LLM call the code-review pipeline made, in call order. */
+export interface CodeReviewTranscriptEntry {
+  stage: string;
+  target: string;
+  model: string;
+  prompt: string;
+  response: string;
+  /** ISO-8601 timestamp the call started (backdated from its measured duration). */
+  started_at: string;
+  duration_ms: number;
+}
+
+/** Response from GET /api/integrations/github/reviews/{job_id}/transcript. */
+export interface CodeReviewTranscript {
+  job_id: string;
+  entries: CodeReviewTranscriptEntry[];
+}

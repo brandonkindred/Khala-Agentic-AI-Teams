@@ -23,19 +23,27 @@ from llm_service import provider_store as ps  # noqa: E402
 from unified_api.routes import llm_config as route  # noqa: E402
 
 
-def _entry(entry_id, *, provider="ollama", label="e", api_key="", limit=False):
+def _entry(entry_id, *, provider="ollama", label="e", api_key="", limit=False, base_url=None):
     return ps.ProviderEntry(
         id=entry_id,
         label=label,
         provider=provider,
         model="m",
-        base_url="http://localhost:11434" if provider == "ollama" else "",
+        base_url=base_url if base_url is not None else ("http://localhost:11434" if provider == "ollama" else ""),
         api_key=api_key,
         sort_order=entry_id,
         limit_exceeded=limit,
         limit_type="rate" if limit else "",
         reset_at=datetime(2026, 6, 30, tzinfo=timezone.utc) if limit else None,
     )
+
+
+def _find_op(state, op_name):
+    """Return the single ``state["ops"]`` tuple named ``op_name``, with a clear
+    assertion message instead of a bare ``StopIteration`` when it's missing."""
+    matches = [op for op in state["ops"] if isinstance(op, tuple) and op[0] == op_name]
+    assert len(matches) == 1, f"expected exactly one {op_name!r} op, got {len(matches)}: {state['ops']!r}"
+    return matches[0]
 
 
 @pytest.fixture
@@ -116,6 +124,19 @@ def test_list_masks_keys_and_reports_state(app_client):
     assert body["providers"][1]["api_key_configured"] is False
     assert "sk-secret" not in resp.text  # key value never returned
     assert body["storage_available"] is True
+
+
+def test_list_returns_endpoint_id_for_runpod_entries_only(app_client):
+    client, state = app_client
+    state["entries"] = [
+        _entry(1, provider="runpod", api_key="k", base_url="https://api.runpod.ai/v2/abc123/openai/v1"),
+        _entry(2, provider="ollama"),
+    ]
+    resp = client.get("/api/llm-config/providers")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["providers"][0]["endpoint_id"] == "abc123"
+    assert body["providers"][1]["endpoint_id"] == ""
 
 
 def test_list_degrades_gracefully_on_read_error(app_client, monkeypatch):
@@ -336,6 +357,267 @@ def test_create_ollama_cloud_without_key_is_400_even_with_env_key(app_client, mo
 
 
 # --------------------------------------------------------------------------- #
+# RunPod provider — endpoint_id validation, reachability probe error mapping,    #
+# api_key trimming, and the Ollama-only base_url validator being skipped.        #
+# --------------------------------------------------------------------------- #
+
+
+def _patch_probe(monkeypatch, *, exc=None):
+    """Replace the RunPod probe with a no-op (or one that raises ``exc``)."""
+
+    async def fake_probe(endpoint_id, api_key):
+        if exc is not None:
+            raise exc
+        return None
+
+    monkeypatch.setattr(route, "_probe_runpod_endpoint", fake_probe)
+
+
+def _patch_async_client_get(monkeypatch, *, get_return=None, get_side_effect=None):
+    """Patch ``httpx.AsyncClient`` so ``async with ... as client: await client.get(...)``
+    returns ``get_return`` or raises ``get_side_effect`` — drives the real
+    ``_probe_runpod_endpoint`` through its ``httpx`` call without a real network request.
+
+    Returns the ``AsyncMock`` standing in for the client, so a caller can assert on
+    ``mock_client.get.call_args`` (e.g. the requested URL/headers).
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    import httpx
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = False  # don't suppress exceptions raised in the `with` body
+    if get_side_effect is not None:
+        mock_client.get.side_effect = get_side_effect
+    else:
+        mock_client.get.return_value = get_return
+    monkeypatch.setattr(httpx, "AsyncClient", MagicMock(return_value=mock_client))
+    return mock_client
+
+
+@pytest.mark.parametrize("endpoint_id", ["abc123", "a", "0000000000", "with-a-hyphen", "MiXedCase9"])
+def test_extract_runpod_endpoint_id_round_trips_through_build(endpoint_id):
+    """Guards the cross-stack contract the UI relies on: whatever shape
+    _build_runpod_base_url produces, _extract_runpod_endpoint_id must recover
+    exactly — including ids _validate_runpod_endpoint_id would itself reject
+    (e.g. a hyphen), since extraction must not depend on that separate rule."""
+    built = route._build_runpod_base_url(endpoint_id)
+    assert route._extract_runpod_endpoint_id(built) == endpoint_id
+
+
+def test_extract_runpod_endpoint_id_returns_empty_for_non_runpod_url():
+    assert route._extract_runpod_endpoint_id("http://localhost:11434") == ""
+    assert route._extract_runpod_endpoint_id("") == ""
+
+
+def test_create_runpod_requires_endpoint_id(app_client, monkeypatch):
+    client, _state = app_client
+    _patch_probe(monkeypatch)
+    resp = client.post("/api/llm-config/providers", json={"provider": "runpod", "api_key": "k"})
+    assert resp.status_code == 400
+    assert "endpoint_id is required" in resp.json()["detail"]
+
+
+def test_create_runpod_rejects_non_alphanumeric_endpoint_id(app_client, monkeypatch):
+    """Format is now validated by the model's field_validator (matching base_url), so
+    a malformed endpoint_id 422s at the request boundary rather than 400ing in the route."""
+    client, _state = app_client
+    _patch_probe(monkeypatch)
+    resp = client.post(
+        "/api/llm-config/providers",
+        json={"provider": "runpod", "api_key": "k", "endpoint_id": "bad-id/../"},
+    )
+    assert resp.status_code == 422  # pydantic validation
+    assert "alphanumeric" in str(resp.json()["detail"])
+
+
+def test_create_runpod_without_key_is_400(app_client, monkeypatch):
+    client, _state = app_client
+    _patch_probe(monkeypatch)
+    resp = client.post("/api/llm-config/providers", json={"provider": "runpod", "endpoint_id": "abc123"})
+    assert resp.status_code == 400
+    assert "without an API key" in resp.json()["detail"]
+
+
+def test_create_runpod_success_builds_base_url_and_trims_key(app_client, monkeypatch):
+    client, state = app_client
+    _patch_probe(monkeypatch)
+    resp = client.post(
+        "/api/llm-config/providers",
+        json={"provider": "runpod", "api_key": "  sk-runpod  ", "endpoint_id": "abc123"},
+    )
+    assert resp.status_code == 200
+    kw = _find_op(state, "create")[1]
+    # The endpoint_id is turned into the canonical OpenAI-compatible base URL, the key
+    # is persisted whitespace-trimmed (matching the update path), and the label defaults.
+    assert kw["base_url"] == "https://api.runpod.ai/v2/abc123/openai/v1"
+    assert kw["api_key"] == "sk-runpod"
+    assert kw["label"] == "RunPod"
+
+
+def test_create_runpod_ignores_stray_base_url(app_client, monkeypatch):
+    """base_url is Ollama-only; a stray (even malformed) value on a RunPod entry must
+    not trip the Ollama URL validator with a 422 — it is simply ignored."""
+    client, _state = app_client
+    _patch_probe(monkeypatch)
+    resp = client.post(
+        "/api/llm-config/providers",
+        json={"provider": "runpod", "api_key": "k", "endpoint_id": "abc123", "base_url": "not-a-url"},
+    )
+    assert resp.status_code == 200
+
+
+def test_create_runpod_probe_http_error_propagates_remote_status(app_client, monkeypatch):
+    """A 4xx/5xx from RunPod is surfaced with the remote status code, not a blanket 400."""
+    from unittest.mock import Mock
+
+    import httpx
+
+    client, _state = app_client
+    request = httpx.Request("GET", "https://api.runpod.ai/v2/abc123/openai/v1/models")
+
+    # Drive the real probe through a mocked httpx.AsyncClient whose response raises the
+    # status error _probe_runpod_endpoint is expected to catch and remap. The route only
+    # reads `e.response.status_code` off the exception, so the same mock_response serves
+    # as both the `.get()` return value and the exception's `response` — no need for a
+    # second, real httpx.Response just to carry the status code.
+    mock_response = Mock(status_code=401)
+    mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "unauthorized", request=request, response=mock_response
+    )
+    _patch_async_client_get(monkeypatch, get_return=mock_response)
+    resp = client.post(
+        "/api/llm-config/providers",
+        json={"provider": "runpod", "api_key": "k", "endpoint_id": "abc123"},
+    )
+    assert resp.status_code == 401
+    assert "401" in resp.json()["detail"]
+
+
+def test_create_runpod_probe_connection_error_is_503(app_client, monkeypatch):
+    """A connection/timeout error (no response) maps to 503 upstream-unreachable."""
+    import httpx
+
+    client, _state = app_client
+    _patch_async_client_get(monkeypatch, get_side_effect=httpx.ConnectError("connection refused"))
+    resp = client.post(
+        "/api/llm-config/providers",
+        json={"provider": "runpod", "api_key": "k", "endpoint_id": "abc123"},
+    )
+    assert resp.status_code == 503
+    assert "could not be reached" in resp.json()["detail"]
+
+
+def test_update_runpod_endpoint_id_rebuilds_base_url_without_probe(app_client, monkeypatch):
+    """Updating a RunPod entry's endpoint_id rebuilds base_url and does not probe."""
+    client, state = app_client
+    state["entries"] = [
+        _entry(1, provider="runpod", api_key="k"),
+    ]
+    # If the update path probed, this would blow up; it must not be called.
+    def _boom(*a, **k):
+        raise AssertionError("update must not probe the RunPod endpoint")
+
+    monkeypatch.setattr(route, "_probe_runpod_endpoint", _boom)
+    resp = client.put("/api/llm-config/providers/1", json={"endpoint_id": "xyz789"})
+    assert resp.status_code == 200
+    kw = _find_op(state, "update")[2]
+    assert kw["base_url"] == "https://api.runpod.ai/v2/xyz789/openai/v1"
+    # provider was omitted from the request body, so the route passes through the
+    # None sentinel rather than re-resolving it — provider_store.update_entry treats
+    # None as "leave this column untouched", so the stored provider stays "runpod".
+    assert kw["provider"] is None
+
+
+def test_update_runpod_rejects_bad_endpoint_id(app_client):
+    client, state = app_client
+    state["entries"] = [_entry(1, provider="runpod", api_key="k")]
+    resp = client.put("/api/llm-config/providers/1", json={"endpoint_id": "no good!"})
+    assert resp.status_code == 400
+    assert "alphanumeric" in resp.json()["detail"]
+
+
+def test_update_switch_to_runpod_without_endpoint_id_is_400(app_client):
+    """Switching a non-RunPod entry to RunPod without an endpoint_id must be rejected
+    — otherwise the entry would persist with provider="runpod" pointed at whatever
+    non-RunPod base_url it had before, an invalid combination create_provider would
+    never allow to be created in the first place."""
+    client, state = app_client
+    state["entries"] = [_entry(1, provider="ollama")]
+    resp = client.put("/api/llm-config/providers/1", json={"provider": "runpod", "api_key": "k"})
+    assert resp.status_code == 400
+    assert "endpoint_id is required" in resp.json()["detail"]
+    assert not any(op[0] == "update" for op in state["ops"] if isinstance(op, tuple))
+
+
+def test_update_switch_to_runpod_with_endpoint_id_succeeds(app_client):
+    client, state = app_client
+    state["entries"] = [_entry(1, provider="ollama")]
+    resp = client.put(
+        "/api/llm-config/providers/1", json={"provider": "runpod", "api_key": "k", "endpoint_id": "abc123"}
+    )
+    assert resp.status_code == 200
+    kw = _find_op(state, "update")[2]
+    assert kw["provider"] == "runpod"
+    assert kw["base_url"] == "https://api.runpod.ai/v2/abc123/openai/v1"
+
+
+def test_update_runpod_ignores_stray_base_url_without_endpoint_id(app_client):
+    """base_url is never directly settable on a RunPod entry — without a new
+    endpoint_id, a stray body.base_url must not overwrite the canonical URL."""
+    client, state = app_client
+    state["entries"] = [_entry(1, provider="runpod", api_key="k")]
+    resp = client.put("/api/llm-config/providers/1", json={"base_url": "http://evil.example.com"})
+    assert resp.status_code == 200
+    kw = _find_op(state, "update")[2]
+    assert kw["base_url"] is None  # unchanged sentinel, not the stray value
+
+
+def test_update_runpod_clear_api_key_is_400(app_client):
+    """RunPod always requires a key; clearing it on an existing RunPod entry must be
+    rejected by the same guard create_provider uses, not silently persisted keyless."""
+    client, state = app_client
+    state["entries"] = [_entry(1, provider="runpod", api_key="k")]
+    resp = client.put("/api/llm-config/providers/1", json={"clear_api_key": True})
+    assert resp.status_code == 400
+    assert "without an API key" in resp.json()["detail"]
+
+
+def test_update_runpod_changes_api_key(app_client):
+    client, state = app_client
+    state["entries"] = [_entry(1, provider="runpod", api_key="k")]
+    resp = client.put("/api/llm-config/providers/1", json={"api_key": "  new-key  "})
+    assert resp.status_code == 200
+    kw = _find_op(state, "update")[2]
+    assert kw["api_key"] == "new-key"
+
+
+def test_update_switch_runpod_to_ollama(app_client):
+    client, state = app_client
+    state["entries"] = [_entry(1, provider="runpod", api_key="k")]
+    resp = client.put("/api/llm-config/providers/1", json={"provider": "ollama", "base_url": "http://localhost:11434"})
+    assert resp.status_code == 200
+    kw = _find_op(state, "update")[2]
+    assert kw["provider"] == "ollama"
+    assert kw["base_url"] == "http://localhost:11434"
+
+
+def test_probe_runpod_endpoint_success_returns_none(monkeypatch):
+    """A 2xx response from RunPod resolves the probe with no exception."""
+    import asyncio
+    from unittest.mock import Mock
+
+    mock_response = Mock(status_code=200)
+    mock_response.raise_for_status.return_value = None
+    mock_client = _patch_async_client_get(monkeypatch, get_return=mock_response)
+    assert asyncio.run(route._probe_runpod_endpoint("abc123", "k")) is None
+    call = mock_client.get.call_args
+    assert call.args[0].endswith("/v2/abc123/openai/v1/models")
+    assert call.kwargs["headers"] == {"Authorization": "Bearer k"}
+
+
+# --------------------------------------------------------------------------- #
 # /ollama-models — the browse utility endpoint (kept; single-provider config    #
 # GET/PUT was removed).                                                         #
 # --------------------------------------------------------------------------- #
@@ -344,12 +626,12 @@ def test_create_ollama_cloud_without_key_is_400_even_with_env_key(app_client, mo
 def test_ollama_models_live_listing(app_client, monkeypatch):
     """A non-empty live listing from /api/tags is returned verbatim with source=live."""
     client, _state = app_client
-    monkeypatch.setattr(route, "list_ollama_models", lambda: ["llama3.2", "qwen3-coder:480b-cloud"])
+    monkeypatch.setattr(route, "list_ollama_models", lambda: ["deepseek-v4-flash:cloud", "qwen3-coder:480b-cloud"])
     resp = client.get("/api/llm-config/ollama-models")
     assert resp.status_code == 200
     body = resp.json()
     assert body["source"] == "live"
-    assert body["models"] == ["llama3.2", "qwen3-coder:480b-cloud"]
+    assert body["models"] == ["deepseek-v4-flash:cloud", "qwen3-coder:480b-cloud"]
     # base_url reflects the resolved effective endpoint (cloud default with no env).
     assert body["base_url"] == "https://ollama.com"
 

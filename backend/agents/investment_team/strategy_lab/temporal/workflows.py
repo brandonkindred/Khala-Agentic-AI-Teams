@@ -91,6 +91,14 @@ _ACTIVITY_TIMEOUT = timedelta(minutes=10)
 # ``STRATEGY_LAB_DESIGN_MAX_LLM_CALLS`` model round-trips plus backtests), so it
 # needs a far wider ceiling than a single LLM/gate/persist activity.
 _DESIGN_ATTEMPT_TIMEOUT = timedelta(hours=2)
+# Server-enforced liveness deadline for the design-attempt activity's
+# heartbeat (activities.py wraps the attempt in a fixed-interval
+# BackgroundHeartbeat, decoupled from ``emit`` checkpoint cadence -- see
+# ``_DESIGN_ATTEMPT_HEARTBEAT_INTERVAL_S`` there). Sized generously relative
+# to that fixed interval (not to the pipeline's own uneven cadence) so a
+# missed heartbeat window is a real liveness problem, not a slow-but-healthy
+# attempt: missing it fails/retries the WHOLE up-to-2-hour attempt.
+_DESIGN_ATTEMPT_HEARTBEAT_TIMEOUT = timedelta(seconds=90)
 
 # A cycle child workflow is expensive and its own activities already retry
 # internally, so a failed cycle is not re-run at the child level — it surfaces
@@ -115,6 +123,7 @@ async def _exec(
     *,
     params: Optional[Dict[str, Any]] = None,
     timeout: timedelta = _ACTIVITY_TIMEOUT,
+    heartbeat_timeout: Optional[timedelta] = None,
 ) -> Any:
     """Thin ``workflow.execute_activity`` wrapper.
 
@@ -126,6 +135,9 @@ async def _exec(
         ``fn`` is an ``@activity.defn``-decorated function from the
         ``activities`` module. ``params`` is the single positional dict the
         activity expects, or ``None`` for a no-argument activity.
+        ``heartbeat_timeout`` is ``None`` (the default -- no heartbeat
+        deadline, matching every non-heartbeating activity) unless ``fn``
+        heartbeats itself (currently only ``run_design_attempt_activity``).
     Postconditions:
         Returns the activity's result, retried per ``_ACTIVITY_RETRY``.
     """
@@ -134,6 +146,7 @@ async def _exec(
         fn,
         args=args,
         start_to_close_timeout=timeout,
+        heartbeat_timeout=heartbeat_timeout,
         retry_policy=_ACTIVITY_RETRY,
     )
 
@@ -161,7 +174,21 @@ class StrategyLabCycleWorkflow:
         tracker), and optionally ``workflow_config`` (a
         ``resolve_workflow_config_activity`` result; resolved via an activity
         call when absent — its ``regime_summary_enabled`` flag and
-        ``max_design_reentries`` value are read here).
+        ``max_design_reentries`` value are read here), ``run_id`` (the owning
+        run's id -- absent/``None`` disables design-attempt checkpointing for
+        every attempt in this cycle, since checkpointing needs a stable run
+        identifier to correlate attempts against (``ADR-012``,
+        ``system_design/adr/ADR-012-strategy-lab-design-attempt-checkpoint-contract.md``)),
+        ``cycle_index`` (this
+        cycle's 0-based index within the run -- absent/``None`` disables live
+        SSE progress publishing for every attempt in this cycle, since
+        ``StrategyLabProgressEvent.cycle_index`` is a required field on the
+        frontend and a malformed event is worse than none), and ``generation``
+        (int, default ``_DEFAULT_FENCING_GENERATION`` -- the fencing
+        generation this cycle's incarnation was dispatched with). All three
+        are ``.get(...)``-guarded so a ``cycle_input`` from a workflow-history
+        replay predating these fields still runs (with checkpointing/progress
+        publishing simply disabled).
     Postconditions:
         Returns ``{"record": StrategyLabRecord dump, "convergence_tracker_state":
         <updated dto wire dict>}`` on a terminal record, mirroring ``run_cycle``'s
@@ -174,7 +201,11 @@ class StrategyLabCycleWorkflow:
         Exactly one ``run_design_attempt_activity`` call happens per design
         attempt; the LLM-call budget, gate-result accumulation, and tracker
         state are threaded attempt→attempt so their ceilings/history span the
-        whole cycle, never resetting per attempt.
+        whole cycle, never resetting per attempt. The re-entry loop bound
+        (``max_reentries``) is resolved once, from ``wf_config``'s
+        ``max_design_reentries`` (falling back to
+        ``_MAX_DESIGN_REENTRIES_FALLBACK`` when absent), and stays constant
+        for every attempt in the cycle.
     """
 
     @workflow.run
@@ -184,6 +215,18 @@ class StrategyLabCycleWorkflow:
         signal_brief = cycle_input.get("signal_brief")
         exclude_asset_classes = cycle_input.get("exclude_asset_classes")
         tracker_state = cycle_input.get("convergence_tracker_state") or {}
+        run_id = cycle_input.get("run_id")
+        # Absent for a cycle_input from a workflow-history replay predating
+        # this field -- run_design_attempt_activity's progress-publish
+        # closure treats a missing cycle_index as "skip publishing" rather
+        # than sending a malformed event, so this is safe to leave None.
+        cycle_index = cycle_input.get("cycle_index")
+        generation = int(cycle_input.get("generation", _DEFAULT_FENCING_GENERATION))
+        # Per-batch cache key threaded from the parent batch workflow; forwarded
+        # verbatim to run_design_attempt_activity so the worker can resolve the
+        # one shared BatchIndicatorCache for this batch (when the flag is on).
+        # ``.get`` tolerates old-shaped/resumed inputs that predate this field.
+        batch_cache_key = cycle_input.get("batch_cache_key")
 
         # Gather convergence directives once from the batch-level tracker
         # (pure counter/set reads — safe in the sandbox), appended to on each
@@ -232,6 +275,9 @@ class StrategyLabCycleWorkflow:
             outcome = await _exec(
                 act.run_design_attempt_activity,
                 params={
+                    "run_id": run_id,
+                    "generation": generation,
+                    "cycle_index": cycle_index,
                     "prior_records": prior_records,
                     "config": config_dict,
                     "signal_brief": signal_brief,
@@ -245,8 +291,10 @@ class StrategyLabCycleWorkflow:
                     "budget_calls": budget_calls,
                     "regime_summary": regime_summary,
                     "convergence_tracker_state": tracker_state,
+                    "batch_cache_key": batch_cache_key,
                 },
                 timeout=_DESIGN_ATTEMPT_TIMEOUT,
+                heartbeat_timeout=_DESIGN_ATTEMPT_HEARTBEAT_TIMEOUT,
             )
             # Thread the whole-cycle accumulators forward regardless of outcome.
             tracker_state = outcome["convergence_tracker_state"]
@@ -352,6 +400,84 @@ def _snapshot_tracker_wire(primary_state: Dict[str, Any]) -> Dict[str, Any]:
     return convergence_tracker_to_wire(convergence_tracker_from_wire(primary_state).snapshot())
 
 
+# The only five values StrategyLabBatchWorkflow.run's own `status` local can
+# hold (external_terminal_status_activity's documented return values, plus
+# the "completed"/"completed_with_errors" happy-path fallback). Enumerated
+# explicitly so _terminal_sse_event can enforce its precondition rather than
+# silently misclassifying an unexpected value as "complete".
+_TERMINAL_STATUSES = frozenset(
+    {"cancelled", "failed", "interrupted", "completed", "completed_with_errors"}
+)
+
+
+def _terminal_sse_event(
+    *,
+    status: str,
+    completed_count: int,
+    skipped_count: int,
+    errored_count: int,
+    errored_details: List[Dict[str, Any]],
+    completed_batches: int,
+    total_batches: int,
+) -> Dict[str, Any]:
+    """Build the terminal SSE event payload for ``StrategyLabBatchWorkflow.run``'s status.
+
+    Maps ``status`` onto the three terminal event shapes the frontend's
+    ``StrategyLabStreamEvent`` union models
+    (user-interface/src/app/models/investment.model.ts):
+    ``StrategyLabCancelledEvent`` (``status == "cancelled"``),
+    ``StrategyLabErrorDetailEvent`` (``status`` in
+    ``{"failed", "interrupted"}``), or ``StrategyLabCompleteEvent`` (``status``
+    in ``{"completed", "completed_with_errors"}``) -- pure dict construction,
+    no I/O, so this runs directly in workflow code rather than an activity.
+
+    Preconditions:
+        ``status`` is one of ``_TERMINAL_STATUSES`` -- the five values
+        ``StrategyLabBatchWorkflow.run``'s own ``status`` local can hold.
+    Postconditions:
+        Returns a JSON-shaped dict with a ``"type"`` key matching one of the
+        three event shapes above. ``completed_count``/``skipped_count``/
+        ``errored_count``/``errored_details``/``completed_batches``/
+        ``total_batches`` are included only in the ``"complete"`` case's
+        returned dict -- neither the ``"cancelled"`` nor the ``"error"``
+        shape carries any of them, matching
+        ``StrategyLabCancelledEvent``/``StrategyLabErrorDetailEvent`` (neither
+        models those fields either).
+    Raises:
+        ``AssertionError`` if ``status`` is not one of ``_TERMINAL_STATUSES``
+        -- a caller precondition violation (the batch workflow's own status
+        local produced a value this function was never told to expect), never
+        silently coerced into a misleading "complete" event for an
+        unrecognized status. Raised via an explicit ``if``/``raise`` rather
+        than a bare ``assert`` statement so the check survives even when
+        Python runs with ``-O``/``PYTHONOPTIMIZE=1`` (which strips asserts).
+    """
+    if status not in _TERMINAL_STATUSES:
+        raise AssertionError(f"_terminal_sse_event: unexpected status {status!r}")
+    if status == "cancelled":
+        return {"type": "cancelled", "detail": "Run cancelled."}
+    if status in ("failed", "interrupted"):
+        return {"type": "error", "detail": f"Run {status}.", "terminal_status": status}
+    if status not in ("completed", "completed_with_errors"):
+        raise AssertionError(f"_terminal_sse_event: unexpected status {status!r}")
+    message = (
+        f"Run completed with {errored_count} errored and {skipped_count} skipped cycle(s)."
+        if errored_count
+        else "Run completed."
+    )
+    return {
+        "type": "complete",
+        "message": message,
+        "status": status,
+        "completed_count": completed_count,
+        "skipped_count": skipped_count,
+        "errored_count": errored_count,
+        "errored_details": errored_details,
+        "completed_batches": completed_batches,
+        "total_batches": total_batches,
+    }
+
+
 @workflow.defn(name="StrategyLabBatchWorkflow")
 class StrategyLabBatchWorkflow:
     """Durable batch driver — ports ``_strategy_lab_worker``'s batch/wave loop.
@@ -427,7 +553,14 @@ class StrategyLabBatchWorkflow:
         ``tracker_merge_error_count``. ``completed_record_ids`` is seeded
         forward from ``batch_input`` (the pre-resume ids) and extended with
         every newly finalized record's id — never truncated below what was
-        seeded.
+        seeded. When ``workflow.patched("strategy-lab-sse-run-events")`` is
+        ``True`` for this execution (see ``run``'s own inline comment — False
+        only when replaying a run already in flight when this behavior
+        shipped), also best-effort publishes ``cycle_skipped``/
+        ``cycle_complete`` SSE events per cycle and one terminal
+        ``complete``/``error``/``cancelled`` event via
+        ``publish_run_event_activity`` — a UI side-channel, never required for
+        this method's own return value or persisted run state to be correct.
     Invariants:
         Each wave merges its settled cycles into the batch-level tracker in
         cycle-index order (via ``merge_wave_results_activity``), so directives are
@@ -454,6 +587,19 @@ class StrategyLabBatchWorkflow:
         # silently committing (shared.fencing.check_fencing_token).
         generation = int(batch_input.get("generation", _DEFAULT_FENCING_GENERATION))
 
+        # Gates the three new-in-this-change SSE publish call sites below
+        # (cycle_skipped / cycle_complete / terminal). Called here, before any
+        # activity/child-workflow command in this method, so any run already
+        # in flight when this ships (which by definition already executed
+        # past this point under the old code) replays with this False and
+        # simply doesn't publish for the remainder of its lifetime -- the
+        # existing, already-safe degraded behavior (no live SSE events), not
+        # a replay non-determinism error. Mirrors
+        # ai_systems_team/temporal/workflows.py's established use of
+        # workflow.patched for this exact purpose (see its own module
+        # docstring / README for the pattern).
+        sse_events_enabled = workflow.patched("strategy-lab-sse-run-events")
+
         wf_config = batch_input.get("workflow_config")
         if wf_config is None:
             wf_config = await _exec(act.resolve_workflow_config_activity)
@@ -474,9 +620,15 @@ class StrategyLabBatchWorkflow:
         # interrupt/failure is never mislabeled a user cancellation (matching
         # thread mode's _strategy_lab_worker).
         external_terminal_status: Optional[str] = None
-
         # Resume: derive the starting batch + within-batch index from the flat offset.
         start_batch_idx, start_within_batch = divmod(start_cycle_offset, batch_size)
+        # How many batches have fully completed so far, for the terminal SSE
+        # event's informational completed_batches/total_batches fields only
+        # (not itself persisted run state -- persist_run_state_activity's own
+        # "completed_batches" write below is the source of truth for resume).
+        # Approximated forward from the resume offset, matching
+        # completed_indices' own resume-seed approximation just above.
+        completed_batches_count = start_batch_idx
 
         for batch_idx in range(start_batch_idx, batch_count):
             within_start = start_within_batch if batch_idx == start_batch_idx else 0
@@ -509,12 +661,22 @@ class StrategyLabBatchWorkflow:
                 handles: List[tuple[int, Any]] = []
                 for cycle_index in wave_indices:
                     cycle_input = {
+                        "run_id": run_id,
+                        "generation": generation,
+                        "cycle_index": cycle_index,
                         "prior_records": prior_records,
                         "config": config_dict,
                         "signal_brief": signal_brief,
                         "exclude_asset_classes": exclude_asset_classes,
                         "convergence_tracker_state": _snapshot_tracker_wire(primary_tracker_state),
                         "workflow_config": wf_config,
+                        # Deterministic per-batch key (a string — safe to build in
+                        # the workflow sandbox). Every cycle of this batch carries
+                        # the same key, so when the batch-indicator-cache flag is
+                        # on the worker resolves one shared BatchIndicatorCache per
+                        # batch from it (see run_design_attempt_activity). Inert
+                        # payload when the flag is off.
+                        "batch_cache_key": f"{run_id}-b{batch_idx}",
                     }
                     handle = await workflow.start_child_workflow(
                         StrategyLabCycleWorkflow.run,
@@ -588,6 +750,19 @@ class StrategyLabBatchWorkflow:
                         # cycle contributes no record, so it's neither
                         # finalized nor merged into the batch tracker.
                         skipped += 1
+                        if sse_events_enabled:
+                            await _exec(
+                                act.publish_run_event_activity,
+                                params={
+                                    "run_id": run_id,
+                                    "event": {
+                                        "type": "cycle_skipped",
+                                        "cycle_index": cycle_index,
+                                        "reason": "no_market_data",
+                                        "batch_index": batch_idx + 1,
+                                    },
+                                },
+                            )
                         continue
                     finalized = await _exec(
                         act.finalize_cycle_record_activity,
@@ -605,6 +780,20 @@ class StrategyLabBatchWorkflow:
                     if record_id is not None:
                         completed_record_ids.append(record_id)
                     completed_indices.add(cycle_index)
+                    if sse_events_enabled:
+                        await _exec(
+                            act.publish_run_event_activity,
+                            params={
+                                "run_id": run_id,
+                                "event": {
+                                    "type": "cycle_complete",
+                                    "cycle_index": cycle_index,
+                                    "record_id": record_id,
+                                    "completed_cycles": len(completed_indices),
+                                    "batch_index": batch_idx + 1,
+                                },
+                            },
+                        )
                     wave_results.append(
                         {
                             "cycle_index": cycle_index,
@@ -654,11 +843,24 @@ class StrategyLabBatchWorkflow:
             if external_terminal_status is not None:
                 break
             await self._persist_state(run_id, {"completed_batches": batch_idx + 1}, generation)
+            completed_batches_count = batch_idx + 1
 
-        status = external_terminal_status or (
-            "completed_with_errors" if errored else "completed"
-        )
+        status = external_terminal_status or ("completed_with_errors" if errored else "completed")
         await self._persist_state(run_id, {"status": status}, generation)
+        if sse_events_enabled:
+            terminal_event = _terminal_sse_event(
+                status=status,
+                completed_count=len(completed_record_ids),
+                skipped_count=skipped,
+                errored_count=errored,
+                errored_details=errored_details,
+                completed_batches=completed_batches_count,
+                total_batches=batch_count,
+            )
+            await _exec(
+                act.publish_run_event_activity,
+                params={"run_id": run_id, "event": terminal_event},
+            )
         return {
             "run_id": run_id,
             "status": status,
@@ -681,6 +883,10 @@ class StrategyLabBatchWorkflow:
             - ``run_id`` is a non-empty string identifying an existing run.
             - ``state`` is a JSON-serializable dict of run-state deltas.
             - ``generation`` is a non-negative int (this workflow's fencing token).
+
+        Postconditions:
+            - On successful return, ``state`` has been durably persisted for
+              ``run_id`` via ``persist_run_state_activity``.
 
         Raises when ``persist_run_state_activity`` rejects ``generation`` as stale
         (a non-retryable ``ApplicationError`` — a fenced write means this incarnation

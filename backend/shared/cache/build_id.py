@@ -28,6 +28,8 @@ _SAFE_BUILD_ID = re.compile(r"^[A-Za-z0-9._@+/-]+$")
 def cache_build_id() -> str:
     """Return the configured cache build id, or ``\"\"`` when unset.
 
+    Preconditions:
+        - None (reads only from the process environment).
     Postconditions:
         - Returns a non-empty string with no ``:`` when a recognized env var is
           set to a non-blank, safe value.

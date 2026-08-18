@@ -632,7 +632,7 @@ while True:
   not a binary Temporal/thread split — a Temporal-mode job is not
   automatically signal-capable:
   - **Native-signal-capable Temporal workflows** (`CodingTeamWorkflow`, and
-    `RunTeamWorkflowV2` when `SE_WORKFLOW_V2` selects it): signal without
+    `RunTeamWorkflowV2`, unconditionally): signal without
     touching the job record's pause envelope (per the idempotency note in
     §1 — clearing it is the orchestrator's job alone, once it actually
     consumes the answer).
@@ -669,18 +669,14 @@ while True:
     - **Thread-mode jobs** (e.g. the still-threaded `run-from-github` flow),
       where `hitl.wait_for_answers`'s poll loop is exactly what the
       store-and-clear write unblocks.
-    - **SE V1 Temporal jobs** — when `SE_WORKFLOW_V2` is unset/false,
-      `/run-team` launches `RunTeamWorkflow` (`temporal/workflows.py:40`),
-      whose activity still blocks in the SE `orchestrator.py`'s own
-      `_wait_for_user_answers` poll loop and whose workflow defines no
-      `submit_answers` signal at all. Signaling a V1 job would target a
-      workflow with no such handler; it must keep writing to the job store
-      like today until V1 is migrated or removed.
     The route must check both the job's mode (thread vs. Temporal) *and*,
-    for Temporal jobs, whether the actual running workflow is
-    signal-capable (V2) before choosing a branch — attempting a signal
-    against a workflow ID that doesn't define `submit_answers`, or that
-    isn't the one actually running, silently fails to unblock it.
+    for Temporal jobs, whether *this specific pause* is signal-capable
+    before choosing a branch — SE Temporal jobs are unconditionally
+    `RunTeamWorkflowV2` now (no V1 case remains), but not every pause a V2
+    job hits defines `submit_answers`; see the per-phase check below.
+    Attempting a signal against a workflow ID that doesn't define
+    `submit_answers`, or that isn't the one actually running, silently
+    fails to unblock it.
   - **"V2 workflow" is not itself sufficient — the check must be per-phase,
     not per-workflow-class.** `RunTeamWorkflowV2`'s Phase 1
     (`parse_spec_activity`, `temporal/workflows.py:119-127`) runs the PRA
@@ -701,8 +697,29 @@ while True:
     persisted for *this* pause: only a pause carrying the new discriminated
     envelope (`resume_token` / `pause_kind`, per §1 — i.e. one that went
     through the redesigned Phase 3 activity) takes the signal-only branch;
-    a pause with no such envelope (PRA's Phase 1, or SE V1 entirely) takes
-    the store-and-clear branch regardless of the workflow's class.
+    a pause with no such envelope (PRA's Phase 1) takes the store-and-clear
+    branch regardless of the workflow's class.
+- **Current status (V1 fully removed):** `/run-team` always starts
+  `RunTeamWorkflowV2`; the `RunTeamWorkflow` V1 class, its worker
+  registration, and the `SE_WORKFLOW_V2` gate have all been deleted from the
+  codebase — there is no operator opt-out back to V1, and no V1 code path
+  left to opt into. This does **not** change HITL behavior described
+  above — V2's Phase 3 activity (`execute_coding_team_activity`) still calls
+  `run_coding_team_orchestrator` with the default `pause_strategy="block"`,
+  not `"return"`, so `/run-team/{job_id}/answers` continues to resume V2 jobs
+  by writing to the job store and relying on
+  `orchestrator._wait_for_user_answers`'s poll loop, with no Temporal signal
+  involved. The native-signal branch described in this section
+  (`RunTeamWorkflowV2` gaining a `submit_answers` signal, the discriminated
+  `resume_token`/`pause_kind` envelope, the per-phase check) remains
+  unimplemented future work, not something V1's removal requires or
+  provides.
+- **V1 removal history:** no managed environment ever ran the SE Temporal
+  worker, so no in-flight `RunTeamWorkflow` (V1) executions ever existed —
+  there was nothing to drain, complete, or cancel. The `RunTeamWorkflow`
+  class and its worker registration were deleted outright rather than left
+  in place to drain. No V1-only special case remains anywhere in this
+  contract, the answers routes, or the SE Temporal worker.
 - `POST /run/{job_id}/resume` is Temporal-native only: it requires a
   `resume_token` and `waiting_for_user`, then signals `CodingTeamWorkflow`.
   The old cross-worker claim lease (`resume_claim_at` / `resume_claim_seq`)

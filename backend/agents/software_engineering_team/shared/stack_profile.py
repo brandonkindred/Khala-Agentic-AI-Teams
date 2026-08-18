@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, Protocol, Tuple
 
-from software_engineering_team.shared.models import Task
+from shared.dev_models.models import Task
 
 
 class PhaseModels(Protocol):

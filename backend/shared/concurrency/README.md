@@ -170,3 +170,54 @@ write of the latest state, not N sequential writes.
   possibly being abandoned mid-write by a writer slower than `join_timeout`
   (e.g. an HTTP client with its own longer timeout/retry budget);
   `join_timeout` only bounds the final thread join once draining is done.
+
+## `KeyedLockManager`
+
+A per-key mutual-exclusion registry: concurrent callers that name the same
+key are serialized against each other, while callers touching disjoint keys
+proceed fully concurrently — the "lock only what actually conflicts" pattern,
+as opposed to a single global lock that would serialize everything.
+
+Motivating use case: the SE code-v2 gated execution loop
+(`software_engineering_team/shared/phases/execution.py`) accumulates every
+microtask's output into a shared `all_files: Dict[str, str]` dict and writes
+it to a shared `repo_path` git worktree. Independent microtasks in the same
+scheduled wave run concurrently via `parallel_map` with `wait_for_stragglers=True`
+so a stop-on-review-failure does not return while a sibling is still writing
+the worktree. The pool is capped by `SE_EXECUTION_WAVE_CONCURRENCY` (default 4),
+not wave size. Generation runs unlocked; write through review, docs, and
+rollback then hold a per-run worktree lock because review tools (build/lint)
+observe the whole repo and review/docs can introduce paths that were not in
+the initial generation set. Per-path `KeyedLockManager` locks still
+serialize overlapping snapshot/write/merge under that exclusive section;
+keys are physical (`realpath`) paths, so `shared.py` and `./shared.py`
+serialize against each other.
+
+```python
+from shared.concurrency import KeyedLockManager
+
+file_locks: KeyedLockManager[str] = KeyedLockManager()  # one instance per task run
+
+# Keys are physical (realpath) paths so aliases of one file serialize together.
+with file_locks.lock(physical_lock_keys):
+    write_repo_text_files(repo_path, microtask_files)
+    all_files.update(microtask_files)
+```
+
+- `lock(keys)` — a context manager that acquires every key in `keys` (any
+  hashable) for the duration of the `with` block, deduplicating repeated keys
+  first. An empty batch is a no-op.
+- Disjoint key sets never block each other; overlapping keys are fully
+  serialized — whichever caller acquires second observes every side effect
+  the first caller made under the lock (no interleaving, no dropped update).
+- Batch acquisition is deadlock-safe **regardless of the order keys are
+  passed in**: every key is assigned a global order the first time this
+  manager ever sees it, and `lock()` always acquires a batch sorted by that
+  order — so two callers locking `["a", "b"]` and `["b", "a"]` concurrently
+  can never deadlock on each other.
+- Not reentrant: a thread calling `lock()` for a key it already holds from an
+  outer, not-yet-exited `lock()` call raises `RuntimeError` immediately
+  instead of deadlocking silently.
+- A key's lock is never removed once created — this manager is meant to be
+  constructed once and reused for an entire run (the same lifetime as the
+  `all_files` dict it is intended to guard), not created per call.

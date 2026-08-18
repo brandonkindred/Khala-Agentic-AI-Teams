@@ -23,9 +23,9 @@ if str(_agents) not in sys.path:
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from agent_console import AgentConsoleStorageUnavailable
-from agent_console.models import SavedInput
-from agent_console.store import SavedInputNameConflict
+from agent_platform.console import AgentConsoleStorageUnavailable
+from agent_platform.console.models import SavedInput
+from agent_platform.console.store import SavedInputNameConflict
 
 
 class _FakeStore:
@@ -116,7 +116,7 @@ def client(tmp_path, monkeypatch) -> TestClient:
         "  entrypoint: x:y\n",
         encoding="utf-8",
     )
-    import agent_registry.loader as loader
+    import agent_platform.registry.loader as loader
 
     # Prior tests in the suite may have monkeypatched ``get_registry`` to a
     # plain lambda, which lacks ``cache_clear``. Restore the cached function

@@ -57,13 +57,13 @@ class TestModels:
     def test_microtask_defaults(self):
         mt = Microtask(id="mt-1")
         assert mt.status == MicrotaskStatus.PENDING
-        assert mt.tool_agent == ToolAgentKind.GENERAL
+        assert mt.tool_agent == ""
         assert mt.depends_on == []
         assert mt.output_files == {}
 
     def test_planning_result_defaults(self):
         pr = PlanningResult()
-        assert pr.language == "typescript"
+        assert pr.language == ""
         assert pr.microtasks == []
 
     def test_workflow_result_defaults(self):
@@ -303,7 +303,7 @@ class TestPlanningPhase:
     def test_language_detection_angular(self, tmp_path):
         from frontend_code_v2_team.phases.planning import _detect_language
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         (tmp_path / "angular.json").write_text("{}")
         task = Task(
@@ -318,7 +318,7 @@ class TestPlanningPhase:
     def test_language_detection_from_description(self, tmp_path):
         from frontend_code_v2_team.phases.planning import _detect_language
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         task = Task(
             id="t1",
@@ -360,7 +360,7 @@ class TestPlanningPhase:
     def test_run_planning_fallback(self, tmp_path):
         from frontend_code_v2_team.phases.planning import run_planning
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         mock_llm = _TextStubClient(
             "## MICROTASKS ##\n## END MICROTASKS ##\n"
@@ -461,7 +461,7 @@ class TestFrontendDevelopmentAgentBranchReuse:
             PlanningResult,
         )
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         (tmp_path / "eslint.config.js").write_text("export default [];\n")
         (tmp_path / "package.json").write_text('{"scripts":{"test":"vitest run"}}\n')
@@ -564,7 +564,7 @@ class TestFrontendDevelopmentAgentBranchReuse:
             PlanningResult,
         )
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         (tmp_path / "eslint.config.js").write_text("export default [];\n")
         (tmp_path / "package.json").write_text('{"scripts":{"test":"vitest run"}}\n')
@@ -675,7 +675,7 @@ class TestFrontendCodeV2TeamLead:
             SetupResult,
         )
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         deliver = DeliverResult(
             branch_name="feature/ui",
@@ -807,3 +807,129 @@ class TestDocumentationSelfReviewWiring:
         # The team's own prompt template was the one shown to the LLM.
         prefix = DOCUMENTATION_SELF_REVIEW_PROMPT.split("{", 1)[0]
         assert prefix and prefix in client.prompts[0]
+
+
+class TestDbCSelfReviewWiring:
+    """The frontend GATE_CONFIG must point the DbC self-review seam at the shared,
+    reusable ``run_dbc_comments_review`` callable so completed frontend microtasks
+    get DbC comment coverage by default (gated at the call site by
+    ``enable_dbc_comments``). Frontend's non-Python files have no AST-level
+    insertion safety net of their own, so the shared phase's post-insertion
+    build-verification revert is exercised here as the sole guard against a bad
+    DbC edit reaching a commit.
+    """
+
+    def test_gate_config_wires_dbc_self_review(self):
+        from frontend_code_v2_team.phases.execution import GATE_CONFIG
+
+        from software_engineering_team.shared.phases.dbc_phase import run_dbc_comments_review
+
+        # Identity, not just truthiness: the shared loop and its tests rely on this
+        # being the exact shared callable, not a team-local wrapper around it.
+        assert GATE_CONFIG.run_dbc_self_review is run_dbc_comments_review
+
+    @staticmethod
+    def _drive_dbc(*, tmp_path, monkeypatch, dbc_files, build_verifier, microtask_files):
+        """Run the shared DbC self-review through the *frontend* GATE_CONFIG.
+
+        Monkeypatches ``DbcCommentsAgent`` so the wired ``run_dbc_comments_review``
+        returns ``dbc_files`` for the concatenated frontend input, then invokes the
+        phase orchestrator with the frontend team's ``GATE_CONFIG`` and the given
+        ``build_verifier``. Returns ``(mt, microtask_files, all_files)`` after the
+        in-place mutations.
+        """
+        from types import SimpleNamespace
+
+        from frontend_code_v2_team.phases.execution import GATE_CONFIG
+
+        from software_engineering_team.shared.phases import dbc_phase
+        from software_engineering_team.shared.phases.dbc_phase import _run_dbc_self_review
+        from software_engineering_team.shared.phases.execution import ReviewDependencies
+        from software_engineering_team.technical_writers.dbc_comments_agent.models import (
+            DbcCommentsOutput,
+        )
+
+        class _FakeDbcAgent:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            def run(self, input_data: Any, on_status: Optional[Any] = None) -> DbcCommentsOutput:
+                return DbcCommentsOutput(files=dict(dbc_files))
+
+        monkeypatch.setattr(dbc_phase, "DbcCommentsAgent", _FakeDbcAgent)
+
+        mt = SimpleNamespace(id="mt-1", title="Microtask", output_files=dict(microtask_files))
+        all_files = dict(microtask_files)
+        _run_dbc_self_review(
+            gate_config=GATE_CONFIG,
+            task=SimpleNamespace(id="t1", title="T", description="build a component"),
+            task_id="t1",
+            mt=mt,
+            microtask_files=microtask_files,
+            repo_path=tmp_path,
+            all_files=all_files,
+            architecture=None,
+            language="typescript",
+            deps=ReviewDependencies(build_verifier=build_verifier),
+            build_verify_label="build",
+            progress_callback=None,
+            current_idx=0,
+            completed_ids=set(),
+            total=1,
+            detail_cb=lambda d, idx, phase: None,
+        )
+        return mt, microtask_files, all_files
+
+    def test_frontend_microtask_gets_dbc_comments_when_build_passes(self, tmp_path, monkeypatch):
+        # A completed frontend microtask's .tsx file gains DbC-inserted comments,
+        # persisted to disk and reflected in every in-memory map, once the
+        # post-insertion build verification passes.
+        (tmp_path / "src").mkdir()
+        original = "export const Button = () => null;\n"
+        (tmp_path / "src" / "button.tsx").write_text(original, encoding="utf-8")
+        with_dbc = "// Preconditions: none.\n" + original
+        microtask_files = {"src/button.tsx": original}
+
+        mt, microtask_files, all_files = self._drive_dbc(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            dbc_files={"src/button.tsx": with_dbc},
+            build_verifier=lambda repo, label, tid: (True, "ok"),
+            microtask_files=microtask_files,
+        )
+
+        assert (tmp_path / "src" / "button.tsx").read_text(encoding="utf-8") == with_dbc
+        assert microtask_files == {"src/button.tsx": with_dbc}
+        assert all_files == microtask_files
+        assert mt.output_files == microtask_files
+
+    def test_frontend_build_failure_after_dbc_reverts_only_affected_file(
+        self, tmp_path, monkeypatch
+    ):
+        # The build-safety net: when build verification fails after DbC insertion,
+        # only the DbC-touched file is reverted (on disk and in every map); a
+        # sibling frontend file the DbC step never touched is left untouched. This
+        # is the guard frontend relies on in place of an AST-level safety net.
+        (tmp_path / "src").mkdir()
+        original_button = "export const Button = () => null;\n"
+        original_input = "export const Input = () => null;\n"
+        (tmp_path / "src" / "button.tsx").write_text(original_button, encoding="utf-8")
+        (tmp_path / "src" / "input.tsx").write_text(original_input, encoding="utf-8")
+        microtask_files = {"src/button.tsx": original_button, "src/input.tsx": original_input}
+
+        mt, microtask_files, all_files = self._drive_dbc(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            # DbC only proposes an edit to button.tsx; input.tsx is never touched.
+            dbc_files={"src/button.tsx": "// Preconditions: none.\n" + original_button},
+            build_verifier=lambda repo, label, tid: (False, "tsc failed"),
+            microtask_files=microtask_files,
+        )
+
+        # Affected file reverted to its pre-DbC content everywhere; sibling intact.
+        assert (tmp_path / "src" / "button.tsx").read_text(encoding="utf-8") == original_button
+        assert (tmp_path / "src" / "input.tsx").read_text(encoding="utf-8") == original_input
+        expected = {"src/button.tsx": original_button, "src/input.tsx": original_input}
+        assert microtask_files == expected
+        assert all_files == expected
+        assert mt.output_files == expected

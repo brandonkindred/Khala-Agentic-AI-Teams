@@ -10,15 +10,31 @@ import pytest
 from pydantic import BaseModel
 
 from llm_service.clients.dummy import DummyLLMClient
-from llm_service.interface import LLMClient
+from llm_service.interface import (
+    LLMClient,
+    record_complete_json_turn,
+    reset_complete_json_observer_state,
+    take_complete_json_turns,
+)
 from llm_service.strands_adapter import (
     LLMClientModel,
     _flatten_system_prompt_content,
     _strands_messages_to_openai,
     _tool_specs_to_openai,
-    get_strands_model,
     run_json_via_strands,
 )
+from llm_service.strands_adapter import (
+    _get_strands_model as get_strands_model,
+)
+from llm_service.tests._fakes import _drain
+
+
+@pytest.fixture(autouse=True)
+def _reset_observer_turns() -> None:
+    reset_complete_json_observer_state()
+    yield
+    reset_complete_json_observer_state()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -81,18 +97,6 @@ class _RecordingClient(LLMClient):
         }
         self.chat_calls.append(call)
         return self.response
-
-
-def _drain(gen) -> List[Dict[str, Any]]:
-    """Drain a Strands async stream into a list for easy assertions."""
-
-    async def _run() -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
-        async for event in gen:
-            out.append(event)
-        return out
-
-    return asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +178,17 @@ def test_flatten_system_prompt_content_handles_absence_and_non_dict_blocks() -> 
     assert _flatten_system_prompt_content([]) == ""
     assert _flatten_system_prompt_content([{"text": "a"}, {"text": "b"}]) == "ab"
     assert _flatten_system_prompt_content(["already-a-string"]) == "already-a-string"
+
+
+def test_flatten_system_prompt_content_unwraps_cache_breakpoint() -> None:
+    """A CacheBreakpoint reaching the no-op flatten path (e.g. a backing client
+    that doesn't support caching) contributes its plain ``.text`` — never the
+    dataclass's ``repr`` — so the flattened string is identical to what a plain
+    string segment would have produced."""
+    from llm_service.cache_breakpoint import CacheBreakpoint
+
+    assert _flatten_system_prompt_content([CacheBreakpoint("stable prefix")]) == "stable prefix"
+    assert _flatten_system_prompt_content([CacheBreakpoint("a"), {"text": "b"}, "c"]) == "abc"
 
 
 def test_flatten_skips_unknown_blocks() -> None:
@@ -275,6 +290,88 @@ def test_stream_emits_text_events_for_plain_response() -> None:
     assert call["think"] is True
 
 
+def test_stream_records_observer_turns_for_each_chat_call() -> None:
+    """Each Strands stream() invocation is one model HTTP turn for transcripts."""
+    client = _RecordingClient({"summary": "done", "status": "ok"})
+    model = LLMClientModel(client, agent_key="qa_agent")
+
+    async def _run() -> list:
+        events = []
+        async for event in model.stream(
+            messages=[{"role": "user", "content": [{"text": "review this"}]}],
+            system_prompt="You are a QA expert.",
+        ):
+            events.append(event)
+        return take_complete_json_turns()
+
+    turns = asyncio.run(_run())
+    assert len(turns) == 1
+    prompt, response, _started = turns[0]
+    assert json.loads(prompt)[0]["role"] == "system"
+    assert "QA expert" in prompt
+    assert "done" in response
+
+
+def test_stream_replays_provider_turns_recorded_inside_to_thread() -> None:
+    """chat() runs in a worker thread; ContextVar writes there must be
+    returned and re-recorded on the awaiting task or self-correction
+    turns never reach the transcript observer."""
+
+    class _InnerTurnClient(_RecordingClient):
+        def chat(self, messages: list, **kwargs: Any) -> Any:
+            super().chat(messages, **kwargs)
+            record_complete_json_turn("first messages", "prose analysis")
+            record_complete_json_turn("corrective messages", '{"ok": true}')
+            return self.response
+
+    client = _InnerTurnClient({"ok": True})
+    model = LLMClientModel(client, agent_key="qa_agent")
+
+    async def _run() -> list:
+        async for _event in model.stream(
+            messages=[{"role": "user", "content": [{"text": "review this"}]}],
+        ):
+            pass
+        return take_complete_json_turns()
+
+    turns = asyncio.run(_run())
+    assert [(p, r) for p, r, _s in turns] == [
+        ("first messages", "prose analysis"),
+        ("corrective messages", '{"ok": true}'),
+    ]
+
+
+def test_stream_replays_worker_turns_when_chat_raises() -> None:
+    """Self-correction that still fails records turns in the worker; those
+    must replay onto the parent task even though ``chat()`` raised."""
+    from llm_service.interface import LLMJsonParseError
+
+    class _FailAfterTurns(_RecordingClient):
+        def chat(self, messages: list, **kwargs: Any) -> Any:
+            super().chat(messages, **kwargs)
+            record_complete_json_turn("first messages", "prose analysis")
+            record_complete_json_turn("corrective messages", '{"ok": false}')
+            raise LLMJsonParseError("not json", response_preview="nope")
+
+    model = LLMClientModel(_FailAfterTurns({"ok": True}), agent_key="qa_agent")
+
+    async def _run() -> list:
+        try:
+            async for _event in model.stream(
+                messages=[{"role": "user", "content": [{"text": "review this"}]}],
+            ):
+                pass
+        except LLMJsonParseError:
+            return take_complete_json_turns()
+        raise AssertionError("expected LLMJsonParseError")
+
+    turns = asyncio.run(_run())
+    assert [(p, r) for p, r, _s in turns] == [
+        ("first messages", "prose analysis"),
+        ("corrective messages", '{"ok": false}'),
+    ]
+
+
 def test_stream_merges_system_prompt_content_blocks() -> None:
     """``system_prompt_content`` (Strands' structured system prompt) must not be
     silently dropped — its flattened text reaches the emitted system message
@@ -312,6 +409,86 @@ def test_stream_combines_system_prompt_and_system_prompt_content() -> None:
         "role": "system",
         "content": "You are a QA expert.\n\nFollow the house style.",
     }
+
+
+class _CachingRecordingClient(_RecordingClient):
+    """``_RecordingClient`` variant whose backing wire protocol supports
+    prompt caching — used to exercise the "preserve the CacheBreakpoint marker"
+    branch of ``stream()``, as opposed to the "flatten to plain text" default
+    every other test double takes."""
+
+    def supports_prompt_caching(self) -> bool:
+        return True
+
+
+def test_stream_preserves_cache_breakpoint_when_client_supports_caching() -> None:
+    """A CacheBreakpoint in system_prompt_content survives intact — not
+    flattened to text — as a segment in the system message's content list,
+    when the backing client opts into prompt caching."""
+    from llm_service.cache_breakpoint import CacheBreakpoint
+
+    client = _CachingRecordingClient({"ok": True})
+    model = LLMClientModel(client)
+    breakpoint_marker = CacheBreakpoint("stable spec excerpt")
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            system_prompt="lead-in",
+            system_prompt_content=[breakpoint_marker, {"text": "trailer"}],
+        )
+    )
+
+    call = client.chat_calls[0]
+    assert call["messages"][0] == {
+        "role": "system",
+        "content": ["lead-in", breakpoint_marker, "trailer"],
+    }
+
+
+def test_stream_flattens_cache_breakpoint_when_client_lacks_caching() -> None:
+    """The same input as above, but through a client that does NOT support
+    prompt caching, must flatten to plain text exactly as it did before the
+    caching feature existed — no CacheBreakpoint object leaks onto the wire,
+    no error is raised (the documented no-op contract)."""
+    from llm_service.cache_breakpoint import CacheBreakpoint
+
+    client = _RecordingClient({"ok": True})
+    model = LLMClientModel(client)
+    assert model.supports_prompt_caching() is False
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            system_prompt="lead-in",
+            system_prompt_content=[CacheBreakpoint("stable spec excerpt"), {"text": "trailer"}],
+        )
+    )
+
+    call = client.chat_calls[0]
+    assert call["messages"][0] == {
+        "role": "system",
+        "content": "lead-in\n\nstable spec excerpttrailer",
+    }
+
+
+def test_stream_with_no_breakpoint_is_unaffected_by_caching_capable_client() -> None:
+    """No CacheBreakpoint anywhere -> identical flattened-string output
+    regardless of the backing client's caching capability (the branch point is
+    marker presence, not client capability alone)."""
+    client = _CachingRecordingClient({"ok": True})
+    model = LLMClientModel(client)
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            system_prompt="lead-in",
+            system_prompt_content=[{"text": "trailer"}],
+        )
+    )
+
+    call = client.chat_calls[0]
+    assert call["messages"][0] == {"role": "system", "content": "lead-in\n\ntrailer"}
 
 
 def test_stream_propagates_team_through_to_thread() -> None:
@@ -634,8 +811,16 @@ def test_get_strands_model_does_not_alias_distinct_agent_keys(monkeypatch) -> No
     # The provider list is the sole source of LLM resolution — seed a local Ollama
     # entry so get_client resolves (the shared model resolver still drives model_id).
     _entry = ps.ProviderEntry(
-        id=1, label="e", provider="ollama", model="", base_url="http://localhost:11434",
-        api_key="", sort_order=1, limit_exceeded=False, limit_type="", reset_at=None,
+        id=1,
+        label="e",
+        provider="ollama",
+        model="",
+        base_url="http://localhost:11434",
+        api_key="",
+        sort_order=1,
+        limit_exceeded=False,
+        limit_type="",
+        reset_at=None,
     )
     monkeypatch.setattr(ps, "load_ordered_entries", lambda *a, **k: [_entry])
     monkeypatch.setattr(ps, "select_active_entry", lambda es, **k: es[0])
@@ -746,6 +931,20 @@ def test_public_llm_service_get_strands_model_accepts_client_kwarg() -> None:
     assert isinstance(model, LLMClientModel)
     assert model._client is client
     assert model.get_config()["response_format"] == "text"
+
+
+def test_adapter_get_strands_model_is_not_publicly_exported() -> None:
+    """``strands_adapter`` must not export a public ``get_strands_model`` name:
+    ``llm_service.get_strands_model`` (re-exported from ``strands_provider``,
+    which adds caching, provider resolution, and fingerprint invalidation) is
+    the sole canonical public entry point. The adapter's own factory is a
+    low-level, package-private helper (``_get_strands_model``).
+    """
+    import llm_service.strands_adapter as adapter
+
+    assert "get_strands_model" not in adapter.__all__
+    assert not hasattr(adapter, "get_strands_model")
+    assert hasattr(adapter, "_get_strands_model")
 
 
 def test_invocation_state_invalid_response_format_raises() -> None:
@@ -1051,6 +1250,23 @@ def test_llm_client_model_supports_structured_output_delegates_to_backing_client
     get_max_context_tokens delegation precedent above."""
     assert LLMClientModel(_StructuredOutputClient()).supports_structured_output() is True
     assert LLMClientModel(DummyLLMClient()).supports_structured_output() is False
+
+
+# ---------------------------------------------------------------------------
+# supports_prompt_caching delegation
+# ---------------------------------------------------------------------------
+
+
+class _PromptCachingClient(DummyLLMClient):
+    def supports_prompt_caching(self) -> bool:
+        return True
+
+
+def test_llm_client_model_supports_prompt_caching_delegates_to_backing_client() -> None:
+    """Same delegation precedent as supports_structured_output, for the new
+    prompt-caching capability flag."""
+    assert LLMClientModel(_PromptCachingClient()).supports_prompt_caching() is True
+    assert LLMClientModel(DummyLLMClient()).supports_prompt_caching() is False
 
 
 # ---------------------------------------------------------------------------

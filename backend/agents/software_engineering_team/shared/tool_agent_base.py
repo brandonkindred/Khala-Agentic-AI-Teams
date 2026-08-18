@@ -44,8 +44,9 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
-from llm_service.interface import LLMError
+from llm_service.interface import LLMError, LLMJsonParseError
 from software_engineering_team.code_review_agent.profiles import ReviewProfile
+from software_engineering_team.shared.json_utils import parse_json_object
 from software_engineering_team.shared.llm_tool_agent_base import LlmToolAgentBase
 from software_engineering_team.shared.v2_models import (
     ReviewIssue,
@@ -102,6 +103,37 @@ _REVIEW_PLACEHOLDER_RE = re.compile(r"\{(task_description|code)\}")
 # it risks a broken fix — the cap exists only to bound a pathological single
 # file, not to restrict normal usage.
 DEFAULT_MAX_RELEVANT_CODE_CHARS = 100_000
+
+# Shared cache for BaseReviewToolAgent's default one-shot LLM review path
+# (shared.cache; opts every subclass in at once via LlmToolAgentBase's
+# _cached_invoke_llm). One namespace/env var for the whole family: the cache
+# key already folds in the concrete class's module+qualname, so distinct
+# agents (e.g. backend vs. frontend Security) never collide. Base stem;
+# LlmToolAgentBase._cache_namespace appends the deploy build id.
+DEFAULT_REVIEW_CACHE_SIZE = 256  # TOOL_AGENT_REVIEW_CACHE_SIZE, floor 0
+_REVIEW_CACHE_NAMESPACE = "toolagent:review:v1"
+
+
+def clear_tool_agent_review_cache() -> None:
+    """Drop every cached BaseReviewToolAgent review result (tests / forced cold review).
+
+    Preconditions:
+        None.
+    Postconditions:
+        This process's view of the shared review-cache namespace is empty
+        when the call returns (best-effort across Redis). A cache backend
+        error is caught and logged rather than propagated — fails open, same
+        as every other cache operation in this module.
+    """
+    from shared.cache import get_shared_cache, with_cache_build_id
+
+    try:
+        get_shared_cache(with_cache_build_id(_REVIEW_CACHE_NAMESPACE)).clear()
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "tool_agent_base: review cache clear failed", exc_info=True
+        )
+
 
 # Placeholders filled explicitly in ``SingleIssueProblemSolveMixin.problem_solve``.
 # ``_problem_solving_kwargs`` must not return these keys (they are dropped with a
@@ -175,36 +207,29 @@ def relevant_code_for_issue(
 def lenient_json_object(
     raw: str, *, logger: logging.Logger, context: str, on_fail_msg: str
 ) -> Dict[str, Any]:
-    """Parse a JSON object from ``raw``, tolerating surrounding prose.
+    """Parse a JSON object from ``raw`` via the canonical recovery ladder.
 
-    Mirrors the historical inline fallback: try ``json.loads`` directly, then
-    the substring between the first ``{`` and last ``}``; on failure log a
-    warning and return ``{}``.
+    Delegates to :func:`software_engineering_team.shared.json_utils.parse_json_object`
+    -- the single recovery ladder shared across the SE team (markdown-fence
+    stripping, prose-prefix trimming, trailing-comma repair, and the
+    string-aware salvage engine behind it). This path therefore recovers the
+    fenced and prose-wrapped payloads that the historical first-``{``/last-``}``
+    substring slice mishandled (e.g. a fenced object followed by prose braces,
+    which the old slice ran past ``rfind("}")`` and dropped). On unrecoverable
+    or non-object output the canonical parser raises ``LLMJsonParseError`` or
+    ``TypeError``, both caught here and mapped to the historical ``{}`` return
+    plus a warning, so callers keep their dict contract.
 
     Preconditions: ``raw`` is a str; ``logger``/``context``/``on_fail_msg`` set.
-    Postconditions: returns a dict (``{}`` when no JSON object can be parsed,
-        or when the parsed JSON value is not a mapping).
+    Postconditions: returns a dict (``{}`` when no JSON object can be recovered,
+        or when the recovered JSON value is not a mapping). Never raises on
+        malformed input.
     """
     try:
-        parsed = json.loads(raw)
-        return parsed if isinstance(parsed, dict) else {}
-    except json.JSONDecodeError:
-        start = raw.find("{")
-        end = raw.rfind("}") + 1
-        if start >= 0 and end > start:
-            try:
-                parsed = json.loads(raw[start:end])
-                return parsed if isinstance(parsed, dict) else {}
-            except json.JSONDecodeError:
-                logger.warning(
-                    "%s: model output did not parse as JSON: %r; %s",
-                    context,
-                    raw,
-                    on_fail_msg,
-                )
-                return {}
+        return parse_json_object(raw)
+    except (LLMJsonParseError, TypeError):
         logger.warning(
-            "%s: model output contained no JSON object: %r; %s",
+            "%s: model output did not parse as JSON: %r; %s",
             context,
             raw,
             on_fail_msg,
@@ -368,6 +393,12 @@ class BaseReviewToolAgent(LlmToolAgentBase):
     use_run_strands_agent: bool = True
     json_parse_strategy: str = "lenient"
     # review_parse_mode / uses_json_model already declared below as "text" / False
+
+    # --- LlmToolAgentBase cache recipe (opt-in; see _cached_invoke_llm) ---
+    # Every subclass shares one namespace/env var — see DEFAULT_REVIEW_CACHE_SIZE.
+    cache_namespace: str = _REVIEW_CACHE_NAMESPACE
+    cache_capacity_env: str = "TOOL_AGENT_REVIEW_CACHE_SIZE"
+    cache_default_capacity: int = DEFAULT_REVIEW_CACHE_SIZE
 
     # --- Labels (subclasses override) ------------------------------------
     name: str = "Tool"  # used for deliver and "<name> review"
@@ -621,7 +652,14 @@ class BaseReviewToolAgent(LlmToolAgentBase):
             :attr:`build_runner` or :attr:`review_via_engine` is set, an
             unexpected exception from the runner/engine is a defect and
             propagates uncaught; see :meth:`_build_review` and
-            :meth:`_engine_review`.
+            :meth:`_engine_review`. On the default one-shot LLM path, the
+            call is routed through :meth:`LlmToolAgentBase._cached_invoke_llm`
+            (keyed on this class's identity, the resolved model, and the
+            rendered prompt): a cache hit skips the LLM call entirely; a
+            cache miss or cache-backend failure falls open to the exact same
+            ``_invoke_llm`` call this method used before caching existed, so
+            the fallback taxonomy above (skip/fail summaries, the
+            ``ValueError`` case) is unaffected by cache state.
         """
         if self.build_runner is not None:
             return self._build_review(inp)
@@ -651,7 +689,7 @@ class BaseReviewToolAgent(LlmToolAgentBase):
             code=code_text,
         )
         status, result = self._call_with_single_fallback(
-            lambda: self._invoke_llm(model, prompt),
+            lambda: self._cached_invoke_llm(model, prompt),
             log_label=review_label,
         )
         if status == "error":
@@ -682,9 +720,3 @@ class BaseReviewToolAgent(LlmToolAgentBase):
             summary; never touches ``inp`` or applies any change.
         """
         return ToolAgentPhaseOutput(summary=f"{self.name} deliver.")
-
-
-# Preferred name for the generalized review base. The historical
-# ``BaseReviewToolAgent`` name is retained above and aliased here so both stacks
-# (and their tests) can import either.
-ReviewToolAgent = BaseReviewToolAgent

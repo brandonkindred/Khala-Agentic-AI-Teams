@@ -17,27 +17,11 @@ from llm_service.interface import (
     LLMTemporaryError,
     LLMTruncatedError,
 )
+from llm_service.tests._fakes import _FakeStreamCtx, _text_message
 
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
-
-
-class _FakeStreamCtx:
-    def __init__(self, message=None, exc=None):
-        self._message = message
-        self._exc = exc
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_a):
-        return False
-
-    def get_final_message(self):
-        if self._exc is not None:
-            raise self._exc
-        return self._message
 
 
 class _FakeMessages:
@@ -54,14 +38,6 @@ class _FakeMessages:
 class _FakeClient:
     def __init__(self, ctx, capture):
         self.messages = _FakeMessages(ctx, capture)
-
-
-def _text_message(text, *, stop_reason="end_turn", input_tokens=11, output_tokens=7):
-    return SimpleNamespace(
-        content=[SimpleNamespace(type="text", text=text)],
-        stop_reason=stop_reason,
-        usage=SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens),
-    )
 
 
 def _tool_message(name, tool_input, *, tool_id="toolu_1"):
@@ -103,6 +79,11 @@ def test_complete_json_accepts_schema_kwarg_as_noop():
     assert client.supports_structured_output() is False
     out = client.complete_json("q", objective="test", schema={"type": "object"})
     assert out == {"answer": 42}
+
+
+def test_claude_supports_prompt_caching_is_true():
+    client, _ = _make_client(_text_message("ok"))
+    assert client.supports_prompt_caching() is True
 
 
 def test_complete_json_never_sends_temperature():
@@ -264,6 +245,90 @@ def test_to_anthropic_messages_drops_empty_id_tool_result():
     assert not has_tool_result
 
 
+def test_to_anthropic_messages_system_string_unchanged_without_breakpoint():
+    """No CacheBreakpoint anywhere -> identical str-typed system, unaffected by
+    the caching feature (regression guard for the pre-caching behavior)."""
+    from llm_service.clients.claude import _to_anthropic_messages
+
+    system, _msgs = _to_anthropic_messages(
+        [
+            {"role": "system", "content": "You are terse."},
+            {"role": "user", "content": "hi"},
+        ]
+    )
+    assert system == "You are terse."
+    assert isinstance(system, str)
+
+
+def test_to_anthropic_messages_translates_cache_breakpoint_to_cache_control_block():
+    from llm_service.cache_breakpoint import CacheBreakpoint
+    from llm_service.clients.claude import _to_anthropic_messages
+
+    system, _msgs = _to_anthropic_messages(
+        [
+            {
+                "role": "system",
+                "content": [CacheBreakpoint("stable prefix"), "\n\ntrailer text"],
+            },
+            {"role": "user", "content": "hi"},
+        ]
+    )
+    assert system == [
+        {"type": "text", "text": "stable prefix", "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "\n\ntrailer text"},
+    ]
+
+
+def test_to_anthropic_messages_list_system_without_breakpoint_still_flattens_to_str():
+    """A list-typed system content with no CacheBreakpoint still renders as a
+    plain joined string (the str/list branch point is CacheBreakpoint presence,
+    not content shape)."""
+    from llm_service.clients.claude import _to_anthropic_messages
+
+    system, _msgs = _to_anthropic_messages(
+        [
+            {"role": "system", "content": ["lead", "trail"]},
+            {"role": "user", "content": "hi"},
+        ]
+    )
+    assert system == "lead\n\ntrail"
+
+
+def test_json_system_appends_instruction_to_block_list_system():
+    from llm_service.clients.claude import _JSON_ONLY_INSTRUCTION, _json_system
+
+    blocks = [{"type": "text", "text": "stable", "cache_control": {"type": "ephemeral"}}]
+    result = _json_system(blocks, tools=None)
+    assert result == [*blocks, {"type": "text", "text": _JSON_ONLY_INSTRUCTION}]
+
+
+def test_json_system_leaves_block_list_system_unchanged_when_tools_present():
+    from llm_service.clients.claude import _json_system
+
+    blocks = [{"type": "text", "text": "stable", "cache_control": {"type": "ephemeral"}}]
+    assert _json_system(blocks, tools=[{"name": "f"}]) == blocks
+
+
+def test_chat_wire_payload_carries_cache_control_for_breakpoint_system():
+    from llm_service.cache_breakpoint import CacheBreakpoint
+
+    client, capture = _make_client(_text_message("hi there"))
+    client.chat(
+        [
+            {"role": "system", "content": [CacheBreakpoint("stable prefix"), "more"]},
+            {"role": "user", "content": "hi"},
+        ],
+        objective="test",
+        response_format="text",
+    )
+    assert capture["system"][0] == {
+        "type": "text",
+        "text": "stable prefix",
+        "cache_control": {"type": "ephemeral"},
+    }
+    assert capture["system"][1] == {"type": "text", "text": "more"}
+
+
 def test_complete_json_requires_objective():
     client, _ = _make_client(_text_message("{}"))
     with pytest.raises(ValueError):
@@ -283,10 +348,28 @@ def test_complete_json_json_parse_error_propagates():
 # ---------------------------------------------------------------------------
 
 
-def test_thinking_default_is_adaptive(monkeypatch):
+def test_thinking_default_is_off_for_json_mode(monkeypatch):
+    """complete_json is always JSON mode; with no explicit think and no agent
+    pin, extended thinking competes with strict JSON decoding for the content
+    channel, so the default omits the thinking kwarg entirely."""
     monkeypatch.delenv("LLM_ENABLE_THINKING", raising=False)
     client, capture = _make_client(_text_message("{}"))
     client.complete_json("q", objective="t")
+    assert "thinking" not in capture
+    assert "output_config" not in capture
+
+
+def test_thinking_default_is_adaptive_for_text_mode(monkeypatch):
+    monkeypatch.delenv("LLM_ENABLE_THINKING", raising=False)
+    client, capture = _make_client(_text_message("hello"))
+    client.complete("q", objective="t")
+    assert capture["thinking"] == {"type": "adaptive"}
+    assert "output_config" not in capture
+
+
+def test_thinking_explicit_true_is_adaptive_even_in_json_mode():
+    client, capture = _make_client(_text_message("{}"))
+    client.complete_json("q", objective="t", think=True)
     assert capture["thinking"] == {"type": "adaptive"}
     assert "output_config" not in capture
 
@@ -620,6 +703,84 @@ def test_telemetry_recorded_with_tokens():
     assert rec["completion_tokens"] == 8
     assert rec["total_tokens"] == 20
     assert rec["status"] == "success"
+    # SDK usage object with no cache activity reported -> defaults to zero.
+    assert rec["cache_read_tokens"] == 0
+    assert rec["cache_creation_tokens"] == 0
+
+
+def test_telemetry_recorded_with_cache_tokens():
+    from llm_service import telemetry
+
+    telemetry.clear_call_log()
+    client, _ = _make_client(
+        _text_message(
+            '{"ok": 1}',
+            input_tokens=12,
+            output_tokens=8,
+            cache_read_input_tokens=500,
+            cache_creation_input_tokens=200,
+        )
+    )
+    client.complete_json("q", objective="record me")
+    calls = telemetry.get_recent_calls()
+    assert calls, "expected a telemetry record"
+    rec = calls[-1]
+    assert rec["cache_read_tokens"] == 500
+    assert rec["cache_creation_tokens"] == 200
+
+
+def test_repeated_call_with_identical_cache_breakpoint_prefix_hits_cache_without_changing_output():
+    """Two chat() calls with the identical CacheBreakpoint-marked system
+    prefix + identical user turn: the wire payload sent is byte-identical
+    both times (a genuine repeat, not two arbitrary calls); the returned
+    completion text is identical regardless of whether the call was
+    cache-served (AC: "no output change for identical inputs"); and the
+    second call's telemetry record carries a non-zero cache_read_tokens
+    (AC: "non-zero cache_read on a repeated identical prefix")."""
+    from llm_service import telemetry
+    from llm_service.cache_breakpoint import CacheBreakpoint
+
+    telemetry.clear_call_log()
+    messages = [
+        {
+            "role": "system",
+            "content": [CacheBreakpoint("stable spec excerpt"), "\n\ntrailer"],
+        },
+        {"role": "user", "content": "hi"},
+    ]
+
+    # First call: simulated cache write (miss -> populates the cache).
+    client, capture = _make_client(
+        _text_message("hi there", cache_read_input_tokens=0, cache_creation_input_tokens=200)
+    )
+    first_out = client.chat(messages, objective="t", response_format="text")
+    # Snapshot before the next call clears/rewrites `capture`.
+    first_system = capture["system"]
+
+    # Second call, same client/messages: simulated cache hit.
+    client._client = _FakeClient(
+        _FakeStreamCtx(
+            message=_text_message(
+                "hi there", cache_read_input_tokens=500, cache_creation_input_tokens=0
+            )
+        ),
+        capture,
+    )
+    second_out = client.chat(messages, objective="t", response_format="text")
+    second_system = capture["system"]
+
+    # No output change for identical inputs, cache-served or not.
+    assert first_out == second_out == "hi there"
+    # Proves it's a genuine repeat: identical wire payload both times.
+    assert first_system == second_system
+
+    calls = telemetry.get_recent_calls()
+    rec1, rec2 = calls[-2], calls[-1]
+    assert rec1["cache_creation_tokens"] == 200
+    assert rec1["cache_read_tokens"] == 0
+    # Non-zero cache_read on the repeated identical prefix.
+    assert rec2["cache_read_tokens"] == 500
+    assert rec2["cache_creation_tokens"] == 0
 
 
 def test_complete_requires_objective():

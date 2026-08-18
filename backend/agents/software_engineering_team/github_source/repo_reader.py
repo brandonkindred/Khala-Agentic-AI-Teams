@@ -90,7 +90,8 @@ class GitHubRepoReader:
         self._max_listed = max_listed
         # A single Condition guards all shared state and lets same-key readers
         # wait for the in-flight leader (single-flight), so a path is fetched
-        # once even when the verifier fans out over a ThreadPoolExecutor.
+        # once even when the verifier fans out via shared.concurrency.parallel_map's
+        # worker pool.
         self._cond = threading.Condition(threading.Lock())
         self._tree: Optional[List[str]] = None
         self._tree_inflight = False

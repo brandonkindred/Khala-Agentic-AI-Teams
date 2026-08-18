@@ -13,15 +13,18 @@ import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { EMPTY, Subscription, catchError, interval, switchMap, timeout } from 'rxjs';
-import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
-import { PersonaTestingApiService } from '../../../services/persona-testing-api.service';
+import { Router } from '@angular/router';
+import { EMPTY, Subscription, catchError, interval, throwError, timeout } from 'rxjs';
+import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
+import { pollWhile } from '../../../shared/poll-while';
+import { STAGE_INDEX } from '../../../models/agent-studio.model';
 import type {
   AgenticTeam,
   ProcessDefinition,
   TestPipelineRun,
 } from '../../../models/agentic-team.model';
+import { isPersonaRunTerminal } from '../../../models/persona-testing.model';
 import type { PersonaInfo, PersonaTestRunDetail } from '../../../models/persona-testing.model';
 import { AgenticTeamTestPanelComponent } from '../agentic-team-test-panel/agentic-team-test-panel.component';
 import {
@@ -30,12 +33,6 @@ import {
   type PersonaEditorDialogResult,
 } from '../persona-testing-dashboard/persona-editor-dialog.component';
 
-/**
- * Persona-test run statuses that are terminal (polling stops). Both the British
- * ('cancelled') and American ('canceled') spellings are accepted because the
- * backend pipeline status string is not normalized at the source.
- */
-const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'canceled']);
 /** Live-run poll cadence (ms). Matches the founder run's coarse 15–30s ticks. */
 const POLL_MS = 10_000;
 /** Upper bound on the launch (`POST /start`) request so a hung call can't wedge the UI. */
@@ -84,11 +81,14 @@ function humanizeStatus(status: string): string {
   );
 }
 
-// Back-loop destinations as 0-based indices into STUDIO_STAGES
-// (build=0, test=1, compose=2, personas=3). Named so the back-loops don't carry
-// bare magic numbers; keep in sync with the STUDIO_STAGES order.
-const STAGE_TEST_AGENT = 1;
-const STAGE_COMPOSE_TEAM = 2;
+/** Parse an ISO (or Date-parseable) timestamp to epoch ms; `null` if unusable. */
+function parseTimestampMs(value: unknown): number | null {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return null;
+  }
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
 
 type StudioPersonaMode = 'manual' | 'persona';
 
@@ -98,15 +98,19 @@ type StudioPersonaMode = 'manual' | 'persona';
  * Validates the team assembled in Stage 3 two ways:
  *   - **Manual:** reuses `app-agentic-team-test-panel` (chat + pipeline) as-is.
  *   - **Persona-driven:** picks a testing persona + a target process and launches
- *     an autonomous run via `POST /start` with
+ *     an autonomous run via `AgentStudioFacade.startPersonaRun` with
  *     `target_team_key = "agentic_team:<teamId>"`, then renders a live run view
  *     (elapsed counter, "persona is thinking…", decision transcript).
+ * Primary HTTP goes through `AgentStudioFacade`; the embedded test panel and
+ * persona editor dialog keep their own API clients (same documented exception
+ * as Stage 2's Console runner).
  *
  * Back-loops (spec §2.1): "iterate roster" → Stage 3, "fix an agent" → Stage 2
  * (disabled when no registry agent is in focus). A team that isn't testable yet
  * (no `complete` process) shows the §Stage-3 safety net rather than an empty
- * dropdown. Reads the handoff `teamId`/`processId`; never navigates backward via
- * the stepper itself.
+ * dropdown. Reads the handoff `teamId`/`processId`/`personaId`; process
+ * selection writes through the shared store (no local competing signal). Never
+ * navigates backward via the stepper itself.
  */
 @Component({
   selector: 'app-agent-studio-persona',
@@ -125,10 +129,10 @@ type StudioPersonaMode = 'manual' | 'persona';
 })
 export class AgentStudioPersonaComponent implements OnInit {
   private readonly state = inject(AgentStudioStateService);
-  private readonly agenticApi = inject(AgenticTeamApiService);
-  private readonly personaApi = inject(PersonaTestingApiService);
+  private readonly facade = inject(AgentStudioFacade);
   private readonly dialog = inject(MatDialog);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly router = inject(Router);
 
   readonly mode = signal<StudioPersonaMode>('persona');
 
@@ -141,7 +145,7 @@ export class AgentStudioPersonaComponent implements OnInit {
   readonly personasError = signal<string | null>(null);
   /** True while a create-persona POST is in flight (drives a progress indicator). */
   readonly creatingPersona = signal(false);
-  readonly selectedProcessId = signal<string | null>(null);
+  readonly selectedProcessId = computed(() => this.state.processId());
   readonly launching = signal(false);
   /** True while a stop-run (cancel) request is in flight; drives "Stopping…". */
   readonly cancelling = signal(false);
@@ -203,7 +207,7 @@ export class AgentStudioPersonaComponent implements OnInit {
 
   readonly runTerminal = computed(() => {
     const r = this.run();
-    return r ? TERMINAL_STATUSES.has(r.status) : false;
+    return r ? isPersonaRunTerminal(r.status) : false;
   });
 
   /**
@@ -217,7 +221,7 @@ export class AgentStudioPersonaComponent implements OnInit {
    */
   readonly pipelineTerminal = computed(() => {
     const s = this.pipelineRun()?.status;
-    return s ? TERMINAL_STATUSES.has(s) : false;
+    return s ? isPersonaRunTerminal(s) : false;
   });
 
   /**
@@ -385,12 +389,14 @@ export class AgentStudioPersonaComponent implements OnInit {
     if (!teamId) {
       return; // empty state: no team composed yet (handled in template)
     }
-    // Pre-seed the target process from the Stage-3 handoff *before* loading the
-    // team, so loadTeam's "default to the single complete process" only fires
-    // when the handoff carried none (it must not clobber a seeded selection).
-    this.selectedProcessId.set(this.state.processId());
     this.loadTeam(teamId);
     this.loadPersonas();
+    // Resume a run that survived this component being destroyed (nested audit
+    // child or a Stage 3/2 back-loop). The id lives on the session store.
+    const liveRunId = this.state.personaLiveRunId();
+    if (liveRunId) {
+      this.startPolling(liveRunId);
+    }
   }
 
   /** Switch the Stage-4 sub-mode between 'manual' (chat/pipeline) and 'persona'. */
@@ -435,16 +441,24 @@ export class AgentStudioPersonaComponent implements OnInit {
     this.state.setPersonaId(id);
   }
 
-  /** Select the target process for the run (must be a `complete` process). */
+  /**
+   * Select the target process for the run (must be a `complete` process).
+   * Process selection is owned by the shared studio state (so it survives a
+   * back-loop to Stage 2/3 and is what drafts persist), hence the write goes
+   * through the state service rather than a local signal.
+   *
+   * Preconditions: `id` is a process id on the loaded team.
+   * Postconditions: `state.processId()` equals `id`.
+   */
   selectProcess(id: string): void {
-    this.selectedProcessId.set(id);
+    this.state.setProcessId(id);
   }
 
   // ── Data loads ────────────────────────────────────────────────────────────
 
   private loadTeam(teamId: string): void {
     this.teamError.set(null);
-    this.agenticApi
+    this.facade
       .getTeam(teamId)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
@@ -466,11 +480,11 @@ export class AgentStudioPersonaComponent implements OnInit {
           // <select> only lists complete ones (so it'd show the placeholder) and
           // the backend would 422 it, but the signal would still enable Run.
           if (current && !complete.some((p) => p.process_id === current)) {
-            this.selectedProcessId.set(null);
+            this.state.setProcessId(null);
           }
           // Default to the only complete process when nothing valid is selected.
           if (!this.selectedProcessId() && complete.length === 1) {
-            this.selectedProcessId.set(complete[0].process_id);
+            this.state.setProcessId(complete[0].process_id);
           }
         },
         error: () => {
@@ -485,8 +499,8 @@ export class AgentStudioPersonaComponent implements OnInit {
     // each error region is independently responsible and safely reloadable.
     this.personasError.set(null);
     this.personasLoading.set(true);
-    this.personaApi
-      .getPersonas()
+    this.facade
+      .listPersonas()
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (resp) => {
@@ -534,8 +548,8 @@ export class AgentStudioPersonaComponent implements OnInit {
     }
     this.launching.set(true);
     this.error.set(null);
-    this.personaApi
-      .startTest({
+    this.facade
+      .startPersonaRun({
         persona_id: personaId,
         target_team_key: `agentic_team:${teamId}`,
         process_id: processId,
@@ -559,6 +573,23 @@ export class AgentStudioPersonaComponent implements OnInit {
           this.error.set('Could not start the persona test.');
         },
       });
+  }
+
+  /**
+   * Open the full audit view for the current persona run inside Studio.
+   *
+   * Preconditions: none (safe to call with no run).
+   * Postconditions: when `run()` is set, navigates to
+   *   `/agent-studio/persona-run/:runId` with that run's `run_id`. When `run()`
+   *   is null, does not navigate. A rejected navigation sets `error()` rather
+   *   than failing silently.
+   */
+  openFullAudit(): void {
+    const id = this.run()?.run_id;
+    if (!id) return;
+    this.router.navigate(['/agent-studio', 'persona-run', id]).catch(() => {
+      this.error.set('Could not open the full audit.');
+    });
   }
 
   /**
@@ -586,8 +617,8 @@ export class AgentStudioPersonaComponent implements OnInit {
     const runId = r.run_id;
     this.cancelling.set(true);
     this.error.set(null);
-    this.personaApi
-      .cancelJob(runId)
+    this.facade
+      .cancelPersonaRun(runId)
       .pipe(timeout(LAUNCH_TIMEOUT_MS), takeUntilDestroyed(this.destroyRef))
       .subscribe({
         error: () => {
@@ -602,62 +633,51 @@ export class AgentStudioPersonaComponent implements OnInit {
   private startPolling(runId: string): void {
     this.stopPolling();
     this.activeRunId = runId;
+    const sameRun = this.state.personaLiveRunId() === runId;
+    const resumeMs = sameRun ? this.state.personaLiveRunStartedAtMs() : null;
+    if (!sameRun) {
+      this.state.setPersonaLiveRunEndedAtMs(null);
+    }
+    const startedAtMs = resumeMs ?? Date.now();
+    this.state.setPersonaLiveRunStartedAtMs(startedAtMs);
+    this.state.setPersonaLiveRunId(runId);
     this.run.set(null);
     // Clear the prior run's pipeline state so a new launch doesn't briefly show
     // the last run's step progress before the first pipeline read lands.
     this.pipelineRun.set(null);
     // A fresh run can't be mid-stop; clear a stale "Stopping…" from a prior run.
     this.cancelling.set(false);
-    this.elapsedSec.set(0);
-    this.elapsedSub = interval(1000)
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe(() => {
-        if (!this.runTerminal()) {
-          this.elapsedSec.update((s) => s + 1);
-        }
-      });
-    this.pollSub = interval(POLL_MS)
-      .pipe(
-        // Handle the failure INSIDE switchMap: a transient getRunStatus error
-        // must not propagate to the outer interval subscription (that would
-        // terminate the stream permanently). catchError → EMPTY surfaces a
-        // banner and lets the next tick retry, matching the immediate-fetch
-        // comment's promise.
-        switchMap(() =>
-          this.personaApi.getRunStatus(runId).pipe(
-            catchError(() => {
-              this.error.set(LOST_CONTACT);
-              return EMPTY;
-            }),
-          ),
-        ),
-        takeUntilDestroyed(this.destroyRef),
-      )
-      .subscribe((detail) => this.handleStatus(detail));
-    // Fetch once immediately so the panel isn't blank for a full poll interval.
-    this.personaApi
-      .getRunStatus(runId)
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-        next: (detail) => this.handleStatus(detail),
-        error: () => {
-          // Guard against a stale fetch landing after a newer run was launched:
-          // only banner the run that is still active. Use the LOST_CONTACT
-          // constant so handleStatus clears it on the next good poll (it matches
-          // by value). The interval poll will retry meanwhile.
-          if (this.activeRunId === runId) {
+    const endedAtMs = sameRun ? this.state.personaLiveRunEndedAtMs() : null;
+    this.elapsedSec.set(Math.max(0, Math.floor(((endedAtMs ?? Date.now()) - startedAtMs) / 1000)));
+    if (endedAtMs == null) {
+      this.startElapsedTicker();
+    }
+    // pollWhile fetches once immediately (so the panel isn't blank for a full
+    // poll interval), then every POLL_MS thereafter, until a terminal status is
+    // reached. A transient getRunStatus error is caught here (banner + rethrow)
+    // so pollWhile's onError: 'continue' swallows it and keeps polling rather
+    // than tearing the stream down.
+    this.pollSub = pollWhile(
+      () =>
+        this.facade.getPersonaRunStatus(runId).pipe(
+          catchError((err) => {
             this.error.set(LOST_CONTACT);
-          }
-        },
-      });
+            return throwError(() => err);
+          }),
+        ),
+      (detail) => isPersonaRunTerminal(detail.status),
+      { intervalMs: POLL_MS, onError: 'continue' },
+    )
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((detail) => this.handleStatus(detail));
   }
 
   /** Apply a polled status; stop polling once the run reaches a terminal state. */
   private handleStatus(detail: PersonaTestRunDetail): void {
     // Ignore a null/undefined payload (defensive against a malformed response
     // slipping past the error handler) and a stale response from a superseded
-    // run (e.g. the previous run's in-flight immediate fetch) so neither can
-    // clobber the current run or stop its poller.
+    // run (e.g. a poll that was already in flight when a new run superseded
+    // it) so neither can clobber the current run or stop its poller.
     if (!detail || detail.run_id !== this.activeRunId) {
       return;
     }
@@ -667,7 +687,7 @@ export class AgentStudioPersonaComponent implements OnInit {
       this.error.set(null);
     }
     this.run.set(detail);
-    const terminal = TERMINAL_STATUSES.has(detail.status);
+    const terminal = isPersonaRunTerminal(detail.status);
     // Piggyback a pipeline-run read on the founder poll (same 10s cadence, no
     // second poller to manage) to refresh the real step/WAIT progress. Skipped
     // once terminal: the progress UI is hidden then, so the read would be wasted.
@@ -676,8 +696,93 @@ export class AgentStudioPersonaComponent implements OnInit {
       this.fetchPipelineRun(teamId, detail.se_job_id);
     }
     if (terminal) {
+      this.freezeElapsedAtTerminal(detail);
       this.stopPolling();
+    } else if (this.state.personaLiveRunEndedAtMs() != null) {
+      this.reseedElapsedAfterRestart();
     }
+  }
+
+  /**
+   * A run this session had frozen as terminal is running again (resume/restart
+   * on the same `run_id` from Testing Personas). Drop the stale end timestamp
+   * and start a new elapsed window from now.
+   *
+   * Preconditions: `personaLiveRunEndedAtMs()` is non-null and the latest
+   *   status for the active run is non-terminal.
+   * Postconditions: `personaLiveRunEndedAtMs()` is null,
+   *   `personaLiveRunStartedAtMs()` is `Date.now()`, `elapsedSec` is 0, and
+   *   the per-second ticker is running.
+   */
+  private reseedElapsedAfterRestart(): void {
+    this.state.setPersonaLiveRunEndedAtMs(null);
+    this.state.setPersonaLiveRunStartedAtMs(Date.now());
+    this.elapsedSec.set(0);
+    this.startElapsedTicker();
+  }
+
+  /**
+   * Start the per-second elapsed ticker if it is not already running.
+   *
+   * Preconditions: none.
+   * Postconditions: `elapsedSub` is subscribed; a second call is a no-op.
+   */
+  private startElapsedTicker(): void {
+    if (this.elapsedSub) {
+      return;
+    }
+    this.elapsedSub = interval(1000)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(() => {
+        if (!this.runTerminal()) {
+          this.elapsedSec.update((s) => s + 1);
+        }
+      });
+  }
+
+  /**
+   * Cap elapsed time at the run's completion rather than wall-clock since launch.
+   *
+   * Preconditions: `detail` is the active run and is terminal.
+   * Postconditions: if `personaLiveRunStartedAtMs()` is null, this is a no-op —
+   *   that can only happen if something cleared the session's live-run state
+   *   (e.g. `setTeamId` on a team change) since this poll was issued, meaning
+   *   `detail` belongs to an orphaned run that Stage 4 must not resurrect
+   *   timing for. Otherwise `personaLiveRunEndedAtMs` is set and `elapsedSec`
+   *   is `endedAt - startedAt` in seconds. When both `created_at` and
+   *   `updated_at` parse, both endpoints are taken from the payload so
+   *   elapsed is not a browser-clock start minus a server-clock end. If
+   *   `updated_at` is later than a previously stored end, this is a new
+   *   attempt that finished while unmounted; that attempt's start was never
+   *   observed, so `elapsedSec` is 0. If the payload timestamps are missing,
+   *   falls back to the client-observed end (`storedEnd` or `Date.now()`).
+   */
+  private freezeElapsedAtTerminal(detail: PersonaTestRunDetail): void {
+    let startedAt = this.state.personaLiveRunStartedAtMs();
+    if (startedAt == null) {
+      return;
+    }
+    const storedEnd = this.state.personaLiveRunEndedAtMs();
+    const payloadStart = parseTimestampMs(detail.created_at);
+    const payloadEnd = parseTimestampMs(detail.updated_at);
+    let endedAt: number;
+    if (payloadStart != null && payloadEnd != null) {
+      startedAt = payloadStart;
+      endedAt = payloadEnd;
+    } else {
+      endedAt = payloadEnd ?? storedEnd ?? Date.now();
+    }
+    // A later terminal timestamp than the one already frozen means a subsequent
+    // attempt completed while Stage 4 was unmounted. The persisted start belongs
+    // to the prior attempt; using it would include the idle gap between them.
+    if (storedEnd != null && endedAt > storedEnd) {
+      startedAt = endedAt;
+      this.state.setPersonaLiveRunStartedAtMs(endedAt);
+    } else if (payloadStart != null && payloadEnd != null) {
+      this.state.setPersonaLiveRunStartedAtMs(payloadStart);
+    }
+    this.state.setPersonaLiveRunEndedAtMs(endedAt);
+    this.elapsedSec.set(Math.max(0, Math.floor((endedAt - startedAt) / 1000)));
   }
 
   /**
@@ -690,8 +795,8 @@ export class AgentStudioPersonaComponent implements OnInit {
    * so a slow read from a prior run can't clobber the current one.
    */
   private fetchPipelineRun(teamId: string, pipelineRunId: string): void {
-    this.agenticApi
-      .getPipelineRun(teamId, pipelineRunId)
+    this.facade
+      .getTeamPipelineRun(teamId, pipelineRunId)
       .pipe(
         catchError(() => EMPTY),
         takeUntilDestroyed(this.destroyRef),
@@ -760,7 +865,7 @@ export class AgentStudioPersonaComponent implements OnInit {
         // "New persona" trigger — without this the dialog is already closed and a
         // user with no feedback might retry and double-submit.
         this.creatingPersona.set(true);
-        this.personaApi
+        this.facade
           .createPersona(result)
           .pipe(takeUntilDestroyed(this.destroyRef))
           .subscribe({
@@ -773,7 +878,7 @@ export class AgentStudioPersonaComponent implements OnInit {
                 return;
               }
               this.personas.update((list) => [...list, created]);
-              this.state.setPersonaId(created.id);
+              // The façade writes `personaId` on success; do not re-write it here.
             },
             error: () => {
               this.creatingPersona.set(false);
@@ -791,7 +896,7 @@ export class AgentStudioPersonaComponent implements OnInit {
 
   /** Back-loop to Stage 3 (Compose Team) to revise the roster. */
   iterateRoster(): void {
-    this.state.navigateToStage(STAGE_COMPOSE_TEAM);
+    this.state.navigateToStage(STAGE_INDEX.compose);
   }
 
   /**
@@ -801,12 +906,12 @@ export class AgentStudioPersonaComponent implements OnInit {
    */
   fixAgent(): void {
     if (this.canFixAgent()) {
-      this.state.navigateToStage(STAGE_TEST_AGENT);
+      this.state.navigateToStage(STAGE_INDEX.test);
     }
   }
 
   /** Jump to Stage 3 (Compose Team) from an empty/safety-net state. */
   finishInCompose(): void {
-    this.state.navigateToStage(STAGE_COMPOSE_TEAM);
+    this.state.navigateToStage(STAGE_INDEX.compose);
   }
 }

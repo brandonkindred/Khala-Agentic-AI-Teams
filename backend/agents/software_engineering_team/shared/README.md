@@ -7,11 +7,9 @@ The `shared/` directory contains common utilities, models, and infrastructure us
 ```
 shared/
 ├── llm.py                    # LLM client abstraction
-├── models.py                 # Shared Pydantic models
 ├── job_store.py              # Job state management
 ├── repo_writer.py            # File writing utilities
 ├── repo_utils.py             # Repository utilities
-├── git_utils.py              # Git operations
 ├── task_parsing.py           # Task parsing utilities
 ├── task_validation.py        # Task validation
 ├── task_utils.py             # Task utilities
@@ -65,7 +63,7 @@ AGENT_DEFAULT_MODELS = {
 ### Usage
 
 ```python
-from shared.llm import LLMClient
+from software_engineering_team.shared.llm import LLMClient
 
 llm = LLMClient()
 
@@ -87,15 +85,51 @@ result = llm.complete_json(
 ### Agent-Specific Client
 
 ```python
-from shared.llm import get_llm_for_agent
+from software_engineering_team.shared.llm import get_client
 
 # Uses LLM_MODEL_BACKEND or agent default
-llm = get_llm_for_agent("backend")
+llm = get_client("backend")
 ```
 
-## Models (`models.py`)
+### Prompt caching
 
-Core Pydantic models used across agents:
+`llm.py` re-exports `get_strands_model` from `llm_service`, which also exposes
+`CacheBreakpoint` — a marker a prompt builder wraps around a stable, repeated
+prefix (a spec excerpt, a persona/standards block, ...) to declare it safe to
+send as a provider-side cached prefix. To adopt it, place the marker directly
+in the `system_prompt_content` list passed to a Strands `Agent` built from
+`get_strands_model`:
+
+```python
+from llm_service import CacheBreakpoint
+from strands import Agent
+
+from software_engineering_team.shared.llm import get_strands_model
+
+model = get_strands_model("backend")
+agent = Agent(
+    model=model,
+    system_prompt_content=[CacheBreakpoint(stable_spec_excerpt), "\n\n" + rest_of_persona],
+)
+```
+
+On a caching-capable backing client (Claude, today) the marked segment reaches
+the wire as a real cache-control breakpoint; on every other client it is a
+documented no-op — flattened to plain text, no error, no output change. No SE
+agent adopts this yet (adopting it at a call site is a separate, later
+change); see `llm_service/README.md`'s "Prompt caching (cache-control
+breakpoints)" section for the full contract and telemetry fields.
+
+## Models (moved to `shared.dev_models`)
+
+Core Pydantic models used across agents now live in the neutral top-level
+package `shared.dev_models` (see `backend/shared/dev_models/`) so both the
+software-engineering team and the coding team can use them without importing
+each other:
+
+```python
+from shared.dev_models.models import Task, TaskStatus, TaskType
+```
 
 ### Task Models
 
@@ -222,12 +256,14 @@ result = write_agent_output(
 )
 ```
 
-## Git Utilities (`git_utils.py`)
+## Git Utilities (moved to `shared.git`)
 
-Git operations wrapper:
+Git operations wrapper now lives in the neutral top-level package `shared.git`
+(see `backend/shared/git/`) so both the software-engineering team and the
+coding team can use it without importing each other:
 
 ```python
-from shared.git_utils import (
+from shared.git.git_utils import (
     init_repo,
     create_branch,
     commit_changes,
@@ -388,7 +424,7 @@ from shared.sla_best_practices import (
 2. **Environment variables**: Configure LLM and other settings via environment variables
 3. **Pydantic models**: Use provided models for type safety and validation
 4. **Logging**: Use the shared logging configuration for consistent output
-5. **Git operations**: Always use `git_utils` for repository operations to ensure consistency
+5. **Git operations**: Always use `shared.git.git_utils` for repository operations to ensure consistency
 
 ## Khala platform
 

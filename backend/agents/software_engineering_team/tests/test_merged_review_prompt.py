@@ -20,10 +20,20 @@ from code_review_agent.models import (
 from code_review_agent.prompts import (
     _ARCHITECTURE_CONSISTENCY_BODY,
     _SIDE_EFFECT_IMPACT_BODY,
+    _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION,
+    ARCHITECTURE_CONSISTENCY_FORMATTING_INSTRUCTIONS,
     ARCHITECTURE_CONSISTENCY_PROMPT,
+    ARCHITECTURE_CONSISTENCY_REASONING_SYSTEM_PROMPT,
     JSON_OUTPUT_INSTRUCTION,
+    MERGED_ARCHITECTURE_SIDE_EFFECT_FORMATTING_INSTRUCTIONS,
     MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT,
+    MERGED_ARCHITECTURE_SIDE_EFFECT_REASONING_SYSTEM_PROMPT,
+    SIDE_EFFECT_IMPACT_FORMATTING_INSTRUCTIONS,
     SIDE_EFFECT_IMPACT_PROMPT,
+    SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT,
+    build_merged_architecture_side_effect_prompt,
+    build_merged_architecture_side_effect_reasoning_system_prompt,
+    build_side_effect_impact_reasoning_system_prompt,
 )
 from pydantic import ValidationError
 
@@ -36,6 +46,7 @@ def test_individual_prompts_still_contain_their_own_body_and_output_format():
     assert ARCHITECTURE_CONSISTENCY_PROMPT.startswith(_ARCHITECTURE_CONSISTENCY_BODY)
     assert ARCHITECTURE_CONSISTENCY_PROMPT.endswith(JSON_OUTPUT_INSTRUCTION)
     assert '"category": "architecture" | "refactor"' in ARCHITECTURE_CONSISTENCY_PROMPT
+    assert '"pre_existing": boolean' in ARCHITECTURE_CONSISTENCY_PROMPT
 
     assert SIDE_EFFECT_IMPACT_PROMPT.startswith(_SIDE_EFFECT_IMPACT_BODY)
     assert SIDE_EFFECT_IMPACT_PROMPT.endswith(JSON_OUTPUT_INSTRUCTION)
@@ -63,6 +74,28 @@ def test_merged_prompt_output_format_describes_two_separate_keys():
     assert MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT.endswith(JSON_OUTPUT_INSTRUCTION)
 
 
+def test_submission_pass_prompts_split_reasoning_and_formatting() -> None:
+    assert ARCHITECTURE_CONSISTENCY_PROMPT == (
+        ARCHITECTURE_CONSISTENCY_REASONING_SYSTEM_PROMPT
+        + ARCHITECTURE_CONSISTENCY_FORMATTING_INSTRUCTIONS
+    )
+    assert _ARCHITECTURE_CONSISTENCY_BODY in ARCHITECTURE_CONSISTENCY_REASONING_SYSTEM_PROMPT
+    assert "Return a single JSON object" in ARCHITECTURE_CONSISTENCY_FORMATTING_INSTRUCTIONS
+    assert "Answer in structured prose" in ARCHITECTURE_CONSISTENCY_REASONING_SYSTEM_PROMPT
+
+    assert SIDE_EFFECT_IMPACT_PROMPT == (
+        SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT + SIDE_EFFECT_IMPACT_FORMATTING_INSTRUCTIONS
+    )
+
+    assert MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT == (
+        MERGED_ARCHITECTURE_SIDE_EFFECT_REASONING_SYSTEM_PROMPT
+        + MERGED_ARCHITECTURE_SIDE_EFFECT_FORMATTING_INSTRUCTIONS
+    )
+    assert build_merged_architecture_side_effect_prompt(arch_on=True, side_on=False).startswith(
+        "You are running ONLY the architecture-consistency"
+    )
+
+
 def test_merged_schema_round_trips_both_finding_types():
     payload = {
         "architecture_findings": [
@@ -73,6 +106,7 @@ def test_merged_schema_round_trips_both_finding_types():
                 "line": 10,
                 "description": "Bypasses the stated data-access layer.",
                 "suggestion": "Use the repository module instead.",
+                "pre_existing": False,
             }
         ],
         "side_effect_findings": [
@@ -92,6 +126,24 @@ def test_merged_schema_round_trips_both_finding_types():
     assert len(parsed.side_effect_findings) == 1
     assert isinstance(parsed.architecture_findings[0], ArchitectureConsistencyFindingLLM)
     assert isinstance(parsed.side_effect_findings[0], SideEffectImpactFindingLLM)
+
+
+def test_architecture_finding_schema_pre_existing_defaults_false():
+    """``pre_existing`` is optional on an architecture/refactor finding (like
+    its side-effect counterpart), defaulting False when the model omits it."""
+    finding = ArchitectureConsistencyFindingLLM.model_validate(
+        {"category": "architecture", "description": "Bypasses the stated data-access layer."}
+    )
+    assert finding.pre_existing is False
+
+    tagged = ArchitectureConsistencyFindingLLM.model_validate(
+        {
+            "category": "refactor",
+            "description": "Duplicates an existing helper untouched by this change.",
+            "pre_existing": True,
+        }
+    )
+    assert tagged.pre_existing is True
 
 
 def test_merged_schema_accepts_explicit_empty_lists_but_requires_both_keys():
@@ -159,3 +211,144 @@ def test_architecture_body_allows_review_without_formal_document():
     assert "no formal" in body or "without a formal" in body or "when none is provided" in body
     assert "repository" in body
     assert "pattern" in body or "boundaries" in body
+
+
+def test_architecture_body_documents_pre_existing_tagging() -> None:
+    """Regression test: Part 1 (architecture-consistency / cross-codebase
+    redundancy) must instruct the model to tag pre_existing, the same as
+    Part 2 (side-effect impact) already does -- otherwise every architecture/
+    refactor finding about code this submission never touched defaults to
+    pre_existing=False and gets posted as a blocking PR comment instead of
+    routed to a human-review proposal."""
+    assert "pre_existing" in _ARCHITECTURE_CONSISTENCY_BODY
+    assert "Tagging" in _ARCHITECTURE_CONSISTENCY_BODY
+
+
+def test_architecture_body_prefers_scoped_reads_over_whole_file_first() -> None:
+    """The architecture-consistency body must document find_references and the
+    scoped construct readers as the default path, and must no longer instruct
+    "you MUST use list_files()/read_file()" as the way to confirm a duplicate
+    exists elsewhere in the repository."""
+    assert "find_references" in _ARCHITECTURE_CONSISTENCY_BODY
+    assert "read_lines" in _ARCHITECTURE_CONSISTENCY_BODY
+    assert "read_function" in _ARCHITECTURE_CONSISTENCY_BODY
+    assert (
+        "you MUST use `list_files()`/`read_file()` to confirm" not in _ARCHITECTURE_CONSISTENCY_BODY
+    )
+    assert "default path" in _ARCHITECTURE_CONSISTENCY_BODY.lower()
+
+
+def test_side_effect_body_prefers_scoped_reads_over_whole_file_first() -> None:
+    """The side-effect-impact body must document find_references and the
+    scoped construct readers as the default path for finding callers, and
+    must mark read_file/list_files as the non-default fallback rather than
+    the primary way to find every caller of a changed function."""
+    assert "find_references" in _SIDE_EFFECT_IMPACT_BODY
+    assert "read_lines" in _SIDE_EFFECT_IMPACT_BODY
+    assert "read_function" in _SIDE_EFFECT_IMPACT_BODY
+    assert "default path" in _SIDE_EFFECT_IMPACT_BODY.lower()
+    assert "non-default" in _SIDE_EFFECT_IMPACT_BODY.lower()
+    assert (
+        "Use `search_codebase`/`search_repository`/`list_files`/`read_file` to find every caller"
+        not in _SIDE_EFFECT_IMPACT_BODY
+    )
+
+
+def test_side_effect_body_mutation_subcheck_present_by_default() -> None:
+    """The default (mutation-on) body documents the mutation-vs-replaced-code
+    contract sub-check: it's scoped to files with a shown before-image, cites
+    the caller-inspection tools, and frames the verdict in DbC terms."""
+    lower = _SIDE_EFFECT_IMPACT_BODY.lower()
+    assert "replaced (pre-change) content" in lower
+    assert "mutation" in lower
+    assert "contract" in lower
+    assert "find_references" in _SIDE_EFFECT_IMPACT_BODY
+    assert "search_repository" in _SIDE_EFFECT_IMPACT_BODY
+    assert "read_file" in _SIDE_EFFECT_IMPACT_BODY
+    # DbC framing: which side is the defect.
+    assert "callers" in lower and "defect" in lower
+
+
+def test_side_effect_body_guard_names_the_one_narrow_exception_by_default() -> None:
+    """With mutation analysis on, the no-prior-version guard must name its one
+    exception rather than reading as a blanket, unconditional prohibition."""
+    assert "never a prior version" in _SIDE_EFFECT_IMPACT_BODY
+    assert "one narrow, explicit exception" in _SIDE_EFFECT_IMPACT_BODY
+    assert "Replaced (pre-change) content" in _SIDE_EFFECT_IMPACT_BODY
+
+
+def test_side_effect_body_no_mutation_omits_subcheck_and_stays_absolute() -> None:
+    """The disabled (mutation-off) body variant must omit the mutation sub-check
+    (and its "Replaced (pre-change) content" / "EXCEPT" cross-references) and
+    retain the absolute, unconditional no-prior-version guard."""
+    assert "mutation-vs-replaced-code" not in _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION
+    assert "Replaced (pre-change) content" not in _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION
+    assert (
+        "**You are given the CURRENT content of the changed files only — never a "
+        "prior version.** Do not guess, infer, or invent"
+    ) in _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION
+    assert (
+        'do not invent or assume a prior/"old" version of any function — you were not given one.'
+        in _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION.lower()
+    )
+    assert "EXCEPT" not in _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION
+
+
+def test_side_effect_body_no_mutation_still_documents_find_references() -> None:
+    """Disabling the mutation sub-check must not remove the primary
+    caller-impact check's own tool guidance."""
+    assert "find_references" in _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION
+    assert "read_lines" in _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION
+    assert "read_function" in _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION
+
+
+def test_build_side_effect_impact_reasoning_system_prompt_matches_toggle() -> None:
+    assert (
+        build_side_effect_impact_reasoning_system_prompt(mutation_on=True)
+        == SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT
+    )
+    off_prompt = build_side_effect_impact_reasoning_system_prompt(mutation_on=False)
+    assert "mutation-vs-replaced-code" not in off_prompt
+    assert off_prompt != SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT
+
+
+def test_merged_prompt_mutation_toggle_both_halves_on() -> None:
+    """With both halves on, mutation_on=True reuses the precomputed merged
+    constant; mutation_on=False must still carry both bodies but the
+    no-mutation side-effect variant."""
+    on_prompt = build_merged_architecture_side_effect_reasoning_system_prompt(
+        arch_on=True, side_on=True, mutation_on=True
+    )
+    assert on_prompt == MERGED_ARCHITECTURE_SIDE_EFFECT_REASONING_SYSTEM_PROMPT
+
+    off_prompt = build_merged_architecture_side_effect_reasoning_system_prompt(
+        arch_on=True, side_on=True, mutation_on=False
+    )
+    assert _ARCHITECTURE_CONSISTENCY_BODY in off_prompt
+    assert _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION in off_prompt
+    assert "mutation-vs-replaced-code" not in off_prompt
+
+
+def test_merged_prompt_mutation_toggle_side_only() -> None:
+    on_prompt = build_merged_architecture_side_effect_reasoning_system_prompt(
+        arch_on=False, side_on=True, mutation_on=True
+    )
+    assert _SIDE_EFFECT_IMPACT_BODY in on_prompt
+    assert "mutation-vs-replaced-code" in on_prompt
+
+    off_prompt = build_merged_architecture_side_effect_reasoning_system_prompt(
+        arch_on=False, side_on=True, mutation_on=False
+    )
+    assert _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION in off_prompt
+    assert "mutation-vs-replaced-code" not in off_prompt
+
+
+def test_merged_prompt_mutation_toggle_has_no_effect_when_side_off() -> None:
+    """mutation_on is meaningless when the side-effect half itself is off."""
+    arch_only_on = build_merged_architecture_side_effect_reasoning_system_prompt(
+        arch_on=True, side_on=False, mutation_on=True
+    )
+    arch_only_off = build_merged_architecture_side_effect_reasoning_system_prompt(
+        arch_on=True, side_on=False, mutation_on=False
+    )
+    assert arch_only_on == arch_only_off

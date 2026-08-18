@@ -7,7 +7,7 @@ teams had a real gap:
 
 * ``agent_studio``'s router mount was already correctly gated in
   ``unified_api/main.py``, but its lifespan Postgres schema-registration import
-  (``from agent_team_studio.agent_studio.postgres import SCHEMA``) ran unconditionally, regardless
+  (``from agent_platform.studio.postgres import SCHEMA``) ran unconditionally, regardless
   of ``TEAM_CONFIGS["agent_studio"].enabled``.
 * ``user_profile`` had two leaks: the router import itself
   (``from unified_api.routes.user_profile import router``) sat at module scope
@@ -76,17 +76,17 @@ def test_agent_studio_not_imported_when_disabled() -> None:
 import sys
 import unified_api.config as config
 config.TEAM_CONFIGS["agent_studio"].enabled = False
-assert "agent_team_studio.agent_studio" not in sys.modules, "agent_studio already loaded before import"
+assert "agent_platform.studio" not in sys.modules, "agent_studio already loaded before import"
 import unified_api.main
-assert "agent_team_studio.agent_studio" not in sys.modules, (
+assert "agent_platform.studio" not in sys.modules, (
     f"disabled agent_studio was imported by unified_api.main: "
-    f"{[m for m in sys.modules if m == 'agent_team_studio.agent_studio' or m.startswith('agent_team_studio.agent_studio.')]}"
+    f"{[m for m in sys.modules if m == 'agent_platform.studio' or m.startswith('agent_platform.studio.')]}"
 )
-assert "unified_api.routes.agent_studio" not in sys.modules, (
-    "disabled agent_studio: unified_api.routes.agent_studio was still imported"
-)
+# do not assert unified_api.routes.agent_studio — that file is gone
+from unified_api.tests._route_gating import route_serves_prefix
+
 assert not any(
-    getattr(r, "path", "").startswith("/api/agent-studio") for r in unified_api.main.app.routes
+    route_serves_prefix(r, "/api/agent-studio") for r in unified_api.main.app.routes
 ), "disabled agent_studio route was still mounted"
 
 from fastapi.testclient import TestClient
@@ -94,12 +94,12 @@ from fastapi.testclient import TestClient
 with TestClient(unified_api.main.app):
     pass
 
-assert "agent_team_studio.agent_studio" not in sys.modules, (
+assert "agent_platform.studio" not in sys.modules, (
     f"disabled agent_studio was imported during ASGI lifespan startup: "
-    f"{[m for m in sys.modules if m == 'agent_team_studio.agent_studio' or m.startswith('agent_team_studio.agent_studio.')]}"
+    f"{[m for m in sys.modules if m == 'agent_platform.studio' or m.startswith('agent_platform.studio.')]}"
 )
-assert "agent_team_studio.agent_studio.postgres" not in sys.modules, (
-    "disabled agent_studio: lifespan schema registration still imported agent_team_studio.agent_studio.postgres"
+assert "agent_platform.studio.postgres" not in sys.modules, (
+    "disabled agent_studio: lifespan schema registration still imported agent_platform.studio.postgres"
 )
 print("ok")
 """
@@ -120,12 +120,12 @@ def test_agent_studio_imported_when_enabled() -> None:
     script = """
 import sys
 import unified_api.main
-assert "agent_team_studio.agent_studio" in sys.modules, "enabled agent_studio was not imported"
-assert "unified_api.routes.agent_studio" in sys.modules, (
-    "enabled agent_studio: unified_api.routes.agent_studio was not imported"
-)
+assert "agent_platform.studio" in sys.modules, "enabled agent_studio was not imported"
+# do not assert unified_api.routes.agent_studio
+from unified_api.tests._route_gating import route_serves_prefix
+
 assert any(
-    getattr(r, "path", "").startswith("/api/agent-studio") for r in unified_api.main.app.routes
+    route_serves_prefix(r, "/api/agent-studio") for r in unified_api.main.app.routes
 ), "enabled agent_studio route was not mounted"
 
 from fastapi.testclient import TestClient
@@ -133,8 +133,8 @@ from fastapi.testclient import TestClient
 with TestClient(unified_api.main.app):
     pass
 
-assert "agent_team_studio.agent_studio.postgres" in sys.modules, (
-    "enabled agent_studio: lifespan schema registration did not import agent_team_studio.agent_studio.postgres"
+assert "agent_platform.studio.postgres" in sys.modules, (
+    "enabled agent_studio: lifespan schema registration did not import agent_platform.studio.postgres"
 )
 print("ok")
 """
@@ -166,8 +166,10 @@ assert "user_profile" not in sys.modules, (
 assert "unified_api.routes.user_profile" not in sys.modules, (
     "disabled user_profile: unified_api.routes.user_profile was still imported"
 )
+from unified_api.tests._route_gating import route_serves_prefix
+
 assert not any(
-    getattr(r, "path", "").startswith("/api/user-profile") for r in unified_api.main.app.routes
+    route_serves_prefix(r, "/api/user-profile") for r in unified_api.main.app.routes
 ), "disabled user_profile route was still mounted"
 
 from fastapi.testclient import TestClient
@@ -205,8 +207,10 @@ assert "user_profile" in sys.modules, "enabled user_profile was not imported"
 assert "unified_api.routes.user_profile" in sys.modules, (
     "enabled user_profile: unified_api.routes.user_profile was not imported"
 )
+from unified_api.tests._route_gating import route_serves_prefix
+
 assert any(
-    getattr(r, "path", "").startswith("/api/user-profile") for r in unified_api.main.app.routes
+    route_serves_prefix(r, "/api/user-profile") for r in unified_api.main.app.routes
 ), "enabled user_profile route was not mounted"
 
 from fastapi.testclient import TestClient

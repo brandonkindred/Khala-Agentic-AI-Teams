@@ -72,9 +72,9 @@ from llm_service import (
     LLMTruncatedError,
     LLMUnreachableAfterRetriesError,
 )
+from llm_service.strands_model import model_fingerprint as _model_fingerprint
 from shared.cache import get_shared_cache
 from shared.concurrency import parallel_map
-from shared.env import env_flag_enabled
 from shared.env_config import env_bool
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_sibling_surface_chars,
@@ -103,7 +103,6 @@ from .models import (
     ReviewProgressCallback,
     notify_review_progress,
 )
-from .side_effect_consolidation import SIDE_EFFECT_CONSOLIDATION_ENV
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +123,16 @@ def _chunk_cache_namespace() -> str:
 
 
 def _chunk_outcome_cache_size() -> int:
+    """Return the configured size of the process-global chunk outcome cache.
+
+    Reads ``CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE`` from the environment,
+    defaulting to ``DEFAULT_CHUNK_OUTCOME_CACHE_SIZE`` (512) and clamping
+    any negative value to 0.
+
+    Postconditions:
+        - Returns a non-negative int. A return value of 0 means caching is
+          disabled and the map phase becomes a pure passthrough.
+    """
     return parse_env_int(
         "CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE", DEFAULT_CHUNK_OUTCOME_CACHE_SIZE, 0
     )
@@ -773,6 +782,12 @@ def _review_chunk_with_recovery(
 def _review_model_fingerprint(llm: LLMClient) -> str:
     """Best-effort stable identifier for the model chunk reviews will run on.
 
+    Resolves the raw ``LLMClient`` to a Strands model via
+    ``resolve_code_review_model``, then delegates the actual attribute
+    probing to ``llm_service.strands_model.model_fingerprint`` — this
+    function's own value-add over that shared helper is the client
+    resolution step and its fail-open fallback to the client's type name.
+
     Preconditions:
         - ``llm`` is the client that will be handed to ``ChunkReviewAgent``.
 
@@ -795,16 +810,7 @@ def _review_model_fingerprint(llm: LLMClient) -> str:
             exc_info=True,
         )
         return type(llm).__name__
-    for attr in ("model_id", "model_name", "model"):
-        value = getattr(model, attr, None)
-        if isinstance(value, str) and value:
-            return value
-    config = getattr(model, "config", None)
-    if isinstance(config, dict):
-        candidate = config.get("model_id") or config.get("model")
-        if isinstance(candidate, str) and candidate:
-            return candidate
-    return type(model).__name__
+    return _model_fingerprint(model)
 
 
 # Top-level symbol declarations whose rename/removal in one file can break a
@@ -828,6 +834,20 @@ _TS_EXPORT_RE = re.compile(
 )
 _TS_EXPORT_LIST_RE = re.compile(r"^[ \t]*export[ \t]*\{([^}]*)\}", re.MULTILINE)
 
+# Pre-numbered content (``FileSegment.pre_numbered`` / ``ChangeSurface`` blocks,
+# e.g. a diff-first submission's ``files=<surface.blocks>``) prefixes every line with its
+# original line number (``"42| def f():"``, or the legacy ``"42: def f():"``),
+# which would otherwise shift every line off column zero and make the anchored
+# symbol patterns above match nothing. Only a genuine numbered gutter at the
+# very start of a line matches (never mid-line, e.g. inside a dict literal or
+# docstring), so stripping it is safe for already-plain content too -- there is
+# nothing to strip there. Indented dict keys (``    1: value``) do not match:
+# they use ``: `` after a 4-space indent, whereas the live ``| `` gutter never
+# uses ``: ``, and the legacy ``N: `` gutter is column-zero only. The optional
+# ``[+>]`` consumes a change-surface marker column (``+ 9| code``) so a marked
+# gutter is stripped as cleanly as an un-marked one.
+_LINE_NUMBER_PREFIX_RE = re.compile(r"^(?:\d+: |[+>]?[ ]*\d+\| )", re.MULTILINE)
+
 
 def _symbol_surface(content: str) -> List[str]:
     """Extract a file's top-level defined/exported symbol names.
@@ -840,7 +860,12 @@ def _symbol_surface(content: str) -> List[str]:
           cache key via ``_sibling_surface``, so a missed export can leave a
           stale map-phase hit after a sibling's public API changes. Prefer
           false positives (extra cache misses) over false negatives.
+        - Pre-numbered content is de-numbered first (see
+          ``_LINE_NUMBER_PREFIX_RE``) so each line's original column position
+          -- and therefore top-level-vs-nested classification -- is unchanged
+          by whether the submission carried numbered ``N| `` / ``N: `` prefixes.
     """
+    content = _LINE_NUMBER_PREFIX_RE.sub("", content)
     names: set[str] = set()
     for match in _PY_SYMBOL_RE.finditer(content):
         names.add(match.group(1))
@@ -975,7 +1000,12 @@ def _context_fingerprint(base_input: Dict, model_fingerprint: str) -> str:
 
 
 def _submission_fingerprint(
-    input_data: CodeReviewInput, model_fingerprint: str, spec_compliance_single_pass: bool
+    input_data: CodeReviewInput,
+    model_fingerprint: str,
+    spec_compliance_single_pass: bool,
+    mutation_analysis_enabled: bool,
+    side_effect_consolidation_enabled: bool,
+    combine_similarity_threshold: float,
 ) -> str:
     """Hash the whole raw submission plus the resolved model.
 
@@ -987,21 +1017,34 @@ def _submission_fingerprint(
         - ``input_data`` is a valid ``CodeReviewInput``.
         - ``model_fingerprint`` is ``_review_model_fingerprint(llm)`` for the
           client that would run the review.
-        - ``spec_compliance_single_pass`` is the caller's already-resolved decision
-          (``run_coordinator``'s single per-run computation, already folding in the
-          ``CODE_REVIEW`` profile restriction) — this function never reads the
-          ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` env var itself, so a non-``CODE_REVIEW``
-          submission is never fingerprinted as flag-sensitive merely because the
-          env var happens to be set (which would cause needless cache misses on
-          every such submission).
+        - ``spec_compliance_single_pass``, ``mutation_analysis_enabled``, and
+          ``side_effect_consolidation_enabled`` are the caller's already-resolved
+          decisions (``run_coordinator``'s single per-run computation, already
+          folding in the ``CODE_REVIEW`` profile restriction each toggle shares
+          with the pass(es) it gates) — this function never reads the
+          ``CODE_REVIEW_SPEC_COMPLIANCE_PASS``, ``CODE_REVIEW_MUTATION_ANALYSIS``,
+          or ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION`` env vars itself, so a
+          non-``CODE_REVIEW`` submission is never fingerprinted as flag-sensitive
+          merely because one of those env vars happens to be set (which would
+          cause needless cache misses on every such submission, since none of
+          the three toggles can affect a non-``CODE_REVIEW`` review's output).
+        - ``combine_similarity_threshold`` is the caller's already-resolved
+          ``resolve_combine_similarity_threshold()`` value — unlike the three
+          toggles above, this is deliberately **not** profile-gated by the
+          caller: ``combine_findings``'s similarity threshold governs finding
+          combination for every profile, not just ``CODE_REVIEW``'s
+          side-effects, so it is genuinely output-affecting regardless of
+          ``input_data.profile``.
 
     Postconditions:
         - Returns a hex digest that changes whenever **any** input field (or the
           resolved model) changes, and also whenever an output-affecting toggle —
-          ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION`` or the caller's resolved
-          ``spec_compliance_single_pass`` decision — flips. It is derived from
+          the caller's resolved ``side_effect_consolidation_enabled``,
+          ``combine_similarity_threshold``, ``spec_compliance_single_pass``, or
+          ``mutation_analysis_enabled`` — flips. It is derived from
           ``input_data.model_dump()`` plus those toggles, so it keys on the whole
-          input (not a hand-picked subset) plus consolidation and
+          input (not a hand-picked subset) plus consolidation,
+          combine-similarity-threshold, mutation-analysis, and
           spec-compliance-pass identity: a new ``CodeReviewInput`` field is hashed
           automatically and can never be silently dropped. Two submissions
           collide only when their full inputs and toggle settings are identical,
@@ -1009,18 +1052,29 @@ def _submission_fingerprint(
           identical ``CODE_REVIEW``-profile submission approved with
           ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` off can never be served from cache
           once the flag is on, since that would silently skip the post-dedupe
-          ``synthesize_spec_compliance`` pass the flag adds. (Every current field
-          is verdict-affecting, so this is exactly the submission identity; a
-          future non-verdict field would only cause extra misses — full
-          re-reviews — never a stale hit.)
+          ``synthesize_spec_compliance`` pass the flag adds; likewise a
+          ``CODE_REVIEW``-profile submission whose ``replaced_content`` was
+          reviewed with ``CODE_REVIEW_MUTATION_ANALYSIS`` off (before-image
+          hidden from the model, no mutation-vs-replaced-code sub-check) can
+          never be served from cache to a run with the toggle on, and vice versa.
+          (Every current field is verdict-affecting, so this is exactly the
+          submission identity; a future non-verdict field would only cause extra
+          misses — full re-reviews — never a stale hit.)
         - Computed from raw fields only (no compaction/LLM), so the short-circuit
           it guards fires before any model call. Deterministic (``sort_keys``),
           so a stored approval survives across coordinator calls in a process.
     """
     payload = input_data.model_dump(mode="json")
+    # A per-invocation caller id, not content: two submissions with identical code
+    # and context must still collide here even when their ``job_id``s differ (a
+    # resubmission of the same PR is a fresh job_id every time), or this field alone
+    # would turn every cache hit into a guaranteed miss.
+    payload.pop("job_id", None)
     payload["__model__"] = model_fingerprint
-    payload["__side_effect_consolidation__"] = env_flag_enabled(SIDE_EFFECT_CONSOLIDATION_ENV)
+    payload["__side_effect_consolidation__"] = side_effect_consolidation_enabled
+    payload["__combine_similarity_threshold__"] = combine_similarity_threshold
     payload["__spec_compliance_single_pass__"] = spec_compliance_single_pass
+    payload["__mutation_analysis__"] = mutation_analysis_enabled
     return _stable_json_digest(payload)
 
 

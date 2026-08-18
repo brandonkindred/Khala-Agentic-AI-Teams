@@ -38,22 +38,22 @@ from agent_cognition.invoke_gate import (
     prepare_invoke,
 )
 from agent_cognition.tools.envelope import ENVELOPE_MARKER
-from agent_console import (
+from agent_platform.console import (
     AgentConsoleStorageUnavailable,
     RunRecord,
     RunSummary,
     get_store,
     resolve_author,
 )
-from agent_console.models import RunCreate
-from agent_registry import AgentDetail, AgentSummary, TeamGroup, get_registry
-from agent_registry.schema_resolver import SchemaResolutionError, resolve_schema
-from agent_team_studio.agent_provisioning_team.sandbox import (
+from agent_platform.console.models import RunCreate
+from agent_platform.registry import AgentDetail, AgentSummary, TeamGroup, get_registry
+from agent_platform.registry.schema_resolver import SchemaResolutionError, resolve_schema
+from agent_platform.sandbox import (
     DockerUnavailableError,
     SandboxStatus,
     note_activity,
 )
-from agent_team_studio.agent_provisioning_team.sandbox.state import COLD_START_LOG_PREFIX
+from agent_platform.sandbox.state import COLD_START_LOG_PREFIX
 from shared.agent_invoke.limits import (
     RESPONSE_ENVELOPE_OVERHEAD_BYTES,
     max_output_bytes,
@@ -173,7 +173,7 @@ def get_sample(agent_id: str, name: str) -> dict[str, Any]:
 async def acquire(agent_id: str):
     """Warm ``agent_id``'s sandbox via the Temporal-aware acquire dispatch.
 
-    Imports ``agent_team_studio.agent_provisioning_team.temporal.sandbox_dispatch`` lazily so
+    Imports ``agent_platform.sandbox.temporal.dispatch`` lazily so
     non-sandbox routes (registry listing, schema resolution, run history)
     never pull in ``temporalio`` at module-import time — only a call into
     this function (i.e. an actual invoke) does. Kept as a real module-level
@@ -188,7 +188,7 @@ async def acquire(agent_id: str):
           ``acquire_sandbox`` raises — this wrapper adds no error handling of
           its own.
     """
-    from agent_team_studio.agent_provisioning_team.temporal.sandbox_dispatch import acquire_sandbox
+    from agent_platform.sandbox.temporal.dispatch import acquire_sandbox
 
     return await acquire_sandbox(agent_id)
 
@@ -226,7 +226,7 @@ async def invoke_agent(
         warming 202, or an ``HTTPException`` mapped to the status codes above);
         no claimed run is both finalized and abandoned.
     """
-    # get() can hit Postgres for a dynamically-registered agent id (agent_registry's
+    # get() can hit Postgres for a dynamically-registered agent id (agent_platform.registry's
     # dynamic-manifest overlay); this is an async route, so a blocking round trip here
     # would stall the whole worker's event loop. Run it in a worker thread.
     manifest = await asyncio.to_thread(get_registry().get, agent_id)

@@ -25,7 +25,9 @@ Invariants:
 
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, Union
@@ -67,6 +69,12 @@ class LlmToolAgentBase:
     vocabulary and invoke ``_fallback_no_model``, ``_call_with_single_fallback``,
     ``_call_partial_tolerant``, and/or ``_fallback_empty_parse``. Nothing in
     ``__init__`` enables them automatically.
+
+    Caching is likewise call-site opt-in: set ``cache_namespace`` and
+    ``cache_capacity_env`` (and, optionally, ``cache_default_capacity``) and
+    call ``_cached_invoke_llm`` instead of ``_invoke_llm`` directly. Leaving
+    ``cache_namespace`` unset (the default) disables caching entirely, so
+    subclasses that never opt in are byte-for-byte unaffected.
 
     Recipes:
         Review-like — ``resolve_models = True`` (defaults:
@@ -119,6 +127,12 @@ class LlmToolAgentBase:
     empty_recommendations: List[str] = []
     default_summary: str = ""
     empty_summary_override: Optional[str] = None
+
+    # Cache vocabulary (opt-in; see ``_cached_invoke_llm``). ``cache_namespace``
+    # unset disables caching regardless of the other two attrs.
+    cache_namespace: Optional[str] = None
+    cache_capacity_env: Optional[str] = None
+    cache_default_capacity: int = 256
 
     def __init__(self, llm=None) -> None:
         self.llm = llm
@@ -186,6 +200,145 @@ class LlmToolAgentBase:
             return run_strands_agent(self._agent_factory(), model, prompt)
         return str(self._agent_factory()(model=model)(prompt)).strip()
 
+    def _cache_namespace(self) -> Optional[str]:
+        """Shared-cache namespace for this class's cached LLM calls, or ``None``.
+
+        Preconditions:
+            None.
+
+        Postconditions:
+            Returns ``None`` when ``cache_namespace`` is unset (caching
+            disabled). Otherwise returns ``cache_namespace`` suffixed with the
+            deploy build id via ``shared.cache.with_cache_build_id``, so a
+            deploy naturally starts with a cold cache.
+        """
+        ns = type(self).cache_namespace
+        if not ns:
+            return None
+        from shared.cache import with_cache_build_id  # noqa: PLC0415
+
+        return with_cache_build_id(ns)
+
+    def _cache_capacity(self) -> int:
+        """Resolve this class's cache capacity from its configured env var.
+
+        Preconditions:
+            None.
+
+        Postconditions:
+            Returns 0 (cache disabled) when ``cache_capacity_env`` is unset.
+            Otherwise returns the env var parsed as an int and clamped to a
+            floor of 0: unset/unparseable falls back to
+            ``cache_default_capacity``, a negative value clamps to 0. 0
+            (explicit or clamped) disables the cache.
+        """
+        cls = type(self)
+        if not cls.cache_capacity_env:
+            return 0
+        from shared.env_config import env_int  # noqa: PLC0415
+
+        return env_int(cls.cache_capacity_env, cls.cache_default_capacity, 0)
+
+    def _cache_key(self, model: Any, prompt: str) -> str:
+        """Hash of this agent's identity, the resolved model, and the rendered prompt.
+
+        By the time a caller has a ``prompt`` string to invoke the LLM with,
+        whatever ``phase_inp`` shape produced it (``current_files`` +
+        ``task_description``, or something else entirely) has already been
+        flattened into that string — so keying on the prompt itself (rather
+        than on ``phase_inp`` fields) generalizes across every tool-agent
+        kind without per-kind key-building logic.
+
+        Preconditions:
+            ``model`` is a resolved Strands model (or any object
+            ``llm_service.strands_model.model_fingerprint`` accepts).
+            ``prompt`` is a str.
+
+        Postconditions:
+            Returns a stable hex digest: identical (class, model, prompt)
+            always yields the same key; any change to any of the three
+            changes the key.
+        """
+        from llm_service.strands_model import model_fingerprint  # noqa: PLC0415
+
+        payload = {
+            "agent": f"{type(self).__module__}.{type(self).__qualname__}",
+            "model": model_fingerprint(model),
+            "prompt": prompt,
+        }
+        body = json.dumps(payload, sort_keys=True)
+        return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+    def _cached_invoke_llm(self, model: Any, prompt: str) -> str:
+        """Cache-checked ``_invoke_llm``: a hit skips the LLM call entirely.
+
+        Preconditions:
+            Same as ``_invoke_llm``.
+
+        Postconditions:
+            When caching is disabled (``cache_namespace`` unset,
+            ``cache_capacity_env`` unset, or the resolved capacity is
+            ``<= 0``), delegates to ``_invoke_llm`` directly — identical to
+            calling it without this wrapper. Otherwise: a cache hit returns
+            the previously cached string without invoking the LLM. A cache
+            miss, a corrupt cache entry, or any cache backend error falls
+            open to a genuine ``_invoke_llm`` call — never raises for a
+            cache failure, and the fallen-open call's own exceptions (e.g. an
+            LLM provider error) propagate unchanged to the caller, exactly as
+            an uncached ``_invoke_llm`` call would. Only a successful
+            ``_invoke_llm`` result is written back to the cache.
+        """
+        namespace = self._cache_namespace()
+        capacity = self._cache_capacity() if namespace is not None else 0
+        if namespace is None or capacity <= 0:
+            return self._invoke_llm(model, prompt)
+
+        from shared.cache import get_shared_cache  # noqa: PLC0415
+
+        logger = logging.getLogger(type(self).__module__)
+        cache = get_shared_cache(namespace)
+        key = self._cache_key(model, prompt)
+
+        try:
+            raw = cache.get(key)
+        except Exception:
+            logger.warning(
+                "%s: cache get failed; treating as miss", type(self).__name__, exc_info=True
+            )
+            raw = None
+
+        if raw is not None:
+            try:
+                return raw.decode("utf-8")
+            except Exception:
+                logger.warning(
+                    "%s: corrupt cache entry for %s; evicting",
+                    type(self).__name__,
+                    key,
+                    exc_info=True,
+                )
+                try:
+                    cache.delete(key)
+                except Exception:
+                    logger.warning(
+                        "%s: cache delete failed after corrupt entry",
+                        type(self).__name__,
+                        exc_info=True,
+                    )
+
+        result = self._invoke_llm(model, prompt)
+
+        try:
+            cache.set(key, result.encode("utf-8"), max_entries=capacity)
+        except Exception:
+            logger.warning(
+                "%s: cache set failed; continuing without cache write",
+                type(self).__name__,
+                exc_info=True,
+            )
+
+        return result
+
     def _parse_llm_json(
         self,
         raw: str,
@@ -196,8 +349,9 @@ class LlmToolAgentBase:
         """Parse model output via the selected JSON-salvage strategy.
 
         When ``json_parse_strategy`` is ``"extract"``, delegates to
-        ``shared.llm_recovery.extract_json_object`` (failure → ``None``).
-        When ``"lenient"`` and ``review_parse_mode == "text"``, calls
+        ``software_engineering_team.shared.json_utils.parse_json_object``
+        (failure → ``None``). When ``"lenient"`` and
+        ``review_parse_mode == "text"``, calls
         ``type(self)._parse_review(raw)``. Otherwise uses
         ``tool_agent_base.lenient_json_object`` (failure → ``{}``).
 
@@ -210,7 +364,7 @@ class LlmToolAgentBase:
         Postconditions:
             Returns a ``dict`` for lenient/text paths (``{}`` on lenient JSON
             failure). Returns ``dict | None`` for extract (``None`` on failure).
-            Does not import ``shared.llm_recovery`` or
+            Does not import ``software_engineering_team.shared.json_utils`` or
             ``tool_agent_base.lenient_json_object`` until the corresponding
             branch runs. For the lenient-JSON branch, ``context``/``on_fail_msg``
             are forwarded to ``lenient_json_object`` when given; otherwise the
@@ -222,9 +376,13 @@ class LlmToolAgentBase:
         assert strategy in ("lenient", "extract"), strategy
 
         if strategy == "extract":
-            from shared.llm_recovery import extract_json_object
+            from llm_service import LLMJsonParseError
+            from software_engineering_team.shared.json_utils import parse_json_object
 
-            return extract_json_object(raw)
+            try:
+                return parse_json_object(raw)
+            except (LLMJsonParseError, TypeError):
+                return None
 
         mode = type(self).review_parse_mode
         assert mode in ("json", "text"), mode

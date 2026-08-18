@@ -13,6 +13,7 @@ Tests the following new functionality:
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 from unittest.mock import MagicMock
@@ -20,34 +21,13 @@ from unittest.mock import MagicMock
 import pytest
 
 if TYPE_CHECKING:
-    from software_engineering_team.shared.models import Task
+    from shared.dev_models.models import Task
 
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
 
 from llm_service.clients.dummy import DummyLLMClient  # noqa: E402
-
-
-class _TextStubClient(DummyLLMClient):
-    """Returns a canned text response from ``complete_json()`` to simulate the
-    legacy text-template review path."""
-
-    def __init__(self, text: str = "") -> None:
-        super().__init__()
-        self._text = text
-
-    def complete_json(
-        self,
-        prompt: str,
-        *,
-        temperature: float = 0.0,
-        system_prompt: Optional[str] = None,
-        tools: Optional[list] = None,
-        think: bool = False,
-        **kwargs: Any,
-    ) -> Any:
-        return self._text
 
 
 class _ScriptedTextClient(DummyLLMClient):
@@ -76,11 +56,21 @@ class _ScriptedTextClient(DummyLLMClient):
 
 
 class _CallableTextClient(DummyLLMClient):
-    """Calls a user-provided function to generate each response."""
+    """Calls a user-provided function to generate each response.
+
+    Chunk review is a think-then-format split: call 1 (``complete``) carries
+    the code, call 2 (``complete_json``) is the JSON wrap. Stub matching must
+    use the reasoning prompt, not the format-pass schema text.
+    """
 
     def __init__(self, fn) -> None:
         super().__init__()
         self._fn = fn
+        self._tls = threading.local()
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        self._tls.reasoning = prompt
+        return super().complete(prompt, **kwargs)
 
     def complete_json(
         self,
@@ -92,12 +82,27 @@ class _CallableTextClient(DummyLLMClient):
         think: bool = False,
         **kwargs: Any,
     ) -> Any:
+        reasoning = getattr(self._tls, "reasoning", "")
+        lowered = prompt.lower()
+        if reasoning and (
+            "convert the following analysis into a single json object" in lowered
+            or ("--- analysis " in lowered and "end analysis" in lowered)
+        ):
+            return self._fn(reasoning)
         return self._fn(prompt)
+
+
+_CLEAN_COORDINATOR_APPROVAL = {
+    "approved": True,
+    "issues": [],
+    "summary": "All good.",
+    "spec_compliance_notes": "",
+}
 
 
 def _create_test_task(task_type: str = "frontend") -> "Task":
     """Create a valid Task object for testing."""
-    from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+    from shared.dev_models.models import Task, TaskStatus, TaskType
 
     return Task(
         id="task-1",
@@ -199,9 +204,10 @@ class TestFrontendRunMicrotaskReview:
         mt = Microtask(id="mt-1", title="Test Microtask")
         files = {"src/app.ts": "const x = 1;"}
 
-        mock_llm = _TextStubClient(
-            "## REVIEW_STATUS ##\npassed\n\n## ISSUES ##\n\n## SUMMARY ##\nNo issues found.\n"
-        )
+        # DummyLLMClient's built-in "code to review"/"senior code reviewer"
+        # catch-all already returns an approved, issue-free CodeReviewOutput
+        # for the coordinator's chunk-review call.
+        mock_llm = DummyLLMClient()
 
         # Provide mock QA and security agents that return no issues
         # (without these, fail-closed gates correctly flag missing agents)
@@ -230,9 +236,27 @@ class TestFrontendRunMicrotaskReview:
         mt = Microtask(id="mt-1", title="Test Microtask")
         files = {"src/app.ts": "const x = eval(input);"}
 
-        mock_llm = _TextStubClient(
-            "## REVIEW_STATUS ##\nfailed\n\n## ISSUES ##\n---\nsource: security\nseverity: critical\ndescription: Use of eval() is a security vulnerability\nfile_path: src/app.ts\nrecommendation: Remove eval and use safer alternatives\n---\n## END ISSUES ##\n\n## SUMMARY ##\nCritical security issue found.\n## END SUMMARY ##"
-        )
+        def _respond(prompt: str) -> Any:
+            # The coordinator's chunk reviewer calls complete_json directly
+            # and needs a schema-shaped dict (matches DummyLLMClient's own
+            # "code to review" catch-all anchor text).
+            assert "code to review" in prompt.lower()
+            return {
+                "approved": False,
+                "issues": [
+                    {
+                        "severity": "critical",
+                        "category": "logic",
+                        "file_path": "src/app.ts",
+                        "description": "Use of eval() is a security vulnerability",
+                        "suggestion": "Remove eval and use safer alternatives",
+                    }
+                ],
+                "summary": "Critical security issue found.",
+                "spec_compliance_notes": "",
+            }
+
+        mock_llm = _CallableTextClient(_respond)
 
         result = run_microtask_review(
             llm=mock_llm,
@@ -258,9 +282,7 @@ class TestFrontendAgentReviewCache:
         mt = Microtask(id="mt-1", title="Test Microtask")
         files = {"src/app.ts": "const x = 1;"}
 
-        mock_llm = _TextStubClient(
-            "## REVIEW_STATUS ##\npassed\n\n## ISSUES ##\n\n## SUMMARY ##\nNo issues found.\n"
-        )
+        mock_llm = DummyLLMClient()
         mock_qa = MagicMock()
         mock_qa.run.return_value = MagicMock(bugs_found=[], issues=[])
         mock_sec = MagicMock()
@@ -292,9 +314,7 @@ class TestFrontendAgentReviewCache:
         mt = Microtask(id="mt-1", title="Test Microtask")
         files = {"src/app.ts": "const x = 1;"}
 
-        mock_llm = _TextStubClient(
-            "## REVIEW_STATUS ##\npassed\n\n## ISSUES ##\n\n## SUMMARY ##\nNo issues found.\n"
-        )
+        mock_llm = DummyLLMClient()
         mock_qa = MagicMock()
         mock_qa.run.return_value = MagicMock(bugs_found=[], issues=[])
         mock_sec = MagicMock()
@@ -358,7 +378,15 @@ class TestFrontendRunExecutionWithReviewGates:
 
         _call_count = [0]
 
-        def _side_effect(prompt: str) -> str:
+        def _side_effect(prompt: str) -> Any:
+            # The coordinator's chunk reviewer calls complete_json directly and
+            # needs a schema-shaped dict; code generation (and any remaining
+            # text-template step, e.g. documentation self-review) goes through
+            # the Strands Agent/stream() path and needs raw template text --
+            # branch on the chunk-review prompt's own anchor text (matches
+            # DummyLLMClient's own "code to review" catch-all).
+            if "code to review" in prompt.lower():
+                return _CLEAN_COORDINATOR_APPROVAL
             _call_count[0] += 1
             if _call_count[0] == 1:
                 # First call: execution (file generation)
@@ -366,7 +394,8 @@ class TestFrontendRunExecutionWithReviewGates:
                     "\n## FILE src/app.ts ##\n"
                     "export const app = () => console.log('Hello');\n\n## SUMMARY ##\nCreated app module.\n"
                 )
-            # All subsequent calls: reviews and documentation self-review
+            # Any remaining non-review text-template call (e.g. documentation
+            # self-review).
             return "\n## REVIEW_STATUS ##\npassed\n\n## ISSUES ##\n\n## SUMMARY ##\nAll good.\n"
 
         mock_llm = _CallableTextClient(_side_effect)
@@ -410,7 +439,20 @@ class TestFrontendRunExecutionWithReviewGates:
         mock_llm = _ScriptedTextClient(
             [
                 "## FILES ##\n--- src/bad.ts ---\nconst x = eval('danger');\n---\n\n## SUMMARY ##\nCreated code with security issue.\n",
-                "## REVIEW_STATUS ##\nfailed\n\n## ISSUES ##\n---\nsource: security\nseverity: critical\ndescription: eval is dangerous\nfile_path: src/bad.ts\nrecommendation: Fix it\n---\n## END ISSUES ##\n\n## SUMMARY ##\nSecurity issue found.\n## END SUMMARY ##",
+                {
+                    "approved": False,
+                    "issues": [
+                        {
+                            "severity": "critical",
+                            "category": "logic",
+                            "file_path": "src/bad.ts",
+                            "description": "eval is dangerous",
+                            "suggestion": "Fix it",
+                        }
+                    ],
+                    "summary": "Security issue found.",
+                    "spec_compliance_notes": "",
+                },
             ]
         )
 
@@ -540,12 +582,19 @@ class TestFrontendQaSecurityGateToolAgentScoping:
 
         _call_count = [0]
 
-        def _side_effect(prompt: str) -> str:
+        def _side_effect(prompt: str) -> Any:
+            # The coordinator's chunk reviewer calls complete_json directly and
+            # needs a schema-shaped dict; code generation goes through the
+            # Strands Agent/stream() path and needs raw template text -- branch
+            # on the chunk-review prompt's own anchor text (matches
+            # DummyLLMClient's own "code to review" catch-all).
+            if "code to review" in prompt.lower():
+                return _CLEAN_COORDINATOR_APPROVAL
             _call_count[0] += 1
             if _call_count[0] == 1:
                 return (
-                    "\n## FILES ##\n--- src/app.ts ---\n"
-                    "export const app = () => console.log('Hello');\n---\n\n"
+                    "\n## FILE src/app.ts ##\n"
+                    "export const app = () => console.log('Hello');\n\n"
                     "## SUMMARY ##\nCreated app module.\n"
                 )
             return "\n## REVIEW_STATUS ##\npassed\n\n## ISSUES ##\n\n## SUMMARY ##\nAll good.\n"
@@ -818,6 +867,11 @@ class TestBackendAgentReviewCache:
 
 class TestBackendRunProblemSolvingForMicrotask:
     def test_problem_solving_no_issues(self):
+        """Problem solving should report resolved when the review has no issues.
+
+        With an empty issue list and a passed review, the function should not
+        need to invoke the LLM and should return a resolved result.
+        """
         from backend_code_v2_team.models import Microtask, ReviewResult
         from backend_code_v2_team.phases.problem_solving import run_problem_solving_for_microtask
 
@@ -857,15 +911,14 @@ class TestBackendRunExecutionWithReviewGates:
         mt2 = Microtask(id="mt-2", title="Will Pass", tool_agent=ToolAgentKind.GENERAL)
         planning_result = PlanningResult(microtasks=[mt1, mt2], language="python")
 
-        gen_call_count = 0
-
         def mock_complete_text(prompt: str) -> Any:
             # The coordinator's chunk reviewer calls complete_json directly and
             # needs a schema-shaped dict; code generation (below) goes through
             # the Strands Agent/stream() path and needs raw template text --
             # branch on the chunk-review prompt's own anchor text (matches
-            # DummyLLMClient's own "code to review" catch-all).
-            nonlocal gen_call_count
+            # DummyLLMClient's own "code to review" catch-all). Generation is
+            # keyed on the microtask title, not call order, so concurrent wave
+            # members still get the intended file each.
             if "code to review" in prompt.lower():
                 if "eval(" in prompt:
                     return {
@@ -888,8 +941,7 @@ class TestBackendRunExecutionWithReviewGates:
                     "summary": "Good code.",
                     "spec_compliance_notes": "",
                 }
-            gen_call_count += 1
-            if gen_call_count == 1:
+            if "Will Fail" in prompt:
                 return "## FILE bad.py ##\neval('bad')\n\n## SUMMARY ##\nBad code.\n"
             return "## FILE good.py ##\nprint('good')\n\n## SUMMARY ##\nGood code.\n"
 
@@ -915,6 +967,98 @@ class TestBackendRunExecutionWithReviewGates:
         assert failed_ids == {"mt-1"}
         mt2_result = next(m for m in result.microtasks if m.id == "mt-2")
         assert mt2_result.status == MicrotaskStatus.COMPLETED
+
+    def test_completed_microtask_can_include_dbc_inserted_comments(self, tmp_path, monkeypatch):
+        """Smoke test: with DbC wired on by default, a completed backend microtask's
+        output files carry any comments the DbC agent chose to insert.
+
+        Drives the real backend ``run_execution_with_review_gates`` end to end (clean
+        gates -> the microtask reaches the DbC self-review step before Documentation),
+        with the ``DbcCommentsAgent`` stubbed to insert a contract comment into the
+        coder-produced file. The insertion must survive to ``result.files``.
+        """
+        from backend_code_v2_team.models import (
+            Microtask,
+            MicrotaskReviewConfig,
+            MicrotaskStatus,
+            PlanningResult,
+            ToolAgentKind,
+        )
+        from backend_code_v2_team.phases.execution import (
+            ReviewDependencies,
+            run_execution_with_review_gates,
+        )
+
+        from software_engineering_team.shared.phases import dbc_phase
+        from software_engineering_team.technical_writers.dbc_comments_agent.models import (
+            DbcCommentsOutput,
+        )
+
+        (tmp_path / ".git").mkdir()
+
+        task = _create_test_task("backend")
+        mt = Microtask(id="mt-1", title="Will Pass", tool_agent=ToolAgentKind.GENERAL)
+        planning_result = PlanningResult(microtasks=[mt], language="python")
+
+        _call_count = [0]
+
+        def mock_complete_text(prompt: str) -> Any:
+            # Chunk review calls complete_json with a schema-shaped dict; the
+            # first text-template call is code generation. Later text-template
+            # calls (the documentation self-review iterations) must NOT return a
+            # ``## FILE good.py ##`` block, or the doc phase would parse it back
+            # and overwrite the DbC-augmented file -- return a review-status
+            # template (no code file) instead, as the frontend smoke test does.
+            if "code to review" in prompt.lower():
+                return {
+                    "approved": True,
+                    "issues": [],
+                    "summary": "Good code.",
+                    "spec_compliance_notes": "",
+                }
+            _call_count[0] += 1
+            if _call_count[0] == 1:
+                return "## FILE good.py ##\nprint('good')\n\n## SUMMARY ##\nGood code.\n"
+            return "## REVIEW_STATUS ##\npassed\n\n## ISSUES ##\n\n## SUMMARY ##\nAll good.\n"
+
+        mock_llm = _CallableTextClient(mock_complete_text)
+
+        # Stub the DbC agent so it deterministically inserts a Design-by-Contract
+        # comment into the file the coder produced (``good.py`` -- a reviewed path,
+        # so the self-review phase writes it back rather than filtering it out).
+        augmented = "print('good')\n# Preconditions: none\n"
+
+        class _InsertingAgent:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            def run(self, input_data: Any, on_status: Any = None) -> DbcCommentsOutput:
+                return DbcCommentsOutput(files={"good.py": augmented})
+
+        monkeypatch.setattr(dbc_phase, "DbcCommentsAgent", _InsertingAgent)
+
+        # Default config -> ``enable_dbc_comments`` is True.
+        config = MicrotaskReviewConfig()
+        mock_qa = MagicMock()
+        mock_qa.run.return_value = MagicMock(bugs_found=[], issues=[])
+        mock_sec = MagicMock()
+        mock_sec.run.return_value = MagicMock(vulnerabilities=[], issues=[])
+        deps = ReviewDependencies(qa_agent=mock_qa, security_agent=mock_sec)
+
+        result = run_execution_with_review_gates(
+            llm=mock_llm,
+            task=task,
+            planning_result=planning_result,
+            repo_path=tmp_path,
+            review_config=config,
+            review_deps=deps,
+        )
+
+        completed = [m for m in result.microtasks if m.status == MicrotaskStatus.COMPLETED]
+        assert len(completed) == 1
+        assert completed[0].id == "mt-1"
+        # The DbC-inserted contract comment reached the completed microtask's output.
+        assert "# Preconditions" in result.files["good.py"]
 
     def test_code_review_gate_forwards_enable_llm_review_grounding(self, tmp_path, monkeypatch):
         """Kill switch on MicrotaskReviewConfig must reach run_code_review_phase."""

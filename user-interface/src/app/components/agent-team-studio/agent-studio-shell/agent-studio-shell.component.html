@@ -1,14 +1,43 @@
 <div class="studio">
   <!--
-    Save / Load draft controls (spec §3.5). Placeholders in this scaffold —
-    disabled until the drafts API + AgentStudioStateService persistence land in
-    a later increment.
+    Save / Load draft controls (spec §3.5). Save creates/updates a server
+    draft via the Save-draft popover; Load lists saved drafts and hydrates the
+    session from the selected one. When a draft is bound, the header shows its
+    name with a rename pencil; deleting the bound draft from the Load menu
+    unbinds it without clearing handoff.
   -->
   <header class="studio__header">
     <h1 class="studio__title">Agent Studio</h1>
     <div class="studio__draft-actions">
-      <button mat-stroked-button type="button" class="studio__draft-btn" disabled>Save draft</button>
-      <button mat-stroked-button type="button" class="studio__draft-btn" disabled>Load draft ▾</button>
+      @if (state.currentDraftId()) {
+        <span class="studio__current-draft">
+          <span class="studio__current-draft-name" [title]="state.currentDraftName()">{{ state.currentDraftName() }}</span>
+          <button
+            mat-icon-button
+            type="button"
+            class="studio__rename-draft"
+            [attr.aria-label]="'Rename draft ' + state.currentDraftName()"
+            [disabled]="loadingDraft()"
+            (click)="openRenameDraftDialog()"
+          >
+            <mat-icon>edit</mat-icon>
+          </button>
+        </span>
+      }
+      <button
+        mat-stroked-button
+        type="button"
+        class="studio__draft-btn"
+        [disabled]="loadingDraft()"
+        (click)="openSaveDraftDialog()"
+      >
+        Save draft
+      </button>
+      <app-load-draft-menu
+        [busy]="loadingDraft()"
+        (draftSelected)="loadDraft($event)"
+        (draftDeleted)="onDraftDeleted($event)"
+      />
     </div>
   </header>
 
@@ -37,30 +66,10 @@
   </nav>
 
   <main class="studio__stage">
-    @switch (activeStageDef().key) {
-      @case ('build') {
-        <app-agent-studio-build-agent />
-      }
-      @case ('test') {
-        <app-agent-studio-test-agent />
-      }
-      @case ('compose') {
-        <app-agent-studio-compose-team />
-      }
-      @case ('personas') {
-        <app-agent-studio-persona />
-      }
-      @default {
-        <app-agent-studio-stage-placeholder
-          [title]="activeStageDef().label"
-          [blurb]="activeStageDef().blurb"
-          [icon]="activeStageDef().icon"
-          [handoff]="state.handoff()"
-        />
-      }
-    }
+    <router-outlet />
   </main>
 
+  @if (!hideFooter()) {
   <footer class="studio__footer">
     <span class="studio__progress">Stage {{ state.activeStage() + 1 }} of {{ stages.length }}</span>
     <!--
@@ -77,8 +86,8 @@
            (same pattern as the Stage-4 "fix an agent" back-loop button). -->
       <span
         class="studio__continue-wrap"
-        [matTooltip]="composeForwardDisabledReason() ?? ''"
-        [matTooltipDisabled]="!composeForwardDisabledReason()"
+        [matTooltip]="forwardDisabledReason() ?? ''"
+        [matTooltipDisabled]="!forwardDisabledReason()"
       >
         <button
           mat-flat-button
@@ -92,4 +101,5 @@
       </span>
     }
   </footer>
+  }
 </div>

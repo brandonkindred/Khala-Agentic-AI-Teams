@@ -160,3 +160,19 @@ def test_find_repo_files_requires_is_file(tmp_path: Path) -> None:
     (tmp_path / "real.py").write_text("R = 1")
     matched = {f.name for f in find_repo_files(tmp_path, suffixes={".py"}, exclude_dirs=set())}
     assert matched == {"real.py"}
+
+
+def test_find_repo_files_accepts_frozenset_exclude_dirs(tmp_path: Path) -> None:
+    """Callers may pass an immutable exclude_dirs iterable; the helper copies it
+    and must not mutate the original (os.walk pruning uses dirnames, not the
+    argument)."""
+    (tmp_path / "keep.py").write_text("K = 1")
+    deep = tmp_path / "node_modules" / "deep"
+    deep.mkdir(parents=True)
+    (deep / "ignored.py").write_text("X = 1")
+    exclude_dirs = frozenset({"node_modules"})
+    before = id(exclude_dirs)
+    matched = {f.name for f in find_repo_files(tmp_path, suffixes={".py"}, exclude_dirs=exclude_dirs)}
+    assert matched == {"keep.py"}
+    assert id(exclude_dirs) == before
+    assert exclude_dirs == frozenset({"node_modules"})

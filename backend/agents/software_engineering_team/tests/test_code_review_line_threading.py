@@ -8,9 +8,11 @@ powers inline PR review comments downstream.
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Dict, List, Optional
 
 from code_review_agent import CodeReviewAgent
+from code_review_agent.chunk_reviewer import CODE_TO_REVIEW_HEADER
 from code_review_agent.models import CodeReviewInput, CodeReviewIssue, coerce_line
 
 from llm_service.clients.dummy import DummyLLMClient
@@ -93,9 +95,9 @@ def test_single_call_threads_line() -> None:
             }
         ]
     )
-    code = "### app/main.py ###\n" + "\n".join(f"x{i} = {i}" for i in range(50))
+    code = "\n".join(f"x{i} = {i}" for i in range(50))
     agent = CodeReviewAgent(llm_client=client, force_in_process=True)
-    result = agent.run(CodeReviewInput(code=code, language="python"))
+    result = agent.run(CodeReviewInput(files={"app/main.py": code}, language="python"))
     assert len(result.issues) == 1
     assert result.issues[0].line == 42
 
@@ -125,7 +127,7 @@ def test_single_call_bad_line_becomes_none() -> None:
         ]
     )
     agent = CodeReviewAgent(llm_client=client, force_in_process=True)
-    result = agent.run(CodeReviewInput(code="### app/main.py ###\nx=1", language="python"))
+    result = agent.run(CodeReviewInput(files={"app/main.py": "x=1"}, language="python"))
     assert result.issues[0].line is None
 
 
@@ -135,7 +137,7 @@ def test_single_call_bad_line_becomes_none() -> None:
 
 
 def test_coordinator_threads_line() -> None:
-    big = "### app/main.py ###\n" + "\n".join(f"x{i} = {i}" for i in range(100))
+    big = "\n".join(f"x{i} = {i}" for i in range(100))
     client = _ScriptedClient(
         [
             {
@@ -156,7 +158,7 @@ def test_coordinator_threads_line() -> None:
         ]
     )
     agent = CodeReviewAgent(llm_client=client, force_in_process=True)
-    result = agent.run(CodeReviewInput(code=big, language="python"))
+    result = agent.run(CodeReviewInput(files={"app/main.py": big}, language="python"))
     assert len(result.issues) == 1
     assert result.issues[0].line == 13
 
@@ -187,10 +189,26 @@ def test_split_segments_cite_absolute_prefixed_lines() -> None:
     class _CiteFirstPrefixed(DummyLLMClient):
         """Cites the first original-line prefix found in the chunk prompt."""
 
+        def __init__(self) -> None:
+            super().__init__()
+            self._tls = threading.local()
+
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            if CODE_TO_REVIEW_HEADER in prompt:
+                # This prompt is FileSegment.prompt_content (partial-segment
+                # rendering), which never carries a change-surface ``+``/``>``
+                # marker; the optional ``[+>]`` here only mirrors the
+                # production gutter parsers' tolerance and is not exercised.
+                m = _re.search(r"^[+>]?[ ]*(\d+)[:|] line", prompt, _re.M)
+                assert m is not None, "split segments must render prefixed lines"
+                self._tls.cited = int(m.group(1))
+            return super().complete(prompt, **kwargs)
+
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            m = _re.search(r"^(\d+): line", prompt, _re.M)
-            assert m is not None, "split segments must render prefixed lines"
-            cited = int(m.group(1))
+            cited = getattr(self._tls, "cited", None)
+            if cited is None:
+                return super().complete_json(prompt, **kwargs)
+            self._tls.cited = None
             return {
                 "approved": False,
                 "issues": [

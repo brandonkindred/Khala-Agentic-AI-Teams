@@ -12,7 +12,9 @@ import pytest
 from llm_service.clients.ollama import (
     DEFAULT_MAX_OUTPUT_TOKENS,
     OllamaLLMClient,
+    _EmptyResponseSignal,
     _parse_retry_after_seconds,
+    _SemanticRetryDecision,
     list_ollama_models,
 )
 from llm_service.interface import (
@@ -20,6 +22,11 @@ from llm_service.interface import (
     LLMRateLimitError,
     LLMSemanticExhaustionError,
     LLMTemporaryError,
+    LLMTruncatedError,
+    record_complete_json_turn,
+    reset_complete_json_observer_state,
+    take_complete_json_raw,
+    take_complete_json_turns,
 )
 
 
@@ -273,6 +280,60 @@ def test_ollama_complete_json_parses_response(monkeypatch: pytest.MonkeyPatch) -
     assert result == {"answer": 42}
 
 
+def test_ollama_sse_parsing_handles_str_lines_from_httpx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """httpx's Response.iter_lines() yields decoded str (via iter_text()), NOT
+    bytes like requests. The SSE parser therefore operates on str throughout:
+    ``partial_buf`` is a str, and joining it with a raw line via ``+`` plus the
+    subsequent ``startswith("data:")`` must work without a TypeError.
+
+    This exercises the partial-buffer branch by splitting one ``data:`` line
+    across two str chunks (as a mid-frame TCP split would surface it), so a
+    regression to bytes-typed handling would raise here.
+    """
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    payload = '{"choices":[{"delta":{"content":"{\\"answer\\": 42}"},"finish_reason":null}]}'
+    split = len(payload) // 2
+    # First fragment is not valid JSON on its own -> buffered as str partial_buf;
+    # the second fragment completes it -> str concatenation + startswith.
+    sse_lines = [
+        "data: " + payload[:split],
+        payload[split:],
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    assert all(isinstance(line, str) for line in sse_lines)
+    mock_client, _ = _make_streaming_mock(200, sse_lines)
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete_json("What is 6*7?", objective="test", temperature=0)
+    assert result == {"answer": 42}
+
+
+def test_complete_json_clears_stale_turns_from_prior_failed_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn recorded before this complete_json must not survive a successful
+    call that does not continue — otherwise the next observer would attribute
+    the stale partial to the new prompt."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    record_complete_json_turn("stale", "old-partial")
+    sse_lines = [
+        'data: {"choices":[{"delta":{"content":"{\\"answer\\": 42}"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    mock_client, _ = _make_streaming_mock(200, sse_lines)
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete_json("What is 6*7?", objective="test", temperature=0)
+    assert result == {"answer": 42}
+    assert take_complete_json_turns() == []
+
+
 def test_ollama_streams_and_accumulates_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify that content delta chunks are concatenated before JSON parsing."""
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
@@ -308,6 +369,25 @@ def test_ollama_sse_malformed_chunk_skipped(monkeypatch: pytest.MonkeyPatch) -> 
         assert result == {"v": 1}
 
 
+def test_ollama_sse_non_object_chunk_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A syntactically valid but non-object SSE chunk (e.g. ``data: 123``) is skipped,
+    not crashed on — valid content around it is still returned."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "0")
+    sse_lines = [
+        'data: {"choices":[{"delta":{"content":"{\\"v\\":1}"},"finish_reason":null}]}',
+        "data: 123",  # valid JSON, but a bare int has no .get() — must be skipped
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    mock_client, _ = _make_streaming_mock(200, sse_lines)
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete_json("test", objective="test", temperature=0)
+    assert result == {"v": 1}
+
+
 def test_ollama_sse_no_space_after_colon(monkeypatch: pytest.MonkeyPatch) -> None:
     """SSE lines with data:{...} (no space after colon) must be parsed correctly."""
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
@@ -322,6 +402,62 @@ def test_ollama_sse_no_space_after_colon(monkeypatch: pytest.MonkeyPatch) -> Non
         client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
         result = client.complete_json("test", objective="test", temperature=0)
     assert result == {"v": 1}
+
+
+def test_ollama_stream_without_done_marker_returns_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 200 stream that ends WITHOUT a ``data: [DONE]`` sentinel is not a stuck
+    state: ``iter_lines()`` exhausts naturally, the inner ``for`` loop completes,
+    and control falls through to the same ``return`` the ``[DONE]`` break reaches.
+    The accumulated content is parsed and returned rather than the ``while True``
+    loop spinning. A single stream attempt is provided, so an unbounded retry
+    would exhaust the mock and fail loudly instead of hanging."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "0")
+    # No trailing "data: [DONE]" line — the server closed the stream after the
+    # final content/finish chunk.
+    sse_lines = [
+        'data: {"choices":[{"delta":{"content":"{\\"ok\\": 1}"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+    ]
+    mock_client, _ = _make_streaming_mock(200, sse_lines)
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete_json("test", objective="test", temperature=0)
+    assert result == {"ok": 1}
+
+
+def test_ollama_stream_without_done_marker_empty_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty (reasoning-only) 200 stream that ends WITHOUT a ``[DONE]`` sentinel
+    terminates on a finite budget, not an infinite retry. The natural for-loop
+    completion falls through to ``_parse_response_content``, which raises
+    ``_EmptyResponseSignal`` for empty content; with ``think=False`` the
+    downgrade ladder yields a single attempt before declaring semantic
+    exhaustion. Exactly one stream attempt is mocked, so an unbounded outer loop
+    would raise ``StopIteration`` on the second ``.stream()`` call rather than
+    silently looping."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    # Reasoning delta + a finish chunk, but no content and no "data: [DONE]" line.
+    sse_lines = [
+        'data: {"choices":[{"delta":{"reasoning":"hmm..."},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+    ]
+    cms = [_stream_cm(200, sse_lines=sse_lines)]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(
+            model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
+        )
+        with pytest.raises(LLMSemanticExhaustionError) as exc_info:
+            client.complete_json("q", objective="test", temperature=0, think=False)
+    # Single attempt consumed — the empty path is bounded, not infinitely retried.
+    assert len(captured) == 1
+    assert exc_info.value.attempts_used == 1
 
 
 def test_ollama_complete_json_429_raises_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -676,7 +812,7 @@ def test_ollama_empty_content_downgrades_boolean_think(
         mock_client, captured = _capturing_multi_client(cms)
         mock_client_cls.return_value = mock_client
         client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
-        result = client.complete_json("hello", objective="test", temperature=0)
+        result = client.complete_json("hello", objective="test", temperature=0, think=True)
     assert result == {"ok": 1}
     assert waits == []  # the changed payload is the proof of change — no backoff
     assert captured[0]["think"] is True
@@ -748,6 +884,46 @@ def test_ollama_httpstatuserror_5xx_exhaustion_raises(monkeypatch: pytest.Monkey
         with pytest.raises(LLMTemporaryError) as exc_info:
             client.complete_json("hello", objective="test", temperature=0)
     assert exc_info.value.status_code == 503
+
+
+def test_ollama_httpstatuserror_4xx_raises_permanent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 4xx httpx.HTTPStatusError raises LLMPermanentError without retrying."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "3")
+    req = httpx.Request("POST", "http://localhost:9999/v1/chat/completions")
+    resp = httpx.Response(403, request=req, text="forbidden")
+    err = httpx.HTTPStatusError("403", request=req, response=resp)
+    mock_client = MagicMock()
+    # A single side-effect entry: any retry would exhaust it and raise
+    # StopIteration, so a clean LLMPermanentError proves the loop fails fast.
+    mock_client.__enter__.return_value.stream.side_effect = [err]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        with pytest.raises(LLMPermanentError) as exc_info:
+            client.complete_json("hello", objective="test", temperature=0)
+    assert exc_info.value.status_code == 403
+    assert mock_client.__enter__.return_value.stream.call_count == 1
+
+
+def test_ollama_httpstatuserror_unhandled_status_raises_permanent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A status outside 429/5xx/4xx hits the catch-all: raise, never loop forever."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "3")
+    req = httpx.Request("POST", "http://localhost:9999/v1/chat/completions")
+    resp = httpx.Response(302, request=req, text="found")
+    err = httpx.HTTPStatusError("302", request=req, response=resp)
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value.stream.side_effect = [err]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        with pytest.raises(LLMPermanentError) as exc_info:
+            client.complete_json("hello", objective="test", temperature=0)
+    assert exc_info.value.status_code == 302
+    assert mock_client.__enter__.return_value.stream.call_count == 1
 
 
 def test_ollama_read_timeout_exhaustion_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -947,6 +1123,75 @@ def test_reasoning_only_logs_info_not_warning(
     assert not any(lvl == "WARNING" and "reasoning only" in msg for lvl, msg in records)
 
 
+def test_reasoning_only_with_no_tool_calls_still_logs_reasoning_only(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Positive counterpart to
+    ``test_reasoning_then_tool_calls_does_not_log_reasoning_only``: a turn
+    with reasoning, no text content, and no ``tool_calls`` at all is a
+    genuine reasoning-only turn that DOES need the empty-response retry
+    ladder -- the "reasoning only (no content) ... will retry" line must
+    still fire for it. This locks in the other side of the
+    ``tool_call_buffers`` gate added to that log line: it is suppressed
+    exactly when the turn also carries ``tool_calls``, not for every
+    empty-text-content turn regardless of ``tool_calls``."""
+    import logging
+
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "0")
+    sse = [
+        'data: {"choices":[{"delta":{"reasoning":"thinking, no tool call this time"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    cms = [
+        _stream_cm(200, sse_lines=sse),
+        _stream_cm(200, sse_lines=list(sse)),
+    ]
+    with (
+        patch("httpx.Client") as mock_client_cls,
+        caplog.at_level(logging.INFO, logger="llm_service.clients.ollama"),
+    ):
+        mock_client_cls.return_value = _multi_attempt_client(cms)
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        with pytest.raises(LLMSemanticExhaustionError):
+            client.complete_json("q", objective="test", temperature=0)
+    records = [(r.levelname, r.getMessage()) for r in caplog.records]
+    assert any(lvl == "INFO" and "reasoning only" in msg for lvl, msg in records)
+
+
+def test_reasoning_then_tool_calls_does_not_log_reasoning_only(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A turn with reasoning but no text content, that goes on to return
+    ``tool_calls``, must NOT log the "reasoning only (no content) ... will
+    retry" line -- that line's own text says the empty-response handler will
+    retry, but a tool-calling turn is returned as a success one function call
+    later and no retry ever happens. Logging it anyway is a false alarm that
+    makes a normal tool-calling turn look like the start of a stuck loop."""
+    import logging
+
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    sse_lines = [
+        'data: {"choices":[{"delta":{"reasoning":"let me check"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search_codebase","arguments":"{\\"query\\": \\"foo\\"}"}}]},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+        "data: [DONE]",
+    ]
+    tools = [{"type": "function", "function": {"name": "search_codebase"}}]
+    mock_client, _ = _make_streaming_mock(200, sse_lines)
+    with (
+        patch("httpx.Client") as mock_client_cls,
+        caplog.at_level(logging.INFO, logger="llm_service.clients.ollama"),
+    ):
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete_json("q", objective="test", tools=tools)
+    assert "__tool_calls__" in result
+    records = [(r.levelname, r.getMessage()) for r in caplog.records]
+    assert not any("reasoning only" in msg for _lvl, msg in records)
+
+
 def test_extract_json_implicit_truncation_raises_for_continuation() -> None:
     """A reply cut off mid-value must raise (not be repaired) so the caller's
     implicit-truncation handler triggers multi-turn continuation. This holds even
@@ -1110,6 +1355,38 @@ def test_ollama_chat_round_returns_tool_calls_when_tools_present(
     assert result["__tool_calls__"][0]["function"]["name"] == "do_thing"
 
 
+def test_chat_truncated_records_partial_before_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """finish_reason=length on chat() must record the partial reply before
+    re-raising so Strands worker-turn replay can surface it."""
+    reset_complete_json_observer_state()
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    truncated_sse = [
+        'data: {"choices":[{"delta":{"content":"PARTIAL CHAT"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+        "data: [DONE]",
+    ]
+    cms = [_stream_cm(200, sse_lines=truncated_sse)]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, _captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        with pytest.raises(LLMTruncatedError):
+            client.chat(
+                [{"role": "user", "content": "review this"}],
+                objective="test",
+                response_format="text",
+                temperature=0.0,
+            )
+    turns = take_complete_json_turns()
+    assert len(turns) == 1
+    prompt, response, started = turns[0]
+    assert json.loads(prompt) == [{"role": "user", "content": "review this"}]
+    assert response == "PARTIAL CHAT"
+    assert isinstance(started, float)
+
+
 def test_ollama_chat_json_self_corrects_prose_when_tools_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1118,6 +1395,7 @@ def test_ollama_chat_json_self_corrects_prose_when_tools_present(
     perform one corrective follow-up that recovers a JSON object instead of
     raising LLMJsonParseError (code_review Strands tool-loop failure mode).
     """
+    reset_complete_json_observer_state()
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     prose = (
         "I'll analyze the file structure you've provided to understand the "
@@ -1143,9 +1421,7 @@ def test_ollama_chat_json_self_corrects_prose_when_tools_present(
             },
         }
     ]
-    mock_client = _multi_attempt_client(
-        [_stream_cm(200, prose_sse), _stream_cm(200, json_sse)]
-    )
+    mock_client = _multi_attempt_client([_stream_cm(200, prose_sse), _stream_cm(200, json_sse)])
     captured: list[dict] = []
     original_stream = mock_client.__enter__.return_value.stream
 
@@ -1178,6 +1454,11 @@ def test_ollama_chat_json_self_corrects_prose_when_tools_present(
     assert msgs[-1]["role"] == "user"
     assert "rejected" in msgs[-1]["content"].lower()
     assert "json" in msgs[-1]["content"].lower()
+    turns = take_complete_json_turns()
+    assert len(turns) == 2
+    assert "architecture" in turns[0][1]
+    assert "findings" in turns[1][1]
+    assert "rejected" in turns[1][0].lower() or "assistant" in turns[1][0]
 
 
 def test_ollama_chat_json_self_correct_exhausted_still_raises(
@@ -1187,6 +1468,7 @@ def test_ollama_chat_json_self_correct_exhausted_still_raises(
     after exactly one corrective attempt (two total stream calls)."""
     from llm_service.interface import LLMJsonParseError
 
+    reset_complete_json_observer_state()
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     prose = "Still thinking about the architecture in markdown."
     prose_sse = [
@@ -1195,9 +1477,7 @@ def test_ollama_chat_json_self_correct_exhausted_still_raises(
         "data: [DONE]",
     ]
     tools = [{"type": "function", "function": {"name": "list_files", "parameters": {}}}]
-    mock_client = _multi_attempt_client(
-        [_stream_cm(200, prose_sse), _stream_cm(200, prose_sse)]
-    )
+    mock_client = _multi_attempt_client([_stream_cm(200, prose_sse), _stream_cm(200, prose_sse)])
     with patch("httpx.Client") as mock_client_cls:
         mock_client_cls.return_value = mock_client
         client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
@@ -1210,6 +1490,7 @@ def test_ollama_chat_json_self_correct_exhausted_still_raises(
                 temperature=0.0,
             )
     assert mock_client.__enter__.return_value.stream.call_count == 2
+    assert len(take_complete_json_turns()) == 2
 
 
 def test_ollama_get_max_context_tokens_deepseek_v4_pro(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1240,9 +1521,22 @@ def _captured_payload_client(monkeypatch: pytest.MonkeyPatch, model: str) -> tup
     return client, captured
 
 
-def test_complete_json_resolves_default_think_to_max_level(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_complete_json_resolves_default_think_to_false_for_json_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """complete_json is always JSON mode; with no explicit think and no agent
+    pin, extended thinking competes with strict JSON decoding for the content
+    channel, so the default resolves to thinking off."""
     client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
     client.complete_json("hi", objective="test")
+    assert captured["think"] is False
+
+
+def test_complete_json_explicit_think_true_resolves_to_max_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
+    client.complete_json("hi", objective="test", think=True)
     assert captured["think"] == "max"
 
 
@@ -1258,17 +1552,39 @@ def test_complete_resolves_default_think_to_max_level(monkeypatch: pytest.Monkey
     assert captured["think"] == "max"
 
 
-def test_chat_resolves_default_think_to_max_level(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_chat_resolves_default_think_to_false_for_json_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """chat() defaults to response_format='json'; with no explicit think and no
+    agent pin, the default resolves to thinking off, same as complete_json."""
     client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
     client.chat([{"role": "user", "content": "hi"}], objective="test")
+    assert captured["think"] is False
+
+
+def test_chat_text_mode_resolves_default_think_to_max_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """response_format='text' is not JSON mode, so None still upgrades to the
+    model's max registered thinking level."""
+    client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
+    client.chat([{"role": "user", "content": "hi"}], objective="test", response_format="text")
     assert captured["think"] == "max"
 
 
-def test_complete_json_boolean_think_for_unregistered_model(
+def test_complete_json_default_think_false_for_unregistered_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, captured = _captured_payload_client(monkeypatch, "qwen3.5:cloud")
     client.complete_json("hi", objective="test")
+    assert captured["think"] is False
+
+
+def test_complete_json_explicit_think_true_boolean_for_unregistered_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, captured = _captured_payload_client(monkeypatch, "qwen3.5:cloud")
+    client.complete_json("hi", objective="test", think=True)
     assert captured["think"] is True
 
 
@@ -1277,7 +1593,7 @@ def test_payload_maps_thinking_level_to_reasoning_effort(monkeypatch: pytest.Mon
     controls reasoning via reasoning_effort; the native think field is kept
     for proxies that honor it, but levels must also reach reasoning_effort."""
     client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
-    client.complete_json("hi", objective="test")
+    client.complete_json("hi", objective="test", think=True)
     assert captured["think"] == "max"
     assert captured["reasoning_effort"] == "max"
 
@@ -1285,14 +1601,14 @@ def test_payload_maps_thinking_level_to_reasoning_effort(monkeypatch: pytest.Mon
 def test_payload_omits_reasoning_effort_for_boolean_think(monkeypatch: pytest.MonkeyPatch) -> None:
     """reasoning_effort has no boolean form; unregistered models keep think only."""
     client, captured = _captured_payload_client(monkeypatch, "qwen3.5:cloud")
-    client.complete_json("hi", objective="test")
+    client.complete_json("hi", objective="test", think=True)
     assert captured["think"] is True
     assert "reasoning_effort" not in captured
 
 
 def test_chat_and_complete_also_map_reasoning_effort(monkeypatch: pytest.MonkeyPatch) -> None:
     client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
-    client.chat([{"role": "user", "content": "hi"}], objective="test")
+    client.chat([{"role": "user", "content": "hi"}], objective="test", think=True)
     assert captured["reasoning_effort"] == "max"
     client2, captured2 = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
     client2.complete("hi", objective="test")
@@ -1396,7 +1712,7 @@ def test_reasoning_only_downgrades_one_thinking_level(monkeypatch: pytest.Monkey
         client = OllamaLLMClient(
             model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
         )
-        result = client.complete_json("q", objective="test", temperature=0)
+        result = client.complete_json("q", objective="test", temperature=0, think=True)
     assert result == {"ok": 1}
     assert captured[0]["think"] == "max"
     assert captured[0]["reasoning_effort"] == "max"
@@ -1429,7 +1745,7 @@ def test_ladder_exhausts_after_downgrade_then_thinking_off(
             model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
         )
         with pytest.raises(LLMSemanticExhaustionError) as exc_info:
-            client.complete_json("q", objective="test", temperature=0)
+            client.complete_json("q", objective="test", temperature=0, think=True)
     err = exc_info.value
     assert isinstance(err, LLMTemporaryError)  # outer pause/degrade handlers still work
     assert err.failure_class == "semantic_exhaustion"
@@ -1468,7 +1784,7 @@ def test_downgrade_retry_logged_at_warning(
         client = OllamaLLMClient(
             model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
         )
-        client.complete_json("q", objective="test", temperature=0)
+        client.complete_json("q", objective="test", temperature=0, think=True)
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert any("proof-of-change retry" in m and "'max'" in m and "'high'" in m for m in warnings)
 
@@ -1563,7 +1879,7 @@ def test_transient_5xx_before_downgrade_keeps_schedule_and_payload(
         client = OllamaLLMClient(
             model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
         )
-        result = client.complete_json("q", objective="test", temperature=0)
+        result = client.complete_json("q", objective="test", temperature=0, think=True)
     assert result == {"ok": 1}
     assert captured[0]["reasoning_effort"] == "max"
     assert captured[1]["reasoning_effort"] == "max"  # 5xx retry: identical payload
@@ -1592,7 +1908,7 @@ def test_transient_5xx_after_downgrade_retries_downgraded_payload(
         client = OllamaLLMClient(
             model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
         )
-        result = client.complete_json("q", objective="test", temperature=0)
+        result = client.complete_json("q", objective="test", temperature=0, think=True)
     assert result == {"ok": 1}
     assert captured[0]["reasoning_effort"] == "max"
     assert captured[1]["reasoning_effort"] == "high"
@@ -1617,7 +1933,7 @@ def test_kill_switch_restores_legacy_transient_retries(monkeypatch: pytest.Monke
             model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
         )
         with pytest.raises(LLMTemporaryError) as exc_info:
-            client.complete_json("q", objective="test", temperature=0)
+            client.complete_json("q", objective="test", temperature=0, think=True)
     assert not isinstance(exc_info.value, LLMSemanticExhaustionError)
     assert len(captured) == 3
     assert all(p["reasoning_effort"] == "max" for p in captured)
@@ -1638,7 +1954,7 @@ def test_length_empty_is_semantic_exhaustion_with_finish_reason(
             model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
         )
         with pytest.raises(LLMSemanticExhaustionError) as exc_info:
-            client.complete_json("q", objective="test", temperature=0)
+            client.complete_json("q", objective="test", temperature=0, think=True)
     assert exc_info.value.finish_reason == "length"
     assert [c["reasoning_effort"] for c in captured] == ["max", "high", "none"]
 
@@ -1695,7 +2011,10 @@ def test_semantic_exhaustion_diagnostic_accumulates_across_ladder(
         "data: [DONE]",
     ]
     # Rung 1 (high) has JSON in reasoning; rung 2 (thinking-off) is truly empty.
-    cms = [_stream_cm(200, sse_lines=with_json), _stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE))]
+    cms = [
+        _stream_cm(200, sse_lines=with_json),
+        _stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE)),
+    ]
     with (
         patch("httpx.Client") as mock_client_cls,
         caplog.at_level(logging.ERROR, logger="llm_service.clients.ollama"),
@@ -1708,7 +2027,9 @@ def test_semantic_exhaustion_diagnostic_accumulates_across_ladder(
         with pytest.raises(LLMSemanticExhaustionError):
             client.complete_json("q", objective="test", temperature=0, think="high")
     assert [c["reasoning_effort"] for c in captured] == ["high", "none"]
-    receipt = next(r.getMessage() for r in caplog.records if "semantic_exhaustion" in r.getMessage())
+    receipt = next(
+        r.getMessage() for r in caplog.records if "semantic_exhaustion" in r.getMessage()
+    )
     # Accumulated from rung 1, not taken from the empty final rung.
     assert "reasoning_has_json=True" in receipt
 
@@ -1823,11 +2144,90 @@ def test_continuation_resumes_at_downgraded_thinking_level(
         client = OllamaLLMClient(
             model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
         )
-        result = client.complete_json("q", objective="test", temperature=0)
+        result = client.complete_json("q", objective="test", temperature=0, think=True)
     assert result == {"ok": 1}
     assert captured[0]["reasoning_effort"] == "max"
     assert captured[1]["reasoning_effort"] == "high"
     assert captured[2]["reasoning_effort"] == "high"  # continuation inherits the downgrade
+
+
+def test_complete_json_continuation_records_each_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each continuation HTTP turn (initial partial + continuation reply) is
+    recorded for observers, and the merged raw text is stored for take()."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    truncated_partial_sse = [
+        'data: {"choices":[{"delta":{"content":"{\\"ok\\":"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+        "data: [DONE]",
+    ]
+    continuation_ok_sse = [
+        'data: {"choices":[{"delta":{"content":" 1}"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    cms = [
+        _stream_cm(200, sse_lines=truncated_partial_sse),
+        _stream_cm(200, sse_lines=continuation_ok_sse),
+    ]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, _captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete_json("q", objective="test", temperature=0, think=False)
+    assert result == {"ok": 1}
+    turns = take_complete_json_turns()
+    raw = take_complete_json_raw()
+    assert len(turns) == 2
+    assert turns[0][0] == "q"
+    assert turns[0][1] == '{"ok":'
+    assert isinstance(turns[0][2], float)
+    continuation_messages = json.loads(turns[1][0])
+    assert continuation_messages[1] == {"role": "user", "content": "q"}
+    assert continuation_messages[2] == {"role": "assistant", "content": '{"ok":'}
+    assert continuation_messages[3]["role"] == "user"
+    assert "continue exactly from where you left off" in continuation_messages[3]["content"]
+    assert turns[1][1] == " 1}"
+    assert raw == '{"ok": 1}'
+    assert turns[0][2] <= turns[1][2]
+
+
+def test_complete_text_continuation_records_each_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text complete() continuation HTTP turns must each be recorded, matching
+    complete_json, so reasoning transcripts are per-LLM-call not merged-only."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    truncated_partial_sse = [
+        'data: {"choices":[{"delta":{"content":"PARTIAL "},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+        "data: [DONE]",
+    ]
+    continuation_ok_sse = [
+        'data: {"choices":[{"delta":{"content":"REVIEW"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    cms = [
+        _stream_cm(200, sse_lines=truncated_partial_sse),
+        _stream_cm(200, sse_lines=continuation_ok_sse),
+    ]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, _captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete("q", objective="test", think=False)
+    assert result == "PARTIAL REVIEW"
+    turns = take_complete_json_turns()
+    assert len(turns) == 2
+    assert turns[0][0] == "q"
+    assert turns[0][1] == "PARTIAL "
+    continuation_messages = json.loads(turns[1][0])
+    assert continuation_messages[0] == {"role": "user", "content": "q"}
+    assert continuation_messages[1] == {"role": "assistant", "content": "PARTIAL "}
+    assert turns[1][1] == "REVIEW"
+    assert turns[0][2] <= turns[1][2]
 
 
 def test_generic_temporary_error_retries_on_transient_schedule(
@@ -1894,17 +2294,20 @@ def test_list_ollama_models_parses_and_sorts_names(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("LLM_BASE_URL", "http://localhost:11434")
     payload = {
         "models": [
-            {"name": "llama3.2", "model": "llama3.2:latest"},
+            {"name": "deepseek-v4-flash:cloud", "model": "deepseek-v4-flash:cloud:latest"},
             {"name": "deepseek-v4-flash:cloud"},
             {"model": "qwen3-coder:480b-cloud"},  # no name -> falls back to model
-            {"name": "llama3.2"},  # duplicate -> collapsed
+            {"name": "deepseek-v4-flash:cloud"},  # duplicate -> collapsed
             {"name": ""},  # blank -> dropped
             "not-a-dict",  # ignored
         ]
     }
     mock_cls, mock_client = _patch_tags_get(_make_tags_response(200, payload))
     with patch("httpx.Client", mock_cls):
-        assert list_ollama_models() == ["deepseek-v4-flash:cloud", "llama3.2", "qwen3-coder:480b-cloud"]
+        assert list_ollama_models() == [
+            "deepseek-v4-flash:cloud",
+            "qwen3-coder:480b-cloud",
+        ]
     # The request targets {base_url}/api/tags.
     called_url = mock_client.__enter__.return_value.get.call_args[0][0]
     assert called_url == "http://localhost:11434/api/tags"
@@ -1950,3 +2353,171 @@ def test_list_ollama_models_http_error_returns_empty(monkeypatch: pytest.MonkeyP
     mock_cls, _ = _patch_tags_get(httpx.ConnectError("refused"))
     with patch("httpx.Client", mock_cls):
         assert list_ollama_models() == []
+
+
+# ---------------------------------------------------------------------------
+# Direct unit tests for the extracted retry-loop helpers
+# (_route_http_status_error, _handle_semantic_exhaustion_retry). The integration
+# tests above exercise these through _ollama_post; these lock their contracts.
+# ---------------------------------------------------------------------------
+
+
+def _client() -> OllamaLLMClient:
+    return OllamaLLMClient(model="qwen3.5:397b-cloud", base_url="http://localhost:9999", timeout=5)
+
+
+def _resp(body_text: str = "", headers: dict | None = None) -> MagicMock:
+    resp = MagicMock()
+    resp.text = body_text
+    resp.headers = {} if headers is None else headers
+    return resp
+
+
+def test_route_http_status_error_429_attaches_exhaustion_context() -> None:
+    """A 429 is raised as LLMRateLimitError carrying the deferred (status, body, headers) log."""
+    client = _client()
+    headers = {"retry-after": "5"}
+    resp = _resp(body_text='{"error":"rate limited"}', headers=headers)
+    with pytest.raises(LLMRateLimitError) as exc_info:
+        client._route_http_status_error(429, resp, attempt=0, headers={"Authorization": "Bearer k"})
+    ctx = exc_info.value._exhaustion_log_context
+    assert ctx == (429, '{"error":"rate limited"}', headers)
+
+
+def test_route_http_status_error_5xx_attaches_exhaustion_context() -> None:
+    """A 5xx is raised as LLMTemporaryError with status_code and deferred log context."""
+    client = _client()
+    resp = _resp(body_text="upstream boom", headers={"x-request-id": "abc"})
+    with pytest.raises(LLMTemporaryError) as exc_info:
+        client._route_http_status_error(503, resp, attempt=1, headers=None)
+    err = exc_info.value
+    assert err.status_code == 503
+    assert err._exhaustion_log_context == (503, "upstream boom", {"x-request-id": "abc"})
+
+
+def test_route_http_status_error_5xx_adds_qwen35_cloud_hint() -> None:
+    """A 5xx from Ollama Cloud running qwen3.5 appends the think=False hint."""
+    client = OllamaLLMClient(model="qwen3.5:397b-cloud", base_url="https://ollama.com", timeout=5)
+    with pytest.raises(LLMTemporaryError) as exc_info:
+        client._route_http_status_error(500, _resp("boom"), attempt=0, headers=None)
+    assert "try passing think=False" in str(exc_info.value)
+
+
+def test_route_http_status_error_401_permanent_with_auth_hint() -> None:
+    """401 -> LLMPermanentError; the hint depends on whether auth headers were sent."""
+    client = _client()
+    # No auth headers were sent -> tell the caller to set OLLAMA_API_KEY.
+    with pytest.raises(LLMPermanentError) as no_key:
+        client._route_http_status_error(401, _resp("unauthorized"), attempt=0, headers=None)
+    assert no_key.value.status_code == 401
+    assert "Set OLLAMA_API_KEY" in str(no_key.value)
+    assert not hasattr(no_key.value, "_exhaustion_log_context")
+    # A key was sent -> tell the caller to check its validity.
+    with pytest.raises(LLMPermanentError) as bad_key:
+        client._route_http_status_error(
+            401, _resp("unauthorized"), attempt=0, headers={"Authorization": "Bearer k"}
+        )
+    assert "not expired" in str(bad_key.value)
+
+
+def test_route_http_status_error_404_and_generic_4xx_permanent_no_context() -> None:
+    """404 model-not-found and a generic 4xx both raise LLMPermanentError with no deferred log."""
+    client = _client()
+    with pytest.raises(LLMPermanentError) as not_found:
+        client._route_http_status_error(404, _resp("model not found"), attempt=0, headers=None)
+    assert not_found.value.status_code == 404
+    assert not hasattr(not_found.value, "_exhaustion_log_context")
+    with pytest.raises(LLMPermanentError) as generic:
+        client._route_http_status_error(400, _resp("bad request"), attempt=0, headers=None)
+    assert generic.value.status_code == 400
+
+
+def test_route_http_status_error_unexpected_status_permanent() -> None:
+    """A non-2xx/4xx/5xx status (e.g. 3xx) falls through to the unexpected-status branch."""
+    client = _client()
+    with pytest.raises(LLMPermanentError) as exc_info:
+        client._route_http_status_error(302, _resp("redirect"), attempt=0, headers=None)
+    assert exc_info.value.status_code == 302
+    assert "Unexpected LLM response status 302" in str(exc_info.value)
+
+
+def _sig(finish_reason: str = "stop", *, content_len: int = 0) -> _EmptyResponseSignal:
+    return _EmptyResponseSignal(
+        finish_reason,
+        has_reasoning=True,
+        content_len=content_len,
+        reasoning_len=42,
+        reasoning_has_json=True,
+    )
+
+
+def _handle(client: OllamaLLMClient, **overrides: object) -> _SemanticRetryDecision:
+    kwargs: dict = dict(
+        schema_forced=False,
+        attempt=0,
+        resolved_think="max",
+        active_think="max",
+        semantic_attempt=0,
+        max_semantic_retries=2,
+        stream_payload={"model": "m", "stream": True},
+        any_content_bytes=False,
+        reasoning_len_seen=0,
+        reasoning_has_json_seen=False,
+    )
+    kwargs.update(overrides)
+    return client._handle_semantic_exhaustion_retry(_sig(), **kwargs)
+
+
+def test_handle_semantic_exhaustion_schema_forced_raises_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """schema_forced empty response bails with schema_forced=True regardless of the kill switch."""
+    monkeypatch.setenv("LLM_THINKING_DOWNGRADE_RETRY", "false")
+    client = _client()
+    with pytest.raises(LLMSemanticExhaustionError) as exc_info:
+        _handle(client, schema_forced=True, attempt=2)
+    err = exc_info.value
+    assert err.schema_forced is True
+    assert err.attempts_used == 3
+    assert err.retry_thinking_level is None
+
+
+def test_handle_semantic_exhaustion_kill_switch_off_returns_transient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kill switch off -> a retry_transient decision carrying an LLMTemporaryError."""
+    monkeypatch.setenv("LLM_THINKING_DOWNGRADE_RETRY", "false")
+    client = _client()
+    decision = _handle(client)
+    assert decision.action == "retry_transient"
+    assert isinstance(decision.transient_error, LLMTemporaryError)
+
+
+def test_handle_semantic_exhaustion_ladder_retry_returns_downgraded_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proof-of-change downgrade retry advances the ladder and accumulates diagnostics."""
+    monkeypatch.setenv("LLM_THINKING_DOWNGRADE_RETRY", "true")
+    client = _client()
+    decision = _handle(client, active_think=True, semantic_attempt=0, max_semantic_retries=1)
+    assert decision.action == "retry_semantic"
+    assert decision.active_think is False  # True -> thinking-off
+    assert decision.semantic_attempt == 1
+    assert decision.stream_payload["think"] is False
+    assert decision.reasoning_len_seen == 42
+    assert decision.reasoning_has_json_seen is True
+
+
+def test_handle_semantic_exhaustion_ladder_exhausted_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When no further downgrade is available the call fails with LLMSemanticExhaustionError."""
+    monkeypatch.setenv("LLM_THINKING_DOWNGRADE_RETRY", "true")
+    client = _client()
+    # active_think already False -> _semantic_retry_think returns None -> exhausted.
+    with pytest.raises(LLMSemanticExhaustionError) as exc_info:
+        _handle(client, active_think=False, semantic_attempt=0, max_semantic_retries=1, attempt=3)
+    err = exc_info.value
+    assert err.schema_forced is False
+    assert err.attempts_used == 4
+    assert err.finish_reason == "stop"

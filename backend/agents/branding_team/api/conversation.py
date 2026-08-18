@@ -10,15 +10,19 @@ Collaborators tests monkeypatch (``orchestrator``, ``branding_store``,
 owned by ``main`` and dereferenced through it at call time. The ``import main``
 is function-local (not at module scope): ``main`` re-exports names from this
 module at its own bottom, so a module-scope hub import would form a load-time
-cycle and stop ``conversation`` from being imported independently.
+cycle and stop ``conversation`` from being imported independently. The one
+exception is ``_phase_caches``: unlike the collaborators above, it is state
+this module owns directly (per-conversation, in-memory only) rather than
+proxying through ``main``.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import threading
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import HTTPException
 
@@ -31,14 +35,59 @@ from branding_team.api.models import (
 from branding_team.api.state import _mission_has_brand_name, _mission_has_minimal_required_fields
 from branding_team.assistant.store import _default_mission, _StoredMessage
 from branding_team.models import BrandingMission, HumanReview, TeamOutput
+from branding_team.shared.phase_output_cache import PhaseOutputCache
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Per-conversation phase cache (in-memory only; see PhaseOutputCache)
+# ---------------------------------------------------------------------------
+
+# Keyed by conversation_id. Unlike ``latest_output`` (persisted to Postgres via
+# ``conversation_store``), the phase cache is intentionally process-local: it
+# exists to let a future orchestrator.run() call skip re-running unchanged
+# pipeline phases within a live process, not to survive a restart. Entries are
+# never evicted -- conversations already live forever in their Postgres table
+# with no TTL/cleanup precedent anywhere in this codebase, so an unbounded
+# registry matches that existing tradeoff rather than introducing a new one.
+_phase_caches: Dict[str, PhaseOutputCache] = {}
+_phase_caches_lock = threading.Lock()
+
+
+def _get_or_create_phase_cache(conversation_id: str) -> PhaseOutputCache:
+    """Return this conversation's in-memory phase cache, creating one on first use.
+
+    Preconditions:
+        ``conversation_id`` is a non-empty string identifying an existing or
+        about-to-exist conversation.
+    Postconditions:
+        Returns the same ``PhaseOutputCache`` instance for a given
+        ``conversation_id`` on every call within this process, initialized
+        empty (no entries) the first time a given id is seen -- so mutations
+        made to the returned cache (e.g. via ``PhaseOutputCache.put``) are
+        visible to every later call with the same ``conversation_id``. Never
+        persisted to Postgres or across process restarts. Thread-safe:
+        concurrent first calls for the same new ``conversation_id`` (the chat
+        endpoints run on a bounded pipeline executor threadpool) construct
+        exactly one ``PhaseOutputCache``, via the same double-checked-locking
+        idiom used by ``main._get_assistant_agent`` and
+        ``store.get_default_store``.
+    """
+    cache = _phase_caches.get(conversation_id)
+    if cache is None:
+        with _phase_caches_lock:
+            cache = _phase_caches.get(conversation_id)
+            if cache is None:
+                cache = PhaseOutputCache()
+                _phase_caches[conversation_id] = cache
+    return cache
 
 
 def _run_orchestrator_if_ready(
     mission: BrandingMission,
     previous_mission: Optional[BrandingMission] = None,
     previous_output: Optional[TeamOutput] = None,
+    phase_cache: Optional[PhaseOutputCache] = None,
 ) -> Optional[TeamOutput]:
     """Run the pipeline for *mission*, or reuse a cached result.
 
@@ -47,7 +96,19 @@ def _run_orchestrator_if_ready(
     unchanged since the previous run we return ``previous_output`` instead of
     re-running ~40 agents — the common case on the chat path, where most turns
     don't change the mission. Equality is a structural Pydantic compare; no
-    serialization needed.
+    serialization needed. This whole-mission short-circuit is checked before
+    ``phase_cache`` is ever consulted, so it remains the outermost fast path
+    regardless of whether a cache was supplied.
+
+    When a mission edit does slip past the short-circuit, ``phase_cache`` (the
+    caller's per-conversation ``PhaseOutputCache``, when supplied) is forwarded
+    to ``orchestrator.run``, which runs each phase in isolation and reuses any
+    phase whose input hash is already cached — so only the earliest phase whose
+    input actually changed, and everything downstream of it, gets recomputed.
+    ``phase_cache`` mutates in place (it's a view over a shared, process-wide
+    backing store — see ``PhaseOutputCache``), so the caller's retained
+    reference already reflects this run's writes; there is nothing separate to
+    write back.
     """
     from branding_team.api import main as _main
 
@@ -63,6 +124,7 @@ def _run_orchestrator_if_ready(
     return _main.orchestrator.run(
         mission=mission,
         human_review=HumanReview(approved=False, feedback="Building brand from conversation."),
+        phase_cache=phase_cache,
     )
 
 
@@ -152,6 +214,9 @@ def _create_branding_conversation_impl(
     # below attaches this conversation to a new brand before the response is
     # returned; otherwise, send_message will handle auto-creation on a later turn.
     conversation_id = conversation_store.create(brand_id=brand_id)
+    # Seed this conversation's phase-cache slot now; threaded into
+    # orchestrator.run below via _run_orchestrator_if_ready.
+    phase_cache = _get_or_create_phase_cache(conversation_id)
     initial_message = (req.initial_message or "").strip()
     suggested_questions: List[str] = []
     # Track the response messages in memory (a fresh conversation has none yet)
@@ -182,7 +247,7 @@ def _create_branding_conversation_impl(
         # can intercept it (patch main._run_orchestrator_if_ready); the local
         # name would make that patch a silent no-op, same reasoning as
         # background._run_branding_background calling _main._run_branding_core.
-        output = _main._run_orchestrator_if_ready(updated_mission)
+        output = _main._run_orchestrator_if_ready(updated_mission, phase_cache=phase_cache)
         if output is not None:
             if not conversation_store.update_output(conversation_id, output):
                 logger.warning("Pipeline output not persisted for conversation %s", conversation_id)
@@ -327,6 +392,9 @@ def _send_branding_conversation_message_impl(
     state = conversation_store.get_state(conversation_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    # Retrieve this conversation's retained phase-cache slot from prior turns;
+    # threaded into orchestrator.run below via _run_orchestrator_if_ready.
+    phase_cache = _get_or_create_phase_cache(conversation_id)
     brand_id = state.brand_id
     # If the write does not land (conversation no longer exists), don't go on to
     # build an in-memory response that claims the message was persisted.
@@ -348,7 +416,9 @@ def _send_branding_conversation_message_impl(
     # fresh run happened and thus whether a write is needed. Call the hub's
     # re-exported binding, not the module-local name — see the comment in
     # _create_branding_conversation_impl above.
-    output = _main._run_orchestrator_if_ready(updated_mission, state.mission, state.latest_output)
+    output = _main._run_orchestrator_if_ready(
+        updated_mission, state.mission, state.latest_output, phase_cache=phase_cache
+    )
     if output is not None and output is not state.latest_output:
         if not conversation_store.update_output(conversation_id, output):
             logger.warning("Pipeline output not persisted for conversation %s", conversation_id)

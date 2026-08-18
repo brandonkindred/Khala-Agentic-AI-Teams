@@ -58,6 +58,15 @@ x-team-env-base: &team-env-base
   TEAM_TEMPORAL_WORKER_FUNC: start_se_temporal_worker_thread
   SE_WORKSPACE_DIR: /data/agents/software_engineering_team/workspaces
 
+# Per-phase branding LLM overrides. Blank means fall through to LLM_MODEL.
+# Names match branding_team.graphs.shared.phase_agent_key.
+x-branding-llm-tiers: &branding-llm-tiers
+  LLM_MODEL_branding_strategic_core: ${LLM_MODEL_branding_strategic_core:-}
+  LLM_MODEL_branding_narrative_messaging: ${LLM_MODEL_branding_narrative_messaging:-}
+  LLM_MODEL_branding_visual_identity: ${LLM_MODEL_branding_visual_identity:-}
+  LLM_MODEL_branding_channel_activation: ${LLM_MODEL_branding_channel_activation:-}
+  LLM_MODEL_branding_governance: ${LLM_MODEL_branding_governance:-}
+
 # Shared.cache Redis wiring for SE only (code-review + SE compaction). Kept off
 # *team-env-base so other team containers do not receive Redis credentials and
 # cannot write `cr:*` / `llm:compact:*` namespaces (review-cache poisoning).
@@ -318,23 +327,15 @@ services:
       temporal: { condition: service_started }
       job-service: { condition: service_healthy }
     environment:
-      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
-      LLM_BASE_URL: ${LLM_BASE_URL:-https://ollama.com}
-      LLM_MODEL: ${LLM_MODEL:-deepseek-v4-pro:cloud}
-      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
-      PYTHONUNBUFFERED: "1"
-      POSTGRES_HOST: postgres
-      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-      POSTGRES_DB: ${POSTGRES_DB:-postgres}
-      TEMPORAL_ADDRESS: temporal:7233
-      JOB_SERVICE_URL: http://job-service:8085
+      # Postgres creds (and the rest of the shared team env) come from
+      # *team-env-base — do not re-declare POSTGRES_* here, it would be a
+      # second, independently-drifting copy of the same credential wiring.
+      <<: *team-env-base
       # No OTEL_EXPORTER_OTLP_ENDPOINT: spans stay in-process. Only se-service,
       # investment-service, and branding-service export to the in-stack Tempo.
       BLOG_PLANNING_MAX_ITERATIONS: ${BLOG_PLANNING_MAX_ITERATIONS:-5}
       BLOG_PLANNING_MAX_PARSE_RETRIES: ${BLOG_PLANNING_MAX_PARSE_RETRIES:-3}
       BLOG_PLANNING_MODEL: ${BLOG_PLANNING_MODEL:-}
-      AGENT_CACHE: /data/agents
       BLOGGING_RUN_ARTIFACTS_ROOT: /data/agents/blogging_team/runs
       BLOGGING_MEDIUM_STATS_ROOT: ${BLOGGING_MEDIUM_STATS_ROOT:-/data/agents/blogging_team/medium_stats}
       INTEGRATIONS_BROWSER_SESSION_ROOT: ${INTEGRATIONS_BROWSER_SESSION_ROOT:-/data/agents/blogging_team/sessions}
@@ -533,7 +534,7 @@ services:
       temporal: { condition: service_started }
       job-service: { condition: service_healthy }
     environment:
-      <<: [*team-env-base, *team-otel-export]
+      <<: [*team-env-base, *team-otel-export, *branding-llm-tiers]
       TEAM_MODULE: branding_team.api.main
       TEAM_NAME: branding_team
       TEAM_PORT: "8096"
@@ -935,17 +936,33 @@ services:
   # mem_limit was 2G, sized for the pre-fix process: 4 uvicorn workers plus an
   # eager Strands/botocore import and a duplicate Temporal worker boot on
   # import (see the workers=1, Pattern-A-boot, and Strands-import-edge fixes).
-  # Measured post-fix (this repo's Docker Hub pulls are blocked by org egress
-  # policy in this environment, so this ran the unified-api process directly
-  # via a local venv rather than the built container): single worker idle RSS
-  # ~137 MiB, ~139-140 MiB under light /health + /api/agents load, vs. the
-  # pre-fix 4-worker process totaling ~600 MiB idle / ~610 MiB under the same
-  # load. Both figures exclude live Postgres/Temporal connections (not wired
-  # up in the isolated measurement), so treat them as the process/import-graph
-  # floor, not full production RSS. 1G / 512M leaves several times that floor
-  # as headroom for the real Postgres pool, Temporal client, and request
-  # bursts; re-check with `docker stats` once deployed somewhere with
-  # registry access, and raise these back if that shows sustained pressure.
+  # Measured post-fix (Docker Hub pulls were blocked by org egress policy, so
+  # this ran the unified-api process directly via a local venv rather than the
+  # built container): single worker idle RSS ~137 MiB, ~139-140 MiB under
+  # light /health + /api/agents load, vs. the pre-fix 4-worker process
+  # totaling ~600 MiB idle / ~610 MiB under the same load. Both figures are a
+  # bare-process floor — no Postgres/Temporal wired up.
+  #
+  # Re-validated 2026-08-12: still no live peak-burst number. The measurement
+  # tooling (docker/scripts/measure_unified_api_rss.sh) and its methodology
+  # (docker/README.md's "Memory / RSS Measurement" section) are ready to run,
+  # but every attempt so far — this one included — hits Docker Hub pulls
+  # blocked at the network-egress layer (here: the agent proxy 403s the
+  # CONNECT to production.cloudfront.docker.com, which serves image layer
+  # blobs), so the full compose stack can't come up to sample real RSS. Until
+  # someone with registry access runs the four subcommands, 1G/512M is
+  # reconfirmed below by a reasoned worst-case estimate instead of a live one:
+  # +15-40 MiB as the Postgres pool grows from its 2-connection min to its
+  # 10-connection max (POSTGRES_POOL_MIN/MAX_SIZE), +20-40 MiB
+  # industry-typical for the temporalio client's Rust-core bridge (unverified
+  # for this repo), +up to 20 MiB worst case for per-team httpx pools (every
+  # real team actually gets team_proxy.py's DEFAULT_POOL_LIMITS 10/5 fallback
+  # — TEAM_POOL_CONFIG's per-team entries key off team names absent from
+  # TEAM_CONFIGS, so that part of the recent pool-limit tuning is dead code),
+  # plus a generous +50-100 MiB for concurrency/thread overhead this analysis
+  # can't bound. That totals ~245-340 MiB reasoned peak, comfortably under
+  # 512M — hence no change to the values below. Replace this paragraph with
+  # real numbers the next time this runs somewhere with registry access.
 
   khala:
     build:
@@ -989,20 +1006,12 @@ services:
     mem_limit: 1g
     mem_reservation: 512m
     environment:
-      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
-      LLM_BASE_URL: ${LLM_BASE_URL:-https://ollama.com}
-      LLM_MODEL: ${LLM_MODEL:-deepseek-v4-pro:cloud}
-      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
-      PYTHONUNBUFFERED: "1"
-      POSTGRES_HOST: postgres
-      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      # Postgres creds (and the rest of the shared team env) come from
+      # *team-env-base — do not re-declare POSTGRES_* here, it would be a
+      # second, independently-drifting copy of the same credential wiring.
+      <<: *team-env-base
       ENABLE_LOG_API: ${ENABLE_LOG_API:-0}
       UNIFIED_API_TEAM_ASSISTANTS_ENABLED: ${UNIFIED_API_TEAM_ASSISTANTS_ENABLED:-true}
-      TEMPORAL_ADDRESS: temporal:7233
-      JOB_SERVICE_URL: http://job-service:8085
-      AGENT_CACHE: /data/agents
       # No OTEL_EXPORTER_OTLP_ENDPOINT: the unified API is a thin proxy. Trace
       # export is limited to se-service / investment-service / branding-service.
       # Knowledge-graph layer (Graphiti + Neo4j). NEO4J_BOLT_URL is the enablement
@@ -1197,6 +1206,16 @@ services:
     # The grafana/tempo image runs as uid 10001; uncomment if Tempo logs a
     # permission error writing /var/tempo on first boot with a fresh volume.
     # user: "0"
+    environment:
+      # GOMEMLIMIT is a soft heap target the Go runtime actively collects
+      # toward, set below the 1G mem_limit/deploy.resources.limits.memory
+      # cap below (~80%) to leave headroom for non-Go-heap memory (mmap'd
+      # WAL segments, etc.) that GOMEMLIMIT doesn't account for. GOGC=50
+      # collects more eagerly than the Go default (100) so the heap doesn't
+      # balloon between collections — together these smooth peak RSS instead
+      # of letting it sawtooth past the cgroup cap and get OOM-killed.
+      GOMEMLIMIT: "800MiB"
+      GOGC: "50"
     volumes:
       - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
       - tempo_data:/var/tempo
@@ -1225,6 +1244,25 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
+
+  # Concurrent load-test harness for unified-api (see docker/k6/load_test_unified_api.js
+  # and docker/README.md's "Load Testing (k6)" section). Opt-in only via the
+  # `load-test` profile — never starts on a plain `docker compose up`. Run with:
+  #   docker compose -f docker/docker-compose.yml --profile load-test run --rm k6
+  k6:
+    image: grafana/k6:0.55.1
+    container_name: khala-k6
+    profiles: ["load-test"]
+    volumes:
+      - ./k6:/scripts:ro
+    environment:
+      BASE_URL: http://khala:8080
+      VUS: ${K6_VUS:-10}
+      DURATION: ${K6_DURATION:-30s}
+      TEAMS: ${K6_TEAMS:-blogging,personal-assistant,market-research,soc2-compliance,social-marketing,branding}
+    command: run /scripts/load_test_unified_api.js
+    networks:
+      stack: { ipv4_address: 172.28.0.34, aliases: [k6] }
 
 networks:
   stack:

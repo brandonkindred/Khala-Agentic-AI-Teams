@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional, Sequence
 
 # The two-insert idiom is inlined (rather than delegating to
 # ``shared.app.paths.bootstrap_syspath``) because importing ``shared.app`` runs its
@@ -80,7 +80,6 @@ class SECodeEngineProvider:
     def run_pr_code_review(
         self,
         *,
-        code: str = "",
         pre_numbered: bool = False,
         task_description: str,
         task_requirements: str,
@@ -89,16 +88,27 @@ class SECodeEngineProvider:
         files: Any = None,
         existing_codebase: Any = None,
         repo_reader: Any = None,
+        replaced_content: Optional[Dict[str, str]] = None,
+        job_id: str = "",
     ) -> Any:
         """Run the PR code-review agent over a pull request's changes.
 
         Preconditions:
-            - Exactly one code source is supplied: ``files`` (the preferred
-              ``{path: content}`` whole-file mapping) OR ``code`` (the legacy
-              diff-hunk blob). ``pre_numbered`` describes ``code`` only.
+            - ``files`` is a non-empty ``{path: content}`` mapping. ``pre_numbered``
+              describes whether its content already carries ``N| `` line-number
+              prefixes (diff-hunk submissions) or is whole-file content.
             - ``repo_reader`` is None or a duck-typed ``RepoReader`` (``list_files``
               /``read_file``) giving the false-positive verifier read access to
               existing repository files outside the diff.
+            - ``replaced_content``, when not None, is a ``{path: pre-change body}``
+              mapping forwarded to ``CodeReviewInput.replaced_content`` unchanged;
+              the caller derives it (e.g. from diff removed-hunk sides) and this
+              method does not validate its shape beyond passing it through.
+            - ``job_id``, when non-blank, is the caller's persisted review job id
+              (e.g. a ``code_review_runs`` row) — forwarded so the reviewer's LLM
+              calls can record into that job's durable transcript. ``""`` (the
+              default) means no caller-tracked job; transcript recording is then
+              a no-op.
 
         Postconditions: returns the reviewer's output (carries an ``issues`` list).
         """
@@ -107,12 +117,13 @@ class SECodeEngineProvider:
 
         review_input = build_code_review_input(
             files=files,
-            code=None if files is not None else code,
             pre_numbered=pre_numbered,
             task_description=task_description,
             task_requirements=task_requirements,
             language=language,
             existing_codebase=existing_codebase,
+            replaced_content=replaced_content,
+            job_id=job_id,
         )
         run_kwargs: dict = {"progress_callback": progress_callback}
         # Forward the reader only when present: passing ``repo_reader=None`` is a
@@ -131,3 +142,48 @@ class SECodeEngineProvider:
             run_kwargs["repo_reader"] = repo_reader
             force_in_process = True
         return CodeReviewAgent(force_in_process=force_in_process).run(review_input, **run_kwargs)
+
+    def classify_issue_scope(
+        self,
+        findings: Sequence[Any],
+        changed_context: Optional[Dict[str, str]],
+        task_description: str,
+    ) -> List[Any]:
+        """Classify each finding in/out-of-scope, delegating to ``scope_classifier``.
+
+        Preconditions: ``findings`` is a sequence of ``CodeReviewIssue``-like
+            objects. ``changed_context`` is ``None``/empty or a non-empty
+            ``{path: content}`` mapping of current file content;
+            ``CodeReviewInput`` requires non-empty ``files``, so an empty
+            mapping is treated the same as ``None`` (no grounding context,
+            matching ``api.pr_review._tag_review_issues_for_scope``'s existing
+            ``if scope_files: input_data = CodeReviewInput(...)`` pattern).
+
+        Postconditions: returns ``scope_classifier.classify_scope(findings,
+            ...)`` unchanged — a list positionally aligned 1:1 with
+            ``findings``. Resolves the ``code_review_verify`` client itself
+            (pinned the same way as the sibling verification passes, via
+            ``model_resolution.resolve_code_review_verify_client``) so callers
+            need no SE or ``llm_service`` imports; a client-resolution failure
+            degrades to ``llm=None`` (all findings verdict to "unknown"),
+            preserving ``classify_scope``'s never-raises guarantee at this
+            boundary too.
+        """
+        from software_engineering_team.code_review_agent.model_resolution import (
+            resolve_code_review_verify_client,
+        )
+        from software_engineering_team.code_review_agent.models import build_code_review_input
+        from software_engineering_team.code_review_agent.scope_classifier import classify_scope
+
+        input_data = None
+        if changed_context:
+            input_data = build_code_review_input(
+                files=dict(changed_context), task_description=task_description
+            )
+
+        try:
+            llm = resolve_code_review_verify_client()
+        except Exception:  # noqa: BLE001 — never raise; classify_scope treats llm=None as UNKNOWN
+            llm = None
+
+        return classify_scope(findings, llm=llm, input_data=input_data)

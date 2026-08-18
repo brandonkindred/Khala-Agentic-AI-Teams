@@ -7,6 +7,7 @@ This team defines and operationalizes an enterprise brand system through a coord
 - [What this team does](#what-this-team-does)
 - [Agency model (clients and brands)](#agency-model-clients-and-brands)
 - [Agent setup and flow](#agent-setup-and-flow)
+- [LLM routing (agent_key tiers)](#llm-routing-agent_key-tiers)
 - [API and session flow](#api-and-session-flow)
 - [Agency API (clients, brands, run, outsourcing)](#agency-api-clients-brands-run-outsourcing)
 - [Outsourcing](#outsourcing)
@@ -36,6 +37,8 @@ This team defines and operationalizes an enterprise brand system through a coord
 
 `BrandingTeamOrchestrator.run()` (`orchestrator.py`) drives the pipeline: it resolves the mission, builds `build_branding_graph(target_phase=...)` (`graphs/top_level.py`), serializes the mission into a task string, and invokes the graph. The result is a **single top-level Strands `Graph`** whose 5 nodes are themselves phase sub-graphs, wired **strictly sequentially** — `phase1_strategic_core → phase2_narrative → phase3_visual → phase4_channel → phase5_governance`. An optional `target_phase` stops the pipeline early; gating happens at graph-build time (later phase nodes/edges are simply never added), not via runtime conditional edges. `run_single_phase()` reuses the same per-phase builders to run one phase in isolation (e.g. from a Temporal activity).
 
+`run()` also accepts an optional `phase_cache` (a `PhaseOutputCache`, `shared/phase_output_cache.py`). When supplied, the pipeline switches from the single monolithic-graph invocation to `_run_phases_with_cache()`, which runs each phase one at a time via `run_single_phase()`: before invoking a phase, it hashes the phase's inputs (`shared/memoization.py`'s `phase_input_hash`, over the phase itself, the mission, and every upstream output produced so far this call) and checks it against `phase_cache`. A hit reuses the cached output without invoking the phase; a miss runs it and, if the result isn't degraded, stores it back in the cache. Because each phase's hash is computed from the upstream outputs actually produced this call, a changed upstream phase automatically invalidates every downstream phase's hash. Omitting `phase_cache` (the default) preserves the original monolithic-graph behavior exactly.
+
 Brand-compliance checks (`BrandComplianceAgent`, a plain keyword-matching dataclass, not a graph node) and the market-research / design-asset integrations run **outside** the graph, after it completes: compliance checks run synchronously first, then the two integrations run concurrently with each other via `asyncio.gather`. The orchestrator then assembles everything into a single `TeamOutput` whose status depends on the per-phase gates and `human_review.approved`.
 
 ```mermaid
@@ -50,7 +53,7 @@ flowchart TB
 
     P1 --> P2
 
-    subgraph P2 ["Phase 2 · Narrative & Messaging (Graph, linear + carry-forward)"]
+    subgraph P2 ["Phase 2 · Narrative & Messaging (Graph, linear + read-only context)"]
         direction LR
         P2a[Storyteller] --> P2b[ArchetypeAnalyst]
         P2b --> P2rest["TaglineWriter → MessageMapper →
@@ -59,31 +62,32 @@ flowchart TB
 
     P2 --> P3
 
-    subgraph P3 ["Phase 3 · Visual & Expressive Identity (Graph)"]
+    subgraph P3 ["Phase 3 · Visual & Expressive Identity (Graph, no compositor)"]
         direction TB
-        P3diverge["MoodBoardConceptualist_Editorial/Minimalist/Bold
-        → CreativeDirector"] --> P3conv[converge_decider]
+        P3diverge["MoodBoardConceptualist_Editorial/Minimalist/Bold"] --> P3conv[converge_decider]
         P3conv --> P3fan["logo_specifier, color_system_builder, typography_builder,
         iconography_director, photography_video_director,
-        voice_tone_builder, design_system_codifier"]
-        P3fan --> P3comp[visual_compositor]
+        voice_tone_builder, design_system_codifier
+        (seven parallel terminal nodes, Python-merged)"]
     end
 
     P3 --> P4
 
-    subgraph P4 ["Phase 4 · Channel Activation (Graph, fan-out/fan-in)"]
+    subgraph P4 ["Phase 4 · Channel Activation (Graph, pure fan-out — no compositor)"]
         direction LR
         P4nodes["brand_experience_principler, website_guide, social_guide,
         email_guide, events_guide, partnerships_guide, internal_guide,
-        brand_architecture_builder, brand_in_action_illustrator"] --> P4join[channel_compositor]
+        brand_architecture_builder, brand_in_action_illustrator
+        (nine parallel terminal nodes, Python-merged)"]
     end
 
     P4 --> P5
 
-    subgraph P5 ["Phase 5 · Governance & Evolution (Graph, fan-out/fan-in)"]
+    subgraph P5 ["Phase 5 · Governance & Evolution (Graph, pure fan-out — no compositor)"]
         direction LR
         P5nodes["ownership_definer, approval_workflow_designer, asset_wiki_planner,
-        training_planner, kpi_designer, evolution_framer, brand_rules_codifier"] --> P5join[governance_compositor]
+        training_planner, kpi_designer, evolution_framer, brand_rules_codifier
+        (seven parallel terminal nodes, Python-merged)"]
     end
 
     P5 --> GraphResult[Graph result]
@@ -112,10 +116,9 @@ Phase 3 combines a diverge fan-out with a post-converge specialist fan-out, so i
 
 ```mermaid
 flowchart LR
-    ed[MoodBoardConceptualist_Editorial] --> cd[CreativeDirector]
-    min[MoodBoardConceptualist_Minimalist] --> cd
-    bold[MoodBoardConceptualist_Bold] --> cd
-    cd --> converge[converge_decider]
+    ed[MoodBoardConceptualist_Editorial] --> converge[converge_decider]
+    min[MoodBoardConceptualist_Minimalist] --> converge
+    bold[MoodBoardConceptualist_Bold] --> converge
     converge --> logo[logo_specifier]
     converge --> color[color_system_builder]
     converge --> typo[typography_builder]
@@ -123,26 +126,41 @@ flowchart LR
     converge --> photo[photography_video_director]
     converge --> voice[voice_tone_builder]
     converge --> design[design_system_codifier]
-    logo --> compositor[visual_compositor]
-    color --> compositor
-    typo --> compositor
-    icon --> compositor
-    photo --> compositor
-    voice --> compositor
-    design --> compositor
 ```
 
-Three style-variant `MoodBoardConceptualist_{Editorial,Minimalist,Bold}` agents run in parallel and fan into `CreativeDirector`, which collects their concepts into `mood_board_candidates`. Agents use `structured_output=`, which stops Strands' agent loop after the structured payload is produced, so this is a Graph (not a Swarm) — the same lesson as Phase 2.
+Three style-variant `MoodBoardConceptualist_{Editorial,Minimalist,Bold}` agents run in parallel and fan directly into `converge_decider` — the same direct fan-in shape as Phase 1's five specialists into `positioning_synthesizer`, with no intermediate collector node; Strands' Graph engine assembles the three completed `mood_board_candidates` fragments into `converge_decider`'s input once the whole diverge batch finishes. Agents use `structured_output=`, which stops Strands' agent loop after the structured payload is produced, so this is a Graph (not a Swarm) — the same lesson as Phase 2.
+
+The seven post-converge specialists are terminal nodes — there is no compositor. Their typed fragments, plus `converge_decider`'s own decision and the three moodboard candidates, are merged into `VisualIdentityOutput` in Python by the orchestrator's Phase-3 `merge_fn` (`_PHASE3_NODE_MERGE`), the same pattern Phase 4 and Phase 5 already use.
 
 Per-phase participating nodes. Node identifiers are the explicit `node_id` values passed to `builder.add_node(...)`:
 
 | Phase | Construct | Nodes |
 |---|---|---|
 | 1 — Strategic Core | `Graph`, fan-out/fan-in | `discovery_auditor`, `purpose_vision_writer`, `values_articulator`, `audience_segmenter`, `differentiation_mapper` → `positioning_synthesizer` |
-| 2 — Narrative & Messaging | `Graph`, linear + carry-forward | `Storyteller` → `ArchetypeAnalyst` → `TaglineWriter` → `MessageMapper` → `PersonaBuilder` → `VoicePrinciplesDrafter` (single-predecessor chain; each `structured_output` inherits upstream fields) |
-| 3 — Visual & Expressive Identity | `Graph`, diverge fan-out + converge fan-out | `MoodBoardConceptualist_{Editorial,Minimalist,Bold}` → `CreativeDirector` → `converge_decider` → 7-way fan-out (`logo_specifier`, `color_system_builder`, `typography_builder`, `iconography_director`, `photography_video_director`, `voice_tone_builder`, `design_system_codifier`) → `visual_compositor` |
-| 4 — Channel Activation | `Graph`, fan-out/fan-in | `brand_experience_principler`, `website_guide`, `social_guide`, `email_guide`, `events_guide`, `partnerships_guide`, `internal_guide`, `brand_architecture_builder`, `brand_in_action_illustrator` → `channel_compositor` |
-| 5 — Governance & Evolution | `Graph`, fan-out/fan-in | `ownership_definer`, `approval_workflow_designer`, `asset_wiki_planner`, `training_planner`, `kpi_designer`, `evolution_framer`, `brand_rules_codifier` → `governance_compositor` |
+| 2 — Narrative & Messaging | `Graph`, linear + read-only context | `Storyteller` → `ArchetypeAnalyst` → `TaglineWriter` → `MessageMapper` → `PersonaBuilder` → `VoicePrinciplesDrafter` (single-predecessor chain; each `structured_output` is own-field-only, reading upstream output as read-only context) |
+| 3 — Visual & Expressive Identity | `Graph`, diverge fan-out + converge fan-out (no compositor) | `MoodBoardConceptualist_{Editorial,Minimalist,Bold}` → `converge_decider` → 7-way fan-out (`logo_specifier`, `color_system_builder`, `typography_builder`, `iconography_director`, `photography_video_director`, `voice_tone_builder`, `design_system_codifier`) (seven parallel terminal nodes; merged in Python via `_PHASE3_NODE_MERGE`) |
+| 4 — Channel Activation | `Graph`, pure fan-out (no compositor) | `brand_experience_principler`, `website_guide`, `social_guide`, `email_guide`, `events_guide`, `partnerships_guide`, `internal_guide`, `brand_architecture_builder`, `brand_in_action_illustrator` (nine parallel terminal nodes; merged in Python via `_PHASE4_NODE_MERGE`) |
+| 5 — Governance & Evolution | `Graph`, pure fan-out (no compositor) | `ownership_definer`, `approval_workflow_designer`, `asset_wiki_planner`, `training_planner`, `kpi_designer`, `evolution_framer`, `brand_rules_codifier` (seven parallel terminal nodes; merged in Python via `_PHASE5_NODE_MERGE`) |
+
+## LLM routing (agent_key tiers)
+
+Every pipeline agent (all `make_*` factories in `agents.py`) resolves an explicit `agent_key` instead of falling through to `build_agent()`'s implicit `"branding"` default. `agent_key` is `build_agent()`'s pass-through to the centralized `get_strands_model(agent_key, ...)` resolver (`llm_service`), which — per agent_key — checks an `LLM_MODEL_<agent_key>` env override before falling back to the global `LLM_MODEL` / provider default. This lets each tier below be pinned to a different model via env vars alone, with no change to `build_agent()`'s resolution mechanism or to any factory's own logic.
+
+Specialist factories pass `agent_key=` to `build_agent()` directly (a phase-scoped constant, e.g. `_PHASE1_AGENT_KEY = phase_agent_key(BrandPhase.STRATEGIC_CORE)` in `agents.py`). No phase has a compositor node — every phase's fragments are merged deterministically in Python by the orchestrator's per-phase `merge_fn` (Phase 1 and Phase 2 already worked this way; Phase 3 now joins Phase 4 and Phase 5 in using the same pattern) — so a phase's specialist factories are the only users of its tier.
+
+**Naming scheme:** `branding_<tier>` (underscores so `LLM_MODEL_<agent_key>` is a valid shell identifier), where `<tier>` is one of:
+
+| `agent_key` | Covers | Why this grouping |
+|---|---|---|
+| `branding_strategic_core` | All 6 Phase 1 factories | `phase_agent_key(BrandPhase.STRATEGIC_CORE)` — Phase 1 mixes discovery/audience extraction with the brand-defining `positioning_synthesizer` synthesis step; one dial lets ops tune the whole "define what the brand is" phase together. |
+| `branding_narrative_messaging` | All 6 Phase 2 factories | `phase_agent_key(BrandPhase.NARRATIVE_MESSAGING)` — open-ended creative writing (story, tagline, voice) that benefits from a stronger model. |
+| `branding_visual_identity` | The 9 Phase 3 specialist factories (the `make_moodboard_conceptualist` factory covering the 3 `MoodBoardConceptualist_*` variants, `converge_decider`, and the 7 post-converge specialists) | `phase_agent_key(BrandPhase.VISUAL_IDENTITY)`. |
+| `branding_channel_activation` | The 9 Phase 4 specialist factories (including all 6 channel guides built via the shared `_make_channel_guide` helper) — Phase 4 has no compositor; its fragments are merged deterministically in Python by the orchestrator | `phase_agent_key(BrandPhase.CHANNEL_ACTIVATION)` — mostly bounded, template-driven channel-guideline generation; a natural candidate for a lighter model. |
+| `branding_governance` | The 7 Phase 5 specialist factories — Phase 5 has no compositor; its fragments are merged deterministically in Python by the orchestrator | `phase_agent_key(BrandPhase.GOVERNANCE)` — largely structured list/policy generation (KPIs, wiki backlog, training plans); another candidate for a lighter model. |
+
+`BrandComplianceAgent` (outside the graph — see [Agent roles and outputs](#agent-roles-and-outputs)) is deliberately excluded from this scheme: it's a keyword-matching `@dataclass` with no LLM call, so no `agent_key` applies to it. The `"branding_assistant"` key used by the separate conversational assistant (`assistant/agent.py`) is also out of scope here — it predates this scheme and routes the assistant, not a pipeline agent.
+
+Assigning which physical model/provider backs each tier (e.g. a lighter model for `branding_channel_activation` and `branding_governance`, a stronger one for `branding_strategic_core` and `branding_narrative_messaging`) is an operational decision made post-deploy via `LLM_MODEL_<agent_key>` env vars (e.g. `export LLM_MODEL_branding_strategic_core=...`) — see [`docs/ENV_VARS.md`](../../../docs/ENV_VARS.md) — not part of this naming scheme itself. The full-stack Docker Compose file forwards the five tier variables into `branding-service` (`docker/docker-compose.yml`), the container that actually runs the pipeline; `unified-api` proxies to it rather than importing branding code in-process, so it has no use for them. Leave the vars blank to keep the global `LLM_MODEL`.
 
 ## API and session flow
 
@@ -195,17 +213,19 @@ Output model: `StrategicCoreOutput`
 | `differentiation_mapper` | Maps competitive differentiation pillars with proof points | `differentiation_pillars` |
 | `positioning_synthesizer` | Synthesises the fragments above into a positioning statement and brand promise | `positioning_statement`, `brand_promise` |
 
-### Phase 2 — Narrative & Messaging (Graph: linear + carry-forward)
+### Phase 2 — Narrative & Messaging (Graph: linear + read-only context)
 
 Output model: `NarrativeMessagingOutput`
 
 Phase 2 is a Graph (not a Swarm). Agents use `structured_output=`, which stops
 Strands' agent loop after the structured payload is produced, so tool-based
 `handoff_to_agent` cannot sequence them. Edges are a single-predecessor chain
-(multi-in edges are OR-ready in Strands and would race). Upstream narrative
-travels via cumulative output models: each specialist inherits prior fields and
-adds its own, so the immediate predecessor already exposes the full prior
-payload in `Inputs from previous nodes`.
+(multi-in edges are OR-ready in Strands and would race). Each specialist's
+`structured_output` model is own-field-only (Story 5b Step 1): the
+single-predecessor edge into a node is what makes Strands auto-populate
+`Inputs from previous nodes` with the immediate predecessor's typed output,
+which downstream specialists read as read-only context rather than
+re-emitting.
 
 | Agent | Purpose | Output field(s) |
 |-------|---------|------------------|
@@ -223,13 +243,16 @@ Output model: `VisualIdentityOutput`
 Phase 3 is a Graph (not a Swarm). Agents use `structured_output=`, which stops
 Strands' agent loop after the structured payload is produced, so tool-based
 `handoff_to_agent` cannot sequence the diverge step. Three moodboard
-conceptualists fan out in parallel into `CreativeDirector`, which collects
-`mood_board_candidates`; `converge_decider` then selects a winner before the
-seven specialists fan out into `visual_compositor`.
+conceptualists fan out in parallel directly into `converge_decider` — no
+intermediate collector node; `converge_decider` then selects a winner before
+fanning out into the seven specialists. There is no compositor: the seven
+specialists are terminal nodes, and their typed fragments — plus
+`converge_decider`'s own decision and the three moodboard candidates — are
+merged into `VisualIdentityOutput` in Python by the orchestrator's Phase-3
+`merge_fn` (`_PHASE3_NODE_MERGE`), the same pattern Phase 4 and Phase 5 use.
 
 | Agent | Purpose | Output field(s) |
 |-------|---------|------------------|
-| `CreativeDirector` | Collects moodboard concepts from conceptualists into a unified candidate list | `mood_board_candidates` |
 | `MoodBoardConceptualist_{Editorial,Minimalist,Bold}` | Generates one visual-direction moodboard concept per variant | `mood_board_candidates` |
 | `converge_decider` | Scores moodboard candidates and selects a winner | `creative_refinement` |
 | `logo_specifier` | Defines the logo suite with usage rules | `logo_suite` |
@@ -251,7 +274,7 @@ Output model: `ChannelActivationOutput`
 | `brand_architecture_builder` | Defines brand architecture rules, naming conventions, and terminology | `brand_architecture`, `naming_conventions`, `terminology_glossary` |
 | `brand_in_action_illustrator` | Creates applied brand-in-action do/don't examples | `brand_in_action` |
 
-### Phase 5 — Governance & Evolution (Graph: fan-out / fan-in)
+### Phase 5 — Governance & Evolution (Graph: pure fan-out — no compositor)
 
 Output model: `GovernanceOutput`
 
@@ -396,6 +419,7 @@ In addition to codification, mood boards, guidelines, design system, wiki backlo
 
 ## Integration with other teams
 
+- **`Brand.to_consumer_context()` (in-process consumer accessor):** `Brand` (in `models.py`) exposes `to_consumer_context()`, which flattens its Phase 1 (`strategic_core`) and Phase 2 (`narrative_messaging`) outputs into a `BrandConsumerContext` — a stable, documented shape (`brand_name`, `target_audience`, `voice_and_tone`, `brand_guidelines`, `brand_objectives`, `messaging_pillars`, `brand_story`, `tagline`). Other teams holding a `Brand` can reuse this synthesis in-process instead of re-deriving it against the nested phase schemas, and it degrades safely (mission-only values plus documented fallbacks) when phase outputs are absent. Field names mirror the social-marketing branding adapter's `BrandContext`, so a consumer can build one via `model_dump()` without a remap.
 - **Market Research API:** Used for competitive/similar-brands research. Set `UNIFIED_API_BASE_URL` or `BRANDING_MARKET_RESEARCH_URL` to the base URL of the server that hosts the market research API (e.g. unified API at `http://localhost:8080`). The branding team POSTs to `/api/market-research/market-research/run`.
 - **Design service (design system workflow):** Not currently mounted on the unified API. When a design service is added and a “brand intake → design assets” contract is defined, set `BRANDING_DESIGN_SERVICE_URL` (or use the same base URL and path) so the design-asset adapter can call it instead of returning a stub.
 

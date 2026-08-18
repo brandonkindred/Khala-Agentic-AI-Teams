@@ -23,18 +23,32 @@ Two invariants hold for everything here:
 
 from __future__ import annotations
 
-import json
 import logging
+import time
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
-from strands import Agent
 
 from llm_service import LLMClient
+from llm_service.interface import take_complete_json_turns
+from software_engineering_team.shared.json_utils import parse_json_object
 
 from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue
-from .prompts import REVIEW_SYNTHESIS_PROMPT, SPEC_COMPLIANCE_PASS_PROMPT
+from .prompts import (
+    REVIEW_SYNTHESIS_FORMATTING_INSTRUCTIONS,
+    REVIEW_SYNTHESIS_REASONING_SYSTEM_PROMPT,
+    SPEC_COMPLIANCE_PASS_FORMATTING_INSTRUCTIONS,
+    SPEC_COMPLIANCE_PASS_REASONING_SYSTEM_PROMPT,
+)
+from .transcript import (
+    model_label,
+    record_formatting_transcript_turns,
+    record_reasoning_transcript_turns,
+    record_transcript_entry,
+    resolve_format_turn_started,
+)
+from .via_reasoning import formatting_system_prompt_with_untrusted_guard, run_agent_via_reasoning
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +152,112 @@ def build_findings_digest(
     return "\n".join(lines)
 
 
+def _parse_json_object(raw: str) -> dict:
+    """Parse formatting-pass JSON text into a dict.
+
+    Thin delegate to the canonical
+    :func:`software_engineering_team.shared.json_utils.parse_json_object`.
+
+    Preconditions:
+        ``raw`` is the JSON text from the formatting pass.
+
+    Postconditions:
+        Returns a ``dict`` on success. Parses via the canonical
+        ``parse_json_object`` recovery ladder (markdown fences, prose
+        prefixes, and trailing commas are salvaged). Raises
+        ``LLMJsonParseError`` when no JSON object can be recovered, or
+        ``TypeError`` when the recovered payload is not a JSON object.
+    """
+    return parse_json_object(raw)
+
+
+def _run_via_reasoning_with_transcript(
+    model: object,
+    *,
+    prompt: str,
+    reasoning_system_prompt: str,
+    formatting_instructions: str,
+    stage: str,
+) -> dict:
+    """Run the think-then-format split and buffer both transcript entries.
+
+    Preconditions:
+        ``prompt``, ``reasoning_system_prompt``, and ``formatting_instructions``
+        are non-empty (enforced by ``run_agent_via_reasoning``). ``stage`` is
+        the durable-transcript stage label (``synthesis`` or ``spec_compliance``).
+
+    Postconditions:
+        Returns the parsed JSON object from the formatting pass. Records the
+        reasoning pass as one entry per model invocation (inner HTTP turns
+        when the Strands adapter recorded them, otherwise per assistant
+        message in ``agent.messages``), and a formatting-pass entry per
+        formatting LLM turn once those calls return (or raise
+        ``LLMJsonParseError`` with a raw body), even if parse later fails.
+        A no-op on the transcript when no ``job_id`` is bound. Raises
+        whatever ``run_agent_via_reasoning`` raises.
+    """
+    reasoning_agent = None
+    reasoning_turns: list[tuple[str, str, float]] = []
+    format_turns: list[tuple[str, str, float]] = []
+    started = time.monotonic()
+    reasoning_done_at = started
+    format_turn_started_at: float | None = None
+
+    def _capture(agent: object) -> None:
+        nonlocal reasoning_agent, reasoning_done_at, reasoning_turns
+        reasoning_agent = agent
+        reasoning_done_at = time.monotonic()
+        reasoning_turns = take_complete_json_turns()
+
+    def _on_formatting_start() -> None:
+        nonlocal format_turn_started_at
+        format_turn_started_at = time.monotonic()
+
+    def _capture_formatting(prompt: str, response: str) -> None:
+        turn_started = resolve_format_turn_started(
+            [started for _, _, started in format_turns],
+            format_turn_started_at,
+            time.monotonic(),
+        )
+        format_turns.append((prompt, response, turn_started))
+
+    try:
+        return run_agent_via_reasoning(
+            model=model,
+            reasoning_prompt=prompt,
+            reasoning_system_prompt=reasoning_system_prompt,
+            formatting_instructions=formatting_instructions,
+            parse=_parse_json_object,
+            tools=[],
+            on_reasoning_agent=_capture,
+            on_formatting=_capture_formatting,
+            on_formatting_start=_on_formatting_start,
+        )
+    finally:
+        now = time.monotonic()
+        record_reasoning_transcript_turns(
+            stage,
+            "",
+            turns=reasoning_turns,
+            agent=reasoning_agent,
+            fallback_prompt=prompt,
+            started=started,
+            reasoning_done_at=reasoning_done_at,
+            system_prompt=reasoning_system_prompt,
+            model=model_label(model),
+            recorder=record_transcript_entry,
+        )
+        record_formatting_transcript_turns(
+            stage,
+            "",
+            turns=format_turns,
+            last_ended=now,
+            system_prompt=formatting_system_prompt_with_untrusted_guard(None),
+            model=model_label(model),
+            recorder=record_transcript_entry,
+        )
+
+
 def synthesize_review_findings(
     llm: LLMClient,
     *,
@@ -165,6 +285,11 @@ def synthesize_review_findings(
           reviewers' actual evidence rather than reconstructing it.
 
     Postconditions:
+        - Records transcript entries (stage ``synthesis``) for the reasoning
+          pass once the reasoning agent exists — the full ``agent.messages``
+          conversation — and for each formatting LLM turn, whether or not the
+          formatting reply parses or validates, so a malformed response is
+          visible for debugging rather than silently discarded.
         - Returns a ``SynthesisResult`` with a non-empty ``summary`` on success;
           ``spec_compliance_notes`` may be empty (no spec gaps were recorded).
         - Returns ``None`` on ANY failure — exception, malformed JSON, a missing
@@ -178,13 +303,13 @@ def synthesize_review_findings(
         prompt = f"{framing}\n\n{digest}"
 
         _model = resolve_code_review_model(llm)
-        agent = Agent(model=_model, system_prompt=REVIEW_SYNTHESIS_PROMPT)
-        result = agent(prompt)
-        data = json.loads(str(result).strip())
-
-        if not isinstance(data, dict):
-            logger.warning("ReviewSynthesis: model returned non-object JSON; falling back")
-            return None
+        data = _run_via_reasoning_with_transcript(
+            _model,
+            prompt=prompt,
+            reasoning_system_prompt=REVIEW_SYNTHESIS_REASONING_SYSTEM_PROMPT,
+            formatting_instructions=REVIEW_SYNTHESIS_FORMATTING_INSTRUCTIONS,
+            stage="synthesis",
+        )
 
         summary = str(data.get("summary", "") or "").strip()
         spec_notes = str(data.get("spec_compliance_notes", "") or "").strip()
@@ -264,6 +389,12 @@ def synthesize_spec_compliance(
           unmerged per-chunk output.
 
     Postconditions:
+        - Records transcript entries (stage ``spec_compliance``) for the
+          reasoning pass once the reasoning agent exists — the full
+          ``agent.messages`` conversation — and for each formatting LLM turn,
+          whether or not the formatting reply parses or validates, so a
+          malformed response is visible for debugging rather than silently
+          discarded.
         - Returns a string on success: ``""`` when no gaps were found, or the
           consolidated spec/acceptance-criteria gaps otherwise — the same
           shape as ``CodeReviewOutput.spec_compliance_notes``.
@@ -279,13 +410,14 @@ def synthesize_spec_compliance(
         prompt = f"{framing}\n\n{digest}"
 
         _model = resolve_code_review_model(llm)
-        agent = Agent(model=_model, system_prompt=SPEC_COMPLIANCE_PASS_PROMPT)
-        result = agent(prompt)
-        data = json.loads(str(result).strip())
+        data = _run_via_reasoning_with_transcript(
+            _model,
+            prompt=prompt,
+            reasoning_system_prompt=SPEC_COMPLIANCE_PASS_REASONING_SYSTEM_PROMPT,
+            formatting_instructions=SPEC_COMPLIANCE_PASS_FORMATTING_INSTRUCTIONS,
+            stage="spec_compliance",
+        )
 
-        if not isinstance(data, dict):
-            logger.warning("SpecCompliancePass: model returned non-object JSON; skipping")
-            return None
         if "spec_compliance_notes" not in data:
             logger.warning("SpecCompliancePass: missing spec_compliance_notes key; skipping")
             return None

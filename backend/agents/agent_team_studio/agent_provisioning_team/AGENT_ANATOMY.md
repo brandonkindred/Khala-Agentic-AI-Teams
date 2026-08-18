@@ -60,13 +60,13 @@ For any agent that operates on a **known local Git repository** (orchestrator-re
 - **`GitToolContext`**: host-injected `repo_path`, `default_base_branch`, and policy flags (e.g. `allow_merge_to_default_branch=False` during implement phases so merge stays orchestrator-gated).
 - **`build_git_tool_handlers(ctx)`**: returns a name → handler map for **`llm_service.tool_loop.complete_json_with_tool_loop`**, which runs multi-turn chat until the model returns final structured JSON.
 
-The executor delegates to **`software_engineering_team.shared.git_utils`** so subprocess Git behavior stays consistent. Models must not supply `repo_path` in tool arguments; the runtime ignores it.
+The executor delegates to **`shared.git.git_utils`** so subprocess Git behavior stays consistent. Models must not supply `repo_path` in tool arguments; the runtime ignores it.
 
 **Rollout:** repo-backed agents can import the shared Git definitions, convert them with `agent_llm_tools_service.strands_bridge.build_strands_tools`, and bind a `GitToolContext` for their workspace.
 
 ### 3.2 Agent Cognition Core (batteries-included)
 
-Newly generated agents are stamped with a default `cognition` manifest block (`agent_registry.CognitionSpec`) so the tools layer, memory, and guardrails of the **Agent Cognition Core** are wired by default — no per-agent boilerplate. Note that an agent's **roster tools** (free-text labels like "Git" or "Slack API") are deliberately **not** mapped into `cognition.tools`: those ids resolve against the cognition tool registries (`LlmToolsService` + a caller-supplied integration registry + `agent_git_tools`), so `cognition.tools` ships empty and is widened explicitly when a real, resolvable tool is bound.
+Newly generated agents are stamped with a default `cognition` manifest block (`agent_platform.registry.CognitionSpec`) so the tools layer, memory, and guardrails of the **Agent Cognition Core** are wired by default — no per-agent boilerplate. Note that an agent's **roster tools** (free-text labels like "Git" or "Slack API") are deliberately **not** mapped into `cognition.tools`: those ids resolve against the cognition tool registries (`LlmToolsService` + a caller-supplied integration registry + `agent_git_tools`), so `cognition.tools` ships empty and is widened explicitly when a real, resolvable tool is bound.
 
 ---
 

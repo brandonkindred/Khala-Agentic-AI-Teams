@@ -43,7 +43,7 @@ def temp_work_path(tmp_path: Path) -> Path:
 
 
 @patch("software_engineering_team.temporal.start_workflow.start_run_team_workflow")
-@patch("software_engineering_team.temporal.client.is_temporal_enabled", return_value=False)
+@patch("shared.temporal.client.is_temporal_enabled", return_value=False)
 def test_run_team_dispatches_to_temporal_even_when_disabled(
     mock_temporal_enabled: MagicMock,
     mock_start_workflow: MagicMock,
@@ -62,7 +62,7 @@ def test_run_team_dispatches_to_temporal_even_when_disabled(
 
 
 @patch("software_engineering_team.temporal.start_workflow.start_run_team_workflow")
-@patch("software_engineering_team.temporal.client.is_temporal_enabled", return_value=True)
+@patch("shared.temporal.client.is_temporal_enabled", return_value=True)
 def test_run_team_with_temporal_starts_workflow(
     mock_temporal_enabled: MagicMock,
     mock_start_workflow: MagicMock,
@@ -82,7 +82,7 @@ def test_run_team_with_temporal_starts_workflow(
 
 @patch("software_engineering_team.api.routes.jobs._preflight_sprint_scope")
 @patch("software_engineering_team.temporal.start_workflow.start_run_team_workflow")
-@patch("software_engineering_team.temporal.client.is_temporal_enabled", return_value=True)
+@patch("shared.temporal.client.is_temporal_enabled", return_value=True)
 def test_run_team_with_sprint_id_succeeds_under_temporal(
     mock_temporal_enabled: MagicMock,
     mock_start_workflow: MagicMock,
@@ -105,19 +105,17 @@ def test_run_team_with_sprint_id_succeeds_under_temporal(
 
 @patch("software_engineering_team.api.routes.jobs._preflight_sprint_scope")
 @patch("software_engineering_team.temporal.start_workflow.start_run_team_workflow")
-@patch("software_engineering_team.temporal.client.is_temporal_enabled", return_value=True)
-def test_run_team_with_valid_sprint_id_succeeds_under_workflow_v2(
+@patch("shared.temporal.client.is_temporal_enabled", return_value=True)
+def test_run_team_with_valid_sprint_id_succeeds(
     mock_temporal_enabled: MagicMock,
     mock_start_workflow: MagicMock,
     mock_preflight_sprint_scope: MagicMock,
     client: TestClient,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """POST /run-team with a valid sprint_id under SE_WORKFLOW_V2 succeeds (200) and forwards
-    sprint_id to start_run_team_workflow — the old blanket-reject guard is gone now that V2
-    can actually synthesize sprint scope (#3983)."""
-    monkeypatch.setenv("SE_WORKFLOW_V2", "true")
+    """POST /run-team with a valid sprint_id succeeds (200) and forwards sprint_id to
+    start_run_team_workflow — the old blanket-reject guard is gone now that V2 can
+    actually synthesize sprint scope."""
     work = tmp_path / "sprint_work_v2_valid"
     work.mkdir()
 
@@ -130,18 +128,16 @@ def test_run_team_with_valid_sprint_id_succeeds_under_workflow_v2(
 
 
 @patch("software_engineering_team.temporal.start_workflow.start_run_team_workflow")
-@patch("software_engineering_team.temporal.client.is_temporal_enabled", return_value=True)
-def test_run_team_with_invalid_sprint_id_400s_before_dispatch_under_workflow_v2(
+@patch("shared.temporal.client.is_temporal_enabled", return_value=True)
+def test_run_team_with_invalid_sprint_id_400s_before_dispatch(
     mock_temporal_enabled: MagicMock,
     mock_start_workflow: MagicMock,
     client: TestClient,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """POST /run-team with an unplanned sprint_id under SE_WORKFLOW_V2 still fails fast (400)
-    via _preflight_sprint_scope before any job/workflow is created — the blanket V2 guard is
-    gone, but real pre-dispatch validation (shared with V1) takes its place."""
-    monkeypatch.setenv("SE_WORKFLOW_V2", "true")
+    """POST /run-team with an unplanned sprint_id still fails fast (400) via
+    _preflight_sprint_scope before any job/workflow is created — the blanket V2 guard is
+    gone, but real pre-dispatch validation takes its place."""
     work = tmp_path / "sprint_work_v2_invalid"
     work.mkdir()
 
@@ -163,7 +159,7 @@ def test_run_team_with_invalid_sprint_id_400s_before_dispatch_under_workflow_v2(
 
 
 @patch("software_engineering_team.temporal.start_workflow.start_retry_failed_workflow")
-@patch("software_engineering_team.temporal.client.is_temporal_enabled", return_value=True)
+@patch("shared.temporal.client.is_temporal_enabled", return_value=True)
 def test_retry_failed_with_temporal_starts_workflow(
     mock_temporal_enabled: MagicMock,
     mock_start_retry: MagicMock,
@@ -190,7 +186,7 @@ def test_retry_failed_with_temporal_starts_workflow(
 @patch(
     "software_engineering_team.temporal.start_workflow.cancel_run_team_workflow", return_value=True
 )
-@patch("software_engineering_team.temporal.client.is_temporal_enabled", return_value=True)
+@patch("shared.temporal.client.is_temporal_enabled", return_value=True)
 def test_cancel_with_temporal_cancels_workflow(
     mock_temporal_enabled: MagicMock,
     mock_cancel_workflow: MagicMock,
@@ -216,7 +212,7 @@ def test_resumable_statuses_include_failed() -> None:
 
 
 @patch("software_engineering_team.temporal.start_workflow.start_run_team_workflow")
-@patch("software_engineering_team.temporal.client.is_temporal_enabled", return_value=True)
+@patch("shared.temporal.client.is_temporal_enabled", return_value=True)
 def test_resume_failed_job_starts_workflow(
     mock_temporal_enabled: MagicMock,
     mock_start_workflow: MagicMock,

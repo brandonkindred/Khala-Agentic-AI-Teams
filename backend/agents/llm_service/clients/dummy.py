@@ -32,6 +32,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only; runtime uses lazy strands i
 
 _STRANDS_MODEL_REGISTERED = False
 
+_DEFAULT_DUMMY_CONTEXT_TOKENS = 16384
+
 
 def _strands_already_imported() -> bool:
     """Return True when any ``strands`` package module is already in ``sys.modules``.
@@ -350,7 +352,7 @@ def _phase3_creative_director_stub() -> Dict[str, Any]:
 
 
 def _phase3_moodboard_conceptualist_stub() -> Dict[str, Any]:
-    """Return the MoodBoardConceptualist ``MoodBoardConceptOutput`` stub."""
+    """Return the MoodBoardConceptualist ``MoodBoardConcept`` stub."""
     return {
         "title": "Dummy Moodboard Direction",
         "visual_direction": "Cohesive visual system for Dummy Co. (dummy).",
@@ -361,7 +363,7 @@ def _phase3_moodboard_conceptualist_stub() -> Dict[str, Any]:
 
 
 def _phase3_converge_decider_stub() -> Dict[str, Any]:
-    """Return the ConvergeDecider ``CreativeRefinementDecisionOutput`` stub."""
+    """Return the ConvergeDecider ``CreativeRefinementDecision`` stub."""
     return {
         "winning_candidate_title": "Editorial Clarity",
         "scoring_criteria": [
@@ -620,9 +622,9 @@ def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, 
            → ``MoodBoardCandidatesOutput`` (must precede MoodBoardConceptualist
            because its prompt also names the moodboard field list).
         2. MoodBoardConceptualist — ``moodboard conceptualist`` + ``visual_direction``
-           → ``MoodBoardConceptOutput``.
+           → ``MoodBoardConcept``.
         3. ConvergeDecider — ``winning_candidate_title`` + ``scores_by_candidate``
-           → ``CreativeRefinementDecisionOutput`` (separate from CreativeDirector).
+           → ``CreativeRefinementDecision`` (separate from CreativeDirector).
         The seven specialists in ``_PHASE3_SPECIALIST_REGISTRY`` are matched
         afterward, in registry order, by agent-specific prompt anchors; their
         anchor pairs are mutually exclusive so registry order is not significant.
@@ -1105,16 +1107,14 @@ def _branding_phase5_text_routed_stub(system_lowered: str) -> Optional[Dict[str,
     return None
 
 
-def _branding_phase2_narrative_base() -> Dict[str, Any]:
-    """Return the base brand-narrative fields shared by all Phase 2 stubs.
+def _branding_phase2_story_stub() -> Dict[str, Any]:
+    """Return BrandStoryOutput's own-field stub payload.
 
     Preconditions:
         None.
     Postconditions:
         Returns a fresh dict with ``brand_story``, ``hero_narrative``, and
-        ``boilerplate_variants`` — the fields every Phase 2 branding stub
-        carries forward, regardless of how much further downstream fields
-        each specific agent also requires.
+        ``boilerplate_variants`` — Storyteller's own fields.
     """
     return {
         "brand_story": (
@@ -1133,17 +1133,16 @@ def _branding_phase2_narrative_base() -> Dict[str, Any]:
     }
 
 
-def _branding_phase2_narrative_with_archetype() -> Dict[str, Any]:
-    """Return the Phase 2 base narrative plus ``brand_archetypes``.
+def _branding_phase2_archetypes_stub() -> Dict[str, Any]:
+    """Return BrandArchetypesOutput's own-field stub payload.
 
     Preconditions:
         None.
     Postconditions:
-        Returns a fresh dict extending ``_branding_phase2_narrative_base()``
-        with a single-entry ``brand_archetypes`` list.
+        Returns a fresh dict with a single-entry ``brand_archetypes`` list —
+        ArchetypeAnalyst's own field.
     """
     return {
-        **_branding_phase2_narrative_base(),
         "brand_archetypes": [
             {
                 "archetype": "The Creator",
@@ -1154,18 +1153,16 @@ def _branding_phase2_narrative_with_archetype() -> Dict[str, Any]:
     }
 
 
-def _branding_phase2_narrative_with_tagline() -> Dict[str, Any]:
-    """Return the Phase 2 narrative-with-archetype payload plus tagline fields.
+def _branding_phase2_tagline_stub() -> Dict[str, Any]:
+    """Return TaglineOutput's own-field stub payload.
 
     Preconditions:
         None.
     Postconditions:
-        Returns a fresh dict extending
-        ``_branding_phase2_narrative_with_archetype()`` with ``tagline``,
-        ``tagline_rationale``, and ``elevator_pitches``.
+        Returns a fresh dict with ``tagline``, ``tagline_rationale``, and
+        ``elevator_pitches`` — TaglineWriter's own fields.
     """
     return {
-        **_branding_phase2_narrative_with_archetype(),
         "tagline": "Ship brand with the product",
         "tagline_rationale": "Ties cohesion to shipping speed (dummy).",
         "elevator_pitches": [
@@ -1188,18 +1185,16 @@ def _branding_phase2_narrative_with_tagline() -> Dict[str, Any]:
     }
 
 
-def _branding_phase2_narrative_with_messaging() -> Dict[str, Any]:
-    """Return the Phase 2 narrative-with-tagline payload plus messaging fields.
+def _branding_phase2_messaging_stub() -> Dict[str, Any]:
+    """Return MessagingFrameworkOutput's own-field stub payload.
 
     Preconditions:
         None.
     Postconditions:
-        Returns a fresh dict extending
-        ``_branding_phase2_narrative_with_tagline()`` with
-        ``messaging_framework`` and ``audience_message_maps``.
+        Returns a fresh dict with ``messaging_framework`` and
+        ``audience_message_maps`` — MessageMapper's own fields.
     """
     return {
-        **_branding_phase2_narrative_with_tagline(),
         "messaging_framework": [
             {
                 "pillar": "Cohesion",
@@ -1228,18 +1223,16 @@ def _branding_phase2_narrative_with_messaging() -> Dict[str, Any]:
     }
 
 
-def _branding_phase2_narrative_with_personas() -> Dict[str, Any]:
-    """Return the Phase 2 narrative-with-messaging payload plus persona profiles.
+def _branding_phase2_personas_stub() -> Dict[str, Any]:
+    """Return PersonaProfilesOutput's own-field stub payload.
 
     Preconditions:
         None.
     Postconditions:
-        Returns a fresh dict extending
-        ``_branding_phase2_narrative_with_messaging()`` with
-        ``persona_profiles``.
+        Returns a fresh dict with ``persona_profiles`` — PersonaBuilder's own
+        field.
     """
     return {
-        **_branding_phase2_narrative_with_messaging(),
         "persona_profiles": [
             {
                 "name": "Alex Rivera",
@@ -1265,18 +1258,16 @@ def _branding_phase2_narrative_with_personas() -> Dict[str, Any]:
     }
 
 
-def _branding_phase2_narrative_with_writing_guidelines() -> Dict[str, Any]:
-    """Return the Phase 2 narrative-with-personas payload plus writing guidelines.
+def _branding_phase2_writing_guidelines_stub() -> Dict[str, Any]:
+    """Return WritingGuidelinesOutput's own-field stub payload.
 
     Preconditions:
         None.
     Postconditions:
-        Returns a fresh dict extending
-        ``_branding_phase2_narrative_with_personas()`` with a nested
-        ``writing_guidelines`` object.
+        Returns a fresh dict with a nested ``writing_guidelines`` object —
+        VoicePrinciplesDrafter's own field.
     """
     return {
-        **_branding_phase2_narrative_with_personas(),
         "writing_guidelines": {
             "voice_principles": [
                 "Use a confident, human voice (dummy).",
@@ -1362,17 +1353,17 @@ def _branding_phase2_structured_output_stub(model_name: str) -> Optional[Dict[st
         continue non–Phase-2 routing paths.
     """
     if model_name == "BrandStoryOutput":
-        return _branding_phase2_narrative_base()
+        return _branding_phase2_story_stub()
     if model_name == "BrandArchetypesOutput":
-        return _branding_phase2_narrative_with_archetype()
+        return _branding_phase2_archetypes_stub()
     if model_name == "TaglineOutput":
-        return _branding_phase2_narrative_with_tagline()
+        return _branding_phase2_tagline_stub()
     if model_name == "MessagingFrameworkOutput":
-        return _branding_phase2_narrative_with_messaging()
+        return _branding_phase2_messaging_stub()
     if model_name == "PersonaProfilesOutput":
-        return _branding_phase2_narrative_with_personas()
+        return _branding_phase2_personas_stub()
     if model_name == "WritingGuidelinesOutput":
-        return _branding_phase2_narrative_with_writing_guidelines()
+        return _branding_phase2_writing_guidelines_stub()
     return None
 
 
@@ -1404,6 +1395,67 @@ def _looks_like_structured_output_tool(name: str, description_lowered: str) -> b
         or name in _PHASE4_STRUCTURED_OUTPUT_MODEL_NAMES
         or name in _PHASE5_STRUCTURED_OUTPUT_MODEL_NAMES
     )
+
+
+def _is_via_reasoning_format_prompt(lowered: str) -> bool:
+    """True when ``lowered`` looks like a via-reasoning formatting-pass prompt.
+
+    Preconditions: ``lowered`` is already lowercased prompt text.
+    Postconditions: True when the shared convert-preamble or ANALYSIS
+        delimiters are present; False otherwise.
+    """
+    return "convert the following analysis into a single json object" in lowered or (
+        "--- analysis " in lowered and "end analysis" in lowered
+    )
+
+
+def _code_review_via_reasoning_format_stub(lowered: str) -> Optional[Dict[str, Any]]:
+    """Stub JSON for code-review via-reasoning formatting contracts.
+
+    Kept out of :meth:`DummyLLMClient.complete_json` so that method stays under
+    the mccabe complexity ceiling. Matches schema-specific format instructions
+    (synthesis, spec-compliance, FPF, merged/standalone submission passes,
+    chunk review) and returns ``None`` for unrelated ANALYSIS-wrapped prompts
+    (sales, SOC2, etc.).
+
+    Preconditions: ``lowered`` is already lowercased prompt text.
+    Postconditions: returns a dict matching the recognized format contract, or
+        ``None`` when this helper does not own the prompt shape.
+    """
+    if not _is_via_reasoning_format_prompt(lowered):
+        return None
+    if (
+        "exactly these keys" in lowered
+        and '"summary"' in lowered
+        and "spec_compliance_notes" in lowered
+    ):
+        # synthesize_review_findings format pass
+        return {
+            "summary": "Code review synthesis (dummy).",
+            "spec_compliance_notes": "",
+        }
+    if "exactly this key" in lowered and "spec_compliance_notes" in lowered:
+        # synthesize_spec_compliance format pass
+        return {"spec_compliance_notes": ""}
+    if '"verdicts"' in lowered:
+        # false-positive filter format pass
+        return {"verdicts": []}
+    if "architecture_findings" in lowered and "side_effect_findings" in lowered:
+        # merged architecture/side-effect format pass
+        return {"architecture_findings": [], "side_effect_findings": []}
+    if "exactly one key" in lowered and '"findings"' in lowered:
+        # Standalone architecture-consistency / side-effect-impact format pass
+        # (still used by snapshot_comparison and pre-merged Temporal replay).
+        return {"findings": []}
+    if "spec_compliance_notes" in lowered and "approved" in lowered and '"issues"' in lowered:
+        # chunk-review format pass only (must not match bare ANALYSIS alone)
+        return {
+            "approved": True,
+            "issues": [],
+            "summary": "Code review passed (dummy).",
+            "spec_compliance_notes": "",
+        }
+    return None
 
 
 class DummyLLMClient(LLMClient):
@@ -1697,13 +1749,14 @@ class DummyLLMClient(LLMClient):
         return hashlib.md5(prompt.encode(), usedforsecurity=False).hexdigest()[:12]
 
     def get_max_context_tokens(self) -> int:
-        """Return the fixed maximum context token limit for the dummy client.
+        """Return the dummy client's nominal maximum context size.
 
         Preconditions: none.
-        Postconditions: returns the constant context-window limit (16384) used by this
-            dummy implementation; the value is not derived from any loaded model config.
+        Postconditions: returns the configured dummy context-window limit
+            (``_DEFAULT_DUMMY_CONTEXT_TOKENS``); the value is not derived from any
+            loaded model config.
         """
-        return 16384
+        return _DEFAULT_DUMMY_CONTEXT_TOKENS
 
     def complete(
         self,
@@ -1716,9 +1769,19 @@ class DummyLLMClient(LLMClient):
         tools: Optional[list] = None,
         think: "bool | str | None" = None,
     ) -> str:
-        # ``objective`` is accepted to match the LLMClient contract; the dummy
-        # client makes no real LLM call and performs no attribution, so it
-        # tolerates an omitted objective (test stubs need not declare one).
+        """Return a plain-text stub response.
+
+        This no-op implementation satisfies the LLMClient contract without
+        making a real LLM call. ``objective`` is accepted to match the
+        contract but performs no attribution, so test stubs may omit it.
+
+        Preconditions:
+            - ``prompt`` is a string; other arguments are accepted for
+              contract compatibility and are ignored.
+        Postconditions:
+            - ``self._request_count`` is incremented by one and a fixed
+              placeholder string is returned.
+        """
         self._request_count += 1
         return "Dummy text completion (no LLM)."
 
@@ -2080,6 +2143,13 @@ class DummyLLMClient(LLMClient):
                 "summary": "Code review passed (dummy).",
                 "spec_compliance_notes": "Code aligns with task requirements.",
             }
+        elif (via_reasoning_stub := _code_review_via_reasoning_format_stub(lowered)) is not None:
+            # Schema-specific via-reasoning format contracts (chunk review,
+            # synthesis, spec-compliance, FPF, merged pass). Must precede the
+            # security/accessibility anchors — formatting instructions can
+            # mention "security" — but must not match unrelated ANALYSIS
+            # prompts (sales critics, SOC2) that share only the preamble.
+            return via_reasoning_stub
         elif "security" in lowered and "vulnerabilities" in lowered:
             # Kept ABOVE the code-review catch-all because the security agent's
             # own prompt includes "Code to review" as a section header, which

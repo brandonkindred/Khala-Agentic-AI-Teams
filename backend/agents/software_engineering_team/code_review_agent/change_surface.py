@@ -2,14 +2,18 @@
 
 Public contract for turning PR unified patches or SE old/new file pairs into a
 bounded, pre-numbered review input suitable for ``CodeReviewInput`` with
-``pre_numbered=True``. Callers consume ``ChangeSurface.code`` (concatenated
-``### path ###`` blocks) or ``ChangeSurface.blocks`` (path → body without
-headers).
+``pre_numbered=True``. Callers consume ``ChangeSurface.blocks`` (path → body
+without headers) via ``CodeReviewInput.files=``.
 
 This module locks types, signatures, and empty/no-op builder contracts.
 ``expand_touched_ranges`` expands touched lines via Python AST when possible,
-otherwise a heuristic start or capped context window. ``extract_touched_lines``
-wraps GitHub unified-patch helpers for added-only touched lines.
+otherwise a heuristic start or capped context window. Added-only touched
+lines are read directly from ``parse_valid_lines(patch, added_only=True)``
+(``github_source.pr_review_mapping``). The rendered
+body marks each added/modified (touched) line with a leading ``+`` gutter
+column and each enclosing context line with a space, so the reviewer has direct
+evidence of the change surface; the marker sits before the line number and never
+shifts the 1-based numbers the posting/mapping layer depends on.
 ``render_patch_hunks`` wraps annotated hunk rendering for the same patch text.
 Surface assembly from unified patches is implemented; ``unified_diffs_from_pairs``
 derives per-path diffs from SE old/new maps. Full pairs surface assembly
@@ -28,6 +32,10 @@ from dataclasses import dataclass, field
 from typing import Collection, Mapping, Optional, Sequence
 
 from software_engineering_team.github_source.pr_review_mapping import (
+    CONTEXT_LINE_MARKER,
+    TOUCHED_LINE_MARKER,
+    format_numbered_source_line,
+    numbered_line_width,
     parse_valid_lines,
     render_annotated_hunks,
 )
@@ -44,8 +52,6 @@ __all__ = [
     "build_change_surface_from_pairs",
     "build_change_surface_from_patches",
     "expand_touched_ranges",
-    "extract_touched_lines",
-    "format_change_surface_code",
     "render_patch_hunks",
     "unified_diffs_from_pairs",
 ]
@@ -92,24 +98,14 @@ class ChangeSurface:
     """Chunker-ready change surface for ``CodeReviewInput``.
 
     Invariants:
-        - ``blocks`` maps each path to a pre-numbered body (``N: `` prefixes)
+        - ``blocks`` maps each path to a pre-numbered body (``N| `` prefixes,
+          each line carrying a leading ``+``/space change-surface marker column)
           without ``### path ###`` headers.
-        - ``code`` equals ``format_change_surface_code(blocks)``.
         - Non-empty surfaces are always consumed with
           ``CodeReviewInput.pre_numbered=True``.
     """
 
     blocks: Mapping[str, str] = field(default_factory=dict)
-
-    @property
-    def code(self) -> str:
-        """Concatenated ``### path ###`` blocks for the legacy ``code`` channel.
-
-        Postconditions:
-            - Empty ``blocks`` yields ``""``.
-            - Otherwise matches the join style used by PR ``_build_review_code``.
-        """
-        return format_change_surface_code(self.blocks)
 
     @property
     def is_empty(self) -> bool:
@@ -122,28 +118,11 @@ class ChangeSurface:
         return len(self.blocks)
 
 
-def format_change_surface_code(blocks: Mapping[str, str]) -> str:
-    """Render path → pre-numbered body mapping as ``### path ###`` blocks.
-
-    Preconditions:
-        - ``blocks`` is a mapping (may be empty). Values are treated as opaque
-          body text (already pre-numbered when produced by assemblers).
-
-    Postconditions:
-        - Empty mapping → ``""``.
-        - Otherwise ``"\\n\\n".join(f"### {path} ###\\n{body}" ...)`` in
-          insertion order, matching PR ``_build_review_code``.
-    """
-    if not blocks:
-        return ""
-    return "\n\n".join(f"### {path} ###\n{body}" for path, body in blocks.items())
-
-
 def _empty_surface() -> ChangeSurface:
     """Return the canonical empty change surface.
 
     Postconditions:
-        - ``is_empty`` is True, ``code == ""``, ``blocks == {}``.
+        - ``is_empty`` is True, ``blocks == {}``.
     """
     return ChangeSurface(blocks={})
 
@@ -158,24 +137,6 @@ def _mapping_has_nonblank_value(mapping: Mapping[str, str]) -> bool:
         - Returns False for ``{}`` and for mappings whose values are all blank.
     """
     return any((value or "").strip() for value in mapping.values())
-
-
-def extract_touched_lines(patch: str) -> frozenset[int]:
-    """Return added-only new-file line numbers from one file's unified patch.
-
-    Preconditions:
-        - ``patch`` is one file's unified-diff text (GitHub ``files[].patch``
-          style), or empty / blank for binary / oversized / unchanged files.
-
-    Postconditions:
-        - Returns a frozenset of 1-based new-file line numbers that appear as
-          added (``+``) lines in the patch.
-        - Context (`` ``), removed (``-``), and ``\\ No newline at end of file``
-          markers are never included.
-        - Empty or blank ``patch`` → empty frozenset.
-        - Never raises.
-    """
-    return frozenset(parse_valid_lines(patch or "", added_only=True))
 
 
 def render_patch_hunks(patch: str) -> str:
@@ -267,18 +228,36 @@ def _merge_line_ranges(ranges: Sequence[LineRange]) -> tuple[LineRange, ...]:
     return tuple(merged)
 
 
-def _pre_number_ranges(content: str, ranges: Sequence[LineRange]) -> str:
+def _pre_number_ranges(
+    content: str,
+    ranges: Sequence[LineRange],
+    touched: Collection[int] = (),
+) -> str:
     """Render merged-or-raw ranges as pre-numbered body text with gap markers.
 
     Preconditions:
         - ``content`` is the full new-file text (may be empty).
         - ``ranges`` is a sequence of inclusive 1-based ``LineRange`` values
           (caller should merge first when desired).
+        - ``touched`` is any collection of 1-based new-file line numbers that
+          were added/modified (e.g. ``parse_valid_lines(patch, added_only=True)``);
+          it is consulted only for membership, so any ``Collection[int]`` is
+          accepted. May be empty.
 
     Postconditions:
-        - Emits ``f\"{n}: {line}\"`` for each line in each range, clamped to the
-          file's last line when ``end_line`` exceeds length.
-        - Between successive ranges, inserts a bare ``...`` line.
+        - Emits a column-aligned ``N| <line>`` gutter for each line in each
+          range, clamped to the file's last line when ``end_line`` exceeds
+          length. Gutter width is the widest emitted line number so hanging
+          indents stay visually 4 columns across 9→10 / 99→100.
+        - When ``touched`` is non-empty, every emitted source line additionally
+          carries a single leading marker column — ``+`` when its number is in
+          ``touched`` (added/modified), a space otherwise (enclosing context) —
+          so the reviewer can tell the change surface from the context it was
+          given. The marker sits BEFORE the number, so the rendered line NUMBER
+          is unchanged (the number a citation maps against is identical with or
+          without the marker). When ``touched`` is empty, no marker column is
+          emitted (the body is byte-identical to the un-marked rendering).
+        - Between successive ranges, inserts a bare ``...`` line (never marked).
         - Empty ``ranges`` or empty file with no emitable lines → ``\"\"``.
         - Never raises.
     """
@@ -286,15 +265,27 @@ def _pre_number_ranges(content: str, ranges: Sequence[LineRange]) -> str:
     if not ranges or not lines:
         return ""
     total = len(lines)
-    chunks: list[str] = []
+    touched_set = {int(n) for n in touched}
+    mark = bool(touched_set)
+    rows: list[tuple[Optional[int], str]] = []
     for idx, r in enumerate(ranges):
         if idx > 0:
-            chunks.append("...")
+            rows.append((None, "..."))
         start = min(max(1, r.start_line), total)
         end = min(max(start, r.end_line), total)
         for n in range(start, end + 1):
-            chunks.append(f"{n}: {lines[n - 1]}")
-    return "\n".join(chunks)
+            rows.append((n, lines[n - 1]))
+    width = numbered_line_width(n for n, _ in rows if n is not None)
+
+    def _marker(n: int) -> str:
+        if not mark:
+            return ""
+        return TOUCHED_LINE_MARKER if n in touched_set else CONTEXT_LINE_MARKER
+
+    return "\n".join(
+        text if n is None else format_numbered_source_line(n, text, width=width, marker=_marker(n))
+        for n, text in rows
+    )
 
 
 def _assemble_path_block(path: str, patch: str, content: str) -> Optional[str]:
@@ -308,18 +299,20 @@ def _assemble_path_block(path: str, patch: str, content: str) -> Optional[str]:
 
     Postconditions:
         - Blank ``content`` → ``None``.
-        - Empty ``extract_touched_lines(patch)`` → ``None``.
-        - Otherwise expands, merges, and pre-numbers; empty body → ``None``.
+        - Empty ``parse_valid_lines(patch, added_only=True)`` → ``None``.
+        - Otherwise expands, merges, and pre-numbers, marking the added/modified
+          (touched) lines distinctly from enclosing context (see
+          ``_pre_number_ranges``); empty body → ``None``.
         - Never raises.
     """
     if not (content or "").strip():
         return None
-    touched = extract_touched_lines(patch)
+    touched = parse_valid_lines(patch or "", added_only=True)
     if not touched:
         return None
     ranges = expand_touched_ranges(content, touched, path=path)
     merged = _merge_line_ranges(ranges)
-    body = _pre_number_ranges(content, merged)
+    body = _pre_number_ranges(content, merged, touched)
     if not body.strip():
         return None
     return body
@@ -341,12 +334,11 @@ def build_change_surface_from_patches(
 
     Postconditions:
         - ``patches == {}`` or every patch value is blank → empty
-          ``ChangeSurface`` (``code == ""``, ``blocks == {}``).
+          ``ChangeSurface`` (``blocks == {}``).
         - For each path with a non-blank patch, in iteration order: omit when
           ``new_contents`` is missing/blank for that path, when there are no
           added touched lines, or when the assembled body is empty; otherwise
           include a pre-numbered expanded body.
-        - ``ChangeSurface.code`` equals ``format_change_surface_code(blocks)``.
         - Never raises for well-typed string mappings.
     """
     if not _mapping_has_nonblank_value(patches):
@@ -493,9 +485,7 @@ def _expand_touched_ranges_python(
         construct = enclosing_construct(content, line)
         if construct is not None:
             key = (construct.start_line, construct.end_line)
-            found[key] = LineRange(
-                start_line=construct.start_line, end_line=construct.end_line
-            )
+            found[key] = LineRange(start_line=construct.start_line, end_line=construct.end_line)
             continue
         fb = _capped_fallback_range(content, line)
         found[(fb.start_line, fb.end_line)] = fb

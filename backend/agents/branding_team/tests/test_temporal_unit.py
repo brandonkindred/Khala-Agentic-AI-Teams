@@ -338,6 +338,68 @@ def test_phase_activity_none_payload_checkpoint_does_not_short_circuit(monkeypat
     mock_rsp.assert_called_once()
 
 
+# ---------------------------------------------------------------------------
+# Story 2b Step 3: the thread-path phase cache (orchestrator.run(phase_cache=...))
+# must never reach the Temporal branch. run_branding_phase_activity calls
+# orchestrator.run_single_phase directly -- never orchestrator.run -- so these
+# pin that structural guarantee down as an explicit regression rather than
+# relying on it staying true by accident.
+# ---------------------------------------------------------------------------
+
+
+def test_run_single_phase_has_no_phase_cache_parameter() -> None:
+    """``run_single_phase`` -- the only orchestrator method the Temporal activity
+    calls -- has no ``phase_cache`` parameter, so there is no way for the
+    thread-path cache (``orchestrator.run(phase_cache=...)``) to reach the
+    Temporal branch through it."""
+    import inspect
+
+    from branding_team.orchestrator import BrandingTeamOrchestrator
+
+    params = inspect.signature(BrandingTeamOrchestrator.run_single_phase).parameters
+    assert "phase_cache" not in params
+
+
+def test_phase_activity_recomputes_even_with_a_warm_cache_for_the_same_phase(monkeypatch) -> None:
+    """A ``PhaseOutputCache`` warmed (e.g. by an unrelated thread-path run) for
+    the exact same mission/phase has no effect on the Temporal activity: it
+    always invokes ``run_single_phase``, since it never receives or constructs
+    a cache -- proving the Temporal branch runs every phase unchanged
+    regardless of what the thread-path cache holds elsewhere in the process."""
+    import shared.temporal
+    from branding_team.api import main as main_mod
+    from branding_team.models import BrandingMission, BrandPhase, StrategicCoreOutput
+    from branding_team.shared.memoization import phase_input_hash
+    from branding_team.shared.phase_output_cache import PhaseOutputCache
+    from branding_team.temporal import activities
+
+    payload = _phase_payload()
+    mission = BrandingMission(**payload["mission"])
+    cache = PhaseOutputCache()
+    cache_hash = phase_input_hash(BrandPhase.STRATEGIC_CORE, mission, {})
+    cache.put(
+        BrandPhase.STRATEGIC_CORE,
+        cache_hash,
+        StrategicCoreOutput(positioning_statement="FROM-THREAD-CACHE"),
+    )
+
+    monkeypatch.setattr(shared.temporal, "load_checkpoint", lambda team, jid, phase: None)
+    monkeypatch.setattr(shared.temporal, "save_checkpoint", MagicMock())
+
+    model = StrategicCoreOutput(positioning_statement="FROM-TEMPORAL-RUN")
+    with patch.object(
+        main_mod.orchestrator, "run_single_phase", return_value=(model, False)
+    ) as mock_rsp:
+        out = activities.run_branding_phase_activity(payload, "strategic_core", {})
+
+    mock_rsp.assert_called_once()
+    assert out["positioning_statement"] == "FROM-TEMPORAL-RUN"
+    # The warm thread-path cache entry is provably untouched by the activity.
+    assert cache.get(BrandPhase.STRATEGIC_CORE, cache_hash).positioning_statement == (
+        "FROM-THREAD-CACHE"
+    )
+
+
 def test_market_research_activity_returns_none_on_failure() -> None:
     from branding_team.temporal import activities
 
@@ -1492,3 +1554,146 @@ def test_submit_brand_run_executor_mark_failed_error_still_raises_503() -> None:
             bg._submit_brand_run(*_submit_args())
 
     assert exc_info.value.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Extracted dispatch helpers (unit): _temporal_enabled / _fail_job_and_raise_503
+# / _dispatch_temporal / _dispatch_thread. These pin the small named pieces that
+# _submit_brand_run was split into, independent of the full submit path.
+# ---------------------------------------------------------------------------
+
+
+def _dispatch_args():
+    """(job_id, brand, human_review, payload, client_id, brand_id, target_phase)."""
+    from branding_team.api.models import RunBrandRequest
+    from branding_team.models import HumanReview
+
+    brand = SimpleNamespace(mission=make_mission())
+    return (
+        "job-1",
+        brand,
+        HumanReview(approved=True, feedback=""),
+        RunBrandRequest(human_approved=True),
+        "client-1",
+        "brand-1",
+        None,
+    )
+
+
+def test_temporal_enabled_true_when_flag_true() -> None:
+    from branding_team.api import background as bg
+
+    with patch("shared.temporal.is_temporal_enabled", return_value=True):
+        assert bg._temporal_enabled() is True
+
+
+def test_temporal_enabled_false_when_flag_false() -> None:
+    from branding_team.api import background as bg
+
+    with patch("shared.temporal.is_temporal_enabled", return_value=False):
+        assert bg._temporal_enabled() is False
+
+
+def test_temporal_enabled_false_on_import_error() -> None:
+    """When ``shared.temporal`` can't be imported, degrade to False, not raise."""
+    import sys
+
+    from branding_team.api import background as bg
+
+    with patch.dict(sys.modules, {"shared.temporal": None}):
+        assert bg._temporal_enabled() is False
+
+
+def test_fail_job_and_raise_503_marks_failed_then_raises() -> None:
+    from fastapi import HTTPException
+
+    from branding_team.api import background as bg
+
+    with patch.object(bg, "mark_failed") as mock_mark_failed:
+        with pytest.raises(HTTPException) as exc_info:
+            bg._fail_job_and_raise_503("job-1", "some reason")
+
+    assert exc_info.value.status_code == 503
+    mock_mark_failed.assert_called_once_with("job-1", "some reason")
+
+
+def test_fail_job_and_raise_503_swallows_mark_failed_error() -> None:
+    """A secondary mark_failed failure must not mask the intended 503."""
+    from fastapi import HTTPException
+
+    from branding_team.api import background as bg
+    from branding_team.shared.job_store import JobNotFoundError
+
+    with patch.object(bg, "mark_failed", side_effect=JobNotFoundError("unreachable")):
+        with pytest.raises(HTTPException) as exc_info:
+            bg._fail_job_and_raise_503("job-1", "some reason")
+
+    assert exc_info.value.status_code == 503
+
+
+def test_dispatch_temporal_happy_path_starts_workflow() -> None:
+    from branding_team.api import background as bg
+
+    with patch("branding_team.temporal.start_workflow.start_branding_workflow") as mock_start:
+        assert bg._dispatch_temporal(*_dispatch_args()) is None
+
+    mock_start.assert_called_once()
+    started_job_id, wf_payload = mock_start.call_args.args[:2]
+    assert started_job_id == "job-1"
+    assert wf_payload["job_id"] == "job-1"
+
+
+def test_dispatch_temporal_failure_raises_503_and_marks_failed() -> None:
+    from fastapi import HTTPException
+
+    from branding_team.api import background as bg
+
+    with (
+        patch.object(bg, "mark_failed") as mock_mark_failed,
+        patch(
+            "branding_team.temporal.start_workflow.start_branding_workflow",
+            side_effect=RuntimeError("worker down"),
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            bg._dispatch_temporal(*_dispatch_args())
+
+    assert exc_info.value.status_code == 503
+    _job_id, failure_message = mock_mark_failed.call_args.args[:2]
+    assert failure_message == "temporal dispatch failed"
+
+
+def test_dispatch_thread_happy_path_submits_to_executor() -> None:
+    from branding_team.api import background as bg
+    from branding_team.api import main as main_mod
+
+    with patch.object(main_mod._run_executor, "submit") as mock_submit:
+        assert bg._dispatch_thread(*_dispatch_args()) is None
+
+    mock_submit.assert_called_once()
+    # First positional arg is the function; second is the job id.
+    submitted_fn, submitted_job_id = mock_submit.call_args.args[:2]
+    assert submitted_fn is main_mod._run_branding_background
+    assert submitted_job_id == "job-1"
+
+
+def test_dispatch_thread_executor_shutdown_raises_503_and_marks_failed() -> None:
+    from fastapi import HTTPException
+
+    from branding_team.api import background as bg
+    from branding_team.api import main as main_mod
+
+    with (
+        patch.object(bg, "mark_failed") as mock_mark_failed,
+        patch.object(
+            main_mod._run_executor,
+            "submit",
+            side_effect=RuntimeError("cannot schedule new futures after shutdown"),
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            bg._dispatch_thread(*_dispatch_args())
+
+    assert exc_info.value.status_code == 503
+    _job_id, failure_message = mock_mark_failed.call_args.args[:2]
+    assert failure_message == "run executor unavailable"

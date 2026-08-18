@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 _worker_threads: dict[str, threading.Thread] = {}
 _worker_ready: dict[str, threading.Event] = {}
 _activity_executors: dict[str, ThreadPoolExecutor] = {}
+_workers: dict[str, Any] = {}
+_worker_loops: dict[str, asyncio.AbstractEventLoop] = {}
 
 
 def is_team_worker_alive(team: str) -> bool:
@@ -43,6 +45,24 @@ def is_team_worker_alive(team: str) -> bool:
     """
     thread = _worker_threads.get(team)
     return thread is not None and thread.is_alive()
+
+
+def is_team_worker_ready(team: str) -> bool:
+    """Return whether ``team``'s Temporal worker is connected and polling.
+
+    ``start_team_worker`` returns True as soon as the daemon thread is spawned;
+    connect happens asynchronously. This is the non-blocking counterpart of
+    :func:`wait_for_team_worker_ready`: False while the thread exists but has
+    not finished connecting, and False if the thread has exited.
+
+    Preconditions:
+        - ``team`` is a non-empty team key (unknown teams report False).
+    Postconditions:
+        - Returns True iff a live worker thread is registered for ``team`` and
+          that team's ready event is set. Never raises. Never blocks.
+    """
+    event = _worker_ready.get(team)
+    return is_team_worker_alive(team) and event is not None and event.is_set()
 
 
 def wait_for_team_worker_ready(team: str, timeout_s: float | None = None) -> None:
@@ -69,25 +89,14 @@ def wait_for_team_worker_ready(team: str, timeout_s: float | None = None) -> Non
         timeout_s = CLIENT_READY_TIMEOUT_S
     event = _worker_ready.get(team)
     if event is None:
-        raise RuntimeError(
-            f"{team} Temporal worker was not started; refusing to serve without a worker"
-        )
+        raise RuntimeError(f"{team} Temporal worker was not started; refusing to serve without a worker")
     if event.wait(timeout=timeout_s):
         if not is_team_worker_alive(team):
-            raise RuntimeError(
-                f"{team} Temporal worker thread exited after start; "
-                "refusing to serve without a worker"
-            )
+            raise RuntimeError(f"{team} Temporal worker thread exited after start; refusing to serve without a worker")
         return
     if not is_team_worker_alive(team):
-        raise RuntimeError(
-            f"{team} Temporal worker thread exited after start; "
-            "refusing to serve without a worker"
-        )
-    raise RuntimeError(
-        f"{team} Temporal worker thread never became ready; "
-        "refusing to serve without a worker"
-    )
+        raise RuntimeError(f"{team} Temporal worker thread exited after start; refusing to serve without a worker")
+    raise RuntimeError(f"{team} Temporal worker thread never became ready; refusing to serve without a worker")
 
 
 def _build_workflow_runner() -> Any:
@@ -144,6 +153,28 @@ def _build_workflow_runner() -> Any:
         # exclusively in activity code.
         "numpy",
         "pandas",
+        # StrategyLabCycleWorkflow.run() calls dto.convergence_tracker_from_wire,
+        # which imports quality_gates.ConvergenceTracker; quality_gates/__init__.py
+        # eagerly imports every quality gate (including backtest_anomaly.py,
+        # spec_readiness.py), and those import investment_team.market_data_service
+        # for a type/helper reference. market_data_service reads
+        # ALPHA_VANTAGE_API_KEY via `os.environ.get(...)` at module scope, which
+        # the sandbox's re-import forbids (`RestrictedWorkflowAccessError`).
+        # Passing the module through is safe on the same grounds as numpy/pandas
+        # above: workflow run() bodies never call into market_data_service
+        # themselves, only reach it as a side effect of this import chain.
+        "investment_team.market_data_service",
+        # Same import chain, same failure class: quality_gates/__init__.py's
+        # eager quality-gate imports reach predicate_conformance.py, which
+        # imports StrategyLabBudgetConfig from budget_config.py, which imports
+        # llm_service.config for resolve_timeout(). llm_service/config.py does
+        # ``_warned_lock = threading.Lock()`` at module scope, which the
+        # sandbox's re-import forbids (`RestrictedWorkflowAccessError` on
+        # ``threading.Lock.__call__``). Passing budget_config through is safe
+        # on the same grounds as market_data_service above: workflow run()
+        # bodies never call StrategyLabBudgetConfig themselves, only reach it
+        # as a side effect of this import chain.
+        "investment_team.strategy_lab.budget_config",
     )
     return SandboxedWorkflowRunner(restrictions=restrictions)
 
@@ -180,11 +211,17 @@ async def _run_worker_async(
         max_concurrent_activities=max_concurrent_activities,
         workflow_runner=_build_workflow_runner(),
     )
-    ready = _worker_ready.get(team)
-    if ready is not None:
-        ready.set()
-    logger.info("Temporal worker starting: team=%s task_queue=%s", team, task_queue)
-    await worker.run()
+    _workers[team] = worker
+    _worker_loops[team] = asyncio.get_running_loop()
+    try:
+        ready = _worker_ready.get(team)
+        if ready is not None:
+            ready.set()
+        logger.info("Temporal worker starting: team=%s task_queue=%s", team, task_queue)
+        await worker.run()
+    finally:
+        _workers.pop(team, None)
+        _worker_loops.pop(team, None)
 
 
 def start_team_worker(
@@ -214,9 +251,7 @@ def start_team_worker(
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(
-                _run_worker_async(team, queue, workflows, activities, max_concurrent_activities)
-            )
+            loop.run_until_complete(_run_worker_async(team, queue, workflows, activities, max_concurrent_activities))
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -239,3 +274,95 @@ def start_team_worker(
     _worker_threads[team] = thread
     logger.info("Temporal worker thread started for team=%s queue=%s", team, queue)
     return True
+
+
+def _clear_team_registry(team: str) -> None:
+    """Drop one team's worker-thread registry entries and shut its executor.
+
+    Preconditions:
+        - ``team`` is a team key (unknown keys are a no-op).
+        - The worker thread for ``team`` is not alive (callers must join first).
+    Postconditions:
+        - Thread, worker, loop, ready-event, and activity-executor slots for
+          ``team`` are removed. The executor is shut down if one existed.
+          Never raises.
+    """
+    _worker_threads.pop(team, None)
+    _workers.pop(team, None)
+    _worker_loops.pop(team, None)
+    _worker_ready.pop(team, None)
+    executor = _activity_executors.pop(team, None)
+    if executor is not None:
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:  # pragma: no cover - ThreadPoolExecutor.shutdown does not raise
+            logger.debug("activity executor shutdown failed for team=%s", team, exc_info=True)
+
+
+def stop_team_worker(team: str, *, timeout_s: float = 5.0) -> bool:
+    """Stop one in-process Temporal worker and join its daemon thread.
+
+    Preconditions:
+        - ``team`` is a non-empty team key (unknown teams are a no-op).
+        - ``timeout_s`` >= 0.
+
+    Postconditions:
+        - ``Worker.shutdown()`` has been requested on that team's loop when a
+          live worker exists; the daemon thread has been joined for at most
+          ``timeout_s`` seconds.
+        - Returns True iff the worker thread is gone (or never existed). Registry
+          entries are cleared only in that case — a still-running thread keeps
+          its handles so a later wait can join it before storage teardown.
+          Never raises.
+    """
+    assert team, "team must be a non-empty team key"
+    assert timeout_s >= 0, "timeout_s must be non-negative"
+    live_worker = _workers.get(team)
+    loop = _worker_loops.get(team)
+    thread = _worker_threads.get(team)
+    if live_worker is not None and loop is not None and not loop.is_closed() and loop.is_running():
+        try:
+            fut = asyncio.run_coroutine_threadsafe(live_worker.shutdown(), loop)
+            fut.result(timeout=timeout_s)
+        except Exception:
+            logger.warning("Temporal worker.shutdown failed for team=%s", team, exc_info=True)
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=timeout_s)
+    if thread is not None and thread.is_alive():
+        logger.warning("Temporal worker thread did not exit for team=%s; keeping registry", team)
+        return False
+    _clear_team_registry(team)
+    return True
+
+
+def stop_all_team_workers(*, timeout_s: float = 5.0) -> None:
+    """Stop every in-process Temporal worker started via :func:`start_team_worker`.
+
+    Used on graceful shutdown so LLM-producing activities finish before the
+    usage flusher unregisters and Postgres closes. ``timeout_s`` bounds each
+    ``Worker.shutdown()`` wait; any thread that outlives that bound is joined
+    until it actually exits so in-flight usage can still be persisted.
+
+    Preconditions:
+        - ``timeout_s`` >= 0 (applied per team for the shutdown request).
+
+    Postconditions:
+        - Every registered team has been asked to stop, and no worker thread
+          from this registry is still alive. Never raises.
+    """
+    assert timeout_s >= 0, "timeout_s must be non-negative"
+    teams = list(dict.fromkeys([*_worker_threads, *_workers]))
+    for team in teams:
+        try:
+            stop_team_worker(team, timeout_s=timeout_s)
+        except Exception:  # pragma: no cover - stop_team_worker never raises; defensive
+            logger.warning("stop_team_worker failed for team=%s", team, exc_info=True)
+    for team, thread in list(_worker_threads.items()):
+        if thread.is_alive():
+            logger.warning(
+                "Temporal worker thread still running after shutdown timeout; waiting: team=%s",
+                team,
+            )
+            thread.join()
+        if not thread.is_alive():
+            _clear_team_registry(team)

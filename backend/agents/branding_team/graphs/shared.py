@@ -7,40 +7,82 @@ Provides:
 
 from __future__ import annotations
 
-from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
+import re
+from typing import Any, Dict, Optional, Type
 
+from pydantic import BaseModel
 from strands import Agent
-from strands.multiagent.graph import GraphBuilder
 
-from branding_team.models import BrandPhase
-from llm_service import get_strands_model
+from branding_team.models import (
+    BrandPhase,
+    ChannelActivationOutput,
+    GovernanceOutput,
+    NarrativeMessagingOutput,
+    StrategicCoreOutput,
+    VisualIdentityOutput,
+)
+from shared.graph import OutputMode
+from shared.graph import build_agent as _shared_build_agent
 
-if TYPE_CHECKING:
-    from llm_service import LLMClientModel
+# ---------------------------------------------------------------------------
+# Agent-key tiers (per-phase LLM routing)
+# ---------------------------------------------------------------------------
+
+# Every pipeline agent passes an explicit ``agent_key`` instead of resolving
+# ``build_agent``'s implicit "branding" default: ``branding_<phase value>``
+# (via ``phase_agent_key``) for each phase's specialist agents — reusing
+# ``BrandPhase``'s own enum values so the tier and the phase it routes can
+# never drift apart. Underscores keep the key a valid shell/Compose
+# identifier so ``LLM_MODEL_<agent_key>`` can be exported
+# (``LLM_MODEL_branding_strategic_core``). This groups each phase's mix of
+# open-ended strategic/creative work (e.g. Phase 1's positioning_synthesizer,
+# Phase 2's Storyteller) alongside its more bounded extraction/list-
+# generation specialists (e.g. Phase 5's asset_wiki_planner) under one dial,
+# so ops can tune per-phase cost/quality via ``LLM_MODEL_branding_<phase>``
+# without a code change. No phase has a compositor node anymore (Phase 3's
+# ``visual_compositor`` was the last one; its fragments are now merged
+# deterministically in Python, same as Phases 4 and 5), so there is no
+# separate compositor tier.
+#
+# ``BrandComplianceAgent`` (outside the graph) is deliberately excluded: it
+# is a keyword-matching ``@dataclass`` with no LLM call, so no agent_key
+# applies to it.
+
+
+# ``str.isidentifier()`` accepts Unicode letters (PEP 3131), which are valid
+# Python identifiers but not valid POSIX/Docker Compose env var names — so
+# it under-enforces the shell/Compose guarantee ``phase_agent_key`` makes
+# below. This is the ASCII-only shape env var names actually require.
+_SHELL_SAFE_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def phase_agent_key(phase: BrandPhase) -> str:
+    """Return the ``agent_key`` tier for *phase*'s specialist agents.
+
+    Preconditions:
+        ``phase`` is a ``BrandPhase`` member.
+    Postconditions:
+        Returns ``f"branding_{phase.value}"`` (e.g.
+        ``"branding_strategic_core"`` for ``BrandPhase.STRATEGIC_CORE``).
+        The result is a valid shell/Compose identifier (ASCII letters,
+        digits, and underscores, not starting with a digit) so
+        ``LLM_MODEL_<agent_key>`` can be set in env files and Compose.
+        Raises ``ValueError`` rather than returning a key that would
+        violate that guarantee — the mechanical ``f"branding_{phase.value}"``
+        derivation has no other enforcement point, so a future ``BrandPhase``
+        value containing e.g. a hyphen, space, or non-ASCII character is
+        caught here instead of silently producing an unexportable env var
+        name.
+    """
+    key = f"branding_{phase.value}"
+    if not _SHELL_SAFE_KEY_RE.fullmatch(key):
+        raise ValueError(f"phase_agent_key derived a non-shell-safe key {key!r} from {phase!r}")
+    return key
+
 
 # ---------------------------------------------------------------------------
 # Agent factory
 # ---------------------------------------------------------------------------
-
-OutputMode = Literal["json", "text"]
-
-
-# Every branding agent resolves a model keyed by (agent_key, output_mode),
-# defaulting to agent_key="branding". Building the graph instantiates ~40
-# agents per run; without memoisation each one constructs a fresh
-# LLMClientModel. The model is a stateless wrapper over the cached LLM
-# client, so one instance per (agent_key, output_mode) pair is safe to share
-# across all agents and all runs. The Agents themselves are NOT cached —
-# they carry per-invocation conversation state and must stay distinct per
-# graph build.
-#
-# ``maxsize`` bounds the cache: the key space is small (today, just the
-# "branding" default plus any override), so this never holds more than a
-# handful of entries.
-@lru_cache(maxsize=8)
-def _branding_model(agent_key: str, output_mode: OutputMode) -> "LLMClientModel":
-    return get_strands_model(agent_key, response_format=output_mode)
 
 
 def build_agent(
@@ -55,12 +97,14 @@ def build_agent(
 ) -> Agent:
     """Create a ``strands.Agent`` pre-configured for branding work.
 
-    The backing model is the project's centralized ``LLMClientModel`` resolved
-    via ``get_strands_model(agent_key, response_format=output_mode)`` — this
+    Thin wrapper over the cross-team :func:`shared.graph.build_agent` that
+    pins the branding-specific default ``agent_key="branding"`` (the shared
+    factory defaults to ``None``, which falls back to the bare ``LLM_MODEL``
+    env var instead of branding's own tier). The backing model is the
+    project's centralized ``LLMClientModel`` resolved via
+    ``get_strands_model(agent_key, response_format=output_mode)`` — this
     routes through Ollama (or any configured ``LLM_PROVIDER``) and inherits
     retries, telemetry, and per-agent model routing (``LLM_MODEL_<agent_key>``).
-    Passing a bare model string here would make Strands treat it as a Bedrock
-    model ID and fail with ``NoCredentialsError`` outside AWS.
 
     Parameters
     ----------
@@ -88,54 +132,21 @@ def build_agent(
     agent_key:
         LLM routing key passed to ``get_strands_model``, controlling which
         ``LLM_MODEL_<agent_key>`` override (if any) resolves the backing
-        model. Defaults to ``"branding"``, preserving the behavior of all
-        existing call sites.
+        model. Defaults to ``"branding"`` for callers that don't need
+        per-tier routing; every pipeline call site instead passes one of the
+        ``branding_<phase>`` tiers documented on :func:`phase_agent_key`
+        (see also the "LLM routing (agent_key tiers)" section of
+        ``README.md``).
     """
-    if output_mode not in ("json", "text"):
-        raise ValueError(f"output_mode must be 'json' or 'text', got {output_mode!r}")
-    kwargs: dict[str, Any] = {
-        "name": name,
-        "system_prompt": system_prompt,
-        "model": _branding_model(agent_key, output_mode),
-        "callback_handler": None,
-    }
-    if structured_output is not None:
-        kwargs["structured_output_model"] = structured_output
-    if tools:
-        kwargs["tools"] = tools
-    if description:
-        kwargs["description"] = description
-    return Agent(**kwargs)
-
-
-# ---------------------------------------------------------------------------
-# Fan-out/fan-in wiring
-# ---------------------------------------------------------------------------
-
-
-def build_fan_out_fan_in(
-    builder: GraphBuilder,
-    agents: list[tuple[str, Callable[[], Agent]]],
-    compositor: Any,
-) -> None:
-    """Wire a fan-out/fan-in topology onto *builder*.
-
-    For each ``(node_id, factory)`` pair in *agents*: builds the node via
-    ``factory()``, adds it to *builder*, wires an edge from it to
-    *compositor*, and marks it as a graph entry point.
-
-    Preconditions:
-        *agents* is non-empty. *compositor* is a node handle already
-        returned by ``builder.add_node(...)`` on the same *builder*.
-    Postconditions:
-        Every ``(node_id, factory)`` pair is added as a node on *builder*,
-        edged to *compositor*, and registered as an entry point.
-    """
-    assert agents, "agents must be non-empty"
-    for node_id, factory in agents:
-        node = builder.add_node(factory(), node_id=node_id)
-        builder.add_edge(node, compositor)
-        builder.set_entry_point(node_id)
+    return _shared_build_agent(
+        name=name,
+        system_prompt=system_prompt,
+        output_mode=output_mode,
+        structured_output=structured_output,
+        tools=tools,
+        description=description,
+        agent_key=agent_key,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +160,17 @@ PHASE_ORDER = [
     BrandPhase.CHANNEL_ACTIVATION,
     BrandPhase.GOVERNANCE,
 ]
+
+# Single source of truth for a phase's output model class, shared by
+# ``orchestrator._PHASE_SPEC`` (graph-result extraction) and
+# ``PhaseOutputCache`` (deserializing a cached phase output).
+PHASE_OUTPUT_MODELS: Dict[BrandPhase, Type[BaseModel]] = {
+    BrandPhase.STRATEGIC_CORE: StrategicCoreOutput,
+    BrandPhase.NARRATIVE_MESSAGING: NarrativeMessagingOutput,
+    BrandPhase.VISUAL_IDENTITY: VisualIdentityOutput,
+    BrandPhase.CHANNEL_ACTIVATION: ChannelActivationOutput,
+    BrandPhase.GOVERNANCE: GovernanceOutput,
+}
 
 
 def phase_index(phase: BrandPhase) -> int:

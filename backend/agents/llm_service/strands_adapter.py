@@ -54,6 +54,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import time
 from typing import Any, AsyncGenerator, Dict, List, Literal, Optional, Union
 
 from strands.models.model import Model
@@ -62,13 +63,14 @@ from strands.types.streaming import StreamEvent
 from strands.types.tools import ToolChoice, ToolSpec
 
 from .attribution import caller_agent, caller_team, current_attribution, llm_attribution
+from .cache_breakpoint import CacheBreakpoint
 from .factory import client_agent_key, get_client, unwrap_client
-from .interface import LLMClient
+from .interface import LLMClient, record_complete_json_turn, take_complete_json_turns
 from .util import _flatten_system_prompt_content
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["LLMClientConfig", "LLMClientModel", "get_strands_model", "run_json_via_strands"]
+__all__ = ["LLMClientConfig", "LLMClientModel", "run_json_via_strands"]
 
 
 ResponseFormat = Literal["json", "text"]
@@ -112,6 +114,48 @@ class LLMClientConfig:
 # ---------------------------------------------------------------------------
 # Message + tool conversion helpers
 # ---------------------------------------------------------------------------
+
+
+def _system_prompt_content_segments(
+    system_prompt_content: Optional[List[Any]],
+) -> List[Union[str, CacheBreakpoint]]:
+    """Convert Strands ``system_prompt_content`` blocks into an ordered segment list.
+
+    Companion to :func:`llm_service.util._flatten_system_prompt_content` — that
+    function collapses the same input to one string (the no-op path, used when
+    the backing client has no use for a marker); this one preserves structure so
+    a ``CacheBreakpoint`` segment survives intact for a caching-capable client
+    (see ``LLMClientModel.stream``).
+
+    Preconditions:
+        - ``system_prompt_content`` is ``None`` or a list of content blocks: a
+          ``CacheBreakpoint`` instance a prompt builder placed directly in the
+          list, a dict block (e.g. ``{"text": "..."}``), or a plain string.
+
+    Postconditions:
+        - Returns ``[]`` when absent/empty; otherwise one segment per block, in
+          order — a ``CacheBreakpoint`` is preserved as-is, a dict block's
+          ``text`` is extracted, anything else is stringified. Empty (falsy)
+          text segments are dropped; a whitespace-only segment is NOT
+          considered empty and is kept as-is (consistent with how a
+          whitespace-only ``system_prompt`` string is treated elsewhere in
+          this module). Never raises.
+    """
+    if not system_prompt_content:
+        return []
+    segments: List[Union[str, CacheBreakpoint]] = []
+    for block in system_prompt_content:
+        if isinstance(block, CacheBreakpoint):
+            segments.append(block)
+        elif isinstance(block, dict):
+            text = str(block.get("text", "") or "")
+            if text:
+                segments.append(text)
+        else:
+            text = str(block)
+            if text:
+                segments.append(text)
+    return segments
 
 
 def _tool_result_content_to_text(content: List[Dict[str, Any]]) -> str:
@@ -389,6 +433,20 @@ class LLMClientModel(Model):
         """
         return self._client.supports_structured_output()
 
+    def supports_prompt_caching(self) -> bool:
+        """Delegate to the backing ``LLMClient`` (see ``LLMClient.supports_prompt_caching``).
+
+        ``stream()`` uses this to decide whether a ``CacheBreakpoint`` segment in
+        ``system_prompt_content`` should be preserved as a wire-level cache
+        breakpoint or flattened to plain text (see :meth:`stream`).
+
+        Postconditions:
+            - Returns the backing client's capability flag. Synchronous, no
+              network call, never raises (assuming the backing client's
+              override doesn't — the default and Claude's override both don't).
+        """
+        return self._client.supports_prompt_caching()
+
     def clone(self, **overrides: Any) -> "LLMClientModel":
         """Return a new ``LLMClientModel`` sharing the backing client but with
         per-field overrides applied to the config.
@@ -454,18 +512,38 @@ class LLMClientModel(Model):
         after ``system_prompt`` when both are present. Either may be omitted;
         when both are absent, no system message is emitted.
 
+        A ``CacheBreakpoint`` (see ``llm_service.cache_breakpoint``) placed
+        directly in ``system_prompt_content`` is preserved — not flattened —
+        when the backing client's ``supports_prompt_caching()`` is ``True``
+        (``ClaudeLLMClient``): the system message's ``content`` becomes the
+        ordered segment list itself, and ``ClaudeLLMClient`` translates the
+        marked segment into a real ``cache_control`` breakpoint on the wire.
+        For every other backing client (or when no ``CacheBreakpoint`` is
+        present), the pre-caching flatten-to-text behavior is unchanged —
+        byte-identical output, no error.
+
         ``tool_choice`` is accepted for interface compatibility but is not
         forwarded: ``LLMClient`` does not currently expose a tool_choice knob.
         """
         del tool_choice  # interface-only: LLMClient exposes no tool_choice knob
+        # Unwrapped once, up front: needed both for the prompt-caching capability
+        # check below and for the dispatch later on (see the comment at the
+        # dispatch site for why the *unwrapped* client is used there).
+        client = unwrap_client(self._client)
         oai_messages = _strands_messages_to_openai(messages)
-        combined_system = "\n\n".join(
-            part
-            for part in (system_prompt, _flatten_system_prompt_content(system_prompt_content))
-            if part
-        )
-        if combined_system:
-            oai_messages.insert(0, {"role": "system", "content": combined_system})
+        content_segments = _system_prompt_content_segments(system_prompt_content)
+        if any(isinstance(seg, CacheBreakpoint) for seg in content_segments) and (
+            client.supports_prompt_caching()
+        ):
+            system_content: Any = ([system_prompt] if system_prompt else []) + content_segments
+        else:
+            system_content = "\n\n".join(
+                part
+                for part in (system_prompt, _flatten_system_prompt_content(system_prompt_content))
+                if part
+            )
+        if system_content:
+            oai_messages.insert(0, {"role": "system", "content": system_content})
 
         oai_tools = _tool_specs_to_openai(tool_specs)
 
@@ -513,8 +591,8 @@ class LLMClientModel(Model):
         # key already bound on the context by an orchestrator; then the key held
         # by the backing ``_AttributingClient`` when the model was built via
         # ``get_strands_model(client=get_client("backend"))`` *without* repeating
-        # ``agent_key`` — recovering it here is essential because the dispatch
-        # below unwraps that client, discarding its binding. Only when none of
+        # ``agent_key`` — recovering it here is essential because ``client`` was
+        # already unwrapped above, discarding that binding. Only when none of
         # those authoritative keys exist does a path-derived identity fill the
         # field so unkeyed ``get_strands_model()`` calls aren't recorded as
         # ``agent=-``. The configured objective is a fallback — a caller that
@@ -529,24 +607,64 @@ class LLMClientModel(Model):
         objective = (
             current_attribution().objective or f"strands agent turn ({cfg.agent_key or 'agent'})"
         )
-        # Dispatch to the raw (unwrapped) client so that if ``self._client`` is
-        # an ``_AttributingClient`` (from ``get_client(agent_key)``), its inner
-        # ``llm_attribution(agent_key=...)`` binding does not override the key
-        # we set above.  The correct key is already on the context via the
-        # outer ``with llm_attribution(...)``; bypassing the wrapper ensures
-        # ``cfg.agent_key`` (which may differ after ``clone``/``update_config``)
-        # is the effective binding rather than the wrapper's original key.
-        with llm_attribution(agent_key=agent_key or None, team=team):
-            result = await asyncio.to_thread(
-                unwrap_client(self._client).chat,
-                oai_messages,
-                objective=objective,
-                response_format=response_format,
-                temperature=temperature,
-                tools=oai_tools,
-                think=think,
-                max_tokens=max_tokens,
+        # Dispatch to the raw (unwrapped) ``client`` computed above so that if
+        # ``self._client`` is an ``_AttributingClient`` (from
+        # ``get_client(agent_key)``), its inner ``llm_attribution(agent_key=...)``
+        # binding does not override the key we set above.  The correct key is
+        # already on the context via the outer ``with llm_attribution(...)``;
+        # bypassing the wrapper ensures ``cfg.agent_key`` (which may differ after
+        # ``clone``/``update_config``) is the effective binding rather than the
+        # wrapper's original key.
+        turn_started = time.monotonic()
+        worker_turns: list[tuple[str, str, float]] = []
+
+        def _chat_in_worker() -> Any:
+            # ContextVar writes in this thread do not copy back to the caller.
+            # Drop the inherited snapshot, then stash turns on the shared list
+            # even when chat() raises (self-correction that still fails).
+            take_complete_json_turns()
+            try:
+                return client.chat(
+                    oai_messages,
+                    objective=objective,
+                    response_format=response_format,
+                    temperature=temperature,
+                    tools=oai_tools,
+                    think=think,
+                    max_tokens=max_tokens,
+                )
+            finally:
+                worker_turns.extend(take_complete_json_turns())
+
+        def _replay_worker_turns() -> None:
+            if worker_turns:
+                for turn_prompt, turn_response, started in worker_turns:
+                    record_complete_json_turn(turn_prompt, turn_response, started_monotonic=started)
+                return
+            try:
+                observer_response = json.dumps(result, default=str)
+            except (TypeError, ValueError):
+                observer_response = str(result)
+            record_complete_json_turn(
+                json.dumps(oai_messages, default=str),
+                observer_response,
+                started_monotonic=turn_started,
             )
+
+        chat_error: BaseException | None = None
+        result: Any = None
+        with llm_attribution(agent_key=agent_key or None, team=team):
+            try:
+                result = await asyncio.to_thread(_chat_in_worker)
+            except BaseException as exc:
+                chat_error = exc
+        if worker_turns:
+            for turn_prompt, turn_response, started in worker_turns:
+                record_complete_json_turn(turn_prompt, turn_response, started_monotonic=started)
+        elif chat_error is None:
+            _replay_worker_turns()
+        if chat_error is not None:
+            raise chat_error
 
         yield {"messageStart": {"role": "assistant"}}
 
@@ -675,7 +793,7 @@ class LLMClientModel(Model):
 # ---------------------------------------------------------------------------
 
 
-def get_strands_model(
+def _get_strands_model(
     agent_key: Optional[str] = None,
     *,
     temperature: float = 0.0,
@@ -685,11 +803,17 @@ def get_strands_model(
     client: Optional[LLMClient] = None,
     response_format: str = "json",
 ) -> LLMClientModel:
-    """Return a Strands-compatible ``Model`` wired to the Khala LLM service.
+    """Construct a Strands-compatible ``Model`` wired to a raw ``LLMClient``.
 
-    This is the canonical entry point for constructing a Strands ``Agent``
-    that should use the project's LLM stack. Under the hood it calls
-    :func:`llm_service.get_client` (respecting ``LLM_PROVIDER``,
+    This is a low-level, package-private helper: the canonical public entry
+    point for constructing a Strands ``Agent`` that should use the project's
+    LLM stack is :func:`llm_service.get_strands_model` (backed by
+    ``strands_provider``), which adds provider resolution, model caching, and
+    API-key-fingerprint cache invalidation on top of a directly-built
+    :class:`LLMClientModel`. This function is used directly, and intentionally,
+    only by ``strategy_lab.model_factory`` where the caller needs to inject
+    its own timeout-scoped client and bypass the provider cache. Under the
+    hood it calls :func:`llm_service.get_client` (respecting ``LLM_PROVIDER``,
     ``LLM_MODEL_<agent_key>``, and the rest of the env contract) and wraps
     the result in :class:`LLMClientModel`.
 

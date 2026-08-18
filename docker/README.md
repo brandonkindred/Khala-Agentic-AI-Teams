@@ -129,7 +129,7 @@ On **macOS** with Docker Desktop, container memory is capped by the VM's memory 
 The **khala** (Unified API) image is mostly a reverse proxy: of the teams
 configured in `TEAM_CONFIGS` (`backend/unified_api/config.py`), all but a
 handful (`in_process=True` — `user_profile`, `product_delivery`,
-`agent_studio`, plus platform modules `agent_console`, `agent_registry`,
+`agent_studio`, plus platform modules `agent_platform.console`, `agent_platform.registry`,
 `agent_cognition`, `team_assistant`) are proxied over HTTP via
 `unified_api/team_proxy.py` to their own per-team container and never
 imported by this process. `backend/Dockerfile` reflects that: it installs
@@ -213,6 +213,15 @@ spans in-process. Grafana queries Tempo via the pre-provisioned "Tempo"
 datasource (`docker/grafana/provisioning/datasources/tempo.yml`, uid
 `khala-tempo`).
 
+Tempo is a Go binary, and the Go garbage collector doesn't know about cgroup
+memory limits — by default (`GOGC=100`) the heap can roughly double before a
+collection runs, which produces RSS spikes that can blow past the 1G cap even
+when average usage is fine. The `tempo` service sets `GOMEMLIMIT=800MiB` (a
+soft heap target the runtime actively collects toward, kept below the 1G cap
+to leave headroom for non-Go-heap memory like mmap'd WAL segments) and
+`GOGC=50` (collects more eagerly than the Go default) so peak RSS stays
+smoothed under the cgroup cap instead of sawtoothing past it.
+
 Query-path memory is bounded by three cooperating caps in `tempo.yaml`:
 
 - **`querier.max_concurrent_queries`** (5, Tempo default 20) — limits concurrently-executing
@@ -234,6 +243,159 @@ usage. See the concurrent-load validation script in the PR description for
 the querier + query_frontend sub-issue for how these values were checked
 under load.
 
+## Load Testing (k6)
+
+`docker/k6/load_test_unified_api.js` is a [Grafana k6](https://k6.io) script that fans out
+concurrent GET requests across a rotation of unified-api's *proxied* teams, hitting each team's
+forwarded `/health` endpoint through `khala:8080`. It's the repeatable, concurrency-controlled
+alternative to the one-off curl loop in the Verification section below — use it whenever you need
+sustained load rather than a quick sanity ping (e.g. to validate memory/right-sizing changes under
+realistic traffic). k6 was chosen over a hand-rolled script because it already reports
+throughput/latency out of the box and pairs naturally with the Prometheus + Grafana stack above;
+see `system_design/adr/ADR-011-grafana-k6-load-testing.md` for the full decision record.
+
+The k6 service is opt-in via the `load-test` Compose profile, so it never starts on a plain
+`docker compose up`:
+
+```bash
+docker compose -f docker/docker-compose.yml --env-file docker/.env up -d --build
+docker compose -f docker/docker-compose.yml --profile load-test run --rm k6
+```
+
+Concurrency (virtual users) and duration default to 10 VUs / 30s and are configurable via env vars
+or k6's native CLI flags:
+
+```bash
+# Env vars (picked up by the compose service definition)
+K6_VUS=20 K6_DURATION=60s docker compose -f docker/docker-compose.yml --profile load-test run --rm k6
+
+# Native k6 flags (override the script's `options`, or run k6 directly against the stack
+# without Docker if you have k6 installed locally)
+docker compose -f docker/docker-compose.yml --profile load-test run --rm k6 run --vus 20 --duration 60s /scripts/load_test_unified_api.js
+k6 run docker/k6/load_test_unified_api.js -e BASE_URL=http://localhost:8888 --vus 20 --duration 60s
+```
+
+`K6_TEAMS` (comma-separated team URL segments, default `blogging,personal-assistant,market-research,soc2-compliance,social-marketing,branding`)
+picks which proxied teams to target — pick from any team listed in the Port summary above except
+`user-profile`, `product-delivery`, and `agent-studio` (in-process, never proxied, so hitting them
+wouldn't exercise the proxy path this harness is for).
+
+k6 prints throughput and latency automatically at the end of every run — no extra flags needed:
+
+```
+     http_req_duration..............: avg=12.4ms min=3.1ms med=9.8ms max=118ms p(90)=22ms p(95)=31ms
+     http_req_failed.................: 0.00%  ✓ 0        ✗ 5412
+     http_reqs.......................: 5412   180.4/s
+```
+
+## Memory / RSS Measurement
+
+`docker/scripts/measure_unified_api_rss.sh` samples unified-api's process RSS across four
+operating states — idle, DB-pool-warm, Temporal-client-active, and peak-concurrency-burst — to
+build a reproducible memory profile for right-sizing the `khala` service's resource limits (see
+the `deploy.resources`/`mem_limit` block on the `khala` service above). It reads
+`process_resident_memory_bytes{job="unified-api"}` from Prometheus (already scraped, per the
+Observability section above — no new endpoint or `docker stats` shell-out needed) using the same
+`curl .../api/v1/query | jq` pattern as the Prometheus-targets verification step below.
+
+**Methodology**
+
+- **Warm-up period**: 30s of zero driven traffic before each `idle`/`temporal-active` sample batch
+  (`WARMUP_SECONDS`), so transient startup/GC-adjacent noise settles before sampling.
+- **Sampling interval**: 5s between samples, 5 samples per state by default
+  (`SAMPLE_INTERVAL_SECONDS`/`SAMPLE_COUNT`); the script reports the median and max per state.
+- **`idle`**: sampled immediately after `/health` responds and the warm-up period elapses. In the
+  standard compose config this baseline already includes the Postgres pool at its min size (2
+  connections, opened eagerly at startup) and the Temporal client connected (also automatic at
+  startup when `TEMPORAL_ADDRESS` is set) — there's no code path that defers either past process
+  readiness, so `idle` is "freshly booted, standard config, no request traffic," not "nothing
+  initialized yet."
+- **`db-pool-warm`**: fires 12 concurrent requests (`DB_WARM_CONCURRENCY`, above the pool's default
+  10-connection max) at `/api/product-delivery/products` (`DB_WARM_PATH`) to force the Postgres
+  pool to grow beyond min size, waits 5s to settle (`DB_WARM_SETTLE_SECONDS`, comfortably inside
+  psycopg_pool's ~300s default idle-reclaim window), then samples — isolating the incremental RSS
+  cost of a fully-grown pool. Targets that route rather than `/health`: `/health`'s live-DB-probe
+  branch runs through a fixed 2-worker executor (`_get_probe_executor` in
+  `backend/unified_api/main.py`), so concurrent `/health` traffic can never grow the pool past that
+  cap, no matter how many requests are in flight — `/api/product-delivery/products` is a plain
+  synchronous route that hits Postgres directly per request through Starlette's much larger default
+  thread pool. Aborts with an error instead of sampling if fewer than half the warm-up requests
+  succeeded, since that would produce a misleading "pool-warm" measurement against a pool that
+  never actually warmed.
+- **`temporal-active`**: sampled identically to `idle`, because the Temporal client isn't
+  toggleable at runtime — it's a boot-time decision. To isolate its incremental cost, run the
+  script twice across two container boots: once with `UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER=false`
+  and `UNIFIED_API_SANDBOX_TEMPORAL_WORKER=false` set on the `khala` service (Temporal-disabled
+  baseline — run `idle` against this boot), then again with the default config (Temporal enabled —
+  run `temporal-active`), and diff the two summaries.
+- **`peak-burst`**: launches the [k6 harness](#load-testing-k6) at `VUS=50 DURATION=60s`
+  (`PEAK_VUS`/`PEAK_DURATION` — "max configured concurrency" per the harness's own tunables) and
+  samples RSS every 15s (`PEAK_SAMPLE_INTERVAL_SECONDS`) for the burst's duration, reporting the
+  max observed value as the peak. The interval defaults to 15s — matching
+  `docker/prometheus/prometheus.yml`'s global `scrape_interval` — rather than something shorter,
+  since sampling faster than Prometheus actually scrapes just re-reads the same cached value and
+  silently produces fewer independent observations than it looks like. Keep this at or above your
+  stack's configured `scrape_interval` if you change it.
+
+**Running it**
+
+```bash
+docker compose -f docker/docker-compose.yml --env-file docker/.env up -d --build
+./docker/scripts/measure_unified_api_rss.sh idle
+./docker/scripts/measure_unified_api_rss.sh db-pool-warm
+./docker/scripts/measure_unified_api_rss.sh temporal-active
+./docker/scripts/measure_unified_api_rss.sh peak-burst
+```
+
+All four subcommands append to the same CSV (default `rss_measurements.csv` in the current
+directory, override with `OUTPUT_CSV`) with columns `timestamp,state,sample_index,rss_bytes`, and
+the `state` column always matches the subcommand name exactly (`idle`, `db-pool-warm`,
+`temporal-active`, `peak-burst`). Each invocation prints a median/max-in-MiB summary as it runs.
+Since the default filename has no timestamp, move or rename it (or set `OUTPUT_CSV` explicitly)
+between unrelated measurement sessions so they don't mix in one file. Attach or link the CSV,
+along with the printed summaries, wherever you're recording the measurement results for
+reproducibility.
+
+**Tests**: `docker/scripts/tests/test_measure_unified_api_rss.sh` covers the median/max math (odd
+and even sample counts, including Prometheus-style scientific-notation values), state-label
+consistency, `sample_index` sequencing, usage/bad-argument handling, failing loudly rather than
+reporting success when a state collects zero usable samples, and — via local mock HTTP servers
+standing in for `/health` and Prometheus, no live stack required — an end-to-end run of the `idle`
+and `db-pool-warm` subcommands. Run it with `bash docker/scripts/tests/test_measure_unified_api_rss.sh`.
+
+**Results (2026-08-12)**
+
+No live numbers exist yet for any of the four states. Two separate attempts to actually run this
+methodology — including the one that wrote this paragraph — were blocked before reaching a live
+stack: Docker Hub pulls are denied at the network-egress layer (confirmed here via the outbound
+proxy explicitly 403ing the `CONNECT` to `production.cloudfront.docker.com`, which serves image
+layer blobs), so `docker compose up` can't pull Postgres, Temporal, or any of the ~20 team-service
+images in this class of environment. Bringing up the stack somewhere with registry access and
+re-running the four subcommands above remains the only way to get trustworthy numbers. Until then,
+`docker/docker-compose.yml`'s `khala` service comment carries a reasoned, component-based worst-case
+estimate in place of a measurement, built from:
+
+- The existing bare-process idle floor (~137-140 MiB, no Postgres/Temporal — see that comment).
+- The Postgres pool's own configured range (`POSTGRES_POOL_MIN_SIZE`/`MAX_SIZE`, default 2/10 —
+  `backend/shared/postgres/client.py`) at a conservative ~2-5 MiB/connection.
+- An unverified, industry-typical figure for the `temporalio` client's Rust-core bridge (~20-40
+  MiB) — the number most worth replacing first, since it's the least grounded in this repo.
+- Per-team httpx pool connections (`backend/unified_api/team_proxy.py`), which are KB- not
+  MB-scale per idle keep-alive connection. Worth flagging while re-validating "post pool-tuning":
+  every real team currently falls through to `DEFAULT_POOL_LIMITS` (10 max_connections / 5
+  max_keepalive) — `TEAM_POOL_CONFIG`'s per-team overrides are keyed to `auth_team`/`billing_team`/
+  `reporting_team`/`ops_tooling`, none of which exist in `TEAM_CONFIGS` (the real proxied teams are
+  `blogging`, `software_engineering`, `personal_assistant`, etc.), so the per-team differentiation
+  never actually applies. The reduced *default* is still real and still helps; only the *per-team*
+  part is dead code.
+- A generous, deliberately unbounded-by-analysis headroom slice for concurrency/thread overhead —
+  exactly what live `peak-burst` sampling would pin down and this math can't.
+
+The reasoned worst case lands around 245-340 MiB, comfortably inside the current 512M reservation,
+so the compose values are unchanged. Whoever next has registry access: run the four subcommands
+above, replace this paragraph and the compose comment with the real numbers, and reconsider the
+values if they don't hold up.
+
 ## Verification
 
 After starting the stack:
@@ -244,7 +406,7 @@ After starting the stack:
 4. **Logs API** – With `ENABLE_LOG_API=1` in `.env`, `curl "http://localhost:8888/api/software-engineering/logs?service=sw_api&lines=100"` should return 200 and log content. With `ENABLE_LOG_API` unset, the same URL should return 404.
 5. **Metrics endpoints** – `curl -sf http://localhost:8888/metrics | head` and the same on `:8585` (job service) and `:8090`–`:8110` (team services) should return Prometheus text-format output (`# HELP ...`).
 6. **Prometheus targets** – Open http://localhost:9090/targets; all rows should be green (`UP`). Or run `curl -s 'http://localhost:9090/api/v1/query?query=up' | jq '.data.result[] | {service:.metric.service, up:.value[1]}'`.
-7. **Grafana datasource** – `curl -sf -u admin:admin http://localhost:3000/api/datasources | jq` should list one `Prometheus` datasource. Then open http://localhost:3000 → Dashboards → Khala → **Khala FastAPI Overview** and confirm the panels render live data after generating some traffic (e.g. `for i in {1..20}; do curl -sf http://localhost:8888/health > /dev/null; done`).
+7. **Grafana datasource** – `curl -sf -u admin:admin http://localhost:3000/api/datasources | jq` should list one `Prometheus` datasource. Then open http://localhost:3000 → Dashboards → Khala → **Khala FastAPI Overview** and confirm the panels render live data after generating some traffic (e.g. `for i in {1..20}; do curl -sf http://localhost:8888/health > /dev/null; done`, or for a repeatable, concurrency-controlled load run see the "Load Testing (k6)" section above).
 8. **Tempo tracing** – `curl -sf http://localhost:3200/ready` should return `ready`. Generate a few traces by calling an opted-in service a few times through `khala:8888` (e.g. an `se-service` route), wait ~10s for `ingester.trace_idle_period` to flush, then `curl -s 'http://localhost:3200/api/search?tags=' | jq '.traces | length'` should return a non-zero count. Pick a `traceID` from that response and confirm `curl -s http://localhost:3200/api/traces/<traceID> | jq '.batches | length'` returns non-zero. Finally, in Grafana open **Explore** → **Tempo** datasource and confirm the same trace is browsable via search and via trace-by-ID lookup.
 
 ## Security

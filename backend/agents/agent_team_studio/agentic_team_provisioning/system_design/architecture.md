@@ -149,7 +149,7 @@ In this service, the orchestrator is **not** a dedicated LLM agent — it is the
 | `RosterValidator` | `roster_validation.py` | Detects gaps: `unrostered_agent`, `unused_agent`, `unstaffed_step`, `incomplete_profile`, `sparse_profile` (`roster_validation.py:48-151`) |
 | `AgentEnvProvisioner` | `agent_env_provisioning.py` | Spawns background threads calling `agent_provisioning_team.ProvisioningOrchestrator.run_workflow` (`agent_env_provisioning.py:88-129`) |
 | `PipelineRunner` | `runtime/pipeline_runner.py` | Walks a `ProcessDefinition` DAG step-by-step, pauses at `WAIT` steps, resumes on human input (`runtime/pipeline_runner.py:33-71`) |
-| `AgentBuilder` | `runtime/agent_builder.py` | Converts an `AgenticTeamAgent` roster entry into a `strands.Agent` for interactive testing |
+| `AgentBuilder` | `runtime/agent_builder.py` | Builds a `strands.Agent` from join-at-read persona fields for interactive testing and pipeline steps |
 | `AgenticTestStore` | `testing/store.py` | Testing-mode persistence (chat sessions, messages, pipeline runs, ratings) |
 | `TeamFormStore` + `JobServiceClient` | `infrastructure.py` | Per-team SQLite (`team.db`, WAL mode) and job lifecycle tracking (`infrastructure.py:51-80`) |
 

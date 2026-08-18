@@ -74,6 +74,8 @@ class LLMCallRecord:
     total_tokens: int
     latency_ms: int
     status: str  # "success", "error", "rate_limited", "truncated"
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
     error_type: Optional[str] = None
     job_id: Optional[str] = None
     objective: str = ""
@@ -100,6 +102,8 @@ class LLMCallRecord:
             "status": self.status,
             "cost_usd": self.cost_usd,
             "outcome": self.outcome,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_creation_tokens": self.cache_creation_tokens,
         }
         if self.error_type:
             d["error_type"] = self.error_type
@@ -190,6 +194,8 @@ def record_llm_call(
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
     total_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    cache_creation_tokens: int = 0,
     latency_ms: int = 0,
     status: str = "success",
     error_type: Optional[str] = None,
@@ -209,6 +215,10 @@ def record_llm_call(
     over the token counts when not supplied; ``outcome`` defaults to a coarse
     bucket derived from ``status``. Returns the created record for
     testing/inspection.
+
+    ``cache_read_tokens`` and ``cache_creation_tokens`` default to ``0`` and are
+    populated by providers that expose prompt-cache accounting (currently
+    Anthropic, via ``ClaudeLLMClient``); other callers may omit them.
 
     Negative ``prompt_tokens``/``completion_tokens`` are clamped to ``0`` for the
     cost estimate (telemetry recording must never raise into the LLM call path,
@@ -246,6 +256,8 @@ def record_llm_call(
         total_tokens=total_tokens,
         latency_ms=latency_ms,
         status=status,
+        cache_read_tokens=cache_read_tokens,
+        cache_creation_tokens=cache_creation_tokens,
         error_type=error_type,
         job_id=job_id,
         objective=objective,
@@ -363,6 +375,8 @@ def _emit_otel_llm_span(record: LLMCallRecord) -> None:
             "llm.usage.prompt_tokens": record.prompt_tokens,
             "llm.usage.completion_tokens": record.completion_tokens,
             "llm.usage.total_tokens": record.total_tokens,
+            "llm.usage.cache_read_tokens": record.cache_read_tokens,
+            "llm.usage.cache_creation_tokens": record.cache_creation_tokens,
             # Issue-named aliases for the input/output token counts.
             "llm.input_tokens": record.prompt_tokens,
             "llm.output_tokens": record.completion_tokens,
@@ -442,6 +456,8 @@ class UsageSummary:
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
     total_tokens: int = 0
+    total_cache_read_tokens: int = 0
+    total_cache_creation_tokens: int = 0
     avg_latency_ms: float = 0.0
     error_count: int = 0
     by_agent: Dict[str, Dict[str, int]] = field(default_factory=dict)
@@ -455,6 +471,8 @@ class UsageSummary:
             "total_prompt_tokens": self.total_prompt_tokens,
             "total_completion_tokens": self.total_completion_tokens,
             "total_tokens": self.total_tokens,
+            "total_cache_read_tokens": self.total_cache_read_tokens,
+            "total_cache_creation_tokens": self.total_cache_creation_tokens,
             "avg_latency_ms": round(self.avg_latency_ms, 1),
             "error_count": self.error_count,
             "by_agent": self.by_agent,
@@ -465,25 +483,36 @@ class UsageSummary:
 def get_usage_summary(
     *,
     team: Optional[str] = None,
-    window_hours: float = 24.0,
+    window_hours: Optional[float] = 24.0,
 ) -> Dict[str, Any]:
     """Aggregate token usage over the given time window.
 
     Returns a summary dict with totals and per-agent/per-model breakdowns.
+    ``window_hours is None`` means all-time (no timestamp cutoff).
+    ``window_hours == 0`` is a zero-width window (cutoff is now), matching
+    the pre-change route when clients sent numeric ``window=0``.
     """
-    cutoff = time.time() - (window_hours * 3600)
     with _log_lock:
-        records = [r for r in _call_log if r.timestamp >= cutoff]
+        if window_hours is None:
+            records = list(_call_log)
+        else:
+            cutoff = time.time() - (window_hours * 3600)
+            records = [r for r in _call_log if r.timestamp >= cutoff]
     if team:
         records = [r for r in records if r.team == team]
 
-    summary = UsageSummary(team=team or "all", window_hours=window_hours)
+    summary = UsageSummary(
+        team=team or "all",
+        window_hours=0.0 if window_hours is None else window_hours,
+    )
     total_latency = 0
     for r in records:
         summary.total_calls += 1
         summary.total_prompt_tokens += r.prompt_tokens
         summary.total_completion_tokens += r.completion_tokens
         summary.total_tokens += r.total_tokens
+        summary.total_cache_read_tokens += r.cache_read_tokens
+        summary.total_cache_creation_tokens += r.cache_creation_tokens
         total_latency += r.latency_ms
         if r.status != "success":
             summary.error_count += 1
@@ -495,10 +524,22 @@ def get_usage_summary(
             agent["tokens"] += r.total_tokens
 
         # Per-model breakdown
-        if r.model:
-            model = summary.by_model.setdefault(r.model, {"calls": 0, "tokens": 0})
-            model["calls"] += 1
-            model["tokens"] += r.total_tokens
+        model_key = r.model or ""
+        model = summary.by_model.setdefault(
+            model_key,
+            {
+                "calls": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "tokens": 0,
+            },
+        )
+        model["calls"] += 1
+        model["prompt_tokens"] += r.prompt_tokens
+        model["completion_tokens"] += r.completion_tokens
+        model["total_tokens"] += r.total_tokens
+        model["tokens"] += r.total_tokens
 
     if summary.total_calls > 0:
         summary.avg_latency_ms = total_latency / summary.total_calls

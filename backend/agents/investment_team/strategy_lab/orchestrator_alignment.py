@@ -40,20 +40,20 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from shared.env_config import env_int
-
 from ..market_data_service import OHLCVBar
 from ..models import BacktestConfig, BacktestResult, StrategySpec, TradeRecord
 from ..trading_service.modes.sandbox_compat import StrategyRunResult
 from ._orchestrator_helpers import (
     _AlignmentLoopOutcome,
     _attach_execution_diagnostics,
+    _DesignAttemptState,
     _DriftCollector,
     _format_execution_diagnostics,
     _maybe_attach_coverage_report,
 )
-from .agents._llm_budget import DesignBudgetExhausted
+from .agents._llm_budget import DesignBudgetExhausted, _annotate_budget_exhaustion
 from .agents.alignment import TradeAlignmentReport
+from .budget_config import StrategyLabBudgetConfig
 from .exceptions import OrchestratorContractError, SpecImplementabilityError
 from .quality_gates.models import QualityGateResult, join_gate_details
 
@@ -66,11 +66,11 @@ PhaseCallback = Callable[[str, Dict[str, Any]], None]
 # alignment agent to rewrite the Python code; the new code is sent back
 # through the sandbox for a fresh backtest. The cap prevents runaway loops
 # when the agent cannot converge.
-MAX_ALIGNMENT_ROUNDS = env_int("STRATEGY_LAB_MAX_ALIGNMENT_ROUNDS", 10, floor=1)
+MAX_ALIGNMENT_ROUNDS = StrategyLabBudgetConfig.from_env().max_alignment_rounds
 
 
 @dataclass
-class _AlignmentRoundOutcome:
+class _AlignmentRoundOutcome(_DesignAttemptState):
     """One iteration of ``_run_trade_alignment_loop``.
 
     Semantics:
@@ -87,10 +87,6 @@ class _AlignmentRoundOutcome:
     directly.
     """
 
-    spec: StrategySpec
-    code: str
-    trades: List[TradeRecord]
-    metrics: BacktestResult
     terminate: bool
     # Set on a committing round (``terminate=False``) to the conformance
     # verdict of the just-committed code; ignored on terminate rounds (which
@@ -395,8 +391,7 @@ class AlignmentMixin:
                 config=config,
             )
         except DesignBudgetExhausted as exc:
-            exc.latest_spec = spec
-            exc.latest_code = code
+            _annotate_budget_exhaustion(exc, spec, code=code)
             raise
         alignment_reports.append(report)
 

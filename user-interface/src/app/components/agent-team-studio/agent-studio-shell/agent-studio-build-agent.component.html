@@ -1,20 +1,115 @@
 <section class="studio-build">
-  <div class="studio-build__bar">
-    @if (selectedAgentId(); as id) {
-      <span class="studio-build__selected">
-        <mat-icon aria-hidden="true">check_circle</mat-icon>
-        <span>selected:&nbsp;<strong>{{ id }}</strong> — ready to test</span>
-      </span>
-    } @else {
-      <span class="studio-build__hint">Pick an agent below to work on, then test it in the next step.</span>
+  <nav class="studio-build__substepper" role="list" aria-label="Build sub-steps">
+    @for (sub of subStages; track sub.key; let i = $index) {
+      <div
+        class="studio-build__substep"
+        role="listitem"
+        [class.is-active]="state.buildSubStageStatus(i) === 'active'"
+        [class.is-done]="state.buildSubStageStatus(i) === 'done'"
+        [attr.aria-current]="state.buildSubStageStatus(i) === 'active' ? 'step' : null"
+      >
+        <span class="studio-build__substep-num">
+          @if (state.buildSubStageStatus(i) === 'done') {
+            <mat-icon aria-hidden="true">check</mat-icon>
+          } @else {
+            {{ i + 1 }}
+          }
+        </span>
+        <span class="studio-build__substep-label">{{ sub.label }}</span>
+      </div>
+      @if (i < subStages.length - 1) {
+        <span class="studio-build__substep-conn" aria-hidden="true"></span>
+      }
     }
-    <button mat-stroked-button type="button" class="studio-build__provision-btn" (click)="openProvision()">
-      <mat-icon aria-hidden="true">cloud_upload</mat-icon>
-      Provision an agent
-    </button>
-  </div>
+  </nav>
 
-  <app-agent-catalog (requestRun)="onSelectAgent($event)" />
+  @switch (activeSubStageDef().key) {
+    @case ('start') {
+      <div class="studio-build__bar">
+        @if (selectedAgentId(); as id) {
+          <span class="studio-build__selected">
+            <mat-icon aria-hidden="true">check_circle</mat-icon>
+            <span>cloned:&nbsp;<strong>{{ id }}</strong> — ready to define</span>
+          </span>
+        } @else if (cloning()) {
+          <span class="studio-build__hint">Cloning agent…</span>
+        } @else {
+          <span class="studio-build__hint">Pick an agent below to work on, then test it in the next step.</span>
+        }
+        <button mat-stroked-button type="button" class="studio-build__provision-btn" (click)="openProvision()">
+          <mat-icon aria-hidden="true">cloud_upload</mat-icon>
+          Provision an agent
+        </button>
+      </div>
+
+      @if (cloneError(); as message) {
+        <p class="error-text">{{ message }}</p>
+      }
+
+      <app-agent-catalog (requestRun)="onSelectAgent($event)" />
+
+      @if (selectedAgentId()) {
+        <div class="studio-build__substage-actions">
+          <button
+            mat-flat-button
+            type="button"
+            class="studio-build__continue-sub"
+            (click)="continueToDefine()"
+          >
+            Continue to Define →
+          </button>
+        </div>
+      }
+    }
+    @case ('define') {
+      <app-agent-studio-stage-placeholder
+        title="Define"
+        blurb="Co-author the agent with the build assistant, then fine-tune the live definition panel."
+        icon="chat"
+        [handoff]="state.handoff()"
+      />
+      <div class="studio-build__substage-actions">
+        <button
+          mat-flat-button
+          type="button"
+          class="studio-build__continue-sub"
+          (click)="continueToConfigure()"
+        >
+          Continue to Configure →
+        </button>
+      </div>
+    }
+    @case ('configure') {
+      <app-agent-studio-stage-placeholder
+        title="Configure & Review"
+        blurb="Review the agent's full anatomy, then save it to register it in the catalog."
+        icon="fact_check"
+        [handoff]="state.handoff()"
+      />
+      @if (saveError(); as message) {
+        <p class="error-text">{{ message }}</p>
+      }
+      <div class="studio-build__substage-actions">
+        <button
+          mat-stroked-button
+          type="button"
+          class="studio-build__back-sub"
+          (click)="backToDefine()"
+        >
+          ◂ back to Define
+        </button>
+        <button
+          mat-flat-button
+          type="button"
+          class="studio-build__save-sub"
+          [disabled]="saving()"
+          (click)="saveAgent()"
+        >
+          {{ saving() ? 'Saving…' : 'Save agent' }}
+        </button>
+      </div>
+    }
+  }
 </section>
 
 @if (provisionOpen()) {
@@ -40,7 +135,7 @@
       </button>
     </header>
     <div class="studio-build__provision-body">
-      <app-agent-provisioning-dashboard />
+      <app-agent-provisioning-panel />
     </div>
   </aside>
 }

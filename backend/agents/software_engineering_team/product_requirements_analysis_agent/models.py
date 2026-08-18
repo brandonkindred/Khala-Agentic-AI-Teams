@@ -15,7 +15,6 @@ from pydantic import BaseModel, Field
 class AnalysisPhase(str, Enum):
     """Phases of the Product Requirements Analysis workflow."""
 
-    CONTEXT_DISCOVERY = "context_discovery"  # deprecated, kept for backward compat
     SOP_PHASE1 = "sop_phase1"
     SOP_PHASE2_ARCHITECTURE = "sop_phase2_architecture"
     SPEC_REVIEW = "spec_review"

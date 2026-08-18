@@ -29,7 +29,6 @@ def test_identical_old_new_yields_empty_surface() -> None:
 def test_new_file_when_old_contents_none() -> None:
     surface = build_change_surface_from_pairs({"a.py": _NEW}, old_contents=None)
     assert not surface.is_empty
-    assert "### a.py ###" in surface.code
     assert "a.py" in surface.blocks
 
 
@@ -39,7 +38,7 @@ def test_new_file_when_key_missing_from_old_map() -> None:
         old_contents={"other.py": "x\n"},
     )
     assert not surface.is_empty
-    assert "### b.py ###" in surface.code
+    assert "b.py" in surface.blocks
 
 
 def test_modified_file_golden_parity_with_patch_path() -> None:
@@ -53,4 +52,3 @@ def test_modified_file_golden_parity_with_patch_path() -> None:
     )
     assert not via_pairs.is_empty
     assert via_pairs == via_patches
-    assert via_pairs.code == via_patches.code

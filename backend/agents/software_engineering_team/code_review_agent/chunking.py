@@ -15,7 +15,6 @@ from __future__ import annotations
 import re
 from typing import List, Optional, Tuple
 
-from software_engineering_team.shared.chunking import parse_code_into_file_blocks
 from software_engineering_team.shared.context_sizing import parse_env_int
 
 from .code_boundaries import preferred_break_lines
@@ -29,8 +28,17 @@ from .models import (
     is_no_op_suggestion,
 )
 
-# First capture: the original line number embedded in a pre-numbered line.
-_PRENUMBERED_LINE_RE = re.compile(r"^\s*(\d+):")
+# First capture: the original line number embedded in a pre-numbered line
+# (live ``N| `` gutter, or legacy ``N: ``). Optional leading spaces are
+# width-padding on the live format, not source indent.
+# Optional leading ``[+>]`` tolerates a change-surface marker column
+# (``+ 9| code``) so only the digit run is captured — the recovered line number
+# is identical with or without the marker. The delimiter alternation consumes
+# the trailing gutter space (``| `` / ``: ``) for parity with the equivalent
+# patterns in ``function_boundaries.py`` and ``mapping.py``; every rendered
+# gutter carries that space (``_NUMBERED_LINE_SEP``), so requiring it never
+# drops a real pre-numbered line.
+_PRENUMBERED_LINE_RE = re.compile(r"^[+>]?[ ]*(\d+)(?:: |\| )")
 
 # Suffix that ``ReviewChunk.paths_label`` appends to partial segments; stripped
 # when the model echoes it back inside an issue's file_path.
@@ -93,35 +101,39 @@ def _map_parallelism() -> int:
     return max(1, min(ceiling, get_llm_max_concurrency()))
 
 
+def map_parallelism() -> int:
+    """Public accessor for the code-review map-phase fan-out budget.
+
+    Stable public API for passes that fan out on the shared budget (the map
+    phase, false-positive verification, scope classification) so they need not
+    import the private ``_map_parallelism`` symbol.
+
+    Postconditions:
+        - Returns ``_map_parallelism()`` — ``min(CODE_REVIEW_MAP_PARALLELISM,
+          LLM_MAX_CONCURRENCY)`` floored at 1. Never raises.
+    """
+    return _map_parallelism()
+
+
 def _blocks_from_input(input_data: CodeReviewInput) -> Tuple[List[Tuple[str, str]], List[str]]:
     """Resolve the review input into ordered (path, content) blocks.
 
     Preconditions:
         - ``input_data`` is a valid ``CodeReviewInput`` (its validator already
-          guarantees a code source is present).
+          guarantees ``files`` is a non-empty mapping).
 
     Postconditions:
-        - When ``files`` is set: one block per file with non-blank content,
-          insertion order preserved, no header parsing of ``code``.
-        - Otherwise blocks come from ``parse_code_into_file_blocks(code)``.
+        - One block per file with non-blank content, insertion order preserved.
         - No returned block has blank content; the second element names every
           non-blank path whose content was blank, so the caller can report the
           skip instead of silently dropping the file.
     """
     skipped: List[str] = []
-    if input_data.files is not None:
-        blocks = []
-        for path, content in input_data.files.items():
-            if content and content.strip():
-                blocks.append((path, content))
-            else:
-                skipped.append(path)
-        return blocks, skipped
     blocks = []
-    for path, content in parse_code_into_file_blocks(input_data.code or ""):
-        if content.strip():
+    for path, content in input_data.files.items():
+        if content and content.strip():
             blocks.append((path, content))
-        elif path:
+        else:
             skipped.append(path)
     return blocks, skipped
 
@@ -164,11 +176,11 @@ def split_block_into_segments(
             )
         ]
     # Lines (1-based) that start a top-level construct; cutting before one keeps
-    # the preceding construct whole. Pre-numbered hunks carry "N: " prefixes that
+    # the preceding construct whole. Pre-numbered hunks carry "N| " prefixes that
     # defeat boundary detection and are rarely whole functions, so they keep the
     # plain line-boundary behavior (empty break set).
     breaks = frozenset() if pre_numbered else preferred_break_lines(path, content)
-    # Split pieces become partial segments, which render with "N: " prefixes
+    # Split pieces become partial segments, which render with "N| " prefixes
     # (unless already pre-numbered); budget each line's rendered size so the
     # prompt stays within max_chars after prefixing.
     prefix_width = 0 if pre_numbered else len(str(total_lines)) + 2
@@ -268,7 +280,7 @@ def build_review_chunks(
 
 
 def _prenumbered_line_numbers(seg: FileSegment) -> List[int]:
-    """Parse the embedded ``N: `` line-number prefixes of a pre-numbered segment.
+    """Parse the embedded ``N| `` / ``N: `` line-number prefixes of a pre-numbered segment.
 
     Postconditions:
         - Returns the parsed prefixes in content order; empty when the segment
@@ -396,14 +408,17 @@ def _segment_notes(chunk: ReviewChunk) -> str:
         name = seg.path or "the code"
         if seg.pre_numbered:
             notes.append(
-                f"The lines of {name} carry their original line-number prefixes (e.g. `123: code`); "
-                "set `line` to those exact prefixed numbers."
+                f"The lines of {name} carry their original line-number prefixes (e.g. `123| code`); "
+                "set `line` to those exact prefixed numbers. The `N| ` gutter is metadata, not "
+                "source: ignore it when judging indentation. A continuation line indented 4 spaces "
+                "past its opening `(` / `[` / `{` is standard hanging indent, not extra whitespace."
             )
         elif seg.is_partial:
             notes.append(
                 f"{name} is shown only from original line {seg.start_line} to {seg.end_line} "
                 f"(of {seg.total_lines} total), and every line carries its original line-number "
-                "prefix (e.g. `123: code`); set `line` to those exact prefixed numbers."
+                "prefix (e.g. `123| code`); set `line` to those exact prefixed numbers. The "
+                "`N| ` gutter is metadata, not source: ignore it when judging indentation."
             )
     return "\n".join(notes)
 

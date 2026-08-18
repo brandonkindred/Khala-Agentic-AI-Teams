@@ -62,6 +62,9 @@ class _CountingClient(DummyLLMClient):
     """Returns a fixed canned response; counts total and map-phase calls.
 
     Thread-safe: map calls may run in parallel across chunks.
+
+    After the think-then-format split, the map marker lives on the reasoning
+    ``complete`` prompt; ``complete_json`` is the format pass only.
     """
 
     def __init__(self, response: Dict[str, Any]) -> None:
@@ -71,11 +74,16 @@ class _CountingClient(DummyLLMClient):
         self.calls = 0
         self.map_calls = 0
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    def complete(self, prompt: str, **kwargs: Any) -> str:
         with self._lock:
             self.calls += 1
             if _MAP_MARKER in prompt:
                 self.map_calls += 1
+        return "Structured prose review summary."
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        with self._lock:
+            self.calls += 1
         return dict(self._response)
 
 
@@ -93,10 +101,14 @@ class _SwitchingClient(DummyLLMClient):
         self._lock = threading.Lock()
         self.map_calls = 0
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    def complete(self, prompt: str, **kwargs: Any) -> str:
         with self._lock:
             if _MAP_MARKER in prompt:
                 self.map_calls += 1
+        return "Structured prose review summary."
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        with self._lock:
             resp = self._responses[min(self._idx, len(self._responses) - 1)]
             self._idx += 1
             return dict(resp)
@@ -117,12 +129,15 @@ class _FailOnMarkerClient(DummyLLMClient):
         self.map_calls = 0
         self.fail = True
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    def complete(self, prompt: str, **kwargs: Any) -> str:
         with self._lock:
             if _MAP_MARKER in prompt:
                 self.map_calls += 1
         if self.fail and self._fail_marker in prompt:
             raise LLMSemanticExhaustionError("no verdict")
+        return "Structured prose review summary."
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         return dict(_APPROVED)
 
 
@@ -242,6 +257,91 @@ def test_context_fingerprint_normalizes_non_profile_enum_values() -> None:
     )
 
 
+def test_replaced_content_changes_submission_fingerprint() -> None:
+    """A before-image (``replaced_content``) present vs absent yields distinct
+    submission keys, so a with/without-before-image pair can never collide."""
+    without = _one_file_input()
+    with_before = _one_file_input(replaced_content={"app/a.py": "def f():\n    return 0\n"})
+
+    fp_without = mapping._submission_fingerprint(without, "model-A", False, False, True, 0.6)
+    fp_with = mapping._submission_fingerprint(with_before, "model-A", False, False, True, 0.6)
+    assert fp_without != fp_with
+
+    # The no-before-image case reproduces today's key exactly (absent behaves as
+    # before this field existed): a second identical no-before-image input matches.
+    assert (
+        mapping._submission_fingerprint(_one_file_input(), "model-A", False, False, True, 0.6)
+        == fp_without
+    )
+
+
+def test_identical_replaced_content_matches_submission_fingerprint() -> None:
+    """The same before-image is deterministic (same key); a different before-image
+    forces a distinct key."""
+    before = {"app/a.py": "def f():\n    return 0\n"}
+    one = _one_file_input(replaced_content=before)
+    two = _one_file_input(replaced_content=dict(before))
+    assert mapping._submission_fingerprint(
+        one, "model-A", False, False, True, 0.6
+    ) == mapping._submission_fingerprint(two, "model-A", False, False, True, 0.6)
+
+    other = _one_file_input(replaced_content={"app/a.py": "def f():\n    return 1\n"})
+    assert mapping._submission_fingerprint(
+        one, "model-A", False, False, True, 0.6
+    ) != mapping._submission_fingerprint(other, "model-A", False, False, True, 0.6)
+
+
+def test_mutation_analysis_flag_changes_submission_fingerprint() -> None:
+    """``mutation_analysis_enabled`` is output-affecting (it decides whether a
+    replaced-content before-image is shown to the model and whether the
+    mutation-vs-replaced-code sub-check runs), so it must flip the submission
+    fingerprint like the other output-affecting toggles -- otherwise the
+    coordinator's short-circuit cache could serve a verdict computed under one
+    state to a run under the other. Like ``spec_compliance_single_pass``, this
+    is a caller-resolved (already profile-folded) boolean, not an env var the
+    fingerprint helper reads itself -- see
+    ``test_mutation_analysis_flag_passed_to_fingerprint_is_profile_gated``."""
+    input_data = _one_file_input(replaced_content={"app/a.py": "def f():\n    return 0\n"})
+
+    fp_off = mapping._submission_fingerprint(input_data, "model-A", False, False, True, 0.6)
+    fp_on = mapping._submission_fingerprint(input_data, "model-A", False, True, True, 0.6)
+
+    assert fp_off != fp_on
+
+
+def test_side_effect_consolidation_flag_changes_submission_fingerprint() -> None:
+    """``side_effect_consolidation_enabled`` is output-affecting for ``side-effects``
+    findings (it decides whether they merge regardless of wording and whether the
+    citation signal applies), so it must flip the submission fingerprint like the
+    other output-affecting toggles -- otherwise the coordinator's short-circuit
+    cache could serve a verdict computed under one state to a run under the
+    other. Like ``mutation_analysis_enabled``, this is a caller-resolved
+    (already profile-folded) boolean, not an env var the fingerprint helper
+    reads itself -- see
+    ``test_side_effect_consolidation_flag_passed_to_fingerprint_is_profile_gated``."""
+    input_data = _one_file_input()
+
+    fp_off = mapping._submission_fingerprint(input_data, "model-A", False, False, False, 0.6)
+    fp_on = mapping._submission_fingerprint(input_data, "model-A", False, False, True, 0.6)
+
+    assert fp_off != fp_on
+
+
+def test_combine_similarity_threshold_changes_submission_fingerprint() -> None:
+    """``combine_similarity_threshold`` is output-affecting for *every* profile
+    (it governs ``combine_findings``'s generic proximity/same-anchor merge rules,
+    not just ``side-effects``), so it must flip the submission fingerprint --
+    unlike the other three toggles, this one is never profile-gated by the
+    caller -- see
+    ``test_combine_similarity_threshold_passed_to_fingerprint_is_not_profile_gated``."""
+    input_data = _one_file_input()
+
+    fp_default = mapping._submission_fingerprint(input_data, "model-A", False, False, True, 0.6)
+    fp_changed = mapping._submission_fingerprint(input_data, "model-A", False, False, True, 0.9)
+
+    assert fp_default != fp_changed
+
+
 def test_cache_hit_reproduces_findings_without_consulting_model() -> None:
     """A hit reuses the stored findings even if the model would now differ."""
     high_issue = {
@@ -287,9 +387,7 @@ def test_degraded_outcome_is_not_cached() -> None:
     # Default graceful degradation: the clean sibling drives an approved verdict,
     # chunk b is recorded as a non-blocking not-reviewed range (never posted).
     assert degraded.approved is True
-    assert not any(
-        mapping.NOT_REVIEWED_FINDING_MARKER in i.description for i in degraded.issues
-    )
+    assert not any(mapping.NOT_REVIEWED_FINDING_MARKER in i.description for i in degraded.issues)
     assert degraded.not_reviewed_ranges  # b's range is recorded for observability
 
     # Heal the client and re-run identical input: chunk a is a cache hit (no new
@@ -317,12 +415,15 @@ class _FailFullThenBisectClient(DummyLLMClient):
         self._lock = threading.Lock()
         self.map_calls = 0
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    def complete(self, prompt: str, **kwargs: Any) -> str:
         with self._lock:
             if _MAP_MARKER in prompt:
                 self.map_calls += 1
         if "S_MARK_START" in prompt and "E_MARK_END" in prompt:
             raise LLMTruncatedError("full chunk too big", finish_reason="length")
+        return "Structured prose review summary."
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         return dict(_APPROVED)
 
 
@@ -350,6 +451,20 @@ def test_bisected_recovery_outcome_is_not_cached(monkeypatch: pytest.MonkeyPatch
     second = run_coordinator(client, data)
     assert client.map_calls == 2 * before
     assert second.approved is True
+
+
+def test_chunk_outcome_cache_size_default_override_and_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default is 512; env override applies; negative values clamp to 0."""
+    monkeypatch.delenv("CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE", raising=False)
+    assert mapping._chunk_outcome_cache_size() == mapping.DEFAULT_CHUNK_OUTCOME_CACHE_SIZE
+
+    monkeypatch.setenv("CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE", "10")
+    assert mapping._chunk_outcome_cache_size() == 10
+
+    monkeypatch.setenv("CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE", "-5")
+    assert mapping._chunk_outcome_cache_size() == 0
 
 
 def test_cache_disabled_via_env_is_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -415,10 +530,13 @@ class _PromptCapturingClient(DummyLLMClient):
         self._lock = threading.Lock()
         self.map_prompts: List[str] = []
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    def complete(self, prompt: str, **kwargs: Any) -> str:
         with self._lock:
             if _MAP_MARKER in prompt:
                 self.map_prompts.append(prompt)
+        return "Structured prose review summary."
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         return dict(_APPROVED)
 
 
@@ -465,6 +583,36 @@ def test_symbol_surface_is_not_capped_at_sixty() -> None:
     assert "fn_0" in result and "fn_74" in result
 
 
+def test_symbol_surface_finds_symbols_in_pre_numbered_content() -> None:
+    """Pre-numbered content (``FileSegment.pre_numbered`` / a diff-first
+    ``files=`` submission's ``N: `` prefixes) must not blind symbol extraction
+    -- the anchored patterns match column zero, so a raw ``"12: def foo():"``
+    line would otherwise never match ``def`` at all, silently emptying the
+    sibling surface for every pre-numbered submission."""
+    content = "1: def foo():\n2:     pass\n3: \n4: class Bar:\n5:     pass\n"
+    assert coord._symbol_surface(content) == ["Bar", "foo"]
+
+
+def test_symbol_surface_pre_numbered_still_excludes_indented_defs() -> None:
+    """De-numbering must restore each line's real column position, not just
+    strip the prefix and shift everything to column zero -- an indented
+    method stays non-top-level even once its ``N: `` prefix is removed."""
+    content = (
+        "10: class C:\n"
+        "11:     def method(self):\n"  # indented → not top-level
+        "12:         pass\n"
+        "13: def top():\n"  # column-zero → top-level
+        "14:     pass\n"
+    )
+    assert coord._symbol_surface(content) == ["C", "top"]
+
+
+def test_symbol_surface_strips_padded_pipe_gutter() -> None:
+    """Live ``N| `` prefixes (width-padded) must de-number to column zero too."""
+    content = "  9| def foo():\n 10|     pass\n"
+    assert coord._symbol_surface(content) == ["foo"]
+
+
 def test_half_sibling_surface_falls_back_without_map() -> None:
     """With no surface map (a direct caller), a bisected half keeps the parent's surface."""
     from code_review_agent.models import FileSegment, ReviewChunk
@@ -499,6 +647,7 @@ def test_sibling_surface_honors_env_cap(monkeypatch: pytest.MonkeyPatch) -> None
 
     monkeypatch.setenv("CODE_REVIEW_SIBLING_SURFACE_CHARS", "0")
     assert coord._sibling_surface(chunk, surface) == ""
+
 
 def test_surface_by_path_skips_headerless_and_symbolless() -> None:
     """Only named blocks with a non-empty surface appear in the map."""
@@ -543,12 +692,15 @@ class _FailFullCaptureHalvesClient(DummyLLMClient):
         self._lock = threading.Lock()
         self.map_prompts: List[str] = []
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    def complete(self, prompt: str, **kwargs: Any) -> str:
         with self._lock:
             if _MAP_MARKER in prompt:
                 self.map_prompts.append(prompt)
         if "def a_func" in prompt and "def b_func" in prompt:
             raise LLMSemanticExhaustionError("combined chunk too big")
+        return "Structured prose review summary."
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         return dict(_APPROVED)
 
 
@@ -678,18 +830,14 @@ def test_waiter_reuses_resolved_inflight_result() -> None:
 
     def leader() -> None:
         try:
-            results.append(
-                mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
-            )
+            results.append(mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp))
         except BaseException as exc:  # noqa: BLE001 - collect for assertion
             errors.append(exc)
 
     def waiter() -> None:
         assert started.wait(timeout=2), "leader never started"
         try:
-            results.append(
-                mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
-            )
+            results.append(mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp))
         except BaseException as exc:  # noqa: BLE001 - collect for assertion
             errors.append(exc)
 
@@ -1019,9 +1167,23 @@ def test_spec_compliance_flag_passed_to_fingerprint_is_profile_gated(
     original = coord._submission_fingerprint
     calls: list = []
 
-    def _spy(input_data, model_fingerprint, spec_compliance_single_pass):
+    def _spy(
+        input_data,
+        model_fingerprint,
+        spec_compliance_single_pass,
+        mutation_analysis_enabled,
+        side_effect_consolidation_enabled,
+        combine_similarity_threshold,
+    ):
         calls.append(spec_compliance_single_pass)
-        return original(input_data, model_fingerprint, spec_compliance_single_pass)
+        return original(
+            input_data,
+            model_fingerprint,
+            spec_compliance_single_pass,
+            mutation_analysis_enabled,
+            side_effect_consolidation_enabled,
+            combine_similarity_threshold,
+        )
 
     monkeypatch.setattr(coord, "_submission_fingerprint", _spy)
 
@@ -1036,6 +1198,171 @@ def test_spec_compliance_flag_passed_to_fingerprint_is_profile_gated(
     calls.clear()
     run_coordinator(client, _one_file_input(profile=ReviewProfile.CODE_REVIEW))
     assert calls == [True], "the CODE_REVIEW profile must fingerprint the env var as-is"
+
+
+def test_mutation_analysis_flag_passed_to_fingerprint_is_profile_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run_coordinator`` computes the ``CODE_REVIEW_MUTATION_ANALYSIS`` decision
+    exactly once and passes the *already profile-gated* result into
+    ``_submission_fingerprint`` -- the fingerprint helper itself never reads the raw
+    env var. Mirrors
+    ``test_spec_compliance_flag_passed_to_fingerprint_is_profile_gated`` for the
+    mutation-analysis toggle.
+
+    Regression test: a profile-blind env read inside the fingerprint helper would
+    fingerprint a non-``CODE_REVIEW`` submission as flag-sensitive whenever the env
+    var happens to be set, even though neither side-effect pass ever honors the
+    toggle (or shows ``replaced_content`` to the model) outside ``CODE_REVIEW`` --
+    causing needless cache misses. Spying on the call site (rather than inferring it
+    from cache hit/miss side effects) proves the exact boolean the coordinator
+    resolved and threaded through.
+    """
+    monkeypatch.setenv("CODE_REVIEW_MUTATION_ANALYSIS", "true")
+    original = coord._submission_fingerprint
+    calls: list = []
+
+    def _spy(
+        input_data,
+        model_fingerprint,
+        spec_compliance_single_pass,
+        mutation_analysis_enabled,
+        side_effect_consolidation_enabled,
+        combine_similarity_threshold,
+    ):
+        calls.append(mutation_analysis_enabled)
+        return original(
+            input_data,
+            model_fingerprint,
+            spec_compliance_single_pass,
+            mutation_analysis_enabled,
+            side_effect_consolidation_enabled,
+            combine_similarity_threshold,
+        )
+
+    monkeypatch.setattr(coord, "_submission_fingerprint", _spy)
+
+    client = _CountingClient(_APPROVED)
+    run_coordinator(client, _one_file_input(profile=ReviewProfile.SPEC_CONFORMANCE))
+
+    assert calls == [False], (
+        "the flag is CODE_REVIEW-only; a non-CODE_REVIEW profile must fingerprint "
+        "as mutation-analysis=False regardless of the env var"
+    )
+
+    calls.clear()
+    run_coordinator(client, _one_file_input(profile=ReviewProfile.CODE_REVIEW))
+    assert calls == [True], "the CODE_REVIEW profile must fingerprint the env var as-is"
+
+
+def test_side_effect_consolidation_flag_passed_to_fingerprint_is_profile_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run_coordinator`` computes the ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``
+    decision exactly once and passes the *already profile-gated* result into
+    ``_submission_fingerprint`` -- the fingerprint helper itself never reads the raw
+    env var. Mirrors
+    ``test_mutation_analysis_flag_passed_to_fingerprint_is_profile_gated`` for the
+    side-effect-consolidation toggle.
+
+    Regression test: a profile-blind env read inside the fingerprint helper would
+    fingerprint a non-``CODE_REVIEW`` submission as flag-sensitive whenever the env
+    var happens to be set, even though ``consolidate_side_effects`` only ever
+    changes output for ``side-effects``-category findings, which no profile other
+    than ``CODE_REVIEW`` ever produces -- causing needless cache misses. Spying on
+    the call site (rather than inferring it from cache hit/miss side effects)
+    proves the exact boolean the coordinator resolved and threaded through.
+    """
+    monkeypatch.setenv("CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION", "true")
+    original = coord._submission_fingerprint
+    calls: list = []
+
+    def _spy(
+        input_data,
+        model_fingerprint,
+        spec_compliance_single_pass,
+        mutation_analysis_enabled,
+        side_effect_consolidation_enabled,
+        combine_similarity_threshold,
+    ):
+        calls.append(side_effect_consolidation_enabled)
+        return original(
+            input_data,
+            model_fingerprint,
+            spec_compliance_single_pass,
+            mutation_analysis_enabled,
+            side_effect_consolidation_enabled,
+            combine_similarity_threshold,
+        )
+
+    monkeypatch.setattr(coord, "_submission_fingerprint", _spy)
+
+    client = _CountingClient(_APPROVED)
+    run_coordinator(client, _one_file_input(profile=ReviewProfile.SPEC_CONFORMANCE))
+
+    assert calls == [False], (
+        "the flag is CODE_REVIEW-only; a non-CODE_REVIEW profile must fingerprint "
+        "as side-effect-consolidation=False regardless of the env var"
+    )
+
+    calls.clear()
+    run_coordinator(client, _one_file_input(profile=ReviewProfile.CODE_REVIEW))
+    assert calls == [True], "the CODE_REVIEW profile must fingerprint the env var as-is"
+
+
+def test_combine_similarity_threshold_passed_to_fingerprint_is_not_profile_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run_coordinator`` resolves ``CODE_REVIEW_COMBINE_SIMILARITY_THRESHOLD``
+    exactly once and passes it into ``_submission_fingerprint`` unconditionally --
+    unlike ``spec_compliance_single_pass``, ``mutation_analysis_enabled``, and
+    ``side_effect_consolidation_enabled``, this value is deliberately **not**
+    folded with a ``CODE_REVIEW`` profile restriction.
+
+    Regression test: ``combine_findings``'s similarity threshold governs the
+    generic proximity/same-anchor merge rules for every finding category, and
+    ``_run_tail_passes``/``combine_findings`` run for every profile, not just
+    ``CODE_REVIEW`` -- so gating this value by profile (over-applying the pattern
+    the other three toggles use) would let a threshold change silently fail to
+    invalidate a cached non-``CODE_REVIEW`` verdict the new threshold should have
+    altered. Spying on the call site proves the exact value the coordinator
+    resolved and threaded through is identical across profiles.
+    """
+    monkeypatch.setenv("CODE_REVIEW_COMBINE_SIMILARITY_THRESHOLD", "0.9")
+    original = coord._submission_fingerprint
+    calls: list = []
+
+    def _spy(
+        input_data,
+        model_fingerprint,
+        spec_compliance_single_pass,
+        mutation_analysis_enabled,
+        side_effect_consolidation_enabled,
+        combine_similarity_threshold,
+    ):
+        calls.append(combine_similarity_threshold)
+        return original(
+            input_data,
+            model_fingerprint,
+            spec_compliance_single_pass,
+            mutation_analysis_enabled,
+            side_effect_consolidation_enabled,
+            combine_similarity_threshold,
+        )
+
+    monkeypatch.setattr(coord, "_submission_fingerprint", _spy)
+
+    client = _CountingClient(_APPROVED)
+    run_coordinator(client, _one_file_input(profile=ReviewProfile.SPEC_CONFORMANCE))
+
+    assert calls == [0.9], (
+        "the threshold affects every profile's finding combination, so it must "
+        "fingerprint as the resolved env value regardless of profile"
+    )
+
+    calls.clear()
+    run_coordinator(client, _one_file_input(profile=ReviewProfile.CODE_REVIEW))
+    assert calls == [0.9], "the CODE_REVIEW profile must fingerprint the same resolved value"
 
 
 def test_rejected_submission_is_not_short_circuited(monkeypatch: pytest.MonkeyPatch) -> None:

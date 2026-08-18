@@ -9,8 +9,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from llm_service import get_strands_model
 from llm_service.strands_model import resolve_strands_model
-from shared.repo_context.repo_utils import DOCUMENTATION_EXTENSIONS, read_repo_code
-from software_engineering_team.shared.git_utils import (
+from shared.git.git_utils import (
     DEVELOPMENT_BRANCH,
     checkout_branch,
     create_feature_branch,
@@ -18,6 +17,7 @@ from software_engineering_team.shared.git_utils import (
     merge_branch,
     write_files_and_commit,
 )
+from shared.repo_context.repo_utils import DOCUMENTATION_EXTENSIONS, read_repo_code
 from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .models import DocumentationInput, DocumentationOutput, DocumentationStatus

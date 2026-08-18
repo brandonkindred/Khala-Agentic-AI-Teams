@@ -1,0 +1,106 @@
+@use '../draft-btn';
+
+// The host wraps only the trigger button + `mat-menu` template — neither
+// participates in the shell's `.studio__draft-actions` flex layout as a box,
+// so it must not introduce one of its own.
+:host {
+  display: contents;
+}
+
+// Same shared look as the shell's `.studio__draft-btn` rule (`draft-btn.scss`)
+// — view encapsulation means that rule doesn't reach this component's own
+// template, so it still needs its own selector, but the property lives in
+// one place.
+.studio__draft-btn {
+  @include draft-btn.look;
+}
+
+.load-draft-menu {
+  &__loading,
+  &__empty,
+  &__error {
+    margin: 0;
+    padding: 8px 16px;
+    color: var(--kh-text-muted);
+    font-size: 0.85rem;
+  }
+
+  &__loading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  &__error {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--mat-sys-error, #b00020);
+
+    mat-icon {
+      font-size: 18px;
+      height: 18px;
+      width: 18px;
+    }
+  }
+
+  &__row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--kh-space-2);
+  }
+
+  // Overrides Material's default `width: 100%` on `mat-menu-item` so the
+  // load button sizes to its content instead of crowding out the sibling
+  // options trigger in the `&__row` flex layout.
+  &__load {
+    width: auto;
+  }
+
+  // `mat-icon-button` can't be combined with `mat-menu-item` (Angular
+  // doesn't allow two Components on one host element), so this is also a
+  // `mat-menu-item` — which is what gets it registered with MatMenu's
+  // FocusKeyManager, making it arrow-key reachable, unlike a plain
+  // `mat-icon-button` sibling. These overrides shrink its default
+  // full-width menu-item row back down to the compact icon-only square the
+  // `mat-icon-button` look provided.
+  &__options {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 0;
+    min-height: 0;
+    justify-content: center;
+    padding: var(--kh-space-2);
+
+    .mat-icon {
+      margin-right: 0;
+    }
+  }
+
+  &__body {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  &__name {
+    display: block;
+    font-weight: 600;
+  }
+
+  &__when {
+    display: block;
+    font-size: 0.75rem;
+    color: var(--kh-text-muted);
+  }
+
+  &__more {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: calc(100% - 16px);
+    margin: 4px 8px 8px;
+  }
+}

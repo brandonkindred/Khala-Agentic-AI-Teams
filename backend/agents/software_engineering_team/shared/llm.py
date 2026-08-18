@@ -7,7 +7,6 @@ and adds complete_json_with_continuation (delegates to Strands Agent).
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Dict, Optional, Union
 
@@ -37,10 +36,6 @@ DEFAULT_JSON_SYSTEM_PROMPT = "You are a helpful assistant. Always respond with v
 
 logger = logging.getLogger(__name__)
 
-# Backward-compat aliases so existing "from software_engineering_team.shared.llm import get_llm_for_agent" still works
-get_llm_for_agent = get_client
-get_llm_client = get_client
-
 
 def complete_json_with_continuation(
     client: LLMClient,
@@ -49,13 +44,11 @@ def complete_json_with_continuation(
     system_prompt: str = DEFAULT_JSON_SYSTEM_PROMPT,
     temperature: float = 0.0,
     think: Optional[Union[bool, str]] = None,
-    max_continuation_cycles: int = 5,
     task_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Complete JSON request with automatic continuation on truncation.
 
     Uses a Strands Agent for the LLM call. Parses the agent's text output as JSON.
-    max_continuation_cycles is accepted for backward compatibility but ignored.
 
     Preconditions:
         ``prompt`` is a non-empty string. ``client`` is a Strands ``Model``, an
@@ -79,12 +72,7 @@ def complete_json_with_continuation(
         invocation_kwargs["think"] = think
     result = agent(prompt, **invocation_kwargs)
     raw = str(result).strip()
-    # Try bare json.loads first; fall back to extract_json_from_response for
-    # responses wrapped in markdown fences or prefixed with explanatory text.
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return extract_json_from_response(raw)
+    return extract_json_from_response(raw)
 
 
 __all__ = [
@@ -104,7 +92,5 @@ __all__ = [
     "extract_json_from_response",
     "get_client",
     "get_llm_config_summary",
-    "get_llm_for_agent",
-    "get_llm_client",
     "get_strands_model",
 ]

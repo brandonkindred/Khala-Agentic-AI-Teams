@@ -19,6 +19,7 @@ import threading
 from typing import Any, Dict, List
 
 from code_review_agent import CodeReviewAgent
+from code_review_agent.chunk_reviewer import CODE_TO_REVIEW_HEADER
 from code_review_agent.coordinator import build_review_chunks
 from code_review_agent.models import CodeReviewInput
 
@@ -46,9 +47,12 @@ class _BigCtxRecorder(DummyLLMClient):
     def get_max_context_tokens(self) -> int:
         return _BIG_CONTEXT_TOKENS
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    def complete(self, prompt: str, **kwargs: Any) -> str:
         with self._lock:
             self.prompts.append(prompt)
+        return super().complete(prompt, **kwargs)
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         return {
             "approved": True,
             "issues": [],
@@ -110,17 +114,33 @@ def test_e2e_bounded_prompts_and_full_coverage() -> None:
 class _CiteFirstPrefixed(DummyLLMClient):
     """1M-context client that cites the first original-line prefix in each chunk."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._tls = threading.local()
+
     def get_max_context_tokens(self) -> int:
         return _BIG_CONTEXT_TOKENS
 
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        if CODE_TO_REVIEW_HEADER in prompt:
+            # Match the splitter's generic original-line prefix ("N: <code>"),
+            # not the synthetic content's "line" token, so the test stays robust
+            # to changes in the filler format. The run-level assertion that cited
+            # lines equal the segments' own start_lines confirms each is in range.
+            # This prompt is FileSegment.prompt_content (partial-segment
+            # rendering), which never carries a change-surface ``+``/``>``
+            # marker; the optional ``[+>]`` here only mirrors the production
+            # gutter parsers' tolerance and is not itself exercised.
+            m = re.search(r"^[+>]?[ ]*(\d+)[:|] ", prompt, re.M)
+            assert m is not None, "split segments must render original-line prefixes"
+            self._tls.cited = int(m.group(1))
+        return super().complete(prompt, **kwargs)
+
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        # Match the splitter's generic original-line prefix ("N: <code>"),
-        # not the synthetic content's "line" token, so the test stays robust
-        # to changes in the filler format. The run-level assertion that cited
-        # lines equal the segments' own start_lines confirms each is in range.
-        m = re.search(r"^(\d+): ", prompt, re.M)
-        assert m is not None, "split segments must render original-line prefixes"
-        cited = int(m.group(1))
+        cited = getattr(self._tls, "cited", None)
+        if cited is None:
+            return super().complete_json(prompt, **kwargs)
+        self._tls.cited = None
         return {
             "approved": False,
             "issues": [
@@ -171,16 +191,14 @@ class _FailOneFile(DummyLLMClient):
     def __init__(self, marker: str) -> None:
         super().__init__()
         self.marker = marker
-        self._lock = threading.Lock()
 
     def get_max_context_tokens(self) -> int:
         return _BIG_CONTEXT_TOKENS
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        if self.marker in prompt:
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        if CODE_TO_REVIEW_HEADER in prompt and self.marker in prompt:
             raise LLMSemanticExhaustionError("LLM returned reasoning only (no content)")
-        with self._lock:
-            return super().complete_json(prompt, **kwargs)
+        return super().complete(prompt, **kwargs)
 
 
 def test_e2e_one_chunk_failure_degrades_gracefully_without_blocking(monkeypatch) -> None:

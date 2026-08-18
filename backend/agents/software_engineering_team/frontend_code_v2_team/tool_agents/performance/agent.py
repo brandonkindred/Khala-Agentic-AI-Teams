@@ -6,6 +6,7 @@ from typing import Dict
 
 from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
+from software_engineering_team.shared.prompt_utils import JSON_OUTPUT_INSTRUCTION
 from software_engineering_team.shared.tool_agent_base import (
     BaseReviewToolAgent,
     relevant_code_for_issue,
@@ -15,7 +16,8 @@ from ...models import ReviewIssue
 
 MAX_RELEVANT_CODE_CHARS = 8_000
 
-PERFORMANCE_REVIEW_PROMPT = """You are a Performance Engineer Agent. Your job is to protect the app from shipping a 14 MB JavaScript novella. You own speed, responsiveness, bundle size, and runtime cost.
+PERFORMANCE_REVIEW_PROMPT = (
+    """You are a Performance Engineer Agent. Your job is to protect the app from shipping a 14 MB JavaScript novella. You own speed, responsiveness, bundle size, and runtime cost.
 
 **Your expertise:**
 - Performance budgets (bundle size, route chunk size, LCP/INP targets)
@@ -53,8 +55,9 @@ Return a single JSON object with:
 - "summary": string
 
 If no critical issues, return approved=true. Be practical – focus on issues that materially affect load time or runtime performance.
-
-Respond with valid JSON only. No explanatory text outside JSON.
+"""
+    + JSON_OUTPUT_INSTRUCTION
+    + """
 
 ---
 
@@ -63,6 +66,7 @@ Respond with valid JSON only. No explanatory text outside JSON.
 **Code to review:**
 {code}
 """
+)
 
 
 def _relevant_code_for_issue(issue: ReviewIssue, current_files: Dict[str, str]) -> str:

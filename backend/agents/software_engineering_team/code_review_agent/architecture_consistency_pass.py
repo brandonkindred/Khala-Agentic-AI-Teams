@@ -14,7 +14,8 @@ This pass runs ONCE PER SUBMISSION (never once per chunk), after the
 false-positive filter, and is purely additive: it is given the full
 architecture document and the merged submission, with read access to the rest
 of the repository via the same tools the false-positive filter uses
-(``read_file``, ``list_files``, ``search_codebase``, ``find_function_at_line``),
+(``read_file``, ``read_lines``, ``read_function``, ``list_files``, ``search_codebase``,
+``find_function_at_line``, ``find_references``),
 and emits new findings in two categories only: ``"architecture"`` (a stated
 boundary/pattern/decision the change contradicts) and ``"refactor"`` (a
 capability the change re-implements that already exists elsewhere). Every
@@ -32,8 +33,13 @@ Invariants:
       here to addition: a broken new pass must never affect the review's
       existing accuracy or block the run.
 
-    - **Bounded cost.** Exactly one LLM call per submission (not per chunk),
-      matching the false-positive filter's per-submission cost shape.
+    - **One call with reactive bisect recovery.** Agent construction and
+      overflow recovery (file-list bisect only; no character truncation) are
+      owned by the shared
+      :func:`~code_review_agent.submission_pass_runner.run_submission_pass`
+      runner; this module supplies only its system prompt, tool set, and
+      prompt/parse callbacks. Prompts inline full architecture and file
+      content — there is no character packing.
 
     - **``CODE_REVIEW`` profile only.** The other :class:`.profiles.ReviewProfile`
       values narrow the engine to a specific checklist whose contract expects
@@ -45,24 +51,26 @@ Invariants:
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import List, Optional
-
-from strands import Agent
+from typing import List, Optional, Tuple
 
 from llm_service import LLMClient
+from shared.dev_models.models import SystemArchitecture
 from shared.env import env_flag_enabled
-from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
-from software_engineering_team.shared.models import SystemArchitecture
+from software_engineering_team.shared.llm import extract_json_from_response
 
 from .architecture_context import architecture_evidence_available, render_architecture_context
+from .chunking import _coerce_bool
 from .false_positive_filter import CodebaseIndex, _build_tools, _code_fence_for
-from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue, coerce_line, is_no_op_suggestion
 from .profiles import ReviewProfile
-from .prompts import ARCHITECTURE_CONSISTENCY_PROMPT
+from .prompts import (
+    ARCHITECTURE_CONSISTENCY_FORMATTING_INSTRUCTIONS,
+    ARCHITECTURE_CONSISTENCY_REASONING_SYSTEM_PROMPT,
+)
 from .repo_reader import RepoReader
+from .side_effect_impact_pass import _effective_pre_numbered
+from .submission_pass_runner import FileBatch, run_submission_pass
 
 logger = logging.getLogger(__name__)
 
@@ -74,39 +82,76 @@ _ALLOWED_CATEGORIES = frozenset({"architecture", "refactor"})
 _ALLOWED_SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
 
 
+def _flatten_architecture_document(architecture: Optional[SystemArchitecture]) -> str:
+    """Flatten ``architecture`` into the document text :func:`_build_prompt` inlines.
+
+    Postconditions:
+        - Returns ``""`` when ``architecture`` is None or carries neither a
+          document nor renderable overview/components/decisions context.
+        - Otherwise returns the document (or the rendered context in its
+          place/alongside it) with a blank line between the two when both are
+          present. Pure; never raises.
+    """
+    if architecture is None:
+        return ""
+    return "\n\n".join(
+        p
+        for p in (
+            (architecture.architecture_document or "").strip(),
+            render_architecture_context(architecture),
+        )
+        if p
+    )
+
+
+def _render_manifest(paths: List[str]) -> List[str]:
+    """Render the full changed-file path list (no character truncation).
+
+    A small pass-owned duplicate of
+    ``merged_architecture_side_effect_pass._render_manifest`` -- that module
+    imports this one, so importing the reverse direction would be circular.
+
+    Postconditions: always includes the section header followed by every path.
+    """
+    return [f"**Changed files in this submission ({len(paths)}):**", *paths]
+
+
 def _build_prompt(
     index: CodebaseIndex,
     architecture: Optional[SystemArchitecture],
-    max_inline_chars: int,
+    *,
+    content_items: Optional[List[Tuple[str, str]]] = None,
+    batch_index: Optional[int] = None,
+    total_batches: Optional[int] = None,
+    is_partial: bool = False,
 ) -> str:
-    """Render the single user prompt for this pass.
+    """Render the user prompt for one submission-pass runner call.
+
+    Preconditions:
+        - ``content_items``, when given, is this call's batch of the changed
+          files (a subset of ``index.files.items()``); ``None`` inlines every
+          changed file.
+        - ``batch_index``/``total_batches`` are both ``None`` (no batch label
+          rendered) or both set to this batch's 1-based position and the
+          total batch count.
+        - ``is_partial`` is True only for a reactive-recovery bisect child
+          batch (:attr:`~code_review_agent.submission_pass_runner.FileBatch.is_partial`).
 
     Postconditions:
-        - When architecture context is present, inlines the architecture
-          document in full (folding in the rendered ``overview``/
-          ``components``/``decisions`` alongside it, or in its place when no
-          full document is set) -- no tool exposes the document itself, so
-          unlike the changed files below it is never truncated.
-        - When no formal architecture document/context is present, states that
-          explicitly so the model relies on repository structure/patterns.
-        - Then inlines the submission's changed files up to a
-          ``max_inline_chars`` budget; any file content beyond that budget is
-          named as reachable via the attached tools rather than silently
-          dropped.
+        - When architecture context is present, inlines it in full.
+        - When no formal architecture document/context is present, states
+          that explicitly so the model relies on repository structure/patterns.
+        - The changed-file path manifest lists every changed file in the
+          submission (from ``index.files``, not ``content_items``) with no
+          truncation.
+        - Inlines every file in ``content_items`` (or every changed file when
+          ``None``) in full. When ``is_partial`` is True, the content section
+          header renders a reduced-view recovery banner; otherwise, when
+          ``total_batches`` is set (> 1), it names this batch's position.
     """
     parts: List[str] = []
 
-    if architecture is None:
-        arch_doc = ""
-    else:
-        arch_doc = "\n\n".join(
-            p
-            for p in (
-                (architecture.architecture_document or "").strip(),
-                render_architecture_context(architecture),
-            )
-            if p
-        )
+    arch_doc = _flatten_architecture_document(architecture)
     if arch_doc:
         doc_fence = _code_fence_for(arch_doc)
         parts.append("**Architecture document:**")
@@ -124,35 +169,34 @@ def _build_prompt(
     parts.append("")
 
     changed_files = list(index.files.items())
-    manifest = [path for path, _ in changed_files]
-    parts.append(f"**Changed files in this submission ({len(manifest)}):**")
-    parts.extend(manifest)
+    paths = [path for path, _ in changed_files]
+    parts.extend(_render_manifest(paths))
     parts.append("")
 
-    parts.append("**Full content of the changed files:**")
-    remaining = max_inline_chars
-    omitted = 0
-    for i, (path, content) in enumerate(changed_files):
-        if remaining <= 0:
-            omitted = len(changed_files) - i
-            break
-        body = content[:remaining]
-        body_fence = _code_fence_for(body)
+    batch_files = content_items if content_items is not None else changed_files
+    if is_partial:
+        parts.append(
+            f"**Content of the changed files shown in this call ({len(batch_files)} of "
+            f"{len(changed_files)} changed files in this submission -- a reduced view "
+            "produced while recovering from a context-size overflow; any file not shown "
+            "here is still listed in the manifest above and reachable via "
+            "read_file()/list_files()):**"
+        )
+    elif total_batches and total_batches > 1:
+        parts.append(
+            f"**Full content of the changed files (batch {batch_index} of {total_batches} -- "
+            f"showing {len(batch_files)} of {len(changed_files)} changed files in this "
+            "submission; the rest are listed in the manifest above and reachable via "
+            "read_file()/list_files()):**"
+        )
+    else:
+        parts.append("**Full content of the changed files:**")
+    for path, content in batch_files:
+        body_fence = _code_fence_for(content)
         parts.append(f"### {path} ###")
         parts.append(body_fence)
-        parts.append(body)
+        parts.append(content)
         parts.append(body_fence)
-        if len(body) < len(content):
-            parts.append(
-                f"(Only the first {len(body)} characters of `{path}` are shown above; call "
-                "read_file to see the rest.)"
-            )
-        remaining -= len(body)
-    if omitted:
-        parts.append(
-            f"... and {omitted} more changed file(s) not shown above; use read_file(path) or "
-            "list_files() to see them."
-        )
     parts.append("")
 
     parts.append(
@@ -163,8 +207,9 @@ def _build_prompt(
         "provided, confirm contradictions against established repository structure/patterns."
     )
     parts.append(
-        'Return a single JSON object with a "findings" array as instructed. Return '
-        '{"findings": []} if you find nothing in either category.'
+        "Summarize architecture-consistency findings in structured prose per the system "
+        "instructions (severity, category, file_path, line, description, suggestion, "
+        "pre_existing). State clearly when you find nothing in either category."
     )
     return "\n".join(parts)
 
@@ -182,6 +227,14 @@ def _coerce_finding(item: object) -> Optional[CodeReviewIssue]:
           ``severity`` defaults to ``"medium"`` rather than being dropped,
           matching this pass's default-severity guidance. Never raises on
           malformed input.
+        - ``pre_existing`` reflects the model's optional per-finding tag
+          (coerced via ``chunking._coerce_bool``, tolerating string
+          encodings), defaulting to ``False`` when absent -- mirrors
+          ``side_effect_impact_pass._coerce_finding``'s identical convention,
+          used by the PR-review whole-file path to route a finding about a
+          field/function/class this submission did NOT add or modify to a
+          human-review proposal instead of a blocking PR comment (see
+          ``CodeReviewIssue.pre_existing``).
     """
     if not isinstance(item, dict):
         return None
@@ -204,6 +257,7 @@ def _coerce_finding(item: object) -> Optional[CodeReviewIssue]:
         line=coerce_line(item.get("line")),
         description=description,
         suggestion=suggestion,
+        pre_existing=_coerce_bool(item.get("pre_existing")),
     )
 
 
@@ -441,6 +495,13 @@ def _run_pass(
     Postconditions:
         - Same contract as :func:`find_architecture_and_redundancy_issues`,
           minus the env-toggle early returns the caller already handled.
+        - Delegates ``Agent`` construction and reactive overflow bisect recovery
+          to
+          :func:`~code_review_agent.submission_pass_runner.run_submission_pass`,
+          which never raises; a batch's findings are folded into the returned
+          list in batch order. An empty runner result (every batch
+          unrecoverable) folds to ``[]`` -- never ``None`` and never a raised
+          exception.
     """
     if index is None:
         index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
@@ -449,25 +510,38 @@ def _run_pass(
         # architecture fit or redundancy.
         return []
 
-    model = resolve_code_review_model(llm)
-    # The architecture document itself is always inlined in full (see _build_prompt) --
-    # no tool exposes it, so there is no fallback path for a truncated excerpt. The
-    # changed-file budget below is independent of the document's size: overflow files
-    # remain reachable via read_file()/list_files(), so capping this budget on its own
-    # merits (the model's context for a map-phase-shaped prompt) is sufficient.
-    max_inline_chars = compute_code_review_map_chunk_chars(llm)
+    pre_numbered = _effective_pre_numbered(input_data, index)
+    tools = _build_tools(index)
 
-    prompt = _build_prompt(index, architecture, max_inline_chars)
-    agent = Agent(
-        model=model,
-        system_prompt=ARCHITECTURE_CONSISTENCY_PROMPT,
-        tools=_build_tools(index),
+    def _build_prompt_for_batch(batch: FileBatch) -> str:
+        return _build_prompt(
+            index,
+            architecture,
+            content_items=batch.items,
+            batch_index=batch.index,
+            total_batches=batch.total,
+            is_partial=batch.is_partial,
+        )
+
+    def _parse_batch_reply(raw: str) -> List[CodeReviewIssue]:
+        data = extract_json_from_response(raw)
+        findings = _parse_findings(data)
+        if findings:
+            findings = _validate_findings(index, findings, pre_numbered=pre_numbered)
+        return findings
+
+    results = run_submission_pass(
+        llm,
+        changed_files=list(index.files.items()),
+        reasoning_system_prompt=ARCHITECTURE_CONSISTENCY_REASONING_SYSTEM_PROMPT,
+        formatting_instructions=ARCHITECTURE_CONSISTENCY_FORMATTING_INSTRUCTIONS,
+        build_prompt=_build_prompt_for_batch,
+        tools=tools,
+        parse=_parse_batch_reply,
+        pass_label="ArchitectureConsistencyPass",
     )
-    raw = str(agent(prompt)).strip()
-    data = json.loads(raw)
-    findings = _parse_findings(data)
+    findings = [finding for batch_findings in results for finding in batch_findings]
     if findings:
-        findings = _validate_findings(index, findings, pre_numbered=input_data.pre_numbered)
         logger.info(
             "ArchitectureConsistencyPass: found %s new finding(s) (architecture/refactor)",
             len(findings),

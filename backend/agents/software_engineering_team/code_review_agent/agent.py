@@ -26,8 +26,9 @@ from __future__ import annotations
 import logging
 import uuid
 
-from llm_service import get_client
+from llm_service import get_client, llm_attribution
 
+from . import transcript
 from .coordinator import run_coordinator
 from .models import (
     CodeReviewInput,
@@ -141,6 +142,12 @@ class CodeReviewAgent:
               When it is None and ``input_data.repo_root`` names a disk checkout,
               the in-process path rebuilds a ``DiskRepoReader`` from that path so
               a live reader and a serialized ``repo_root`` grant the same access.
+            - ``input_data.job_id`` is ``""`` (the default — no caller-tracked
+              job) or a review job id (e.g. a ``code_review_runs`` row's
+              ``job_id``); when non-blank, every LLM call the in-process
+              coordinator makes for this run is recorded into that job's
+              durable transcript (``code_review_transcripts`` — see
+              ``transcript.record_transcript_entry``).
 
         Postconditions:
             - Returns the coordinator's merged verdict covering every submitted
@@ -163,6 +170,16 @@ class CodeReviewAgent:
             - When this instance was constructed with ``force_in_process=True``,
               never starts a Temporal worker or child workflow; always uses the
               in-process coordinator.
+            - Transcript recording (see ``input_data.job_id`` above) only
+              happens on the in-process coordinator path: ``llm_attribution``
+              is a contextvar and does not cross the Temporal activity
+              boundary, so a Temporal-dispatched run (the default unless this
+              instance was constructed with ``force_in_process=True``) records
+              no transcript regardless of ``input_data.job_id``. The GitHub PR
+              review flow — the only caller with a ``code_review_runs``-backed
+              transcript UI — always supplies a live ``repo_reader`` and is
+              therefore always ``force_in_process=True`` in practice (see
+              ``coding_engine_provider.run_pr_code_review``).
 
         Raises:
             CodeReviewUnavailableError: when the review could not be completed —
@@ -173,11 +190,7 @@ class CodeReviewAgent:
                 synchronous wait for the durable workflow's result exceeds
                 ``CODE_REVIEW_EXECUTE_TIMEOUT_S`` — see ``_run_via_temporal``.
         """
-        code_size = (
-            sum(len(c) for c in input_data.files.values())
-            if input_data.files is not None
-            else len(input_data.code or "")
-        )
+        code_size = sum(len(c) for c in input_data.files.values())
         logger.info(
             "CodeReview: reviewing %s chars of %s code | task=%s | has_spec=%s | has_architecture=%s | acceptance_criteria=%s",
             code_size,
@@ -212,9 +225,38 @@ class CodeReviewAgent:
         effective_reader = repo_reader
         if effective_reader is None:
             effective_reader = disk_repo_reader_from_root(input_data.repo_root)
-        return run_coordinator(
-            self.llm, input_data, progress_callback=progress_callback, repo_reader=effective_reader
-        )
+        # Binds job_id for the whole in-process run so every LLM call site can
+        # record its prompt/response into that job's durable transcript (see
+        # ``transcript.record_transcript_entry``); ``shared.concurrency.parallel_map``
+        # propagates this context into the map phase's and tail passes' worker
+        # threads by default, so no call site below needs job_id threaded through
+        # its own parameters. A blank ``input_data.job_id`` (no caller-tracked job)
+        # makes every record a no-op. Not honored on the Temporal-dispatched path:
+        # attribution is a contextvar and does not cross the activity boundary.
+        with llm_attribution(
+            job_id=input_data.job_id, team="software_engineering_team", agent_key="code_review"
+        ):
+            try:
+                output = run_coordinator(
+                    self.llm,
+                    input_data,
+                    progress_callback=progress_callback,
+                    repo_reader=effective_reader,
+                )
+            finally:
+                if input_data.job_id:
+                    # Synchronously flush this run's buffered transcript entries
+                    # before returning, rather than waiting for the background
+                    # heartbeat (default 2s interval) — in ``finally`` so a chunk
+                    # that already recorded an entry before a LATER chunk raises
+                    # ``CodeReviewUnavailableError`` is still flushed: the caller
+                    # (``pr_review.py``) marks the review COMPLETED/FAILED (which
+                    # is what makes the UI's "View Transcript" action appear) as
+                    # soon as this call returns OR raises, so without this a
+                    # failed review could show a transcript missing entries that
+                    # were buffered before the failure.
+                    transcript.drain()
+        return output
 
     def _run_via_temporal(
         self,

@@ -51,7 +51,26 @@ class CodeEngineProvider(Protocol):
 
     def run_pr_code_review(self, **kwargs: Any) -> Any:
         """Review a pull request's diff. Postconditions: returns an object with
-        an ``issues`` list."""
+        an ``issues`` list. Accepts an optional ``replaced_content`` kwarg
+        (``{path: pre-change body}``) forwarded additively to the review
+        input; absent/``None`` behaves exactly as before its introduction."""
+        ...
+
+    def classify_issue_scope(
+        self, findings: Any, changed_context: Any, task_description: str
+    ) -> Any:
+        """Classify each finding in/out-of-scope for the pull request under review.
+
+        Preconditions: ``findings`` is a sequence of finding-like objects each
+        exposing ``file_path`` (mirrors ``scope_classifier.classify_scope``'s
+        ``issues``). ``changed_context`` is ``None`` or a ``{path: content}``
+        mapping of current file content grounding the classifier's prompt.
+
+        Postconditions: returns a list positionally aligned 1:1 with
+        ``findings``; never raises — resolution/LLM/parse failures degrade
+        per-finding to an "unknown" verdict (mirrors
+        ``scope_classifier.classify_scope``).
+        """
         ...
 
 

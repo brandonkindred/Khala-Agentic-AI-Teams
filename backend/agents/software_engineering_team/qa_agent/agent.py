@@ -22,13 +22,22 @@ output contract).
 from __future__ import annotations
 
 import logging
-from typing import Dict
+from typing import Dict, Optional
 
 from strands import Agent
 
 from llm_service import get_strands_model
-from llm_service.strands_model import resolve_strands_model
+from llm_service.strands_model import model_fingerprint, resolve_strands_model
+from shared.cache import get_shared_cache
 from software_engineering_team.shared.persona_agent_base import run_structured_persona
+from software_engineering_team.shared.review_result_cache import (
+    build_review_cache_key,
+    cache_capacity_for,
+    cache_namespace_for,
+    clear_review_cache_namespace,
+    get_cached_review_result,
+    set_cached_review_result,
+)
 from software_engineering_team.shared.security_service import derive_approved
 
 from .models import QAInput, QAOutput
@@ -40,6 +49,88 @@ from .prompts import (
 )
 
 logger = logging.getLogger(__name__)
+
+_CACHE_LABEL = "QA"
+
+# Shared review-result cache: keyed on the whole QAInput content plus the
+# resolved review model, so a byte-identical resubmission (e.g. across the
+# review->fix->re-review retry loop, or an unchanged sibling task) skips the
+# LLM call entirely. Same whole-input key *shape* as code_review_agent.
+# coordinator's submission-level cache, but code_review_agent.mapping's
+# chunk-level *policy*: every genuine outcome is cached regardless of
+# ``approved`` (see ``run()``'s ``is_fallback`` guard below), since this is a
+# single atomic call with no reduce phase to short-circuit. The shared
+# policy itself lives in
+# ``software_engineering_team.shared.review_result_cache``, imported above
+# (also used by security_agent's analogous cache); this module supplies only
+# its own namespace stem, env var, capacity default, and output model.
+# Backed by shared.cache (Redis, falls open to an in-process store). Base
+# stem; ``_review_cache_namespace()`` appends build id.
+DEFAULT_REVIEW_CACHE_SIZE = 256  # QA_REVIEW_CACHE_SIZE, floor 0
+_REVIEW_CACHE_NAMESPACE = "qa:review:v1"
+
+
+def _review_cache_namespace() -> str:
+    """Shared-cache namespace for QA review results (includes build id)."""
+    return cache_namespace_for(_REVIEW_CACHE_NAMESPACE)
+
+
+def _review_cache_size() -> int:
+    """Resolve the review cache capacity from the environment.
+
+    Postconditions:
+        - Returns ``QA_REVIEW_CACHE_SIZE`` parsed as an int, clamped to a
+          floor of 0: an unset or unparseable value falls back to
+          ``DEFAULT_REVIEW_CACHE_SIZE``, a negative value clamps to 0. An
+          explicit or clamped-to 0 disables the cache — every ``run()`` call
+          re-invokes the model, matching pre-cache behavior.
+    """
+    return cache_capacity_for("QA_REVIEW_CACHE_SIZE", DEFAULT_REVIEW_CACHE_SIZE)
+
+
+def clear_review_cache() -> None:
+    """Drop every cached QA review result.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - This process's view of the shared review-cache namespace is empty
+          when the call returns (best-effort across Redis). A cache backend
+          error is caught and logged rather than propagated — fails open,
+          same as every other cache operation in this module — so a broken
+          backend never breaks a caller (e.g. a test-teardown fixture)
+          forcing a cold review. Intended for tests and for callers that
+          must force a cold review.
+    """
+    clear_review_cache_namespace(_CACHE_LABEL, lambda: get_shared_cache(_review_cache_namespace()))
+
+
+def _review_cache_key(input_data: QAInput, model_fp: str) -> str:
+    """Hash of the whole QA input plus the resolved review model.
+
+    The qa_agent analogue of ``code_review_agent.mapping._submission_
+    fingerprint`` (same key design, per the caching contract this module
+    implements): keys the entire ``QAInput`` — code, language, task
+    description, architecture, build errors, request mode, acceptance
+    criteria, tool results — so any reviewed-file byte change naturally
+    busts the key with no explicit invalidation logic. ``QAInput`` carries no
+    per-invocation id field (no ``job_id``/``task_id``/``microtask_id``), so
+    nothing needs to be excluded before hashing.
+
+    Preconditions:
+        - ``input_data`` is a valid ``QAInput``.
+        - ``model_fp`` is the value returned by
+          ``llm_service.strands_model.model_fingerprint(resolved_model)``,
+          where ``resolved_model`` is the Strands model this
+          ``QAExpertAgent`` instance uses for the review (its ``self._model``
+          — this is a free function, so there is no ``self`` here).
+
+    Postconditions:
+        - Returns a hex digest that changes whenever any input field or the
+          resolved model changes, and is stable (``sort_keys``) across calls
+          in a process, so a byte-identical resubmission is recognized.
+    """
+    return build_review_cache_key(input_data, model_fp)
 
 
 class QAExpertAgent:
@@ -84,7 +175,19 @@ class QAExpertAgent:
         }
 
     def run(self, input_data: QAInput) -> QAOutput:
-        """Review code for bugs and produce integration tests. Reports bugs; does not fix them."""
+        """Review code for bugs and produce integration tests. Reports bugs; does not fix them.
+
+        Preconditions:
+            - ``input_data`` is a valid :class:`QAInput`.
+        Postconditions:
+            - A cache hit (byte-identical ``QAInput`` and resolved model)
+              returns the prior result without invoking the LLM. A cache
+              miss, a disabled cache (``QA_REVIEW_CACHE_SIZE=0``), or any
+              cache backend error falls open to a genuine review — never
+              raises for a cache failure. Only a genuine (non-fallback)
+              result is written back to the cache, regardless of
+              ``approved``.
+        """
         mode = self._select_mode(input_data)
         logger.info(
             "QA: reviewing %s chars of code, mode=%s",
@@ -92,13 +195,35 @@ class QAExpertAgent:
             mode,
         )
 
+        capacity = _review_cache_size()
+        cache_key: Optional[str] = None
+        if capacity > 0:
+            cache_key = _review_cache_key(input_data, model_fingerprint(self._model))
+            cache = get_shared_cache(_review_cache_namespace())
+            cached_result = get_cached_review_result(_CACHE_LABEL, cache, cache_key, QAOutput)
+            if cached_result is not None:
+                logger.info(
+                    "QA: review cache hit; skipping LLM call (approved=%s)",
+                    cached_result.approved,
+                )
+                return cached_result
+
         user_prompt = self._build_user_prompt(input_data)
 
+        is_fallback = False
+
         def _fallback(exc: Exception) -> QAOutput:
+            nonlocal is_fallback
+            is_fallback = True
             logger.warning("QA: structured_output failed (%s); returning fallback", exc)
+            # In acceptance_evidence mode a parse failure must still fail closed with
+            # an explicit failing gate, since this mode's consumers block on gate
+            # values rather than reading ``approved`` directly.
+            quality_gates = {"acceptance_evidence": "fail"} if mode == "acceptance_evidence" else {}
             return QAOutput(
                 bugs_found=[],
                 approved=False,
+                quality_gates=quality_gates,
                 summary=f"QA could not parse model response: {exc}",
                 integration_tests="",
                 unit_tests="",
@@ -116,11 +241,17 @@ class QAExpertAgent:
             # Only applied to a genuine model result — the fallback above is
             # already a final, safe ``approved=False``.
             if mode == "acceptance_evidence":
-                # ``.strip().lower()`` mirrors ``DevOpsTestValidationAgent._coerce_gate_status``
-                # so a whitespace-padded ``" fail "`` from the model still blocks approval.
+                gates_lower = {
+                    k: (v or "").strip().lower() for k, v in result.quality_gates.items()
+                }
                 result.approved = bool(result.approved) and not any(
-                    (v or "").strip().lower() == "fail" for v in result.quality_gates.values()
+                    v == "fail" for v in gates_lower.values()
                 )
+                # Fail closed: an unapproved verdict with no explicit failing gate
+                # (e.g. an LLM verdict of false but an all-pass/empty gate map) must
+                # still surface a blocking gate, since consumers key off gate values.
+                if not result.approved and not any(v == "fail" for v in gates_lower.values()):
+                    result.quality_gates["acceptance_evidence"] = "fail"
             else:
                 result.approved = derive_approved(result.bugs_found, llm_approved=None)
             return result
@@ -145,6 +276,11 @@ class QAExpertAgent:
             len(result.bugs_found),
             result.approved,
         )
+
+        if cache_key is not None and not is_fallback:
+            cache = get_shared_cache(_review_cache_namespace())
+            set_cached_review_result(_CACHE_LABEL, cache, cache_key, result, capacity=capacity)
+
         return result
 
     @staticmethod

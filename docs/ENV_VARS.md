@@ -43,6 +43,20 @@ TTL (seconds, default `30`) for the cross-container runtime config cache backing
 supply entry defaults (model/base URL). Each team container caches resolved defaults for this window.
 Garbage → default; negative floors to `0` (read-through every call). No effect when Postgres is unset.
 
+### LLM_USAGE_BUFFER_MAX
+Maximum number of LLM-usage rows held in memory before the oldest is dropped
+(default `1000`; floor `1`). Overflow drops the oldest row and logs a WARNING
+once per burst. Used by `llm_service.usage_flusher`. No-op when Postgres is unset.
+
+### LLM_USAGE_FLUSH_INTERVAL_S
+Seconds between background drains of the in-memory usage buffer to
+`llm_call_records` (default `2`; garbage → `2`, negatives clamped to `0` which
+floors the loop at `0.1s` so it never busy-loops). The observer does zero DB I/O
+on the LLM call path. A final drain runs at process shutdown (team-app
+lifespan, Unified API lifespan, or team-service ``atexit``) before the
+Postgres pool closes. The observer registry is process-local, so every
+LLM-calling process registers its own flusher.
+
 ### LLM_NUM_CTX_FALLBACK_TTL_S
 TTL (seconds, default `300`) for the Ollama client's provisional `num_ctx` fallback. When a model's
 context size is not in `KNOWN_MODEL_CONTEXT` / `LLM_CONTEXT_SIZE` and `/api/show` fails, the client
@@ -204,6 +218,10 @@ Temporal namespace.
 ### TEMPORAL_TASK_QUEUE
 Temporal task queue name.
 
+### SE_WORKFLOW_V2
+Removed. `/run-team` always starts `RunTeamWorkflowV2`; this variable no
+longer has any effect and may be safely unset from any environment.
+
 ### Investment team Temporal queues
 The investment team runs three Temporal queues, all booted from
 `investment_team.temporal.worker.start_investment_temporal_worker_thread` (each on
@@ -336,13 +354,21 @@ and small payloads are nowhere near the warning threshold anyway).
 ### SECURITY_GATEWAY_ENABLED
 Security gateway toggle (default: true).
 
+Unified-API lifespan worker/route registration (which step boots which worker,
+which routers mount at import time vs inside `lifespan()`) is catalogued in
+[`UNIFIED_API_LIFESPAN.md`](UNIFIED_API_LIFESPAN.md). The toggles below are the
+gates for those steps.
+
 ### UNIFIED_API_SANDBOX_TEMPORAL_WORKER
-Agent Console sandbox reaper/worker toggle (default: true). When true, the
-unified-api `lifespan` starts the Agent Console sandbox idle reaper — a
+Platform sandbox reaper/worker toggle (default: true). When true, the
+unified-api `lifespan` starts the platform sandbox idle reaper — a
 durable `SandboxReaperWorkflow` served by this process's own sandbox-only
-Temporal worker thread when Temporal is enabled, or an in-process asyncio
-task otherwise. Set to `false`/`0`/`no` to run unified-api without starting
-the sandbox reaper or its Temporal worker thread at all.
+Temporal worker thread (`start_agent_platform_sandbox_temporal_worker_thread`
+in `agent_platform.sandbox.temporal.worker`) when Temporal is enabled, or
+an in-process asyncio task otherwise. This lifespan is the sole boot site
+for that worker; the standalone agent-provisioning team container must not
+poll `SANDBOX_TASK_QUEUE`. Set to `false`/`0`/`no` to run unified-api
+without starting the sandbox reaper or its Temporal worker thread at all.
 
 ### UNIFIED_API_TEAM_ASSISTANTS_ENABLED
 Team-assistant conversational sub-app mount toggle (default: true). When
@@ -355,11 +381,21 @@ registration entirely (no assistant sub-app is ever mounted, regardless of
 traffic) — team proxy routes and health checks are unaffected.
 
 ### UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER
-Agent Studio Temporal worker toggle (default: true). When true, the
-unified-api `lifespan` starts the in-process Agent Studio Temporal worker
-thread (Agent Studio is Temporal-only; the team's requests fail without it).
-Set to `false`/`0`/`no` to run unified-api without booting this worker
-thread, e.g. when Agent Studio is unused.
+Agent Studio authoring CRUD (conversations / clone / save) is served by **direct
+dispatch**: a bounded in-process thread pool that calls the `AgentStudioService`
+singleton directly, with no Temporal workflow and no dependency on
+`agent-studio-queue`. This is the supported authoring path regardless of this
+flag or of Temporal configuration.
+
+This flag only toggles the legacy `agent-studio-queue` Temporal worker starter
+(default: true), a no-op left over from before authoring CRUD was demoted off
+Temporal. When true and Temporal is configured (`TEMPORAL_ADDRESS` set), the
+unified-api `lifespan` calls that starter, which no-ops because there are no
+authoring workflows left to register. When Temporal is not configured, the
+lifespan skips the call (and the `agent_platform.studio.temporal.worker`
+import) entirely rather than calling a no-op starter. Set this flag to
+`false`/`0`/`no` to skip the starter call regardless of Temporal configuration.
+Other teams' Temporal workers are unaffected.
 
 ### ENABLE_LOG_API
 Exposes HTTP log endpoint.
@@ -495,6 +531,12 @@ Retention window (by `last_seen`) for `se_learnings` rows used by
 `shared.observability.process_health` arms each team worker with fault
 diagnostics and a memory watchdog; `team_service/entrypoint.py` controls how many
 workers run. See `backend/shared/observability/process_health.py`.
+
+The `khala` (unified-api) service is not a `team_service` worker and is sized
+separately — its container `mem_limit`/`mem_reservation` in `docker-compose.yml`,
+the RSS-measurement tooling and methodology, and the current findings (a
+reasoned estimate pending a live measurement) are documented in
+[`docker/README.md`](../docker/README.md)'s "Memory / RSS Measurement" section.
 
 ### TEAM_WORKERS
 uvicorn worker processes per team service (default 2; parsed defensively, clamped
@@ -797,9 +839,25 @@ within-batch index) confirmed a false positive does not change which finding
 gets dropped. Lowering this cap increases the number of verification LLM
 calls (and therefore cost/latency) for files with many findings; raising it
 trades that against a larger prompt per call. This is a cap on how many
-*findings* share one verification call — separate from any cap on how much
-*file content* a single tool read can return (out of scope here; tracked in
-a separate sub-issue).
+*findings* share one verification call — it has no counterpart for the cited
+*file*'s content, because that content is never inlined into the prompt at
+all (see `CODE_REVIEW_FALSE_POSITIVE_FILTER` below): the model always fetches
+it via the unbounded `read_file` tool, so there is nothing to cap.
+
+### CODE_REVIEW_SCOPE_MAX_FINDINGS_PER_GROUP
+Int (default `20`, floor `1`). Cap on how many findings the LLM scope
+classifier (`code_review_agent/scope_classifier.py::classify_scope`) inlines
+into a single per-file classification call. Findings are first grouped by their
+cited file; a file whose findings exceed this cap is split into multiple
+batches of at most this size (the final batch may be smaller), each its own
+`complete_json` call, fanned out across the
+shared `CODE_REVIEW_MAP_PARALLELISM` budget. Each batch fails safe on its own —
+any client, LLM, or parse error degrades that batch's findings to an "unknown"
+verdict (a caller falls back to the free heuristic) rather than raising.
+Lowering this cap increases the number of classification calls (cost/latency)
+for files with many findings; raising it trades that against a larger prompt per
+call. A smaller default than `CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP`
+keeps each scope decision focused.
 
 ### CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES
 Int (default `8`, floor `1`). Two things, both governed by this one knob (see
@@ -865,17 +923,23 @@ waiting on is reclaimed (freeing its worker slots) at essentially the same
 moment, rather than running unbounded server-side.
 
 ### CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS
-A failing chunk smaller than twice this is retried once as-is instead of being
-bisected. Default `8000`, floor `1000`.
+Int (default `8000`, floor `1000`). A failing chunk smaller than twice this is
+retried once as-is instead of being bisected. Parsed via the shared `env_int`
+(unset/garbage → default; a parsed value below the floor is clamped up to it,
+not reset to the default).
 
 ### CODE_REVIEW_MAX_BISECT_DEPTH
-Max bisect-and-retry recursion depth for a failing review chunk before the chunk
-is treated as unreviewable and degraded (see `CODE_REVIEW_BLOCK_ON_UNREVIEWED`:
-by default its range is recorded non-blockingly in `not_reviewed_ranges`; with
-the opt-out on it becomes a blocking `high` finding). The whole run only raises
-`CodeReviewUnavailableError` when *no* chunk could be reviewed at all. Default
-`3`, floor `0` (`0` disables bisection; a chunk then gets only the single
-same-input retry, then the thinking-off retry, before degrading).
+Int (default `3`, floor `0`). Max bisect-and-retry recursion depth for a
+failing review chunk before the chunk is treated as unreviewable and degraded
+(see `CODE_REVIEW_BLOCK_ON_UNREVIEWED`: by default its range is recorded
+non-blockingly in `not_reviewed_ranges`; with the opt-out on it becomes a
+blocking `high` finding). The whole run only raises
+`CodeReviewUnavailableError` when *no* chunk could be reviewed at all. `0`
+disables bisection; a chunk then gets only the single same-input retry, then
+the thinking-off retry, before degrading. Parsed via the shared `env_int`
+(unset/garbage → default; a parsed value below `0` is clamped up to the floor
+of `0`, not reset to the default, with a warning logged only for the
+set-but-unparseable case).
 
 ### CODE_REVIEW_THINKING_OFF_RETRY
 Default-on last-resort retry for a chunk whose review could not be recovered by
@@ -954,7 +1018,7 @@ abort, which remains a loud operator-facing comment.
 
 ### PR_REVIEW_DUPLICATE_THRESHOLD_WITH_LOCATION / PR_REVIEW_DUPLICATE_THRESHOLD_NO_LOCATION
 Similarity-ratio overrides (0.0–1.0) for the `/review-pr` flow's duplicate-issue
-check: before a pre-existing finding is offered to a human as a "file a new
+check: before a finding is offered to a human as a "file a new
 GitHub issue?" candidate, the reviewed repository's open issues are checked for
 one that already tracks the same bug (`difflib.SequenceMatcher` ratio between the
 finding's description headline and a candidate issue's title, casefolded). A
@@ -1016,6 +1080,35 @@ verdict; any ambiguity or verifier error keeps the finding, and the not-reviewed
 coverage findings are never removed. Set to `false`/`0`/`no` to disable the pass
 (any other value, or unset, leaves it enabled).
 
+The verification prompt (`_build_group_prompt`) never inlines the cited
+file's content — it only names the file and directs the model to fetch it via
+`read_file`. This keeps the per-call prompt size independent of the cited
+file's size with no cap or truncation involved: the model always sees the
+file's full, current content on demand instead of a possibly-stale or
+size-limited inline copy. Because nothing is inlined, `_verify_group` also
+enforces that the run made a *successful* `read_file` call for that exact
+cited file before honoring any false-positive verdict from it
+(`_agent_read_the_cited_file`) — since every finding in one verification call
+cites the same file, this is a per-batch bar, restoring the guarantee the
+original inlined design had (the whole cited file was visible before any
+drop in that batch was accepted). A narrow `read_lines`/`read_function`
+slice, a successful read of only a *related* file, calling only
+`list_files()` (no code content), or a `read_file` call that errors
+(unknown/ambiguous path), does not count as grounded. The verification
+`Agent` is also constructed with
+`SlidingWindowConversationManager(should_truncate_results=False)`, so
+Strands' own default conversation manager can never silently truncate an
+oversized `read_file` result in place (keeping only the first/last 200
+chars) while still marking it `status="success"` on a context-window
+overflow — that recovery path is disabled outright rather than trying to
+detect its output after the fact, since any text-based detection risks
+either missing a real truncation or misfiring on legitimate content that
+happens to share its shape. On overflow the conversation is trimmed instead;
+if the cited file's read survives, its content is always the complete
+original, and if it doesn't survive, the grounding check simply finds no
+matching read and fails safe. A false-positive verdict from a run that never
+met this bar is discarded (the finding is kept) rather than trusted.
+
 When the review is invoked with a repository reader (the GitHub PR-review path
 fetches whole files at the PR head and supplies a reader; the software-engineering
 pipeline supplies one rooted at the job workspace), the verifier can additionally
@@ -1023,6 +1116,19 @@ read existing repository files *outside* the diff. This lets it confirm that a
 file/module a finding claims is missing ("add X" / "X does not exist") already
 exists, and drop that false positive. The reader is read-only, bounded, and
 fail-safe (a read failure only ever keeps a finding).
+
+### CODE_REVIEW_SCOPE_FILTER
+Default-on toggle for the scope-verification pass that runs after the reviewer
+returns findings and before PR comments are posted. A tool-using verifier
+sees the PR's added/modified line map and classifies each genuine finding as
+in-scope (including required omissions), out-of-scope / pre-existing, or
+unsure. Findings that are not confidently in-scope are tagged `pre_existing`
+so they become pending issue proposals instead of PR comments. Posting is
+fail-closed (unsure does not comment). An ungrounded out-of-scope verdict is
+ignored so it cannot hide a real in-scope finding. Coverage/safety findings
+never enter this pass. The unscripted dummy LLM harness is a no-op so tests
+that do not stub the verifier keep their existing posting behavior. Set to
+`false`/`0`/`no` to disable (any other value, or unset, leaves it enabled).
 
 ### CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS
 Default-on toggle for the architecture-consistency / cross-codebase-redundancy
@@ -1085,10 +1191,15 @@ tool-verified caller elsewhere in the system — and `documentation` — a
 docstring/comment that no longer matches the implementation (a
 documentation-accuracy problem, not a side effect, reported under its own
 category rather than mislabeled as `side-effects`).
-This pass is only ever given CURRENT file content, never a prior revision, so
-it judges behavior as written now rather than comparing against history. It
-never removes or alters any finding the map phase, the false-positive filter,
-or the architecture pass already produced. `search_repository` requires a
+This pass is only ever given CURRENT file content, never a prior revision, with
+one narrow exception: a file with a before-image populated on
+`CodeReviewInput.replaced_content` (see `CODE_REVIEW_MUTATION_ANALYSIS` below)
+shows that before-image alongside the current content, and the pass may reason
+over that shown block specifically — never any other prior version it was not
+given. Absent that one case, it judges behavior as written now rather than
+comparing against history. It never removes or alters any finding the map
+phase, the false-positive filter, or the architecture pass already produced.
+`search_repository` requires a
 repository reader to be attached (the GitHub PR-review path and the
 software-engineering pipeline both supply one; without one, this pass can
 still find callers within the submission's own files via `search_codebase`).
@@ -1112,6 +1223,42 @@ findings, so a broken pass never blocks or changes the rest of the review. Set
 to `false`/`0`/`no` to disable the pass (any other value, or unset, leaves it
 enabled).
 
+### CODE_REVIEW_MUTATION_ANALYSIS
+Default-on toggle for the mutation-vs-replaced-code contract sub-check inside
+the side-effect / blast-radius pass above (both the standalone Temporal
+activity and the in-process merged pass). When a file has a before-image on
+`CodeReviewInput.replaced_content` (rendered as a per-path "Replaced
+(pre-change) content" prompt section), this sub-check compares the file's
+current content against that shown before-image for data/variable-mutation
+differences (a different return value/type, a different mutation of
+shared/passed-in state, a different exception, a different ordering/timing
+guarantee), assesses whether the difference changed the enclosing
+function/class's observable contract, and — only when the contract changed —
+uses `find_references` (falling back to `search_repository`) and
+`read_file`/`read_function`/`read_lines` to inspect real callers and decide,
+in Design-by-Contract terms, whether the new code or its callers are the
+defect. This is the *only* case in which the pass's general "never assume a
+prior version" guard is relaxed, and only for the specific file whose
+before-image is actually shown — a file with no `replaced_content` entry gets
+none of it, and the guard stays absolute for every other file regardless of
+this toggle. Findings still ride the pass's existing `side-effects`
+category/schema; there is no new category and no schema change. When
+disabled, `replaced_content` is never shown to the model at all (not merely
+ignored), so the pass's prompt and behavior are identical to before this
+sub-check existed. Output-affecting, so it participates in
+`mapping._submission_fingerprint` (the `__mutation_analysis__` payload entry,
+alongside `__side_effect_consolidation__` and
+`__spec_compliance_single_pass__`) — flipping this toggle invalidates the
+in-process coordinator's submission-level short-circuit cache, so a verdict
+computed under one toggle state is never served to a run under the other. Set
+to `false`/`0`/`no` to disable (any other value, or unset, leaves it
+enabled). Like `__side_effect_consolidation__` and
+`__spec_compliance_single_pass__`, `__mutation_analysis__` is a caller-resolved
+value `run_coordinator` folds with the `CODE_REVIEW` profile restriction
+before threading it into the fingerprint helper — the helper itself never
+reads any of these three env vars, so a non-`CODE_REVIEW` submission is never
+fingerprinted as sensitive to a toggle that can never affect its output.
+
 ### CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION
 Default-on toggle for consolidating related `side-effects` findings from the
 pass above. Two (or more) `side-effects` issues are merged into one when they
@@ -1131,9 +1278,48 @@ matches a finding keyed as `app/foo.py`. Set to `false`/`0`/`no` to
 disable consolidation (any other value, or unset, leaves it enabled) — this
 only turns off merging, the underlying findings are unaffected.
 
+In the in-process thread-mode coordinator this consolidation is now performed
+as the `side-effects` special case of the generalized finding-combination step
+(see `CODE_REVIEW_COMBINE_SIMILARITY_THRESHOLD` below), which runs after the
+merged architecture/side-effect pass and before the false-positive filter;
+setting this flag to `false` disables that `side-effects`-specific merging
+(the merge-regardless-of-wording construct rule and the citation link) while
+the generic same-construct-plus-similar and same-anchor de-duplication still
+apply. The durable Temporal path continues to run the standalone consolidation
+activity gated by this same flag.
+
 Any setup failure is fail-safe: it is logged and the original `side-effects`
 findings pass through unchanged, so a broken consolidation step never blocks
 or changes the rest of the review.
+
+### CODE_REVIEW_COMBINE_SIMILARITY_THRESHOLD
+Jaccard word-set similarity floor (default `0.6`, clamped to `[0, 1]`; garbage
+→ default) used by the thread-mode coordinator's finding-combination step to
+decide when two findings describe the same underlying issue. Combination runs
+once over the whole finding stream — the map-phase findings plus the merged
+architecture/side-effect pass's additive findings — after that pass and
+**before** the false-positive filter, so the filter verifies a smaller, deduped
+set (fewer tokens). Two same-category findings are combined when they are
+anchored in the same enclosing Python construct and are either `side-effects`
+(see `CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION` above) or have description Jaccard
+`>= threshold`; or when they are the same-anchor near-duplicate (same file, same
+line or one unanchored, Jaccard `>= threshold`). Raising the threshold merges
+less (more separate findings, more filter calls); lowering it merges more. It is
+included in the submission-cache fingerprint (`mapping._submission_fingerprint`'s
+`__combine_similarity_threshold__` payload entry), so changing it invalidates a
+stored verdict — unlike `CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION`,
+`CODE_REVIEW_SPEC_COMPLIANCE_PASS`, and `CODE_REVIEW_MUTATION_ANALYSIS`, this
+value is deliberately **not** folded with the `CODE_REVIEW` profile
+restriction before being threaded into the fingerprint: it governs the generic
+proximity/same-anchor merge rules `combine_findings` applies for every
+profile, not just `CODE_REVIEW`'s `side-effects` findings, so it is genuinely
+output-affecting regardless of `input_data.profile` and must invalidate a
+cached verdict for any profile when it changes. Separate occurrences on
+different lines are never merged; that cross-line theming is left to the
+review narrative / systemic synthesis. This step subsumes the exact-match
+dedupe and the standalone side-effect consolidation on the in-process path; it
+is fail-safe (any error degrades to the uncombined findings). The durable
+Temporal path does not yet run it.
 
 ### CODE_REVIEW_SPEC_COMPLIANCE_PASS
 Default-**off** toggle (`env_bool`, unlike the default-on tail passes above)
@@ -1189,6 +1375,88 @@ between 1 and 2 chunks. Every submission with 2+ chunks measured here shows a
 net reduction, growing toward the fixed-overhead floor as chunk count rises.
 This is descriptive data for a future decision on the default, not a
 recommendation to flip it (deliberately out of scope here).
+
+---
+
+## Software Engineering QA Review
+
+### QA_REVIEW_CACHE_SIZE
+Max entries in the shared QA review-result cache (`shared.cache`; owned by
+`qa_agent.agent.QAExpertAgent.run`). See
+[`software_engineering_team/README.md`](../backend/agents/software_engineering_team/README.md#caching-sharedcache--redis):
+the key hashes the whole `QAInput` — code, language, task description,
+architecture, build errors, request mode, acceptance criteria, tool results —
+plus the resolved review model in one shot, the same whole-input key shape as
+code review's `CODE_REVIEW_SUBMISSION_CACHE_SIZE` cache, so any reviewed-file
+byte change naturally busts the key with no explicit invalidation logic. A
+cache hit skips the LLM call entirely. Unlike that submission cache's
+approved-only rule, every genuine (non-fallback) result is cached regardless
+of `approved` — the same **chunk-level** caching *policy* as
+`CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE` — since `QAExpertAgent.run()` is a
+single atomic call with no chunk/reduce pipeline to short-circuit; only a
+structured-output parse/model failure is never cached, so it is retried for
+real on the next call. Backend failures (Redis unavailable, corrupt entry)
+fail open to a miss/recompute, same as every other `shared.cache` consumer.
+Default `256`, floor `0` (`0` disables the cache — every call re-invokes the
+model).
+
+---
+
+## Software Engineering DevOps Review
+
+### DEVOPS_IAC_CACHE_SIZE / DEVOPS_CICD_CACHE_SIZE / DEVOPS_DEPLOYMENT_STRATEGY_CACHE_SIZE / DEVOPS_DEVSECOPS_CACHE_SIZE / DEVOPS_TASK_CLARIFIER_CACHE_SIZE / DEVOPS_INFRA_DEBUG_CACHE_SIZE / DEVOPS_INFRA_PATCH_CACHE_SIZE / DEVOPS_DOC_RUNBOOK_CACHE_SIZE
+Max entries in each `devops_team` specialist agent's own shared LLM-response
+cache (`shared.cache`; the get/set/key/clear boilerplate lives in
+`software_engineering_team.shared.review_result_cache`, shared by all eight
+devops agents **and** `qa_agent` / `security_agent`). See
+[`software_engineering_team/README.md`](../backend/agents/software_engineering_team/README.md#caching-sharedcache--redis):
+one cache per agent — `InfrastructureAsCodeAgent`, `CICDPipelineAgent`,
+`DeploymentStrategyAgent`, `DevOpsTaskClarifierAgent`, `InfraDebugAgent`,
+`InfraPatchAgent`, and `DocumentationRunbookAgent` (all seven wired through
+the shared `DevOpsSingleShotAgent.run()`), plus `DevSecOpsReviewAgent`
+(wired at its own call site, since it calls `run_single_shot_review` rather
+than `complete_json_with_continuation`) — same
+whole-input key shape as `QA_REVIEW_CACHE_SIZE`: the key hashes the agent's
+entire structured input (including any embedded `DevOpsTaskSpec`) plus the
+resolved review model in one shot, so any field change naturally busts the
+key with no explicit invalidation logic. A cache hit skips the LLM call
+entirely; only a genuine (non-fallback) result is written back. A
+deterministic early return that never reaches the LLM (`DevOpsTaskClarifierAgent`'s
+gap check, `InfraPatchAgent`'s `not fixable` check) never touches the cache
+either way. Backend failures (Redis unavailable, corrupt entry) fail open to
+a miss/recompute, same as every other `shared.cache` consumer. `ChangeReviewAgent`
+has no cache of its own — it delegates entirely to `CodeReviewAgent`, which
+is already covered by `CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE` /
+`CODE_REVIEW_SUBMISSION_CACHE_SIZE`. Each var defaults to `128`, floor `0`
+(`0` disables that agent's cache — every call re-invokes the model).
+
+---
+
+## Software Engineering V2 Tool Agents
+
+### TOOL_AGENT_REVIEW_CACHE_SIZE
+Max entries in the shared V2 tool-agent review cache (`shared.cache`; owned
+by `LlmToolAgentBase._cached_invoke_llm`, wired into
+`BaseReviewToolAgent.review()`'s default one-shot LLM path). See
+[`software_engineering_team/README.md`](../backend/agents/software_engineering_team/README.md#caching-sharedcache--redis):
+one namespace/env var backs every backend and frontend V2 tool agent that
+uses that default path (security, testing/QA, accessibility, performance,
+UX's `review()`) — the key hashes the concrete class's module+qualname, the
+resolved review model, and the fully-rendered prompt (not the raw
+`current_files`/`task_description` input), so any reviewed-file byte change
+naturally busts the key with no explicit invalidation logic, and distinct
+agent classes never collide even when their rendered prompts happen to
+coincide. A cache hit skips the LLM call entirely. Same **atomic-call**
+caching *policy* as `QA_REVIEW_CACHE_SIZE`: only a genuine (non-exception)
+result is cached, so an LLM failure is retried for real on the next call
+rather than being frozen in as a permanent failure. Backend failures (Redis
+unavailable, corrupt entry) fail open to a miss/recompute, same as every
+other `shared.cache` consumer. Default `256`, floor `0` (`0` disables the
+cache — every call re-invokes the model). Out of scope: `build_runner`
+agents (build specialist) take a different review path with no LLM call to
+cache; `UxUsabilityToolAgent.plan()` and `DocumentationToolAgentBase.review()`
+override their phase method entirely and do not currently route through
+this cache.
 
 ---
 
@@ -1621,6 +1889,14 @@ with the issues it depends on so the UI can flag blocked issues; the lookups fan
 semaphore of this width (default `8`). A failed/absent lookup degrades to no dependencies for that
 issue and never fails the list.
 
+### SE_EXECUTION_WAVE_CONCURRENCY
+Maximum number of microtask workers the code-v2 execution loops
+(`run_execution_impl` / `run_gated_execution_impl`) dispatch concurrently within
+one independent wave (default `4`; garbage/empty → default; floored at `1`).
+`parallel_map` sizes the pool at `min(this, wave size)`, so a large planner
+wave cannot spawn one thread per microtask. Cycle-flush batches with intra-batch
+edges still run sequentially.
+
 ### CODING_TEAM_REVIEW_RETRIES
 Number of times the coding-team Tech Lead `run_code_review` LLM call is retried (with jittered
 exponential backoff) on a transient failure (rate limit / timeout / provider outage) before the
@@ -1664,13 +1940,34 @@ timeout the job fails closed (`failed`) rather than proceeding on a guessed deci
 orchestrator thread (e.g. server restart) is recovered via
 `POST /api/coding-team/run/{job_id}/resume`.
 
+### CODING_TEAM_DEVOPS_ROUTING
+Opt-in (**default OFF**) gate for dispatching `target_team="devops"`/`"infra"`/`"infrastructure"`/
+`"ci"`/`"ci_cd"`/`"cicd"`/`"dev_ops"` coding-team tasks to a dedicated DevOps worker
+(`DevOpsTeamWorker`, backed by `DevOpsTeamLeadAgent.run_task`) instead of the pre-existing behavior
+of aliasing them to the `backend_v2` worker. Unlike this file's other boolean toggles (which build on
+`shared.env.env_flag_enabled`'s default-**on** contract), this one uses `shared.env.env_flag_opt_in`:
+only an explicit `1`/`true`/`yes`/`on` (case-insensitive, whitespace-tolerant) enables it — unset,
+blank, or any other value (including `false`/`0`/`off`) leaves it disabled. With the flag off, devops-
+labeled tasks route exactly as before: aliased to `backend_v2` and implemented by an ordinary v2
+worker. With it on, such tasks are routed to a devops worker that builds a structured
+`DevOpsTaskSpec`, runs the full DevOps pipeline (including its own internal IaC/CI/CD/security/change-
+review gates — the coding team's generic build/lint gate is skipped for these tasks), and hands the
+resulting feature branch back for the normal Tech Lead review/merge step, the same as a v2 team's
+output. The devops worker's `DevOpsTaskSpec.environment` is *derived* from the task's own title,
+description, and acceptance criteria (via the same inference `run_workflow`'s free-text callers
+already use) — `"production"` when the task text carries an explicit production signal, `"staging"`
+otherwise. A genuinely production-scoped task therefore keeps the DevOps pipeline's own production
+policy and approval-gate checks (`required_approvals`/`prod_approval_required` on the completion
+package); if its text carries no explicit approval-gate language it fails Phase 1's environment-policy
+gate rather than silently proceeding, the same trade-off `run_workflow` callers already accept.
+
 ---
 
 ## SE CI Gate and Git Identity
 
 ### GIT_COMMIT_USER_NAME
 Author/committer name for every git commit platform code makes (SE pipeline, coding team, agent git
-tools — all routed through `software_engineering_team/shared/git_utils.py`). Default `Khala`. Blank
+tools — all routed through `backend/shared/git/git_utils.py`). Default `Khala`. Blank
 values fall back to the default; natively-exported `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env vars win over
 this setting.
 

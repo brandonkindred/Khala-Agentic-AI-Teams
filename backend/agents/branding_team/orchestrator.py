@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Iterable, List, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterable, List, NamedTuple, Optional, get_origin
 
 from pydantic import BaseModel, ValidationError
 from strands.multiagent.graph import GraphBuilder
@@ -36,7 +36,7 @@ from .graphs.phase2_narrative import build_phase2_graph
 from .graphs.phase3_visual import build_phase3_graph
 from .graphs.phase4_channel import build_phase4_graph
 from .graphs.phase5_governance import build_phase5_graph
-from .graphs.shared import PHASE_ORDER, phase_index, serialize_mission
+from .graphs.shared import PHASE_ORDER, PHASE_OUTPUT_MODELS, phase_index, serialize_mission
 from .graphs.top_level import (
     DEFAULT_EXECUTION_TIMEOUT_SECONDS,
     DEFAULT_NODE_TIMEOUT_SECONDS,
@@ -58,6 +58,8 @@ from .models import (
     VisualIdentityOutput,
     WorkflowStatus,
 )
+from .shared.memoization import phase_input_hash
+from .shared.phase_output_cache import PhaseOutputCache
 
 if TYPE_CHECKING:
     from .store import BrandingStore
@@ -69,10 +71,8 @@ logger = logging.getLogger(__name__)
 # nests under, or None to merge its fields in flat. Every value except
 # discovery_auditor's matches a StrategicCoreOutput field name 1:1 (see
 # agents.py/models.py). discovery_auditor alone nests: StrategicCoreOutput.
-# brand_discovery is typed BrandDiscoveryAudit, not BrandDiscoveryAuditOutput
-# (discovery_auditor's own structured_output= type) -- but the two are
-# field-for-field identical (see models.py), so BrandDiscoveryAuditOutput's
-# model_dump() validates cleanly as a BrandDiscoveryAudit once nested here.
+# brand_discovery and discovery_auditor's own structured_output= are both
+# typed BrandDiscoveryAudit (see models.py), so no conversion is needed here.
 _PHASE1_NODE_MERGE: dict[str, Optional[str]] = {
     "discovery_auditor": "brand_discovery",
     "purpose_vision_writer": None,
@@ -84,11 +84,12 @@ _PHASE1_NODE_MERGE: dict[str, Optional[str]] = {
 
 
 # Phase 2 linear Graph node id -> nest-under key on NarrativeMessagingOutput,
-# or None to merge fields in flat. Each specialist's structured_output is a
-# cumulative carry-forward model (see models.py). Merge uses prefer_first so
-# upstream-owned keys are not overwritten by later re-emissions; require_all
-# still insists every specialist actually ran. VoicePrinciplesDrafter already
-# nests writing_guidelines in its own schema — no remap needed.
+# or None to merge fields in flat. Each specialist's structured_output is an
+# own-field-only model (Story 5b Step 1; see models.py) -- no two of the six
+# fragments can set the same flat key, so the merge is a plain flat union with
+# no collision-avoidance needed. require_all still insists every specialist
+# actually ran. VoicePrinciplesDrafter already nests writing_guidelines in its
+# own schema — no remap needed.
 _PHASE2_NODE_MERGE: dict[str, Optional[str]] = {
     "Storyteller": None,
     "ArchetypeAnalyst": None,
@@ -99,19 +100,140 @@ _PHASE2_NODE_MERGE: dict[str, Optional[str]] = {
 }
 
 
+# Phase 3 fan-out node id -> the VisualIdentityOutput key its structured_output
+# nests under, or None to merge its fields in flat. The three
+# MoodBoardConceptualist_* variants each emit a single MoodBoardConcept, all
+# nesting under "mood_board_candidates" -- since that's a List field on
+# VisualIdentityOutput, _merge_named_fragments appends each one as a list
+# element, so all three survive the merge. converge_decider's
+# CreativeRefinementDecision nests under "creative_refinement" (its
+# default_factory merge target). Six of the seven post-converge specialists
+# already match VisualIdentityOutput field names 1:1 and merge flat;
+# design_system_codifier's DesignSystemDefinition nests under "design_system"
+# since its own fields don't exist at the top level.
+_PHASE3_NODE_MERGE: dict[str, Optional[str]] = {
+    "MoodBoardConceptualist_Editorial": "mood_board_candidates",
+    "MoodBoardConceptualist_Minimalist": "mood_board_candidates",
+    "MoodBoardConceptualist_Bold": "mood_board_candidates",
+    "converge_decider": "creative_refinement",
+    "logo_specifier": None,
+    "color_system_builder": None,
+    "typography_builder": None,
+    "iconography_director": None,
+    "photography_video_director": None,
+    "voice_tone_builder": None,
+    "design_system_codifier": "design_system",
+}
+
+
+# Phase 4 fan-out node id -> the ChannelActivationOutput key its
+# structured_output nests under, or None to merge its fields in flat. Three
+# specialists (brand_experience_principler, brand_architecture_builder,
+# brand_in_action_illustrator) already match ChannelActivationOutput field
+# names 1:1 and merge flat. The six *_guide specialists each emit a single
+# ChannelGuidelineOutput for their own channel, all nesting under the same
+# "channel_guidelines" key -- since that's a List field on
+# ChannelActivationOutput, _merge_named_fragments appends each one as a list
+# element instead of overwriting, so all six survive the merge.
+_PHASE4_NODE_MERGE: dict[str, Optional[str]] = {
+    "brand_experience_principler": None,
+    "website_guide": "channel_guidelines",
+    "social_guide": "channel_guidelines",
+    "email_guide": "channel_guidelines",
+    "events_guide": "channel_guidelines",
+    "partnerships_guide": "channel_guidelines",
+    "internal_guide": "channel_guidelines",
+    "brand_architecture_builder": None,
+    "brand_in_action_illustrator": None,
+}
+
+
+# Phase 5 fan-out node id -> the GovernanceOutput key its structured_output
+# nests under, or None to merge its fields in flat. Unlike Phase 4's six
+# *_guide specialists (which all nest under the same list field), every
+# Phase 5 specialist's structured_output matches a disjoint set of
+# GovernanceOutput field names 1:1 (see models.py) -- so every value here is
+# None and the merge is a plain flat union with no list-append case.
+_PHASE5_NODE_MERGE: dict[str, Optional[str]] = {
+    "ownership_definer": None,
+    "approval_workflow_designer": None,
+    "asset_wiki_planner": None,
+    "training_planner": None,
+    "kpi_designer": None,
+    "evolution_framer": None,
+    "brand_rules_codifier": None,
+}
+
+
+def _child_structured_output(child: Any) -> Optional[BaseModel]:
+    """Recover a merge child's usable ``structured_output``, or ``None``.
+
+    Preconditions:
+        ``child`` is a value looked up from a nested ``MultiAgentResult.results``
+        mapping — either a ``NodeResult``-shaped object or ``None`` (a node id
+        not present in that run).
+    Postconditions:
+        Returns the last agent result's ``structured_output`` when ``child`` is
+        present, exposes a non-empty ``get_agent_results()``, and that output is
+        a ``pydantic.BaseModel``; returns ``None`` otherwise. The ``None`` cases
+        are exactly the ``continue`` conditions the caller skips over.
+    """
+    if child is None or not hasattr(child, "get_agent_results"):
+        return None
+    child_agent_results = child.get_agent_results()
+    if not child_agent_results:
+        return None
+    structured = getattr(child_agent_results[-1], "structured_output", None)
+    if not isinstance(structured, BaseModel):
+        return None
+    return structured
+
+
+def _apply_fragment(
+    merged: dict[str, Any],
+    data: dict[str, Any],
+    nest_under: Optional[str],
+    *,
+    list_fields: frozenset[str] = frozenset(),
+) -> None:
+    """Fold one recognized fragment's dumped ``data`` into the ``merged`` accumulator.
+
+    Preconditions:
+        ``merged`` is the in-progress accumulator; ``data`` is a child's
+        ``model_dump()``; ``nest_under`` is the child's optional nest-under key;
+        ``list_fields`` is the set of ``model_class`` field names typed as a
+        list.
+    Postconditions:
+        Mutates ``merged`` in place and returns ``None``.
+        - When ``nest_under`` names a list field, ``data`` is appended as one
+          element under it (several single-item fragments combine into one list,
+          e.g. Phase 4's ``channel_guidelines``).
+        - When ``nest_under`` names a non-list field, ``data`` is placed under
+          it (last writer wins).
+        - When ``nest_under`` is ``None``, ``data`` overwrites ``merged``'s
+          matching keys (last writer wins).
+        No other keys are touched.
+    """
+    if nest_under and nest_under in list_fields:
+        merged.setdefault(nest_under, []).append(data)
+    elif nest_under:
+        merged[nest_under] = data
+    else:
+        merged.update(data)
+
+
 def _merge_named_fragments(
     node_result: Any,
     model_class: type[BaseModel],
     node_merge: dict[str, Optional[str]],
     *,
     require_all: bool = False,
-    prefer_first: bool = False,
 ) -> Optional[BaseModel]:
     """Merge every recognized child's ``structured_output`` into one phase output.
 
-    Shared by Phase 1 (graph fan-out) and Phase 2 (sequential graph): both wrap
-    several named agents as a single top-level node whose nested
-    ``MultiAgentResult.results`` is keyed by node/agent id.
+    Shared by Phase 1 (graph fan-out), Phase 2 (sequential graph), and Phase 4
+    (graph fan-out): each wraps several named agents as a single top-level
+    node whose nested ``MultiAgentResult.results`` is keyed by node/agent id.
 
     Preconditions:
         ``node_result`` is the ``NodeResult`` for a single top-level graph node
@@ -127,38 +249,36 @@ def _merge_named_fragments(
         validation — in every None case the caller falls back to its existing
         single-agent-result logic unchanged.
 
-        When ``prefer_first`` is True, the first child that sets a flat key
-        wins (later dumps do not overwrite). Phase 2 needs this because each
-        specialist's cumulative ``structured_output`` re-emits upstream fields
-        that a real LLM may rewrite.
+        When ``nest_under`` names a ``model_class`` field typed as a list
+        (e.g. Phase 4's ``channel_guidelines``), every child mapped to that
+        key appends its dump as one list element instead of overwriting —
+        this is how several single-item fragments (one per channel) combine
+        into one list field. Non-list nest_under fields keep the original
+        single-value-assignment behavior.
     """
     nested_results = getattr(getattr(node_result, "result", None), "results", None)
     if not isinstance(nested_results, dict):
         return None
 
+    list_fields = {
+        name
+        for name, field in model_class.model_fields.items()
+        if get_origin(field.annotation) is list
+    }
+
     merged: dict[str, Any] = {}
     found_ids: set[str] = set()
     for child_node_id, nest_under in node_merge.items():
-        child = nested_results.get(child_node_id)
-        if child is None or not hasattr(child, "get_agent_results"):
-            continue
-        child_agent_results = child.get_agent_results()
-        if not child_agent_results:
-            continue
-        structured = getattr(child_agent_results[-1], "structured_output", None)
-        if not isinstance(structured, BaseModel):
+        structured = _child_structured_output(nested_results.get(child_node_id))
+        if structured is None:
             continue
         found_ids.add(child_node_id)
-        data = structured.model_dump()
-        if nest_under:
-            if prefer_first and nest_under in merged:
-                continue
-            merged[nest_under] = data
-        elif prefer_first:
-            for key, value in data.items():
-                merged.setdefault(key, value)
-        else:
-            merged.update(data)
+        _apply_fragment(
+            merged,
+            structured.model_dump(),
+            nest_under,
+            list_fields=list_fields,
+        )
 
     if not found_ids:
         return None
@@ -207,9 +327,11 @@ def _merge_phase2_fragments(node_result: Any, model_class: type[BaseModel]) -> O
     — a partial run (e.g. entry agent only) must not validate as a complete
     ``NarrativeMessagingOutput`` via field defaults.
 
-    Cumulative carry-forward models re-emit upstream fields; merge keeps the
-    first value for each key so a later specialist cannot overwrite the
-    authoritative upstream fragment (e.g. Voice rewriting ``brand_story``).
+    Each specialist's ``structured_output`` is an own-field-only model (Story
+    5b Step 1): upstream narrative reaches it only as read-only context via
+    the single-predecessor edge chain's ``Inputs from previous nodes``, never
+    as a field it re-emits. So no two of the six fragments can ever set the
+    same flat key, and the flat union merge below is deterministic.
 
     Preconditions:
         ``node_result`` is the ``NodeResult`` for a single top-level graph node
@@ -221,9 +343,77 @@ def _merge_phase2_fragments(node_result: Any, model_class: type[BaseModel]) -> O
         the merged data fails validation — same None contract as
         ``_merge_phase1_fragments``.
     """
-    return _merge_named_fragments(
-        node_result, model_class, _PHASE2_NODE_MERGE, require_all=True, prefer_first=True
-    )
+    return _merge_named_fragments(node_result, model_class, _PHASE2_NODE_MERGE, require_all=True)
+
+
+def _merge_phase3_fragments(node_result: Any, model_class: type[BaseModel]) -> Optional[BaseModel]:
+    """Merge every Phase 3 node's ``structured_output`` into one phase output.
+
+    Phase 3 wraps eleven agents (three moodboard conceptualists, converge_decider,
+    and seven post-converge specialists) as a single top-level ``"phase3_visual"``
+    node (see ``graphs/phase3_visual.py``); the same nested-``MultiAgentResult``
+    recovery Phase 1 and Phase 4/5 use applies here. All eleven must be present --
+    a partial run must not silently validate as a complete ``VisualIdentityOutput``
+    via field defaults.
+
+    Preconditions:
+        ``node_result`` is the ``NodeResult`` for a single top-level graph node
+        (may or may not wrap a nested multi-agent result).
+    Postconditions:
+        Returns a validated ``model_class`` instance merging every recognized
+        Phase 3 node's ``structured_output`` when all of ``_PHASE3_NODE_MERGE``'s
+        node ids were found -- the three moodboard conceptualists each contribute
+        one element of ``mood_board_candidates``; returns None when any node is
+        missing or the merged data fails validation -- same None contract as
+        ``_merge_phase1_fragments``.
+    """
+    return _merge_named_fragments(node_result, model_class, _PHASE3_NODE_MERGE, require_all=True)
+
+
+def _merge_phase4_fragments(node_result: Any, model_class: type[BaseModel]) -> Optional[BaseModel]:
+    """Merge every Phase 4 specialist's ``structured_output`` into one phase output.
+
+    Phase 4 wraps nine parallel fan-out agents as a single top-level
+    ``"phase4_channel"`` node (see ``graphs/phase4_channel.py``); the same
+    nested-``MultiAgentResult`` recovery Phase 1 uses applies here. All nine
+    specialists must be present — a partial run must not silently validate as
+    a complete ``ChannelActivationOutput`` via field defaults.
+
+    Preconditions:
+        ``node_result`` is the ``NodeResult`` for a single top-level graph node
+        (may or may not wrap a nested multi-agent result).
+    Postconditions:
+        Returns a validated ``model_class`` instance merging every Phase 4
+        specialist's ``structured_output`` when all of ``_PHASE4_NODE_MERGE``'s
+        node ids were found — the six ``*_guide`` fragments each contribute one
+        element of ``channel_guidelines``; returns None when any specialist is
+        missing or the merged data fails validation — same None contract as
+        ``_merge_phase1_fragments``.
+    """
+    return _merge_named_fragments(node_result, model_class, _PHASE4_NODE_MERGE, require_all=True)
+
+
+def _merge_phase5_fragments(node_result: Any, model_class: type[BaseModel]) -> Optional[BaseModel]:
+    """Merge every Phase 5 specialist's ``structured_output`` into one phase output.
+
+    Phase 5 wraps seven parallel fan-out agents as a single top-level
+    ``"phase5_governance"`` node (see ``graphs/phase5_governance.py``); the
+    same nested-``MultiAgentResult`` recovery Phase 1 and Phase 4 use applies
+    here. All seven specialists must be present -- a partial run must not
+    silently validate as a complete ``GovernanceOutput`` via field defaults.
+
+    Preconditions:
+        ``node_result`` is the ``NodeResult`` for a single top-level graph node
+        (may or may not wrap a nested multi-agent result).
+    Postconditions:
+        Returns a validated ``model_class`` instance merging every recognized
+        Phase 5 specialist's ``structured_output`` when all of
+        ``_PHASE5_NODE_MERGE``'s node ids were found -- every specialist's
+        fields land flat since none of them nest under a shared key; returns
+        None when any specialist is missing or the merged data fails
+        validation -- same None contract as ``_merge_phase1_fragments``.
+    """
+    return _merge_named_fragments(node_result, model_class, _PHASE5_NODE_MERGE, require_all=True)
 
 
 class _PhaseSpec(NamedTuple):
@@ -245,16 +435,26 @@ class _PhaseSpec(NamedTuple):
         model_cls: The phase's output model.
         merge_fn: When the phase's node wraps several named sub-agents whose
             fragments must be merged into one ``model_cls`` (Phase 1's fan-out,
-            Phase 2's sequential graph), the merge function to try first.
-            ``None`` for phases whose terminal node's own output already is
-            the complete phase output (Phases 3-5's compositor nodes).
+            Phase 2's sequential graph, Phase 3's, Phase 4's, and Phase 5's
+            fan-out), the merge function to try first. All five current phases
+            supply one; ``None`` remains valid for a hypothetical future phase
+            whose terminal node's own output is already the complete phase
+            output — none of today's five needs it. Invariant: a merge
+            function must return ``None`` to signal "could not merge" — never
+            a default-constructed ``model_cls()`` — since
+            ``_extract_phase_output`` trusts any non-``None`` return as a
+            successful, non-degraded extraction.
         check_structured_output: Whether the single-agent fallback may accept
             the last agent's own ``structured_output`` as the phase output.
-            ``False`` only for Phase 2, where the last agent
-            (VoicePrinciplesDrafter) only ever emits its own fragment, and
-            subset-validating that against ``NarrativeMessagingOutput`` would
-            silently report a non-degraded output with every other field
-            defaulted empty.
+            ``False`` for Phase 2, Phase 3, Phase 4, and Phase 5, whose
+            last-seen agent (Phase 2's VoicePrinciplesDrafter; Phase 3's,
+            Phase 4's, and Phase 5's parallel specialists have no single
+            "last" node) only ever emits its own fragment — subset-validating
+            that against the phase's full output model would silently report
+            a non-degraded output with every other field defaulted empty.
+            None of these four phases have a compositor, so ``merge_fn`` is
+            the only legitimate extraction path; when it returns ``None`` the
+            phase must degrade instead of accepting a stray fragment.
     """
 
     builder_fn: Callable[[], Any]
@@ -272,23 +472,37 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
     BrandPhase.STRATEGIC_CORE: _PhaseSpec(
         build_phase1_graph,
         "phase1_strategic_core",
-        StrategicCoreOutput,
+        PHASE_OUTPUT_MODELS[BrandPhase.STRATEGIC_CORE],
         merge_fn=_merge_phase1_fragments,
     ),
     BrandPhase.NARRATIVE_MESSAGING: _PhaseSpec(
         build_phase2_graph,
         "phase2_narrative",
-        NarrativeMessagingOutput,
+        PHASE_OUTPUT_MODELS[BrandPhase.NARRATIVE_MESSAGING],
         merge_fn=_merge_phase2_fragments,
         check_structured_output=False,
     ),
     BrandPhase.VISUAL_IDENTITY: _PhaseSpec(
-        build_phase3_graph, "phase3_visual", VisualIdentityOutput
+        build_phase3_graph,
+        "phase3_visual",
+        PHASE_OUTPUT_MODELS[BrandPhase.VISUAL_IDENTITY],
+        merge_fn=_merge_phase3_fragments,
+        check_structured_output=False,
     ),
     BrandPhase.CHANNEL_ACTIVATION: _PhaseSpec(
-        build_phase4_graph, "phase4_channel", ChannelActivationOutput
+        build_phase4_graph,
+        "phase4_channel",
+        PHASE_OUTPUT_MODELS[BrandPhase.CHANNEL_ACTIVATION],
+        merge_fn=_merge_phase4_fragments,
+        check_structured_output=False,
     ),
-    BrandPhase.GOVERNANCE: _PhaseSpec(build_phase5_graph, "phase5_governance", GovernanceOutput),
+    BrandPhase.GOVERNANCE: _PhaseSpec(
+        build_phase5_graph,
+        "phase5_governance",
+        PHASE_OUTPUT_MODELS[BrandPhase.GOVERNANCE],
+        merge_fn=_merge_phase5_fragments,
+        check_structured_output=False,
+    ),
 }
 
 # node id -> spec, so `_extract_phase_output` (which only receives a node id,
@@ -395,6 +609,7 @@ class BrandingTeamOrchestrator:
         include_market_research: bool = False,
         include_design_assets: bool = False,
         target_phase: Optional[BrandPhase] = None,
+        phase_cache: Optional[PhaseOutputCache] = None,
     ) -> TeamOutput:
         """Run the branding pipeline up to and including *target_phase*
         (default: all phases). When *target_phase* is None, every phase is
@@ -411,6 +626,8 @@ class BrandingTeamOrchestrator:
               every phase runs).
             - When ``store`` and ``brand_id`` are supplied, ``store`` implements
               ``get_brand``/``get_brand_by_id``/``append_brand_version``.
+            - ``phase_cache`` is a ``PhaseOutputCache`` instance (possibly
+              empty) or ``None``.
 
         Postconditions:
             - Returns a fully populated ``TeamOutput``.
@@ -420,30 +637,51 @@ class BrandingTeamOrchestrator:
               during the run (``append_brand_version`` returns ``None``), so the
               caller can mark the run as failed instead of reporting success
               without persistence.
+            - When ``phase_cache`` is ``None`` (the default), execution is
+              identical to omitting it entirely -- the pipeline always runs as
+              one monolithic graph invocation, exactly as before this
+              parameter existed.
+            - When ``phase_cache`` is supplied, each phase up to
+              ``target_phase`` is run in isolation (see
+              ``_run_phases_with_cache``): a phase whose input hash matches a
+              cached entry reuses that cached output instead of being
+              invoked; a miss runs the phase via ``run_single_phase`` and, if
+              the result is not degraded, stores it in ``phase_cache`` for a
+              future call.
+            - ``phase_cache`` is thread-path-only by construction, not by
+              convention: the Temporal activity (``temporal/activities.py``)
+              calls ``run_single_phase`` directly and never this method, and
+              ``run_single_phase`` itself takes no ``phase_cache`` parameter
+              -- so a warm cache elsewhere in the process cannot alter the
+              Temporal workflow branch, which keeps invoking every phase.
         """
         # ---- Resolve brand from store if applicable ----
         mission, resolved_client_id = self._resolve_mission(mission, store, client_id, brand_id)
 
         stop_idx = phase_index(target_phase) if target_phase else len(PHASE_ORDER) - 1
 
-        # ---- Build and invoke the graph ----
-        graph = build_branding_graph(target_phase=target_phase)
-        task = (
-            f"Create a comprehensive brand strategy for the following company.\n\n"
-            f"Branding Mission:\n{serialize_mission(mission)}"
-        )
-        result = run_coroutine(graph.invoke_async(task))
+        if phase_cache is None:
+            # ---- Build and invoke the graph ----
+            graph = build_branding_graph(target_phase=target_phase)
+            task = (
+                f"Create a comprehensive brand strategy for the following company.\n\n"
+                f"Branding Mission:\n{serialize_mission(mission)}"
+            )
+            result = run_coroutine(graph.invoke_async(task))
 
-        # ---- Extract phase outputs from graph node results (table-driven) ----
-        # min_idx is a phase's position in PHASE_ORDER, which _PHASE_SPEC's
-        # order always matches.
-        phase_specs = [_PHASE_SPEC[phase] for phase in PHASE_ORDER]
-        extractions = [
-            self._extract_phase_output(result, spec.node_id, spec.model_cls)
-            if stop_idx >= min_idx
-            else (None, False)
-            for min_idx, spec in enumerate(phase_specs)
-        ]
+            # ---- Extract phase outputs from graph node results (table-driven) ----
+            # min_idx is a phase's position in PHASE_ORDER, which _PHASE_SPEC's
+            # order always matches.
+            phase_specs = [_PHASE_SPEC[phase] for phase in PHASE_ORDER]
+            extractions = [
+                self._extract_phase_output(result, spec.node_id, spec.model_cls)
+                if stop_idx >= min_idx
+                else (None, False)
+                for min_idx, spec in enumerate(phase_specs)
+            ]
+        else:
+            extractions = self._run_phases_with_cache(mission, stop_idx, phase_cache)
+
         strategic_core, narrative, visual_identity, channel_activation, governance = (
             output for output, _ in extractions
         )
@@ -490,6 +728,62 @@ class BrandingTeamOrchestrator:
 
         return output
 
+    def _run_phases_with_cache(
+        self,
+        mission: BrandingMission,
+        stop_idx: int,
+        cache: PhaseOutputCache,
+    ) -> List[tuple[Optional[BaseModel], bool]]:
+        """Run each phase up to ``stop_idx`` in isolation, reusing cache hits.
+
+        Unlike the monolithic-graph path this replaces, each phase is invoked
+        one at a time via ``run_single_phase`` so a cache hit can genuinely
+        skip invoking that phase, rather than discarding a freshly computed
+        result in favor of the cached one.
+
+        Preconditions:
+            - ``stop_idx`` is a valid index into ``PHASE_ORDER`` (as computed
+              by ``run`` from ``target_phase``).
+            - ``cache`` is a ``PhaseOutputCache`` instance (possibly empty).
+        Postconditions:
+            - Returns exactly ``len(PHASE_ORDER)`` ``(output, degraded)``
+              pairs in ``PHASE_ORDER`` order, matching the shape and contract
+              of the monolithic path's extraction list: phases beyond
+              ``stop_idx`` are ``(None, False)``.
+            - Each phase's input hash is computed from ``mission`` and the
+              upstream outputs actually produced earlier in this same call
+              (cache hits or fresh runs) -- never from a previous call's
+              accumulated state -- so a changed upstream phase naturally
+              yields a different hash for every downstream phase, causing
+              them to miss and recompute without any separate invalidation
+              step.
+            - Only a non-degraded phase output is ever stored in ``cache``; a
+              degraded (default-constructed) output is returned but never
+              cached, so a transient parse failure cannot poison a later call.
+        """
+        upstream_models: dict[BrandPhase, BaseModel] = {}
+        prior_outputs: dict[str, dict] = {}
+        extractions: List[tuple[Optional[BaseModel], bool]] = []
+        for min_idx, phase in enumerate(PHASE_ORDER):
+            if stop_idx < min_idx:
+                extractions.append((None, False))
+                continue
+
+            input_hash = phase_input_hash(phase, mission, upstream_models)
+            cached_output = cache.get(phase, input_hash)
+            if cached_output is not None:
+                output, degraded = cached_output, False
+            else:
+                output, degraded = self.run_single_phase(mission, phase, prior_outputs)
+                if not degraded:
+                    cache.put(phase, input_hash, output)
+
+            extractions.append((output, degraded))
+            upstream_models[phase] = output
+            prior_outputs[phase.value] = output.model_dump(mode="json")
+
+        return extractions
+
     def run_single_phase(
         self,
         mission: BrandingMission,
@@ -516,10 +810,13 @@ class BrandingTeamOrchestrator:
         Postconditions:
             - Returns ``(output, degraded)`` from ``_extract_phase_output``:
               ``output`` is never ``None`` (a parse failure yields a
-              default-constructed model); ``degraded`` is ``True`` iff that
-              default was used. The caller (the Temporal phase activity) owns
-              folding ``degraded`` into the run's durable degradation record —
-              this method does not persist anything itself.
+              default-constructed model); ``degraded`` is ``True`` only when
+              extraction fell through to that default-construction fallback,
+              not whenever the returned value merely looks default-shaped
+              (see ``_extract_phase_output``'s postcondition). The caller (the
+              Temporal phase activity) owns folding ``degraded`` into the
+              run's durable degradation record — this method does not persist
+              anything itself.
         """
         if phase not in _PHASE_SPEC:
             raise ValueError(f"{phase!r} is not a runnable branding phase")
@@ -656,8 +953,11 @@ class BrandingTeamOrchestrator:
         store: Optional["BrandingStore"] = None,
         client_id: Optional[str] = None,
         brand_id: Optional[str] = None,
+        phase_cache: Optional[PhaseOutputCache] = None,
     ) -> TeamOutput:
-        """Convenience method: run the pipeline up to (and including) a specific phase."""
+        """Convenience method: run the pipeline up to (and including) a specific
+        phase. Accepts an optional ``phase_cache`` to reuse cached phase
+        outputs (see ``run()``)."""
         return self.run(
             mission=mission,
             human_review=human_review,
@@ -666,6 +966,7 @@ class BrandingTeamOrchestrator:
             client_id=client_id,
             brand_id=brand_id,
             target_phase=phase,
+            phase_cache=phase_cache,
         )
 
     @staticmethod
@@ -806,11 +1107,11 @@ class BrandingTeamOrchestrator:
         tool call to produce the payload and populates
         ``AgentResult.structured_output`` instead of the message's text blocks
         — so that's checked next, unless the spec sets
-        ``check_structured_output=False`` (Phase 2 only: a lone specialist's
-        own fragment must never be accepted as a complete phase output, since
-        subset validation against ``NarrativeMessagingOutput`` would succeed
-        via defaults). Agents without usable structured output fall back to
-        parsing the last text block.
+        ``check_structured_output=False`` (Phase 2 and Phase 4: a lone
+        specialist's own fragment must never be accepted as a complete phase
+        output, since subset validation against the phase's full output model
+        would succeed via defaults). Agents without usable structured output
+        fall back to parsing the last text block.
 
         Preconditions:
             - ``result`` is the Strands graph invocation result (or a test
@@ -822,38 +1123,32 @@ class BrandingTeamOrchestrator:
               ``model_class`` instance on success (from the phase's merge_fn,
               structured output, or text parsing), or a default-constructed
               ``model_class()`` when none of those yield a value or the node
-              result is missing/malformed. ``degraded`` is ``True`` iff a
-              default was returned, and every such fall-through is logged
-              (with traceback for unexpected errors) rather than swallowed
-              silently. Callers that assemble a ``TeamOutput`` must fold
-              ``degraded`` phases into ``TeamOutput.degraded_phases``
-              themselves — this method does not know which ``BrandPhase`` it
-              was called for.
+              result is missing/malformed. ``degraded`` reflects which code
+              path produced ``output``, not a property of the value itself:
+              it is ``True`` only when extraction fell through every
+              recognized path to the default-construction fallback, and every
+              such fall-through is logged (with traceback for unexpected
+              errors) rather than swallowed silently. Any non-``None`` return
+              from ``spec.merge_fn`` is trusted as a successful extraction and
+              always yields ``degraded=False``, even if that value happens to
+              equal ``model_class()`` — merge functions must return ``None``,
+              never a default instance, to signal failure (see
+              ``_PhaseSpec.merge_fn``). Callers that assemble a
+              ``TeamOutput`` must fold ``degraded`` phases into
+              ``TeamOutput.degraded_phases`` themselves — this method does
+              not know which ``BrandPhase`` it was called for.
         """
         spec = _SPEC_BY_NODE_ID.get(node_id)
         try:
-            result_obj = getattr(result, "result", None)
-            if result_obj is not None and hasattr(result_obj, "get"):
-                node_result = result_obj.get(node_id)
-                if node_result and hasattr(node_result, "result"):
-                    if spec is not None and spec.merge_fn is not None:
-                        merged = spec.merge_fn(node_result, model_class)
-                        if merged is not None:
-                            return merged, False
-                    agent_results = node_result.get_agent_results()
-                    if agent_results:
-                        last = agent_results[-1]
-                        if spec is None or spec.check_structured_output:
-                            structured = getattr(last, "structured_output", None)
-                            if isinstance(structured, BaseModel):
-                                parsed = _merge_structured_output(structured, model_class)
-                                if parsed is not None:
-                                    return parsed, False
-                        if hasattr(last, "message") and last.message:
-                            text = _collect_message_text(last.message)
-                            parsed = _parse_model_from_text(text, model_class)
-                            if parsed is not None:
-                                return parsed, False
+            node_result = _locate_node_result(result, node_id)
+            if node_result is not None:
+                if spec is not None and spec.merge_fn is not None:
+                    merged = spec.merge_fn(node_result, model_class)
+                    if merged is not None:
+                        return merged, False
+                parsed = _extract_from_single_agent(node_result, model_class, spec)
+                if parsed is not None:
+                    return parsed, False
         except Exception:
             # Malformed JSON / schema mismatch already returns None from
             # _parse_model_from_text; reaching here means an unexpected error
@@ -898,10 +1193,11 @@ def _merge_structured_output(
 ) -> Optional[BaseModel]:
     """Validate an agent's typed ``structured_output`` against a phase's output model.
 
-    ``structured`` is often a strict subset of ``model_class`` — e.g. the
+    ``structured`` is often a specialist fragment of ``model_class`` — e.g. the
     positioning synthesizer only emits ``positioning_statement``/``brand_promise``
     out of the full ``StrategicCoreOutput`` schema — which validates fine since
-    every field on the phase output models has a default.
+    every field on the phase output models has a default. Dump-then-validate is
+    required for those subset payloads; it is not leftover twin-model conversion.
 
     Preconditions:
         ``structured`` is a ``pydantic.BaseModel`` instance; ``model_class`` is
@@ -954,6 +1250,68 @@ def _parse_model_from_text(text: str, model_class: type[BaseModel]) -> Optional[
         return model_class.model_validate(data)
     except ValidationError:
         return None
+
+
+def _locate_node_result(result: Any, node_id: str) -> Optional[Any]:
+    """Walk a Strands graph invocation ``result`` down to one node's result.
+
+    Preconditions:
+        ``result`` is the graph invocation result (or a test double shaped like
+        one); ``node_id`` identifies the node to fetch.
+    Postconditions:
+        Returns the ``NodeResult`` for ``node_id`` when ``result`` exposes a
+        ``result`` mapping (duck-typed via ``.get``) that contains ``node_id``
+        and the fetched value itself wraps a ``result``; returns ``None`` for
+        any missing/malformed link in that chain (no ``result`` attr, not a
+        mapping, node id absent, or a node result without a ``result``).
+    """
+    result_obj = getattr(result, "result", None)
+    if result_obj is None or not hasattr(result_obj, "get"):
+        return None
+    node_result = result_obj.get(node_id)
+    if node_result and hasattr(node_result, "result"):
+        return node_result
+    return None
+
+
+def _extract_from_single_agent(
+    node_result: Any, model_class: type[BaseModel], spec: Optional["_PhaseSpec"]
+) -> Optional[BaseModel]:
+    """Recover a phase output from a node's last agent result, or ``None``.
+
+    The per-node fallback for phases whose merge_fn didn't apply: prefer the
+    last agent's typed ``structured_output`` (Strands populates it when the
+    agent was built with ``structured_output=``), then fall back to parsing the
+    last text block.
+
+    Preconditions:
+        ``node_result`` is a ``NodeResult`` exposing ``get_agent_results()``;
+        ``spec`` is the phase's ``_PhaseSpec`` or ``None`` for an unrecognized
+        node id.
+    Postconditions:
+        Returns a validated ``model_class`` instance from the last agent's
+        ``structured_output`` (only when ``spec`` is ``None`` or
+        ``spec.check_structured_output`` is True) or from parsing its last text
+        block; returns ``None`` when there are no agent results or neither
+        source yields a usable value — in which case the caller degrades to a
+        default-constructed model.
+    """
+    agent_results = node_result.get_agent_results()
+    if not agent_results:
+        return None
+    last = agent_results[-1]
+    if spec is None or spec.check_structured_output:
+        structured = getattr(last, "structured_output", None)
+        if isinstance(structured, BaseModel):
+            parsed = _merge_structured_output(structured, model_class)
+            if parsed is not None:
+                return parsed
+    if hasattr(last, "message") and last.message:
+        text = _collect_message_text(last.message)
+        parsed = _parse_model_from_text(text, model_class)
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def _bullets(title: str, items: Iterable[Any], fmt: Callable[[Any], str] = lambda x: x) -> str:

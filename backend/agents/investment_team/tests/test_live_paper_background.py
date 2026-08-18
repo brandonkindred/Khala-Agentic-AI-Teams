@@ -16,6 +16,7 @@ fires.
 
 from __future__ import annotations
 
+import types
 from typing import Any, Dict
 
 import pytest
@@ -123,13 +124,15 @@ def _install_run_paper_trade(
 ):
     """Patch the ``run_paper_trade`` import inside the worker function.
 
-    If ``captured`` is given, the call's ``backtest_config`` is stashed under
-    ``captured["backtest_config"]`` for assertions.
+    If ``captured`` is given, the call's ``backtest_config``/``paper_config``
+    are stashed under ``captured["backtest_config"]``/``captured["paper_config"]``
+    for assertions.
     """
 
     def _fake_run(*, strategy, backtest_config, paper_config, stop_controller):
         if captured is not None:
             captured["backtest_config"] = backtest_config
+            captured["paper_config"] = paper_config
         if isinstance(result, Exception):
             raise result
         return result
@@ -187,6 +190,36 @@ def test_live_paper_background_marks_completed_on_clean_termination(
     assert session.data_source == "live:binance"
     # Stop-controller entry should have been cleared.
     assert "pt-1" not in api_state._live_paper_stop_controllers
+
+
+def test_live_paper_background_falls_back_to_default_timeframe(
+    monkeypatch: pytest.MonkeyPatch, api_state
+) -> None:
+    """Neither the request nor the strategy supplies a timeframe: the worker
+    must fall back to ``api_main._DEFAULT_TIMEFRAME``, not a bare literal."""
+    from investment_team.api import main as api_main
+
+    _seed_running_session(api_state, session_id="pt-default-timeframe")
+    # A strategy stand-in with no ``timeframe`` attribute — ``StrategySpec``
+    # can't express this since ``timeframe`` is a required Literal field.
+    strategy = types.SimpleNamespace(asset_class="equities")
+
+    import investment_team.market_data_service as mds
+
+    monkeypatch.setattr(mds, "MarketDataService", lambda: _FakeMarketService(["AAA"]))
+
+    captured: Dict[str, Any] = {}
+    _install_run_paper_trade(monkeypatch, _FakeRunResult(), captured=captured)
+
+    req = api_main.RunPaperTradingRequest(lab_record_id="lab-w")
+    api_main._run_live_paper_trading_background(
+        "pt-default-timeframe", "lab-w", strategy, req
+    )
+
+    assert (
+        captured["paper_config"].kwargs["strategy_timeframe"]
+        == api_main._DEFAULT_TIMEFRAME
+    )
 
 
 def test_live_paper_background_marks_failed_on_lookahead_violation(

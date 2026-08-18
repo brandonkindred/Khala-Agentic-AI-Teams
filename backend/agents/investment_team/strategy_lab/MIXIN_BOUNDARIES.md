@@ -114,11 +114,15 @@ than just move code, which is out of this issue's scope:
   `_AnomalyRecoveryOutcome` itself — a real contract change to a type
   consumed by `_handle_critical_anomalies`, not a rename.
 - **A shared `spec`/`code`/`trades`/`metrics` base dataclass.** This
-  4-tuple appears verbatim in five dataclasses across three files. A common
-  base or composed type would cut real duplication, but touches
-  `dataclasses.replace()`/equality semantics and every consumer of all five
-  types — a larger, riskier change better scoped as its own follow-up than
-  bundled into this line-count-reduction issue.
+  4-tuple appeared verbatim in five dataclasses across three files. It was
+  a larger, riskier change than this line-count-reduction issue's scope, so
+  it was left as its own follow-up — since done: the five dataclasses
+  (`_AlignmentLoopOutcome` / `_SynthesisLoopOutcome` in
+  `_orchestrator_helpers.py`, `_AnomalyRecoveryOutcome` /
+  `_SynthesisEvaluateResult` in `orchestrator_synthesis.py`,
+  `_AlignmentRoundOutcome` in `orchestrator_alignment.py`) now inherit the
+  4-tuple from a shared `_DesignAttemptState` base defined in
+  `_orchestrator_helpers.py`, purely additively — no call site changed.
 
 ## Final module boundaries
 
@@ -142,13 +146,17 @@ than just move code, which is out of this issue's scope:
   single-file dataclasses and no glue-method involvement.
 - **`orchestrator_record_assembly.py`** (`RecordAssemblyMixin`) — building
   the final `StrategyLabRecord`. Also untouched.
-- **`_orchestrator_helpers.py`** — now holds only the 9 dataclasses that
-  are genuinely constructed in one mixin and consumed in another
-  (`_MarketDataFetch`, `_VerificationOutcome`, `_AlignmentLoopOutcome`,
-  `_DesignPersistContext`, `_DriftCollector`, `RefinementStallTracker`,
-  `_CodeSynthesisPhaseResult`, `_RefinementAlignmentResult`,
-  `_SynthesisLoopOutcome`), plus the dependency-free pure functions every
-  mixin needs and that cannot import from `orchestrator.py` or each other.
+- **`_orchestrator_helpers.py`** — now holds the 10 dataclasses that are
+  genuinely constructed in one mixin and consumed in another
+  (`_MarketDataFetch`, `_VerificationOutcome`, `_DesignAttemptState`,
+  `_AlignmentLoopOutcome`, `_DesignPersistContext`, `_DriftCollector`,
+  `RefinementStallTracker`, `_CodeSynthesisPhaseResult`,
+  `_RefinementAlignmentResult`, `_SynthesisLoopOutcome`), plus the
+  dependency-free pure functions every mixin needs and that cannot import
+  from `orchestrator.py` or each other. `_DesignAttemptState` is the shared
+  `spec`/`code`/`trades`/`metrics` base the dedup item above describes — it
+  is constructed directly (not just via its five subclasses) at two call
+  sites in `orchestrator_design.py` and two in `orchestrator_synthesis.py`.
 
 Pipeline behavior (design → synthesis → alignment → verification → record
 assembly) is unchanged by every step above — each was either a field-for-field

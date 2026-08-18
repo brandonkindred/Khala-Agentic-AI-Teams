@@ -25,10 +25,17 @@ from .code_boundaries import node_end_line, node_start_line
 _HEURISTIC_SKIP = ("}", ")", "]", "*/", "/*", "//", "#", "*", "...")
 
 # The ``render_annotated_hunks`` path (coding-team PR review) prefixes each hunk
-# line with its original file line number: ``4242: const x = 1;``. This pattern
-# detects and strips those prefixes so the boundary helpers below receive plain
-# code and a physical (1-based) line index.
-_LINE_NUMBER_PREFIX_RE = re.compile(r"^(\d+): ")
+# line with its original file line number: ``4242| const x = 1;`` (legacy
+# fixtures still use ``4242: const x = 1;``). A pipe gutter is the live format
+# so the prefix cannot be mistaken for Python ``def``/dict syntax. Leading
+# spaces before the digits are width-padding (``  9| ``), never source indent.
+# A change-surface body prepends a single ``+``/``>`` marker column on
+# added/modified lines (``+ 9| ``); the optional ``[+>]`` here consumes that
+# marker so only the digit run is captured — the recovered line number is the
+# same with or without the marker. Indented dict keys (``    1: value``) do not
+# match: they use ``: `` and sit at a 4-space indent, whereas a padded ``| ``
+# gutter never uses ``: ``.
+_LINE_NUMBER_PREFIX_RE = re.compile(r"^(?:(\d+): |[+>]?[ ]*(\d+)\| )")
 
 # Bare inter-hunk gap marker emitted by ``render_annotated_hunks`` between
 # non-contiguous hunks. Joining across it would attach a later hunk's indented
@@ -63,10 +70,10 @@ class EnclosingConstruct:
 def strip_numbered_prefixes(
     content: str, line_number: int
 ) -> Tuple[str, int, Optional[Callable[[int], int]]]:
-    """Strip ``N: `` line-number prefixes from pre-numbered hunk content.
+    """Strip ``N| `` / legacy ``N: `` line-number prefixes from pre-numbered hunk content.
 
     The coding-team PR-review path calls ``render_annotated_hunks`` which
-    prepends each line with its new-file line number: ``4242: const x = 1;``.
+    prepends each line with its new-file line number: ``4242| const x = 1;``.
     This content reaches the verifier's ``CodebaseIndex`` verbatim, so the
     boundary-lookup functions below must strip those prefixes before scanning.
 
@@ -75,13 +82,14 @@ def strip_numbered_prefixes(
         - ``line_number`` is a positive int (not a bool).
 
     Postconditions:
-        - If the first non-blank line does NOT match ``r'^\\d+: '``, the
-          content is not pre-numbered; returns ``(content, line_number, None)``
-          unchanged — no remap is needed.
+        - If the first non-blank line does NOT match ``r'^(\\d+): '`` or
+          ``r'^[+>]?[ ]*(\\d+)\\| '`` (the optional ``[+>]`` tolerates a
+          change-surface marker column), the content is not pre-numbered;
+          returns ``(content, line_number, None)`` unchanged — no remap needed.
         - Otherwise returns ``(stripped_content, physical_index, line_mapper)``
           where:
-          - ``stripped_content`` is the content with all ``N: `` prefixes
-            removed. Bare ``...`` hunk-gap markers from
+          - ``stripped_content`` is the content with all ``N| `` / legacy
+            ``N: `` prefixes removed. Bare ``...`` hunk-gap markers from
             ``render_annotated_hunks`` are kept as-is so
             :func:`enclosing_construct` can resolve each hunk independently
             without joining them into one AST (joining would attach a later
@@ -118,7 +126,7 @@ def strip_numbered_prefixes(
     for i, line in enumerate(lines, start=1):
         m = _LINE_NUMBER_PREFIX_RE.match(line)
         if m:
-            orig = int(m.group(1))
+            orig = int(m.group(1) or m.group(2))
             phys_to_orig[i] = orig
             stripped.append(line[m.end() :])
             if orig == line_number and not exact_match:
@@ -286,9 +294,7 @@ def _iter_constructs_ast(content: str) -> List[EnclosingConstruct]:
         start_line = node_start_line(node)
         end_line = node_end_line(node)
         kind = "class" if isinstance(node, ast.ClassDef) else "function"
-        nodes.append(
-            (start_line, end_line, node.name, kind, _property_accessor_suffix(node))
-        )
+        nodes.append((start_line, end_line, node.name, kind, _property_accessor_suffix(node)))
 
     peers = [(s, e, n, k) for s, e, n, k, _ in nodes]
     results: List[EnclosingConstruct] = []
@@ -297,9 +303,7 @@ def _iter_constructs_ast(content: str) -> List[EnclosingConstruct]:
             name, kind, start_line, end_line, peers, accessor_suffix=accessor_suffix
         )
         results.append(
-            EnclosingConstruct(
-                start_line=start_line, end_line=end_line, name=qualified, kind=kind
-            )
+            EnclosingConstruct(start_line=start_line, end_line=end_line, name=qualified, kind=kind)
         )
     return results
 
@@ -446,6 +450,38 @@ def segment_containing_line(
                     return "\n".join(seg_lines)
             return None
     return content
+
+
+def hunk_segment_bounds(
+    content: str, line_number: int, *, annotated_hunks: bool = False
+) -> Optional[Tuple[int, int]]:
+    """1-based ``(start, end)`` bounds of the gap-bounded segment containing ``line_number``.
+
+    The bounds counterpart of :func:`segment_containing_line`: same gap-scan
+    over :func:`_hunk_segments`, but returns the segment's endpoints instead
+    of its joined text, for callers that need to clip a range rather than
+    re-parse a snippet.
+
+    Preconditions:
+        - ``content`` is a string (may be empty).
+        - ``line_number`` >= 1.
+
+    Postconditions:
+        - When ``annotated_hunks`` is False, or ``content`` has no bare
+          ``...`` gap markers, returns ``(1, len(lines))`` where ``lines`` is
+          ``content.splitlines()``, or ``None`` when ``content`` is empty.
+        - When ``annotated_hunks`` is True and gap markers are present,
+          returns the 1-based ``(start, end)`` of the single hunk segment
+          containing ``line_number``, or ``None`` when no segment contains it.
+        - Never raises.
+    """
+    lines = content.splitlines()
+    if annotated_hunks and any(line == _HUNK_SEPARATOR for line in lines):
+        for seg_start, seg_end, _seg_lines in _hunk_segments(lines):
+            if seg_start <= line_number <= seg_end:
+                return (seg_start, seg_end)
+        return None
+    return (1, len(lines)) if lines else None
 
 
 def enclosing_construct_start_heuristic(content: str, line_number: int) -> Optional[int]:

@@ -27,9 +27,15 @@ import hashlib
 import json
 import logging
 import os
-from typing import TYPE_CHECKING, Any, List, Tuple
+from typing import TYPE_CHECKING, Any, Callable, List, Tuple
 
 from shared.cache import get_shared_cache, with_cache_build_id
+
+from .interface import (
+    LLMTruncatedError,
+    observer_turn_started,
+    take_complete_json_turns,
+)
 
 if TYPE_CHECKING:
     from .interface import LLMClient
@@ -93,6 +99,16 @@ def clear_compaction_cache() -> None:
 def _model_fingerprint(llm: "LLMClient") -> str:
     """Best-effort stable identifier for the model a compaction will run on.
 
+    Delegates to ``llm_service.strands_model.model_fingerprint`` — the
+    canonical attribute-probing tail — imported lazily (not at module level)
+    to avoid a circular import: this module is imported eagerly by
+    ``llm_service/__init__.py``, before ``strands_model``'s own top-level
+    ``from llm_service import get_strands_model`` could resolve.
+    ``model_fingerprint`` is a strict superset of this function's old
+    inline probe (it additionally falls back to a dict-shaped ``.config``),
+    so this is behavior-preserving for every ``LLMClient`` that has no such
+    attribute — true of every concrete client in this package.
+
     Postconditions:
         - Returns a string that changes when the *currently preferred* model
           changes, so switching the configured provider/model (e.g. Ollama →
@@ -107,14 +123,11 @@ def _model_fingerprint(llm: "LLMClient") -> str:
           provider produces a valid, budget-bounded compaction of the same input,
           so reusing one within a configured provider list is acceptable.
     """
-    for attr in ("model_id", "model_name", "model"):
-        try:
-            value = getattr(llm, attr, None)
-        except Exception:
-            value = None
-        if isinstance(value, str) and value:
-            return value
-    return type(llm).__name__
+    from llm_service.strands_model import (
+        model_fingerprint as _model_fingerprint_tail,  # noqa: PLC0415
+    )
+
+    return _model_fingerprint_tail(llm)
 
 
 def _compaction_cache_key(
@@ -178,11 +191,48 @@ def _split_into_chunks(text: str, chunk_chars: int) -> List[str]:
     return chunks
 
 
+def _invoke_on_attempt(
+    on_attempt: Callable[[str, str], None] | None, prompt: str, response: str
+) -> None:
+    """Best-effort compaction observer; never raises."""
+    if on_attempt is None:
+        return
+    try:
+        on_attempt(prompt, response)
+    except Exception:  # noqa: BLE001 - observer must never break compaction
+        logger.warning("compact_text: on_attempt callback failed", exc_info=True)
+
+
+def _observe_complete_turns(
+    on_attempt: Callable[[str, str], None] | None,
+    prompt: str,
+    fallback_response: str,
+) -> None:
+    """Notify ``on_attempt`` for each recorded ``complete`` continuation turn.
+
+    Preconditions:
+        ``prompt`` is the compaction user message. ``fallback_response`` is
+        used when the provider recorded no inner turns.
+    Postconditions:
+        Inner continuation turns, when present, are each observed in record
+        order with that turn's start time bound. Otherwise ``on_attempt`` is
+        invoked once with ``(prompt, fallback_response)``. Never raises.
+    """
+    turns = take_complete_json_turns()
+    if turns:
+        for turn_prompt, turn_response, started in turns:
+            with observer_turn_started(started):
+                _invoke_on_attempt(on_attempt, turn_prompt, turn_response)
+        return
+    _invoke_on_attempt(on_attempt, prompt, fallback_response)
+
+
 def _compact_single(
     text: str,
     target_chars: int,
     llm: "LLMClient",
     content_description: str,
+    on_attempt: Callable[[str, str], None] | None = None,
 ) -> str:
     """Compact a single chunk that fits within the model's context window."""
     prompt = (
@@ -199,9 +249,17 @@ def _compact_single(
         f"--- END CONTENT ---\n\n"
         f"Compacted version:"
     )
-    result = llm.complete(
-        prompt, objective=f"compact oversized {content_description}", temperature=0.0
-    )
+    try:
+        result = llm.complete(
+            prompt, objective=f"compact oversized {content_description}", temperature=0.0
+        )
+    except LLMTruncatedError as exc:
+        _observe_complete_turns(on_attempt, prompt, exc.partial_content or "")
+        raise
+    except Exception:
+        _observe_complete_turns(on_attempt, prompt, "")
+        raise
+    _observe_complete_turns(on_attempt, prompt, result)
     return result.strip()
 
 
@@ -224,6 +282,8 @@ def compact_text(
     max_chars: int,
     llm: "LLMClient",
     content_description: str = "content",
+    *,
+    on_attempt: Callable[[str, str], None] | None = None,
 ) -> str:
     """Return *text* as-is when it fits, otherwise ask the LLM to compact it.
 
@@ -239,6 +299,11 @@ def compact_text(
         Human-readable label for the content type (e.g. "research document",
         "architecture overview").  Included in the compaction prompt so the LLM
         knows what it is summarising.
+    on_attempt:
+        Optional observer invoked with ``(prompt, response)`` for each
+        ``llm.complete`` this call actually makes (not on cache hits). A
+        truncated reply is reported with its ``partial_content`` rather than
+        an empty string. Observer exceptions are swallowed.
 
     Returns
     -------
@@ -272,13 +337,17 @@ def compact_text(
     if capacity <= 0:
         # Cache disabled — pure passthrough (keeps the number of LLM invocations
         # deterministic for callers/tests that assert on it).
-        return _compact_uncached(text, max_chars, llm, content_description)[0]
+        return _compact_uncached(text, max_chars, llm, content_description, on_attempt=on_attempt)[
+            0
+        ]
 
     key = _compaction_cache_key(text, max_chars, content_description, llm)
     cache = get_shared_cache(_compaction_cache_namespace())
 
     def _compute() -> Tuple[bytes, bool]:
-        result, cacheable = _compact_uncached(text, max_chars, llm, content_description)
+        result, cacheable = _compact_uncached(
+            text, max_chars, llm, content_description, on_attempt=on_attempt
+        )
         return result.encode("utf-8"), cacheable
 
     # SharedCache.single_flight takes compute → (payload_bytes, cacheable) and
@@ -300,7 +369,9 @@ def compact_text(
                 key,
                 exc_info=True,
             )
-        result, cacheable = _compact_uncached(text, max_chars, llm, content_description)
+        result, cacheable = _compact_uncached(
+            text, max_chars, llm, content_description, on_attempt=on_attempt
+        )
         if cacheable:
             try:
                 cache.set(key, result.encode("utf-8"), max_entries=capacity)
@@ -318,6 +389,7 @@ def _compact_uncached(
     max_chars: int,
     llm: "LLMClient",
     content_description: str,
+    on_attempt: Callable[[str, str], None] | None = None,
 ) -> Tuple[str, bool]:
     """Compact *text* without consulting the memo cache.
 
@@ -346,7 +418,9 @@ def _compact_uncached(
 
         # If the text fits in one compaction call, do it directly.
         if len(text) <= chunk_chars:
-            result = _compact_single(text, max_chars, llm, content_description)
+            result = _compact_single(
+                text, max_chars, llm, content_description, on_attempt=on_attempt
+            )
             if result:
                 logger.info(
                     "Compaction result for %s: %d chars (target %d)",
@@ -383,6 +457,7 @@ def _compact_uncached(
                     per_chunk_target,
                     llm,
                     f"{content_description} (chunk {i + 1}/{num_chunks})",
+                    on_attempt=on_attempt,
                 )
                 if part:
                     compacted_parts.append(part)
@@ -411,7 +486,9 @@ def _compact_uncached(
             # Models can overshoot the per-chunk target; tighten once against
             # the overall budget before accepting the join.
             try:
-                tightened = _compact_single(result, max_chars, llm, content_description)
+                tightened = _compact_single(
+                    result, max_chars, llm, content_description, on_attempt=on_attempt
+                )
                 if tightened:
                     result = tightened
             except Exception:

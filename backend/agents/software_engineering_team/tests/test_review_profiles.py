@@ -13,8 +13,11 @@ import pytest
 from code_review_agent import CodeReviewAgent, CodeReviewInput, ReviewProfile
 from code_review_agent.profiles import (
     _SHARED_OUTPUT_SECTION,
+    _SHARED_REVIEW_POLICY,
     _SHARED_ROLE_AND_SETTLED,
     REVIEW_PROFILES,
+    build_review_formatting_instructions,
+    build_review_reasoning_system_prompt,
     build_review_system_prompt,
 )
 from code_review_agent.prompts import CODE_REVIEW_PROMPT
@@ -32,23 +35,58 @@ def test_code_review_profile_is_byte_identical_to_legacy_prompt() -> None:
     assert build_review_system_prompt(ReviewProfile.CODE_REVIEW) == CODE_REVIEW_PROMPT
 
 
+def test_reasoning_prompt_omits_json_output_contract() -> None:
+    """Reasoning prompt carries review policy and prose guidance, not the JSON schema."""
+    text = build_review_reasoning_system_prompt(ReviewProfile.CODE_REVIEW)
+    assert "Return a single JSON object" not in text
+    assert '"approved": boolean' not in text
+    assert "Answer in structured prose" in text
+    assert _SHARED_REVIEW_POLICY in text
+
+
+def test_formatting_instructions_include_json_contract() -> None:
+    """Formatting instructions carry the shared JSON output contract, not review policy."""
+    text = build_review_formatting_instructions(ReviewProfile.CODE_REVIEW)
+    assert "Return a single JSON object" in text
+    assert '"approved": boolean' in text
+    assert _SHARED_REVIEW_POLICY not in text
+    assert _SHARED_OUTPUT_SECTION in text
+
+
+def test_composed_system_prompt_equals_reasoning_plus_formatting() -> None:
+    """Legacy builder concatenates reasoning and formatting halves."""
+    profile = ReviewProfile.CODE_REVIEW
+    assert build_review_system_prompt(profile) == (
+        build_review_reasoning_system_prompt(profile)
+        + build_review_formatting_instructions(profile)
+    )
+
+
 def test_shared_skeleton_pieces_are_slices_of_legacy_prompt() -> None:
     """Shared skeleton pieces remain substrings of the derived CODE_REVIEW prompt."""
     assert _SHARED_ROLE_AND_SETTLED in CODE_REVIEW_PROMPT
+    assert _SHARED_REVIEW_POLICY in CODE_REVIEW_PROMPT
     assert _SHARED_OUTPUT_SECTION in CODE_REVIEW_PROMPT
 
 
+def test_shared_output_section_treats_line_gutter_as_metadata_not_indent() -> None:
+    """Numbered prefixes must not be judged as source whitespace (9→10 hang)."""
+    assert "`123| <code>`" in _SHARED_OUTPUT_SECTION
+    assert "`N| `" in _SHARED_OUTPUT_SECTION
+    assert "hanging indent" in _SHARED_OUTPUT_SECTION
+    assert "gutter is metadata" in _SHARED_OUTPUT_SECTION
+
+
 def test_requirement_citation_guardrail_in_spec_flavored_sections_only() -> None:
-    """Guardrail sits under Spec Compliance / Coverage items, not Naming/Quality."""
+    """Guardrail sits under the Ticket/Spec Fit item, not Style."""
     code_review = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
     assert REQUIREMENT_CITATION_GUARDRAIL in code_review
-    # Search after the Spec Compliance checklist item — Naming also appears earlier
+    # Search after the Ticket/Spec Fit checklist item — Naming also appears earlier
     # in REVIEW_PRIORITY_FRAMEWORK.
-    i_spec = code_review.index("1. **Spec Compliance**")
-    i_guard = code_review.index(REQUIREMENT_CITATION_GUARDRAIL, i_spec)
-    i_naming = code_review.index("2. **Naming Conventions**", i_spec)
-    i_quality = code_review.index("4. **Code Quality**", i_spec)
-    assert i_spec < i_guard < i_naming < i_quality
+    i_ticket = code_review.index("7. **Ticket/Spec Fit**")
+    i_guard = code_review.index(REQUIREMENT_CITATION_GUARDRAIL, i_ticket)
+    i_style = code_review.index("8. **Style**", i_ticket)
+    assert i_ticket < i_guard < i_style
 
     spec_conf = build_review_system_prompt(ReviewProfile.SPEC_CONFORMANCE)
     assert REQUIREMENT_CITATION_GUARDRAIL in spec_conf
@@ -99,25 +137,75 @@ def test_summary_guidance_enforces_brevity_and_no_praise() -> None:
     assert 'return an empty string "" — do not write reassuring "meets the spec" prose' in prompt
 
 
-def test_code_review_criteria_covers_architecture_refactor_correctness_maintainability() -> None:
-    """The default CODE_REVIEW profile's checklist covers the four expanded review
-    angles: architecture consistency, refactoring opportunities, correctness/best
-    practices, and maintainability -- on top of everything it already checked."""
+def test_thoroughness_requirements_are_surface_scoped_not_whole_codebase() -> None:
+    """Regression guard: the shared THOROUGHNESS REQUIREMENTS block scopes the
+    reviewer's obligation to the code it was given to review, not every file
+    the wider codebase happens to contain -- and no longer carries the old
+    "review EVERY function/class in EVERY file" mandate that predated the
+    diff-first rewrite."""
+    assert (
+        "Your thoroughness obligation is everything in the code you were given to review"
+        in _SHARED_REVIEW_POLICY
+    )
+    assert '"Code to review" input' in _SHARED_REVIEW_POLICY
+    assert (
+        "Do NOT extend that obligation to code shown to you only as background"
+        in _SHARED_REVIEW_POLICY
+    )
+    # The retired whole-codebase thoroughness mandate must not reappear.
+    assert "EVERY file" not in _SHARED_REVIEW_POLICY
+    assert "EVERY function, method, and class" not in _SHARED_REVIEW_POLICY
+    assert "review every function" not in _SHARED_REVIEW_POLICY.lower()
+
+
+def test_code_review_criteria_covers_eight_change_focused_headers() -> None:
+    """The default CODE_REVIEW profile's checklist covers all eight change-focused
+    criteria the diff-first review goal requires."""
     prompt = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
-    assert "**Architecture Consistency**" in prompt
-    assert "**Refactoring Opportunities**" in prompt
-    assert "**Correctness & Best Practices**" in prompt
-    assert "**Maintainability**" in prompt
+    assert "1. **Correctness**" in prompt
+    assert "2. **Contracts**" in prompt
+    assert "3. **Caller Side Effects**" in prompt
+    assert "4. **Architecture**" in prompt
+    assert "5. **Best Practices**" in prompt
+    assert "6. **New Issues**" in prompt
+    assert "7. **Ticket/Spec Fit**" in prompt
+    assert "8. **Style**" in prompt
 
 
 def test_new_criteria_severity_guidance_caps_default_severity() -> None:
-    """Each new criterion's severity guidance defaults to medium/low/info and names
-    the narrow condition for escalation, so the new checks add feedback without
-    flooding the approval gate with noise."""
+    """The Architecture and New Issues criteria's severity guidance defaults to
+    medium/low/info and names the narrow condition for escalation, so the checks
+    add feedback without flooding the approval gate with noise."""
     prompt = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
     assert "would actually break integration" in prompt
     assert "not merely because a cleaner alternative exists" in prompt
     assert "not for a design preference alone" in prompt
+
+
+def test_code_review_contracts_criterion_covers_dbc_and_documentation_accuracy() -> None:
+    """Contracts consolidates Design by Contract framing with the docstring-accuracy
+    guidance that used to live under the old Documentation item."""
+    prompt = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
+    assert "Preconditions: conditions the function requires" in prompt
+    assert "Postconditions: what the function guarantees" in prompt
+    assert "Invariants: properties that hold before and after" in prompt
+    assert (
+        "A docstring or comment that claims behavior the implementation does not provide" in prompt
+    )
+
+
+def test_code_review_style_criterion_keeps_no_fixed_word_limit_guidance() -> None:
+    """The naming guidance's hard-won 'no fixed word limit' framing survives
+    consolidation into the Style criterion."""
+    prompt = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
+    assert "There is NO fixed word limit" in prompt
+
+
+def test_code_review_new_issues_criterion_reinforces_pre_existing_semantics() -> None:
+    """New Issues explicitly ties its scope to the pre_existing JSON field so
+    reviewers separate diff-introduced defects from pre-existing ones."""
+    prompt = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
+    assert '"pre_existing" field to make that distinction' in prompt
 
 
 def test_output_contract_accepts_new_categories() -> None:
@@ -174,7 +262,7 @@ def test_registry_exhausts_all_profiles() -> None:
 
 def test_criteria_block_ends_without_trailing_newline() -> None:
     """Every profile's criteria_block ends without a trailing newline (the
-    _ProfileSpec invariant), so it composes cleanly into _SHARED_OUTPUT_SECTION
+    _ProfileSpec invariant), so it composes cleanly into _SHARED_REVIEW_POLICY
     without introducing extra blank lines."""
     for profile, spec in REVIEW_PROFILES.items():
         assert not spec.criteria_block.endswith("\n"), profile
@@ -186,14 +274,21 @@ def test_criteria_block_ends_without_trailing_newline() -> None:
 
 
 class _SystemPromptProbe(DummyLLMClient):
-    """Captures the ``system_prompt`` each chunk-review call receives."""
+    """Captures chunk-review reasoning-pass ``system_prompt`` values.
+
+    Profile role anchors and review criteria live on call 1 (``complete``);
+    call 2 (``complete_json``) carries only the untrusted-analysis guard.
+    """
 
     def __init__(self):
         super().__init__()
-        self.system_prompts: list[str] = []
+        self.reasoning_system_prompts: list[str] = []
+
+    def complete(self, prompt, *, system_prompt=None, **kwargs):
+        self.reasoning_system_prompts.append(system_prompt or "")
+        return "Structured prose review summary."
 
     def complete_json(self, prompt, *, system_prompt=None, **kwargs):
-        self.system_prompts.append(system_prompt or "")
         return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
 
@@ -209,15 +304,104 @@ def test_engine_threads_profile_to_chunk_reviewer(profile: ReviewProfile, anchor
     """Running the engine with a profile routes that profile's system prompt to
     the chunk reviewer."""
     probe = _SystemPromptProbe()
-    CodeReviewAgent(probe, force_in_process=True).run(CodeReviewInput(code="def f():\n    return 1", profile=profile))
-    assert probe.system_prompts, "expected at least one chunk-review call"
-    assert any(anchor in sp for sp in probe.system_prompts)
+    CodeReviewAgent(probe, force_in_process=True).run(
+        CodeReviewInput(files={"main.py": "def f():\n    return 1"}, profile=profile)
+    )
+    assert probe.reasoning_system_prompts, "expected at least one chunk-review call"
+    assert any(anchor in sp for sp in probe.reasoning_system_prompts)
+
+
+# ---------------------------------------------------------------------------
+# Epic-level prompt contract regression net (#5418).
+#
+# The tests above pin the eight criteria and the retired thoroughness mandate
+# against the builder function and its private ``_SHARED_REVIEW_POLICY``
+# constant directly. Neither production caller of the review engine
+# (``api/pr_review.py``'s ``_run_reviewer`` nor ``shared/v2_review.py``) ever
+# passes ``profile=`` -- both rely entirely on ``CodeReviewInput``'s implicit
+# default (``ReviewProfile.CODE_REVIEW``). These tests close that gap: they
+# assert the same eight-criteria / no-retired-mandate contract holds when the
+# profile is left unset (the real production path) and when the prompt is
+# read only through the public surface (``CODE_REVIEW_PROMPT`` /
+# ``build_review_system_prompt``), not the private module constants.
+# ---------------------------------------------------------------------------
+
+_EIGHT_CRITERIA_HEADERS = (
+    "1. **Correctness**",
+    "2. **Contracts**",
+    "3. **Caller Side Effects**",
+    "4. **Architecture**",
+    "5. **Best Practices**",
+    "6. **New Issues**",
+    "7. **Ticket/Spec Fit**",
+    "8. **Style**",
+)
+
+_RETIRED_THOROUGHNESS_PHRASES = (
+    "EVERY file",
+    "EVERY function, method, and class",
+    "MUST review EVERY file",
+    "Do NOT skip files because they",
+)
+
+
+def _assert_eight_criteria_present(prompt: str) -> None:
+    for header in _EIGHT_CRITERIA_HEADERS:
+        assert header in prompt, f"missing criterion header: {header}"
+
+
+def _assert_retired_thoroughness_mandate_absent(prompt: str) -> None:
+    for phrase in _RETIRED_THOROUGHNESS_PHRASES:
+        assert phrase not in prompt, f"retired thoroughness phrase reappeared: {phrase}"
+    assert "review every function" not in prompt.lower()
+    assert (
+        "Your thoroughness obligation is everything in the code you were given to review" in prompt
+    )
+
+
+def _assert_eight_criteria_present_and_retired_mandate_absent(prompt: str) -> None:
+    _assert_eight_criteria_present(prompt)
+    _assert_retired_thoroughness_mandate_absent(prompt)
+
+
+def test_public_default_profile_prompt_covers_eight_criteria_and_drops_retired_mandate() -> None:
+    """The public ``CODE_REVIEW_PROMPT`` alias and ``build_review_system_prompt``
+    output -- not the private ``_SHARED_OUTPUT_SECTION``/``_CODE_REVIEW_CRITERIA``
+    constants the local unit tests above pin directly -- still carry all eight
+    criteria and lack the retired whole-codebase thoroughness mandate."""
+    _assert_eight_criteria_present_and_retired_mandate_absent(CODE_REVIEW_PROMPT)
+    _assert_eight_criteria_present_and_retired_mandate_absent(
+        build_review_system_prompt(ReviewProfile.CODE_REVIEW)
+    )
+
+
+def test_default_dispatch_prompt_covers_eight_criteria_and_drops_retired_mandate() -> None:
+    """Running the engine WITHOUT an explicit ``profile=`` kwarg -- the exact
+    path every production caller (PR review, SE v2_review) takes -- still
+    delivers a system prompt carrying all eight criteria and none of the
+    retired every-file/every-function thoroughness mandate. Offline only: no
+    live LLM, ``_SystemPromptProbe`` is a scripted ``DummyLLMClient``.
+
+    ``skip_tail_passes=True`` keeps this probe capturing only chunk-review
+    system prompts -- the thing under test -- rather than also picking up the
+    merged architecture/side-effect pass's own differently-shaped prompt,
+    which now runs because a real ``files`` path makes the submission's
+    file readable to that pass."""
+    probe = _SystemPromptProbe()
+    CodeReviewAgent(probe, force_in_process=True).run(
+        CodeReviewInput(files={"main.py": "def f():\n    return 1"}, skip_tail_passes=True)
+    )
+    assert probe.reasoning_system_prompts, "expected at least one chunk-review call"
+    for prompt in probe.reasoning_system_prompts:
+        _assert_eight_criteria_present_and_retired_mandate_absent(prompt)
 
 
 def test_skip_false_positive_filter_field_default_off() -> None:
     """The skip_false_positive_filter input field defaults to False and is settable."""
-    assert CodeReviewInput(code="x").skip_false_positive_filter is False
-    assert CodeReviewInput(code="x", skip_false_positive_filter=True).skip_false_positive_filter
+    assert CodeReviewInput(files={"main.py": "x"}).skip_false_positive_filter is False
+    assert CodeReviewInput(
+        files={"main.py": "x"}, skip_false_positive_filter=True
+    ).skip_false_positive_filter
 
 
 class _IssueProbe(DummyLLMClient):
@@ -255,7 +439,9 @@ def test_skip_false_positive_filter_bypasses_verifier(monkeypatch) -> None:
     # promises — the engine's LLM client, the CodeReviewInput, and the raw
     # issue list the chunk reviewer produced (asserting these guards against a
     # silent regression in how the coordinator invokes the filter).
-    CodeReviewAgent(_IssueProbe(), force_in_process=True).run(CodeReviewInput(files={"a.py": "x = 1"}))
+    CodeReviewAgent(_IssueProbe(), force_in_process=True).run(
+        CodeReviewInput(files={"a.py": "x = 1"})
+    )
     assert len(calls) == 1
     spy_llm, spy_input, spy_issues = calls[0]
     assert isinstance(spy_input, CodeReviewInput)
@@ -271,8 +457,8 @@ def test_skip_false_positive_filter_bypasses_verifier(monkeypatch) -> None:
 
 def test_skip_tail_passes_field_default_off() -> None:
     """The skip_tail_passes input field defaults to False and is settable."""
-    assert CodeReviewInput(code="x").skip_tail_passes is False
-    assert CodeReviewInput(code="x", skip_tail_passes=True).skip_tail_passes
+    assert CodeReviewInput(files={"main.py": "x"}).skip_tail_passes is False
+    assert CodeReviewInput(files={"main.py": "x"}, skip_tail_passes=True).skip_tail_passes
 
 
 def test_skip_tail_passes_bypasses_both_tail_passes(monkeypatch) -> None:
@@ -293,7 +479,9 @@ def test_skip_tail_passes_bypasses_both_tail_passes(monkeypatch) -> None:
     monkeypatch.setattr(coord, "find_architecture_and_side_effect_issues", _merged_spy)
 
     # Default: both tail passes run once.
-    CodeReviewAgent(_IssueProbe(), force_in_process=True).run(CodeReviewInput(files={"a.py": "x = 1"}))
+    CodeReviewAgent(_IssueProbe(), force_in_process=True).run(
+        CodeReviewInput(files={"a.py": "x = 1"})
+    )
     assert len(filter_calls) == 1
     assert len(merged_calls) == 1
 

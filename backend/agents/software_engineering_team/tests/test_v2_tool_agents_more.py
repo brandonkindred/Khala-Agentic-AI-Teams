@@ -486,6 +486,29 @@ class TestBackendSecurity:
         assert len(out.issues) == 1
         assert out.issues[0].source == "security"
 
+    def test_review_cache_hit_skips_second_llm_call(self, monkeypatch):
+        """Two review() calls with identical current_files/task_description
+        hit the shared tool-agent cache on the second call: the LLM is
+        invoked only once through the full SecurityToolAgent -> Backend
+        ReviewToolAgent -> BaseReviewToolAgent -> LlmToolAgentBase chain."""
+        a, mod = self._agent()
+        a._model = object()
+        resp = (
+            "## PASSED ##\nfalse\n## END PASSED ##\n"
+            "## ISSUES ##\n"
+            "description: SQL injection\nseverity: high\nfile_path: a.py\nsource: security\n"
+            "## END ISSUES ##\n"
+            "## SUMMARY ##\nfix\n## END SUMMARY ##\n"
+        )
+        stub = _patch_strands(monkeypatch, mod, response=resp)
+
+        first = a.review(_be_phase_input(current_files={"a.py": "x"}))
+        second = a.review(_be_phase_input(current_files={"a.py": "x"}))
+
+        assert len(stub.calls) == 1
+        assert first.summary == second.summary
+        assert [i.description for i in first.issues] == [i.description for i in second.issues]
+
     def test_no_problem_solve_capability(self):
         """Security is review-only: fixing its findings is the coding agent's job."""
         a, _ = self._agent()
@@ -720,6 +743,29 @@ class TestFrontendSecurity:
         assert out.issues[0].source == "security"
         assert out.issues[0].severity == "high"
         assert out.issues[0].description == "XSS risk"
+
+    def test_review_cache_hit_skips_second_llm_call(self, monkeypatch):
+        """Two review() calls with identical current_files/task_description
+        hit the shared tool-agent cache on the second call: the LLM is
+        invoked only once through the full SecurityToolAgent -> BaseReview
+        ToolAgent -> LlmToolAgentBase chain."""
+        a, mod = self._agent()
+        a._model = object()
+        resp = (
+            "## PASSED ##\nfalse\n## END PASSED ##\n"
+            "## ISSUES ##\n"
+            "description: XSS risk\nseverity: high\nfile_path: a.tsx\nsource: security\n"
+            "## END ISSUES ##\n"
+            "## SUMMARY ##\nfix\n## END SUMMARY ##\n"
+        )
+        stub = _patch_strands(monkeypatch, mod, response=resp)
+
+        first = a.review(_fe_phase_input(current_files={"a.tsx": "code"}))
+        second = a.review(_fe_phase_input(current_files={"a.tsx": "code"}))
+
+        assert len(stub.calls) == 1
+        assert first.summary == second.summary
+        assert [i.description for i in first.issues] == [i.description for i in second.issues]
 
     def test_no_problem_solve_capability(self):
         """Security is review-only: fixing its findings is the coding agent's job."""

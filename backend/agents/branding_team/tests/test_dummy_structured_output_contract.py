@@ -28,9 +28,22 @@ text-routed classes only; the six Phase 2 classes moved to
 ``test_model_routed_payload_validates_regardless_of_prompt_text`` since an
 unrouted prompt no longer breaks them, which is the point of their fix.
 
-``governance_compositor`` (Phase 5's fan-in node) is not a ``make_*`` factory in
-this module — it's built inline in ``graphs/phase5_governance.py`` — so it never
-appears in ``dir(branding_agents)`` and needs no entry here.
+This file's scope is deliberately bounded against two neighboring suites so the
+three don't re-accumulate the same assertion under different names:
+
+- ``test_dummy_stub_alignment.py`` owns the *strict* positive check (exact
+  field-set equality, not just ``model_validate`` not raising) for the Phase 1
+  and Phase 2 factories. ``test_dummy_payload_validates_against_agent_schema``
+  below skips those 12 cases for that reason — see
+  ``_STUB_ALIGNMENT_CASE_IDS`` — and instead covers Phase 3, 4, and 5, which
+  that file does not.
+- ``llm_service/tests/test_dummy_client.py`` owns ``DummyLLMClient``-internal
+  unit tests driven by synthetic prompts, messages, and tool specs. It never
+  builds a real ``branding_team.agents.make_*()`` factory or runs a real
+  Strands event loop, which is why the negative-path rejection test, the
+  archetype phrasing regression, and
+  ``test_real_agent_event_loop_routes_deterministically_despite_misleading_prompt``
+  stay here — nothing else exercises those real-agent paths.
 """
 
 from __future__ import annotations
@@ -49,7 +62,7 @@ from branding_team.models import (
     AudienceSegmentsOutput,
     BrandArchetypesOutput,
     BrandArchitectureOutput,
-    BrandDiscoveryAuditOutput,
+    BrandDiscoveryAudit,
     BrandExperiencePrinciplesOutput,
     BrandGuidelinesOutput,
     BrandHealthKPIsOutput,
@@ -58,15 +71,14 @@ from branding_team.models import (
     ChannelGuidelineOutput,
     ColorPaletteSystemOutput,
     CoreValuesOutput,
-    CreativeRefinementDecisionOutput,
-    DesignSystemDefinitionOutput,
+    CreativeRefinementDecision,
+    DesignSystemDefinition,
     DifferentiationPillarsOutput,
     EvolutionFrameworkOutput,
     IconographyOutput,
     LogoSuiteOutput,
     MessagingFrameworkOutput,
-    MoodBoardCandidatesOutput,
-    MoodBoardConceptOutput,
+    MoodBoardConcept,
     OwnershipOutput,
     PersonaProfilesOutput,
     PhotographyVideoOutput,
@@ -93,7 +105,7 @@ _UNROUTED_SYSTEM_PROMPT = "You are a helpful assistant."
 
 _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
     # Phase 1 — Strategic Core
-    ("discovery_auditor", branding_agents.make_discovery_auditor, BrandDiscoveryAuditOutput),
+    ("discovery_auditor", branding_agents.make_discovery_auditor, BrandDiscoveryAudit),
     ("purpose_vision_writer", branding_agents.make_purpose_vision_writer, PurposeVisionOutput),
     ("values_articulator", branding_agents.make_values_articulator, CoreValuesOutput),
     ("audience_segmenter", branding_agents.make_audience_segmenter, AudienceSegmentsOutput),
@@ -115,18 +127,17 @@ _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
         WritingGuidelinesOutput,
     ),
     # Phase 3 — Visual Identity
-    ("creative_director", branding_agents.make_creative_director, MoodBoardCandidatesOutput),
     *(
         (
             f"moodboard_conceptualist_{variant.lower()}",
             # Bind the variant in a default arg so each lambda closes over its
             # own value rather than the loop's last one.
             (lambda v=variant: branding_agents.make_moodboard_conceptualist(v)),
-            MoodBoardConceptOutput,
+            MoodBoardConcept,
         )
         for variant in _PHASE3_CONCEPTUALIST_VARIANTS
     ),
-    ("converge_decider", branding_agents.make_converge_decider, CreativeRefinementDecisionOutput),
+    ("converge_decider", branding_agents.make_converge_decider, CreativeRefinementDecision),
     ("logo_specifier", branding_agents.make_logo_specifier, LogoSuiteOutput),
     ("color_system_builder", branding_agents.make_color_system_builder, ColorPaletteSystemOutput),
     ("typography_builder", branding_agents.make_typography_builder, TypographySystemOutput),
@@ -141,7 +152,7 @@ _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
     (
         "design_system_codifier",
         branding_agents.make_design_system_codifier,
-        DesignSystemDefinitionOutput,
+        DesignSystemDefinition,
     ),
     (
         "brand_experience_principler",
@@ -178,8 +189,6 @@ _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
     ("brand_rules_codifier", branding_agents.make_brand_rules_codifier, BrandGuidelinesOutput),
 )
 
-_CASE_IDS: tuple[str, ...] = tuple(case_id for case_id, _factory, _model in _CASES)
-
 # Model classes DummyLLMClient.complete_json routes by structured_output_model
 # class name (see _branding_structured_output_stub_by_model_name in
 # llm_service.clients.dummy) rather than by scanning system-prompt text.
@@ -212,8 +221,55 @@ _MODEL_ROUTED_CLASS_NAMES: frozenset[str] = frozenset(
         "BrandGuidelinesOutput",
     }
 )
+# Structured-output models with every field optional/default-constructible —
+# BrandDiscoveryAudit, CreativeRefinementDecision, and DesignSystemDefinition,
+# each collapsed (Story 3b) to a single soft model used both as its agent's
+# structured_output and as the corresponding phase output's default_factory
+# merge target, rather than split into a strict agent-facing twin. The
+# dummy's generic unrouted fallback payload validates against these just as
+# happily as a routed one, so they can't serve as routing evidence for
+# test_generic_prompt_payload_is_rejected_by_every_schema either — excluded
+# here for an analogous reason to the model-routed classes above, via a
+# different mechanism (schema permissiveness, not routing).
+_PERMISSIVE_CLASS_NAMES: frozenset[str] = frozenset(
+    {"BrandDiscoveryAudit", "CreativeRefinementDecision", "DesignSystemDefinition"}
+)
+
+# Case ids whose "does the dummy stub validate against the real schema"
+# property is already asserted — more strongly, via exact field-set equality
+# rather than a plain isinstance check — by
+# test_dummy_stub_alignment.py::test_dummy_stub_matches_agent_output_model.
+# Excluded only from the positive-validation parametrization below; they
+# remain in _CASES so _TEXT_ROUTED_CASES/_MODEL_ROUTED_CASES (used by the
+# rejection and model-routing tests) stay complete.
+_STUB_ALIGNMENT_CASE_IDS: frozenset[str] = frozenset(
+    {
+        "discovery_auditor",
+        "purpose_vision_writer",
+        "values_articulator",
+        "audience_segmenter",
+        "differentiation_mapper",
+        "positioning_synthesizer",
+        "storyteller",
+        "archetype_analyst",
+        "tagline_writer",
+        "message_mapper",
+        "persona_builder",
+        "voice_principles_drafter",
+    }
+)
+_SCHEMA_VALIDATION_CASES: tuple[tuple[str, Callable[[], Any], type], ...] = tuple(
+    case for case in _CASES if case[0] not in _STUB_ALIGNMENT_CASE_IDS
+)
+_SCHEMA_VALIDATION_CASE_IDS: tuple[str, ...] = tuple(
+    case_id for case_id, _factory, _model in _SCHEMA_VALIDATION_CASES
+)
+
 _TEXT_ROUTED_CASES: tuple[tuple[str, Callable[[], Any], type], ...] = tuple(
-    case for case in _CASES if case[2].__name__ not in _MODEL_ROUTED_CLASS_NAMES
+    case
+    for case in _CASES
+    if case[2].__name__ not in _MODEL_ROUTED_CLASS_NAMES
+    and case[2].__name__ not in _PERMISSIVE_CLASS_NAMES
 )
 _TEXT_ROUTED_CASE_IDS: tuple[str, ...] = tuple(
     case_id for case_id, _factory, _model in _TEXT_ROUTED_CASES
@@ -230,7 +286,8 @@ _MODEL_ROUTED_CLASSES: tuple[type, ...] = tuple(
 _MODEL_ROUTED_CLASS_NAME_IDS: tuple[str, ...] = tuple(cls.__name__ for cls in _MODEL_ROUTED_CLASSES)
 
 # Factory names covered by ``_CASES``. Parameterized factories appear once here
-# and expand to several table rows, so this is not derivable from ``_CASE_IDS``.
+# and expand to several table rows, so this is not derivable from ``_CASES``'
+# case ids.
 _FACTORIES_WITH_STRUCTURED_OUTPUT: frozenset[str] = frozenset(
     {
         "make_discovery_auditor",
@@ -245,7 +302,6 @@ _FACTORIES_WITH_STRUCTURED_OUTPUT: frozenset[str] = frozenset(
         "make_message_mapper",
         "make_persona_builder",
         "make_voice_principles_drafter",
-        "make_creative_director",
         "make_moodboard_conceptualist",
         "make_converge_decider",
         "make_logo_specifier",
@@ -330,7 +386,11 @@ def _drive_structured_output(output_model: type, system_prompt: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("_case_id", "factory", "output_model"), _CASES, ids=_CASE_IDS)
+@pytest.mark.parametrize(
+    ("_case_id", "factory", "output_model"),
+    _SCHEMA_VALIDATION_CASES,
+    ids=_SCHEMA_VALIDATION_CASE_IDS,
+)
 def test_dummy_payload_validates_against_agent_schema(
     _case_id: str, factory: Callable[[], Any], output_model: type
 ) -> None:
@@ -338,6 +398,13 @@ def test_dummy_payload_validates_against_agent_schema(
 
     Reads ``system_prompt`` off the constructed agent rather than restating it,
     so a prompt reworded in ``agents.py`` is exercised here on the next run.
+
+    Covers Phase 3, 4, and 5 only — the Phase 1/2 factories in
+    ``_STUB_ALIGNMENT_CASE_IDS`` get a strictly stronger check (exact
+    field-set equality) from
+    ``test_dummy_stub_alignment.py::test_dummy_stub_matches_agent_output_model``
+    instead, so asserting the weaker ``isinstance`` here too would be
+    redundant CI coverage of the same property.
     """
     agent = factory()
     output = _drive_structured_output(output_model, agent.system_prompt)

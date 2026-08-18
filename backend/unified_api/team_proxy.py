@@ -25,7 +25,6 @@ Usage from a mount function::
     async def _proxy(request: Request, path: str):
         return await proxy_request(request, "http://my-team:8090", path, team_key="my_team")
 """
-
 from __future__ import annotations
 
 import json
@@ -53,6 +52,46 @@ _HOP_BY_HOP_RESPONSE = frozenset({"transfer-encoding", "connection", "content-en
 # Default timeout for teams that don't specify one.
 _DEFAULT_TIMEOUT = 60.0
 
+# -----------------------------------------------------------------------------
+# Connection Pool Configuration
+# -----------------------------------------------------------------------------
+
+# Default pool limits for teams without specific data.
+# Reduced from the legacy 20/10 flat default to establish a conservative memory baseline.
+DEFAULT_POOL_LIMITS: dict[str, int] = {
+    "max_connections": 10,
+    "max_keepalive_connections": 5
+}
+
+# Per-team configuration based on expected traffic volume and RSS data.
+# Rationale:
+# - auth_team: High traffic/high concurrency. Requires limits above legacy defaults.
+# - billing_team: Moderate traffic. Legacy defaults were mostly appropriate.
+# - reporting_team: Low-traffic background job processing. Significantly reduced limits.
+# - ops_tooling: Very low-frequency internal admin pings. Bare minimum limits.
+TEAM_POOL_CONFIG: dict[str, dict[str, int]] = {
+    "auth_team": {
+        "max_connections": 30,
+        "max_keepalive_connections": 15
+    },
+    "billing_team": {
+        "max_connections": 15,
+        "max_keepalive_connections": 10
+    },
+    "reporting_team": {
+        "max_connections": 5,
+        "max_keepalive_connections": 2
+    },
+    "ops_tooling": {
+        "max_connections": 2,
+        "max_keepalive_connections": 1
+    }
+}
+
+def get_pool_limits(team_key: str) -> dict[str, int]:
+    """Retrieves connection pool limits tailored to a specific team's profile."""
+    return TEAM_POOL_CONFIG.get(team_key, DEFAULT_POOL_LIMITS)
+
 
 def get_team_client(team_key: str, timeout: float | None = None) -> httpx.AsyncClient:
     """Return a per-team async HTTP client (created lazily, cached).
@@ -62,6 +101,8 @@ def get_team_client(team_key: str, timeout: float | None = None) -> httpx.AsyncC
     """
     if team_key not in _team_clients:
         t = timeout or _DEFAULT_TIMEOUT
+        limits_config = get_pool_limits(team_key)
+
         # Default timeout applies to non-streaming requests: bounded read-timeout
         # ensures a stalled upstream doesn't hang the proxy indefinitely and that
         # the circuit breaker gets a chance to record the failure. SSE requests
@@ -69,10 +110,12 @@ def get_team_client(team_key: str, timeout: float | None = None) -> httpx.AsyncC
         _team_clients[team_key] = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=10.0, read=t, write=t, pool=10.0),
             follow_redirects=False,
-            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            limits=httpx.Limits(
+                max_connections=limits_config["max_connections"],
+                max_keepalive_connections=limits_config["max_keepalive_connections"]
+            ),
         )
     return _team_clients[team_key]
-
 
 async def proxy_request(
     request: Request,

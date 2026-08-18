@@ -19,6 +19,7 @@ import { extractErrorDetail } from '../../core/error-handler.interceptor';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import {
   providerRequiresApiKey,
+  providerUsesEndpointId,
   type LlmProvider,
   type LlmProviderCreate,
   type LlmProviderEntry,
@@ -30,7 +31,10 @@ import {
 const OLLAMA_LOCAL_DEFAULT = 'http://localhost:11434';
 
 /** Shared validation message for the add/edit required-key check. */
-const API_KEY_REQUIRED_MSG = 'An API key is required for Claude.';
+const API_KEY_REQUIRED_MSG = 'An API key is required for Claude and RunPod.';
+
+/** Shared validation message for the add/edit required-endpoint-id check. */
+const ENDPOINT_ID_REQUIRED_MSG = 'A RunPod endpoint ID is required.';
 
 /** Editable form fields for a provider list entry (add or edit). */
 interface ProviderForm {
@@ -41,10 +45,20 @@ interface ProviderForm {
   api_key: string;
   /** Edit only: remove the stored key (ignored when a new api_key is typed). */
   clear_api_key: boolean;
+  /** RunPod endpoint ID; ignored for other providers. */
+  endpoint_id: string;
 }
 
 function emptyProviderForm(): ProviderForm {
-  return { label: '', provider: 'ollama', model: '', base_url: '', api_key: '', clear_api_key: false };
+  return {
+    label: '',
+    provider: 'ollama',
+    model: '',
+    base_url: '',
+    api_key: '',
+    clear_api_key: false,
+    endpoint_id: '',
+  };
 }
 
 /**
@@ -110,6 +124,11 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
     return !providerRequiresApiKey(provider);
   }
 
+  /** True for providers configured with a RunPod endpoint ID, not a base URL. */
+  usesEndpointId(provider: LlmProvider): boolean {
+    return providerUsesEndpointId(provider);
+  }
+
   /**
    * Whether a key-requiring provider would be saved with no usable API key.
    *
@@ -128,6 +147,20 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
   }
 
   /**
+   * Whether a RunPod entry would be saved with no usable endpoint ID.
+   *
+   * Preconditions: none.
+   * Postconditions: true iff `provider` is 'runpod', none was `typed`, and the
+   * entry wasn't `alreadyRunpod` (an already-RunPod entry left blank keeps its
+   * stored endpoint ID, mirroring the backend's "empty/omitted leaves unchanged"
+   * contract); false otherwise. Mirrors `apiKeyMissing`.
+   */
+  private endpointIdMissing(provider: LlmProvider, opts: { typed: string; alreadyRunpod?: boolean }): boolean {
+    if (!this.usesEndpointId(provider) || opts.typed.trim()) return false;
+    return !opts.alreadyRunpod;
+  }
+
+  /**
    * Whether an open add/edit form holds unsaved input (drives the CanDeactivate
    * guard). API keys here are write-only and hard to reproduce, so losing a
    * half-typed provider form to a misclick is expensive.
@@ -140,7 +173,7 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
     if (this.providersSaving) return true;
     if (this.addForm) {
       const f = this.addForm;
-      if (f.label.trim() || f.model.trim() || f.api_key.trim()) return true;
+      if (f.label.trim() || f.model.trim() || f.api_key.trim() || f.endpoint_id.trim()) return true;
       // The dropdown defaults to ollama; picking another provider is an edit too.
       if (f.provider !== emptyProviderForm().provider) return true;
       if (f.base_url.trim() && f.base_url.trim() !== OLLAMA_LOCAL_DEFAULT) return true;
@@ -154,7 +187,8 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
         (f.label !== entry.label ||
           f.provider !== entry.provider ||
           f.model !== entry.model ||
-          f.base_url !== entry.base_url)
+          f.base_url !== entry.base_url ||
+          f.endpoint_id !== entry.endpoint_id)
       ) {
         return true;
       }
@@ -261,12 +295,17 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
       this.providersError = API_KEY_REQUIRED_MSG;
       return;
     }
+    if (this.endpointIdMissing(form.provider, { typed: form.endpoint_id })) {
+      this.providersError = ENDPOINT_ID_REQUIRED_MSG;
+      return;
+    }
     const body: LlmProviderCreate = {
       label: form.label.trim(),
       provider: form.provider,
       model: form.model.trim(),
       base_url: this.usesBaseUrl(form.provider) ? form.base_url.trim() : '',
       api_key: form.api_key.trim(),
+      endpoint_id: this.usesEndpointId(form.provider) ? form.endpoint_id.trim() : '',
     };
     this.persistProviders(this.api.createProvider(body), 'Provider added.', {
       onSuccess: () => {
@@ -291,6 +330,7 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
       base_url: entry.base_url,
       api_key: '',
       clear_api_key: false,
+      endpoint_id: entry.endpoint_id,
     };
     this.providersError = null;
   }
@@ -329,6 +369,10 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
       this.providersError = API_KEY_REQUIRED_MSG;
       return;
     }
+    if (this.endpointIdMissing(form.provider, { typed: form.endpoint_id, alreadyRunpod: entry?.provider === 'runpod' })) {
+      this.providersError = ENDPOINT_ID_REQUIRED_MSG;
+      return;
+    }
     const body: LlmProviderUpdate = {
       label: form.label.trim(),
       provider: form.provider,
@@ -336,6 +380,7 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
       base_url: this.usesBaseUrl(form.provider) ? form.base_url.trim() : '',
       api_key: newKey,
       clear_api_key: form.clear_api_key && !newKey,
+      endpoint_id: this.usesEndpointId(form.provider) ? form.endpoint_id.trim() : '',
     };
     this.persistProviders(this.api.updateProvider(this.editingId, body), 'Provider updated.', {
       onSuccess: () => {

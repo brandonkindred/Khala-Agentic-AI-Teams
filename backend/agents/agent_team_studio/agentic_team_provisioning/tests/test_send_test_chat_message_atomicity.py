@@ -13,6 +13,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agent_team_studio.agentic_team_provisioning.assistant.store import AgenticTeamStore
+from agent_team_studio.agentic_team_provisioning.manifest_generation import (
+    build_agent_manifest,
+    manifest_agent_id,
+)
 from agent_team_studio.agentic_team_provisioning.models import AgenticTeamAgent
 from agent_team_studio.agentic_team_provisioning.tests._fake_postgres import install_fake_postgres
 
@@ -29,11 +33,26 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 def _seed_team_with_agent() -> tuple[str, str]:
     store = AgenticTeamStore()
     team = store.create_team(name="Support", description="")
+    agent_name = "Triage Agent"
+    from agent_platform.registry import get_registry
+
+    manifest_id = manifest_agent_id(team.team_id, agent_name)
+    registry = get_registry()
+    if registry.get(manifest_id) is None:
+        registry.register(
+            build_agent_manifest(team.team_id, agent_name, summary="Classifies tickets")
+        )
     store.save_team_agents(
         team.team_id,
-        [AgenticTeamAgent(agent_name="Triage Agent", role="Classifies tickets")],
+        [
+            AgenticTeamAgent(
+                agent_name=agent_name,
+                source="generated",
+                manifest_id=manifest_id,
+            )
+        ],
     )
-    return team.team_id, "Triage Agent"
+    return team.team_id, agent_name
 
 
 def _fake_session_row(team_id: str, agent_name: str, session_id: str) -> dict:

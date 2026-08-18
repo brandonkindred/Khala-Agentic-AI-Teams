@@ -5,9 +5,11 @@ from __future__ import annotations
 from enum import Enum
 from typing import Final, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from agent_registry.models import AgentManifest
+from agent_platform.registry.models import AgentManifest
+
+from ..assistant_kernel import ConversationMessage
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -134,53 +136,55 @@ SOURCE_REGISTRY: Final = "registry"
 
 
 class AgenticTeamAgent(BaseModel):
-    """A named agent in the team's roster.
+    """Thin roster reference to a registry AgentManifest.
 
-    The roster captures enough detail to validate that the team is fully
-    staffed: every process need (skill, capability, tool, expertise) must be
-    covered by at least one agent on the roster.
+    A roster entry is identity only: which manifest fills this team-local slot,
+    and how it got there. Persona (``role``, ``skills``, ``capabilities``,
+    ``tools``, ``expertise``) is not a field on this model — it lives solely on
+    the registered ``AgentManifest`` (see ``agent_platform.registry.models.AgentManifest``)
+    and is joined at read time via ``roster_resolve.resolve_persona`` into
+    ``EnrichedRosterAgent``. See this package's README ("Roster identity: thin
+    refs, Manifest SoT") for the resolution path and the from-registry field
+    mapping.
 
     Invariants:
-        * ``source == "registry"`` implies ``manifest_id`` is set (enforced by the
-          from-registry projection, not the model, so a hand-built roster still
-          round-trips). ``source`` defaults to ``"generated"`` so roster rows
-          persisted before this field existed deserialize unchanged.
+        * ``manifest_id`` is always set for persisted rows (enforced after migrate).
+        * ``agent_name`` is the team-local slot key; may differ from ``manifest.name``.
+        * Persona fields are not stored here — resolve via ``roster_resolve``.
     """
 
-    agent_name: str = Field(..., description="Stable, unique name within the team")
-    role: str = Field(..., description="Primary role this agent fills on the team")
-    skills: list[str] = Field(
-        default_factory=list,
-        description="Specific skills the agent possesses (e.g. 'data analysis', 'copywriting')",
-    )
-    capabilities: list[str] = Field(
-        default_factory=list,
-        description="Functional capabilities (e.g. 'code generation', 'web search', 'image classification')",
-    )
-    tools: list[str] = Field(
-        default_factory=list,
-        description="Tools or integrations the agent can use (e.g. 'Git', 'PostgreSQL', 'Slack API')",
-    )
-    expertise: list[str] = Field(
-        default_factory=list,
-        description="Domain expertise areas (e.g. 'customer support', 'financial analysis', 'HIPAA compliance')",
-    )
-    source: Literal[SOURCE_GENERATED, SOURCE_REGISTRY] = Field(
-        default=SOURCE_GENERATED,
-        description="Provenance of this roster entry: 'generated' (LLM-authored on this team) "
-        "or 'registry' (added from a registered AgentManifest via Agent Studio).",
-    )
-    manifest_id: Optional[str] = Field(
-        default=None,
-        description="Source AgentManifest id when source == 'registry'; None otherwise.",
-    )
+    agent_name: str = Field(..., description="Stable, unique slot name within the team")
+    source: Literal[SOURCE_GENERATED, SOURCE_REGISTRY] = Field(default=SOURCE_GENERATED)
+    manifest_id: str = Field(..., min_length=1, description="AgentManifest id (SoT join key)")
+
+
+class EnrichedRosterAgent(BaseModel):
+    """Thin roster ref plus flattened persona fields for API responses.
+
+    Preconditions: ``agent`` is a valid thin roster ref (see ``enrich_roster_agent``).
+    Postconditions: exposes ``agent_name``, ``source``, ``manifest_id``, and the
+        persona view fields projected from the linked ``AgentManifest`` when it
+        resolves; when the Manifest is missing, persona fields are empty
+        (soft enrich — list/detail endpoints must not 500 on one orphan).
+    Invariants: persona fields are never persisted on ``agentic_team_agents``.
+    """
+
+    agent_name: str
+    source: Literal[SOURCE_GENERATED, SOURCE_REGISTRY]
+    manifest_id: str
+    role: str = ""
+    skills: list[str] = Field(default_factory=list)
+    capabilities: list[str] = Field(default_factory=list)
+    tools: list[str] = Field(default_factory=list)
+    expertise: list[str] = Field(default_factory=list)
 
 
 class AddAgentFromRegistryRequest(BaseModel):
     """Request body for ``POST /teams/{team_id}/agents/from-registry``.
 
-    Adds a registered agent (by manifest id) to the team roster, projecting the
-    manifest's name/summary/tags/tools into the roster fields (Agent Studio §5.3).
+    Adds a registered agent to the team roster as a thin ref (``agent_name``,
+    ``source="registry"``, ``manifest_id``). Persona is not persisted on the roster;
+    API responses join it from the linked ``AgentManifest`` via ``enrich_roster_agent``.
     """
 
     manifest_id: str = Field(
@@ -189,25 +193,22 @@ class AddAgentFromRegistryRequest(BaseModel):
 
 
 class UpdateAgentRequest(BaseModel):
-    """Request body for ``PUT /teams/{team_id}/agents/{agent_name}`` (Agent Studio §3,
-    Stage 3 roster inline edit).
+    """Request body for ``PUT /teams/{team_id}/agents/{agent_name}`` (legacy contract).
 
-    Every field is optional: only the fields present in the request overwrite the
-    existing roster row's corresponding fields, so a caller can edit e.g. just
-    ``skills`` without resending the rest. ``source`` and ``manifest_id`` are never
-    accepted here — they are fixed at add time (from-registry vs. LLM-generated)
-    and are not part of this "edit for this team" contract.
+    Roster rows are thin refs only; persona lives on ``AgentManifest``. This
+    model declares no editable fields — the OpenAPI schema for this endpoint
+    is an empty object, matching the actual contract instead of advertising
+    persona fields that were never a supported write path. ``extra="allow"``
+    lets the handler see (and reject) *any* key supplied in the body, not just
+    a fixed legacy set. An empty body is a no-op that returns the current
+    enriched agent; any non-empty body returns ``400``.
+
+    Invariants:
+        * No field on this model, declared or supplied, is a supported write
+          path. Edit the linked ``AgentManifest`` instead.
     """
 
-    role: Optional[str] = Field(default=None, description="New role, if changed.")
-    skills: Optional[list[str]] = Field(default=None, description="New skills list, if changed.")
-    capabilities: Optional[list[str]] = Field(
-        default=None, description="New capabilities list, if changed."
-    )
-    tools: Optional[list[str]] = Field(default=None, description="New tools list, if changed.")
-    expertise: Optional[list[str]] = Field(
-        default=None, description="New expertise list, if changed."
-    )
+    model_config = ConfigDict(extra="allow")
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +225,27 @@ class AgenticTeam(BaseModel):
     mode: TeamMode = Field(default=TeamMode.DEVELOPMENT)
     agents: list[AgenticTeamAgent] = Field(
         default_factory=list, description="Named agents pool (Agent 1 … Agent N)"
+    )
+    processes: list[ProcessDefinition] = Field(default_factory=list)
+    created_at: str = Field(default="")
+    updated_at: str = Field(default="")
+
+
+class AgenticTeamDetail(BaseModel):
+    """API team detail with Manifest-enriched roster agents (GET /teams/{id}).
+
+    Invariants:
+        * ``agents`` are ``EnrichedRosterAgent`` views — persona is join-at-read,
+          never a second write SoT on the roster row.
+    """
+
+    team_id: str = Field(..., description="Unique id (UUID)")
+    name: str = Field(..., description="Team display name")
+    description: str = Field(default="", description="Short description of what the team does")
+    mode: TeamMode = Field(default=TeamMode.DEVELOPMENT)
+    agents: list[EnrichedRosterAgent] = Field(
+        default_factory=list,
+        description="Roster refs with Manifest-joined persona fields for UI chips",
     )
     processes: list[ProcessDefinition] = Field(default_factory=list)
     created_at: str = Field(default="")
@@ -257,11 +279,11 @@ class TeamSummary(BaseModel):
 
 
 class TeamDetailResponse(BaseModel):
-    team: AgenticTeam
+    team: AgenticTeamDetail
 
 
 class GeneratedManifestsResponse(BaseModel):
-    """Generated ``agent_registry`` manifests for a team's roster.
+    """Generated ``agent_platform.registry`` manifests for a team's roster.
 
     Each manifest carries the batteries-included cognition block stamped by
     ``manifest_generation.build_agent_manifest``.
@@ -278,22 +300,28 @@ class GeneratedAgentInvokeInput(BaseModel):
     roster metadata travels in the request body alongside the user message. This
     is the schema the generated manifest's ``inputs`` points at.
 
-    Binding caveat (tracked follow-up): the persona fields below (``role``,
-    ``skills``, ``capabilities``, ``expertise``) are currently supplied by the
-    caller and are **not yet bound to the agent's persisted roster definition** —
-    the dispatch contract hands the entrypoint only this body, never the resolved
-    manifest/id, so it cannot look up the immutable stored persona. ``tools`` is
+    Manifest binding: when the request **omits** a persona field (``role`` /
+    ``skills`` / ``capabilities`` / ``expertise``) or ``system_prompt``, the runtime
+    binds the value from the agent's stored ``AgentManifest`` — resolved through the
+    shim's trusted, route-supplied agent id (never a body-supplied one). Whether a
+    field is "omitted" is a **raw-body key-presence test**, not a truthiness test: an
+    explicitly-present field — including an explicitly-cleared empty list/blank
+    string — wins over the manifest default for that invoke only (never written
+    back). An explicit ``system_prompt`` is a **full replacement** of the base
+    prompt (persona fields are not spliced in a second time); a manifest-sourced
+    state prompt is composed with the resolved persona fields instead. ``tools`` is
     **inert at runtime**: the generated manifest declares ``cognition.tools = []``
     and tool brokering isn't wired for generated agents, so the runtime grants no
     tools regardless of this field (a caller cannot escalate to ``python`` /
-    ``http_request``). Until binding lands, a generated manifest selects which
-    agent is *advertised*, not an enforced persona.
+    ``http_request``). See
+    ``system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md``
+    for the locked precedence contract.
     """
 
     agent_name: str = Field(..., description="Roster agent name (stable within the team)")
     message: str = Field(..., description="The user/upstream task payload for this invoke")
     role: str = Field(
-        default="", description="Caller-supplied persona; not yet bound to the roster"
+        default="", description="Persona role; binds from the manifest summary when omitted"
     )
     skills: list[str] = Field(default_factory=list)
     capabilities: list[str] = Field(default_factory=list)
@@ -301,6 +329,16 @@ class GeneratedAgentInvokeInput(BaseModel):
         default_factory=list, description="Inert at runtime — no tools are granted (see class doc)"
     )
     expertise: list[str] = Field(default_factory=list)
+    system_prompt: str = Field(
+        default="",
+        description="Full base-prompt replacement when present; binds from the selected "
+        "manifest state's system_prompt (composed with persona fields) when omitted.",
+    )
+    state: str = Field(
+        default="executing",
+        description="Operating-state key selecting which manifest AgentStateSpec system "
+        "prompt binds when the request omits one (planning/executing/researching).",
+    )
     agent_id: Optional[str] = Field(
         default=None, description="Stable cognition agent id; defaults to the agent name"
     )
@@ -315,12 +353,6 @@ class GeneratedAgentInvokeOutput(BaseModel):
 # ---------------------------------------------------------------------------
 # Conversation models
 # ---------------------------------------------------------------------------
-
-
-class ConversationMessage(BaseModel):
-    role: str = Field(..., pattern=r"^(user|assistant)$")
-    content: str
-    timestamp: str
 
 
 class CreateConversationRequest(BaseModel):
@@ -410,8 +442,8 @@ class RosterGap(BaseModel):
 
     category: str = Field(
         ...,
-        description="Gap category: 'unrostered_agent', 'missing_skill', 'missing_capability', "
-        "'missing_tool', 'missing_expertise', 'unstaffed_step'",
+        description="Gap category: 'unrostered_agent', 'missing_manifest', 'missing_skill', "
+        "'missing_capability', 'missing_tool', 'missing_expertise', 'unstaffed_step'",
     )
     detail: str = Field(..., description="Human-readable description of the gap")
     process_id: Optional[str] = Field(default=None, description="Process where the gap was found")

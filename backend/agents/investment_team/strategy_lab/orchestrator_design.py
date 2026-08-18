@@ -43,8 +43,6 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from pydantic import ValidationError
 
-from shared.env_config import env_int
-
 from ..market_data_service import OHLCVBar
 from ..models import (
     BacktestConfig,
@@ -52,22 +50,24 @@ from ..models import (
     ExpectancyForecast,
     StrategyLabRecord,
     StrategySpec,
-    TradeRecord,
 )
 from ..signal_intelligence_models import SignalIntelligenceBriefV1
 from ..strategy_lab_context import normalize_asset_class, normalize_asset_class_strict
 from ._orchestrator_helpers import (
+    _DesignAttemptState,
     _DesignPersistContext,
     _DriftCollector,
     _emit_phase_transition,
     _env_flag,
+    _has_critical_failures,
     _RefinementAlignmentResult,
 )
-from .agents._llm_budget import DesignBudgetExhausted, active_budget
+from .agents._llm_budget import DesignBudgetExhausted, _annotate_budget_exhaustion, active_budget
 from .agents.alignment import AlignmentIssue, TradeAlignmentReport
 from .agents.design_review import CritiqueIssue, CritiqueLedger, LedgerDelta, SpecCritique
 from .alignment_findings import AlignmentFinding
 from .backtest_cache import BacktestCache
+from .budget_config import StrategyLabBudgetConfig
 from .exceptions import OrchestratorContractError, SpecImplementabilityError
 from .market_regime import RegimeSummary
 from .mechanical_repair import RepairAction, demote_code_path, repair_spec, select_code_path
@@ -246,7 +246,7 @@ def _design_review_rounds() -> int:
     completeness issues; a sub-1 override floors to 1 so the loop runs at
     least once.
     """
-    return env_int("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", 20, floor=1)
+    return StrategyLabBudgetConfig.from_env().design_review_rounds
 
 
 def _design_review_stall_rounds() -> int:
@@ -261,7 +261,7 @@ def _design_review_stall_rounds() -> int:
     ``status="failed: design_stalled"`` so oscillation aborts are observable
     apart from specs that simply ran out of rounds.
     """
-    return env_int("STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS", 3, floor=1)
+    return StrategyLabBudgetConfig.from_env().design_review_stall_rounds
 
 
 def _mechanical_repair_enabled() -> bool:
@@ -911,9 +911,7 @@ class DesignMixin:
             )
             self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
             last_readiness_signature = signature
-        deterministic_ready = not any(
-            (not r.passed) and r.severity == "critical" for r in readiness_results
-        )
+        deterministic_ready = not _has_critical_failures(readiness_results)
         return readiness_results, last_readiness_signature, deterministic_ready
 
     def _run_mechanical_repair_stages(
@@ -972,9 +970,7 @@ class DesignMixin:
                 )
                 self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
                 last_readiness_signature = repaired_signature
-                deterministic_ready = not any(
-                    (not r.passed) and r.severity == "critical" for r in readiness_results
-                )
+                deterministic_ready = not _has_critical_failures(readiness_results)
 
         # Stage 2 — trial compile, only on a readiness-clean spec.
         if deterministic_ready:
@@ -1001,9 +997,7 @@ class DesignMixin:
                     )
                     self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
                     last_readiness_signature = repaired_signature
-                    deterministic_ready = not any(
-                        (not r.passed) and r.severity == "critical" for r in readiness_results
-                    )
+                    deterministic_ready = not _has_critical_failures(readiness_results)
 
         if repair_actions:
             mechanical_repair_count += len(repair_actions)
@@ -1091,9 +1085,12 @@ class DesignMixin:
                 # repair) and the repair count so the short-circuit record
                 # reflects the spec actually evaluated, not the pre-loop
                 # draft, and its telemetry still reports the repairs applied.
-                exc.latest_spec = spec
-                exc.latest_rationale = rationale
-                exc.mechanical_repair_count = mechanical_repair_count
+                _annotate_budget_exhaustion(
+                    exc,
+                    spec,
+                    rationale=rationale,
+                    mechanical_repair_count=mechanical_repair_count,
+                )
                 raise
             critique.round = review_round
             critique_history.append(critique)
@@ -1165,9 +1162,12 @@ class DesignMixin:
                 regression_notice=regression_notice,
             )
         except DesignBudgetExhausted as exc:
-            exc.latest_spec = spec
-            exc.latest_rationale = rationale
-            exc.mechanical_repair_count = mechanical_repair_count
+            _annotate_budget_exhaustion(
+                exc,
+                spec,
+                rationale=rationale,
+                mechanical_repair_count=mechanical_repair_count,
+            )
             raise
         spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
         if drift_collector is not None:
@@ -1205,6 +1205,10 @@ class DesignMixin:
         drift_collector: Optional[_DriftCollector] = None,
         cumulative_gate_results: Optional[List[QualityGateResult]] = None,
         regime_summary: Optional[RegimeSummary] = None,
+        resume_spec: Optional[StrategySpec] = None,
+        resume_rationale: Optional[str] = None,
+        resume_design_context: Optional[_DesignPersistContext] = None,
+        checkpoint_hook: Optional[PhaseCallback] = None,
     ) -> StrategyLabRecord:
         """One design + refinement attempt. May raise
         ``SpecImplementabilityError`` to signal a need to re-enter the
@@ -1219,7 +1223,37 @@ class DesignMixin:
         enclosing ``run_cycle`` and is stamped onto the persisted record
         so the breakdown (success after N phase-backs, short-circuit
         after N phase-backs) is observable post hoc.
+
+        Each phase helper below owns its own short-circuiting and its own
+        exit-boundary phase-transition emission; this method only sequences
+        them and checks ``.record`` after each call.
+
+        Checkpoint resume (``ADR-012``): ``resume_spec``/``resume_rationale``/
+        ``resume_design_context`` let a caller skip Phase 1 (design + review)
+        entirely when it already has that phase's converged output from a
+        prior, crashed execution of this exact attempt -- ``resume_spec is
+        not None`` if and only if ``resume_design_context is not None``
+        (``resume_rationale`` may independently be ``None``/``""``).
+        ``checkpoint_hook``, when not ``None``, is invoked exactly once,
+        immediately after Phase 1 converges on a non-resumed run (never on
+        the short-circuit/not-ready path, nor when resuming, since Phase 1
+        didn't run), as ``checkpoint_hook("design_synthesis_boundary",
+        {"spec": spec, "rationale": rationale, "design_context":
+        design_context})`` -- deliberately the live Python objects, not a
+        JSON-shaped dict, since its only intended consumer
+        (``temporal.activities.run_design_attempt_activity``) lives in the
+        same process and does its own wire-conversion before persisting.
+        Both default to ``None``, so thread mode's caller (which passes
+        neither) is unaffected.
+
+        Preconditions:
+            ``resume_spec is None`` if and only if ``resume_design_context
+            is None``.
         """
+        if (resume_spec is None) != (resume_design_context is None):
+            raise ValueError(
+                "resume_spec and resume_design_context must both be set or both be None"
+            )
         # Reset per-attempt counters so a re-entry starts fresh.
         self._consecutive_spec_mutation_rounds = {}
         # Fresh, attempt-scoped backtest memo. Discarding it per attempt keeps
@@ -1247,24 +1281,40 @@ class DesignMixin:
             drift_collector = _DriftCollector()
 
         # ── Phase 1: DESIGN + REVIEW LOOP ──────────────────────────────
-        design_phase = self._orchestrate_design_and_review(
-            prior_records=prior_records,
-            signal_brief=signal_brief,
-            directives=directives,
-            exclude_asset_classes=exclude_asset_classes,
-            config=config,
-            all_gate_results=all_gate_results,
-            emit=emit,
-            design_attempt=design_attempt,
-            phase_back_count=phase_back_count,
-            drift_collector=drift_collector,
-            regime_summary=regime_summary,
-        )
-        if design_phase.record is not None:
-            return design_phase.record
-        spec = design_phase.spec
-        rationale = design_phase.rationale
-        design_context = design_phase.design_context
+        if resume_spec is not None:
+            # Checkpoint resume: Phase 1 already ran (and was durably
+            # checkpointed) by a prior, crashed execution of this exact
+            # design attempt. Skip it entirely -- its LLM calls must never
+            # be re-issued (ADR-012's no-double-charge requirement is
+            # structural precisely because this branch never calls
+            # _orchestrate_design_and_review).
+            spec = resume_spec
+            rationale = resume_rationale or ""
+            design_context = resume_design_context
+        else:
+            design_phase = self._orchestrate_design_and_review(
+                prior_records=prior_records,
+                signal_brief=signal_brief,
+                directives=directives,
+                exclude_asset_classes=exclude_asset_classes,
+                config=config,
+                all_gate_results=all_gate_results,
+                emit=emit,
+                design_attempt=design_attempt,
+                phase_back_count=phase_back_count,
+                drift_collector=drift_collector,
+                regime_summary=regime_summary,
+            )
+            if design_phase.record is not None:
+                return design_phase.record
+            spec = design_phase.spec
+            rationale = design_phase.rationale
+            design_context = design_phase.design_context
+            if checkpoint_hook is not None:
+                checkpoint_hook(
+                    "design_synthesis_boundary",
+                    {"spec": spec, "rationale": rationale, "design_context": design_context},
+                )
 
         # ── Phase 1b: CODE SYNTHESIS ──────────────────────────────────
         code_synthesis = self._synthesize_initial_code(
@@ -1286,55 +1336,28 @@ class DesignMixin:
         config = code_synthesis.config
 
         # ── Phases 1b–2.5: PRE-SYNTHESIS GATE → REFINEMENT → ALIGNMENT ─
-        try:
-            refine_align = self._orchestrate_refinement_and_alignment(
-                spec=spec,
-                code=code,
-                config=config,
-                original_spec=original_spec,
-                original_code=original_code,
-                rationale=rationale,
-                all_gate_results=all_gate_results,
-                refinement_attempts=refinement_attempts,
-                zero_trade_attempts=zero_trade_attempts,
-                emit=emit,
-                design_attempt=design_attempt,
-                phase_back_count=phase_back_count,
-                drift_collector=drift_collector,
-                design_context=design_context,
-            )
-        except DesignBudgetExhausted as exc:
-            # The per-cycle LLM-call budget (bound for the whole design
-            # attempt, not just the design phase — see ``use_budget`` at
-            # ``run_cycle``) can also trip during refinement, alignment-fix,
-            # or zero-trade repair. Those call sites attach the latest
-            # spec/code they were working on before propagating; fall back
-            # to this attempt's pre-refinement spec/code only if none did
-            # (e.g. the trip happened before any leaf call site ran).
-            latest_spec = getattr(exc, "latest_spec", spec)
-            latest_code = getattr(exc, "latest_code", code)
-            abort_reason = (
-                f"Refinement/alignment phase exhausted its LLM-call budget "
-                f"({exc.calls_made}/{exc.limit} calls) after "
-                f"{len(refinement_attempts)} refinement attempt(s)"
-            )
-            emit("coding", {"sub_phase": "aborted", "reason": abort_reason})
-            return self._build_short_circuit_record(
-                spec=latest_spec,
-                config=config,
-                code=latest_code,
-                original_spec=original_spec,
-                original_code=original_code,
-                rationale=rationale,
-                all_gate_results=all_gate_results,
-                refinement_attempts=refinement_attempts,
-                short_circuit_status="failed: budget_exhausted",
-                short_circuit_reason=abort_reason,
-                emit=emit,
-                design_context=design_context,
-                phase_back_count=phase_back_count,
-                drift_collector=drift_collector,
-            )
+        # Budget-exhaustion during this phase (refinement, alignment-fix, or
+        # zero-trade repair) is handled internally by
+        # ``_orchestrate_refinement_and_alignment`` — mirroring how
+        # ``_orchestrate_design_and_review`` handles its own budget
+        # short-circuit — so a ``DesignBudgetExhausted`` trip there returns
+        # via ``record`` rather than propagating here.
+        refine_align = self._orchestrate_refinement_and_alignment(
+            spec=spec,
+            code=code,
+            config=config,
+            original_spec=original_spec,
+            original_code=original_code,
+            rationale=rationale,
+            all_gate_results=all_gate_results,
+            refinement_attempts=refinement_attempts,
+            zero_trade_attempts=zero_trade_attempts,
+            emit=emit,
+            design_attempt=design_attempt,
+            phase_back_count=phase_back_count,
+            drift_collector=drift_collector,
+            design_context=design_context,
+        )
         if refine_align.record is not None:
             return refine_align.record
         synthesis = refine_align.synthesis
@@ -1357,6 +1380,9 @@ class DesignMixin:
         alignment_reports = alignment_outcome.alignment_reports
 
         # ── Phases 2.6–3: TRIAL COUNTING → VERIFICATION → ANALYSIS ─────
+        pre_verification_state = _DesignAttemptState(
+            spec=spec, code=code, trades=trades, metrics=metrics
+        )
         (
             metrics,
             is_winning,
@@ -1364,9 +1390,7 @@ class DesignMixin:
             publishability_skip,
             narrative,
         ) = self._orchestrate_verification_and_analysis(
-            spec=spec,
-            trades=trades,
-            metrics=metrics,
+            state=pre_verification_state,
             market_data=market_data,
             config=config,
             execution_succeeded=execution_succeeded,
@@ -1377,31 +1401,15 @@ class DesignMixin:
             open_position_entry_reasons=open_position_entry_reasons,
             refinement_attempts=refinement_attempts,
             rationale=rationale,
+            design_attempt=design_attempt,
             emit=emit,
         )
 
-        # ═══ Phase 4 → exit: BACKTEST_AND_VERIFICATION → ∅ ════════════
-        # Terminal transition out of the last named phase. ``to_phase``
-        # is ``None``; ``spec_hash``/``code_hash`` must match the values
-        # emitted on the previous two boundaries within this design
-        # attempt — the integration test in
-        # ``test_strategy_lab_phase_transitions.py`` asserts this.
-        _emit_phase_transition(
-            emit,
-            from_phase=Phase.BACKTEST_AND_VERIFICATION,
-            to_phase=None,
-            spec=spec,
-            code=code,
-            attempt=design_attempt,
-        )
-
         # ── Phase 4: RECORD ───────────────────────────────────────────
+        attempt_state = _DesignAttemptState(spec=spec, code=code, trades=trades, metrics=metrics)
         return self._extract_findings_and_assemble_record(
-            spec=spec,
-            code=code,
+            state=attempt_state,
             config=config,
-            metrics=metrics,
-            trades=trades,
             narrative=narrative,
             original_spec=original_spec,
             original_code=original_code,
@@ -1455,153 +1463,193 @@ class DesignMixin:
         Otherwise ``record`` is ``None`` and the returned ``synthesis`` /
         ``alignment`` bundles carry every downstream field. Emits the
         CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION boundary and the
-        backtest-cache telemetry.
+        backtest-cache telemetry. A ``DesignBudgetExhausted`` trip anywhere
+        in this phase (refinement loop or alignment-fix loop) is caught
+        internally and converted to a ``record``-carrying short-circuit
+        (status ``"failed: budget_exhausted"``) — mirroring
+        ``_orchestrate_design_and_review``'s own budget short-circuit — so it
+        does NOT propagate to the caller.
         Raises: ``SpecImplementabilityError`` (from the refinement loop) with
         this attempt's ``design_context`` attached when the raiser left it unset.
         """
-        # ── Phase 1b: PRE-SYNTHESIS SPEC GATING (#547 item 1) ─────────
-        # Validate the ideation-time spec ONCE before entering the
-        # refinement loop. Refinement is code-only post-#547 item 2, so
-        # the spec cannot drift between rounds; revalidating per round
-        # was redundant. A critical SPEC failure here short-circuits the
-        # cycle without ever calling run_strategy_code or fetching
-        # market data.
-        #
-        # The "strategy_code is missing" critical is excluded from
-        # short-circuit eligibility AND from the persisted gate history:
-        # that's a code-generation failure (ideation produced an empty /
-        # whitespace strategy_code), and the refinement loop's existing
-        # code-safety + regeneration paths are equipped to repair it.
-        # Short-circuiting on that critical would regress a previously-
-        # recoverable case into an outright failure; persisting it would
-        # leave a permanently-unresolved critical on the record (the
-        # generic refinement loop never re-runs StrategySpecValidator),
-        # which would also reach convergence_tracker.record() as an
-        # unresolved spec failure.
-        pre_synthesis = self._run_pre_synthesis_phase(
-            spec=spec,
-            config=config,
-            all_gate_results=all_gate_results,
-            code=code,
-            original_spec=original_spec,
-            original_code=original_code,
-            rationale=rationale,
-            refinement_attempts=refinement_attempts,
-            emit=emit,
-            phase_back_count=phase_back_count,
-            drift_collector=drift_collector,
-            design_context=design_context,
-        )
-        if pre_synthesis is not None:
-            return _RefinementAlignmentResult(record=pre_synthesis)
-
-        # ── Phase 2: CODE REFINEMENT LOOP ─────────────────────────────
-        # ``_run_synthesis_loop`` iterates up to ``MAX_CODE_REFINEMENT_ROUNDS``
-        # rounds of (validate → fetch → execute → trade-collect → evaluate)
-        # and either converges (``execution_succeeded=True``) or
-        # short-circuits with ``max_rounds_exhausted`` / a fatal-fetch flag.
-        # The loop appends to ``all_gate_results``, ``refinement_attempts``,
-        # and ``zero_trade_attempts`` in-place; the returned outcome carries
-        # the final spec/code/trades/metrics + universe audit.
         try:
-            synthesis = self._run_synthesis_loop(
+            # ── Phase 1b: PRE-SYNTHESIS SPEC GATING (#547 item 1) ─────
+            # Validate the ideation-time spec ONCE before entering the
+            # refinement loop. Refinement is code-only post-#547 item 2, so
+            # the spec cannot drift between rounds; revalidating per round
+            # was redundant. A critical SPEC failure here short-circuits the
+            # cycle without ever calling run_strategy_code or fetching
+            # market data.
+            #
+            # The "strategy_code is missing" critical is excluded from
+            # short-circuit eligibility AND from the persisted gate history:
+            # that's a code-generation failure (ideation produced an empty /
+            # whitespace strategy_code), and the refinement loop's existing
+            # code-safety + regeneration paths are equipped to repair it.
+            # Short-circuiting on that critical would regress a previously-
+            # recoverable case into an outright failure; persisting it would
+            # leave a permanently-unresolved critical on the record (the
+            # generic refinement loop never re-runs StrategySpecValidator),
+            # which would also reach convergence_tracker.record() as an
+            # unresolved spec failure.
+            pre_synthesis = self._run_pre_synthesis_phase(
                 spec=spec,
-                code=code,
                 config=config,
                 all_gate_results=all_gate_results,
+                code=code,
+                original_spec=original_spec,
+                original_code=original_code,
+                rationale=rationale,
                 refinement_attempts=refinement_attempts,
-                zero_trade_attempts=zero_trade_attempts,
                 emit=emit,
+                phase_back_count=phase_back_count,
+                drift_collector=drift_collector,
+                design_context=design_context,
+            )
+            if pre_synthesis is not None:
+                return _RefinementAlignmentResult(record=pre_synthesis)
+
+            # ── Phase 2: CODE REFINEMENT LOOP ─────────────────────────
+            # ``_run_synthesis_loop`` iterates up to ``MAX_CODE_REFINEMENT_ROUNDS``
+            # rounds of (validate → fetch → execute → trade-collect → evaluate)
+            # and either converges (``execution_succeeded=True``) or
+            # short-circuits with ``max_rounds_exhausted`` / a fatal-fetch flag.
+            # The loop appends to ``all_gate_results``, ``refinement_attempts``,
+            # and ``zero_trade_attempts`` in-place; the returned outcome carries
+            # the final spec/code/trades/metrics + universe audit.
+            try:
+                synthesis = self._run_synthesis_loop(
+                    spec=spec,
+                    code=code,
+                    config=config,
+                    all_gate_results=all_gate_results,
+                    refinement_attempts=refinement_attempts,
+                    zero_trade_attempts=zero_trade_attempts,
+                    emit=emit,
+                    drift_collector=drift_collector,
+                )
+            except SpecImplementabilityError as exc:
+                # The synthesis refinement loop tripped re-design. Attach this
+                # attempt's design-loop telemetry to the exception (mirroring
+                # the ``drift_collector`` hand-off) so the outer
+                # re-entry-exhaustion short-circuit in ``run_cycle`` persists
+                # the generation-funnel telemetry of the design loop that
+                # actually ran, rather than an empty default. Only set when a
+                # raiser didn't already supply one.
+                if exc.design_context is None:
+                    exc.design_context = design_context
+                raise
+            # Synthesis fields needed locally for the phase boundary +
+            # alignment call; the caller reads the remaining fields off the
+            # returned bundle.
+            spec = synthesis.spec
+            code = synthesis.code
+            trades = synthesis.trades
+            metrics = synthesis.metrics
+            market_data = synthesis.market_data
+            execution_succeeded = synthesis.execution_succeeded
+
+            # ═══ Phase 3 → 4 transition: CODE_SYNTHESIS → ═════════════
+            # ═══                         BACKTEST_AND_VERIFICATION ════
+            # Boundary invariant (AC3): synthesis advancing with
+            # ``execution_succeeded=True`` structurally requires that
+            # ``CodeConformanceGate.check`` passed in the final round (it is
+            # one of the critical gates the refinement loop must clear before
+            # executing). When synthesis short-circuits (max-rounds exhausted
+            # or fatal fetch failure), we still cross into the verification
+            # phase but the boundary event reflects the un-converged code
+            # hash and downstream gates handle the rest.
+            _emit_phase_transition(
+                emit,
+                from_phase=Phase.CODE_SYNTHESIS,
+                to_phase=Phase.BACKTEST_AND_VERIFICATION,
+                spec=spec,
+                code=code,
+                attempt=design_attempt,
+            )
+
+            # ── Phase 2.5: TRADE ALIGNMENT LOOP ────────────────────────
+            alignment_outcome = self._run_trade_alignment_loop(
+                spec=spec,
+                code=code,
+                trades=trades,
+                metrics=metrics,
+                market_data=market_data,
+                config=config,
+                execution_succeeded=execution_succeeded,
+                all_gate_results=all_gate_results,
+                emit=emit,
+                ran_on_non_conforming_code=synthesis.ran_on_non_conforming_code,
                 drift_collector=drift_collector,
             )
-        except SpecImplementabilityError as exc:
-            # The synthesis refinement loop tripped re-design. Attach this
-            # attempt's design-loop telemetry to the exception (mirroring the
-            # ``drift_collector`` hand-off) so the outer re-entry-exhaustion
-            # short-circuit in ``run_cycle`` persists the generation-funnel
-            # telemetry of the design loop that actually ran, rather than an
-            # empty default. Only set when a raiser didn't already supply one.
-            if exc.design_context is None:
-                exc.design_context = design_context
-            raise
-        # Synthesis fields needed locally for the phase boundary + alignment
-        # call; the caller reads the remaining fields off the returned bundle.
-        spec = synthesis.spec
-        code = synthesis.code
-        trades = synthesis.trades
-        metrics = synthesis.metrics
-        market_data = synthesis.market_data
-        execution_succeeded = synthesis.execution_succeeded
+            if alignment_outcome.rejection_reason:
+                logger.info(
+                    "Alignment loop for %s ended with rejection_reason=%s",
+                    alignment_outcome.spec.strategy_id,
+                    alignment_outcome.rejection_reason,
+                )
 
-        # ═══ Phase 3 → 4 transition: CODE_SYNTHESIS → ═════════════════
-        # ═══                         BACKTEST_AND_VERIFICATION ════════
-        # Boundary invariant (AC3): synthesis advancing with
-        # ``execution_succeeded=True`` structurally requires that
-        # ``CodeConformanceGate.check`` passed in the final round (it is
-        # one of the critical gates the refinement loop must clear before
-        # executing). When synthesis short-circuits (max-rounds exhausted
-        # or fatal fetch failure), we still cross into the verification
-        # phase but the boundary event reflects the un-converged code
-        # hash and downstream gates handle the rest.
-        _emit_phase_transition(
-            emit,
-            from_phase=Phase.CODE_SYNTHESIS,
-            to_phase=Phase.BACKTEST_AND_VERIFICATION,
-            spec=spec,
-            code=code,
-            attempt=design_attempt,
-        )
+            # Backtest-cache effectiveness for this attempt — emitted so the
+            # synthesis/alignment re-execution savings are observable post hoc.
+            _bt_cache = getattr(self, "_backtest_cache", None)
+            if _bt_cache is not None:
+                emit(
+                    "telemetry",
+                    {
+                        "kind": "backtest_cache",
+                        "hits": _bt_cache.hits,
+                        "misses": _bt_cache.misses,
+                    },
+                )
+                logger.info(
+                    "backtest_cache for %s: hits=%d misses=%d",
+                    alignment_outcome.spec.strategy_id,
+                    _bt_cache.hits,
+                    _bt_cache.misses,
+                )
 
-        # ── Phase 2.5: TRADE ALIGNMENT LOOP ───────────────────────────
-        alignment_outcome = self._run_trade_alignment_loop(
-            spec=spec,
-            code=code,
-            trades=trades,
-            metrics=metrics,
-            market_data=market_data,
-            config=config,
-            execution_succeeded=execution_succeeded,
-            all_gate_results=all_gate_results,
-            emit=emit,
-            ran_on_non_conforming_code=synthesis.ran_on_non_conforming_code,
-            drift_collector=drift_collector,
-        )
-        if alignment_outcome.rejection_reason:
-            logger.info(
-                "Alignment loop for %s ended with rejection_reason=%s",
-                alignment_outcome.spec.strategy_id,
-                alignment_outcome.rejection_reason,
+            return _RefinementAlignmentResult(
+                record=None, synthesis=synthesis, alignment=alignment_outcome
             )
-
-        # Backtest-cache effectiveness for this attempt — emitted so the
-        # synthesis/alignment re-execution savings are observable post hoc.
-        _bt_cache = getattr(self, "_backtest_cache", None)
-        if _bt_cache is not None:
-            emit(
-                "telemetry",
-                {
-                    "kind": "backtest_cache",
-                    "hits": _bt_cache.hits,
-                    "misses": _bt_cache.misses,
-                },
+        except DesignBudgetExhausted as exc:
+            # The per-cycle LLM-call budget (bound for the whole design
+            # attempt, not just the design phase — see ``use_budget`` at
+            # ``run_cycle``) can trip during refinement, alignment-fix, or
+            # zero-trade repair. Those call sites attach the latest
+            # spec/code they were working on before propagating; fall back
+            # to this attempt's pre-refinement spec/code only if none did
+            # (e.g. the trip happened before any leaf call site ran).
+            latest_spec = getattr(exc, "latest_spec", spec)
+            latest_code = getattr(exc, "latest_code", code)
+            abort_reason = (
+                f"Refinement/alignment phase exhausted its LLM-call budget "
+                f"({exc.calls_made}/{exc.limit} calls) after "
+                f"{len(refinement_attempts)} refinement attempt(s)"
             )
-            logger.info(
-                "backtest_cache for %s: hits=%d misses=%d",
-                alignment_outcome.spec.strategy_id,
-                _bt_cache.hits,
-                _bt_cache.misses,
+            emit("coding", {"sub_phase": "aborted", "reason": abort_reason})
+            return _RefinementAlignmentResult(
+                record=self._build_short_circuit_record(
+                    spec=latest_spec,
+                    config=config,
+                    code=latest_code,
+                    original_spec=original_spec,
+                    original_code=original_code,
+                    rationale=rationale,
+                    all_gate_results=all_gate_results,
+                    refinement_attempts=refinement_attempts,
+                    short_circuit_status="failed: budget_exhausted",
+                    short_circuit_reason=abort_reason,
+                    emit=emit,
+                    design_context=design_context,
+                    phase_back_count=phase_back_count,
+                    drift_collector=drift_collector,
+                )
             )
-
-        return _RefinementAlignmentResult(
-            record=None, synthesis=synthesis, alignment=alignment_outcome
-        )
 
     def _orchestrate_verification_and_analysis(
         self,
         *,
-        spec: StrategySpec,
-        trades: List[TradeRecord],
-        metrics: BacktestResult,
+        state: _DesignAttemptState,
         market_data: Optional[Dict[str, List[OHLCVBar]]],
         config: BacktestConfig,
         execution_succeeded: bool,
@@ -1612,18 +1660,25 @@ class DesignMixin:
         open_position_entry_reasons: List[str],
         refinement_attempts: List[str],
         rationale: str,
+        design_attempt: int,
         emit: PhaseCallback,
     ) -> Tuple[BacktestResult, bool, bool, Optional[str], str]:
         """Count the trial, run verification, and generate the analysis.
 
-        Pre: the refinement + alignment loops have settled the run state.
+        Pre: the refinement + alignment loops have settled the run state;
+        ``state`` carries the settled ``spec``/``code``/``trades``/``metrics``
+        for this design attempt (``state.code`` is unused here — verification
+        and analysis never touch the strategy source).
         Post: returns ``(metrics, is_winning, is_publishable,
         publishability_skip_reason, narrative)``. Increments the
         convergence trial counter (one per refinement round, plus the first),
         runs ``_run_verification_phase`` (which mutates ``metrics`` /
         ``all_gate_results`` and resolves ``is_winning`` / ``is_publishable``),
         and produces the analysis narrative off the conformance-resolved
-        alignment report.
+        alignment report. Emits the terminal
+        ``BACKTEST_AND_VERIFICATION → ∅`` phase-transition boundary
+        (mirroring the sibling phase methods, each of which owns emitting its
+        own exit transition) before returning.
         """
         # ── Phase 2.6: TRIAL COUNTING (issue #247) ────────────────────
         # Every refinement round on the same window contributes to the
@@ -1634,9 +1689,9 @@ class DesignMixin:
 
         # ── Phase 2.7: WALK-FORWARD + ACCEPTANCE + CONFORMANCE + is_winning ────
         verification = self._run_verification_phase(
-            spec=spec,
-            trades=trades,
-            metrics=metrics,
+            spec=state.spec,
+            trades=state.trades,
+            metrics=state.metrics,
             market_data=market_data,
             config=config,
             execution_succeeded=execution_succeeded,
@@ -1665,9 +1720,9 @@ class DesignMixin:
             exit_rule_conformance_passed=verification.exit_rule_conformance_passed,
         )
         narrative = self._run_analysis_phase(
-            spec=spec,
+            spec=state.spec,
             metrics=metrics,
-            trades=trades,
+            trades=state.trades,
             rationale=rationale,
             is_winning=is_winning,
             execution_succeeded=execution_succeeded,
@@ -1676,16 +1731,28 @@ class DesignMixin:
             alignment_report=latest_alignment_report,
             emit=emit,
         )
+
+        # ═══ Phase 4 → exit: BACKTEST_AND_VERIFICATION → ∅ ════════════
+        # Terminal transition out of the last named phase. ``to_phase``
+        # is ``None``; ``spec_hash``/``code_hash`` must match the values
+        # emitted on the previous two boundaries within this design
+        # attempt — the integration test in
+        # ``test_strategy_lab_phase_transitions.py`` asserts this.
+        _emit_phase_transition(
+            emit,
+            from_phase=Phase.BACKTEST_AND_VERIFICATION,
+            to_phase=None,
+            spec=state.spec,
+            code=state.code,
+            attempt=design_attempt,
+        )
         return metrics, is_winning, is_publishable, publishability_skip, narrative
 
     def _extract_findings_and_assemble_record(
         self,
         *,
-        spec: StrategySpec,
-        code: str,
+        state: _DesignAttemptState,
         config: BacktestConfig,
-        metrics: BacktestResult,
-        trades: List[TradeRecord],
         narrative: str,
         original_spec: StrategySpec,
         original_code: str,
@@ -1712,8 +1779,10 @@ class DesignMixin:
     ) -> StrategyLabRecord:
         """Extract the final alignment findings and assemble the record.
 
-        Pre: all phases have completed; ``alignment_reports`` holds one report
-        per alignment iteration (empty when the loop never ran).
+        Pre: all phases have completed; ``state`` carries the settled
+        ``spec``/``code``/``trades``/``metrics`` for this design attempt;
+        ``alignment_reports`` holds one report per alignment iteration
+        (empty when the loop never ran).
         Post: returns the persisted ``StrategyLabRecord`` built by
         ``_assemble_record``, carrying the last report's per-rule findings (or
         an empty list) and ``refinement_rounds = len(refinement_attempts)``.
@@ -1729,11 +1798,11 @@ class DesignMixin:
         )
 
         return self._assemble_record(
-            spec=spec,
-            code=code,
+            spec=state.spec,
+            code=state.code,
             config=config,
-            metrics=metrics,
-            trades=trades,
+            metrics=state.metrics,
+            trades=state.trades,
             narrative=narrative,
             original_spec=original_spec,
             original_code=original_code,

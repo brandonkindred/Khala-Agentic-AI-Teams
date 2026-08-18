@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, StrictBool, model_validator
 
-from software_engineering_team.shared.models import SystemArchitecture
+from shared.dev_models.models import SystemArchitecture
 
 from .profiles import ReviewProfile
 
@@ -167,7 +167,7 @@ class FileSegment(BaseModel):
         - A file's segments, in list order, partition its content exactly:
           concatenating their ``content`` reproduces the file.
         - Cited line numbers are always original-file absolute: ``pre_numbered``
-          segments already carry ``N: `` prefixes in their content (the coding
+          segments already carry ``N| `` prefixes in their content (the coding
           team's PR-diff hunks), and partial segments are *rendered* with their
           original line numbers prefixed (``prompt_content``), so the reviewer
           never reports snippet-relative numbers that would need re-anchoring.
@@ -182,7 +182,7 @@ class FileSegment(BaseModel):
     total_lines: int = Field(default=1, description="Total line count of the original file")
     pre_numbered: bool = Field(
         default=False,
-        description="True when content lines carry original line-number prefixes (e.g. '123: code')",
+        description="True when content lines carry original line-number prefixes (e.g. '123| code')",
     )
 
     @property
@@ -212,7 +212,7 @@ class FileSegment(BaseModel):
         """The content as rendered into the review prompt.
 
         Partial segments are prefixed with their original line numbers
-        (``"50: code"``) so cited lines are absolute by construction — a
+        (``"50| code"``) so cited lines are absolute by construction — a
         snippet-relative citation and an absolute one are indistinguishable
         when the segment's absolute range overlaps ``[1, line_count]``, so the
         numbering convention removes the ambiguity instead of guessing.
@@ -220,12 +220,17 @@ class FileSegment(BaseModel):
         Postconditions:
             - Whole files and ``pre_numbered`` segments (which already carry
               prefixes) render verbatim as ``content``.
+            - Partial segments use a right-aligned ``N| `` gutter whose width
+              is the last line number in the segment, so hanging indents stay
+              visually 4 columns across 9→10 / 99→100.
         """
         if self.pre_numbered or not self.is_partial:
             return self.content
-        return "\n".join(
-            f"{self.start_line + i}: {line}" for i, line in enumerate(self.content.splitlines())
-        )
+        lines = self.content.splitlines()
+        if not lines:
+            return self.content
+        width = len(str(self.start_line + len(lines) - 1))
+        return "\n".join(f"{self.start_line + i:>{width}}| {line}" for i, line in enumerate(lines))
 
     @model_validator(mode="after")
     def _validate_segment(self) -> "FileSegment":
@@ -647,16 +652,14 @@ class ArchitectureConsistencyFindingLLM(BaseModel):
 
     Mirrors the fields ``architecture_consistency_pass._coerce_finding``
     actually populates on ``CodeReviewIssue`` — severity, category,
-    file_path, line, description, suggestion — typed as an enumerated
-    schema in the same style as :class:`ChunkReviewIssueLLM`. Intentionally
-    omits ``start_line`` and ``pre_existing``: that pass's own
-    ``_coerce_finding`` never populates either (its prompt's output format
-    has no multi-line-anchor field, and only the side-effect pass emits
-    ``pre_existing``). This is the intended shape for the merged prompt's
-    Part 1 output contract. The in-process merged pass currently reuses the
-    standalone architecture pass's parsing/validation helpers to coerce and
-    validate per-half findings, rather than model-validating this class
-    directly.
+    file_path, line, description, suggestion, and ``pre_existing`` — typed
+    as an enumerated schema in the same style as :class:`ChunkReviewIssueLLM`.
+    Intentionally omits ``start_line``: that pass's own ``_coerce_finding``
+    never populates it (its prompt's output format has no multi-line-anchor
+    field). This is the intended shape for the merged prompt's Part 1 output
+    contract. The in-process merged pass currently reuses the standalone
+    architecture pass's parsing/validation helpers to coerce and validate
+    per-half findings, rather than model-validating this class directly.
     """
 
     severity: CodeReviewIssueSeverity = Field(
@@ -685,6 +688,15 @@ class ArchitectureConsistencyFindingLLM(BaseModel):
         default="",
         description="A concrete fix (e.g. which existing helper/module to reuse instead, or how to "
         "align with the stated boundary)",
+    )
+    pre_existing: StrictBool = Field(
+        default=False,
+        description="True when this issue is about a field, function, class, or other construct "
+        "the change under review did NOT add or modify — a pre-existing contradiction/duplication "
+        "in unrelated, unchanged code that merely lives in a file this submission also touched — "
+        "rather than a defect the change introduced (mirrors CodeReviewIssue.pre_existing's "
+        "canonical wording). Per the merged prompt's Part 1 tagging guidance, that means the "
+        "specific construct the finding is about looks untouched by this submission's actual work.",
     )
 
 
@@ -796,27 +808,71 @@ class CodeReviewInput(BaseModel):
     """Input for the Code Review agent.
 
     Preconditions (enforced at construction):
-        - The code under review is provided either via ``files`` (non-empty
-          mapping) or via an explicitly passed ``code`` string. Constructing
-          the input with neither, or with ``files={}``, raises ``ValueError``
-          so a caller bug never silently becomes an approved empty review.
+        - The code under review is provided via ``files`` (a non-empty
+          ``{path: content}`` mapping). Constructing the input with
+          ``files=None`` or ``files={}`` raises ``ValueError`` so a caller
+          bug never silently becomes an approved empty review.
+
+    Caller contracts:
+        - ``full_content`` overlays ``CodebaseIndex.files`` only when it covers
+          every changed path; a partial overlay does not re-enable whole-file
+          tail passes. Ignored when ``pre_numbered`` is False.
+        - ``replaced_content`` is the before-image analogue of ``full_content``:
+          pre-change text for the changed paths, but not guaranteed to be a
+          complete file body -- a caller deriving it purely from a unified
+          diff (e.g. ``api.pr_review._build_replaced_content``, which reuses
+          the diff's removed-hunk side with no extra fetch) supplies only the
+          hunk-scoped removed/context excerpt, omitting unchanged lines
+          outside a hunk. Default ``None`` and ignored by the review logic
+          when absent (behaves exactly as today). When
+          ``CODE_REVIEW_MUTATION_ANALYSIS`` is enabled (default on), the
+          side-effect-impact pass (standalone and merged) renders it as a
+          per-path "Replaced (pre-change) content" prompt section and reasons
+          over it via the mutation-vs-replaced-code contract sub-check. When
+          that toggle is disabled, the before-image is hidden from the model
+          entirely -- not merely told to ignore it -- so the prompt is
+          byte-identical to a review with no ``replaced_content`` at all.
+          Regardless of the toggle, it is still folded into the
+          submission-level cache key via ``model_dump`` (see
+          ``mapping._submission_fingerprint``), so a verdict computed with a
+          before-image is never served from a cache entry computed without
+          one, and a verdict computed with the toggle on is never served to a
+          run with it off (or vice versa).
+        - ``skip_tail_passes`` is honored by the in-process coordinator; the
+          Temporal workflow path does not yet thread it through.
     """
 
-    code: str = Field(
-        default="",
-        description="Legacy input: code to review, concatenated with ### path ### file headers. "
-        "Ignored when ``files`` is provided.",
-    )
     files: Optional[Dict[str, str]] = Field(
         default=None,
-        description="Preferred input: mapping of file path to file content. "
-        "When set, ``code`` is ignored and no header parsing happens.",
+        description="Mapping of file path to file content. Required and must be non-empty.",
     )
     pre_numbered: bool = Field(
         default=False,
-        description="True when every content line already carries its original line number "
-        "as an 'N: ' prefix (the coding team's PR-diff hunks); issue lines are then "
-        "reported verbatim instead of re-anchored.",
+        description="True when each files line already has an 'N| ' prefix; issue lines are reported as given.",
+    )
+    full_content: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Optional full (non-numbered) bodies for changed paths when files is a bounded "
+        "pre-numbered diff. Enables whole-file tail passes. Ignored when pre_numbered is False.",
+    )
+    replaced_content: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Optional before-image (pre-change) text for changed paths: path -> the file "
+        "content this submission replaced. Analogous to full_content, which carries the "
+        "after-image, but NOT guaranteed to be a complete file body -- a diff-derived caller "
+        "(e.g. the PR-review path, which reuses the diff's removed-hunk side with no extra "
+        "fetch) supplies only the hunk-scoped removed/context excerpt, omitting unchanged "
+        "lines outside a hunk and joining non-contiguous hunks with an ellipsis marker. A "
+        "future consumer must not assume completeness without checking how its caller "
+        "populated this field. Default None; ignored by the review logic when absent (behaves "
+        "exactly as today). Carried through the submission-level cache key so a verdict "
+        "computed with a before-image is never served from a cache entry computed without "
+        "one, and a verdict computed with CODE_REVIEW_MUTATION_ANALYSIS on is never served "
+        "to a run with it off (or vice versa). When that toggle is enabled (default on), "
+        "the side-effect-impact pass (standalone and merged) renders this as a per-path "
+        "'Replaced (pre-change) content' prompt section and reasons over it via the "
+        "mutation-vs-replaced-code contract sub-check; when disabled, this field is hidden "
+        "from the model entirely (not merely told to ignore it).",
     )
     spec_content: str = Field(
         default="",
@@ -848,63 +904,49 @@ class CodeReviewInput(BaseModel):
     )
     user_decisions: Optional[List[str]] = Field(
         default=None,
-        description="Product/design questions the user has already answered ('question → answer' "
-        "lines); the reviewer treats them as settled facts, not as open issues to flag.",
+        description="Settled 'question → answer' facts; do not flag as open issues.",
     )
     profile: ReviewProfile = Field(
         default=ReviewProfile.CODE_REVIEW,
-        description="Role/criteria profile selecting which reviewer persona and checklist the "
-        "engine applies (the gate calling the engine sets this). Defaults to the standard code "
-        "review, reproducing today's behavior for every existing caller.",
+        description="Reviewer persona/checklist. Default is standard code review.",
     )
     skip_false_positive_filter: bool = Field(
         default=False,
-        description="When True, the coordinator skips the whole-codebase false-positive "
-        "re-check and stands behind the per-chunk findings as-is. Default False keeps the "
-        "filter on for every existing caller; an escape hatch for gates whose findings must "
-        "not be silently dropped.",
+        description="Skip the whole-codebase false-positive re-check. Default False.",
     )
     skip_tail_passes: bool = Field(
         default=False,
-        description="When True, the coordinator skips BOTH tail passes entirely (the "
-        "false-positive filter and the merged architecture/side-effect pass) and returns "
-        "the per-chunk findings as-is, with no additional LLM calls from those two passes "
-        "after the map phase. Default False keeps both passes on for every existing caller. "
-        "Intended for a lightweight fallback caller that wants speed over full tail-pass "
-        "rigor; implies skip_false_positive_filter's effect (setting both is redundant, not "
-        "conflicting). Does NOT affect the separate, independently-gated post-dedupe "
-        "spec-compliance synthesis pass: when CODE_REVIEW_SPEC_COMPLIANCE_PASS is enabled "
-        "for the CODE_REVIEW profile, that single synthesize_spec_compliance call still runs "
-        "even if skip_tail_passes is set. Only honored by the in-process coordinator today — "
-        "the Temporal workflow path does not yet thread it through.",
+        description="Skip the false-positive filter and merged architecture/side-effect tail "
+        "passes. Does not skip spec-compliance synthesis. Default False.",
     )
     repo_root: Optional[str] = Field(
         default=None,
-        description="Absolute path to a materialized disk checkout of the whole repository, used "
-        "to reconstruct a fail-safe ``DiskRepoReader`` for the false-positive and "
-        "architecture/redundancy passes. Unlike a live ``RepoReader`` object, this string "
-        "survives ``model_dump(mode='json')``, so it is the channel that gives those passes "
-        "off-diff read access when the review runs as a durable Temporal workflow. ``None`` (or a "
-        "path that no longer exists) means no off-diff read access — the passes then keep more "
-        "findings (fail-safe), never fewer. GitHub-backed reviews leave this unset (their reader "
-        "cannot be rebuilt from a path); they honor the live reader via the in-process path.",
+        description="Absolute checkout path so durable workflows can rebuild off-diff reads. "
+        "None means no reconstructed disk reader.",
+    )
+    job_id: str = Field(
+        default="",
+        description="Id of the persisted review job this input belongs to (e.g. a "
+        "``code_review_runs`` row), when the caller has one. Purely identity metadata: never "
+        "read by the review logic itself, and deliberately excluded from "
+        "``mapping._submission_fingerprint`` (a per-invocation id must never affect the "
+        "submission-level cache key). Consumed by ``CodeReviewAgent.run`` to bind "
+        "``llm_attribution(job_id=...)`` for the run, which lets each LLM call site record its "
+        "prompt/response into that job's durable transcript (``review_history_store."
+        "append_review_transcript_entries``); ``''`` (the default) means no caller-tracked job, so "
+        "transcript recording is a no-op.",
     )
 
     @model_validator(mode="after")
-    def _require_code_or_files(self) -> "CodeReviewInput":
+    def _require_non_empty_files(self) -> "CodeReviewInput":
         """Reject inputs that carry no code source at all.
 
-        ``files={}`` and a fully-defaulted ``code`` are caller bugs (e.g. a glob
-        miss or a dropped kwarg), not empty reviews; per DbC they must raise here
-        rather than fail open downstream. An explicitly passed empty ``code``
-        string remains valid (the review then reports nothing to review).
+        ``files=None`` and ``files={}`` are caller bugs (e.g. a glob miss or a
+        dropped kwarg), not empty reviews; per DbC they must raise here rather
+        than fail open downstream.
         """
-        if self.files is not None:
-            if not self.files:
-                raise ValueError("CodeReviewInput.files must be a non-empty mapping when provided")
-            return self
-        if "code" not in self.model_fields_set:
-            raise ValueError("CodeReviewInput requires either 'files' or an explicit 'code' value")
+        if not self.files:
+            raise ValueError("CodeReviewInput.files must be a non-empty mapping")
         return self
 
 
@@ -942,23 +984,15 @@ class CodeReviewOutput(BaseModel):
 def build_code_review_input(
     *,
     files: Optional[Dict[str, str]] = None,
-    code: Optional[str] = None,
     **fields: Any,
 ) -> CodeReviewInput:
-    """Construct a :class:`CodeReviewInput` passing exactly the source channel given.
+    """Construct a :class:`CodeReviewInput` from ``files`` and the remaining fields.
 
-    ``files`` (the preferred ``{path: content}`` mapping) and ``code`` (the legacy
-    path-headered blob) are forwarded only when not None, so an explicitly-passed
-    empty ``code`` still counts as provided and ``files`` takes precedence —
-    matching the model's own ``_require_code_or_files`` validation. Callers supply
-    the remaining fields (spec_content, task_description, ...) via *fields*.
+    Callers supply the remaining fields (spec_content, task_description, ...) via
+    *fields*. ``files`` must be a non-empty mapping -- ``CodeReviewInput``'s own
+    ``_require_non_empty_files`` validator rejects ``None``/``{}``.
 
-    Single source of truth for the files/code selection that backend_agent,
+    Single source of truth for constructing review input that backend_agent,
     orchestrator, and quality_gate_tools each used to duplicate.
     """
-    kwargs: Dict[str, Any] = dict(fields)
-    if files is not None:
-        kwargs["files"] = files
-    if code is not None:
-        kwargs["code"] = code
-    return CodeReviewInput(**kwargs)
+    return CodeReviewInput(files=files, **fields)

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable, Dict, Optional
 
 from llm_service import LLMClient
-from software_engineering_team.shared.models import Task
+from shared.dev_models.models import Task
 from software_engineering_team.shared.team_lead_base import BaseTeamLead
 
 from .models import (

@@ -42,6 +42,24 @@ _EXTRACTED_ROUTE_KEYS: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/teams/{team_id}/test-pipeline/runs/{run_id}"),
         ("POST", "/teams/{team_id}/test-pipeline/runs/{run_id}/input"),
         ("POST", "/teams/{team_id}/test-pipeline/runs/{run_id}/cancel"),
+        ("GET", "/teams/{team_id}/processes"),
+        ("GET", "/processes/{process_id}"),
+        ("POST", "/teams/{team_id}/processes"),
+        ("PUT", "/processes/{process_id}"),
+        ("POST", "/processes/{process_id}/steps/{step_id}/recommend-agents"),
+        ("GET", "/teams/{team_id}/agent-environments"),
+        ("GET", "/teams/{team_id}/jobs"),
+        ("GET", "/teams/{team_id}/jobs/{job_id}"),
+        ("GET", "/teams/{team_id}/questions"),
+        ("POST", "/teams/{team_id}/questions/{job_id}/answers"),
+        ("GET", "/teams/{team_id}/assets"),
+        ("GET", "/teams/{team_id}/assets/{name}"),
+        ("POST", "/teams/{team_id}/assets"),
+        ("GET", "/teams/{team_id}/forms"),
+        ("GET", "/teams/{team_id}/forms/{form_key}"),
+        ("POST", "/teams/{team_id}/forms/{form_key}"),
+        ("PUT", "/teams/{team_id}/forms/{form_key}/{record_id}"),
+        ("DELETE", "/teams/{team_id}/forms/{form_key}/{record_id}"),
     }
 )
 
@@ -80,6 +98,15 @@ def test_list_teams_route_has_dbc_docstring() -> None:
     assert "Postconditions:" in doc
 
 
+def test_store_list_teams_has_dbc_docstring() -> None:
+    from agent_team_studio.agentic_team_provisioning.assistant.store import AgenticTeamStore
+
+    doc = AgenticTeamStore.list_teams.__doc__
+    assert doc
+    assert "Preconditions:" in doc
+    assert "Postconditions:" in doc
+
+
 def test_list_team_agents_route_has_dbc_docstring() -> None:
     from agent_team_studio.agentic_team_provisioning.api.routes.teams import list_team_agents
 
@@ -90,7 +117,7 @@ def test_list_team_agents_route_has_dbc_docstring() -> None:
 
 
 def test_get_process_route_has_dbc_docstring() -> None:
-    from agent_team_studio.agentic_team_provisioning.api.main import get_process
+    from agent_team_studio.agentic_team_provisioning.api.services.processes import get_process
 
     doc = get_process.__doc__
     assert doc
@@ -114,11 +141,25 @@ def test_main_exposes_testing_router_marker() -> None:
 def test_main_exposes_mounted_router_markers() -> None:
     """main keeps explicit references so we can assert include_router ran."""
     from agent_team_studio.agentic_team_provisioning.api import main as main_mod
-    from agent_team_studio.agentic_team_provisioning.api.routes import conversations, teams, testing
+    from agent_team_studio.agentic_team_provisioning.api.routes import (
+        assets,
+        conversations,
+        forms,
+        jobs,
+        processes,
+        questions,
+        teams,
+        testing,
+    )
 
     assert main_mod._teams_router is teams.router
     assert main_mod._conversations_router is conversations.router
     assert main_mod._testing_router is testing.router
+    assert main_mod._processes_router is processes.router
+    assert main_mod._jobs_router is jobs.router
+    assert main_mod._questions_router is questions.router
+    assert main_mod._assets_router is assets.router
+    assert main_mod._forms_router is forms.router
     paths = {getattr(r, "path", None) for r in main_mod.app.routes if isinstance(r, APIRoute)}
     assert "/health" in paths
 
@@ -204,6 +245,7 @@ def _chat_session_wiring_fakes(monkeypatch: pytest.MonkeyPatch) -> tuple[str, st
     """Shared session/roster fakes so send-message probes reach the agent hub aliases."""
     from agent_team_studio.agentic_team_provisioning.api import main as main_mod
     from agent_team_studio.agentic_team_provisioning.models import AgenticTeamAgent
+    from agent_team_studio.agentic_team_provisioning.roster_resolve import RosterPersonaView
 
     session_id = "sess-wiring"
     team_id = "team-wiring"
@@ -227,7 +269,14 @@ def _chat_session_wiring_fakes(monkeypatch: pytest.MonkeyPatch) -> tuple[str, st
     monkeypatch.setattr(
         main_mod,
         "_find_agent_in_roster",
-        lambda tid, name: AgenticTeamAgent(agent_name=name, role="probe"),
+        lambda tid, name: AgenticTeamAgent(
+            agent_name=name, source="generated", manifest_id="probe.manifest"
+        ),
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "resolve_persona",
+        lambda _mid: RosterPersonaView(role="probe"),
     )
     return team_id, session_id
 
@@ -324,8 +373,47 @@ def test_testing_service_dispatch_uses_hub_pipeline_runner(
     with pytest.raises(RuntimeError, match="hub-pipeline-runner-hit"):
         testing_svc._dispatch_pipeline_run(
             "run-wiring",
-            [AgenticTeamAgent(agent_name="worker", role="doer")],
+            [
+                AgenticTeamAgent(
+                    agent_name="worker", source="generated", manifest_id="worker.manifest"
+                )
+            ],
             process,
             None,
             temporal_owned=False,
         )
+
+
+def test_jobs_service_reads_infra_helper_from_main(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hub dereference: patching ``main._get_infra_or_404`` must be visible to jobs."""
+    from agent_team_studio.agentic_team_provisioning.api import main as main_mod
+    from agent_team_studio.agentic_team_provisioning.api.services import jobs as jobs_svc
+
+    def _boom(_team_id: str):
+        raise RuntimeError("hub-infra-hit")
+
+    monkeypatch.setattr(main_mod, "_get_infra_or_404", _boom)
+    with pytest.raises(RuntimeError, match="hub-infra-hit"):
+        jobs_svc.list_team_jobs("any")
+
+
+def test_main_reexports_asset_upload_chunk_bytes_as_a_settable_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``main._ASSET_UPLOAD_CHUNK_BYTES`` is a real re-export tests can monkeypatch.
+
+    ``upload_team_asset`` (``api.services.assets``) dereferences this value off
+    ``main`` at call time (see ``tests/test_upload_team_asset.py``'s chunking
+    test) rather than reading its own module global, so patching it here is
+    what makes a smaller chunk size actually take effect end-to-end.
+    """
+    from agent_team_studio.agentic_team_provisioning.api import main as main_mod
+    from agent_team_studio.agentic_team_provisioning.api.services import assets as assets_svc
+
+    assert main_mod._ASSET_UPLOAD_CHUNK_BYTES is assets_svc._ASSET_UPLOAD_CHUNK_BYTES
+    monkeypatch.setattr(main_mod, "_ASSET_UPLOAD_CHUNK_BYTES", 4)
+    assert main_mod._ASSET_UPLOAD_CHUNK_BYTES == 4
+    # The service module's own module-global is untouched by the hub patch —
+    # this is exactly why the service must dereference through ``main`` at
+    # call time instead of reading its own global.
+    assert assets_svc._ASSET_UPLOAD_CHUNK_BYTES == 1024 * 1024

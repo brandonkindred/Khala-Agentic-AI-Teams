@@ -163,8 +163,12 @@ jobs:
               - 'backend/agents/software_engineering_team/code_review_agent/**'
               - 'backend/agents/software_engineering_team/tests/test_code_review_cache.py'
               - 'backend/agents/software_engineering_team/tests/test_shared_review_cache_integration.py'
+              - 'backend/agents/software_engineering_team/qa_agent/**'
+              - 'backend/agents/software_engineering_team/tests/test_qa_agent_cache.py'
               - 'backend/agents/llm_service/compaction.py'
               - 'backend/agents/llm_service/tests/test_compaction.py'
+              - 'backend/agents/llm_service/strands_model.py'
+              - 'backend/agents/llm_service/tests/test_strands_model.py'
               - 'docker/docker-compose.yml'
               - 'docker/.env.example'
               - 'docker/redis/**'
@@ -179,7 +183,9 @@ jobs:
               - 'backend/shared/neo4j/**'
               - 'backend/shared/postgres/**'
               - 'backend/agents/llm_service/**'
-              - 'backend/agents/agent_registry/**'
+              - 'backend/agents/agent_platform/registry/**'
+              - 'backend/agents/agent_platform/__init__.py'
+              - 'backend/agents/agent_platform/README.md'
               - 'backend/agents/requirements.txt'
               - '.github/workflows/ci.yml'
             # job_matching: narrowly triggers the fresh-database schema-registration
@@ -220,22 +226,31 @@ jobs:
               - 'backend/agents/investment_team/**'
             social_marketing:
               - 'backend/agents/social_media_marketing_team/**'
-            # agent_provisioning_team imports agent_registry; agent_registry
-            # is also covered by shared_backend so that fan-out catches it
-            # too, but listing it here keeps the matrix narrow on the common
-            # provisioning-only PR.
+            # agent_provisioning_team imports agent_platform.registry; the
+            # registry package is also covered by shared_backend so that
+            # fan-out catches it too, but listing it here keeps the matrix
+            # narrow on the common provisioning-only PR.
             agent_provisioning:
               - 'backend/agents/agent_team_studio/agent_provisioning_team/**'
-              - 'backend/agents/agent_registry/**'
+              - 'backend/agents/agent_platform/registry/**'
+              - 'backend/agents/agent_platform/__init__.py'
+              - 'backend/agents/agent_platform/README.md'
+            agent_platform:
+              - 'backend/agents/agent_platform/**'
             # Agent Studio authoring + drafts persistence (in-memory unit suite;
             # live-Postgres store tests skip without POSTGRES_HOST).
             agent_studio:
-              - 'backend/agents/agent_team_studio/agent_studio/**'
+              - 'backend/agents/agent_platform/studio/**'
+            # Shared design-assistant conversation kernel (message envelope,
+            # fenced-JSON helpers, turn-lock protocol) used by agent_studio and
+            # agentic_team_provisioning's chat assistants.
+            assistant_kernel:
+              - 'backend/agents/agent_team_studio/assistant_kernel/**'
             sales:
               - 'backend/agents/sales_team/**'
             # user_agent_founder's drift tripwire imports the real
             # agentic_team_provisioning models and app routes (and, via its
-            # models, agent_registry), so provisioning-side changes must run
+            # models, agent_platform.registry), so provisioning-side changes must run
             # the founder suite — that tripwire is the only cross-team guard
             # on the founder↔agentic-team contract boundary (see
             # system_design/adr/ADR-007). agentic_team_provisioning's own
@@ -244,7 +259,9 @@ jobs:
             user_agent_founder:
               - 'backend/agents/agent_team_studio/user_agent_founder/**'
               - 'backend/agents/agent_team_studio/agentic_team_provisioning/**'
-              - 'backend/agents/agent_registry/**'
+              - 'backend/agents/agent_platform/registry/**'
+              - 'backend/agents/agent_platform/__init__.py'
+              - 'backend/agents/agent_platform/README.md'
             # Each docker_* filter mirrors what its Dockerfile actually
             # copies into the image, so a change to any baked-in source
             # triggers a rebuild and main never publishes stale code.
@@ -318,10 +335,11 @@ jobs:
               - '!backend/agents/investment_team/**'
               - '!backend/agents/social_media_marketing_team/**'
               - '!backend/agents/agent_team_studio/agent_provisioning_team/**'
-              - '!backend/agents/agent_registry/**'
+              - '!backend/agents/agent_platform/**'
               - '!backend/agents/sales_team/**'
               - '!backend/agents/agent_cognition/**'
-              - '!backend/agents/agent_team_studio/agent_studio/**'
+              - '!backend/agents/agent_platform/studio/**'
+              - '!backend/agents/agent_team_studio/assistant_kernel/**'
               - '!backend/agents/agent_team_studio/user_agent_founder/**'
               - '!backend/agents/agent_team_studio/agentic_team_provisioning/**'
               # shared_backend paths (already trigger fan-out separately)
@@ -360,7 +378,9 @@ jobs:
           F_INVESTMENT: ${{ steps.filter.outputs.investment }}
           F_SOCIAL_MARKETING: ${{ steps.filter.outputs.social_marketing }}
           F_AGENT_PROVISIONING: ${{ steps.filter.outputs.agent_provisioning }}
+          F_AGENT_PLATFORM: ${{ steps.filter.outputs.agent_platform }}
           F_AGENT_STUDIO: ${{ steps.filter.outputs.agent_studio }}
+          F_ASSISTANT_KERNEL: ${{ steps.filter.outputs.assistant_kernel }}
           F_SALES: ${{ steps.filter.outputs.sales }}
           F_AGENT_REPO_TOOLS: ${{ steps.filter.outputs.agent_repo_tools }}
           F_USER_AGENT_FOUNDER: ${{ steps.filter.outputs.user_agent_founder }}
@@ -406,13 +426,25 @@ jobs:
                   "source": "agent_team_studio.agent_provisioning_team",
                   "extra_requirements": "agent_team_studio/agent_provisioning_team/requirements.txt",
               },
+              "agent_platform": {
+                  "name": "Agent Platform",
+                  # In-package sandbox/registry suites plus unified-API sandbox
+                  # lifecycle, invoke HTTP, and dual-path residue tests (cwd is
+                  # backend/agents; space-separated paths word-split in
+                  # `pytest ${{ matrix.tests }}`).
+                  "tests": "agent_platform/sandbox/tests/ agent_platform/registry/tests/ ../unified_api/tests/test_sandboxes_route.py ../unified_api/tests/test_sandbox_reaper_startup.py ../unified_api/tests/test_agents_route.py ../unified_api/tests/test_agents_route_lazy_temporal_import.py ../unified_api/tests/test_agents_dual_path_residue.py",
+                  "source": "agent_platform.sandbox",
+              },
               "agent_studio": {
                   "name": "Agent Studio",
-                  "tests": "agent_team_studio/agent_studio/tests/",
-                  "source": "agent_team_studio.agent_studio",
+                  # In-package unit suite plus unified-API HTTP handler tests
+                  # (cwd is backend/agents; space-separated paths word-split
+                  # in `pytest ${{ matrix.tests }}`).
+                  "tests": "agent_platform/studio/tests/ ../unified_api/tests/test_agent_studio_routes.py ../unified_api/tests/test_agent_studio_direct_routes.py ../unified_api/tests/test_agent_studio_drafts_routes.py ../unified_api/tests/test_agent_studio_worker_startup.py ../unified_api/tests/test_agent_studio_user_profile_import_gating.py",
+                  "source": "agent_platform.studio",
                   # Omit live-Postgres store modules from the unit cov gate
                   # (those suites skip without POSTGRES_HOST).
-                  "cov_config": "agent_team_studio/agent_studio/pyproject.toml",
+                  "cov_config": "agent_platform/studio/pyproject.toml",
               },
               # unified_api lives at backend/unified_api/ (a sibling of backend/agents/,
               # this job's working directory), so its test/source paths are given
@@ -457,6 +489,10 @@ jobs:
                   "tests": "agent_repo_tools/tests/",
                   "source": "agent_repo_tools",
               },
+              "assistant_kernel": {
+                  "tests": "agent_team_studio/assistant_kernel/tests/",
+                  "source": "agent_team_studio.assistant_kernel",
+              },
               "user_agent_founder": {
                   "tests": "agent_team_studio/user_agent_founder/tests/",
                   "source": "agent_team_studio.user_agent_founder",
@@ -464,7 +500,7 @@ jobs:
           }
 
           misc_entry = {
-              "name": "Misc Teams (market_research + soc2 + social_marketing + sales + agent_repo_tools + user_agent_founder)",
+              "name": "Misc Teams (market_research + soc2 + social_marketing + sales + agent_repo_tools + assistant_kernel + user_agent_founder)",
               "tests": "BATCHED",
               "source": "BATCHED",
               "batched_teams": [v for v in misc_teams.values()],
@@ -500,6 +536,18 @@ jobs:
               changed = per_team
 
           entries = [v for k, v in large_teams.items() if changed.get(k)]
+          # Console is a sibling platform member with its own 90% gate. It
+          # shares the agent_platform path filter (lives under
+          # agent_platform/console/) rather than a separate paths-filter key.
+          # Store/prune suites skip without POSTGRES_HOST, so they are omitted
+          # from the unit cov config (same pattern as agent_studio).
+          if changed.get("agent_platform"):
+              entries.append({
+                  "name": "Agent Platform Console",
+                  "tests": "agent_platform/console/tests/",
+                  "source": "agent_platform.console",
+                  "cov_config": "agent_platform/console/pyproject.toml",
+              })
           any_misc = any(changed.get(k) for k in misc_teams)
           if any_misc:
               entries.append(misc_entry)
@@ -584,7 +632,7 @@ jobs:
         image: postgres:16-alpine
         env:
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_PASSWORD: please-change-me
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
@@ -597,7 +645,7 @@ jobs:
       POSTGRES_HOST: localhost
       POSTGRES_PORT: "5432"
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: please-change-me
       POSTGRES_DB: postgres
     steps:
       - uses: actions/checkout@v4
@@ -814,7 +862,7 @@ jobs:
         image: postgres:16-alpine
         env:
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_PASSWORD: please-change-me
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
@@ -828,7 +876,7 @@ jobs:
       POSTGRES_HOST: localhost
       POSTGRES_PORT: "5432"
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: please-change-me
       POSTGRES_DB: postgres
     steps:
       - uses: actions/checkout@v4
@@ -867,7 +915,7 @@ jobs:
         image: postgres:16-alpine
         env:
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_PASSWORD: please-change-me
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
@@ -881,7 +929,7 @@ jobs:
       POSTGRES_HOST: localhost
       POSTGRES_PORT: "5432"
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: please-change-me
       POSTGRES_DB: postgres
     steps:
       - uses: actions/checkout@v4
@@ -1039,6 +1087,19 @@ jobs:
               --cov-fail-under=90
           fi
 
+      # Strategy Lab's real-WorkflowEnvironment cancellation regression
+      # (drives an actual embedded Temporal test server, so it's marked
+      # `integration` and kept out of the `-m "not integration"` run above,
+      # same reasoning as the code-review/coding-team integration slice
+      # below). Needs only the ephemeral temporalio test-server binary, not
+      # Postgres/job-service, so it runs here rather than in the Postgres
+      # integration job. Skips itself if that binary cannot be fetched.
+      - if: matrix.source == 'investment_team'
+        name: Strategy Lab Temporal cancellation (integration)
+        run: |
+          pytest investment_team/tests/test_strategy_lab_temporal_cancellation.py \
+            -v --tb=short -m integration
+
       # Ship the union coverage data (team + shared_*) to combine-shared-infra.
       # if: always() so a failed own-gate still preserves the artifact; the mv
       # above guarantees the file exists whenever pytest itself passed.
@@ -1069,11 +1130,14 @@ jobs:
       run:
         working-directory: backend/agents
     services:
+      # 16-alpine matches the pin used elsewhere in the project
+      # (backend/agent_sandbox_image/sandbox-stack.yml) and specifically
+      # avoids the (unpublished, non-startable) Postgres 18 alpine tag.
       postgres:
         image: postgres:16-alpine
         env:
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_PASSWORD: please-change-me
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
@@ -1087,7 +1151,7 @@ jobs:
       POSTGRES_HOST: localhost
       POSTGRES_PORT: "5432"
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: please-change-me
       POSTGRES_DB: postgres
     steps:
       - uses: actions/checkout@v4
@@ -1114,7 +1178,7 @@ jobs:
           POSTGRES_HOST: localhost
           POSTGRES_PORT: "5432"
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_PASSWORD: please-change-me
           POSTGRES_DB: postgres
           JOB_SERVICE_URL: http://127.0.0.1:8085
         run: |
@@ -1170,6 +1234,9 @@ jobs:
     services:
       # trust auth so the ephemeral CI database needs no password (avoids a
       # hardcoded dummy credential); connections come only from this runner.
+      # 16-alpine matches the pin used elsewhere in the project
+      # (backend/agent_sandbox_image/sandbox-stack.yml) and specifically
+      # avoids the (unpublished, non-startable) Postgres 18 alpine tag.
       postgres:
         image: postgres:16-alpine
         env:
@@ -1214,6 +1281,11 @@ jobs:
           POSTGRES_HOST: localhost
           POSTGRES_PORT: "5432"
           POSTGRES_USER: postgres
+          # The service container above uses POSTGRES_HOST_AUTH_METHOD: trust,
+          # so this value is never actually checked — but job_service/db.py
+          # requires POSTGRES_PASSWORD to be set (no default), so it must be
+          # present here too. Matches the sibling integration-tests job.
+          POSTGRES_PASSWORD: please-change-me
           POSTGRES_DB: postgres
           JOB_SERVICE_URL: http://127.0.0.1:8085
         run: |
@@ -1294,6 +1366,7 @@ jobs:
       - test-backend
       - test-integration
       - test-branding
+      - test-job-matching-schema-registration
     steps:
       - name: Verify dependencies
         env:

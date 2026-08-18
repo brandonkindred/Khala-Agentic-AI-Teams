@@ -22,6 +22,7 @@ from agent_team_studio.agentic_team_provisioning.models import (
     ConversationMessage,
     ProcessDefinition,
 )
+from agent_team_studio.agentic_team_provisioning.roster_resolve import migrate_roster_row
 from shared.postgres import get_conn
 from shared.postgres.metrics import timed_query
 from user_profile import ArtifactType, record_association_safe, remove_association_safe
@@ -112,7 +113,7 @@ class AgenticTeamStore:
             if not row:
                 return None
             processes = self._load_processes(cur, team_id)
-            agents = self._load_team_agents(cur, team_id)
+            agents = self._load_team_agents(cur, team_id, conn=conn)
         return AgenticTeam(
             team_id=row["team_id"],
             name=row["name"],
@@ -125,6 +126,16 @@ class AgenticTeamStore:
 
     @timed_query(store=_STORE, op="list_teams")
     def list_teams(self) -> list[dict]:
+        """List every persisted agentic team, most recently created first.
+
+        Preconditions: none.
+        Postconditions: returns one dict per row in ``agentic_teams``
+            (``team_id``, ``name``, ``description``, ``process_count``,
+            ``created_at``, ``updated_at``), ordered by ``created_at``
+            descending; ``process_count`` is the number of
+            ``agentic_processes`` rows linked to that team. Returns an empty
+            list when no teams exist.
+        """
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
@@ -352,7 +363,7 @@ class AgenticTeamStore:
                 if on_merged is not None:
                     on_merged([], conn)
                 return []
-            existing = self._load_team_agents(cur, team_id)
+            existing = self._load_team_agents(cur, team_id, already_locked=True, conn=conn)
             preserved = [a for a in existing if a.source == SOURCE_REGISTRY]
             preserved_names = {a.agent_name for a in preserved}
             merged = preserved + [g for g in generated if g.agent_name not in preserved_names]
@@ -394,7 +405,7 @@ class AgenticTeamStore:
             self._lock_team(cur, team_id)  # parent-first lock — uniform lock order
             # Read the row we're about to replace under the lock, so a caller's
             # cleanup acts on the truly-replaced row (not a pre-lock snapshot).
-            prior = self._get_team_agent(cur, team_id, agent.agent_name)
+            prior = self._get_team_agent(cur, team_id, agent.agent_name, conn=conn)
             self._upsert_team_agent_row(cur, team_id, agent, now)
             cur.execute(
                 "UPDATE agentic_teams SET updated_at = %s WHERE team_id = %s",
@@ -416,9 +427,13 @@ class AgenticTeamStore:
         ``apply_updates`` receives the agent row read **under the lock** and returns
         the row to persist (the caller merges its patch onto that fresh row and
         re-validates). Because the read, the merge, and the write all happen inside
-        one locked transaction, a concurrent roster write for the same agent (e.g. a
-        chat-save filling ``skills`` while the user saves a ``role`` edit) cannot be
-        clobbered by a merge over a pre-lock snapshot.
+        one locked transaction, a concurrent roster writer for the same agent
+        (e.g. a chat-save merging generated agents while another path updates the
+        same thin ref) cannot be clobbered by a merge over a pre-lock snapshot.
+
+        Note: the HTTP PUT roster endpoint rejects persona-field bodies (Manifest
+        is the persona SoT); this helper remains for thin-ref maintenance paths
+        that still need locked read-modify-write.
 
         Preconditions: ``team_id`` and ``agent_name`` are non-empty strings;
             ``apply_updates`` must not change ``agent_name`` (the row is written under
@@ -435,7 +450,7 @@ class AgenticTeamStore:
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             self._lock_team(cur, team_id)  # parent-first lock — uniform lock order
-            current = self._get_team_agent(cur, team_id, agent_name)
+            current = self._get_team_agent(cur, team_id, agent_name, conn=conn)
             if current is None:
                 return None
             updated = apply_updates(current)
@@ -495,7 +510,17 @@ class AgenticTeamStore:
                 "UPDATE agentic_teams SET updated_at = %s WHERE team_id = %s",
                 (now, team_id),
             )
-            deleted = AgenticTeamAgent.model_validate(row["data_json"])
+            raw = row["data_json"]
+            if isinstance(raw, str):
+                import json
+
+                raw = json.loads(raw)
+            # Coerce legacy fat RETURNING payloads (manifest_id may be null) so
+            # unregister hooks still receive a thin ref with a stamped id.
+            # Join ``conn`` so Manifest get/register during migrate do not open a
+            # nested pool checkout while this delete still holds the roster connection.
+            deleted, _changed = migrate_roster_row(team_id, dict(raw), conn=conn)
+            deleted = AgenticTeamAgent.model_validate(deleted.model_dump(mode="json"))
             if on_deleted is not None:
                 on_deleted(deleted)
             return deleted
@@ -510,28 +535,81 @@ class AgenticTeamStore:
             or does not exist.
         """
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            return self._load_team_agents(cur, team_id)
+            return self._load_team_agents(cur, team_id, conn=conn)
 
-    def _load_team_agents(self, cur, team_id: str) -> list[AgenticTeamAgent]:
+    def _load_team_agents(
+        self,
+        cur,
+        team_id: str,
+        *,
+        already_locked: bool = False,
+        conn: object | None = None,
+    ) -> list[AgenticTeamAgent]:
+        """Load roster rows, eagerly migrating legacy fat JSON to thin refs.
+
+        Takes the team-row lock first (unless ``already_locked``) so migrate
+        rewrites serialize with ``merge_generated_agents`` / single-agent writers
+        (same parent→child lock order). Manifest get/register during migrate join
+        ``conn`` when provided so they do not open a nested pool checkout.
+
+        Preconditions: ``cur`` is an open cursor in a live transaction; when
+            ``already_locked`` is True the caller already holds the team-row
+            ``FOR UPDATE`` lock and has consumed the lock SELECT result.
+            ``conn`` should be the same connection ``cur`` uses when Manifest
+            migration may run (required under ``POSTGRES_POOL_MAX_SIZE=1``).
+        Postconditions: returns validated thin :class:`AgenticTeamAgent` rows;
+            rewrites any row where :func:`migrate_roster_row` reports ``changed``.
+        """
+        if not already_locked:
+            self._lock_team(cur, team_id)
+            cur.fetchone()  # consume FOR UPDATE result so the next execute is clean
         cur.execute(
             "SELECT data_json FROM agentic_team_agents WHERE team_id = %s ORDER BY agent_name",
             (team_id,),
         )
-        return [AgenticTeamAgent.model_validate(r["data_json"]) for r in cur.fetchall()]
+        agents: list[AgenticTeamAgent] = []
+        now = datetime.now(tz=timezone.utc)
+        for r in cur.fetchall():
+            raw = r["data_json"]
+            if isinstance(raw, str):
+                import json
 
-    def _get_team_agent(self, cur, team_id: str, agent_name: str) -> Optional[AgenticTeamAgent]:
+                raw = json.loads(raw)
+            agent, changed = migrate_roster_row(team_id, dict(raw), conn=conn)
+            agent = AgenticTeamAgent.model_validate(agent.model_dump(mode="json"))
+            if changed:
+                self._upsert_team_agent_row(cur, team_id, agent, now)
+            agents.append(agent)
+        return agents
+
+    def _get_team_agent(
+        self, cur, team_id: str, agent_name: str, *, conn: object | None = None
+    ) -> Optional[AgenticTeamAgent]:
         """Read one roster agent by name on an open cursor (under the caller's lock).
 
         Preconditions: ``cur`` is an open cursor in a live transaction.
         Postconditions: returns the :class:`AgenticTeamAgent` named ``agent_name`` for
-            ``team_id`` if present, else ``None``. Reads only — no mutation.
+            ``team_id`` if present (migrated to thin shape when needed), else ``None``.
+            Rewrites the row when :func:`migrate_roster_row` reports ``changed``.
         """
         cur.execute(
             "SELECT data_json FROM agentic_team_agents WHERE team_id = %s AND agent_name = %s",
             (team_id, agent_name),
         )
         row = cur.fetchone()
-        return AgenticTeamAgent.model_validate(row["data_json"]) if row else None
+        if not row:
+            return None
+        raw = row["data_json"]
+        if isinstance(raw, str):
+            import json
+
+            raw = json.loads(raw)
+        agent, changed = migrate_roster_row(team_id, dict(raw), conn=conn)
+        agent = AgenticTeamAgent.model_validate(agent.model_dump(mode="json"))
+        if changed:
+            now = datetime.now(tz=timezone.utc)
+            self._upsert_team_agent_row(cur, team_id, agent, now)
+        return agent
 
     # ------------------------------------------------------------------
     # Conversations

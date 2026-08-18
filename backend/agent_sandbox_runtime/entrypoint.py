@@ -105,7 +105,7 @@ def _maybe_register_injected_manifest(registry) -> None:
         log.info("no injected manifest at %s; using on-disk registry only", path_str)
         return
     try:
-        from agent_registry.models import AgentManifest
+        from agent_platform.registry.models import AgentManifest
 
         raw = json.loads(path.read_text(encoding="utf-8"))
         manifest = AgentManifest.model_validate(raw)
@@ -123,15 +123,15 @@ def _build_app() -> FastAPI:
         sys.exit(EXIT_MISSING_ENV)
 
     try:
-        from agent_registry import get_registry
+        from agent_platform.registry import get_registry
     except Exception as exc:
-        log.exception("FATAL: could not import agent_registry: %s", exc)
+        log.exception("FATAL: could not import agent_platform.registry: %s", exc)
         sys.exit(EXIT_REGISTRY_LOAD_ERROR)
 
     try:
         registry = get_registry()
     except Exception as exc:
-        log.exception("FATAL: agent_registry load failed: %s", exc)
+        log.exception("FATAL: agent_platform.registry load failed: %s", exc)
         sys.exit(EXIT_REGISTRY_LOAD_ERROR)
 
     # Register the provision-time injected manifest (if any) so a dynamically
@@ -183,6 +183,11 @@ def _build_app() -> FastAPI:
 
     # Mount the shared invoke shim; the middleware above restricts dispatch
     # to the single bound agent.
+    #
+    # Do not register llm_service.usage_flusher here. Sandboxes are
+    # network-isolated from platform Postgres (own khala_sandbox DB, torn
+    # down with the stack); usage persistence belongs on the platform
+    # side of the invoke boundary, not inside the sandbox.
     from shared.agent_invoke import mount_invoke_shim
 
     mount_invoke_shim(app)

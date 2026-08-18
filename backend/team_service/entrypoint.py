@@ -170,10 +170,12 @@ def build_wrapper_body(
     generated code can be compiled/asserted in tests. When imported by each
     uvicorn worker the module re-initialises OpenTelemetry, arms fault
     diagnostics + the memory watchdog, imports/builds the FastAPI ``app``,
-    instruments it, and exposes ``/metrics``. When ``temporal_module`` and
-    ``temporal_func`` are both provided it also registers every schema the app
-    exposes via ``app.state.postgres_schemas`` and then starts the team's
-    Temporal worker *in this worker process* (gated on ``TEMPORAL_ADDRESS``),
+    instruments it, exposes ``/metrics``, and registers the process-local LLM
+    usage flusher (before any Temporal worker, with ``atexit`` shutdown). When
+    ``temporal_module`` and ``temporal_func`` are both provided it also registers
+    every schema the app exposes via ``app.state.postgres_schemas`` and then
+    starts the team's Temporal worker *in this worker process* (gated on
+    ``TEMPORAL_ADDRESS``),
     so the module-level Temporal client lives in the same process that serves
     requests — workers are forked after the supervisor starts, so a worker
     started in the supervisor would never be visible here. Registering every
@@ -277,6 +279,31 @@ def build_wrapper_body(
         "    )\n"
         "except Exception:\n"
         "    _log.warning('prometheus instrumentator unavailable', exc_info=True)\n"
+    )
+
+    # Capture LLM token usage in this worker process. The observer registry is
+    # process-local, so registering only in the unified-api gateway misses every
+    # call made here (request handlers and Temporal activities). Register before
+    # the Temporal worker starts so in-process activities are captured; the
+    # function is idempotent with create_team_app's lifespan. atexit covers
+    # router-only teams that have no FastAPI lifespan shutdown: stop in-process
+    # Temporal workers first so in-flight LLM calls can still be persisted.
+    body += (
+        "try:\n"
+        "    import atexit as _atexit\n"
+        "    from llm_service.usage_flusher import register_usage_flusher as _ruf\n"
+        "    from llm_service.usage_flusher import shutdown as _usage_shutdown\n"
+        "    def _usage_teardown():\n"
+        "        try:\n"
+        "            from shared.temporal.worker import stop_all_team_workers as _satw\n"
+        "            _satw()\n"
+        "        except Exception:\n"
+        "            _log.warning('in-process Temporal worker shutdown failed', exc_info=True)\n"
+        "        _usage_shutdown()\n"
+        "    _ruf()\n"
+        "    _atexit.register(_usage_teardown)\n"
+        "except Exception:\n"
+        "    _log.warning('llm usage flusher registration failed', exc_info=True)\n"
     )
 
     # Start the team's Temporal worker in THIS worker process. uvicorn forks

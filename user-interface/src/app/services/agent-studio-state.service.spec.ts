@@ -105,6 +105,24 @@ describe('AgentStudioStateService', () => {
     });
   });
 
+  it('starts with no server draft bound', () => {
+    expect(service.currentDraftId()).toBeNull();
+    expect(service.currentDraftName()).toBeNull();
+  });
+
+  it('setCurrentDraft updates the id and name together', () => {
+    service.setCurrentDraft('draft-1', 'My draft');
+    expect(service.currentDraftId()).toBe('draft-1');
+    expect(service.currentDraftName()).toBe('My draft');
+  });
+
+  it('reset clears the bound server draft', () => {
+    service.setCurrentDraft('draft-1', 'My draft');
+    service.reset();
+    expect(service.currentDraftId()).toBeNull();
+    expect(service.currentDraftName()).toBeNull();
+  });
+
   it('starts with the Stage-3 gate signals unstaffed/unset', () => {
     expect(service.rosterFullyStaffed()).toBe(false);
     expect(service.composeProcessStatus()).toBeNull();
@@ -137,5 +155,216 @@ describe('AgentStudioStateService', () => {
     service.markHandoffConsumed('t-1::a');
     service.reset();
     expect(service.hasConsumedHandoff('t-1::a')).toBe(false);
+  });
+
+  it('starts with no persona live-run id', () => {
+    expect(service.personaLiveRunId()).toBeNull();
+    expect(service.personaLiveRunStartedAtMs()).toBeNull();
+    expect(service.personaLiveRunEndedAtMs()).toBeNull();
+  });
+
+  it('setPersonaLiveRunId persists the id until reset or a team change', () => {
+    service.setTeamId('team-1');
+    service.setPersonaLiveRunId('run-1');
+    service.setPersonaLiveRunStartedAtMs(1_000);
+    service.setPersonaLiveRunEndedAtMs(2_000);
+    expect(service.personaLiveRunId()).toBe('run-1');
+    service.setTeamId('team-1');
+    expect(service.personaLiveRunId()).toBe('run-1');
+    expect(service.personaLiveRunStartedAtMs()).toBe(1_000);
+    expect(service.personaLiveRunEndedAtMs()).toBe(2_000);
+    service.setTeamId('team-2');
+    expect(service.personaLiveRunId()).toBeNull();
+    expect(service.personaLiveRunStartedAtMs()).toBeNull();
+    expect(service.personaLiveRunEndedAtMs()).toBeNull();
+  });
+
+  it('setPersonaLiveRunId(null) clears the id and both timestamps directly', () => {
+    service.setPersonaLiveRunId('run-1');
+    service.setPersonaLiveRunStartedAtMs(1_000);
+    service.setPersonaLiveRunEndedAtMs(2_000);
+    service.setPersonaLiveRunId(null);
+    expect(service.personaLiveRunId()).toBeNull();
+    expect(service.personaLiveRunStartedAtMs()).toBeNull();
+    expect(service.personaLiveRunEndedAtMs()).toBeNull();
+  });
+
+  it('reset clears the persona live-run id', () => {
+    service.setPersonaLiveRunId('run-1');
+    service.setPersonaLiveRunStartedAtMs(1_000);
+    service.setPersonaLiveRunEndedAtMs(2_000);
+    service.reset();
+    expect(service.personaLiveRunId()).toBeNull();
+    expect(service.personaLiveRunStartedAtMs()).toBeNull();
+    expect(service.personaLiveRunEndedAtMs()).toBeNull();
+  });
+
+  describe('Stage-1 build sub-stepper', () => {
+    it('starts at sub-stage 0 (Start)', () => {
+      expect(service.activeBuildSubStage()).toBe(0);
+      expect(service.maxReachedBuildSubStage()).toBe(0);
+      expect(service.canAdvanceBuildSubStage()).toBe(true);
+    });
+
+    it('buildSubStageStatus reports active / todo / done relative to the active sub-stage', () => {
+      expect(service.buildSubStageStatus(0)).toBe('active');
+      expect(service.buildSubStageStatus(1)).toBe('todo');
+      expect(service.buildSubStageStatus(2)).toBe('todo');
+      service.advanceBuildSubStage();
+      expect(service.buildSubStageStatus(0)).toBe('done');
+      expect(service.buildSubStageStatus(1)).toBe('active');
+      expect(service.buildSubStageStatus(2)).toBe('todo');
+    });
+
+    it('buildSubStageStatus rejects out-of-range and non-integer indices', () => {
+      expect(() => service.buildSubStageStatus(-1)).toThrow(RangeError);
+      expect(() => service.buildSubStageStatus(3)).toThrow(RangeError);
+      expect(() => service.buildSubStageStatus(1.5)).toThrow(RangeError);
+    });
+
+    it('advanceBuildSubStage steps forward one sub-stage at a time and is a no-op at Configure', () => {
+      service.advanceBuildSubStage();
+      expect(service.activeBuildSubStage()).toBe(1);
+      expect(service.maxReachedBuildSubStage()).toBe(1);
+      service.advanceBuildSubStage();
+      expect(service.activeBuildSubStage()).toBe(2);
+      expect(service.canAdvanceBuildSubStage()).toBe(false);
+      service.advanceBuildSubStage();
+      expect(service.activeBuildSubStage()).toBe(2);
+    });
+
+    it('backToDefine moves Configure back to Define without lowering maxReachedBuildSubStage', () => {
+      service.advanceBuildSubStage();
+      service.advanceBuildSubStage();
+      expect(service.activeBuildSubStage()).toBe(2);
+      service.backToDefine();
+      expect(service.activeBuildSubStage()).toBe(1);
+      expect(service.maxReachedBuildSubStage()).toBe(2);
+    });
+
+    it('backToDefine rejects being called from any sub-stage other than Configure', () => {
+      expect(() => service.backToDefine()).toThrow(RangeError);
+      service.advanceBuildSubStage();
+      expect(() => service.backToDefine()).toThrow(RangeError);
+      expect(service.activeBuildSubStage()).toBe(1);
+    });
+
+    it('reset clears the sub-stepper back to Start', () => {
+      service.advanceBuildSubStage();
+      service.advanceBuildSubStage();
+      service.reset();
+      expect(service.activeBuildSubStage()).toBe(0);
+      expect(service.maxReachedBuildSubStage()).toBe(0);
+    });
+
+    it('resetBuildSubStage clears the sub-stepper back to Start without touching handoff state', () => {
+      service.setRegistryAgentId('reg-1');
+      service.advanceBuildSubStage();
+      service.advanceBuildSubStage();
+      service.resetBuildSubStage();
+      expect(service.activeBuildSubStage()).toBe(0);
+      expect(service.maxReachedBuildSubStage()).toBe(0);
+      expect(service.registryAgentId()).toBe('reg-1');
+    });
+  });
+
+  describe('dirty tracking', () => {
+    it('starts clean on a blank session', () => {
+      expect(service.isDirty()).toBe(false);
+    });
+
+    it('becomes dirty when any handoff id is set and no snapshot exists yet', () => {
+      service.setRegistryAgentId('reg-1');
+      expect(service.isDirty()).toBe(true);
+    });
+
+    it('markClean makes the current handoff clean', () => {
+      service.setTeamId('team-1');
+      service.markClean();
+      expect(service.isDirty()).toBe(false);
+    });
+
+    it('markSaved records a snapshot that may differ from the current handoff', () => {
+      service.setTeamId('team-1');
+      service.markSaved({
+        registryAgentId: null,
+        teamId: 'team-1',
+        processId: null,
+        personaId: null,
+        draftAgentId: null,
+      });
+      expect(service.isDirty()).toBe(false);
+      service.setTeamId('team-2');
+      service.markSaved({
+        registryAgentId: null,
+        teamId: 'team-1',
+        processId: null,
+        personaId: null,
+        draftAgentId: null,
+      });
+      expect(service.isDirty()).toBe(true);
+      expect(service.teamId()).toBe('team-2');
+    });
+
+    it('treats a snapshot field of undefined the same as null (defensive against an untyped external source)', () => {
+      service.markSaved({
+        registryAgentId: undefined as unknown as string | null,
+        teamId: null,
+        processId: null,
+        personaId: null,
+        draftAgentId: null,
+      });
+      expect(service.isDirty()).toBe(false);
+    });
+
+    it('becomes dirty again when an id changes after markClean', () => {
+      service.setTeamId('team-1');
+      service.markClean();
+      service.setTeamId('team-2');
+      expect(service.isDirty()).toBe(true);
+    });
+
+    it('reset returns to a clean blank session', () => {
+      service.setRegistryAgentId('reg-1');
+      service.markClean();
+      service.setTeamId('team-1');
+      service.reset();
+      expect(service.isDirty()).toBe(false);
+      expect(service.handoff()).toEqual({
+        registryAgentId: null,
+        teamId: null,
+        processId: null,
+        personaId: null,
+        draftAgentId: null,
+      });
+    });
+
+    it('setCurrentDraft does not by itself change isDirty', () => {
+      service.setRegistryAgentId('reg-1');
+      service.markClean();
+      service.setCurrentDraft('d-1', 'My draft');
+      expect(service.isDirty()).toBe(false);
+    });
+
+    it('invalidateSavedSnapshot makes a retained handoff dirty without clearing ids', () => {
+      service.setRegistryAgentId('reg-1');
+      service.markClean();
+      service.invalidateSavedSnapshot();
+      expect(service.isDirty()).toBe(true);
+      expect(service.registryAgentId()).toBe('reg-1');
+    });
+
+    it('invalidateSavedSnapshot on a blank session stays clean', () => {
+      service.invalidateSavedSnapshot();
+      expect(service.isDirty()).toBe(false);
+    });
+
+    it('compares all five ids, not just the one that was last written', () => {
+      service.setRegistryAgentId('reg-1');
+      service.setDraftAgentId('draft-1');
+      service.markClean();
+      service.setPersonaId('persona-1');
+      expect(service.isDirty()).toBe(true);
+    });
   });
 });

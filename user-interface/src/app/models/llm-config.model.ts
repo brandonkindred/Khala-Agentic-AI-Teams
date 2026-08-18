@@ -6,7 +6,7 @@
  * state and lets the operator overwrite a key, never read it.
  */
 
-export type LlmProvider = 'ollama' | 'claude';
+export type LlmProvider = 'ollama' | 'claude' | 'runpod';
 
 /**
  * Whether a provider authenticates with an API key (vs. a local base URL).
@@ -20,7 +20,20 @@ export type LlmProvider = 'ollama' | 'claude';
  * without a stored API key.
  */
 export function providerRequiresApiKey(provider: LlmProvider): boolean {
-  return provider === 'claude';
+  return provider === 'claude' || provider === 'runpod';
+}
+
+/**
+ * Whether a provider is configured via a RunPod `endpoint_id` rather than a
+ * base URL. Kept alongside `providerRequiresApiKey` so the "which field does
+ * this provider need" logic lives in one place instead of hardcoded strings.
+ *
+ * Preconditions: `provider` is a member of `LlmProvider`.
+ * Postconditions: returns true iff the add/edit form should show the
+ * Endpoint ID field (and hide Base URL) for `provider`.
+ */
+export function providerUsesEndpointId(provider: LlmProvider): boolean {
+  return provider === 'runpod';
 }
 
 /**
@@ -44,6 +57,8 @@ export interface LlmProviderEntry {
   base_url: string;
   /** 0-based fallback position; lower = more preferred. */
   sort_order: number;
+  /** RunPod endpoint ID recovered from `base_url` server-side; `''` for non-RunPod entries. */
+  endpoint_id: string;
   api_key_configured: boolean;
   /** True while this provider is usage-limited and being skipped. */
   limit_exceeded: boolean;
@@ -67,6 +82,8 @@ export interface LlmProviderCreate {
   model?: string;
   base_url?: string;
   api_key?: string;
+  /** RunPod endpoint ID (alphanumeric). Required when provider is 'runpod'. */
+  endpoint_id?: string;
 }
 
 /** Request body to edit a provider; omitted/empty fields keep the stored value. */
@@ -82,4 +99,7 @@ export interface LlmProviderUpdate {
    * non-empty `api_key` takes precedence over this flag on the server.
    */
   clear_api_key?: boolean;
+  /** New RunPod endpoint ID; empty/omitted leaves the stored endpoint ID (and its
+   * derived base URL) unchanged. */
+  endpoint_id?: string;
 }
