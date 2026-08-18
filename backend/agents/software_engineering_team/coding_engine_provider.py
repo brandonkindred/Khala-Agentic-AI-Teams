@@ -161,13 +161,17 @@ class SECodeEngineProvider:
 
         Postconditions: returns ``scope_classifier.classify_scope(findings,
             ...)`` unchanged — a list positionally aligned 1:1 with
-            ``findings``. Resolves the ``code_review_verify`` client itself so
-            callers need no SE or ``llm_service`` imports; a client-resolution
-            failure degrades to ``llm=None`` (all findings verdict to
-            "unknown"), preserving ``classify_scope``'s never-raises guarantee
-            at this boundary too.
+            ``findings``. Resolves the ``code_review_verify`` client itself
+            (pinned the same way as the sibling verification passes, via
+            ``model_resolution.resolve_code_review_verify_client``) so callers
+            need no SE or ``llm_service`` imports; a client-resolution failure
+            degrades to ``llm=None`` (all findings verdict to "unknown"),
+            preserving ``classify_scope``'s never-raises guarantee at this
+            boundary too.
         """
-        from llm_service import get_client
+        from software_engineering_team.code_review_agent.model_resolution import (
+            resolve_code_review_verify_client,
+        )
         from software_engineering_team.code_review_agent.models import build_code_review_input
         from software_engineering_team.code_review_agent.scope_classifier import classify_scope
 
@@ -178,7 +182,7 @@ class SECodeEngineProvider:
             )
 
         try:
-            llm = get_client("code_review_verify")
+            llm = resolve_code_review_verify_client()
         except Exception:  # noqa: BLE001 — never raise; classify_scope treats llm=None as UNKNOWN
             llm = None
 

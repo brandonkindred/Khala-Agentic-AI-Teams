@@ -139,9 +139,7 @@ def test_resolve_code_review_verify_model_preserves_model_id_for_claude_active(
     relabeling ``model_id`` to the Ollama pin would mis-report observability.
     """
     backing = MagicMock(name="failover_client")
-    base = LLMClientModel(
-        backing, agent_key="code_review_verify", model_id="claude-sonnet-4-5"
-    )
+    base = LLMClientModel(backing, agent_key="code_review_verify", model_id="claude-sonnet-4-5")
     pinned_backing = MagicMock(name="pinned_failover")
     pinned_backing.model = "claude-sonnet-4-5"  # Claude path: pin ignored
 
@@ -165,6 +163,40 @@ def test_code_review_verify_model_pin_prefers_per_agent_env(monkeypatch) -> None
         model_resolution._code_review_verify_model_pin()
         == AGENT_DEFAULT_MODELS["code_review_verify"]
     )
+
+
+def test_resolve_code_review_verify_client_returns_given_llm_unchanged() -> None:
+    sentinel = MagicMock()
+    assert model_resolution.resolve_code_review_verify_client(sentinel) is sentinel
+
+
+def test_resolve_code_review_verify_client_resolves_and_pins_when_none(monkeypatch) -> None:
+    """``llm=None`` resolves ``get_client("code_review_verify")`` and applies the
+    same Ollama failover pin as ``resolve_code_review_verify_model``, returning
+    a raw ``LLMClient`` (not a strands ``Model``) for ``complete_json`` callers
+    like ``run_single_shot_review``."""
+    raw_client = MagicMock(name="raw_failover_client")
+    pinned_client = MagicMock(name="pinned_client")
+    calls: list[tuple[Any, ...]] = []
+
+    def _fake_get_client(key: str) -> Any:
+        calls.append(("get_client", key))
+        return raw_client
+
+    def _fake_with_model_override(client: Any, model: str) -> Any:
+        calls.append(("with_model_override", client, model))
+        assert client is raw_client
+        return pinned_client
+
+    monkeypatch.setattr(model_resolution, "get_client", _fake_get_client)
+    monkeypatch.setattr(model_resolution, "with_model_override", _fake_with_model_override)
+    monkeypatch.delenv("LLM_MODEL_code_review_verify", raising=False)
+
+    result = model_resolution.resolve_code_review_verify_client()
+    assert result is pinned_client
+    assert calls[0] == ("get_client", "code_review_verify")
+    assert calls[1][0] == "with_model_override"
+    assert calls[1][2] == AGENT_DEFAULT_MODELS["code_review_verify"]
 
 
 def test_thinking_override_supported_unaffected_by_new_key() -> None:
