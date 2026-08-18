@@ -9,8 +9,14 @@ module only provides the container and its ``get``/``put`` helpers.
 ``orchestrator.run`` consumes it (Story 2b) on the thread path only via its
 optional ``phase_cache`` parameter — the Temporal path calls
 ``orchestrator.run_single_phase`` directly and has no cache parameter to
-receive one. The conversation/session layer (Story 2c) does not yet carry a
-cache across turns.
+receive one. The conversation/session layer (Story 2c Step 1) now holds a
+per-conversation ``PhaseOutputCache`` handle across turns via a registry in
+``api/conversation.py`` (``_get_or_create_phase_cache``), but does not yet
+thread it into ``orchestrator.run`` (Story 2c Step 2). That handle is a thin
+view rather than private state: see below, every instance in a process
+addresses the same shared entries, so retaining one across turns is a
+structural/API guarantee (the same handle stays available to a future
+consumer), not a source of per-conversation cache isolation.
 
 Storage is namespaced (``branding:phase:v1``, suffixed with a build id via
 ``with_cache_build_id`` so a deploy cold-starts the cache) and keyed by

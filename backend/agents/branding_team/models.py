@@ -1005,8 +1005,6 @@ class VisualIdentityOutput(BaseModel):
     photography_direction: str = ""
     video_direction: str = ""
     motion_principles: List[str] = Field(default_factory=list)
-    data_visualization_style: str = ""
-    digital_adaptations: List[str] = Field(default_factory=list)
     voice_tone_spectrum: List[VoiceToneEntry] = Field(default_factory=list)
     language_dos: List[str] = Field(default_factory=list)
     language_donts: List[str] = Field(default_factory=list)
