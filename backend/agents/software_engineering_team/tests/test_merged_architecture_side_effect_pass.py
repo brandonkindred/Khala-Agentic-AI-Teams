@@ -805,7 +805,7 @@ class _MutationFindingClient(SubmissionPassTwoCallClient):
                     }
                 ],
             }
-        return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+        return {"architecture_findings": [], "side_effect_findings": []}
 
 
 def test_fires_mutation_finding_when_before_image_present() -> None:
