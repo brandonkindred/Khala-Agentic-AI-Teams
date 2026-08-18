@@ -40,10 +40,7 @@ from agent_team_studio.agent_provisioning_team.shared.credential_store import (
     CredentialStore,
     CredentialStoreConfigError,
 )
-from agent_team_studio.agent_provisioning_team.shared.llm_client import (
-    LLMClient,
-    sanitize_prompt_var,
-)
+from agent_team_studio.agent_provisioning_team.shared.prompt_sanitize import sanitize_prompt_var
 from agent_team_studio.agent_provisioning_team.shared.provisioner_state import (
     CompensationRecord,
     ProvisionerStateStore,
@@ -421,11 +418,11 @@ class TestRedaction:
 
 
 # ---------------------------------------------------------------------------
-# LLM client + sanitizer
+# Prompt sanitizer
 # ---------------------------------------------------------------------------
 
 
-class TestLLMClient:
+class TestSanitizePromptVar:
     def test_sanitize_strips_control_chars(self):
         assert "\x00" not in sanitize_prompt_var("hi\x00there")
 
@@ -434,14 +431,6 @@ class TestLLMClient:
         out = sanitize_prompt_var(big, max_len=100)
         assert len(out) <= 120
         assert "truncated" in out
-
-    def test_llm_fallback_labeled(self):
-        import asyncio
-
-        from agent_team_studio.agent_provisioning_team.shared.llm_client import LLMRequest
-
-        resp = asyncio.run(LLMClient(model="").complete(LLMRequest(system="s", user="hello")))
-        assert resp.startswith("[llm-fallback]")
 
 
 # ---------------------------------------------------------------------------
