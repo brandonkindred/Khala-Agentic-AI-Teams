@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-import logging
+from typing import Any, Dict
 
-from llm_service import LLMClient, get_strands_model
-from llm_service.strands_model import resolve_strands_model
-from software_engineering_team.shared.llm import complete_json_with_continuation
+from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
 
 from .models import IaCDebugInput, IaCDebugOutput, IaCExecutionError
 from .prompts import INFRA_DEBUG_PROMPT
-
-logger = logging.getLogger(__name__)
 
 _FIXABLE_TYPES = frozenset({"syntax", "validation"})
 
@@ -22,65 +18,55 @@ _MAX_ARTIFACTS = 5
 _MAX_ARTIFACT_CHARS = 2_000
 
 
-class InfraDebugAgent:
+class InfraDebugAgent(DevOpsSingleShotAgent):
     """Classifies IaC (terraform/cdk/compose/helm) execution errors from CLI output.
 
     Given the raw output of a failed IaC command, this agent uses an LLM to
     identify and classify the individual errors, summarize the failure, and
     judge whether the errors are automatically fixable.
+
+    Invariants: instance state is limited to ``llm`` and ``_model`` from the
+    base. ``run`` is deterministic for identical inputs and the resolved
+    model: repeated identical calls may return a cached result and skip the
+    LLM. Cache reads/writes are fail-open and gated by ``CACHE_ENV_VAR``.
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        """Initialize the agent with an LLM client.
+    PROMPT = INFRA_DEBUG_PROMPT
+    CACHE_NAMESPACE = "devops:infra_debug:v1"
+    CACHE_ENV_VAR = "DEVOPS_INFRA_DEBUG_CACHE_SIZE"
+    OUTPUT_MODEL = IaCDebugOutput
 
-        Preconditions:
-            llm_client must not be None.
-        Postconditions:
-            self.llm holds the given client; self._model holds the strands
-            model resolved for the "devops" agent key.
-        """
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
-        self._model = resolve_strands_model(
-            llm_client, agent_key="devops", get_strands_model_fn=get_strands_model
-        )
+    def build_context(self, input_data: IaCDebugInput) -> str:
+        """Build the debug prompt context from tool/command/output/artifacts.
 
-    def run(self, input_data: IaCDebugInput) -> IaCDebugOutput:
-        """Classify the errors in a failed IaC execution and judge fixability.
-
-        Builds a context prompt from the tool name, command, execution output,
-        and up to 5 IaC artifact files, then asks the LLM to classify the
-        errors present.
-
-        Preconditions:
-            input_data is a valid IaCDebugInput.
-        Postconditions:
-            Returns an IaCDebugOutput whose errors list holds one
-            IaCExecutionError per classified error (each carrying the raw
-            execution output), whose summary describes the failure, and
-            whose fixable flag is true only when there is at least one error
-            and every error's type is in {"syntax", "validation"} (or the LLM
-            explicitly overrides this via its own "fixable" response field).
+        Preconditions: ``input_data`` is a valid ``IaCDebugInput``.
+        Postconditions: returns the same context string shape the
+        pre-migration agent appended after the prompt separator, bounded to
+        the first ``_MAX_ARTIFACTS`` artifacts at ``_MAX_ARTIFACT_CHARS``
+        characters each.
         """
         artifacts_snippet = "".join(
             f"\n### {fname} ###\n{content[:_MAX_ARTIFACT_CHARS]}\n"
             for fname, content in list(input_data.artifacts.items())[:_MAX_ARTIFACTS]
         )
-
-        context = (
+        return (
             f"Tool: {input_data.tool_name}\n"
             f"Command: {input_data.command}\n\n"
             f"--- Execution Output ---\n{input_data.execution_output}\n\n"
             f"--- Artifacts ---\n{artifacts_snippet}\n"
         )
 
-        data = complete_json_with_continuation(
-            self._model,
-            INFRA_DEBUG_PROMPT + "\n\n---\n\n" + context,
-            temperature=0.1,
-            think=True,
-        )
+    def build_output(self, input_data: IaCDebugInput, data: Dict[str, Any]) -> IaCDebugOutput:
+        """Map the LLM JSON dict onto ``IaCDebugOutput``.
 
+        Preconditions: ``data`` is the dict from ``complete_json_with_continuation``.
+        Postconditions: returns an ``IaCDebugOutput`` whose ``errors`` list
+        holds one ``IaCExecutionError`` per classified error (each carrying
+        the raw execution output), and whose ``fixable`` flag is true only
+        when there is at least one error and every error's type is in
+        {"syntax", "validation"} (or the LLM explicitly overrides this via
+        its own "fixable" response field).
+        """
         errors = []
         for err_data in data.get("errors") or []:
             errors.append(
@@ -101,3 +87,8 @@ class InfraDebugAgent:
             summary=data.get("summary", ""),
             fixable=data.get("fixable", fixable),
         )
+
+
+def clear_review_cache() -> None:
+    """Drop every cached infra debug result. Intended for test teardown."""
+    InfraDebugAgent.clear_cache()

@@ -840,6 +840,29 @@ def test_writing_guidelines_output_rejects_missing_and_enforces_cardinality() ->
     assert len(output.writing_guidelines.voice_principles) == 3
 
 
+def test_phase2_specialist_models_declare_only_own_fields() -> None:
+    """Each Phase 2 specialist's structured_output model is own-field-only
+    (Story 5b Step 1): no cumulative-inheritance leftovers, and no two
+    specialists' field sets collide (the orchestrator's flat union-merge in
+    _merge_phase2_fragments relies on this to be collision-free). Checked
+    against each model's own model_fields, not a hardcoded flat list, so a
+    future field added to the wrong model is caught here."""
+    own_fields = {
+        BrandStoryOutput: {"brand_story", "hero_narrative", "boilerplate_variants"},
+        BrandArchetypesOutput: {"brand_archetypes"},
+        TaglineOutput: {"tagline", "tagline_rationale", "elevator_pitches"},
+        MessagingFrameworkOutput: {"messaging_framework", "audience_message_maps"},
+        PersonaProfilesOutput: {"persona_profiles"},
+        WritingGuidelinesOutput: {"writing_guidelines"},
+    }
+    for model_cls, expected in own_fields.items():
+        assert set(model_cls.model_fields) == expected, model_cls.__name__
+
+    all_fields = [name for fields in own_fields.values() for name in fields]
+    assert len(all_fields) == len(set(all_fields)), "Phase 2 specialist fields collide"
+    assert set(all_fields) == set(NarrativeMessagingOutput.model_fields)
+
+
 def test_writing_guidelines_body_rejects_blank_list_items() -> None:
     """``voice_principles``/``style_dos``/``style_donts``/``editorial_quality_bar`` reject blanks."""
     output = WritingGuidelinesBody(
