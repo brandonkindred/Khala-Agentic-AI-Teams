@@ -103,7 +103,7 @@ class _ScriptedClient(DummyLLMClient):
 
 
 class _RaisingCache:
-    """Cache backend that raises on every mutating/read operation."""
+    """Cache backend that raises on ``get``/``set``/``delete``; ``clear`` is a no-op."""
 
     def get(self, key: str) -> None:
         raise RuntimeError("boom")

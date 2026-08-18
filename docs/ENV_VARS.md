@@ -1360,11 +1360,12 @@ cache (`shared.cache`; the get/set/key/clear boilerplate lives in
 `software_engineering_team.shared.review_result_cache`, shared by all eight
 devops agents **and** `qa_agent` / `security_agent`). See
 [`software_engineering_team/README.md`](../backend/agents/software_engineering_team/README.md#caching-sharedcache--redis):
-one cache per agent — `InfrastructureAsCodeAgent`, `CICDPipelineAgent`, and
-`DeploymentStrategyAgent` (all three wired through the shared
-`DevOpsSingleShotAgent.run()`), plus `DevSecOpsReviewAgent`,
-`DevOpsTaskClarifierAgent`, `InfraDebugAgent`, `InfraPatchAgent`, and
-`DocumentationRunbookAgent` (each wired at its own call site) — same
+one cache per agent — `InfrastructureAsCodeAgent`, `CICDPipelineAgent`,
+`DeploymentStrategyAgent`, `DevOpsTaskClarifierAgent`, `InfraDebugAgent`,
+`InfraPatchAgent`, and `DocumentationRunbookAgent` (all seven wired through
+the shared `DevOpsSingleShotAgent.run()`), plus `DevSecOpsReviewAgent`
+(wired at its own call site, since it calls `run_single_shot_review` rather
+than `complete_json_with_continuation`) — same
 whole-input key shape as `QA_REVIEW_CACHE_SIZE`: the key hashes the agent's
 entire structured input (including any embedded `DevOpsTaskSpec`) plus the
 resolved review model in one shot, so any field change naturally busts the
