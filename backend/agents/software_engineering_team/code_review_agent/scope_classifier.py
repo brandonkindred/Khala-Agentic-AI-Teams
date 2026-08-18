@@ -57,6 +57,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from llm_service.interface import LLMClient
 from shared.concurrency import parallel_map
 from software_engineering_team.shared.context_sizing import parse_env_int
+from software_engineering_team.shared.single_shot_review import run_single_shot_review
 
 from ._llm_client_utils import is_unscripted_dummy
 from ._prompt_utils import _cap_context_field, _render_finding_block, _truncate_with_marker
@@ -353,10 +354,17 @@ def classify_scope(
         batch_issues = [issues[i] for i in batch]
         try:
             prompt = _build_classify_prompt(file_path, batch_issues, input_data)
-            data = llm.complete_json(
+            # Route through the shared single-shot helper (plain-JSON mode, no
+            # Pydantic schema) rather than hand-rolling complete_json — see
+            # docs/LLM_CALLING_PATTERN_DECISION.md (no new Pattern-5 call sites).
+            # The caller-supplied client is passed through; the agent key only
+            # matters if the client were unresolved, which it never is here.
+            data = run_single_shot_review(
+                llm,
+                "code_review_verify",
                 prompt,
+                SCOPE_CLASSIFY_SYSTEM_PROMPT,
                 objective="classify code-review finding scope",
-                system_prompt=SCOPE_CLASSIFY_SYSTEM_PROMPT,
                 temperature=0.0,
             )
             parsed = _parse_classifications(data, len(batch_issues))
