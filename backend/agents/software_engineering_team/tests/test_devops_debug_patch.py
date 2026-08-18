@@ -461,7 +461,15 @@ class TestDevOpsPipelineDebugPatchLoop:
                 ],
                 # DevSecOps review
                 {"approved": True, "summary": "ok", "findings": []},
-                # Change review
+                # Change review: chunk_reviewer's via-reasoning path now issues
+                # two complete_json calls per chunk (the reasoning pass, routed
+                # through the Strands Agent's chat()/stream() -> complete_json,
+                # then the formatting pass's own complete_json) -- one throwaway
+                # canned reply for the reasoning pass (any non-empty dict
+                # satisfies _require_reasoning_prose; its content is never
+                # schema-validated), then the real ChunkReviewLLMResponse-shaped
+                # reply for the formatting pass, exactly as before.
+                {"summary": "reasoning pass placeholder"},
                 {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""},
                 # Test validation
                 {"quality_gates": {}, "summary": "ok"},
@@ -547,6 +555,10 @@ class TestDevOpsPipelineDebugPatchLoop:
                     "fixable": False,
                 },
                 {"approved": True, "summary": "ok", "findings": []},
+                # Change review: reasoning-pass placeholder + formatting-pass
+                # reply -- see the identical comment in
+                # test_loop_terminates_after_max_iterations.
+                {"summary": "reasoning pass placeholder"},
                 {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""},
                 {"quality_gates": {}, "summary": "ok"},
                 {"files": {}, "summary": "doc ok"},
@@ -640,7 +652,10 @@ class TestDevOpsPipelineDebugPatchLoop:
                 },
                 # DevSecOps review
                 {"approved": True, "summary": "ok", "findings": []},
-                # Change review
+                # Change review: reasoning-pass placeholder + formatting-pass
+                # reply -- see the identical comment in
+                # test_loop_terminates_after_max_iterations.
+                {"summary": "reasoning pass placeholder"},
                 {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""},
                 # Test validation
                 {"quality_gates": {}, "summary": "ok"},
@@ -760,7 +775,10 @@ class TestDevOpsPipelineDebugPatchLoop:
                 },
                 # DevSecOps review
                 {"approved": True, "summary": "ok", "findings": []},
-                # Change review
+                # Change review: reasoning-pass placeholder + formatting-pass
+                # reply -- see the identical comment in
+                # test_loop_terminates_after_max_iterations.
+                {"summary": "reasoning pass placeholder"},
                 {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""},
                 # Test validation
                 {"quality_gates": {}, "summary": "ok"},
