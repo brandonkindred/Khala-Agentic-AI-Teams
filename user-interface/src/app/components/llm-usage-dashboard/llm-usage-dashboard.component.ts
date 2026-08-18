@@ -22,6 +22,8 @@ const EMPTY_TOTALS: Pick<
   | 'total_prompt_tokens'
   | 'total_completion_tokens'
   | 'total_tokens'
+  | 'total_cache_read_tokens'
+  | 'total_cache_creation_tokens'
   | 'by_model'
   | 'by_agent'
   | 'error_count'
@@ -31,6 +33,8 @@ const EMPTY_TOTALS: Pick<
   total_prompt_tokens: 0,
   total_completion_tokens: 0,
   total_tokens: 0,
+  total_cache_read_tokens: 0,
+  total_cache_creation_tokens: 0,
   by_model: {},
   by_agent: {},
   error_count: 0,
