@@ -2,11 +2,14 @@
 ``branding_team.api.conversation`` (Story 2c Step 1).
 
 Covers ``_get_or_create_phase_cache`` directly (empty-on-first-use, identity
-retention across calls, thread safety) plus one lifecycle test through the
-real ``_create_branding_conversation_impl`` / ``_send_branding_conversation_message_impl``
+retention across calls, thread safety) plus lifecycle tests through the real
+``_create_branding_conversation_impl`` / ``_send_branding_conversation_message_impl``
 call path, proving the slot is actually seeded and retained across a turn --
-not just the helper in isolation. None of this wires the cache into
-``orchestrator.run`` yet; that is separate, later work.
+not just the helper in isolation -- and that it reaches ``orchestrator.run``
+(Story 2c Step 2) as the exact per-conversation object once the mission is
+ready. See ``tests/test_conversation_flow.py`` for the ``phase_cache``
+forwarding/short-circuit-ordering unit tests on ``_run_orchestrator_if_ready``
+itself.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ import pytest
 
 import branding_team.api.conversation as conversation
 from branding_team.api.models import CreateConversationRequest, SendMessageRequest
-from branding_team.models import BrandPhase, StrategicCoreOutput
+from branding_team.models import BrandPhase, StrategicCoreOutput, TeamOutput, WorkflowStatus
 from branding_team.shared.phase_output_cache import PhaseOutputCache
 from branding_team.tests._memory_stores import install_memory_stores
 from branding_team.tests.conftest import make_mission
@@ -149,3 +152,43 @@ def test_phase_cache_slot_seeded_on_create_and_retained_through_a_turn(
     )
 
     assert conversation._phase_caches[conversation_id] is seeded_cache
+
+
+def test_send_message_threads_the_conversations_phase_cache_into_orchestrator_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once the mission is ready, the exact per-conversation cache reaches
+    ``orchestrator.run`` (Story 2c Step 2), not a copy or a fresh instance."""
+    install_memory_stores(monkeypatch)
+    from branding_team.api import main as main_mod
+
+    create_resp = conversation._create_branding_conversation_impl(CreateConversationRequest())
+    conversation_id = create_resp.conversation_id
+    seeded_cache = conversation._phase_caches[conversation_id]
+
+    ready_mission = make_mission(
+        company_name="TestCo",
+        company_description="A real company description that is long enough.",
+        target_audience="developers",
+    )
+    mock_agent = MagicMock()
+    mock_agent.respond.return_value = ("Great, thanks!", ready_mission, [], False)
+    monkeypatch.setattr(main_mod, "assistant_agent", mock_agent)
+
+    captured: dict = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        return TeamOutput(
+            status=WorkflowStatus.NEEDS_HUMAN_DECISION,
+            mission_summary="draft",
+            current_phase=BrandPhase.STRATEGIC_CORE,
+        )
+
+    monkeypatch.setattr(main_mod.orchestrator, "run", fake_run)
+
+    conversation._send_branding_conversation_message_impl(
+        conversation_id, SendMessageRequest(message="Our company is TestCo.")
+    )
+
+    assert captured["phase_cache"] is seeded_cache

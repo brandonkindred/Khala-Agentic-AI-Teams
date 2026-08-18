@@ -1,9 +1,7 @@
 import { ChangeDetectionStrategy, Component, OnInit, inject } from '@angular/core';
+import { STAGE_INDEX } from '../../../models/agent-studio.model';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { PersonaTestAuditPanelComponent } from '../persona-test-audit-panel/persona-test-audit-panel.component';
-
-/** 0-based index of Stage 4 (Personas) in STUDIO_STAGES. */
-const STAGE_PERSONAS = 3;
 
 /**
  * Studio host for the persona audit panel (nested `/agent-studio/persona-run/:runId`).
@@ -25,6 +23,6 @@ export class AgentStudioPersonaAuditComponent implements OnInit {
   private readonly state = inject(AgentStudioStateService);
 
   ngOnInit(): void {
-    this.state.navigateToStage(STAGE_PERSONAS);
+    this.state.navigateToStage(STAGE_INDEX.personas);
   }
 }
