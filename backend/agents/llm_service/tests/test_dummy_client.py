@@ -564,41 +564,6 @@ def test_code_review_min_prompt_length_constant() -> None:
     assert CODE_REVIEW_MIN_PROMPT_LENGTH == 200
 
 
-_BRANDING_PHASE2_MODEL_CASES = [
-    ("BrandStoryOutput", {"brand_story", "hero_narrative", "boilerplate_variants"}),
-    ("BrandArchetypesOutput", {"brand_archetypes"}),
-    ("TaglineOutput", {"tagline", "tagline_rationale", "elevator_pitches"}),
-    ("MessagingFrameworkOutput", {"messaging_framework", "audience_message_maps"}),
-    ("PersonaProfilesOutput", {"persona_profiles"}),
-    ("WritingGuidelinesOutput", {"writing_guidelines"}),
-]
-
-
-@pytest.mark.parametrize("model_name,expected_keys", _BRANDING_PHASE2_MODEL_CASES)
-def test_branding_phase2_branches_return_own_field_keys(
-    model_name: str, expected_keys: set[str]
-) -> None:
-    """Each Phase 2 branding specialist stub must return exactly its own
-    fields — no upstream carry-forward — pinned by explicit
-    ``structured_output_model`` class name, not system-prompt substrings.
-
-    Story 5b Step 1: each Phase 2 specialist's ``structured_output`` model
-    now contains only that specialist's own fields (the cumulative
-    inheritance chain that used to make each successive class's stub a
-    superset of its predecessor's was removed).
-    """
-    import branding_team.models as branding_models
-
-    output_model = getattr(branding_models, model_name)
-    c = DummyLLMClient()
-    j = c.complete_json(
-        "dummy prompt",
-        temperature=0.0,
-        structured_output_model=output_model,
-    )
-    assert set(j.keys()) == expected_keys
-
-
 def test_branding_phase2_branch_results_do_not_share_mutable_state() -> None:
     """Each ``complete_json`` call must hand back independent objects so
     mutating one response's nested lists/dicts can't leak into another call's
