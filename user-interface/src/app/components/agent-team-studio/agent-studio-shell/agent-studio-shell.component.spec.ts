@@ -1,59 +1,41 @@
-import { Component, EventEmitter, Injector, Input, Output } from '@angular/core';
+import { Component, Injector } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { MatDialog } from '@angular/material/dialog';
 import { By } from '@angular/platform-browser';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { provideRouter, RouterOutlet, type Routes } from '@angular/router';
+import { RouterTestingHarness } from '@angular/router/testing';
 import { Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import type { AgentStudioDraft, AgentStudioDraftSummary } from '../../../models/agent-studio.model';
 import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import type { ProcessDefinition } from '../../../models/agentic-team.model';
-import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
-import { AgentProvisioningPanelComponent } from '../agent-provisioning-panel/agent-provisioning-panel.component';
-import { AgentRunnerComponent } from '../agent-console/agent-runner/agent-runner.component';
-import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
-import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.component';
-import { AgentStudioPersonaComponent } from './agent-studio-persona.component';
 import { AgentStudioShellComponent } from './agent-studio-shell.component';
-import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
 import { LoadDraftMenuComponent } from './load-draft-menu/load-draft-menu.component';
 
-/** Stub the heavy Agent Console runner so the Test stage can mount with an agent
- *  set without firing sandbox polling / HTTP inside the shell tests. */
-@Component({ selector: 'app-agent-runner', standalone: true, template: '' })
-class StubAgentRunnerComponent {
-  @Input() preselectedAgentId: string | null = null;
-  @Output() readonly requestCatalogReturn = new EventEmitter<void>();
-}
+@Component({ selector: 'app-stub-stage-host', standalone: true, template: '' })
+class StubStageHostComponent {}
 
-/** Stub the catalog + provisioning panel so the Build stage (the default
- *  active stage) mounts without firing catalog HTTP / provisioning polling. */
-@Component({ selector: 'app-agent-catalog', standalone: true, template: '' })
-class StubAgentCatalogComponent {
-  @Output() readonly requestRun = new EventEmitter<string>();
-}
+@Component({ selector: 'app-stub-audit-host', standalone: true, template: '' })
+class StubAuditHostComponent {}
 
-@Component({ selector: 'app-agent-provisioning-panel', standalone: true, template: '' })
-class StubAgentProvisioningPanelComponent {}
-
-/** Stub the Stage-4 persona component so the shell's final-stage tests don't pull
- *  in its API services / dialog. */
-@Component({ selector: 'app-agent-studio-persona', standalone: true, template: '' })
-class StubPersonaComponent {}
-
-/** Stub the Stage-3 compose component so the shell's Compose-stage tests don't
- *  pull in its API services / the embedded process-designer-chat. */
-@Component({ selector: 'app-agent-studio-compose-team', standalone: true, template: '' })
-class StubComposeTeamComponent {}
+@Component({
+  selector: 'app-stub-nested-parent',
+  standalone: true,
+  imports: [RouterOutlet],
+  template: '<router-outlet />',
+})
+class StubNestedParentComponent {}
 
 describe('AgentStudioShellComponent', () => {
   let component: AgentStudioShellComponent;
   let fixture: ComponentFixture<AgentStudioShellComponent>;
-  // The shell provides AgentStudioFacade at the component level, so TestBed
-  // root providers cannot replace it — override the shell's own provider.
-  // Build and Load-draft-menu stay real and consume this same mock. The
-  // leftover getProcess lookup is still a direct AgenticTeamApiService call.
+  // Stage views live on the child host, not the shell. The shell provides
+  // AgentStudioFacade at the component level, so TestBed root providers cannot
+  // replace it — override the shell's own provider. Load-draft-menu stays real
+  // and consumes this same mock. The leftover getProcess lookup is still a
+  // direct AgenticTeamApiService call.
   let facade: {
     loadDraft: ReturnType<typeof vi.fn>;
     listDrafts: ReturnType<typeof vi.fn>;
@@ -72,25 +54,14 @@ describe('AgentStudioShellComponent', () => {
     agenticTeamApi = { getProcess: vi.fn() };
     await TestBed.configureTestingModule({
       imports: [AgentStudioShellComponent, NoopAnimationsModule],
-      providers: [{ provide: AgenticTeamApiService, useValue: agenticTeamApi }],
+      providers: [
+        { provide: AgenticTeamApiService, useValue: agenticTeamApi },
+        provideRouter([]),
+      ],
     })
-      .overrideComponent(AgentStudioTestAgentComponent, {
-        remove: { imports: [AgentRunnerComponent] },
-        add: { imports: [StubAgentRunnerComponent] },
-      })
-      .overrideComponent(AgentStudioBuildAgentComponent, {
-        remove: { imports: [AgentCatalogComponent, AgentProvisioningPanelComponent] },
-        add: { imports: [StubAgentCatalogComponent, StubAgentProvisioningPanelComponent] },
-      })
       .overrideComponent(AgentStudioShellComponent, {
-        remove: {
-          imports: [AgentStudioPersonaComponent, AgentStudioComposeTeamComponent],
-          providers: [AgentStudioFacade],
-        },
-        add: {
-          imports: [StubPersonaComponent, StubComposeTeamComponent],
-          providers: [{ provide: AgentStudioFacade, useValue: facade }],
-        },
+        remove: { providers: [AgentStudioFacade] },
+        add: { providers: [{ provide: AgentStudioFacade, useValue: facade }] },
       })
       .compileComponents();
 
@@ -100,6 +71,21 @@ describe('AgentStudioShellComponent', () => {
   });
 
   afterEach(() => TestBed.resetTestingModule());
+
+  const compileNestedStudioShell = async (children: Routes): Promise<void> => {
+    await TestBed.configureTestingModule({
+      imports: [AgentStudioShellComponent, NoopAnimationsModule],
+      providers: [
+        { provide: AgenticTeamApiService, useValue: agenticTeamApi },
+        provideRouter([{ path: '', component: AgentStudioShellComponent, children }]),
+      ],
+    })
+      .overrideComponent(AgentStudioShellComponent, {
+        remove: { providers: [AgentStudioFacade] },
+        add: { providers: [{ provide: AgentStudioFacade, useValue: facade }] },
+      })
+      .compileComponents();
+  };
 
   it('should create with all four stages and start on Build', () => {
     expect(component).toBeTruthy();
@@ -225,6 +211,13 @@ describe('AgentStudioShellComponent', () => {
       expect(component.loadingDraft()).toBe(false);
       expect(component.state.currentDraftId()).toBeNull();
       expect(component.state.registryAgentId()).toBeNull();
+    });
+
+    it('clears a persisted persona live-run id on hydrate', () => {
+      component.state.setPersonaLiveRunId('run-stale');
+      facade.loadDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
+      component.loadDraft('d-1');
+      expect(component.state.personaLiveRunId()).toBeNull();
     });
 
     it('loadingDraft reflects the in-flight request and guards re-entrancy', () => {
@@ -430,13 +423,6 @@ describe('AgentStudioShellComponent', () => {
     expect(component.state.activeStage()).toBe(3);
   });
 
-  it('renders the real Compose Team stage (not the placeholder) on Stage 3', () => {
-    component.state.navigateToStage(2);
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('app-agent-studio-compose-team')).toBeTruthy();
-    expect(fixture.nativeElement.querySelector('app-agent-studio-stage-placeholder')).toBeNull();
-  });
-
   it('passes the live handoff through to Compose', () => {
     component.state.setRegistryAgentId('reg-1');
     component.state.navigateToStage(2);
@@ -484,13 +470,6 @@ describe('AgentStudioShellComponent', () => {
     expect(steps[1].getAttribute('aria-current')).toBe('step');
   });
 
-  it('renders the real Test Agent stage (not the placeholder) on Stage 2', () => {
-    component.state.navigateToStage(1);
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('app-agent-studio-test-agent')).toBeTruthy();
-    expect(fixture.nativeElement.querySelector('app-agent-studio-stage-placeholder')).toBeNull();
-  });
-
   it('gates the "Add to team →" forward step until an agent is selected', () => {
     component.state.navigateToStage(1);
     fixture.detectChanges();
@@ -503,12 +482,6 @@ describe('AgentStudioShellComponent', () => {
     button = fixture.nativeElement.querySelector('.studio__continue');
     expect(component.forwardDisabled()).toBe(false);
     expect(button.disabled).toBe(false);
-  });
-
-  it('renders the real Build Agent stage (not the placeholder) on Stage 1', () => {
-    expect(component.activeStageDef().key).toBe('build');
-    expect(fixture.nativeElement.querySelector('app-agent-studio-build-agent')).toBeTruthy();
-    expect(fixture.nativeElement.querySelector('app-agent-studio-stage-placeholder')).toBeNull();
   });
 
   it('gates the Build "Test this agent →" forward step until an agent is selected', () => {
@@ -546,5 +519,163 @@ describe('AgentStudioShellComponent', () => {
     fixture.detectChanges();
     expect(component.activeStageDef().key).toBe('test');
     expect(component.buildForwardDisabledReason()).toBeNull();
+  });
+
+  it('hides the continue footer on the persona-run child and keeps handoff state', async () => {
+    TestBed.resetTestingModule();
+    await compileNestedStudioShell([
+      { path: '', component: StubStageHostComponent },
+      {
+        path: 'persona-run/:runId',
+        component: StubAuditHostComponent,
+        data: { hideStudioFooter: true },
+      },
+    ]);
+
+    const harness = await RouterTestingHarness.create();
+    const shell = await harness.navigateByUrl('/', AgentStudioShellComponent);
+    shell.state.setRegistryAgentId('reg-keep');
+    harness.detectChanges();
+    expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeTruthy();
+
+    await harness.navigateByUrl('/persona-run/run-1');
+    harness.detectChanges();
+    expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeNull();
+    expect(harness.routeNativeElement?.querySelector('app-stub-audit-host')).toBeTruthy();
+    expect(shell.state.registryAgentId()).toBe('reg-keep');
+
+    await harness.navigateByUrl('/');
+    harness.detectChanges();
+    expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeTruthy();
+    expect(shell.state.registryAgentId()).toBe('reg-keep');
+  });
+
+  it('returns to Stage 4 (Personas) when Back to Agent Studio leaves the persona-run child', async () => {
+    // "Back to Agent Studio" in the audit panel targets /agent-studio, which resolves to the
+    // shell's default child (stage host). The stepper must still show the stage that was active
+    // when View full audit was opened — Personas (Stage 4) — not /persona-testing.
+    TestBed.resetTestingModule();
+    await compileNestedStudioShell([
+      { path: '', component: StubStageHostComponent },
+      {
+        path: 'persona-run/:runId',
+        component: StubAuditHostComponent,
+        data: { hideStudioFooter: true },
+      },
+    ]);
+
+    const harness = await RouterTestingHarness.create();
+    const shell = await harness.navigateByUrl('/', AgentStudioShellComponent);
+    shell.state.navigateToStage(3);
+    harness.detectChanges();
+    expect(shell.activeStageDef().key).toBe('personas');
+
+    await harness.navigateByUrl('/persona-run/run-1');
+    harness.detectChanges();
+    expect(harness.routeNativeElement?.querySelector('app-stub-audit-host')).toBeTruthy();
+    expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeNull();
+
+    // Back to Agent Studio → shell default child.
+    await harness.navigateByUrl('/');
+    harness.detectChanges();
+    expect(harness.routeNativeElement?.querySelector('app-stub-stage-host')).toBeTruthy();
+    expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeTruthy();
+    expect(shell.state.activeStage()).toBe(3);
+    expect(shell.activeStageDef().key).toBe('personas');
+  });
+
+  it('hides the continue footer when hideStudioFooter is on a nested child', async () => {
+    TestBed.resetTestingModule();
+    await compileNestedStudioShell([
+      { path: '', component: StubStageHostComponent },
+      {
+        path: 'persona-run/:runId',
+        component: StubNestedParentComponent,
+        children: [
+          {
+            path: '',
+            component: StubAuditHostComponent,
+            data: { hideStudioFooter: true },
+          },
+        ],
+      },
+    ]);
+
+    const harness = await RouterTestingHarness.create();
+    const shell = await harness.navigateByUrl('/', AgentStudioShellComponent);
+    shell.state.setRegistryAgentId('reg-deep');
+    harness.detectChanges();
+    expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeTruthy();
+
+    await harness.navigateByUrl('/persona-run/run-1');
+    harness.detectChanges();
+    expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeNull();
+    expect(harness.routeNativeElement?.querySelector('app-stub-audit-host')).toBeTruthy();
+    expect(shell.state.registryAgentId()).toBe('reg-deep');
+  });
+
+  it('returns to the stage host when a draft is loaded from the persona-run child', async () => {
+    TestBed.resetTestingModule();
+    await compileNestedStudioShell([
+      { path: '', component: StubStageHostComponent },
+      {
+        path: 'persona-run/:runId',
+        component: StubAuditHostComponent,
+        data: { hideStudioFooter: true },
+      },
+    ]);
+
+    facade.loadDraft.mockReturnValue(
+      of({
+        draft_id: 'd-1',
+        name: 'My draft',
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+        payload: { registryAgentId: 'reg-from-draft' },
+      }),
+    );
+
+    const harness = await RouterTestingHarness.create();
+    const shell = await harness.navigateByUrl('/persona-run/run-1', AgentStudioShellComponent);
+    harness.detectChanges();
+    expect(harness.routeNativeElement?.querySelector('app-stub-audit-host')).toBeTruthy();
+
+    shell.loadDraft('d-1');
+    await harness.fixture.whenStable();
+    harness.detectChanges();
+
+    expect(harness.routeNativeElement?.querySelector('app-stub-audit-host')).toBeNull();
+    expect(harness.routeNativeElement?.querySelector('app-stub-stage-host')).toBeTruthy();
+    expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeTruthy();
+    // The draft payload sets only registryAgentId (no teamId), so resolveFurthestStage's
+    // furthest-reachable rule lands on Stage 1 (Test) rather than resetting to Stage 0 (Build).
+    expect(shell.state.activeStage()).toBe(1);
+    expect(shell.state.registryAgentId()).toBe('reg-from-draft');
+  });
+
+  it('stays on the persona-run child when loadDraft fails', async () => {
+    TestBed.resetTestingModule();
+    await compileNestedStudioShell([
+      { path: '', component: StubStageHostComponent },
+      {
+        path: 'persona-run/:runId',
+        component: StubAuditHostComponent,
+        data: { hideStudioFooter: true },
+      },
+    ]);
+
+    facade.loadDraft.mockReturnValue(throwError(() => new Error('404')));
+
+    const harness = await RouterTestingHarness.create();
+    const shell = await harness.navigateByUrl('/persona-run/run-1', AgentStudioShellComponent);
+    harness.detectChanges();
+
+    shell.loadDraft('d-1');
+    await harness.fixture.whenStable();
+    harness.detectChanges();
+
+    expect(harness.routeNativeElement?.querySelector('app-stub-audit-host')).toBeTruthy();
+    expect(shell.state.registryAgentId()).toBeNull();
+    expect(shell.loadingDraft()).toBe(false);
   });
 });
