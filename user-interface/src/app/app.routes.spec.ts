@@ -1,5 +1,6 @@
 import { Route } from '@angular/router';
 import { routes } from './app.routes';
+import { unsavedChangesGuard } from './core/unsaved-changes.guard';
 import { JobsDashboardComponent } from './components/jobs-dashboard/jobs-dashboard.component';
 import { SoftwareEngineeringDashboardComponent } from './components/software-engineering-dashboard/software-engineering-dashboard.component';
 import { IntegrationsDashboardComponent } from './components/integrations-dashboard/integrations-dashboard.component';
@@ -72,6 +73,13 @@ describe('App routes', () => {
       './components/agent-team-studio/metrics-tab/metrics-tab.component'
     );
     expect(await loadedComponent('agent-studio/metrics')).toBe(MetricsTabComponent);
+  });
+
+  it('registers unsavedChangesGuard on the agent-studio route\'s canDeactivate', () => {
+    const shell = routes[0];
+    const children = (shell?.children ?? []) as Route[];
+    const route = children.find((r) => r.path === 'agent-studio');
+    expect(route?.canDeactivate).toContain(unsavedChangesGuard);
   });
 
   it('no longer registers the retired agent-console route', () => {
