@@ -167,8 +167,10 @@
     color: var(--kh-text-primary);
   }
 
-  &__stop {
-    // Push the stop control to the trailing edge of the run-head row.
+  &__run-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--kh-space-2);
     margin-inline-start: auto;
   }
 
