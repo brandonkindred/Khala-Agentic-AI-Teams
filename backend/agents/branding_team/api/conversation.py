@@ -87,6 +87,7 @@ def _run_orchestrator_if_ready(
     mission: BrandingMission,
     previous_mission: Optional[BrandingMission] = None,
     previous_output: Optional[TeamOutput] = None,
+    phase_cache: Optional[PhaseOutputCache] = None,
 ) -> Optional[TeamOutput]:
     """Run the pipeline for *mission*, or reuse a cached result.
 
@@ -95,7 +96,19 @@ def _run_orchestrator_if_ready(
     unchanged since the previous run we return ``previous_output`` instead of
     re-running ~40 agents — the common case on the chat path, where most turns
     don't change the mission. Equality is a structural Pydantic compare; no
-    serialization needed.
+    serialization needed. This whole-mission short-circuit is checked before
+    ``phase_cache`` is ever consulted, so it remains the outermost fast path
+    regardless of whether a cache was supplied.
+
+    When a mission edit does slip past the short-circuit, ``phase_cache`` (the
+    caller's per-conversation ``PhaseOutputCache``, when supplied) is forwarded
+    to ``orchestrator.run``, which runs each phase in isolation and reuses any
+    phase whose input hash is already cached — so only the earliest phase whose
+    input actually changed, and everything downstream of it, gets recomputed.
+    ``phase_cache`` mutates in place (it's a view over a shared, process-wide
+    backing store — see ``PhaseOutputCache``), so the caller's retained
+    reference already reflects this run's writes; there is nothing separate to
+    write back.
     """
     from branding_team.api import main as _main
 
@@ -111,6 +124,7 @@ def _run_orchestrator_if_ready(
     return _main.orchestrator.run(
         mission=mission,
         human_review=HumanReview(approved=False, feedback="Building brand from conversation."),
+        phase_cache=phase_cache,
     )
 
 
@@ -200,9 +214,9 @@ def _create_branding_conversation_impl(
     # below attaches this conversation to a new brand before the response is
     # returned; otherwise, send_message will handle auto-creation on a later turn.
     conversation_id = conversation_store.create(brand_id=brand_id)
-    # Seed this conversation's phase-cache slot now; not yet consumed by
-    # orchestrator.run (a later step threads it through).
-    _phase_cache = _get_or_create_phase_cache(conversation_id)
+    # Seed this conversation's phase-cache slot now; threaded into
+    # orchestrator.run below via _run_orchestrator_if_ready.
+    phase_cache = _get_or_create_phase_cache(conversation_id)
     initial_message = (req.initial_message or "").strip()
     suggested_questions: List[str] = []
     # Track the response messages in memory (a fresh conversation has none yet)
@@ -233,7 +247,7 @@ def _create_branding_conversation_impl(
         # can intercept it (patch main._run_orchestrator_if_ready); the local
         # name would make that patch a silent no-op, same reasoning as
         # background._run_branding_background calling _main._run_branding_core.
-        output = _main._run_orchestrator_if_ready(updated_mission)
+        output = _main._run_orchestrator_if_ready(updated_mission, phase_cache=phase_cache)
         if output is not None:
             if not conversation_store.update_output(conversation_id, output):
                 logger.warning("Pipeline output not persisted for conversation %s", conversation_id)
@@ -379,8 +393,8 @@ def _send_branding_conversation_message_impl(
     if state is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     # Retrieve this conversation's retained phase-cache slot from prior turns;
-    # not yet consumed by orchestrator.run (a later step threads it through).
-    _phase_cache = _get_or_create_phase_cache(conversation_id)
+    # threaded into orchestrator.run below via _run_orchestrator_if_ready.
+    phase_cache = _get_or_create_phase_cache(conversation_id)
     brand_id = state.brand_id
     # If the write does not land (conversation no longer exists), don't go on to
     # build an in-memory response that claims the message was persisted.
@@ -402,7 +416,9 @@ def _send_branding_conversation_message_impl(
     # fresh run happened and thus whether a write is needed. Call the hub's
     # re-exported binding, not the module-local name — see the comment in
     # _create_branding_conversation_impl above.
-    output = _main._run_orchestrator_if_ready(updated_mission, state.mission, state.latest_output)
+    output = _main._run_orchestrator_if_ready(
+        updated_mission, state.mission, state.latest_output, phase_cache=phase_cache
+    )
     if output is not None and output is not state.latest_output:
         if not conversation_store.update_output(conversation_id, output):
             logger.warning("Pipeline output not persisted for conversation %s", conversation_id)

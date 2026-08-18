@@ -19,6 +19,7 @@ import pytest
 
 import branding_team.api.main as main
 from branding_team.models import BrandPhase, TeamOutput, WorkflowStatus
+from branding_team.shared.phase_output_cache import PhaseOutputCache
 from branding_team.tests.conftest import make_mission
 
 
@@ -81,4 +82,44 @@ def test_run_orchestrator_returns_none_when_not_ready(
         company_name="Acme", company_description="To be discussed.", target_audience="TBD"
     )
     assert main._run_orchestrator_if_ready(incomplete, None, None) is None
+    assert calls["n"] == 0
+
+
+def test_run_orchestrator_forwards_phase_cache_to_orchestrator_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A supplied ``phase_cache`` reaches ``orchestrator.run`` unchanged (Story 2c Step 2)."""
+    captured: dict = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        return _output()
+
+    monkeypatch.setattr(main.orchestrator, "run", fake_run)
+    mission = _ready_mission()
+    cache = PhaseOutputCache()
+
+    main._run_orchestrator_if_ready(mission, None, None, phase_cache=cache)
+
+    assert captured["phase_cache"] is cache
+
+
+def test_run_orchestrator_short_circuit_ignores_phase_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole-mission short-circuit stays outermost even when a phase_cache is supplied."""
+    calls = {"n": 0}
+    sentinel = _output()
+
+    def fake_run(**kwargs):
+        calls["n"] += 1
+        return sentinel
+
+    monkeypatch.setattr(main.orchestrator, "run", fake_run)
+    mission = _ready_mission()
+    cache = PhaseOutputCache()
+
+    result = main._run_orchestrator_if_ready(mission, mission, sentinel, phase_cache=cache)
+
+    assert result is sentinel
     assert calls["n"] == 0

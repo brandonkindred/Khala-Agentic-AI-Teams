@@ -4,7 +4,6 @@ masking, per-entry guards, CRUD, reorder, and the Postgres-required contract."""
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -16,26 +15,8 @@ _agents = _backend / "agents"
 if str(_agents) not in sys.path:
     sys.path.insert(0, str(_agents))
 
-from fastapi import FastAPI  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
-
-from llm_service import provider_store as ps  # noqa: E402
 from unified_api.routes import llm_config as route  # noqa: E402
-
-
-def _entry(entry_id, *, provider="ollama", label="e", api_key="", limit=False, base_url=None):
-    return ps.ProviderEntry(
-        id=entry_id,
-        label=label,
-        provider=provider,
-        model="m",
-        base_url=base_url if base_url is not None else ("http://localhost:11434" if provider == "ollama" else ""),
-        api_key=api_key,
-        sort_order=entry_id,
-        limit_exceeded=limit,
-        limit_type="rate" if limit else "",
-        reset_at=datetime(2026, 6, 30, tzinfo=timezone.utc) if limit else None,
-    )
+from unified_api.tests.conftest import _entry  # noqa: E402
 
 
 def _find_op(state, op_name):
@@ -44,71 +25,6 @@ def _find_op(state, op_name):
     matches = [op for op in state["ops"] if isinstance(op, tuple) and op[0] == op_name]
     assert len(matches) == 1, f"expected exactly one {op_name!r} op, got {len(matches)}: {state['ops']!r}"
     return matches[0]
-
-
-@pytest.fixture
-def app_client(monkeypatch):
-    """TestClient over a minimal app with provider_store + caches stubbed."""
-    state: dict = {"entries": [], "ops": []}
-
-    monkeypatch.setattr(route, "is_postgres_enabled", lambda: True)
-    monkeypatch.setattr(route, "resolve_storage_status", lambda *a, **k: "available")
-    monkeypatch.setattr(route, "clear_client_cache", lambda: state["ops"].append("clear_clients"))
-    monkeypatch.setattr(route.runtime_config, "clear_cache", lambda: None)
-
-    # provider_store stubs (no DB).
-    monkeypatch.setattr(route.provider_store, "clear_cache", lambda: None)
-    monkeypatch.setattr(route.provider_store, "load_ordered_entries", lambda *a, **k: list(state["entries"]))
-
-    def fake_create(**kw):
-        state["ops"].append(("create", kw))
-        e = _entry(99, provider=kw["provider"], label=kw["label"], api_key=kw.get("api_key", ""))
-        state["entries"].append(e)
-        return e
-
-    def fake_get(entry_id):
-        return next((e for e in state["entries"] if e.id == entry_id), None)
-
-    def fake_update(entry_id, **kw):
-        state["ops"].append(("update", entry_id, kw))
-        return fake_get(entry_id)
-
-    def fake_delete(entry_id):
-        e = fake_get(entry_id)
-        if e is None:
-            return False
-        state["entries"].remove(e)
-        return True
-
-    def fake_reorder(ids):
-        # Mirror the real store: validate the permutation atomically and raise on
-        # mismatch (the route maps ReorderMismatchError -> 400).
-        live = {e.id for e in state["entries"]}
-        if len(ids) != len(live) or set(ids) != live:
-            raise ps.ReorderMismatchError("not a permutation")
-        state["ops"].append(("reorder", list(ids)))
-
-    monkeypatch.setattr(route.provider_store, "create_entry", lambda **kw: fake_create(**kw))
-    monkeypatch.setattr(route.provider_store, "get_entry", fake_get)
-    monkeypatch.setattr(route.provider_store, "update_entry", lambda i, **kw: fake_update(i, **kw))
-    monkeypatch.setattr(route.provider_store, "delete_entry", fake_delete)
-    monkeypatch.setattr(route.provider_store, "reorder", fake_reorder)
-
-    for var in (
-        "LLM_PROVIDER",
-        "LLM_MODEL",
-        "ANTHROPIC_API_KEY",
-        "LLM_CLAUDE_API_KEY",
-        "OLLAMA_API_KEY",
-        "LLM_OLLAMA_API_KEY",
-        "LLM_BASE_URL",
-    ):
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.delenv("POSTGRES_HOST", raising=False)
-
-    app = FastAPI()
-    app.include_router(route.router)
-    return TestClient(app), state
 
 
 def test_list_masks_keys_and_reports_state(app_client):
@@ -615,43 +531,3 @@ def test_probe_runpod_endpoint_success_returns_none(monkeypatch):
     call = mock_client.get.call_args
     assert call.args[0].endswith("/v2/abc123/openai/v1/models")
     assert call.kwargs["headers"] == {"Authorization": "Bearer k"}
-
-
-# --------------------------------------------------------------------------- #
-# /ollama-models — the browse utility endpoint (kept; single-provider config    #
-# GET/PUT was removed).                                                         #
-# --------------------------------------------------------------------------- #
-
-
-def test_ollama_models_live_listing(app_client, monkeypatch):
-    """A non-empty live listing from /api/tags is returned verbatim with source=live."""
-    client, _state = app_client
-    monkeypatch.setattr(route, "list_ollama_models", lambda: ["deepseek-v4-flash:cloud", "qwen3-coder:480b-cloud"])
-    resp = client.get("/api/llm-config/ollama-models")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["source"] == "live"
-    assert body["models"] == ["deepseek-v4-flash:cloud", "qwen3-coder:480b-cloud"]
-    # base_url reflects the resolved effective endpoint (cloud default with no env).
-    assert body["base_url"] == "https://ollama.com"
-
-
-def test_ollama_models_falls_back_to_curated(app_client, monkeypatch):
-    """An empty live listing degrades to the curated suggestions (source=fallback)."""
-    client, _state = app_client
-    monkeypatch.setattr(route, "list_ollama_models", lambda: [])
-    resp = client.get("/api/llm-config/ollama-models")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["source"] == "fallback"
-    assert body["models"] == list(route._OLLAMA_MODEL_SUGGESTIONS)
-    assert body["models"]  # non-empty curated fallback
-
-
-def test_ollama_models_base_url_reflects_resolved_endpoint(app_client, monkeypatch):
-    """The reported base_url tracks the resolved Ollama endpoint (env override here)."""
-    client, _state = app_client
-    monkeypatch.setenv("LLM_BASE_URL", "http://localhost:11434")
-    monkeypatch.setattr(route, "list_ollama_models", lambda: ["deepseek-v4-flash:cloud"])
-    body = client.get("/api/llm-config/ollama-models").json()
-    assert body["base_url"] == "http://localhost:11434"
