@@ -15,6 +15,8 @@ function summary(over: Partial<LlmUsageSummary> = {}): LlmUsageSummary {
     total_prompt_tokens: 30,
     total_completion_tokens: 10,
     total_tokens: 40,
+    total_cache_read_tokens: 4,
+    total_cache_creation_tokens: 2,
     avg_latency_ms: 0,
     error_count: 0,
     by_agent: {},
@@ -36,6 +38,8 @@ function callRow(over: Partial<LlmUsageCall> = {}): LlmUsageCall {
     prompt_tokens: 10,
     completion_tokens: 5,
     total_tokens: 15,
+    cache_read_tokens: 2,
+    cache_creation_tokens: 1,
     status: 'success',
     ...over,
   };
@@ -67,6 +71,11 @@ describe('LlmUsageDashboardComponent', () => {
     expect(component.summary.total_prompt_tokens).toBe(30);
     expect(component.summary.total_completion_tokens).toBe(10);
     expect(component.summary.total_tokens).toBe(40);
+    expect(component.summary.total_cache_read_tokens).toBe(4);
+    expect(component.summary.total_cache_creation_tokens).toBe(2);
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.textContent).toContain('Cache read tokens');
+    expect(el.textContent).toContain('Cache creation tokens');
   });
 
   it('refetches both endpoints when the window chip changes', () => {

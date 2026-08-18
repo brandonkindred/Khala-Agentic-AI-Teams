@@ -17,6 +17,8 @@ export interface LlmUsageSummary {
   total_prompt_tokens: number;
   total_completion_tokens: number;
   total_tokens: number;
+  total_cache_read_tokens: number;
+  total_cache_creation_tokens: number;
   avg_latency_ms: number;
   error_count: number;
   by_agent: Record<string, { calls: number; tokens: number }>;
@@ -33,5 +35,7 @@ export interface LlmUsageCall {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
   status: string;
 }
