@@ -101,6 +101,20 @@ def _map_parallelism() -> int:
     return max(1, min(ceiling, get_llm_max_concurrency()))
 
 
+def map_parallelism() -> int:
+    """Public accessor for the code-review map-phase fan-out budget.
+
+    Stable public API for passes that fan out on the shared budget (the map
+    phase, false-positive verification, scope classification) so they need not
+    import the private ``_map_parallelism`` symbol.
+
+    Postconditions:
+        - Returns ``_map_parallelism()`` — ``min(CODE_REVIEW_MAP_PARALLELISM,
+          LLM_MAX_CONCURRENCY)`` floored at 1. Never raises.
+    """
+    return _map_parallelism()
+
+
 def _blocks_from_input(input_data: CodeReviewInput) -> Tuple[List[Tuple[str, str]], List[str]]:
     """Resolve the review input into ordered (path, content) blocks.
 

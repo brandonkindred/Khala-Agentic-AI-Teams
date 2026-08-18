@@ -844,6 +844,21 @@ trades that against a larger prompt per call. This is a cap on how many
 all (see `CODE_REVIEW_FALSE_POSITIVE_FILTER` below): the model always fetches
 it via the unbounded `read_file` tool, so there is nothing to cap.
 
+### CODE_REVIEW_SCOPE_MAX_FINDINGS_PER_GROUP
+Int (default `20`, floor `1`). Cap on how many findings the LLM scope
+classifier (`code_review_agent/scope_classifier.py::classify_scope`) inlines
+into a single per-file classification call. Findings are first grouped by their
+cited file; a file whose findings exceed this cap is split into multiple
+batches of at most this size (the final batch may be smaller), each its own
+`complete_json` call, fanned out across the
+shared `CODE_REVIEW_MAP_PARALLELISM` budget. Each batch fails safe on its own —
+any client, LLM, or parse error degrades that batch's findings to an "unknown"
+verdict (a caller falls back to the free heuristic) rather than raising.
+Lowering this cap increases the number of classification calls (cost/latency)
+for files with many findings; raising it trades that against a larger prompt per
+call. A smaller default than `CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP`
+keeps each scope decision focused.
+
 ### CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES
 Int (default `8`, floor `1`). Two things, both governed by this one knob (see
 `code_review_agent/temporal/config.py::resolve_max_concurrent_activities`, the
