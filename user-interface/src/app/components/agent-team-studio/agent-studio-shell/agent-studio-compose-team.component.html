@@ -37,8 +37,8 @@
     </button>
   </div>
 
-  @if (teamsError()) {
-    <p class="error-text">{{ teamsError() }}</p>
+  @if (teamsError(); as teamsErrorMessage) {
+    <app-error-message [message]="teamsErrorMessage" />
   }
 
   @if (showCreateForm()) {
@@ -58,8 +58,8 @@
               placeholder="A short description of what this team does..."
             ></textarea>
           </mat-form-field>
-          @if (createError()) {
-            <p class="error-text">{{ createError() }}</p>
+          @if (createError(); as createErrorMessage) {
+            <app-error-message [message]="createErrorMessage" />
           }
           <button mat-raised-button color="primary" type="submit" [disabled]="form.invalid || creating()">
             @if (creating()) {
@@ -79,7 +79,7 @@
       <p>Pick an existing team above, or create a new one to start composing its roster and process.</p>
     </div>
   } @else if (teamLoadError()) {
-    <p class="error-text">{{ teamLoadError() }}</p>
+    <app-error-message [message]="teamLoadError()!" />
   } @else {
     @if (team(); as t) {
       <app-process-designer-chat

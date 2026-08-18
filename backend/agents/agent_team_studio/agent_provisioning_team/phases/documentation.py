@@ -5,6 +5,7 @@ This is phase 5 of the provisioning workflow.
 """
 
 import logging
+import re
 from typing import Callable, Dict, List, Optional
 
 from llm_service import DummyLLMClient, LLMNotConfiguredError, get_client
@@ -34,6 +35,10 @@ _TOOL_DOC_SYSTEM = (
     "You are the tool documentation writer. Write a short, accurate getting-started "
     "blurb for an AI agent that just received credentials for the named tool."
 )
+# `credentials.extra` keys are interpolated into a `{key}` replacement target (not
+# sanitized like the values are — sanitize_prompt_var deliberately allows braces).
+# Restrict to safe identifiers so a stray brace/special char can't malform the target.
+_SAFE_EXTRA_KEY = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 def run_documentation(
@@ -174,7 +179,36 @@ def _generate_getting_started(
     credentials: Optional[GeneratedCredentials],
     result: ToolProvisionResult,
 ) -> str:
-    """Generate getting-started text for a tool."""
+    """Generate getting-started text for a tool, preferring an explicit
+    template, then LLM generation, then a deterministic fallback.
+
+    Execution order:
+      1. If `onboarding_config.getting_started` is set, use it as a
+         template, substituting `{username}`, `{connection_string}`, and
+         any `credentials.extra` keys (each value passed through
+         `sanitize_prompt_var`), and return it directly — no LLM call is
+         made.
+      2. Otherwise, request a completion from the LLM client resolved by
+         `llm_service.get_client(agent_key="agent_provisioning_team.documentation")`.
+         A `DummyLLMClient` result is treated as "unconfigured" rather
+         than used, so its generic canned text is never returned.
+      3. If step 2 is unconfigured, resolves to `DummyLLMClient`, or
+         raises for any other reason, the exception is logged and a
+         deterministic template is built from `tool_name`, whether
+         `credentials.connection_string` is present, and
+         `result.permissions`.
+
+    Preconditions:
+        tool_name is non-empty. onboarding_config is not None (callers
+        only invoke this after resolving a tool definition from the
+        manifest). result is not None. credentials may be None when a
+        tool was provisioned without generated credentials.
+
+    Postconditions:
+        Returns a non-empty str. Never raises: any exception from the
+        LLM path is caught and replaced by the deterministic fallback
+        text.
+    """
     if onboarding_config.getting_started:
         text = onboarding_config.getting_started
 
@@ -186,6 +220,13 @@ def _generate_getting_started(
                     "{connection_string}", sanitize_prompt_var(credentials.connection_string)
                 )
             for key, value in credentials.extra.items():
+                if not _SAFE_EXTRA_KEY.match(key):
+                    logger.warning(
+                        "Skipping unsafe extra key %r for %s getting-started template",
+                        key,
+                        tool_name,
+                    )
+                    continue
                 text = text.replace(f"{{{key}}}", sanitize_prompt_var(str(value)))
 
         return text

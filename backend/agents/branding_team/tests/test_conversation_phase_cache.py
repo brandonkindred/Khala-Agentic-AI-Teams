@@ -9,14 +9,18 @@ not just the helper in isolation -- and that it reaches ``orchestrator.run``
 (Story 2c Step 2) as the exact per-conversation object once the mission is
 ready. See ``tests/test_conversation_flow.py`` for the ``phase_cache``
 forwarding/short-circuit-ordering unit tests on ``_run_orchestrator_if_ready``
-itself.
+itself (with ``orchestrator.run`` mocked). The two tests at the bottom of
+this file (Story 2c Step 3) instead drive a real, unmocked, dummy-backed
+``orchestrator.run`` across two conversation turns, to prove the phase-cache
+reuse and whole-mission short-circuit paths actually pay off end-to-end, not
+just that they're wired.
 """
 
 from __future__ import annotations
 
 import threading
 import time
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -27,6 +31,7 @@ from branding_team.models import BrandPhase, StrategicCoreOutput, TeamOutput, Wo
 from branding_team.shared.phase_output_cache import PhaseOutputCache
 from branding_team.tests._memory_stores import install_memory_stores
 from branding_team.tests.conftest import make_mission
+from llm_service import DummyLLMClient
 
 
 def test_get_or_create_phase_cache_starts_empty_for_a_fresh_conversation() -> None:
@@ -192,3 +197,135 @@ def test_send_message_threads_the_conversations_phase_cache_into_orchestrator_ru
     )
 
     assert captured["phase_cache"] is seeded_cache
+
+
+def _ready_test_mission():
+    return make_mission(
+        company_name="TestCo",
+        company_description="A real company description that is long enough.",
+        target_audience="developers",
+    )
+
+
+def _run_first_turn(
+    monkeypatch: pytest.MonkeyPatch, main_mod, ready_mission
+) -> tuple[str, TeamOutput]:
+    """Create a conversation whose initial message makes the mission ready,
+    driving a real, cold ``orchestrator.run`` call through the dummy
+    provider -- not a mocked one, unlike every other test in this file --
+    since the two regression tests below need a genuinely non-degraded,
+    cache-populating run to reuse on a later turn.
+
+    Returns ``(conversation_id, output)``: the real ``TeamOutput`` from that
+    cold run, with the conversation's phase cache now warm for every phase.
+    """
+    mock_agent = MagicMock()
+    mock_agent.respond.return_value = ("Great, let's get started.", ready_mission, [], False)
+    monkeypatch.setattr(main_mod, "assistant_agent", mock_agent)
+
+    create_resp = conversation._create_branding_conversation_impl(
+        CreateConversationRequest(initial_message="Our company is TestCo.", skip_save=True)
+    )
+    assert create_resp.latest_output is not None
+    return create_resp.conversation_id, create_resp.latest_output
+
+
+def test_cross_turn_message_reuses_phase_cache_and_produces_correct_team_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later turn with an unchanged mission but no stored prior output
+    reuses every phase from the warm cache -- verified via the dummy
+    provider's call counter -- and still yields a correct ``TeamOutput``.
+
+    ``phase_input_hash`` folds the entire mission into every phase's cache
+    key (``shared/memoization.py``), so a genuine mission edit between turns
+    invalidates every phase uniformly, not just a later one; the chat
+    assistant also only ever populates early-phase-ish mission fields
+    (``assistant/agent.py``), so a question about a later phase (e.g.
+    governance) naturally leaves the mission unchanged too rather than
+    triggering selective per-phase invalidation. Turn 2 here keeps the
+    mission byte-identical to turn 1, but clears the stored output first
+    (``conversation_store.update_output(id, None)``, a real store
+    operation) so the whole-mission short-circuit's ``previous_output is
+    not None`` guard fails and ``_run_orchestrator_if_ready`` falls through
+    to a real ``orchestrator.run`` call -- which then finds every one of the
+    5 phases already cached. This isolates the phase-cache reuse path from
+    the short-circuit path (see the companion test below for that one).
+    """
+    install_memory_stores(monkeypatch)
+    from branding_team.api import main as main_mod
+
+    ready_mission = _ready_test_mission()
+
+    with patch.object(main_mod.orchestrator, "run", wraps=main_mod.orchestrator.run) as run_spy:
+        count_before_turn1 = DummyLLMClient._call_counter
+        conversation_id, output1 = _run_first_turn(monkeypatch, main_mod, ready_mission)
+        assert run_spy.call_count == 1
+        assert DummyLLMClient._call_counter > count_before_turn1  # cold run made real LLM calls
+
+        main_mod.conversation_store.update_output(conversation_id, None)
+
+        mock_agent = MagicMock()
+        mock_agent.respond.return_value = (
+            "Good question -- we'll cover governance later.",
+            ready_mission,
+            [],
+            False,
+        )
+        monkeypatch.setattr(main_mod, "assistant_agent", mock_agent)
+
+        count_before_turn2 = DummyLLMClient._call_counter
+        response2 = conversation._send_branding_conversation_message_impl(
+            conversation_id,
+            SendMessageRequest(message="What about our governance approach?", skip_save=True),
+        )
+
+        assert run_spy.call_count == 2  # short-circuit did not fire -- orchestrator.run executed
+        assert DummyLLMClient._call_counter == count_before_turn2  # every phase resolved from cache
+        assert response2.latest_output == output1
+
+
+def test_whole_mission_short_circuit_remains_outermost_fast_path_with_real_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole-mission short-circuit -- not the phase cache -- is what
+    serves a second turn whose stored output is still present, and it's
+    checked before the cache is ever consulted.
+
+    Extends ``test_run_orchestrator_short_circuit_ignores_phase_cache``
+    (``test_conversation_flow.py``, where ``orchestrator.run`` is mocked)
+    with a real dummy-backed pipeline: unlike the companion test above,
+    this turn 2 does *not* clear the stored output, so
+    ``_run_orchestrator_if_ready``'s short-circuit fires and returns
+    ``previous_output`` directly -- ``orchestrator.run`` is never invoked a
+    second time at all, not even to hit the cache.
+    """
+    install_memory_stores(monkeypatch)
+    from branding_team.api import main as main_mod
+
+    ready_mission = _ready_test_mission()
+
+    with patch.object(main_mod.orchestrator, "run", wraps=main_mod.orchestrator.run) as run_spy:
+        conversation_id, output1 = _run_first_turn(monkeypatch, main_mod, ready_mission)
+        assert run_spy.call_count == 1
+
+        mock_agent = MagicMock()
+        mock_agent.respond.return_value = (
+            "Good question -- we'll cover governance later.",
+            ready_mission,
+            [],
+            False,
+        )
+        monkeypatch.setattr(main_mod, "assistant_agent", mock_agent)
+
+        count_before_turn2 = DummyLLMClient._call_counter
+        response2 = conversation._send_branding_conversation_message_impl(
+            conversation_id,
+            SendMessageRequest(message="What about our governance approach?", skip_save=True),
+        )
+
+        assert (
+            run_spy.call_count == 1
+        )  # short-circuit fired -- orchestrator.run wasn't called again
+        assert DummyLLMClient._call_counter == count_before_turn2
+        assert response2.latest_output == output1
