@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
+from software_engineering_team.devops_team._llm_cache import clear_cache
 
 from .models import DeploymentStrategyAgentInput, DeploymentStrategyAgentOutput
 from .prompts import DEPLOYMENT_STRATEGY_PROMPT
@@ -40,6 +41,9 @@ class DeploymentStrategyAgent(DevOpsSingleShotAgent):
     """
 
     PROMPT = DEPLOYMENT_STRATEGY_PROMPT
+    CACHE_NAMESPACE = "devops:deploy_strategy:v1"
+    CACHE_ENV_VAR = "DEVOPS_DEPLOYMENT_STRATEGY_CACHE_SIZE"
+    OUTPUT_MODEL = DeploymentStrategyAgentOutput
 
     def build_context(self, input_data: DeploymentStrategyAgentInput) -> str:
         """Build the deployment prompt context from the task spec.
@@ -84,3 +88,8 @@ class DeploymentStrategyAgent(DevOpsSingleShotAgent):
             alerting_configured=_as_bool(data.get("alerting_configured")),
             summary=data.get("summary", ""),
         )
+
+
+def clear_deployment_strategy_cache() -> None:
+    """Drop every cached deployment strategy agent result. Intended for test teardown."""
+    clear_cache(DeploymentStrategyAgent.CACHE_NAMESPACE, log_prefix="DeploymentStrategyAgent")

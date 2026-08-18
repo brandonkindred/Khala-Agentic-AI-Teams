@@ -103,6 +103,44 @@ def _clear_qa_review_cache() -> None:
             mod.clear_review_cache()
 
 
+# devops_team's eight single-shot specialist agents each carry their own
+# LLM-response cache (namespace + clear function) rather than one shared
+# module, so this table pairs each agent's module suffix with its clear
+# function name; the loop below tries both the bare and dotted import
+# identity for each, same dual-identity story as ``_QA_AGENT_IDENTITIES``.
+_DEVOPS_LLM_CACHE_MODULES = (
+    ("iac_agent.agent", "clear_iac_cache"),
+    ("cicd_pipeline_agent.agent", "clear_cicd_cache"),
+    ("deployment_strategy_agent.agent", "clear_deployment_strategy_cache"),
+    ("devsecops_review_agent.agent", "clear_devsecops_cache"),
+    ("task_clarifier.agent", "clear_task_clarifier_cache"),
+    ("infra_debug_agent.agent", "clear_infra_debug_cache"),
+    ("infra_patch_agent.agent", "clear_infra_patch_cache"),
+    ("doc_runbook_agent.agent", "clear_doc_runbook_cache"),
+)
+_DEVOPS_MODULE_PREFIXES = ("devops_team.", "software_engineering_team.devops_team.")
+
+
+def _clear_devops_llm_caches() -> None:
+    """Clear every devops_team single-shot agent's LLM-response cache.
+
+    Preconditions:
+        - None. Identities that are not present in ``sys.modules`` are
+          skipped (an unimported module cannot have populated its cache).
+
+    Postconditions:
+        - For each loaded identity (bare ``devops_team.<x>.agent`` and
+          dotted ``software_engineering_team.devops_team.<x>.agent``) of
+          every module in ``_DEVOPS_LLM_CACHE_MODULES``, that module's cache
+          namespace is empty.
+    """
+    for suffix, clear_fn_name in _DEVOPS_LLM_CACHE_MODULES:
+        for prefix in _DEVOPS_MODULE_PREFIXES:
+            mod = sys.modules.get(prefix + suffix)
+            if mod is not None:
+                getattr(mod, clear_fn_name)()
+
+
 def _ensure_real_modules() -> None:
     """Evict synthetic module stubs other test files may have installed.
 
@@ -214,6 +252,22 @@ def _reset_qa_review_cache():
     _clear_qa_review_cache()
     yield
     _clear_qa_review_cache()
+
+
+@pytest.fixture(autouse=True)
+def _reset_devops_llm_caches():
+    """Clear every devops_team specialist agent's LLM-response cache around every test.
+
+    Mirrors ``_reset_qa_review_cache`` above, for the same reason: several
+    ``test_devops_team*.py`` tests reuse a byte-identical input (or a
+    locally-scoped dummy-client class whose name — the model fingerprint's
+    fallback identifier — collides across test functions) across test
+    functions that expect independent LLM invocations. Without a reset, one
+    test's cached outcome could be served to another.
+    """
+    _clear_devops_llm_caches()
+    yield
+    _clear_devops_llm_caches()
 
 
 def pytest_configure(config: pytest.Config) -> None:

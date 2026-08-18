@@ -57,10 +57,18 @@ already do via ``_patch_fenced_response``).
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Type
+
+from pydantic import BaseModel
 
 from llm_service import LLMClient, get_strands_model
-from llm_service.strands_model import resolve_strands_model
+from llm_service.strands_model import model_fingerprint, resolve_strands_model
+from software_engineering_team.devops_team._llm_cache import (
+    build_cache_key,
+    cache_capacity,
+    get_cached_result,
+    set_cached_result,
+)
 from software_engineering_team.shared.llm import complete_json_with_continuation
 
 
@@ -73,12 +81,20 @@ class DevOpsSingleShotAgent:
         - ``run`` is stateless across calls aside from that resolved model.
         - Subclasses set a non-empty ``PROMPT`` and override
           ``build_context`` / ``build_output``; ``pre_call`` may short-circuit.
+        - A subclass that sets ``CACHE_NAMESPACE``/``CACHE_ENV_VAR``/
+          ``OUTPUT_MODEL`` gets a cache-checked/populated ``run`` for free; an
+          unset ``CACHE_NAMESPACE`` (the default) disables caching for that
+          subclass, matching the ``capacity <= 0`` passthrough convention.
     """
 
     PROMPT: str = ""
     PROMPT_SEPARATOR: str = "\n\n---\n\n"
     temperature: Optional[float] = 0.1
     think: Optional[bool] = True
+    CACHE_NAMESPACE: str = ""
+    CACHE_ENV_VAR: str = ""
+    CACHE_DEFAULT_SIZE: int = 128
+    OUTPUT_MODEL: Optional[Type[BaseModel]] = None
 
     def __init__(self, llm_client: LLMClient) -> None:
         """Resolve the devops-routed Strands model.
@@ -131,10 +147,16 @@ class DevOpsSingleShotAgent:
             ``build_output`` are overridden on the concrete subclass.
         Postconditions:
             If ``pre_call`` returns non-``None``, that value is returned and
-            the LLM is not called. Otherwise returns
+            the LLM is not called (no cache lookup either — nothing was
+            hashed yet). Otherwise, when ``CACHE_NAMESPACE`` is set and the
+            resolved capacity is ``> 0``, a cache hit (byte-identical
+            ``input_data`` and resolved model) returns the prior
+            ``OUTPUT_MODEL`` instance without invoking the LLM. On a cache
+            miss, a disabled cache, or any cache-backend error, returns
             ``build_output(input_data, data)`` where ``data`` comes from
             ``complete_json_with_continuation`` with prompt
-            ``PROMPT + PROMPT_SEPARATOR + context``. ``temperature`` /
+            ``PROMPT + PROMPT_SEPARATOR + context``, and (when caching is
+            enabled) writes the result back to the cache. ``temperature`` /
             ``think`` class attrs are passed as kwargs only when not ``None``.
             LLM/parse errors propagate unchanged.
         """
@@ -143,6 +165,24 @@ class DevOpsSingleShotAgent:
             return early
 
         assert self.PROMPT, f"{type(self).__name__}.PROMPT must be a non-empty string"
+
+        cache_key: Optional[str] = None
+        capacity = 0
+        if self.CACHE_NAMESPACE and self.CACHE_ENV_VAR:
+            capacity = cache_capacity(self.CACHE_ENV_VAR, self.CACHE_DEFAULT_SIZE)
+            if capacity > 0:
+                assert self.OUTPUT_MODEL is not None, (
+                    f"{type(self).__name__}.OUTPUT_MODEL must be set when CACHE_NAMESPACE is set"
+                )
+                cache_key = build_cache_key(input_data, model_fingerprint(self._model))
+                cached = get_cached_result(
+                    self.CACHE_NAMESPACE,
+                    cache_key,
+                    self.OUTPUT_MODEL,
+                    log_prefix=type(self).__name__,
+                )
+                if cached is not None:
+                    return cached
 
         context = self.build_context(input_data)
         prompt = self.PROMPT + self.PROMPT_SEPARATOR + context
@@ -154,4 +194,11 @@ class DevOpsSingleShotAgent:
             kwargs["think"] = self.think
 
         data = complete_json_with_continuation(self._model, prompt, **kwargs)
-        return self.build_output(input_data, data)
+        result = self.build_output(input_data, data)
+
+        if cache_key is not None:
+            set_cached_result(
+                self.CACHE_NAMESPACE, cache_key, result, capacity, log_prefix=type(self).__name__
+            )
+
+        return result

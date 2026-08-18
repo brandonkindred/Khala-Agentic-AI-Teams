@@ -5,7 +5,14 @@ from __future__ import annotations
 import logging
 
 from llm_service import LLMClient, get_strands_model
-from llm_service.strands_model import resolve_strands_model
+from llm_service.strands_model import model_fingerprint, resolve_strands_model
+from software_engineering_team.devops_team._llm_cache import (
+    build_cache_key,
+    cache_capacity,
+    clear_cache,
+    get_cached_result,
+    set_cached_result,
+)
 from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .models import IaCDebugInput, IaCDebugOutput, IaCExecutionError
@@ -14,6 +21,19 @@ from .prompts import INFRA_DEBUG_PROMPT
 logger = logging.getLogger(__name__)
 
 _FIXABLE_TYPES = frozenset({"syntax", "validation"})
+
+# Shared review-result cache: keyed on the whole IaCDebugInput content plus
+# the resolved model. See ``devops_team._llm_cache`` for the shared
+# implementation.
+_CACHE_NAMESPACE = "devops:infra_debug:v1"
+_CACHE_ENV_VAR = "DEVOPS_INFRA_DEBUG_CACHE_SIZE"
+_CACHE_DEFAULT_SIZE = 128
+
+
+def clear_infra_debug_cache() -> None:
+    """Drop every cached infra debug result. Intended for test teardown."""
+    clear_cache(_CACHE_NAMESPACE, log_prefix="InfraDebugAgent")
+
 
 # Bound the artifacts inlined into the debug prompt so a large or numerous IaC
 # file can't push the single-shot classify call past the model's context
@@ -74,6 +94,16 @@ class InfraDebugAgent:
             f"--- Artifacts ---\n{artifacts_snippet}\n"
         )
 
+        capacity = cache_capacity(_CACHE_ENV_VAR, _CACHE_DEFAULT_SIZE)
+        cache_key = None
+        if capacity > 0:
+            cache_key = build_cache_key(input_data, model_fingerprint(self._model))
+            cached = get_cached_result(
+                _CACHE_NAMESPACE, cache_key, IaCDebugOutput, log_prefix="InfraDebugAgent"
+            )
+            if cached is not None:
+                return cached
+
         data = complete_json_with_continuation(
             self._model,
             INFRA_DEBUG_PROMPT + "\n\n---\n\n" + context,
@@ -96,8 +126,15 @@ class InfraDebugAgent:
 
         fixable = bool(errors) and all(e.error_type in _FIXABLE_TYPES for e in errors)
 
-        return IaCDebugOutput(
+        result = IaCDebugOutput(
             errors=errors,
             summary=data.get("summary", ""),
             fixable=data.get("fixable", fixable),
         )
+
+        if cache_key is not None:
+            set_cached_result(
+                _CACHE_NAMESPACE, cache_key, result, capacity, log_prefix="InfraDebugAgent"
+            )
+
+        return result

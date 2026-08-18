@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
+from software_engineering_team.devops_team._llm_cache import clear_cache
 
 from .models import CICDPipelineAgentInput, CICDPipelineAgentOutput
 from .prompts import CICD_PIPELINE_PROMPT
@@ -18,6 +19,9 @@ class CICDPipelineAgent(DevOpsSingleShotAgent):
     """
 
     PROMPT = CICD_PIPELINE_PROMPT
+    CACHE_NAMESPACE = "devops:cicd:v1"
+    CACHE_ENV_VAR = "DEVOPS_CICD_CACHE_SIZE"
+    OUTPUT_MODEL = CICDPipelineAgentOutput
 
     def build_context(self, input_data: CICDPipelineAgentInput) -> str:
         """Build the CI/CD prompt context from the task spec and existing pipeline.
@@ -58,3 +62,8 @@ class CICDPipelineAgent(DevOpsSingleShotAgent):
             summary=data.get("summary", ""),
             risks=data.get("risks") or [],
         )
+
+
+def clear_cicd_cache() -> None:
+    """Drop every cached CI/CD pipeline agent result. Intended for test teardown."""
+    clear_cache(CICDPipelineAgent.CACHE_NAMESPACE, log_prefix="CICDPipelineAgent")

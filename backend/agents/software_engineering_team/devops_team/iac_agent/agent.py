@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
+from software_engineering_team.devops_team._llm_cache import clear_cache
 
 from .models import IaCAgentInput, IaCAgentOutput
 from .prompts import IAC_AGENT_PROMPT
@@ -18,6 +19,9 @@ class InfrastructureAsCodeAgent(DevOpsSingleShotAgent):
     """
 
     PROMPT = IAC_AGENT_PROMPT
+    CACHE_NAMESPACE = "devops:iac:v1"
+    CACHE_ENV_VAR = "DEVOPS_IAC_CACHE_SIZE"
+    OUTPUT_MODEL = IaCAgentOutput
 
     def build_context(self, input_data: IaCAgentInput) -> str:
         """Build the IaC prompt context from the task spec and repo summary.
@@ -51,3 +55,8 @@ class InfrastructureAsCodeAgent(DevOpsSingleShotAgent):
             destructive_changes_detected=bool(data.get("destructive_changes_detected", False)),
             blast_radius_notes=data.get("blast_radius_notes") or [],
         )
+
+
+def clear_iac_cache() -> None:
+    """Drop every cached IaC agent result. Intended for test teardown."""
+    clear_cache(InfrastructureAsCodeAgent.CACHE_NAMESPACE, log_prefix="IaCAgent")

@@ -1332,6 +1332,34 @@ model).
 
 ---
 
+## Software Engineering DevOps Review
+
+### DEVOPS_IAC_CACHE_SIZE / DEVOPS_CICD_CACHE_SIZE / DEVOPS_DEPLOYMENT_STRATEGY_CACHE_SIZE / DEVOPS_DEVSECOPS_CACHE_SIZE / DEVOPS_TASK_CLARIFIER_CACHE_SIZE / DEVOPS_INFRA_DEBUG_CACHE_SIZE / DEVOPS_INFRA_PATCH_CACHE_SIZE / DEVOPS_DOC_RUNBOOK_CACHE_SIZE
+Max entries in each `devops_team` specialist agent's own shared LLM-response
+cache (`shared.cache`; the get/set/key/clear boilerplate lives in
+`devops_team._llm_cache`, shared by all eight). See
+[`software_engineering_team/README.md`](../backend/agents/software_engineering_team/README.md#caching-sharedcache--redis):
+one cache per agent — `InfrastructureAsCodeAgent`, `CICDPipelineAgent`, and
+`DeploymentStrategyAgent` (all three wired through the shared
+`DevOpsSingleShotAgent.run()`), plus `DevSecOpsReviewAgent`,
+`DevOpsTaskClarifierAgent`, `InfraDebugAgent`, `InfraPatchAgent`, and
+`DocumentationRunbookAgent` (each wired at its own call site) — same
+whole-input key shape as `QA_REVIEW_CACHE_SIZE`: the key hashes the agent's
+entire structured input (including any embedded `DevOpsTaskSpec`) plus the
+resolved review model in one shot, so any field change naturally busts the
+key with no explicit invalidation logic. A cache hit skips the LLM call
+entirely; only a genuine (non-fallback) result is written back. A
+deterministic early return that never reaches the LLM (`DevOpsTaskClarifierAgent`'s
+gap check, `InfraPatchAgent`'s `not fixable` check) never touches the cache
+either way. Backend failures (Redis unavailable, corrupt entry) fail open to
+a miss/recompute, same as every other `shared.cache` consumer. `ChangeReviewAgent`
+has no cache of its own — it delegates entirely to `CodeReviewAgent`, which
+is already covered by `CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE` /
+`CODE_REVIEW_SUBMISSION_CACHE_SIZE`. Each var defaults to `128`, floor `0`
+(`0` disables that agent's cache — every call re-invokes the model).
+
+---
+
 ## Shared Infrastructure and Storage
 
 ### SE_WORKSPACE_DIR
