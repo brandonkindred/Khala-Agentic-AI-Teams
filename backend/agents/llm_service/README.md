@@ -296,6 +296,18 @@ Anthropic response's `cache_read_input_tokens` / `cache_creation_input_tokens`
 usage counters. Both default to `0` for providers that don't report cache
 activity, so existing records and non-Anthropic clients are unaffected.
 
+A repeated call with an identical `CacheBreakpoint`-marked `system_prompt_content`
+segment is safe to adopt: routed through the Strands adapter, it produces
+the same completion text whether or not that call happened to be
+cache-served, and is a documented no-op — never an error — on any client
+that doesn't support prompt caching. Only the `cache_read_tokens` /
+`cache_creation_tokens` telemetry counters differ; nothing else about the
+call's behavior changes. This guarantee is scoped to the
+`system_prompt_content` path: a `CacheBreakpoint` placed directly in a
+`LLMClient.chat()` message's `content` — bypassing the Strands adapter — is
+not flattened by `DummyLLMClient` or `OllamaLLMClient` and will error at the
+client boundary.
+
 ### Migration rule: keep pattern anchors in the **user** prompt
 
 `DummyLLMClient.complete_json` routes to its canned stubs by scanning the **user** prompt only (not the Strands system prompt). When migrating an agent and moving its persona to `Agent(system_prompt=...)`, the user prompt you build in `_build_user_prompt` must still include the distinctive tokens the matching dummy branch looks for — e.g. `bugs_found` + `test_plan` for the QA branch, or `integration expert` + `backend code` + `frontend code` for the Integration branch. An explicit "produce JSON with fields: foo, bar, baz" schema hint in the user prompt usually satisfies this for free. This only affects dummy-client tests; real LLMs see both prompts.

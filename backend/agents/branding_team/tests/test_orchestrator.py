@@ -1447,12 +1447,22 @@ def _phase4_nested_node_result() -> MagicMock:
     return node_result
 
 
-def _assert_every_field_populated(model: BaseModel) -> None:
+def _assert_every_field_populated(
+    model: BaseModel, *, exclude: frozenset[str] = frozenset()
+) -> None:
     """Fail with the offending field names if any field on ``model`` was left
     at an empty/falsy value — used to prove a set of merged fragments
     collectively covers every field on the target schema, so a future field
-    added without a producing specialist is caught automatically."""
-    empty = [name for name in type(model).model_fields if not getattr(model, name)]
+    added without a producing specialist is caught automatically.
+
+    ``exclude`` skips fields known to have no producing node yet (see
+    ``_PHASE3_UNCOVERED_FIELDS``); leave it empty for schemas where every
+    field is expected to be covered."""
+    empty = [
+        name
+        for name in type(model).model_fields
+        if name not in exclude and not getattr(model, name)
+    ]
     assert not empty, f"{type(model).__name__} fields left empty: {empty}"
 
 
@@ -2155,6 +2165,34 @@ def test_extract_phase_output_merges_every_phase3_fragment() -> None:
     ]
 
 
+_PHASE3_UNCOVERED_FIELDS = frozenset({"data_visualization_style", "digital_adaptations"})
+# VisualIdentityOutput fields with no producing node under the current three
+# moodboard conceptualists + converge_decider + seven-specialist set (and none
+# under the removed visual_compositor before it, either). Changing an agent's
+# prompt or output schema to cover them is out of scope for the Python-merge
+# migration this test suite locks in; tracked separately.
+
+
+def test_phase3_fragments_collectively_populate_every_output_field() -> None:
+    """Schema-coverage guard: the three moodboard conceptualists,
+    converge_decider, and the seven post-converge specialists' fragments must
+    collectively populate every VisualIdentityOutput field they can produce,
+    checked generically against the model's own field list (not a hardcoded
+    enumeration) so a field added later without a producing node fails this
+    test instead of silently shipping empty. See _PHASE3_UNCOVERED_FIELDS for
+    the two fields no current node produces."""
+    mock_result = MagicMock()
+    mock_result.result = {"phase3_visual": _phase3_nested_node_result()}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase3_visual", VisualIdentityOutput
+    )
+
+    assert degraded is False
+    assert isinstance(output, VisualIdentityOutput)
+    _assert_every_field_populated(output, exclude=_PHASE3_UNCOVERED_FIELDS)
+
+
 def test_full_run_phase3_not_degraded_with_eleven_fragments() -> None:
     """Phase 3's real runtime shape is eleven separate node fragments, not the
     single flat block _mock_graph_result's default gives every phase (which
@@ -2184,6 +2222,7 @@ def test_full_run_phase3_not_degraded_with_eleven_fragments() -> None:
     assert result.degraded_phases == []
     assert isinstance(result.visual_identity, VisualIdentityOutput)
     assert result.visual_identity.creative_refinement.winning_candidate_title == "Modern Confidence"
+    _assert_every_field_populated(result.visual_identity, exclude=_PHASE3_UNCOVERED_FIELDS)
 
 
 def test_merge_phase3_fragments_rejects_incomplete_specialist_set() -> None:
@@ -2806,3 +2845,47 @@ def test_run_with_phase_cache_cascades_recompute_through_three_phase_chain() -> 
     assert result.strategic_core is fresh_upstream[BrandPhase.STRATEGIC_CORE]
     assert result.narrative_messaging is fresh_upstream[BrandPhase.NARRATIVE_MESSAGING]
     assert result.visual_identity is fresh_upstream[BrandPhase.VISUAL_IDENTITY]
+
+
+# ---------------------------------------------------------------------------
+# Story 2b Step 3: thread/Temporal confinement + cached-vs-cold output parity.
+# The Temporal path (temporal/activities.py) never calls `run` -- it calls
+# `run_single_phase` directly, a method with no `phase_cache` parameter -- so
+# there is no code path by which a cache could reach it; that structural
+# guarantee is exercised from the Temporal side in test_temporal_unit.py. This
+# test instead nails down the thread-path half of the contract: a cache-driven
+# run (whether populating an empty cache or fully reusing a warm one) must
+# produce a `TeamOutput` equal to a cold monolithic-graph run over the same
+# mission -- the cache may change *how much work* a run does, never *what it
+# produces*.
+# ---------------------------------------------------------------------------
+
+
+def test_run_with_phase_cache_matches_cold_monolithic_run() -> None:
+    """A cache miss run and a fully-cached hit run both equal a cold run's TeamOutput."""
+    mission = make_mission()
+    human_review = HumanReview(approved=True)
+
+    with _patch_graph_invoke(ALL_PHASES):
+        cold_orchestrator = BrandingTeamOrchestrator()
+        cold_result = cold_orchestrator.run(mission=mission, human_review=human_review)
+
+    cache = PhaseOutputCache()
+    miss_orchestrator = BrandingTeamOrchestrator()
+    with patch.object(
+        miss_orchestrator, "run_single_phase", side_effect=_run_single_phase_fixture_side_effect
+    ):
+        miss_result = miss_orchestrator.run(
+            mission=mission, human_review=human_review, phase_cache=cache
+        )
+
+    assert miss_result == cold_result
+
+    hit_orchestrator = BrandingTeamOrchestrator()
+    with patch.object(hit_orchestrator, "run_single_phase") as mock_run_single_phase:
+        hit_result = hit_orchestrator.run(
+            mission=mission, human_review=human_review, phase_cache=cache
+        )
+
+    mock_run_single_phase.assert_not_called()
+    assert hit_result == cold_result
