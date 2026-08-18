@@ -480,9 +480,9 @@ _ChunkReviewIssueCategory = Literal[
 class ChunkReviewIssueLLM(BaseModel):
     """Narrow LLM-authored shape for one issue in a chunk-review response.
 
-    Schema for ``chunk_reviewer._run_chunk_review`` to validate replies via
-    ``llm_service.complete_validated`` (see ``llm_service``'s README, "When to use which
-    entrypoint"). This is the raw per-issue shape the model is asked to
+    Schema for ``chunk_reviewer._parse_chunk_review_response`` to validate
+    replies via ``ChunkReviewLLMResponse.model_validate``. This is the raw
+    per-issue shape the model is asked to
     emit — distinct from the persisted :class:`CodeReviewIssue`, which
     additionally range-validates ``line``/``start_line`` against the cited
     file segment and resolves ``file_path`` against the chunk. That
@@ -560,20 +560,22 @@ class ChunkReviewIssueLLM(BaseModel):
 class ChunkReviewLLMResponse(BaseModel):
     """Narrow LLM-authored shape for one chunk-review call's response.
 
-    ``chunk_reviewer._run_chunk_review`` validates every chunk-review reply
-    against this model via ``llm_service.complete_validated``, replacing the
-    hand-rolled ``.get()``/``str()``/``bool()`` coercions the reviewer used to
-    apply to a raw ``complete_json_with_continuation`` reply.
+    ``chunk_reviewer._parse_chunk_review_response`` validates every
+    chunk-review reply against this model via
+    ``ChunkReviewLLMResponse.model_validate``, replacing the hand-rolled
+    ``.get()``/``str()``/``bool()`` coercions the reviewer used to apply to a
+    raw ``complete_json_with_continuation`` reply.
 
     All four fields are required, not defaulted: the chunk-review prompt's
-    own output-contract reminder (``FINAL_OUTPUT_CONTRACT_NOTE`` in
-    chunk_reviewer.py) explicitly tells the model to always emit exactly
-    these four keys, so a reply missing one is a truncated/malformed
+    own output-contract reminder explicitly tells the model to always emit
+    exactly these four keys, so a reply missing one is a truncated/malformed
     response, not a legitimately empty field. Defaulting them here would
     reproduce the hand-parser's permissive ``.get(..., default)`` fallbacks
     in the one place meant to demonstrate the opposite — a missing field
-    must fail validation and drive ``complete_validated``'s corrective
-    retry, not silently look like a clean, empty-issue approval.
+    must fail validation and raise ``LLMSchemaValidationError``, not
+    silently look like a clean, empty-issue approval. No local corrective
+    retry: the coordinator's chunk-level recovery (``mapping.py``) is the
+    retry layer for a rejected reply.
 
     ``approved`` must agree with whether the issues list carries an
     actionable critical/high finding, in both directions -- exactly the

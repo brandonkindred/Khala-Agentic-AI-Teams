@@ -265,16 +265,19 @@ rely on the unconstrained `json_object` + prompt-embedded-schema contract.
 `llm_service.CacheBreakpoint(text)` marks a stable prompt-prefix segment (a
 spec excerpt, a persona/standards block, ...) as safe to send as a
 provider-side cached prefix. On its own it is inert — pure data, no I/O, no
-provider call. To have it actually reach the wire, a prompt builder places it
-directly in a Strands agent's structured `system_prompt_content` list, e.g.
+provider call. To have it actually reach the wire, it must end up in the
+`system_prompt_content` list `LLMClientModel.stream()` receives, e.g. calling
+the model directly:
 
 ```python
 from llm_service import CacheBreakpoint
 
-agent = Agent(
-    model=model,
-    system_prompt_content=[CacheBreakpoint(stable_spec_excerpt), "\n\n" + rest_of_persona],
-)
+async for event in model.stream(
+    messages=messages,
+    system_prompt="rest of the persona",
+    system_prompt_content=[CacheBreakpoint(stable_spec_excerpt)],
+):
+    ...
 ```
 
 `LLMClientModel.stream()` recognizes a `CacheBreakpoint` in that list and, when
@@ -285,9 +288,34 @@ the marked segment. For every other backing client (or when no
 `CacheBreakpoint` is present at all), the marker is flattened to its plain
 `.text` exactly as before — a documented no-op: identical output, no error.
 
+**A Strands `Agent` caller passes this through its public `system_prompt=`
+constructor argument, as a list.** `Agent.__init__` accepts `system_prompt:
+str | list[SystemContentBlock] | None` — never a separate
+`system_prompt_content=` argument. Strands splits either shape via
+`strands.types.content.split_system_prompt` (called both at `Agent`
+construction and again by the event loop on every turn), which does
+`block["text"] for block in system_prompt if "text" in block` and returns the
+list unchanged as the structured-content result. `CacheBreakpoint` duck-types
+as a single-key `{"text": ...}` mapping (`__contains__`/`__getitem__`)
+specifically so it satisfies that check and survives Strands' internal
+processing intact — no private-attribute workaround needed:
+
+```python
+agent = Agent(
+    model=model,
+    system_prompt=[{"text": "rest of the persona"}, CacheBreakpoint(stable_spec_excerpt)],
+)
+```
+
+`code_review_agent.via_reasoning._build_reasoning_agent_system_prompt` (used
+by `run_agent_via_reasoning`'s `system_prompt_content` parameter) is a worked,
+tested example of building this combined list — the chunk-review map-phase
+call adopted it this way to mark its shared spec/architecture/existing-code
+prefix as a cache breakpoint. Follow that pattern for any other `Agent`-based
+caller.
+
 Only `system_prompt_content` is honored today; a `CacheBreakpoint` in a
-message turn, or adoption at any real prompt-builder call site, is out of
-scope for this mechanism (tracked separately).
+message turn is out of scope for this mechanism (tracked separately).
 
 Cache-hit token accounting is recorded automatically: `LLMCallRecord` (and the
 `llm_call_records` Postgres table the usage flusher writes to) carry

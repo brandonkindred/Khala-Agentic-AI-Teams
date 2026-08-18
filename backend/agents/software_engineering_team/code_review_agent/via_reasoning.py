@@ -412,6 +412,46 @@ def complete_validated_via_reasoning_local(
     )
 
 
+def _build_reasoning_agent_system_prompt(
+    reasoning_system_prompt: str, system_prompt_content: list[Any] | None
+) -> "str | list[Any]":
+    """Combine the persona text with extra system-content segments, if any.
+
+    Strands' ``Agent`` accepts ``system_prompt`` as either a plain ``str`` or
+    a ``list[SystemContentBlock]`` — never both separately — and splits
+    either shape via ``strands.types.content.split_system_prompt`` (called
+    both at ``Agent`` construction and again by the event loop on every
+    turn), which does ``block["text"] for block in system_prompt if "text"
+    in block`` and returns the list unchanged as its structured-content
+    result. A ``CacheBreakpoint`` satisfies that dict-like access (see
+    ``llm_service.CacheBreakpoint.__contains__``/``__getitem__``), so placing
+    one directly in this list — via the public ``Agent(system_prompt=...)``
+    constructor, no private-attribute reach-around needed — is exactly how a
+    cache-breakpoint-marked segment reaches ``Model.stream()``.
+
+    Preconditions:
+        ``reasoning_system_prompt`` is non-empty (already enforced by
+        ``run_agent_via_reasoning``). ``system_prompt_content`` is
+        ``None``/``[]``, or a non-empty list of system-content segments
+        (``CacheBreakpoint`` instances, dict blocks, or strings) — the same
+        shapes ``strands_adapter._system_prompt_content_segments`` accepts.
+
+    Postconditions:
+        ``system_prompt_content`` falsy: returns ``reasoning_system_prompt``
+        unchanged (a plain ``str``) — every caller that never passes
+        ``system_prompt_content`` gets byte-identical behavior to before this
+        parameter existed. Otherwise returns
+        ``[{"text": reasoning_system_prompt}] + system_prompt_content`` — the
+        persona wrapped as a native text block, followed by the extra
+        segments in order, so a ``CacheBreakpoint`` among them survives
+        Strands' internal processing with the persona kept as its own
+        leading block (not concatenated into the cached segment's text).
+    """
+    if not system_prompt_content:
+        return reasoning_system_prompt
+    return [{"text": reasoning_system_prompt}, *system_prompt_content]
+
+
 def run_agent_via_reasoning(
     *,
     model: Any,
@@ -421,6 +461,7 @@ def run_agent_via_reasoning(
     parse: Callable[[str], T],
     tools: list | None = None,
     reasoning_think: bool | str | None = True,
+    system_prompt_content: list[Any] | None = None,
     formatting_system_prompt: str | None = None,
     agent_key: str = "code_review",
     conversation_manager: Any | None = None,
@@ -453,6 +494,9 @@ def run_agent_via_reasoning(
         and the formatting pass's raw reply (JSON text, the unparsed body
         when ``complete_json`` raises ``LLMJsonParseError``, or
         ``partial_content`` when it raises ``LLMTruncatedError``).
+        ``system_prompt_content``, when given, is a non-empty list of
+        system-content segments (see :func:`_build_reasoning_agent_system_prompt`)
+        attached to the reasoning ``Agent`` only — never the formatting pass.
 
     Postconditions:
         Returns ``parse``'s result. Tools are attached only to call 1.
@@ -467,7 +511,12 @@ def run_agent_via_reasoning(
         call. ``on_formatting`` is invoked after that call returns or raises
         ``LLMJsonParseError`` / ``LLMTruncatedError`` (so a malformed or
         truncated reply is still observable) and before ``parse``; observer
-        exceptions are swallowed.
+        exceptions are swallowed. When ``system_prompt_content`` is given, the
+        reasoning ``Agent``'s system content is the persona text plus those
+        segments, in order (see :func:`_build_reasoning_agent_system_prompt`);
+        omitted (the default, and every caller as of this parameter's
+        introduction), behavior is unchanged from before this parameter
+        existed.
     """
     _require_non_empty("reasoning_prompt", reasoning_prompt)
     _require_non_empty("reasoning_system_prompt", reasoning_system_prompt)
@@ -481,7 +530,9 @@ def run_agent_via_reasoning(
     )
     reasoning_agent_kwargs: dict[str, Any] = {
         "model": text_model,
-        "system_prompt": reasoning_system_prompt,
+        "system_prompt": _build_reasoning_agent_system_prompt(
+            reasoning_system_prompt, system_prompt_content
+        ),
         "tools": tools or [],
     }
     if conversation_manager is not None:

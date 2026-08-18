@@ -1,9 +1,22 @@
 """Tests for Code Review Chunk Reviewer.
 
-``ChunkReviewAgent`` uses a two-call via-reasoning path: ``complete`` for prose
-review (with thinking), then ``complete_json`` for schema-validated formatting
-(with thinking off). Uses ``DummyLLMClient`` subclasses instead of
-``MagicMock`` so the injected client behaves like a real ``LLMClient``.
+``ChunkReviewAgent`` runs a two-call via-reasoning split through
+``run_agent_via_reasoning`` (a Strands ``Agent`` for the reasoning pass with
+thinking, then ``complete_json`` for schema-validated formatting with
+thinking off). Uses ``DummyLLMClient`` subclasses instead of ``MagicMock`` so
+the injected client behaves like a real ``LLMClient``; both passes land on
+``complete_json`` now (the reasoning pass reaches it via the Strands Agent's
+``chat()`` delegation), so doubles route by call order rather than by
+overriding ``complete``/``complete_json`` separately.
+
+Prompt-*assembly* tests (what content chunk review builds, and whether the
+shared spec/architecture/existing-code prefix is marked as a cache
+breakpoint) monkeypatch ``run_agent_via_reasoning`` directly and inspect its
+captured kwargs — this checks exactly what chunk review constructs without
+depending on Strands/DummyLLMClient plumbing. End-to-end tests (the two-call
+split, think overrides, error propagation, response field pass-through) let
+the real ``run_agent_via_reasoning`` execute against a ``DummyLLMClient``
+double.
 """
 
 from __future__ import annotations
@@ -12,55 +25,44 @@ from typing import Any, Dict, Optional, Union
 
 import pytest
 from code_review_agent.chunk_reviewer import (
-    CODE_TO_REVIEW_HEADER,
     ChunkReviewAgent,
     _build_shared_review_prefix,
 )
-from code_review_agent.models import ChunkReviewInput, ChunkReviewOutput
+from code_review_agent.models import ChunkReviewInput, ChunkReviewLLMResponse, ChunkReviewOutput
 from code_review_agent.profiles import build_review_reasoning_system_prompt
 
-from llm_service import LLMJsonParseError, LLMSchemaValidationError
+from llm_service import CacheBreakpoint, LLMJsonParseError, LLMSchemaValidationError
 from llm_service.clients.dummy import DummyLLMClient
 
 
 class _TwoCallStub(DummyLLMClient):
-    """DummyLLMClient returning canned prose then a ChunkReviewLLMResponse-shaped dict."""
+    """DummyLLMClient returning canned prose then a ChunkReviewLLMResponse-shaped dict.
+
+    Both the reasoning pass (reached via the Strands Agent's ``chat()``
+    delegation) and the formatting pass (a direct ``complete_json`` call from
+    ``run_agent_via_reasoning``) land on ``complete_json`` now, routed by call
+    order — mirrors ``test_code_review_synthesis.py``'s ``_SynthesisTwoCallStub``.
+    """
 
     def __init__(self, canned: Dict[str, Any], prose: str = "prose review") -> None:
         super().__init__()
         self._canned = canned
         self._prose = prose
-        self.complete_calls: list[dict[str, Any]] = []
-        self.complete_json_calls: list[dict[str, Any]] = []
-
-    def complete(
-        self,
-        prompt: str,
-        *,
-        objective: str,
-        think: Optional[Union[bool, str]] = None,
-        system_prompt: Optional[str] = None,
-        **kwargs: Any,
-    ) -> str:
-        self.complete_calls.append(
-            {
-                "prompt": prompt,
-                "objective": objective,
-                "think": think,
-                "system_prompt": system_prompt,
-            }
-        )
-        return self._prose
+        self.complete_json_calls: list[Dict[str, Any]] = []
 
     def complete_json(
         self,
         prompt: str,
         *,
-        objective: str,
+        objective: str = "dummy",
         think: Optional[Union[bool, str]] = None,
         **kwargs: Any,
-    ) -> Dict[str, Any]:
-        self.complete_json_calls.append({"prompt": prompt, "objective": objective, "think": think})
+    ) -> Any:
+        self.complete_json_calls.append(
+            {"prompt": prompt, "objective": objective, "think": think, **kwargs}
+        )
+        if len(self.complete_json_calls) == 1:
+            return self._prose
         return self._canned
 
 
@@ -79,103 +81,71 @@ def _chunk_input(**overrides: Any) -> ChunkReviewInput:
     return ChunkReviewInput(**base)  # type: ignore[arg-type]
 
 
-class _NonJsonClient(DummyLLMClient):
-    """DummyLLMClient whose reasoning pass succeeds but formatting cannot produce
-    parseable JSON — matching the real ``LLMClient`` contract."""
+def _capture_run_agent_via_reasoning(monkeypatch: pytest.MonkeyPatch) -> list[Dict[str, Any]]:
+    """Monkeypatch ``run_agent_via_reasoning`` to record each call's kwargs.
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        return "prose review"
+    Preconditions:
+        ``monkeypatch`` is the active pytest fixture.
+
+    Postconditions:
+        Returns a list that accumulates one kwargs dict per
+        ``run_agent_via_reasoning`` call, in call order. Each call returns a
+        canned, schema-valid ``ChunkReviewLLMResponse`` without touching any
+        real LLM/Strands machinery — for tests that only care what
+        ``_run_chunk_review`` constructs and passes, not how it executes.
+    """
+    calls: list[Dict[str, Any]] = []
+
+    def _fake(**kwargs: Any) -> ChunkReviewLLMResponse:
+        calls.append(kwargs)
+        return ChunkReviewLLMResponse(
+            approved=True, issues=[], summary="ok", spec_compliance_notes=""
+        )
+
+    monkeypatch.setattr("code_review_agent.chunk_reviewer.run_agent_via_reasoning", _fake)
+    return calls
+
+
+class _NonJsonClient(DummyLLMClient):
+    """Reasoning pass succeeds; formatting pass cannot produce parseable JSON --
+    matching the real ``LLMClient`` contract."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Any:
+        self.calls += 1
+        if self.calls == 1:
+            return "prose review"
         raise LLMJsonParseError(
             "I could not produce the requested JSON object.",
             response_preview="I could not produce the requested JSON object.",
         )
 
 
-class _FailsOnceThenValidClient(DummyLLMClient):
-    """First ``complete_json`` call raises a parse error; the corrective retry
-    ``complete_validated`` issues returns a valid ``ChunkReviewLLMResponse``."""
-
-    def __init__(self, canned: Dict[str, Any]) -> None:
-        super().__init__()
-        self._canned = canned
-        self.calls = 0
-
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        return "prose review"
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> Any:
-        self.calls += 1
-        if self.calls == 1:
-            raise LLMJsonParseError("not json", response_preview="not json at all")
-        return self._canned
-
-
-def test_chunk_review_records_each_retry_attempt_in_transcript(monkeypatch) -> None:
-    """A chunk review that needed a corrective retry must record BOTH the
-    failed initial attempt and the successful retry as separate transcript
-    entries -- recording only the final successful attempt would silently
-    drop the initial (malformed) reply and the corrective prompt that
-    followed it, even though both are real LLM calls the pipeline made."""
-    from llm_service import llm_attribution
-
-    canned = {
-        "approved": True,
-        "issues": [],
-        "summary": "ok",
-        "spec_compliance_notes": "",
-    }
-    client = _FailsOnceThenValidClient(canned)
-
-    captured: list = []
-    monkeypatch.setattr(
-        "code_review_agent.chunk_reviewer.record_transcript_entry",
-        lambda *args, **kwargs: captured.append((args, kwargs)),
-    )
-
-    agent = ChunkReviewAgent(llm=client)
-    with llm_attribution(job_id="job-1"):
-        result = agent.run(_chunk_input())
-
-    assert isinstance(result, ChunkReviewOutput)
-    assert client.calls == 2
-    # Reasoning complete() plus the failed formatting attempt plus the
-    # successful corrective retry — three real LLM calls.
-    assert len(captured) == 3
-    assert CODE_TO_REVIEW_HEADER in captured[0][0][2]
-    first_prompt, first_response = captured[1][0][2], captured[1][0][3]
-    second_prompt, second_response = captured[2][0][2], captured[2][0][3]
-    # First formatting entry: the format prompt and the failed attempt's raw
-    # (unparseable) response.
-    assert first_response == "not json at all"
-    # Second formatting entry: the corrective prompt (embeds the parse error
-    # and the previous reply) and the final valid JSON — and it must differ
-    # from the first attempt's prompt, proving this isn't the same entry
-    # recorded twice.
-    assert second_prompt != first_prompt
-    assert "not json" in second_prompt
-    assert "approved" in second_response
-    from code_review_agent.via_reasoning import formatting_system_prompt_with_untrusted_guard
-
-    format_system = formatting_system_prompt_with_untrusted_guard(None)
-    assert captured[0][1]["system_prompt"] != format_system
-    assert captured[1][1]["system_prompt"] == format_system
-    assert captured[2][1]["system_prompt"] == format_system
-
-
-def test_chunk_review_reasoning_continuations_keep_reasoning_system_prompt(
+def test_chunk_review_records_reasoning_and_formatting_transcript_entries(
     monkeypatch,
 ) -> None:
-    """Reasoning ``complete`` may record multiple inner HTTP turns. Those
-    callbacks must keep the reasoning system prompt; only turns after
-    ``on_formatting_start`` use the formatting guard."""
+    """The transcript records the reasoning pass with the reasoning system
+    prompt and the formatting call with the formatting guard.
+
+    Mirrors ``test_synthesize_records_reasoning_conversation_in_transcript``'s
+    contract: the reasoning-pass entry (or entries) reflect whatever
+    ``transcript.record_reasoning_transcript_turns`` observed -- individual
+    inner HTTP continuation turns when the Strands adapter recorded them on
+    this context, otherwise one entry summarizing the reasoning ``Agent``'s
+    conversation. This call path runs the reasoning pass inside the Strands
+    ``Agent``'s own async event loop, whose task gets its own copied
+    ``contextvars`` context, so turns a client records via
+    ``record_complete_json_turn`` during that call are not guaranteed
+    visible back on the synchronous caller's context afterward -- the
+    fallback path exists precisely for this, so this test does not assume
+    which path is taken."""
     from code_review_agent.via_reasoning import formatting_system_prompt_with_untrusted_guard
 
     from llm_service import llm_attribution
-    from llm_service.interface import record_complete_json_turn, reset_complete_json_observer_state
 
-    reset_complete_json_observer_state()
     canned = {
         "approved": True,
         "issues": [],
@@ -183,13 +153,15 @@ def test_chunk_review_reasoning_continuations_keep_reasoning_system_prompt(
         "spec_compliance_notes": "",
     }
 
-    class _ReasoningContinuationClient(DummyLLMClient):
-        def complete(self, prompt: str, **kwargs: Any) -> str:
-            record_complete_json_turn("reasoning turn 1", "PARTIAL")
-            record_complete_json_turn("reasoning turn 2", " REST")
-            return "PARTIAL REST"
+    class _ReasoningClient(DummyLLMClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        def complete_json(self, prompt: str, **kwargs: Any) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                return "prose review"
             return canned
 
     captured: list = []
@@ -198,29 +170,30 @@ def test_chunk_review_reasoning_continuations_keep_reasoning_system_prompt(
         lambda *args, **kwargs: captured.append((args, kwargs)),
     )
 
-    agent = ChunkReviewAgent(llm=_ReasoningContinuationClient())
+    agent = ChunkReviewAgent(llm=_ReasoningClient())
     with llm_attribution(job_id="job-1"):
         agent.run(_chunk_input())
 
     format_system = formatting_system_prompt_with_untrusted_guard(None)
     reasoning_system = build_review_reasoning_system_prompt("code_review")
-    assert len(captured) == 3
-    assert captured[0][0][2] == "reasoning turn 1"
-    assert captured[1][0][2] == "reasoning turn 2"
-    assert captured[0][1]["system_prompt"] == reasoning_system
-    assert captured[1][1]["system_prompt"] == reasoning_system
-    assert captured[2][1]["system_prompt"] == format_system
+    assert len(captured) >= 2
+    *reasoning_entries, formatting_entry = captured
+    assert reasoning_entries
+    for entry in reasoning_entries:
+        assert entry[1]["system_prompt"] == reasoning_system
+    assert formatting_entry[1]["system_prompt"] == format_system
+    assert "ok" in formatting_entry[0][3]
 
 
 def test_chunk_review_raises_llm_json_parse_error_on_non_json_model_output() -> None:
-    """When the injected client's ``complete_json`` cannot produce parseable
-    JSON on any of ``complete_validated``'s attempts, ``LLMJsonParseError``
-    propagates unchanged out of ``_run_chunk_review``.
+    """When the injected client's formatting ``complete_json`` cannot produce
+    parseable JSON, ``LLMJsonParseError`` propagates unchanged out of
+    ``_run_chunk_review``.
 
     This guards the coupling in ``mapping._CONTENT_FAILURE_TYPES``, which lists
     ``LLMJsonParseError`` precisely because this call path can raise it: if the
-    reviewer stopped calling ``complete_validated``/``llm.complete_json`` and
-    raised something else instead, that classification would silently stop
+    reviewer stopped calling ``run_agent_via_reasoning``/``llm.complete_json``
+    and raised something else instead, that classification would silently stop
     matching -- this test fails loudly instead.
     """
     agent = ChunkReviewAgent(llm=_NonJsonClient())
@@ -229,23 +202,27 @@ def test_chunk_review_raises_llm_json_parse_error_on_non_json_model_output() -> 
 
 
 class _NonObjectJsonClient(DummyLLMClient):
-    """DummyLLMClient whose formatting pass returns well-formed but non-object JSON."""
+    """Reasoning pass succeeds; formatting pass returns well-formed but
+    non-object JSON."""
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        return "prose review"
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Any:
+        self.calls += 1
+        if self.calls == 1:
+            return "prose review"
         return ["not", "an", "object"]
 
 
 def test_chunk_review_raises_llm_schema_validation_error_on_non_object_json_response() -> None:
     """A validly-parsed but non-object JSON response (e.g. a bare list) must
-    raise ``LLMSchemaValidationError`` once ``complete_validated`` exhausts its
-    corrective retry (the fake client returns the same value every time) --
-    not crash with an unclassified error. ``mapping.py``'s
-    ``_CONTENT_FAILURE_TYPES`` already classifies ``LLMSchemaValidationError``
-    as a recoverable content failure alongside ``LLMJsonParseError``, so this
-    still degrades gracefully like any other malformed response.
+    raise ``LLMSchemaValidationError`` -- not crash with an unclassified
+    error. ``mapping.py``'s ``_CONTENT_FAILURE_TYPES`` already classifies
+    ``LLMSchemaValidationError`` as a recoverable content failure alongside
+    ``LLMJsonParseError``, so this still degrades gracefully like any other
+    malformed response.
     """
     agent = ChunkReviewAgent(llm=_NonObjectJsonClient())
     with pytest.raises(LLMSchemaValidationError):
@@ -294,58 +271,34 @@ def test_chunk_review_agent_carries_file_path_from_issue() -> None:
     assert "One issue" in result.summary
 
 
-class _RecorderClient(DummyLLMClient):
-    """Delegates to Dummy but records reasoning (``complete``) prompts."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.prompts: list = []
-        self.format_prompts: list = []
-
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        self.prompts.append(prompt)
-        return super().complete(prompt, **kwargs)
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        self.format_prompts.append(prompt)
-        return super().complete_json(prompt, **kwargs)
-
-
-def test_segment_note_is_prepended_to_prompt() -> None:
+def test_segment_note_is_prepended_to_prompt(monkeypatch) -> None:
     """A segment note is rendered under a ``**Segment notes:**`` header and appears
     before the code-to-review section in the chunk prompt."""
-    client = _RecorderClient()
-    agent = ChunkReviewAgent(llm=client)
+    calls = _capture_run_agent_via_reasoning(monkeypatch)
     note = "app/main.py is shown only from original line 501 to 1000 (of 2400 total)."
-    agent.run(_chunk_input(segment_note=note))
-    assert len(client.prompts) == 1
-    prompt = client.prompts[0]
+    ChunkReviewAgent(llm=DummyLLMClient()).run(_chunk_input(segment_note=note))
+    prompt = calls[0]["reasoning_prompt"]
     assert "**Segment notes:**" in prompt
     assert note in prompt
     assert prompt.index(note) < prompt.index("Code to review")
 
 
-def test_no_segment_note_means_no_segment_section() -> None:
+def test_no_segment_note_means_no_segment_section(monkeypatch) -> None:
     """With no segment note, the prompt omits the ``**Segment notes:**`` section."""
-    client = _RecorderClient()
-    agent = ChunkReviewAgent(llm=client)
-    agent.run(_chunk_input())
-    assert "**Segment notes:**" not in client.prompts[0]
+    calls = _capture_run_agent_via_reasoning(monkeypatch)
+    ChunkReviewAgent(llm=DummyLLMClient()).run(_chunk_input())
+    assert "**Segment notes:**" not in calls[0]["reasoning_prompt"]
 
 
-def test_review_guardrails_note_is_in_every_prompt() -> None:
+def test_review_guardrails_note_is_in_every_prompt(monkeypatch) -> None:
     """The anti-false-positive guardrails (no phantom truncation, don't flag
     existing files as missing, defer cross-caller checks to the side-effect
     pass, relative imports are conventional) are injected into the per-chunk
     user prompt (not the byte-locked system prompt).
-
-    Precondition: a ChunkReviewAgent is instantiated and run once, so exactly one
-    prompt is recorded for inspection.
     """
-    client = _RecorderClient()
-    agent = ChunkReviewAgent(llm=client)
-    agent.run(_chunk_input())
-    prompt = client.prompts[0]
+    calls = _capture_run_agent_via_reasoning(monkeypatch)
+    ChunkReviewAgent(llm=DummyLLMClient()).run(_chunk_input())
+    prompt = calls[0]["reasoning_prompt"]
     assert "**Review guardrails" in prompt
     # Full sentences, not bare substrings, so a stray unrelated occurrence of
     # "COMPLETE" or "does not exist" elsewhere in the prompt can't false-pass.
@@ -358,26 +311,26 @@ def test_review_guardrails_note_is_in_every_prompt() -> None:
     assert "from .models import" in prompt  # relative imports are conventional
 
 
-def test_user_decisions_rendered_as_settled_in_prompt() -> None:
+def test_user_decisions_rendered_as_settled_in_prompt(monkeypatch) -> None:
     """A resolved user decision is surfaced to the reviewer as settled so it is never flagged
     as an open/unanswered question."""
-    client = _RecorderClient()
-    agent = ChunkReviewAgent(llm=client)
-    agent.run(_chunk_input(user_decisions=["Which auth? → OAuth2 (Google)"]))
-    prompt = client.prompts[0]
+    calls = _capture_run_agent_via_reasoning(monkeypatch)
+    ChunkReviewAgent(llm=DummyLLMClient()).run(
+        _chunk_input(user_decisions=["Which auth? → OAuth2 (Google)"])
+    )
+    prompt = calls[0]["reasoning_prompt"]
     assert "User decisions already made" in prompt
     assert "Which auth? → OAuth2 (Google)" in prompt
 
 
-def test_no_user_decisions_means_no_decisions_section() -> None:
+def test_no_user_decisions_means_no_decisions_section(monkeypatch) -> None:
     """With no user decisions, the prompt omits the settled-decisions section."""
-    client = _RecorderClient()
-    agent = ChunkReviewAgent(llm=client)
-    agent.run(_chunk_input())
-    assert "User decisions already made" not in client.prompts[0]
+    calls = _capture_run_agent_via_reasoning(monkeypatch)
+    ChunkReviewAgent(llm=DummyLLMClient()).run(_chunk_input())
+    assert "User decisions already made" not in calls[0]["reasoning_prompt"]
 
 
-def test_code_chunk_is_never_compacted() -> None:
+def test_code_chunk_is_never_compacted(monkeypatch) -> None:
     """The coordinator bounds the chunk; the reviewer must send it verbatim.
     A chunk above the map budget is logged but not truncated, so a sentinel at
     the very end must survive into the prompt."""
@@ -385,15 +338,14 @@ def test_code_chunk_is_never_compacted() -> None:
         compute_code_review_map_chunk_chars,
     )
 
-    client = _RecorderClient()
-    budget = compute_code_review_map_chunk_chars(client)
+    budget = compute_code_review_map_chunk_chars(DummyLLMClient())
     sentinel = "UNIQUE_TAIL_SENTINEL_42"
     chunk = ("x = 1\n" * ((budget // 6) + 200)) + sentinel
     assert len(chunk) > budget
 
-    agent = ChunkReviewAgent(llm=client)
-    agent.run(_chunk_input(code_chunk=chunk))
-    assert sentinel in client.prompts[0]
+    calls = _capture_run_agent_via_reasoning(monkeypatch)
+    ChunkReviewAgent(llm=DummyLLMClient()).run(_chunk_input(code_chunk=chunk))
+    assert sentinel in calls[0]["reasoning_prompt"]
 
 
 def test_new_output_fields_are_parsed_through() -> None:
@@ -415,12 +367,10 @@ def test_new_output_fields_are_parsed_through() -> None:
 
 def test_missing_new_output_fields_raise_schema_validation_error() -> None:
     """``ChunkReviewLLMResponse`` requires all four top-level fields (no
-    defaults): a reply missing ``spec_compliance_notes`` fails validation.
-    ``complete_validated`` retries once with a corrective prompt, but
-    ``_StubClient`` always returns the same canned (still-incomplete) payload
-    regardless of prompt, so the retry fails identically and
-    ``LLMSchemaValidationError`` is raised -- replacing the old hand-rolled
-    parser's silent ``.get(..., "")`` default."""
+    defaults): a reply missing ``spec_compliance_notes`` fails validation,
+    raising ``LLMSchemaValidationError`` -- replacing the old hand-rolled
+    parser's silent ``.get(..., "")`` default. No local corrective retry:
+    the coordinator's chunk-level recovery is the retry layer now."""
     agent = ChunkReviewAgent(llm=_TwoCallStub({"approved": True, "issues": [], "summary": "ok"}))
     with pytest.raises(LLMSchemaValidationError):
         agent.run(_chunk_input())
@@ -494,44 +444,43 @@ def test_chunk_review_agent_passes_blank_file_path_through_unchanged() -> None:
     assert result.issues[0]["severity"] == "high"
 
 
-def test_declared_language_reaches_prompt_without_heuristic() -> None:
+def test_declared_language_reaches_prompt_without_heuristic(monkeypatch) -> None:
     """The caller's language is used verbatim; the extension-based fallback only
     applies when no language was declared."""
-    client = _RecorderClient()
-    agent = ChunkReviewAgent(llm=client)
-    agent.run(_chunk_input(code_chunk="TIMEOUT = 30", language="python"))
-    assert "**Language:** python" in client.prompts[0]
+    calls = _capture_run_agent_via_reasoning(monkeypatch)
+    ChunkReviewAgent(llm=DummyLLMClient()).run(
+        _chunk_input(code_chunk="TIMEOUT = 30", language="python")
+    )
+    assert "**Language:** python" in calls[0]["reasoning_prompt"]
 
     # No language declared: falls back to the ".py" extension of the default
     # file_path_or_label ("app/main.py"), not a "typescript" guess.
-    fallback_client = _RecorderClient()
-    ChunkReviewAgent(llm=fallback_client).run(_chunk_input(code_chunk="TIMEOUT = 30"))
-    assert "**Language:** python" in fallback_client.prompts[0]
+    ChunkReviewAgent(llm=DummyLLMClient()).run(_chunk_input(code_chunk="TIMEOUT = 30"))
+    assert "**Language:** python" in calls[1]["reasoning_prompt"]
 
 
-def test_undeclared_language_falls_back_to_typescript_for_non_python_path() -> None:
+def test_undeclared_language_falls_back_to_typescript_for_non_python_path(monkeypatch) -> None:
     """A chunk with no declared language and a non-Python file extension still
     falls back to "typescript" — the extension-based guess only recognizes
     .py/.pyi as Python."""
-    client = _RecorderClient()
-    ChunkReviewAgent(llm=client).run(
+    calls = _capture_run_agent_via_reasoning(monkeypatch)
+    ChunkReviewAgent(llm=DummyLLMClient()).run(
         _chunk_input(file_path_or_label="app/app.component.ts", language="")
     )
-    assert "**Language:** typescript" in client.prompts[0]
+    assert "**Language:** typescript" in calls[0]["reasoning_prompt"]
 
 
-def test_reasoning_prompt_omits_final_output_contract_note() -> None:
+def test_reasoning_prompt_omits_final_output_contract_note(monkeypatch) -> None:
     """The via-reasoning path sends prose on call 1; the JSON contract note must
     not appear in the reasoning user prompt (formatting owns JSON on call 2)."""
-    client = _RecorderClient()
-    ChunkReviewAgent(llm=client).run(_chunk_input())
-    prompt = client.prompts[0]
-    assert "Respond with ONLY the single JSON object" not in prompt
+    calls = _capture_run_agent_via_reasoning(monkeypatch)
+    ChunkReviewAgent(llm=DummyLLMClient()).run(_chunk_input())
+    assert "Respond with ONLY the single JSON object" not in calls[0]["reasoning_prompt"]
 
 
 def test_chunk_review_uses_two_call_via_reasoning_path() -> None:
-    """``run()`` issues ``complete`` then ``complete_json`` with the expected think
-    flags and split system prompts."""
+    """``run()`` issues the reasoning call then the formatting call with the
+    expected think flags and split system prompts."""
     canned = {
         "approved": True,
         "issues": [],
@@ -540,30 +489,33 @@ def test_chunk_review_uses_two_call_via_reasoning_path() -> None:
     }
     client = _TwoCallStub(canned)
     ChunkReviewAgent(llm=client).run(_chunk_input())
-    assert len(client.complete_calls) == 1
-    assert len(client.complete_json_calls) == 1
-    reasoning_system = client.complete_calls[0]["system_prompt"] or ""
+    assert len(client.complete_json_calls) == 2
+    reasoning_call, format_call = client.complete_json_calls
+    reasoning_system = reasoning_call.get("system_prompt") or ""
     assert "Return a single JSON object" not in reasoning_system
-    assert "Respond with ONLY the single JSON object" not in client.complete_calls[0]["prompt"]
-    assert client.complete_calls[0]["think"] is True
-    assert client.complete_json_calls[0]["think"] is False
+    assert "Respond with ONLY the single JSON object" not in reasoning_call["prompt"]
+    assert reasoning_call["think"] is True
+    assert format_call["think"] is False
     assert build_review_reasoning_system_prompt("code_review") in reasoning_system
 
 
 class _ThinkRecorderClient(DummyLLMClient):
-    """Records ``think`` on both the reasoning and formatting calls."""
+    """Records ``think`` on both the reasoning and formatting calls, which
+    alternate strictly (reasoning, formatting, reasoning, formatting, ...)
+    across successive ``ChunkReviewAgent.run`` calls."""
 
     def __init__(self) -> None:
         super().__init__()
         self.reasoning_think_values: list = []
         self.format_think_values: list = []
-
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        self.reasoning_think_values.append(kwargs.get("think"))
-        return super().complete(prompt, **kwargs)
+        self.calls = 0
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        self.format_think_values.append(kwargs.get("think"))
+        self.calls += 1
+        if self.calls % 2 == 1:
+            self.reasoning_think_values.append(kwargs.get("think"))
+        else:
+            self.format_think_values.append(kwargs.get("think"))
         return super().complete_json(prompt, **kwargs)
 
 
@@ -580,70 +532,74 @@ def test_run_forwards_think_override() -> None:
     assert client.format_think_values[-1] is False
 
 
-def test_shared_context_is_passed_through_in_full() -> None:
-    """Spec/arch/existing excerpts are forwarded verbatim — no hard cap, no
-    extra LLM compaction calls — so an upstream compaction failure cannot
-    silently drop context from the chunk prompt."""
+def test_shared_context_is_passed_through_in_full(monkeypatch) -> None:
+    """An oversized spec excerpt is forwarded verbatim into the cache-breakpoint
+    system content — no hard cap, no extra LLM compaction calls — so an
+    upstream compaction failure cannot silently drop context from the chunk
+    review."""
     from software_engineering_team.shared.context_sizing import (
         compute_code_review_spec_excerpt_chars,
     )
 
-    client = _RecorderClient()
-    max_spec = compute_code_review_spec_excerpt_chars(client)
+    max_spec = compute_code_review_spec_excerpt_chars(DummyLLMClient())
     oversized_spec = ("S" * max_spec) + "TAIL_BEYOND_BUDGET"
-    agent = ChunkReviewAgent(llm=client)
-    agent.run(_chunk_input(spec_excerpt=oversized_spec))
-    assert len(client.prompts) == 1  # one reasoning call for this chunk
-    assert len(client.format_prompts) == 1
-    assert "TAIL_BEYOND_BUDGET" in client.prompts[0]
-    assert "S" * 100 in client.prompts[0]
+    calls = _capture_run_agent_via_reasoning(monkeypatch)
+    ChunkReviewAgent(llm=DummyLLMClient()).run(_chunk_input(spec_excerpt=oversized_spec))
+    [breakpoint_] = calls[0]["system_prompt_content"]
+    assert isinstance(breakpoint_, CacheBreakpoint)
+    assert "TAIL_BEYOND_BUDGET" in breakpoint_.text
+    assert "S" * 100 in breakpoint_.text
+    assert "TAIL_BEYOND_BUDGET" not in calls[0]["reasoning_prompt"]
 
 
-def test_architecture_overview_is_passed_through_in_full() -> None:
-    """An oversized architecture overview is forwarded verbatim — no hard cap
-    re-applied here — so a tail past the old budget still reaches the prompt."""
+def test_architecture_overview_is_passed_through_in_full(monkeypatch) -> None:
+    """An oversized architecture overview is forwarded verbatim into the
+    cache-breakpoint system content — no hard cap re-applied here — so a tail
+    past the old budget still reaches the model."""
     from software_engineering_team.shared.context_sizing import (
         compute_code_review_arch_overview_chars,
     )
 
-    client = _RecorderClient()
-    max_arch = compute_code_review_arch_overview_chars(client)
+    max_arch = compute_code_review_arch_overview_chars(DummyLLMClient())
     oversized_arch = ("A" * max_arch) + "TAIL_BEYOND_BUDGET"
-    agent = ChunkReviewAgent(llm=client)
-    agent.run(_chunk_input(architecture_overview=oversized_arch))
-    assert len(client.prompts) == 1
-    assert len(client.format_prompts) == 1
-    assert "TAIL_BEYOND_BUDGET" in client.prompts[0]
-    assert "A" * 100 in client.prompts[0]
+    calls = _capture_run_agent_via_reasoning(monkeypatch)
+    ChunkReviewAgent(llm=DummyLLMClient()).run(_chunk_input(architecture_overview=oversized_arch))
+    [breakpoint_] = calls[0]["system_prompt_content"]
+    assert "TAIL_BEYOND_BUDGET" in breakpoint_.text
+    assert "A" * 100 in breakpoint_.text
+    assert "TAIL_BEYOND_BUDGET" not in calls[0]["reasoning_prompt"]
 
 
-def test_existing_codebase_excerpt_is_passed_through_in_full() -> None:
-    """An oversized existing-codebase excerpt is forwarded verbatim — no hard
-    cap re-applied here — so a tail past the old budget still reaches the
-    prompt."""
+def test_existing_codebase_excerpt_is_passed_through_in_full(monkeypatch) -> None:
+    """An oversized existing-codebase excerpt is forwarded verbatim into the
+    cache-breakpoint system content — no hard cap re-applied here — so a tail
+    past the old budget still reaches the model."""
     from software_engineering_team.shared.context_sizing import (
         compute_code_review_existing_codebase_chars,
     )
 
-    client = _RecorderClient()
-    max_existing = compute_code_review_existing_codebase_chars(client)
+    max_existing = compute_code_review_existing_codebase_chars(DummyLLMClient())
     oversized_existing = ("E" * max_existing) + "TAIL_BEYOND_BUDGET"
-    agent = ChunkReviewAgent(llm=client)
-    agent.run(_chunk_input(existing_codebase_excerpt=oversized_existing))
-    assert len(client.prompts) == 1
-    assert len(client.format_prompts) == 1
-    assert "TAIL_BEYOND_BUDGET" in client.prompts[0]
-    assert "E" * 100 in client.prompts[0]
+    calls = _capture_run_agent_via_reasoning(monkeypatch)
+    ChunkReviewAgent(llm=DummyLLMClient()).run(
+        _chunk_input(existing_codebase_excerpt=oversized_existing)
+    )
+    [breakpoint_] = calls[0]["system_prompt_content"]
+    assert "TAIL_BEYOND_BUDGET" in breakpoint_.text
+    assert "E" * 100 in breakpoint_.text
+    assert "TAIL_BEYOND_BUDGET" not in calls[0]["reasoning_prompt"]
 
 
-def test_spec_compliance_single_pass_omits_acceptance_criteria_and_spec_excerpt() -> None:
+def test_spec_compliance_single_pass_omits_acceptance_criteria_and_spec_excerpt(
+    monkeypatch,
+) -> None:
     """When ``spec_compliance_single_pass`` is True (``CODE_REVIEW_SPEC_COMPLIANCE_PASS``
-    is on), the per-chunk prompt omits the acceptance-criteria/spec-excerpt blocks --
-    that content is now handled once, post-dedupe, by ``synthesize_spec_compliance`` --
-    but ``architecture_overview`` is unaffected, per ADR-010's contract boundary."""
-    client = _RecorderClient()
-    agent = ChunkReviewAgent(llm=client)
-    agent.run(
+    is on), the per-chunk prompt omits the acceptance-criteria block and the
+    cache-breakpoint system content omits the spec excerpt -- that content is
+    now handled once, post-dedupe, by ``synthesize_spec_compliance`` -- but
+    ``architecture_overview`` is unaffected, per ADR-010's contract boundary."""
+    calls = _capture_run_agent_via_reasoning(monkeypatch)
+    ChunkReviewAgent(llm=DummyLLMClient()).run(
         _chunk_input(
             spec_compliance_single_pass=True,
             acceptance_criteria=["Must validate input"],
@@ -651,32 +607,80 @@ def test_spec_compliance_single_pass_omits_acceptance_criteria_and_spec_excerpt(
             architecture_overview="ARCH_MARKER_TEXT",
         )
     )
-    assert len(client.prompts) == 1
-    prompt = client.prompts[0]
+    prompt = calls[0]["reasoning_prompt"]
     assert "Must validate input" not in prompt
-    assert "SPEC_MARKER_TEXT" not in prompt
     assert "**Acceptance criteria" not in prompt
-    assert "**Project specification" not in prompt
-    assert "ARCH_MARKER_TEXT" in prompt
+    assert "SPEC_MARKER_TEXT" not in prompt
+    [breakpoint_] = calls[0]["system_prompt_content"]
+    assert "**Project specification" not in breakpoint_.text
+    assert "SPEC_MARKER_TEXT" not in breakpoint_.text
+    assert "ARCH_MARKER_TEXT" in breakpoint_.text
 
 
-def test_spec_compliance_single_pass_default_false_keeps_legacy_rendering() -> None:
+def test_spec_compliance_single_pass_default_false_keeps_legacy_rendering(monkeypatch) -> None:
     """Default (``spec_compliance_single_pass`` unset/False) still renders the
-    acceptance-criteria/spec-excerpt blocks in the prompt, preserving the legacy
-    flag-off rendering -- the counterpart to the flag-on test above, which asserts
-    the same markers are absent."""
-    client = _RecorderClient()
-    agent = ChunkReviewAgent(llm=client)
-    agent.run(
+    acceptance-criteria block in the prompt and the spec excerpt in the
+    cache-breakpoint system content, preserving the legacy flag-off rendering
+    -- the counterpart to the flag-on test above, which asserts the same
+    markers are absent."""
+    calls = _capture_run_agent_via_reasoning(monkeypatch)
+    ChunkReviewAgent(llm=DummyLLMClient()).run(
         _chunk_input(
             acceptance_criteria=["Must validate input"],
             spec_excerpt="SPEC_MARKER_TEXT",
         )
     )
-    assert len(client.prompts) == 1
-    prompt = client.prompts[0]
-    assert "Must validate input" in prompt
-    assert "SPEC_MARKER_TEXT" in prompt
+    assert "Must validate input" in calls[0]["reasoning_prompt"]
+    [breakpoint_] = calls[0]["system_prompt_content"]
+    assert "SPEC_MARKER_TEXT" in breakpoint_.text
+
+
+def test_run_chunk_review_marks_shared_prefix_as_cache_breakpoint(monkeypatch) -> None:
+    """The spec/architecture/existing-code prefix is emitted as a single
+    ``CacheBreakpoint`` in ``system_prompt_content``, with per-chunk content
+    (the file label, in this case) present in the user-turn prompt instead --
+    the issue's explicit "breakpoint present on the map-phase request" AC."""
+    calls = _capture_run_agent_via_reasoning(monkeypatch)
+    ChunkReviewAgent(llm=DummyLLMClient()).run(
+        _chunk_input(
+            spec_excerpt="SPEC_TEXT",
+            architecture_overview="ARCH_TEXT",
+            existing_codebase_excerpt="EXISTING_TEXT",
+            file_path_or_label="app/FILELABEL_MARKER.py",
+        )
+    )
+    expected_text = "\n".join(
+        _build_shared_review_prefix("SPEC_TEXT", "ARCH_TEXT", "EXISTING_TEXT", False)
+    )
+    assert calls[0]["system_prompt_content"] == [CacheBreakpoint(expected_text)]
+    assert "FILELABEL_MARKER" in calls[0]["reasoning_prompt"]
+
+
+def test_run_chunk_review_omits_system_prompt_content_when_no_shared_context(monkeypatch) -> None:
+    """With no spec/architecture/existing-code content, no cache-breakpoint
+    system content is attached — behavior unchanged from before this
+    mechanism existed."""
+    calls = _capture_run_agent_via_reasoning(monkeypatch)
+    ChunkReviewAgent(llm=DummyLLMClient()).run(_chunk_input())
+    assert calls[0]["system_prompt_content"] is None
+
+
+def test_run_chunk_review_shared_prefix_excluded_from_user_prompt(monkeypatch) -> None:
+    """The shared spec/architecture/existing-code text never appears in the
+    user-turn ``reasoning_prompt`` — it moved entirely to the cache-breakpoint
+    system content."""
+    calls = _capture_run_agent_via_reasoning(monkeypatch)
+    ChunkReviewAgent(llm=DummyLLMClient()).run(
+        _chunk_input(
+            spec_excerpt="SPEC_MARKER_XYZ",
+            architecture_overview="ARCH_MARKER_XYZ",
+            existing_codebase_excerpt="EXISTING_MARKER_XYZ",
+        )
+    )
+    prompt = calls[0]["reasoning_prompt"]
+    assert "SPEC_MARKER_XYZ" not in prompt
+    assert "ARCH_MARKER_XYZ" not in prompt
+    assert "EXISTING_MARKER_XYZ" not in prompt
 
 
 def test_build_shared_review_prefix_orders_spec_arch_existing() -> None:
@@ -716,63 +720,3 @@ def test_build_shared_review_prefix_omits_absent_blocks_individually() -> None:
     assert "ARCH_ONLY_TEXT" in prompt
     assert "**Project specification" not in prompt
     assert "**Existing codebase" not in prompt
-
-
-def test_shared_prefix_is_contiguous_and_precedes_all_per_chunk_content() -> None:
-    """The composed chunk prompt keeps the spec/architecture/existing-code
-    prefix as one contiguous span, with every per-chunk-varying block
-    (segment note, file label, sibling surface, code chunk) positioned
-    strictly after it -- the "single seam" a future cache breakpoint needs."""
-    client = _RecorderClient()
-    agent = ChunkReviewAgent(llm=client)
-    agent.run(
-        _chunk_input(
-            spec_excerpt="SPEC_MARKER_XYZ",
-            architecture_overview="ARCH_MARKER_XYZ",
-            existing_codebase_excerpt="EXISTING_MARKER_XYZ",
-            segment_note="SEGMENT_MARKER_XYZ",
-            sibling_surface="SIBLING_MARKER_XYZ",
-            file_path_or_label="chunk/FILELABEL_MARKER_XYZ.py",
-            code_chunk="CODE_MARKER_XYZ",
-        )
-    )
-    prompt = client.prompts[0]
-    spec_i = prompt.index("SPEC_MARKER_XYZ")
-    arch_i = prompt.index("ARCH_MARKER_XYZ")
-    existing_i = prompt.index("EXISTING_MARKER_XYZ")
-    existing_end = existing_i + len("EXISTING_MARKER_XYZ")
-    segment_i = prompt.index("SEGMENT_MARKER_XYZ")
-    file_label_i = prompt.index("FILELABEL_MARKER_XYZ")
-    sibling_i = prompt.index("SIBLING_MARKER_XYZ")
-    code_i = prompt.index("CODE_MARKER_XYZ")
-
-    # Ordering: the prefix (spec -> arch -> existing) precedes every
-    # per-chunk-varying block.
-    assert spec_i < arch_i < existing_i < segment_i < file_label_i < sibling_i < code_i
-
-    # Contiguity: no per-chunk marker falls inside the prefix's own span.
-    prefix_span = prompt[spec_i:existing_end]
-    for marker in (
-        "SEGMENT_MARKER_XYZ",
-        "FILELABEL_MARKER_XYZ",
-        "SIBLING_MARKER_XYZ",
-        "CODE_MARKER_XYZ",
-    ):
-        assert marker not in prefix_span
-
-
-def test_shared_prefix_precedes_per_chunk_content_when_spec_and_existing_absent() -> None:
-    """Even when only one of the three shared blocks is present (the common
-    ``spec_compliance_single_pass=True`` shape, where spec/existing are both
-    absent), it still precedes per-chunk content -- guards against a
-    contiguity check that would pass vacuously with a single-block prefix."""
-    client = _RecorderClient()
-    agent = ChunkReviewAgent(llm=client)
-    agent.run(
-        _chunk_input(
-            architecture_overview="ARCH_MARKER_XYZ",
-            code_chunk="CODE_MARKER_XYZ",
-        )
-    )
-    prompt = client.prompts[0]
-    assert prompt.index("ARCH_MARKER_XYZ") < prompt.index("CODE_MARKER_XYZ")

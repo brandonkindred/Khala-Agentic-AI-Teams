@@ -37,7 +37,18 @@ _BIG_CONTEXT_TOKENS = 1_000_000
 
 
 class _BigCtxRecorder(DummyLLMClient):
-    """1M-context client that records every prompt and approves with no issues."""
+    """1M-context client that records every reasoning-pass prompt and
+    approves with no issues.
+
+    ``run_agent_via_reasoning`` runs the reasoning pass through a real
+    Strands ``Agent``, whose ``chat()`` unconditionally delegates to
+    ``complete_json`` -- so both the reasoning pass (the original
+    chunk-review prompt) and the formatting pass (wrapped with a
+    ``--- ANALYSIS`` marker by ``wrap_with_analysis_delimiters``) land here
+    instead of the reasoning pass landing on ``complete``. Only the
+    reasoning-pass prompts are recorded, matching what ``self.prompts`` held
+    before this migration.
+    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -47,12 +58,10 @@ class _BigCtxRecorder(DummyLLMClient):
     def get_max_context_tokens(self) -> int:
         return _BIG_CONTEXT_TOKENS
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        with self._lock:
-            self.prompts.append(prompt)
-        return super().complete(prompt, **kwargs)
-
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        if "--- ANALYSIS" not in prompt:
+            with self._lock:
+                self.prompts.append(prompt)
         return {
             "approved": True,
             "issues": [],
@@ -112,35 +121,46 @@ def test_e2e_bounded_prompts_and_full_coverage() -> None:
 
 
 class _CiteFirstPrefixed(DummyLLMClient):
-    """1M-context client that cites the first original-line prefix in each chunk."""
+    """1M-context client that cites the first original-line prefix in each chunk.
 
-    def __init__(self) -> None:
-        super().__init__()
-        self._tls = threading.local()
+    ``run_agent_via_reasoning`` runs the reasoning pass through a real
+    Strands ``Agent`` on a worker thread, whose ``chat()`` unconditionally
+    delegates to ``complete_json`` for both the reasoning pass and the
+    formatting pass -- and each may run on a *different* thread, ruling out
+    a thread-local to correlate them. The two passes are distinguished by
+    the ``--- ANALYSIS`` marker ``wrap_with_analysis_delimiters`` injects
+    into the formatting-pass prompt only. Correlation instead rides in the
+    reasoning pass's own prose reply: returning a bare ``cited_line=<N>``
+    string (rather than a dict) short-circuits ``chat()``'s ``json.dumps``
+    for text mode, so that literal string becomes the reasoning ``Agent``'s
+    output, which is then embedded verbatim in the formatting-pass prompt
+    for this same chunk -- reachable there with a plain regex, no shared
+    mutable state required.
+    """
 
     def get_max_context_tokens(self) -> int:
         return _BIG_CONTEXT_TOKENS
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        if CODE_TO_REVIEW_HEADER in prompt:
-            # Match the splitter's generic original-line prefix ("N: <code>"),
-            # not the synthetic content's "line" token, so the test stays robust
-            # to changes in the filler format. The run-level assertion that cited
-            # lines equal the segments' own start_lines confirms each is in range.
-            # This prompt is FileSegment.prompt_content (partial-segment
-            # rendering), which never carries a change-surface ``+``/``>``
-            # marker; the optional ``[+>]`` here only mirrors the production
-            # gutter parsers' tolerance and is not itself exercised.
-            m = re.search(r"^[+>]?[ ]*(\d+)[:|] ", prompt, re.M)
-            assert m is not None, "split segments must render original-line prefixes"
-            self._tls.cited = int(m.group(1))
-        return super().complete(prompt, **kwargs)
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        cited = getattr(self._tls, "cited", None)
-        if cited is None:
+    def complete_json(self, prompt: str, **kwargs: Any) -> Any:
+        if "--- ANALYSIS" not in prompt:
+            if CODE_TO_REVIEW_HEADER in prompt:
+                # Match the splitter's generic original-line prefix ("N: <code>"),
+                # not the synthetic content's "line" token, so the test stays robust
+                # to changes in the filler format. The run-level assertion that cited
+                # lines equal the segments' own start_lines confirms each is in range.
+                # This prompt is FileSegment.prompt_content (partial-segment
+                # rendering), which never carries a change-surface ``+``/``>``
+                # marker; the optional ``[+>]`` here only mirrors the production
+                # gutter parsers' tolerance and is not itself exercised.
+                m = re.search(r"^[+>]?[ ]*(\d+)[:|] ", prompt, re.M)
+                assert m is not None, "split segments must render original-line prefixes"
+                return f"cited_line={m.group(1)}"
             return super().complete_json(prompt, **kwargs)
-        self._tls.cited = None
+
+        m = re.search(r"cited_line=(\d+)", prompt)
+        if m is None:
+            return super().complete_json(prompt, **kwargs)
+        cited = int(m.group(1))
         return {
             "approved": False,
             "issues": [
@@ -186,7 +206,14 @@ def test_e2e_merged_issues_reanchored_to_original_lines() -> None:
 
 
 class _FailOneFile(DummyLLMClient):
-    """1M-context client that always fails any chunk naming a marker file."""
+    """1M-context client that always fails any chunk naming a marker file.
+
+    ``run_agent_via_reasoning`` runs the reasoning pass through a real
+    Strands ``Agent``, whose ``chat()`` unconditionally delegates to
+    ``complete_json`` -- so the reasoning-pass content check that used to
+    live on ``complete`` now lives on ``complete_json``, gated to the
+    reasoning-pass call (no ``--- ANALYSIS`` marker; only that pass's prompt
+    carries the original chunk-review header and code)."""
 
     def __init__(self, marker: str) -> None:
         super().__init__()
@@ -195,10 +222,14 @@ class _FailOneFile(DummyLLMClient):
     def get_max_context_tokens(self) -> int:
         return _BIG_CONTEXT_TOKENS
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        if CODE_TO_REVIEW_HEADER in prompt and self.marker in prompt:
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        if (
+            "--- ANALYSIS" not in prompt
+            and CODE_TO_REVIEW_HEADER in prompt
+            and self.marker in prompt
+        ):
             raise LLMSemanticExhaustionError("LLM returned reasoning only (no content)")
-        return super().complete(prompt, **kwargs)
+        return super().complete_json(prompt, **kwargs)
 
 
 def test_e2e_one_chunk_failure_degrades_gracefully_without_blocking(monkeypatch) -> None:
