@@ -788,7 +788,9 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
     - ``client``: FastAPI ``TestClient``
     - ``api``: the monkeypatched ``coding_team_main`` module
     - ``repo_path``: temporary directory path used as ``repo_path``
-    - ``github``: dict holding the ``_FakeReviewClient`` under ``client``
+    - ``github``: dict holding the ``_FakeReviewClient`` under ``client``, call
+      recordings under ``scope_classify_calls``, and optional scripted scope
+      verdicts under ``scope_verdicts``
     - ``jobs``: fake job service client recording job-store calls
     """
     _stub_heavy_modules(monkeypatch)
@@ -819,6 +821,11 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
         issues=[_FakeReviewIssue("high", line=2), _FakeReviewIssue("low", line=999)]
     )
 
+    from software_engineering_team.code_review_agent.scope_classifier import (
+        UNKNOWN,
+        ScopeClassification,
+    )
+
     class _FakeProvider:
         def run_pr_code_review(self, **_kw: Any) -> Any:
             out = holder["agent_output"]
@@ -826,13 +833,16 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
                 raise out
             return out
 
-        def classify_issue_scope(self, findings, changed_context, task_description):
+        def classify_issue_scope(
+            self,
+            findings: list[Any],
+            changed_context: Optional[dict[str, str]],
+            task_description: str,
+        ) -> list[ScopeClassification]:
             """Records the call; returns the scripted verdicts, or an all-"unknown"
             list by default so _partition_review_issues falls back to the
             pre_existing-tag heuristic -- the same outcome as before the LLM scope
             pass existed -- unless a test opts in via ``holder["scope_verdicts"]``."""
-            from software_engineering_team.code_review_agent.scope_classifier import UNKNOWN
-
             holder.setdefault("scope_classify_calls", []).append(
                 {
                     "findings": findings,
