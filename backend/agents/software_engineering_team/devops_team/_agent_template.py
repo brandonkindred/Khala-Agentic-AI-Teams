@@ -64,15 +64,15 @@ from pydantic import BaseModel
 from llm_service import LLMClient, get_strands_model
 from llm_service.strands_model import model_fingerprint, resolve_strands_model
 from shared.cache import get_shared_cache
-from software_engineering_team.shared.llm import complete_json_with_continuation
-from software_engineering_team.shared.review_result_cache import (
-    build_review_cache_key,
+from shared.cache.pydantic_cache import (
+    build_model_cache_key,
     cache_capacity_for,
     cache_namespace_for,
-    clear_review_cache_namespace,
-    get_cached_review_result,
-    set_cached_review_result,
+    clear_cache_namespace,
+    get_cached_model,
+    set_cached_model,
 )
+from software_engineering_team.shared.llm import complete_json_with_continuation
 
 
 def _as_bool(value: Any) -> bool:
@@ -204,11 +204,9 @@ class DevOpsSingleShotAgent:
                     f"{type(self).__name__}.OUTPUT_MODEL must be set when CACHE_NAMESPACE and "
                     "CACHE_ENV_VAR are set and capacity > 0"
                 )
-                cache_key = build_review_cache_key(input_data, model_fingerprint(self._model))
+                cache_key = build_model_cache_key(input_data, model_fingerprint(self._model))
                 cache = get_shared_cache(cache_namespace_for(self.CACHE_NAMESPACE))
-                cached = get_cached_review_result(
-                    type(self).__name__, cache, cache_key, self.OUTPUT_MODEL
-                )
+                cached = get_cached_model(type(self).__name__, cache, cache_key, self.OUTPUT_MODEL)
                 if cached is not None:
                     return cached
 
@@ -226,9 +224,7 @@ class DevOpsSingleShotAgent:
 
         if cache_key is not None:
             cache = get_shared_cache(cache_namespace_for(self.CACHE_NAMESPACE))
-            set_cached_review_result(
-                type(self).__name__, cache, cache_key, result, capacity=capacity
-            )
+            set_cached_model(type(self).__name__, cache, cache_key, result, capacity=capacity)
 
         return result
 
@@ -246,6 +242,6 @@ class DevOpsSingleShotAgent:
         """
         if not cls.CACHE_NAMESPACE:
             return
-        clear_review_cache_namespace(
+        clear_cache_namespace(
             cls.__name__, lambda: get_shared_cache(cache_namespace_for(cls.CACHE_NAMESPACE))
         )

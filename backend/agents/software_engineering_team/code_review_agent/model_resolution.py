@@ -6,10 +6,9 @@ the injected ``llm`` when it already implements the strands ``Model`` interface
 (the test path injects such a client), or on the shared, cached production model
 otherwise. Keeping that one rule here stops those call sites from drifting apart.
 
-``resolve_code_review_model`` covers the primary ``code_review`` key (still used by
-synthesis, architecture-consistency, side-effect impact, and ``mapping.py`` cache
-fingerprinting — the chunk reviewer itself now calls ``LLMClient.complete_json``
-directly rather than dispatching through this module).
+``resolve_code_review_model`` covers the primary ``code_review`` key, used by
+synthesis, architecture-consistency, side-effect impact, ``mapping.py`` cache
+fingerprinting, and the chunk reviewer's map-phase call.
 ``resolve_code_review_verify_model`` routes the false-positive verifier onto the
 lighter ``code_review_verify`` key and pins Ollama failover candidates to that
 key's per-agent / default model so a non-empty provider-list ``entry.model``
