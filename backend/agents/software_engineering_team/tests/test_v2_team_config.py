@@ -1,8 +1,11 @@
 """
-Unit tests for :class:`V2TeamConfig` — construction, immutability, the
-``__post_init__`` invariant, and parity against each code-v2 team's real
-``ToolAgentKind``/``PROFILE``/accessibility-clause values — independent of
-any orchestrator consumption (none exists yet; see the class docstring).
+Unit tests for :class:`V2TeamConfig` — construction, immutability, and
+parity against each code-v2 team's real ``ToolAgentKind``/``PROFILE``/
+accessibility-clause values — independent of any orchestrator consumption
+(none exists yet; see the class docstring). ``StackProfile``'s own
+construction/invariant/frozen behavior is covered by ``test_stack_profile.py``
+and is not re-tested here — ``V2TeamConfig`` composes it rather than
+duplicating its fields.
 """
 
 from __future__ import annotations
@@ -11,37 +14,59 @@ import dataclasses
 
 import pytest
 
+from software_engineering_team.shared.stack_profile import StackProfile
 from software_engineering_team.shared.v2_team_config import V2TeamConfig
 
+
+def _make_stack_profile(
+    default_language: str = "python", conventions_by_language: dict | None = None
+) -> StackProfile:
+    """Minimal synthetic ``StackProfile`` for tests that don't need a real team's."""
+    return StackProfile(
+        name="test",
+        default_language=default_language,
+        planning_language_label="Language",
+        planning_progress_label="language",
+        conventions_by_language=conventions_by_language or {"_default": "PY"},
+        has_language_conventions=True,
+        build_verify_label="test_code_v2",
+        detect_language=lambda _p, _t: default_language,
+        repo_extensions=frozenset({".py"}),
+        repo_exclude_dirs=frozenset({".git"}),
+        repo_max_chars=1000,
+        detect_tooling=lambda _p: (True, True),
+    )
+
+
 _CONFIG_KWARGS = dict(
-    default_language="python",
+    stack_profile=_make_stack_profile(),
     tool_agent_kinds=frozenset({"security", "testing_qa"}),
     extra_review_clause="",
-    conventions_by_language={"_default": "PY"},
 )
 
 
 def test_construction_round_trips_all_fields():
     """Every constructor argument is readable back off the instance unchanged."""
     config = V2TeamConfig(**_CONFIG_KWARGS)
-    assert config.default_language == "python"
+    assert config.stack_profile.default_language == "python"
+    assert config.stack_profile.conventions_by_language == {"_default": "PY"}
     assert config.tool_agent_kinds == frozenset({"security", "testing_qa"})
     assert config.extra_review_clause == ""
-    assert config.conventions_by_language == {"_default": "PY"}
 
 
 def test_frozen_instance_rejects_attribute_assignment():
     """Frozen dataclass: assigning to a field raises instead of mutating."""
     config = V2TeamConfig(**_CONFIG_KWARGS)
     with pytest.raises(dataclasses.FrozenInstanceError):
-        config.default_language = "java"
+        config.extra_review_clause = "changed"
 
 
-def test_missing_default_key_raises():
-    """``conventions_by_language`` without a ``"_default"`` key is a construction error."""
-    kwargs = dict(_CONFIG_KWARGS, conventions_by_language={"java": "JAVA"})
+def test_composed_stack_profile_carries_its_own_default_key_invariant():
+    """``V2TeamConfig`` enforces no invariant of its own; a ``StackProfile``
+    missing ``"_default"`` fails when *it* is constructed, before
+    ``V2TeamConfig`` ever sees it."""
     with pytest.raises(ValueError, match="_default"):
-        V2TeamConfig(**kwargs)
+        _make_stack_profile(conventions_by_language={"java": "JAVA"})
 
 
 def test_empty_tool_agent_kinds_and_review_clause_construct_cleanly():
@@ -53,6 +78,7 @@ def test_empty_tool_agent_kinds_and_review_clause_construct_cleanly():
 
 
 def test_extra_review_clause_is_settable_to_non_empty_text():
+    """A non-empty extra review clause is preserved unchanged on the instance."""
     kwargs = dict(_CONFIG_KWARGS, extra_review_clause="Also verify accessibility.")
     config = V2TeamConfig(**kwargs)
     assert config.extra_review_clause == "Also verify accessibility."
@@ -62,20 +88,28 @@ class TestBackendParity:
     """Prove V2TeamConfig can faithfully hold backend_code_v2_team's real values."""
 
     def _build(self) -> V2TeamConfig:
+        """Compose the team's real, already-constructed PROFILE — not a copy of its fields."""
         from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
         from software_engineering_team.backend_code_v2_team.phases._profile import PROFILE
 
         return V2TeamConfig(
-            default_language=PROFILE.default_language,
+            stack_profile=PROFILE,
             tool_agent_kinds=frozenset(k.value for k in ToolAgentKind),
             extra_review_clause="",
-            conventions_by_language=PROFILE.conventions_by_language,
         )
 
+    def test_stack_profile_is_the_real_team_profile(self):
+        """Composition, not copying: the same PROFILE object, not an equal one."""
+        from software_engineering_team.backend_code_v2_team.phases._profile import PROFILE
+
+        assert self._build().stack_profile is PROFILE
+
     def test_default_language_matches_profile(self):
-        assert self._build().default_language == "python"
+        """Backend's default language is python."""
+        assert self._build().stack_profile.default_language == "python"
 
     def test_tool_agent_kinds_match_enum_members(self):
+        """The tool-agent registry mirrors every ToolAgentKind member backend defines."""
         from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
 
         config = self._build()
@@ -84,11 +118,10 @@ class TestBackendParity:
         assert "data_engineering" in config.tool_agent_kinds
 
     def test_conventions_by_language_matches_profile(self):
-        from software_engineering_team.backend_code_v2_team.phases._profile import PROFILE
-
-        assert self._build().conventions_by_language == PROFILE.conventions_by_language
-        assert "java" in self._build().conventions_by_language
-        assert "_default" in self._build().conventions_by_language
+        """Conventions come from the composed PROFILE, including java + _default."""
+        config = self._build()
+        assert "java" in config.stack_profile.conventions_by_language
+        assert "_default" in config.stack_profile.conventions_by_language
 
     def test_no_extra_review_clause(self):
         """Backend's code has no UI to check accessibility on."""
@@ -99,21 +132,29 @@ class TestFrontendParity:
     """Prove V2TeamConfig can faithfully hold frontend_code_v2_team's real values."""
 
     def _build(self) -> V2TeamConfig:
+        """Compose the team's real, already-constructed PROFILE — not a copy of its fields."""
         from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
         from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
         from software_engineering_team.frontend_code_v2_team.phases._profile import PROFILE
 
         return V2TeamConfig(
-            default_language=PROFILE.default_language,
+            stack_profile=PROFILE,
             tool_agent_kinds=frozenset(k.value for k in ToolAgentKind),
             extra_review_clause=review_mod._ACCESSIBILITY_VERIFY_NOTE,
-            conventions_by_language=PROFILE.conventions_by_language,
         )
 
+    def test_stack_profile_is_the_real_team_profile(self):
+        """Composition, not copying: the same PROFILE object, not an equal one."""
+        from software_engineering_team.frontend_code_v2_team.phases._profile import PROFILE
+
+        assert self._build().stack_profile is PROFILE
+
     def test_default_language_matches_profile(self):
-        assert self._build().default_language == "typescript"
+        """Frontend's default language is typescript."""
+        assert self._build().stack_profile.default_language == "typescript"
 
     def test_tool_agent_kinds_match_enum_members(self):
+        """The tool-agent registry mirrors every ToolAgentKind member frontend defines."""
         from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
 
         config = self._build()
@@ -122,13 +163,12 @@ class TestFrontendParity:
         assert "accessibility" in config.tool_agent_kinds
 
     def test_conventions_by_language_matches_profile(self):
-        from software_engineering_team.frontend_code_v2_team.phases._profile import PROFILE
-
+        """Frontend's conventions map has exactly one key: _default."""
         config = self._build()
-        assert config.conventions_by_language == PROFILE.conventions_by_language
-        assert set(config.conventions_by_language.keys()) == {"_default"}
+        assert set(config.stack_profile.conventions_by_language.keys()) == {"_default"}
 
     def test_extra_review_clause_is_accessibility_note(self):
+        """Frontend's extra review clause is the real accessibility-verification note."""
         from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
 
         config = self._build()
