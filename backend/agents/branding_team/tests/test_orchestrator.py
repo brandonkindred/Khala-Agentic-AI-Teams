@@ -2371,7 +2371,7 @@ def test_extract_from_single_agent_checks_structured_when_spec_has_no_merge_fn()
     from branding_team.orchestrator import _extract_from_single_agent, _PhaseSpec
 
     core = _full_strategic_core()
-    node = _phase1_leaf_node(core)
+    node = _leaf_node_result(core)
     spec = _PhaseSpec(
         builder_fn=lambda: None,
         node_id="phase1_strategic_core",
