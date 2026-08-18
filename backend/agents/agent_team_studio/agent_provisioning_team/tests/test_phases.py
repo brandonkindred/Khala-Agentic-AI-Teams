@@ -2255,6 +2255,66 @@ def test_documentation_getting_started_template_substitutes_username(tmp_path: P
     assert "extra=5432" in rendered
 
 
+def test_documentation_getting_started_template_skips_unsafe_extra_key(tmp_path: Path) -> None:
+    """A credentials.extra key containing braces is skipped, not used to build a malformed
+    replacement target — the rest of the template still renders, including sibling keys."""
+    from agent_team_studio.agent_provisioning_team.models import (
+        GeneratedCredentials,
+        ToolProvisionResult,
+    )
+    from agent_team_studio.agent_provisioning_team.phases.documentation import run_documentation
+    from agent_team_studio.agent_provisioning_team.shared.tool_manifest import (
+        ToolDefinition,
+        ToolManifest,
+    )
+
+    manifest = ToolManifest(
+        tools=[
+            ToolDefinition(
+                name="pg",
+                provisioner="postgres_provisioner",
+                config={},
+                onboarding={
+                    "description": "PG",
+                    "getting_started": "user={username} extra={port}",
+                },
+            ),
+        ]
+    )
+
+    creds = GeneratedCredentials(
+        tool_name="pg",
+        username="u1",
+        password="p",
+        connection_string="conn",
+        extra={"port": 5432, "{evil}": "malicious"},
+    )
+    tool_results = [
+        ToolProvisionResult(
+            tool_name="pg",
+            success=True,
+            permissions=["ALL"],
+            provisioner_key="postgres_provisioner",
+        )
+    ]
+
+    result = run_documentation(
+        agent_id="a1",
+        manifest=manifest,
+        credentials={"pg": creds},
+        tool_results=tool_results,
+        workspace_path=str(tmp_path),
+    )
+
+    rendered = result.onboarding.tools[0].getting_started
+    # The well-formed "port" key still substitutes normally.
+    assert "user=u1" in rendered
+    assert "extra=5432" in rendered
+    # The unsafe key "{evil}" (itself containing braces) is never used to build a
+    # replacement target, so its value is never interpolated anywhere in the output.
+    assert "malicious" not in rendered
+
+
 def test_documentation_getting_started_template_sanitizes_credentials(tmp_path: Path) -> None:
     """Credential values interpolated into a getting_started template are sanitized."""
     from agent_team_studio.agent_provisioning_team.models import (
