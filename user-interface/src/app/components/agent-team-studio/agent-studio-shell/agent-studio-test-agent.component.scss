@@ -9,12 +9,13 @@
   gap: var(--kh-space-4);
   height: 100%;
 
-  // Browse trigger + agent label bar (spec wireframe: "[ Browse ▾ ] agent: blogging.planner").
+  // Agent label bar (spec wireframe: "agent: blogging.planner  [ Browse ▾ ]").
   &__bar {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: var(--kh-space-4);
+    flex-wrap: wrap;
   }
 
   &__agent {

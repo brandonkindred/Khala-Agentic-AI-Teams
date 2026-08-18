@@ -26,26 +26,14 @@
       }
     }
 
-    <span
-      class="browse-agents-wrap"
-      [matTooltip]="!selectedTeamId() ? 'Pick a team first' : ''"
-      [matTooltipDisabled]="!!selectedTeamId()"
-    >
-      <button
-        mat-stroked-button
-        type="button"
-        class="browse-agents-btn"
-        [disabled]="!selectedTeamId()"
-        (click)="openBrowse()"
-      >
-        <mat-icon>search</mat-icon>
-        Browse agents
-      </button>
-    </span>
-
     <button mat-stroked-button type="button" class="new-team-btn" (click)="toggleCreateForm()">
       <mat-icon>{{ showCreateForm() ? 'close' : 'add' }}</mat-icon>
       {{ showCreateForm() ? 'Cancel' : 'New team' }}
+    </button>
+
+    <button mat-stroked-button type="button" class="browse-btn" (click)="openBrowse()">
+      <mat-icon aria-hidden="true">search</mat-icon>
+      Browse agents ▾
     </button>
   </div>
 
@@ -94,7 +82,13 @@
     <p class="error-text">{{ teamLoadError() }}</p>
   } @else {
     @if (team(); as t) {
-      <app-process-designer-chat [team]="t" (rosterChanged)="onRosterChanged($event)" />
+      <app-process-designer-chat
+        [team]="t"
+        testAgentTooltip="Test this agent in Stage 2"
+        testAgentDisabledTooltip="Generated agents can't be individually sandbox-tested — test the full team in Stage 4"
+        (rosterChanged)="onRosterChanged($event)"
+        (testAgent)="onTestAgent($event)"
+      />
     } @else {
       <div class="loading-state">Loading team...</div>
     }
@@ -105,12 +99,9 @@
   <app-agent-studio-slide-out
     [open]="browseOpen()"
     heading="Browse agents"
-    panelWidth="min(920px, 96vw)"
+    closeButtonLabel="Close browse agents panel"
     (closeRequested)="closeBrowse()"
   >
-    @if (browseAddError(); as message) {
-      <p class="error-text">{{ message }}</p>
-    }
     <app-agent-catalog (requestRun)="onBrowseSelect($event)" />
   </app-agent-studio-slide-out>
 }

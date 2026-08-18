@@ -5,6 +5,7 @@ import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-cata
 import { AgentRunnerComponent } from '../agent-console/agent-runner/agent-runner.component';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { AgentStudioSlideOutComponent } from './agent-studio-slide-out/agent-studio-slide-out.component';
+import { STAGE_INDEX } from '../../../models/agent-studio.model';
 
 /**
  * Agent Studio — Stage 2 "Test Agent" (spec §3, Stage 2).
@@ -26,14 +27,19 @@ import { AgentStudioSlideOutComponent } from './agent-studio-slide-out/agent-stu
  * heavy runner only mounts once there is a real agent to run — with a
  * contextual jump back to Build.
  *
- * A "Browse" affordance (spec §3, Stage 2) reuses the Agent Console catalog
- * (`app-agent-catalog`) in the shared `AgentStudioSlideOutComponent` overlay
- * to let the user switch which agent is under test without leaving Stage 2.
+ * **Browse agents (spec §2.1).** The forward-only stepper never jumps back to
+ * Stage 1, so picking a *different* agent once here is an explicit in-context
+ * action: a `[ Browse agents ]` overlay hosts the catalog again, using the
+ * shared `AgentStudioSlideOutComponent` (the same scrim + focus-trapped panel
+ * chrome as Stage 1's provisioning panel). Selecting an agent there just
+ * re-points `registryAgentId` — since `AgentRunnerComponent` exposes
+ * `preselectedAgentId` as an `@Input()` setter, reassigning it already resets
+ * run history and re-warms the sandbox for the new agent.
  */
 @Component({
   selector: 'app-agent-studio-test-agent',
   standalone: true,
-  imports: [MatButtonModule, MatIconModule, AgentRunnerComponent, AgentCatalogComponent, AgentStudioSlideOutComponent],
+  imports: [MatButtonModule, MatIconModule, AgentCatalogComponent, AgentRunnerComponent, AgentStudioSlideOutComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './agent-studio-test-agent.component.html',
   styleUrl: './agent-studio-test-agent.component.scss',
@@ -44,7 +50,7 @@ export class AgentStudioTestAgentComponent {
   /** The agent to test, carried from Stage 1 (null until one is selected). */
   readonly agentId = computed(() => this.state.registryAgentId());
 
-  /** Whether the Browse-agents overlay is open. */
+  /** Whether the "Browse agents" overlay is open. */
   readonly browseOpen = signal(false);
 
   /**
@@ -53,42 +59,25 @@ export class AgentStudioTestAgentComponent {
    * Stage 1, so returning to it means moving the stepper back to Build.
    */
   onReturnToBuild(): void {
-    this.state.navigateToStage(0);
+    this.state.navigateToStage(STAGE_INDEX.build);
   }
 
-  /**
-   * Open the Browse-agents overlay.
-   *
-   * Preconditions: none — always safe to call.
-   * Postconditions: `browseOpen()` is true.
-   */
   openBrowse(): void {
     this.browseOpen.set(true);
   }
 
-  /**
-   * Close the Browse-agents overlay without changing the tested agent.
-   *
-   * Preconditions: none.
-   * Postconditions: `browseOpen()` is false.
-   */
   closeBrowse(): void {
     this.browseOpen.set(false);
   }
 
   /**
-   * Handle a catalog selection from the Browse overlay: switch the agent
-   * under test and dismiss the overlay.
-   *
-   * Preconditions: `agentId` is a non-empty registry agent id emitted by the
-   *   catalog's `requestRun` output.
-   * Postconditions: `state.registryAgentId()` equals `agentId`; `browseOpen()`
-   *   is false. `AgentRunnerComponent`'s `[preselectedAgentId]` input re-seeds
-   *   on the next change-detection pass because `agentId()` (bound to it)
-   *   changes.
+   * Re-point the handoff agent to `id` from the Browse-agents overlay (spec
+   * §2.1) — not a clone, just a focus change. `AgentRunnerComponent` reacts to
+   * the resulting `preselectedAgentId` change on its own (fresh run history,
+   * re-warmed sandbox), so no further reset is needed here.
    */
-  onBrowseSelect(agentId: string): void {
-    this.state.setRegistryAgentId(agentId);
+  onBrowseSelect(id: string): void {
+    this.state.setRegistryAgentId(id);
     this.closeBrowse();
   }
 }

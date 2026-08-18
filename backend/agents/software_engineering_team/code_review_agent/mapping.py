@@ -75,7 +75,6 @@ from llm_service import (
 from llm_service.strands_model import model_fingerprint as _model_fingerprint
 from shared.cache import get_shared_cache
 from shared.concurrency import parallel_map
-from shared.env import env_flag_enabled
 from shared.env_config import env_bool
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_sibling_surface_chars,
@@ -104,7 +103,6 @@ from .models import (
     ReviewProgressCallback,
     notify_review_progress,
 )
-from .side_effect_consolidation import SIDE_EFFECT_CONSOLIDATION_ENV
 
 logger = logging.getLogger(__name__)
 
@@ -1006,6 +1004,8 @@ def _submission_fingerprint(
     model_fingerprint: str,
     spec_compliance_single_pass: bool,
     mutation_analysis_enabled: bool,
+    side_effect_consolidation_enabled: bool,
+    combine_similarity_threshold: float,
 ) -> str:
     """Hash the whole raw submission plus the resolved model.
 
@@ -1017,26 +1017,34 @@ def _submission_fingerprint(
         - ``input_data`` is a valid ``CodeReviewInput``.
         - ``model_fingerprint`` is ``_review_model_fingerprint(llm)`` for the
           client that would run the review.
-        - ``spec_compliance_single_pass`` and ``mutation_analysis_enabled`` are
-          the caller's already-resolved decisions (``run_coordinator``'s single
-          per-run computation, already folding in the ``CODE_REVIEW`` profile
-          restriction each toggle shares with the pass(es) it gates) — this
-          function never reads the ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` or
-          ``CODE_REVIEW_MUTATION_ANALYSIS`` env vars itself, so a non-``CODE_REVIEW``
-          submission is never fingerprinted as flag-sensitive merely because
-          either env var happens to be set (which would cause needless cache
-          misses on every such submission, since neither toggle can affect a
-          non-``CODE_REVIEW`` review's output).
+        - ``spec_compliance_single_pass``, ``mutation_analysis_enabled``, and
+          ``side_effect_consolidation_enabled`` are the caller's already-resolved
+          decisions (``run_coordinator``'s single per-run computation, already
+          folding in the ``CODE_REVIEW`` profile restriction each toggle shares
+          with the pass(es) it gates) — this function never reads the
+          ``CODE_REVIEW_SPEC_COMPLIANCE_PASS``, ``CODE_REVIEW_MUTATION_ANALYSIS``,
+          or ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION`` env vars itself, so a
+          non-``CODE_REVIEW`` submission is never fingerprinted as flag-sensitive
+          merely because one of those env vars happens to be set (which would
+          cause needless cache misses on every such submission, since none of
+          the three toggles can affect a non-``CODE_REVIEW`` review's output).
+        - ``combine_similarity_threshold`` is the caller's already-resolved
+          ``resolve_combine_similarity_threshold()`` value — unlike the three
+          toggles above, this is deliberately **not** profile-gated by the
+          caller: ``combine_findings``'s similarity threshold governs finding
+          combination for every profile, not just ``CODE_REVIEW``'s
+          side-effects, so it is genuinely output-affecting regardless of
+          ``input_data.profile``.
 
     Postconditions:
         - Returns a hex digest that changes whenever **any** input field (or the
           resolved model) changes, and also whenever an output-affecting toggle —
-          ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``, the combine-similarity
-          threshold (``__combine_similarity_threshold__``), or the caller's
-          resolved ``spec_compliance_single_pass``/``mutation_analysis_enabled``
-          decisions — flips. It is derived from ``input_data.model_dump()`` plus
-          those toggles, so it keys on the whole input (not a hand-picked subset)
-          plus consolidation, combine-similarity-threshold, mutation-analysis, and
+          the caller's resolved ``side_effect_consolidation_enabled``,
+          ``combine_similarity_threshold``, ``spec_compliance_single_pass``, or
+          ``mutation_analysis_enabled`` — flips. It is derived from
+          ``input_data.model_dump()`` plus those toggles, so it keys on the whole
+          input (not a hand-picked subset) plus consolidation,
+          combine-similarity-threshold, mutation-analysis, and
           spec-compliance-pass identity: a new ``CodeReviewInput`` field is hashed
           automatically and can never be silently dropped. Two submissions
           collide only when their full inputs and toggle settings are identical,
@@ -1056,12 +1064,6 @@ def _submission_fingerprint(
           it guards fires before any model call. Deterministic (``sort_keys``),
           so a stored approval survives across coordinator calls in a process.
     """
-    # Lazy import to keep module-load order robust: ``finding_combination`` and
-    # ``mapping`` are both imported by the coordinator, and deferring this import
-    # to call time avoids any import cycle regardless of future import edges
-    # between the two modules.
-    from .finding_combination import resolve_combine_similarity_threshold
-
     payload = input_data.model_dump(mode="json")
     # A per-invocation caller id, not content: two submissions with identical code
     # and context must still collide here even when their ``job_id``s differ (a
@@ -1069,8 +1071,8 @@ def _submission_fingerprint(
     # would turn every cache hit into a guaranteed miss.
     payload.pop("job_id", None)
     payload["__model__"] = model_fingerprint
-    payload["__side_effect_consolidation__"] = env_flag_enabled(SIDE_EFFECT_CONSOLIDATION_ENV)
-    payload["__combine_similarity_threshold__"] = resolve_combine_similarity_threshold()
+    payload["__side_effect_consolidation__"] = side_effect_consolidation_enabled
+    payload["__combine_similarity_threshold__"] = combine_similarity_threshold
     payload["__spec_compliance_single_pass__"] = spec_compliance_single_pass
     payload["__mutation_analysis__"] = mutation_analysis_enabled
     return _stable_json_digest(payload)

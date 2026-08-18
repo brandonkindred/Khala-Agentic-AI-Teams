@@ -18,8 +18,8 @@ class StubAgentRunnerComponent {
   @Output() readonly requestCatalogReturn = new EventEmitter<void>();
 }
 
-/** Stand-in for the catalog: same selector + the one output Stage 2 wires, so
- *  no catalog HTTP fetch runs in these unit tests. */
+/** Stand-in for the catalog: same selector + the one output the Browse-agents
+ *  overlay wires, so no catalog HTTP fetch runs in these unit tests. */
 @Component({ selector: 'app-agent-catalog', standalone: true, template: '' })
 class StubAgentCatalogComponent {
   @Output() readonly requestRun = new EventEmitter<string>();
@@ -89,55 +89,67 @@ describe('AgentStudioTestAgentComponent', () => {
     expect(state.activeStage()).toBe(0);
   });
 
-  describe('Browse overlay', () => {
-    it('has no Browse trigger when no agent is selected', () => {
-      expect(fixture.nativeElement.querySelector('.studio-test__browse-btn')).toBeNull();
-    });
-
-    it('opens the overlay from the Browse trigger once an agent is selected', () => {
+  describe('Browse agents overlay', () => {
+    beforeEach(() => {
       state.setRegistryAgentId('blogging.planner');
       fixture.detectChanges();
+    });
 
+    it('keeps the overlay closed until requested', () => {
       expect(component.browseOpen()).toBe(false);
       expect(fixture.nativeElement.querySelector('app-agent-catalog')).toBeNull();
-
-      fixture.nativeElement.querySelector('.studio-test__browse-btn').click();
-      fixture.detectChanges();
-
-      expect(component.browseOpen()).toBe(true);
-      expect(fixture.nativeElement.querySelector('.studio-slide-out__panel')).toBeTruthy();
-      expect(fixture.nativeElement.querySelector('app-agent-catalog')).toBeTruthy();
     });
 
-    it('switches the tested agent and closes the overlay on a catalog selection', () => {
-      state.setRegistryAgentId('blogging.planner');
+    it('opens and closes the overlay via its buttons', () => {
+      fixture.nativeElement.querySelector('.studio-test__browse-btn').click();
       fixture.detectChanges();
+      expect(component.browseOpen()).toBe(true);
+      expect(fixture.nativeElement.querySelector('app-agent-catalog')).toBeTruthy();
+
+      fixture.nativeElement.querySelector('.studio-slide-out__head button').click();
+      fixture.detectChanges();
+      expect(component.browseOpen()).toBe(false);
+      expect(fixture.nativeElement.querySelector('app-agent-catalog')).toBeNull();
+    });
+
+    it('closes the overlay when the scrim is clicked', () => {
       component.openBrowse();
       fixture.detectChanges();
+      fixture.nativeElement.querySelector('.studio-slide-out__scrim').click();
+      fixture.detectChanges();
+      expect(component.browseOpen()).toBe(false);
+    });
 
+    it('closes the overlay on Escape', () => {
+      component.openBrowse();
+      fixture.detectChanges();
+      const panel = fixture.nativeElement.querySelector('.studio-slide-out__panel');
+      panel.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      fixture.detectChanges();
+      expect(component.browseOpen()).toBe(false);
+    });
+
+    it('marks the panel as a focus-trapping modal', () => {
+      component.openBrowse();
+      fixture.detectChanges();
+      const panel = fixture.nativeElement.querySelector('.studio-slide-out__panel');
+      expect(panel.getAttribute('aria-modal')).toBe('true');
+      expect(panel.getAttribute('role')).toBe('dialog');
+      expect(panel.hasAttribute('cdkTrapFocus')).toBe(true);
+    });
+
+    it('selecting an agent re-points the handoff id and closes the overlay', () => {
+      component.openBrowse();
+      fixture.detectChanges();
       const catalog = fixture.debugElement.query(By.directive(StubAgentCatalogComponent));
       (catalog.componentInstance as StubAgentCatalogComponent).requestRun.emit('soc2.auditor');
       fixture.detectChanges();
 
       expect(state.registryAgentId()).toBe('soc2.auditor');
       expect(component.browseOpen()).toBe(false);
-      expect(fixture.nativeElement.querySelector('app-agent-catalog')).toBeNull();
-
-      const runner = fixture.debugElement.query(By.directive(StubAgentRunnerComponent));
-      expect((runner.componentInstance as StubAgentRunnerComponent).preselectedAgentId).toBe('soc2.auditor');
-    });
-
-    it('leaves the tested agent unchanged when the overlay is closed without a selection', () => {
-      state.setRegistryAgentId('blogging.planner');
-      fixture.detectChanges();
-      component.openBrowse();
-      fixture.detectChanges();
-
-      fixture.nativeElement.querySelector('.studio-slide-out__scrim').click();
-      fixture.detectChanges();
-
-      expect(component.browseOpen()).toBe(false);
-      expect(state.registryAgentId()).toBe('blogging.planner');
+      expect(fixture.nativeElement.querySelector('.studio-test__agent').textContent).toContain(
+        'soc2.auditor',
+      );
     });
   });
 });

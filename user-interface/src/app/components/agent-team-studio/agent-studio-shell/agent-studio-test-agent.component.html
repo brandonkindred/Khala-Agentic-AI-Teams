@@ -1,14 +1,14 @@
 @if (agentId(); as id) {
   <section class="studio-test">
     <div class="studio-test__bar">
-      <button mat-stroked-button type="button" class="studio-test__browse-btn" (click)="openBrowse()">
-        <mat-icon aria-hidden="true">search</mat-icon>
-        Browse
-      </button>
       <span class="studio-test__agent">
         <mat-icon aria-hidden="true">smart_toy</mat-icon>
         <span>agent:&nbsp;<strong>{{ id }}</strong></span>
       </span>
+      <button mat-stroked-button type="button" class="studio-test__browse-btn" (click)="openBrowse()">
+        <mat-icon aria-hidden="true">search</mat-icon>
+        Browse agents ▾
+      </button>
     </div>
     <app-agent-runner [preselectedAgentId]="id" (requestCatalogReturn)="onReturnToBuild()" />
   </section>
@@ -25,7 +25,7 @@
   <app-agent-studio-slide-out
     [open]="browseOpen()"
     heading="Browse agents"
-    panelWidth="min(920px, 96vw)"
+    closeButtonLabel="Close browse agents panel"
     (closeRequested)="closeBrowse()"
   >
     <app-agent-catalog (requestRun)="onBrowseSelect($event)" />

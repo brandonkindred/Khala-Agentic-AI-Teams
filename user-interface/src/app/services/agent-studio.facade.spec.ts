@@ -247,29 +247,6 @@ describe('AgentStudioFacade', () => {
     expect(agenticTeamApi.addAgentFromRegistry).not.toHaveBeenCalled();
   });
 
-  it('adds a registry agent from the Browse overlay without touching the handoff-consumed set', () => {
-    facade.addAgentFromCatalog('t1', 'blog/writer').subscribe();
-    expect(agenticTeamApi.addAgentFromRegistry).toHaveBeenCalledWith('t1', 'blog/writer');
-    expect(state.markHandoffConsumed).not.toHaveBeenCalled();
-    expect(state.hasConsumedHandoff).not.toHaveBeenCalled();
-  });
-
-  it('still calls the API for a manual add even when the pair was already handoff-consumed', () => {
-    state.hasConsumedHandoff.mockReturnValue(true);
-    facade.addAgentFromCatalog('t1', 'blog/writer').subscribe();
-    expect(agenticTeamApi.addAgentFromRegistry).toHaveBeenCalledWith('t1', 'blog/writer');
-  });
-
-  it('propagates a failed manual add unchanged', () => {
-    const error = new Error('add failed');
-    (agenticTeamApi.addAgentFromRegistry as ReturnType<typeof vi.fn>).mockReturnValue(
-      throwError(() => error),
-    );
-    let caught: unknown;
-    facade.addAgentFromCatalog('t1', 'blog/writer').subscribe({ error: (err) => (caught = err) });
-    expect(caught).toBe(error);
-  });
-
   // ---------------------------------------------------------------------
   // Stage 4 — Test Team w/ Personas
   // ---------------------------------------------------------------------

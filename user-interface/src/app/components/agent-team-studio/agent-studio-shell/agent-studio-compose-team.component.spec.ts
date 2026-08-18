@@ -1,7 +1,6 @@
 import { Component, EventEmitter, Input, Output } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
-import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { Subject, of, tap, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.component';
@@ -18,15 +17,18 @@ import type {
 } from '../../../models';
 
 /** Stub the heavy embedded chat/roster panel; tests exercise `onRosterChanged`
- *  directly rather than through the stub's (unused) output emissions. */
+ *  and `onTestAgent` directly rather than through the stub's (unused) output
+ *  emissions — except `testAgent`, which is exercised via the stub so the
+ *  Stage-3 host's binding is covered end-to-end. */
 @Component({ selector: 'app-process-designer-chat', standalone: true, template: '' })
 class StubProcessDesignerChatComponent {
   @Input() team!: AgenticTeam;
   @Output() readonly rosterChanged = new EventEmitter<RosterValidationResult | null>();
+  @Output() readonly testAgent = new EventEmitter<AgenticTeamAgent>();
 }
 
-/** Stand-in for the catalog: same selector + the one output Stage 3 wires, so
- *  no catalog HTTP fetch runs in these unit tests. */
+/** Stand-in for the catalog: same selector + the one output the Browse-agents
+ *  overlay wires, so no catalog HTTP fetch runs in these unit tests. */
 @Component({ selector: 'app-agent-catalog', standalone: true, template: '' })
 class StubAgentCatalogComponent {
   @Output() readonly requestRun = new EventEmitter<string>();
@@ -84,12 +86,11 @@ describe('AgentStudioComposeTeamComponent', () => {
     getTeam: ReturnType<typeof vi.fn>;
     composeTeam: ReturnType<typeof vi.fn>;
     addAgentToTeam: ReturnType<typeof vi.fn>;
-    addAgentFromCatalog: ReturnType<typeof vi.fn>;
   };
 
   function configure(): void {
     TestBed.configureTestingModule({
-      imports: [AgentStudioComposeTeamComponent, NoopAnimationsModule],
+      imports: [AgentStudioComposeTeamComponent],
       providers: [
         AgentStudioStateService,
         { provide: AgentStudioFacade, useValue: facade },
@@ -114,7 +115,6 @@ describe('AgentStudioComposeTeamComponent', () => {
           tap((resp) => state.setTeamId(resp.team_id)),
         ),
       ),
-      addAgentFromCatalog: vi.fn().mockReturnValue(of(agent())),
       addAgentToTeam: vi.fn().mockImplementation((teamId: string, manifestId: string, alreadyOnRoster = false) => {
         const key = `${teamId}::${manifestId}`;
         if (state.hasConsumedHandoff(key)) {
@@ -425,102 +425,93 @@ describe('AgentStudioComposeTeamComponent', () => {
     expect(component.createError()).toBe('name taken');
   });
 
-  // ── Browse-agents overlay ────────────────────────────────────────────────
+  // ── Browse agents / Test ▸ (spec §2.1) ─────────────────────────────────────
 
-  it('disables the Browse-agents trigger until a team is selected', () => {
-    fixture.detectChanges();
-    const btn: HTMLButtonElement = fixture.nativeElement.querySelector('.browse-agents-btn');
-    expect(btn.disabled).toBe(true);
+  describe('Browse agents overlay', () => {
+    it('keeps the overlay closed until requested, even with no team selected', () => {
+      fixture.detectChanges();
+      expect(component.browseOpen()).toBe(false);
+      expect(fixture.nativeElement.querySelector('app-agent-catalog')).toBeNull();
+    });
 
-    component.selectTeam('t-1');
-    fixture.detectChanges();
-    expect(btn.disabled).toBe(false);
+    it('opens and closes the overlay via its buttons', () => {
+      fixture.detectChanges();
+      fixture.nativeElement.querySelector('.browse-btn').click();
+      fixture.detectChanges();
+      expect(component.browseOpen()).toBe(true);
+      expect(fixture.nativeElement.querySelector('app-agent-catalog')).toBeTruthy();
+
+      fixture.nativeElement.querySelector('.studio-slide-out__head button').click();
+      fixture.detectChanges();
+      expect(component.browseOpen()).toBe(false);
+      expect(fixture.nativeElement.querySelector('app-agent-catalog')).toBeNull();
+    });
+
+    it('closes the overlay when the scrim is clicked', () => {
+      fixture.detectChanges();
+      component.openBrowse();
+      fixture.detectChanges();
+      fixture.nativeElement.querySelector('.studio-slide-out__scrim').click();
+      fixture.detectChanges();
+      expect(component.browseOpen()).toBe(false);
+    });
+
+    it('closes the overlay on Escape', () => {
+      fixture.detectChanges();
+      component.openBrowse();
+      fixture.detectChanges();
+      const panel = fixture.nativeElement.querySelector('.studio-slide-out__panel');
+      panel.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      fixture.detectChanges();
+      expect(component.browseOpen()).toBe(false);
+    });
+
+    it('marks the panel as a focus-trapping modal', () => {
+      fixture.detectChanges();
+      component.openBrowse();
+      fixture.detectChanges();
+      const panel = fixture.nativeElement.querySelector('.studio-slide-out__panel');
+      expect(panel.getAttribute('aria-modal')).toBe('true');
+      expect(panel.getAttribute('role')).toBe('dialog');
+      expect(panel.hasAttribute('cdkTrapFocus')).toBe(true);
+    });
+
+    it('selecting an agent re-points the handoff id without adding it to the roster', () => {
+      state.setTeamId('t-1');
+      fixture.detectChanges();
+      component.openBrowse();
+      fixture.detectChanges();
+      const catalog = fixture.debugElement.query(By.directive(StubAgentCatalogComponent));
+      (catalog.componentInstance as StubAgentCatalogComponent).requestRun.emit('soc2.auditor');
+      fixture.detectChanges();
+
+      expect(state.registryAgentId()).toBe('soc2.auditor');
+      expect(component.browseOpen()).toBe(false);
+      // Only the initial team-load auto-add fires; Browse selection alone must
+      // not trigger a second addAgentToTeam call.
+      expect(facade.addAgentToTeam).not.toHaveBeenCalledWith('t-1', 'soc2.auditor', expect.anything());
+    });
   });
 
-  it('openBrowse no-ops when no team is selected', () => {
-    fixture.detectChanges();
-    component.openBrowse();
-    expect(component.browseOpen()).toBe(false);
-  });
+  describe('Test ▸ back-loop', () => {
+    it('onTestAgent sets the handoff agent and jumps to Stage 2', () => {
+      fixture.detectChanges();
+      component.onTestAgent(agent({ manifest_id: 'blogging.planner' }));
+      expect(state.registryAgentId()).toBe('blogging.planner');
+      expect(state.activeStage()).toBe(1);
+    });
 
-  it('opens and closes the Browse-agents overlay', () => {
-    fixture.detectChanges();
-    component.selectTeam('t-1');
-    fixture.detectChanges();
+    it("the embedded chat's testAgent output is wired to onTestAgent", () => {
+      state.setTeamId('t-1');
+      fixture.detectChanges();
+      const chat = fixture.debugElement.query(By.directive(StubProcessDesignerChatComponent));
+      (chat.componentInstance as StubProcessDesignerChatComponent).testAgent.emit(
+        agent({ manifest_id: 'soc2.auditor' }),
+      );
+      fixture.detectChanges();
 
-    fixture.nativeElement.querySelector('.browse-agents-btn').click();
-    fixture.detectChanges();
-    expect(component.browseOpen()).toBe(true);
-    expect(fixture.nativeElement.querySelector('.studio-slide-out__panel')).toBeTruthy();
-
-    fixture.nativeElement.querySelector('.studio-slide-out__scrim').click();
-    fixture.detectChanges();
-    expect(component.browseOpen()).toBe(false);
-  });
-
-  it('adds a catalog selection via addAgentFromCatalog (not addAgentToTeam) and closes the overlay', () => {
-    fixture.detectChanges();
-    component.selectTeam('t-1');
-    fixture.detectChanges();
-    facade.addAgentToTeam.mockClear();
-    component.openBrowse();
-    fixture.detectChanges();
-
-    const catalog = fixture.debugElement.query(By.directive(StubAgentCatalogComponent));
-    (catalog.componentInstance as StubAgentCatalogComponent).requestRun.emit('blogging.writer');
-    fixture.detectChanges();
-
-    expect(facade.addAgentFromCatalog).toHaveBeenCalledWith('t-1', 'blogging.writer');
-    expect(facade.addAgentToTeam).not.toHaveBeenCalled();
-    expect(component.browseOpen()).toBe(false);
-    expect(component.browseAddError()).toBeNull();
-  });
-
-  it('calls addAgentFromCatalog even when the pair was already handoff-consumed (dedup bypass)', () => {
-    state.markHandoffConsumed('t-1::blogging.writer');
-    fixture.detectChanges();
-    component.selectTeam('t-1');
-    fixture.detectChanges();
-    component.openBrowse();
-    fixture.detectChanges();
-
-    const catalog = fixture.debugElement.query(By.directive(StubAgentCatalogComponent));
-    (catalog.componentInstance as StubAgentCatalogComponent).requestRun.emit('blogging.writer');
-
-    expect(facade.addAgentFromCatalog).toHaveBeenCalledWith('t-1', 'blogging.writer');
-  });
-
-  it('surfaces a failed catalog add and keeps the overlay open', () => {
-    facade.addAgentFromCatalog.mockReturnValueOnce(throwError(() => ({ error: { detail: 'not eligible' } })));
-    fixture.detectChanges();
-    component.selectTeam('t-1');
-    fixture.detectChanges();
-    component.openBrowse();
-    fixture.detectChanges();
-
-    const catalog = fixture.debugElement.query(By.directive(StubAgentCatalogComponent));
-    (catalog.componentInstance as StubAgentCatalogComponent).requestRun.emit('blogging.writer');
-    fixture.detectChanges();
-
-    expect(component.browseOpen()).toBe(true);
-    expect(component.browseAddError()).toBe('not eligible');
-    expect(fixture.nativeElement.querySelector('.studio-slide-out__body .error-text').textContent).toContain(
-      'not eligible',
-    );
-  });
-
-  it('falls back to a generic message when a catalog-add error has no detail', () => {
-    facade.addAgentFromCatalog.mockReturnValueOnce(throwError(() => ({})));
-    fixture.detectChanges();
-    component.selectTeam('t-1');
-    fixture.detectChanges();
-    component.openBrowse();
-    fixture.detectChanges();
-
-    const catalog = fixture.debugElement.query(By.directive(StubAgentCatalogComponent));
-    (catalog.componentInstance as StubAgentCatalogComponent).requestRun.emit('blogging.writer');
-    fixture.detectChanges();
-
-    expect(component.browseAddError()).toBe('Could not add this agent — try again.');
+      expect(state.registryAgentId()).toBe('soc2.auditor');
+      expect(state.activeStage()).toBe(1);
+    });
   });
 });
