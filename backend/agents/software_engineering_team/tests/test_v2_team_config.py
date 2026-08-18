@@ -29,6 +29,7 @@ _CONFIG_KWARGS = dict(
 def test_construction_round_trips_all_fields():
     """Every constructor argument is readable back off the instance unchanged."""
     config = V2TeamConfig(**_CONFIG_KWARGS)
+    assert config.stack_profile is _CONFIG_KWARGS["stack_profile"]
     assert config.stack_profile.default_language == "python"
     assert config.stack_profile.conventions_by_language == {"_default": "PY"}
     assert config.tool_agent_kinds == frozenset({"security", "testing_qa"})
