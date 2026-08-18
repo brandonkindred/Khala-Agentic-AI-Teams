@@ -64,6 +64,18 @@
         <div class="metric-card__value">{{ displaySummary.total_tokens }}</div>
       </mat-card-content>
     </mat-card>
+    <mat-card class="metric-card">
+      <mat-card-content>
+        <div class="metric-card__label">Cache read tokens</div>
+        <div class="metric-card__value">{{ displaySummary.total_cache_read_tokens }}</div>
+      </mat-card-content>
+    </mat-card>
+    <mat-card class="metric-card">
+      <mat-card-content>
+        <div class="metric-card__label">Cache creation tokens</div>
+        <div class="metric-card__value">{{ displaySummary.total_cache_creation_tokens }}</div>
+      </mat-card-content>
+    </mat-card>
   </div>
 
   @if (!loadError && storageAvailable && displaySummary.total_calls === 0 && modelRows().length === 0 && recent.length === 0) {
@@ -119,6 +131,8 @@
               <th>Input</th>
               <th>Response</th>
               <th>Total</th>
+              <th>Cache Read</th>
+              <th>Cache Creation</th>
               <th>Status</th>
             </tr>
           </thead>
@@ -132,6 +146,8 @@
                 <td>{{ row.prompt_tokens }}</td>
                 <td>{{ row.completion_tokens }}</td>
                 <td>{{ row.total_tokens }}</td>
+                <td>{{ row.cache_read_tokens }}</td>
+                <td>{{ row.cache_creation_tokens }}</td>
                 <td>{{ row.status }}</td>
               </tr>
             }

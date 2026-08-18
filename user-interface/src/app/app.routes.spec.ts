@@ -88,13 +88,6 @@ describe('App routes', () => {
     expect(children.some((r) => r.path === 'agent-console')).toBe(false);
   });
 
-  it('redirects legacy agent-provisioning to /agent-studio/provisioning', () => {
-    const shell = routes[0];
-    const children = (shell?.children ?? []) as { path?: string; redirectTo?: string }[];
-    const redirect = children.find((r) => r.path === 'agent-provisioning');
-    expect(redirect?.redirectTo).toBe('/agent-studio/provisioning');
-  });
-
   it('redirects empty path to /dashboard', () => {
     const shell = routes[0];
     const children = shell?.children as { path: string; redirectTo: string }[];
@@ -144,11 +137,12 @@ describe('App routes', () => {
     expect(await emptyChild!.loadComponent!()).toBe(AgentStudioStageHostComponent);
   });
 
-  it('no longer registers the retired agentic-teams, persona-testing, or old persona audit routes', () => {
+  it('no longer registers the retired agentic-teams, persona-testing, agent-provisioning, or old persona audit routes', () => {
     const shell = routes[0];
     const children = (shell?.children ?? []) as Route[];
     expect(children.some((r) => r.path === 'agentic-teams')).toBe(false);
     expect(children.some((r) => r.path === 'persona-testing')).toBe(false);
+    expect(children.some((r) => r.path === 'agent-provisioning')).toBe(false);
     expect(children.some((r) => r.path === 'persona-testing/audit/:runId')).toBe(false);
   });
 });

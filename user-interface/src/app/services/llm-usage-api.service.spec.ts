@@ -14,6 +14,8 @@ function summary(over: Partial<LlmUsageSummary> = {}): LlmUsageSummary {
     total_prompt_tokens: 0,
     total_completion_tokens: 0,
     total_tokens: 0,
+    total_cache_read_tokens: 0,
+    total_cache_creation_tokens: 0,
     avg_latency_ms: 0,
     error_count: 0,
     by_agent: {},
