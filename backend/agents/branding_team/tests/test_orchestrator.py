@@ -1291,22 +1291,12 @@ def _phase4_nested_node_result() -> MagicMock:
     return node_result
 
 
-def _assert_every_field_populated(
-    model: BaseModel, *, exclude: frozenset[str] = frozenset()
-) -> None:
+def _assert_every_field_populated(model: BaseModel) -> None:
     """Fail with the offending field names if any field on ``model`` was left
     at an empty/falsy value — used to prove a set of merged fragments
     collectively covers every field on the target schema, so a future field
-    added without a producing specialist is caught automatically.
-
-    ``exclude`` skips fields known to have no producing node yet (see
-    ``_PHASE3_UNCOVERED_FIELDS``); leave it empty for schemas where every
-    field is expected to be covered."""
-    empty = [
-        name
-        for name in type(model).model_fields
-        if name not in exclude and not getattr(model, name)
-    ]
+    added without a producing specialist is caught automatically."""
+    empty = [name for name in type(model).model_fields if not getattr(model, name)]
     assert not empty, f"{type(model).__name__} fields left empty: {empty}"
 
 
@@ -2009,22 +1999,13 @@ def test_extract_phase_output_merges_every_phase3_fragment() -> None:
     ]
 
 
-_PHASE3_UNCOVERED_FIELDS = frozenset({"data_visualization_style", "digital_adaptations"})
-# VisualIdentityOutput fields with no producing node under the current three
-# moodboard conceptualists + converge_decider + seven-specialist set (and none
-# under the removed visual_compositor before it, either). Changing an agent's
-# prompt or output schema to cover them is out of scope for the Python-merge
-# migration this test suite locks in; tracked separately.
-
-
 def test_phase3_fragments_collectively_populate_every_output_field() -> None:
     """Schema-coverage guard: the three moodboard conceptualists,
     converge_decider, and the seven post-converge specialists' fragments must
     collectively populate every VisualIdentityOutput field they can produce,
     checked generically against the model's own field list (not a hardcoded
     enumeration) so a field added later without a producing node fails this
-    test instead of silently shipping empty. See _PHASE3_UNCOVERED_FIELDS for
-    the two fields no current node produces."""
+    test instead of silently shipping empty."""
     mock_result = MagicMock()
     mock_result.result = {"phase3_visual": _phase3_nested_node_result()}
 
@@ -2034,7 +2015,7 @@ def test_phase3_fragments_collectively_populate_every_output_field() -> None:
 
     assert degraded is False
     assert isinstance(output, VisualIdentityOutput)
-    _assert_every_field_populated(output, exclude=_PHASE3_UNCOVERED_FIELDS)
+    _assert_every_field_populated(output)
 
 
 def test_full_run_phase3_not_degraded_with_eleven_fragments() -> None:
@@ -2066,7 +2047,7 @@ def test_full_run_phase3_not_degraded_with_eleven_fragments() -> None:
     assert result.degraded_phases == []
     assert isinstance(result.visual_identity, VisualIdentityOutput)
     assert result.visual_identity.creative_refinement.winning_candidate_title == "Modern Confidence"
-    _assert_every_field_populated(result.visual_identity, exclude=_PHASE3_UNCOVERED_FIELDS)
+    _assert_every_field_populated(result.visual_identity)
 
 
 def test_merge_phase3_fragments_rejects_incomplete_specialist_set() -> None:
