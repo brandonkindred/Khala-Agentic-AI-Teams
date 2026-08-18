@@ -43,7 +43,9 @@ from code_review_agent.side_effect_impact_pass import (
     find_side_effect_impact_issues,
 )
 from tests.submission_pass_two_call_client import (
+    MutationFindingClient,
     SubmissionPassTwoCallClient,
+    mutation_finding_payload,
     wire_run_agent_via_reasoning_with_raw,
 )
 
@@ -154,6 +156,26 @@ def test_build_prompt_ignores_empty_replaced_content_dict() -> None:
     index = CodebaseIndex.from_input(_input())
     prompt = _build_prompt(index, replaced_content={})
     assert "Replaced (pre-change) content" not in prompt
+
+
+def test_build_prompt_renders_replaced_content_only_for_batch_paths_that_have_one() -> None:
+    """Per-path ``replaced_content`` gating holds when a batch spans multiple
+    files and only some of them have a before-image entry."""
+    files = {
+        "app/main.py": "def bar():\n    return 2\n",
+        "app/util.py": "def helper():\n    return 3\n",
+    }
+    index = CodebaseIndex.from_input(_input(files=files))
+    prompt = _build_prompt(
+        index,
+        content_items=list(files.items()),
+        batch_index=1,
+        total_batches=2,
+        replaced_content={"app/main.py": "def bar():\n    return 1\n"},
+    )
+    assert prompt.count("Replaced (pre-change) content") == 1
+    assert "app/main.py — Replaced (pre-change) content" in prompt
+    assert "app/util.py — Replaced (pre-change) content" not in prompt
 
 
 # --------------------------------------------------------------------------- repo-wide search
@@ -741,6 +763,44 @@ def test_reasoning_system_prompt_reflects_mutation_toggle(monkeypatch: pytest.Mo
     monkeypatch.setenv("CODE_REVIEW_MUTATION_ANALYSIS", "false")
     find_side_effect_impact_issues(DummyLLMClient(), _input())
     assert "mutation-vs-replaced-code" not in captured["reasoning_system_prompt"]
+
+
+def _mutation_finding_client() -> MutationFindingClient:
+    return MutationFindingClient(
+        anchor=_SIDE_EFFECT_PASS_ANCHOR,
+        response_with_finding={"findings": [mutation_finding_payload()]},
+        response_without_finding={"findings": []},
+    )
+
+
+def test_fires_mutation_finding_when_before_image_present() -> None:
+    """A mutation-contract finding is produced when the submission carries a
+    before-image for the changed file."""
+    result = find_side_effect_impact_issues(
+        _mutation_finding_client(),
+        CodeReviewInput(
+            files={"app/main.py": "def bar():\n    return 2\n"},
+            task_description="wire up bar",
+            replaced_content={"app/main.py": "def bar():\n    return 1\n"},
+        ),
+    )
+    assert len(result) == 1
+    assert result[0].category == "side-effects"
+    assert "app/caller.py" in result[0].description
+
+
+def test_no_speculative_finding_without_before_image() -> None:
+    """The identical scripted reply logic produces no finding when there is
+    no before-image to react to -- the mutation sub-check cannot speculate
+    about a prior version it was never shown."""
+    result = find_side_effect_impact_issues(
+        _mutation_finding_client(),
+        CodeReviewInput(
+            files={"app/main.py": "def bar():\n    return 2\n"},
+            task_description="wire up bar",
+        ),
+    )
+    assert result == []
 
 
 def test_returns_empty_when_submission_has_no_readable_files() -> None:
