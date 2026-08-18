@@ -568,7 +568,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     const typeLabels: Record<string, JobTypeInfo> = {
       blogging: { label: 'Blog pipeline', icon: 'article', route: '/blogging' },
       ai_systems: { label: 'Build', icon: 'smart_toy', route: '/ai-systems' },
-      agent_provisioning: { label: 'Provisioning', icon: 'settings', route: '/agent-provisioning' },
+      agent_provisioning: { label: 'Provisioning', icon: 'settings', route: '/agent-studio/provisioning' },
       social_marketing: { label: 'Campaign', icon: 'campaign', route: '/social-marketing' },
     };
     // Fall back to the team's friendly SOURCE_DISPLAY name so the merged Job
