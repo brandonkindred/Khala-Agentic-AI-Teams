@@ -4,32 +4,10 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
+from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent, _as_bool
 
 from .models import CICDPipelineAgentInput, CICDPipelineAgentOutput
 from .prompts import CICD_PIPELINE_PROMPT
-
-
-def _as_bool(value: Any) -> bool:
-    """Coerce an LLM-provided flag to a strict boolean.
-
-    JSON booleans already parse to ``bool``; this guards the common schema drift
-    where a model emits the STRING ``"false"``/``"true"``. ``bool("false")`` is
-    True, so a naive cast would report required gates as present when the model
-    said the opposite. Only a real ``True`` or an explicit true-like string
-    (``true``/``1``/``yes``, case-insensitive) counts.
-
-    Preconditions:
-        - ``value`` is arbitrary parsed-JSON content (bool, str, number, None, ...).
-    Postconditions:
-        - Returns a bool; anything not unambiguously true (including
-          ``"false"``/``"0"``/``"no"``/None/other strings/numbers) returns False.
-    """
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in ("true", "1", "yes")
-    return False
 
 
 class CICDPipelineAgent(DevOpsSingleShotAgent):

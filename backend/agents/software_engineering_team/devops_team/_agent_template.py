@@ -64,6 +64,28 @@ from llm_service.strands_model import resolve_strands_model
 from software_engineering_team.shared.llm import complete_json_with_continuation
 
 
+def _as_bool(value: Any) -> bool:
+    """Coerce an LLM-provided flag to a strict boolean.
+
+    JSON booleans already parse to ``bool``; this guards the common schema drift
+    where a model emits the STRING ``"false"``/``"true"``. ``bool("false")`` is
+    True, so a naive cast would report the flag as set when the model said the
+    opposite. Only a real ``True`` or an explicit true-like string
+    (``true``/``1``/``yes``, case-insensitive) counts.
+
+    Preconditions:
+        - ``value`` is arbitrary parsed-JSON content (bool, str, number, None, ...).
+    Postconditions:
+        - Returns a bool; anything not unambiguously true (including
+          ``"false"``/``"0"``/``"no"``/None/other strings/numbers) returns False.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return False
+
+
 class DevOpsSingleShotAgent:
     """Shared scaffolding for devops single-shot JSON agents.
 
