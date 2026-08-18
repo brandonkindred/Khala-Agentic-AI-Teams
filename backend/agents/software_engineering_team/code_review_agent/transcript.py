@@ -56,6 +56,7 @@ from typing import Any, Callable, Optional
 
 from llm_service import current_attribution
 from llm_service.interface import observer_turn_started_monotonic
+from llm_service.strands_model import model_fingerprint as _model_fingerprint
 from shared.concurrency.heartbeat import BackgroundHeartbeat
 from shared.postgres import is_postgres_enabled
 from software_engineering_team.shared.env_config import env_float, env_int
@@ -103,29 +104,22 @@ def _flush_interval_s() -> float:
 def model_label(model: Any) -> str:
     """Best-effort human-readable identifier for a resolved model/client.
 
-    Mirrors ``mapping._review_model_fingerprint``'s attribute-probing tail
-    (duplicated rather than imported: that function also computes the map-phase
-    cache fingerprint, a different concern this module has no business coupling
-    to), but this copy is purely cosmetic — its output is never hashed into a
-    cache key, so a heuristic mismatch is a display nit, not a correctness bug.
+    Thin wrapper over ``llm_service.strands_model.model_fingerprint`` — kept
+    as a separate name because this copy is purely cosmetic (its output is
+    never hashed into a cache key, so a heuristic mismatch here is a display
+    nit, not a correctness bug), unlike ``mapping._review_model_fingerprint``,
+    which additionally resolves a raw ``LLMClient`` before probing.
 
+    Preconditions:
+        - ``model`` is a resolved Strands model (or any object exposing the
+          same duck-typed attributes) — see ``model_fingerprint``.
     Postconditions:
         - Returns the first non-empty ``model_id``/``model_name``/``model``
           string attribute found on ``model`` (or, for a ``dict``-shaped
           ``.config``, the same three keys within it), else the type name.
           Never raises.
     """
-    for attr in ("model_id", "model_name", "model"):
-        value = getattr(model, attr, None)
-        if isinstance(value, str) and value:
-            return value
-    config = getattr(model, "config", None)
-    if isinstance(config, dict):
-        for key in ("model_id", "model_name", "model"):
-            candidate = config.get(key)
-            if isinstance(candidate, str) and candidate:
-                return candidate
-    return type(model).__name__
+    return _model_fingerprint(model)
 
 
 def _should_prefix_system_prompt(prompt: str, system_prompt: str) -> bool:

@@ -287,9 +287,14 @@ the marked segment. For every other backing client (or when no
 
 Only `system_prompt_content` is honored today; a `CacheBreakpoint` in a
 message turn, or adoption at any real prompt-builder call site, is out of
-scope for this mechanism (tracked separately). Cache-hit token accounting
-(`cache_read`/`cache_creation`) is likewise a separate, not-yet-implemented
-step.
+scope for this mechanism (tracked separately).
+
+Cache-hit token accounting is recorded automatically: `LLMCallRecord` (and the
+`llm_call_records` Postgres table the usage flusher writes to) carry
+`cache_read_tokens` / `cache_creation_tokens` fields, populated from the
+Anthropic response's `cache_read_input_tokens` / `cache_creation_input_tokens`
+usage counters. Both default to `0` for providers that don't report cache
+activity, so existing records and non-Anthropic clients are unaffected.
 
 ### Migration rule: keep pattern anchors in the **user** prompt
 
