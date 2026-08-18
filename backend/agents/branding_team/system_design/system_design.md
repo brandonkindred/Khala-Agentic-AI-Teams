@@ -330,7 +330,7 @@ equal-but-distinct instances and different `upstream_outputs` insertion
 order) always hash identically; any changed mission field, changed
 upstream output field, or added/removed upstream entry changes the
 digest. `phase` must be one of the five runnable phases in
-`graphs/shared.py:145-151` (`PHASE_ORDER`); `BrandPhase.COMPLETE` raises
+`graphs/shared.py:184-190` (`PHASE_ORDER`); `BrandPhase.COMPLETE` raises
 `ValueError`.
 
 ### PhaseOutputCache
@@ -358,11 +358,11 @@ degrades to a miss/no-op, never an exception).
 ### Wiring status
 
 `orchestrator.py` is wired: `run()` accepts an optional `phase_cache:
-PhaseOutputCache` (`orchestrator.py:568`). When it's `None` (the default),
+PhaseOutputCache` (`orchestrator.py:616`). When it's `None` (the default),
 `run()` is unchanged — one monolithic `build_branding_graph` invocation
 covering every phase up to `target_phase`, exactly as before this
 parameter existed. When a `phase_cache` is supplied, `run()` instead calls
-`_run_phases_with_cache()` (`orchestrator.py:681`), which walks
+`_run_phases_with_cache()` (`orchestrator.py:746`), which walks
 `PHASE_ORDER` one phase at a time: for each phase it computes
 `phase_input_hash(phase, mission, upstream_outputs)` from the mission and
 every upstream output produced so far *this call* (cache hits or fresh
