@@ -15,7 +15,22 @@ logger = logging.getLogger(__name__)
 
 
 class InfraPatchAgent:
+    """Produces minimal IaC artifact patches for fixable debug errors.
+
+    Given the classified errors from InfraDebugAgent and the original IaC
+    artifact contents, this agent asks an LLM to produce targeted patches to
+    the artifacts that address those errors.
+    """
+
     def __init__(self, llm_client: LLMClient) -> None:
+        """Initialize the agent with an LLM client.
+
+        Preconditions:
+            llm_client must not be None.
+        Postconditions:
+            self.llm holds the given client; self._model holds the strands
+            model resolved for the "devops" agent key.
+        """
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
         self._model = resolve_strands_model(
@@ -23,6 +38,20 @@ class InfraPatchAgent:
         )
 
     def run(self, input_data: IaCPatchInput) -> IaCPatchOutput:
+        """Produce patched IaC artifacts that address the given debug errors.
+
+        Preconditions:
+            input_data is a valid IaCPatchInput.
+        Postconditions:
+            When input_data.debug_output.fixable is False, returns
+            immediately an IaCPatchOutput with
+            summary="Errors are not fixable via code changes" and no
+            patched_artifacts, without calling the LLM. Otherwise returns an
+            IaCPatchOutput whose patched_artifacts maps filename to patched
+            content for every non-blank patch the LLM proposed, whose
+            summary describes the patch, and whose edits_applied counts the
+            applied edits (defaulting to the number of patched artifacts).
+        """
         if not input_data.debug_output.fixable:
             return IaCPatchOutput(
                 summary="Errors are not fixable via code changes",
