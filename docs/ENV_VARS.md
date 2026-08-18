@@ -381,16 +381,21 @@ registration entirely (no assistant sub-app is ever mounted, regardless of
 traffic) — team proxy routes and health checks are unaffected.
 
 ### UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER
-Agent Studio Temporal worker toggle (default: true). When true and Temporal
-is configured (`TEMPORAL_ADDRESS` set), the unified-api `lifespan` calls the
-Agent Studio worker starter; that starter no-ops when there are no authoring
-workflows to register. When Temporal is not configured, the lifespan skips
-the call (and the `agent_platform.studio.temporal.worker` import) entirely
-rather than calling a no-op starter. Authoring CRUD (conversations / clone /
-save) always uses in-process `AgentStudioService` and does not require
-`agent-studio-queue` either way. Set this flag to `false`/`0`/`no` to skip
-the starter call regardless of Temporal configuration. Other teams' Temporal
-workers are unaffected.
+Agent Studio authoring CRUD (conversations / clone / save) is served by **direct
+dispatch**: a bounded in-process thread pool that calls the `AgentStudioService`
+singleton directly, with no Temporal workflow and no dependency on
+`agent-studio-queue`. This is the supported authoring path regardless of this
+flag or of Temporal configuration.
+
+This flag only toggles the legacy `agent-studio-queue` Temporal worker starter
+(default: true), a no-op left over from before authoring CRUD was demoted off
+Temporal. When true and Temporal is configured (`TEMPORAL_ADDRESS` set), the
+unified-api `lifespan` calls that starter, which no-ops because there are no
+authoring workflows left to register. When Temporal is not configured, the
+lifespan skips the call (and the `agent_platform.studio.temporal.worker`
+import) entirely rather than calling a no-op starter. Set this flag to
+`false`/`0`/`no` to skip the starter call regardless of Temporal configuration.
+Other teams' Temporal workers are unaffected.
 
 ### ENABLE_LOG_API
 Exposes HTTP log endpoint.
@@ -1357,6 +1362,34 @@ has no cache of its own — it delegates entirely to `CodeReviewAgent`, which
 is already covered by `CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE` /
 `CODE_REVIEW_SUBMISSION_CACHE_SIZE`. Each var defaults to `128`, floor `0`
 (`0` disables that agent's cache — every call re-invokes the model).
+
+---
+
+## Software Engineering V2 Tool Agents
+
+### TOOL_AGENT_REVIEW_CACHE_SIZE
+Max entries in the shared V2 tool-agent review cache (`shared.cache`; owned
+by `LlmToolAgentBase._cached_invoke_llm`, wired into
+`BaseReviewToolAgent.review()`'s default one-shot LLM path). See
+[`software_engineering_team/README.md`](../backend/agents/software_engineering_team/README.md#caching-sharedcache--redis):
+one namespace/env var backs every backend and frontend V2 tool agent that
+uses that default path (security, testing/QA, accessibility, performance,
+UX's `review()`) — the key hashes the concrete class's module+qualname, the
+resolved review model, and the fully-rendered prompt (not the raw
+`current_files`/`task_description` input), so any reviewed-file byte change
+naturally busts the key with no explicit invalidation logic, and distinct
+agent classes never collide even when their rendered prompts happen to
+coincide. A cache hit skips the LLM call entirely. Same **atomic-call**
+caching *policy* as `QA_REVIEW_CACHE_SIZE`: only a genuine (non-exception)
+result is cached, so an LLM failure is retried for real on the next call
+rather than being frozen in as a permanent failure. Backend failures (Redis
+unavailable, corrupt entry) fail open to a miss/recompute, same as every
+other `shared.cache` consumer. Default `256`, floor `0` (`0` disables the
+cache — every call re-invokes the model). Out of scope: `build_runner`
+agents (build specialist) take a different review path with no LLM call to
+cache; `UxUsabilityToolAgent.plan()` and `DocumentationToolAgentBase.review()`
+override their phase method entirely and do not currently route through
+this cache.
 
 ---
 

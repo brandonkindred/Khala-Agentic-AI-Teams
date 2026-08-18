@@ -1,18 +1,16 @@
 import { ChangeDetectionStrategy, Component, Injector, computed, inject, signal } from '@angular/core';
+import { toSignal } from '@angular/core/rxjs-interop';
 import { MatButtonModule } from '@angular/material/button';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { ActivatedRoute, NavigationEnd, Router, RouterOutlet } from '@angular/router';
+import { filter, map } from 'rxjs';
 import type { AgentStudioDraft } from '../../../models/agent-studio.model';
 import { STUDIO_STAGES } from '../../../models/agent-studio.model';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
-import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
-import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.component';
-import { AgentStudioPersonaComponent } from './agent-studio-persona.component';
-import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-placeholder.component';
-import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
 import { LoadDraftMenuComponent } from './load-draft-menu/load-draft-menu.component';
 import {
   SaveDraftDialogComponent,
@@ -49,12 +47,8 @@ function asNullableString(value: unknown): string | null {
     MatDialogModule,
     MatIconModule,
     MatTooltipModule,
-    AgentStudioBuildAgentComponent,
-    AgentStudioComposeTeamComponent,
-    AgentStudioPersonaComponent,
-    AgentStudioStagePlaceholderComponent,
-    AgentStudioTestAgentComponent,
     LoadDraftMenuComponent,
+    RouterOutlet,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   providers: [AgentStudioStateService, AgentStudioFacade],
@@ -67,6 +61,46 @@ export class AgentStudioShellComponent {
   private readonly facade = inject(AgentStudioFacade);
   private readonly injector = inject(Injector);
   private readonly agenticTeamApi = inject(AgenticTeamApiService);
+  private readonly router = inject(Router);
+  private readonly route = inject(ActivatedRoute);
+
+  /**
+   * True when the active child route sets `data.hideStudioFooter`.
+   *
+   * Preconditions: this component is the routed `/agent-studio` parent.
+   * Postconditions: `true` iff the deepest activated child snapshot has
+   *   `hideStudioFooter === true`; `false` when there is no child (unit tests
+   *   that construct the shell without navigating).
+   */
+  readonly hideFooter = toSignal(
+    this.router.events.pipe(
+      filter((e): e is NavigationEnd => e instanceof NavigationEnd),
+      map(() => this.childHidesFooter()),
+    ),
+    // Router.events does not replay the NavigationEnd that created this
+    // component, so seed from the already-activated child snapshot. A hardcoded
+    // `false` would flash the footer on a direct load of the audit child.
+    { initialValue: this.childHidesFooter() },
+  );
+
+  /**
+   * Read `data.hideStudioFooter` from the deepest activated child.
+   *
+   * Preconditions: none — safe when there is no child (shell constructed
+   *   without navigating).
+   * Postconditions: `true` iff that child's snapshot has
+   *   `hideStudioFooter === true`. Walks `firstChild` because the audit
+   *   route is nested under this shell; `snapshot` may be missing while
+   *   the outlet is still activating.
+   */
+  private childHidesFooter(): boolean {
+    let child = this.route.firstChild;
+    while (child?.firstChild) {
+      child = child.firstChild;
+    }
+    // `firstChild` can exist before `snapshot` is attached during outlet activation.
+    return child?.snapshot?.data['hideStudioFooter'] === true;
+  }
 
   /** True while a Load-draft selection is being fetched and hydrated. */
   readonly loadingDraft = signal(false);
@@ -196,13 +230,18 @@ export class AgentStudioShellComponent {
    * Preconditions: `draftId` names a draft the current user owns (rows in
    *   `LoadDraftMenuComponent` only ever come from that user's own list).
    * Postconditions: on success, `state` is hydrated from the draft's payload
-   *   and the stepper is moved to the furthest reachable stage.
-   *   `loadingDraft()` stays `true` for the entire chain, including the
-   *   nested process-status check, so a second selection can't race it. On
-   *   failure, `loadingDraft()` returns to `false` and `state` is unchanged
-   *   (surfaced via the global HTTP error toast, not a bespoke inline banner
-   *   — the triggering menu has already closed by the time this runs). A
-   *   call superseded by a later `loadDraft` (its token no longer matches
+   *   and the stepper is moved to the furthest reachable stage. The current
+   *   persona live-run ID is cleared (`state.setPersonaLiveRunId(null)`)
+   *   because a persisted draft never contains an in-progress live run; this
+   *   prevents Stage 4 from displaying a stale run from the previous session.
+   *   If a nested child (the persona-run audit) is showing, the router returns to this
+   *   shell's default child so the restored stage is visible. `loadingDraft()`
+   *   stays `true` for the entire chain, including the nested process-status
+   *   check, so a second selection can't race it. On failure, `loadingDraft()`
+   *   returns to `false`, `state` is unchanged, and the current child stays
+   *   mounted (surfaced via the global HTTP error toast, not a bespoke inline
+   *   banner — the triggering menu has already closed by the time this runs).
+   *   A call superseded by a later `loadDraft` (its token no longer matches
    *   `loadDraftToken`) discards its response instead of applying it.
    */
   loadDraft(draftId: string): void {
@@ -229,6 +268,7 @@ export class AgentStudioShellComponent {
     this.state.setProcessId(asNullableString(payload['processId']));
     this.state.setPersonaId(asNullableString(payload['personaId']));
     this.state.setDraftAgentId(asNullableString(payload['draftAgentId']));
+    this.state.setPersonaLiveRunId(null);
     this.resolveFurthestStage(token);
   }
 
@@ -260,7 +300,7 @@ export class AgentStudioShellComponent {
           if (token !== this.loadDraftToken) return;
           this.state.setComposeProcessStatus(process.status);
           this.state.navigateToStage(process.status === 'complete' ? STAGE_PERSONAS : STAGE_COMPOSE);
-          this.loadingDraft.set(false);
+          this.finishSuccessfulDraftLoad();
         },
         error: () => {
           if (token !== this.loadDraftToken) return;
@@ -271,7 +311,7 @@ export class AgentStudioShellComponent {
           // risk it wrongly satisfying the Stage-3→4 gate.
           this.state.setComposeProcessStatus(null);
           this.state.navigateToStage(STAGE_COMPOSE);
-          this.loadingDraft.set(false);
+          this.finishSuccessfulDraftLoad();
         },
       });
       return;
@@ -284,6 +324,34 @@ export class AgentStudioShellComponent {
       this.state.resetBuildSubStage();
       this.state.navigateToStage(STAGE_BUILD);
     }
+    this.finishSuccessfulDraftLoad();
+  }
+
+  /**
+   * Close out a draft load that already wrote `state` and the stepper.
+   *
+   * Preconditions: the caller's `loadDraftToken` still matches (superseded
+   *   loads must not reach here).
+   * Postconditions: if a non-default child is active, the router is asked to
+   *   show this shell's default child; `loadingDraft()` is `false`.
+   */
+  private finishSuccessfulDraftLoad(): void {
+    this.showStageHostAfterDraftLoad();
     this.loadingDraft.set(false);
+  }
+
+  /**
+   * Leave a nested Studio child so the stage host can show the restored stage.
+   *
+   * Preconditions: none — safe when there is no child (unit tests that
+   *   construct the shell without navigating).
+   * Postconditions: if the active child path is non-empty (today:
+   *   `persona-run/:runId`), navigates to this shell's default child. The
+   *   empty default child and a missing child are left unchanged.
+   */
+  private showStageHostAfterDraftLoad(): void {
+    const childPath = this.route.firstChild?.snapshot?.routeConfig?.path;
+    if (!childPath) return;
+    void this.router.navigate(['.'], { relativeTo: this.route });
   }
 }

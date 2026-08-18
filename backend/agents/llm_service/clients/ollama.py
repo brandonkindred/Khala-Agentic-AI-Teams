@@ -1676,13 +1676,24 @@ class OllamaLLMClient(LLMClient):
                                     completion_tokens,
                                     total_tokens,
                                 )
-                                if not joined_content.strip() and has_reasoning:
+                                if (
+                                    not joined_content.strip()
+                                    and has_reasoning
+                                    and not tool_call_buffers
+                                ):
                                     # Expected for thinking models — reasoning is normal
                                     # stream data, not an error. The stream is still read
                                     # to completion; if the model genuinely produced no
                                     # answer the downstream empty-content handling applies
                                     # the proof-of-change thinking-downgrade retry.
-                                    # Logged at INFO, not WARNING.
+                                    # Logged at INFO, not WARNING. Gated on
+                                    # `not tool_call_buffers`: a reasoning-then-tool-call
+                                    # turn also has empty `joined_content` (the reply is
+                                    # entirely tool_calls), but `_parse_response_content`
+                                    # below returns that as a success via its tool_calls
+                                    # branch without ever reaching the empty-response
+                                    # retry ladder — logging the retry warning on that
+                                    # turn would be false alarm noise.
                                     logger.info(
                                         "LLM returned reasoning only (no content) for caller=%s; "
                                         "the empty-response handler will retry with progressively "
