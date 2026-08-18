@@ -5761,6 +5761,7 @@ class TestPartitionReviewIssuesScopeLlmPass:
         assert result.pr_issues == []
         assert result.preexisting_issues == [issue]
         assert len(result.proposals) == 1
+        assert len(provider.calls) == 1
 
     def test_is_within_diff_forces_in_scope_despite_out_of_scope_llm_verdict(self) -> None:
         from software_engineering_team.api import pr_review
@@ -5784,6 +5785,7 @@ class TestPartitionReviewIssuesScopeLlmPass:
         )
         assert result.pr_issues == [issue]
         assert result.preexisting_issues == []
+        assert len(provider.calls) == 1
 
     def test_llm_unknown_verdict_falls_back_to_pre_existing_tag(self) -> None:
         from software_engineering_team.api import pr_review
@@ -5806,6 +5808,7 @@ class TestPartitionReviewIssuesScopeLlmPass:
         )
         assert result.pr_issues == [untagged]
         assert result.preexisting_issues == [tagged]
+        assert len(provider.calls) == 1
 
     def test_classifier_exception_falls_back_to_heuristic_for_all_findings(self) -> None:
         from software_engineering_team.api import pr_review
@@ -5825,9 +5828,12 @@ class TestPartitionReviewIssuesScopeLlmPass:
             {"a.py": [], "b.py": []},
             provider=provider,
         )
-        # Matches exactly what the tag-only heuristic (provider=None) would do.
+        # Matches exactly what the tag-only heuristic (provider=None) would do --
+        # the call-count assertion is what actually proves the classifier was
+        # invoked (and its exception caught) rather than silently skipped.
         assert result.pr_issues == [untagged]
         assert result.preexisting_issues == [tagged]
+        assert len(provider.calls) == 1
 
     def test_classifier_wrong_length_reply_falls_back_to_heuristic(self) -> None:
         from software_engineering_team.api import pr_review
@@ -5854,6 +5860,7 @@ class TestPartitionReviewIssuesScopeLlmPass:
         )
         assert result.pr_issues == []
         assert result.preexisting_issues == [issue]
+        assert len(provider.calls) == 1
 
     def test_not_reviewed_coverage_finding_never_reaches_classifier(self) -> None:
         """A blocking "could not be reviewed" coverage finding must never be
@@ -5924,8 +5931,11 @@ class TestPartitionReviewIssuesScopeLlmPass:
             removed_by_path={"a.py": [10, 11]},  # a.py's diff includes deletions
         )
         # Verdict distrusted -> falls back to the tag heuristic (pre_existing=False -> in-scope).
+        # The call-count assertion is what actually proves the classifier was
+        # consulted and its verdict discarded, not just never called.
         assert result.pr_issues == [issue]
         assert result.preexisting_issues == []
+        assert len(provider.calls) == 1
 
     def test_decisive_out_of_scope_verdict_trusted_without_deletions(self) -> None:
         """The deletion guard must not overreach: a decisive out-of-scope verdict
@@ -5955,6 +5965,7 @@ class TestPartitionReviewIssuesScopeLlmPass:
         )
         assert result.pr_issues == []
         assert result.preexisting_issues == [issue]
+        assert len(provider.calls) == 1
 
     def test_classifier_malformed_verdict_falls_back_to_heuristic_for_all_findings(
         self,
@@ -5981,9 +5992,12 @@ class TestPartitionReviewIssuesScopeLlmPass:
             {"a.py": [], "b.py": []},
             provider=provider,
         )
-        # Matches exactly what the tag-only heuristic (provider=None) would do.
+        # Matches exactly what the tag-only heuristic (provider=None) would do --
+        # the call-count assertion is what actually proves the malformed reply
+        # was received and degraded, rather than the classifier never running.
         assert result.pr_issues == [untagged]
         assert result.preexisting_issues == [tagged]
+        assert len(provider.calls) == 1
 
     def test_deletion_guard_normalizes_file_path_like_is_within_diff(self) -> None:
         """The deletion-file guard reuses scope_filter's _cited_file_has_deletions,
@@ -6014,8 +6028,11 @@ class TestPartitionReviewIssuesScopeLlmPass:
             removed_by_path={"a.py": [10, 11]},  # keyed without the leading "./"
         )
         # Verdict distrusted despite the leading "./" mismatch -> tag heuristic wins.
+        # The call-count assertion proves the classifier ran (and its verdict
+        # was matched against removed_by_path and discarded), not skipped.
         assert result.pr_issues == [issue]
         assert result.preexisting_issues == []
+        assert len(provider.calls) == 1
 
     def test_scope_llm_pass_disabled_skips_classifier(self, monkeypatch) -> None:
         from software_engineering_team.api import pr_review
