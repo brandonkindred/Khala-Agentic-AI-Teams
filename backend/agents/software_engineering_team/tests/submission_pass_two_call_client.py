@@ -37,6 +37,75 @@ class SubmissionPassTwoCallClient(DummyLLMClient):
         return self.reasoning_prompts[-1] if self.reasoning_prompts else ""
 
 
+_MUTATION_FINDING: dict[str, Any] = {
+    "severity": "high",
+    "category": "side-effects",
+    "file_path": "app/main.py",
+    "description": (
+        "bar() now returns 2 instead of the shown before-image's 1; "
+        "app/caller.py still expects the old contract"
+    ),
+    "suggestion": "update app/caller.py for the new return value",
+}
+
+
+def mutation_finding_payload() -> dict[str, Any]:
+    """The synthetic mutation-vs-replaced-code side-effect finding shared by
+    the standalone and merged pass's "fires with before-image" tests.
+
+    Preconditions: none.
+
+    Postconditions:
+        Returns a fresh copy of :data:`_MUTATION_FINDING` -- never the same
+        dict instance -- so no caller can mutate shared state across tests.
+    """
+    return dict(_MUTATION_FINDING)
+
+
+class MutationFindingClient(SubmissionPassTwoCallClient):
+    """Scripted client for a pass's mutation-vs-replaced-code sub-check.
+
+    Shared by ``test_side_effect_impact_pass.py`` (the standalone Temporal
+    pass) and ``test_merged_architecture_side_effect_pass.py`` (the in-process
+    merged pass) so the guard condition and the synthetic finding payload used
+    by each pass's "fires with before-image / silent without" test pair stay
+    identical -- only each pass's own JSON response envelope shape differs,
+    which the caller supplies.
+
+    Preconditions:
+        ``anchor`` is the calling pass's non-empty prompt anchor.
+        ``response_with_finding``/``response_without_finding`` are that
+        pass's own JSON envelope shapes (e.g. ``{"findings": [...]}`` for the
+        standalone pass, or ``{"architecture_findings": [...],
+        "side_effect_findings": [...]}`` for the merged pass).
+
+    Postconditions:
+        ``complete_json`` returns ``response_with_finding`` when the latest
+        reasoning prompt contains both ``anchor`` and "Replaced (pre-change)
+        content" (i.e. the pass actually showed the model a before-image for
+        this call), else returns ``response_without_finding``.
+    """
+
+    def __init__(
+        self,
+        *,
+        anchor: str,
+        response_with_finding: dict[str, Any],
+        response_without_finding: dict[str, Any],
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._anchor = anchor
+        self._response_with_finding = response_with_finding
+        self._response_without_finding = response_without_finding
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        reasoning_prompt = self.latest_reasoning_prompt()
+        if self._anchor in reasoning_prompt and "Replaced (pre-change) content" in reasoning_prompt:
+            return self._response_with_finding
+        return self._response_without_finding
+
+
 def _backing_client(model: Any) -> Any:
     if hasattr(model, "complete_json"):
         return model

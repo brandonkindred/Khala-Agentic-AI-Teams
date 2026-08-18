@@ -267,13 +267,16 @@ def test_replaced_content_changes_submission_fingerprint() -> None:
     without = _one_file_input()
     with_before = _one_file_input(replaced_content={"app/a.py": "def f():\n    return 0\n"})
 
-    fp_without = mapping._submission_fingerprint(without, "model-A", False, False)
-    fp_with = mapping._submission_fingerprint(with_before, "model-A", False, False)
+    fp_without = mapping._submission_fingerprint(without, "model-A", False, False, True, 0.6)
+    fp_with = mapping._submission_fingerprint(with_before, "model-A", False, False, True, 0.6)
     assert fp_without != fp_with
 
     # The no-before-image case reproduces today's key exactly (absent behaves as
     # before this field existed): a second identical no-before-image input matches.
-    assert mapping._submission_fingerprint(_one_file_input(), "model-A", False, False) == fp_without
+    assert (
+        mapping._submission_fingerprint(_one_file_input(), "model-A", False, False, True, 0.6)
+        == fp_without
+    )
 
 
 def test_identical_replaced_content_matches_submission_fingerprint() -> None:
@@ -283,13 +286,13 @@ def test_identical_replaced_content_matches_submission_fingerprint() -> None:
     one = _one_file_input(replaced_content=before)
     two = _one_file_input(replaced_content=dict(before))
     assert mapping._submission_fingerprint(
-        one, "model-A", False, False
-    ) == mapping._submission_fingerprint(two, "model-A", False, False)
+        one, "model-A", False, False, True, 0.6
+    ) == mapping._submission_fingerprint(two, "model-A", False, False, True, 0.6)
 
     other = _one_file_input(replaced_content={"app/a.py": "def f():\n    return 1\n"})
     assert mapping._submission_fingerprint(
-        one, "model-A", False, False
-    ) != mapping._submission_fingerprint(other, "model-A", False, False)
+        one, "model-A", False, False, True, 0.6
+    ) != mapping._submission_fingerprint(other, "model-A", False, False, True, 0.6)
 
 
 def test_mutation_analysis_flag_changes_submission_fingerprint() -> None:
@@ -304,10 +307,43 @@ def test_mutation_analysis_flag_changes_submission_fingerprint() -> None:
     ``test_mutation_analysis_flag_passed_to_fingerprint_is_profile_gated``."""
     input_data = _one_file_input(replaced_content={"app/a.py": "def f():\n    return 0\n"})
 
-    fp_off = mapping._submission_fingerprint(input_data, "model-A", False, False)
-    fp_on = mapping._submission_fingerprint(input_data, "model-A", False, True)
+    fp_off = mapping._submission_fingerprint(input_data, "model-A", False, False, True, 0.6)
+    fp_on = mapping._submission_fingerprint(input_data, "model-A", False, True, True, 0.6)
 
     assert fp_off != fp_on
+
+
+def test_side_effect_consolidation_flag_changes_submission_fingerprint() -> None:
+    """``side_effect_consolidation_enabled`` is output-affecting for ``side-effects``
+    findings (it decides whether they merge regardless of wording and whether the
+    citation signal applies), so it must flip the submission fingerprint like the
+    other output-affecting toggles -- otherwise the coordinator's short-circuit
+    cache could serve a verdict computed under one state to a run under the
+    other. Like ``mutation_analysis_enabled``, this is a caller-resolved
+    (already profile-folded) boolean, not an env var the fingerprint helper
+    reads itself -- see
+    ``test_side_effect_consolidation_flag_passed_to_fingerprint_is_profile_gated``."""
+    input_data = _one_file_input()
+
+    fp_off = mapping._submission_fingerprint(input_data, "model-A", False, False, False, 0.6)
+    fp_on = mapping._submission_fingerprint(input_data, "model-A", False, False, True, 0.6)
+
+    assert fp_off != fp_on
+
+
+def test_combine_similarity_threshold_changes_submission_fingerprint() -> None:
+    """``combine_similarity_threshold`` is output-affecting for *every* profile
+    (it governs ``combine_findings``'s generic proximity/same-anchor merge rules,
+    not just ``side-effects``), so it must flip the submission fingerprint --
+    unlike the other three toggles, this one is never profile-gated by the
+    caller -- see
+    ``test_combine_similarity_threshold_passed_to_fingerprint_is_not_profile_gated``."""
+    input_data = _one_file_input()
+
+    fp_default = mapping._submission_fingerprint(input_data, "model-A", False, False, True, 0.6)
+    fp_changed = mapping._submission_fingerprint(input_data, "model-A", False, False, True, 0.9)
+
+    assert fp_default != fp_changed
 
 
 def test_cache_hit_reproduces_findings_without_consulting_model() -> None:
@@ -1132,10 +1168,22 @@ def test_spec_compliance_flag_passed_to_fingerprint_is_profile_gated(
     original = coord._submission_fingerprint
     calls: list = []
 
-    def _spy(input_data, model_fingerprint, spec_compliance_single_pass, mutation_analysis_enabled):
+    def _spy(
+        input_data,
+        model_fingerprint,
+        spec_compliance_single_pass,
+        mutation_analysis_enabled,
+        side_effect_consolidation_enabled,
+        combine_similarity_threshold,
+    ):
         calls.append(spec_compliance_single_pass)
         return original(
-            input_data, model_fingerprint, spec_compliance_single_pass, mutation_analysis_enabled
+            input_data,
+            model_fingerprint,
+            spec_compliance_single_pass,
+            mutation_analysis_enabled,
+            side_effect_consolidation_enabled,
+            combine_similarity_threshold,
         )
 
     monkeypatch.setattr(coord, "_submission_fingerprint", _spy)
@@ -1175,10 +1223,22 @@ def test_mutation_analysis_flag_passed_to_fingerprint_is_profile_gated(
     original = coord._submission_fingerprint
     calls: list = []
 
-    def _spy(input_data, model_fingerprint, spec_compliance_single_pass, mutation_analysis_enabled):
+    def _spy(
+        input_data,
+        model_fingerprint,
+        spec_compliance_single_pass,
+        mutation_analysis_enabled,
+        side_effect_consolidation_enabled,
+        combine_similarity_threshold,
+    ):
         calls.append(mutation_analysis_enabled)
         return original(
-            input_data, model_fingerprint, spec_compliance_single_pass, mutation_analysis_enabled
+            input_data,
+            model_fingerprint,
+            spec_compliance_single_pass,
+            mutation_analysis_enabled,
+            side_effect_consolidation_enabled,
+            combine_similarity_threshold,
         )
 
     monkeypatch.setattr(coord, "_submission_fingerprint", _spy)
@@ -1194,6 +1254,116 @@ def test_mutation_analysis_flag_passed_to_fingerprint_is_profile_gated(
     calls.clear()
     run_coordinator(client, _one_file_input(profile=ReviewProfile.CODE_REVIEW))
     assert calls == [True], "the CODE_REVIEW profile must fingerprint the env var as-is"
+
+
+def test_side_effect_consolidation_flag_passed_to_fingerprint_is_profile_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run_coordinator`` computes the ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``
+    decision exactly once and passes the *already profile-gated* result into
+    ``_submission_fingerprint`` -- the fingerprint helper itself never reads the raw
+    env var. Mirrors
+    ``test_mutation_analysis_flag_passed_to_fingerprint_is_profile_gated`` for the
+    side-effect-consolidation toggle.
+
+    Regression test: a profile-blind env read inside the fingerprint helper would
+    fingerprint a non-``CODE_REVIEW`` submission as flag-sensitive whenever the env
+    var happens to be set, even though ``consolidate_side_effects`` only ever
+    changes output for ``side-effects``-category findings, which no profile other
+    than ``CODE_REVIEW`` ever produces -- causing needless cache misses. Spying on
+    the call site (rather than inferring it from cache hit/miss side effects)
+    proves the exact boolean the coordinator resolved and threaded through.
+    """
+    monkeypatch.setenv("CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION", "true")
+    original = coord._submission_fingerprint
+    calls: list = []
+
+    def _spy(
+        input_data,
+        model_fingerprint,
+        spec_compliance_single_pass,
+        mutation_analysis_enabled,
+        side_effect_consolidation_enabled,
+        combine_similarity_threshold,
+    ):
+        calls.append(side_effect_consolidation_enabled)
+        return original(
+            input_data,
+            model_fingerprint,
+            spec_compliance_single_pass,
+            mutation_analysis_enabled,
+            side_effect_consolidation_enabled,
+            combine_similarity_threshold,
+        )
+
+    monkeypatch.setattr(coord, "_submission_fingerprint", _spy)
+
+    client = _CountingClient(_APPROVED)
+    run_coordinator(client, _one_file_input(profile=ReviewProfile.SPEC_CONFORMANCE))
+
+    assert calls == [False], (
+        "the flag is CODE_REVIEW-only; a non-CODE_REVIEW profile must fingerprint "
+        "as side-effect-consolidation=False regardless of the env var"
+    )
+
+    calls.clear()
+    run_coordinator(client, _one_file_input(profile=ReviewProfile.CODE_REVIEW))
+    assert calls == [True], "the CODE_REVIEW profile must fingerprint the env var as-is"
+
+
+def test_combine_similarity_threshold_passed_to_fingerprint_is_not_profile_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run_coordinator`` resolves ``CODE_REVIEW_COMBINE_SIMILARITY_THRESHOLD``
+    exactly once and passes it into ``_submission_fingerprint`` unconditionally --
+    unlike ``spec_compliance_single_pass``, ``mutation_analysis_enabled``, and
+    ``side_effect_consolidation_enabled``, this value is deliberately **not**
+    folded with a ``CODE_REVIEW`` profile restriction.
+
+    Regression test: ``combine_findings``'s similarity threshold governs the
+    generic proximity/same-anchor merge rules for every finding category, and
+    ``_run_tail_passes``/``combine_findings`` run for every profile, not just
+    ``CODE_REVIEW`` -- so gating this value by profile (over-applying the pattern
+    the other three toggles use) would let a threshold change silently fail to
+    invalidate a cached non-``CODE_REVIEW`` verdict the new threshold should have
+    altered. Spying on the call site proves the exact value the coordinator
+    resolved and threaded through is identical across profiles.
+    """
+    monkeypatch.setenv("CODE_REVIEW_COMBINE_SIMILARITY_THRESHOLD", "0.9")
+    original = coord._submission_fingerprint
+    calls: list = []
+
+    def _spy(
+        input_data,
+        model_fingerprint,
+        spec_compliance_single_pass,
+        mutation_analysis_enabled,
+        side_effect_consolidation_enabled,
+        combine_similarity_threshold,
+    ):
+        calls.append(combine_similarity_threshold)
+        return original(
+            input_data,
+            model_fingerprint,
+            spec_compliance_single_pass,
+            mutation_analysis_enabled,
+            side_effect_consolidation_enabled,
+            combine_similarity_threshold,
+        )
+
+    monkeypatch.setattr(coord, "_submission_fingerprint", _spy)
+
+    client = _CountingClient(_APPROVED)
+    run_coordinator(client, _one_file_input(profile=ReviewProfile.SPEC_CONFORMANCE))
+
+    assert calls == [0.9], (
+        "the threshold affects every profile's finding combination, so it must "
+        "fingerprint as the resolved env value regardless of profile"
+    )
+
+    calls.clear()
+    run_coordinator(client, _one_file_input(profile=ReviewProfile.CODE_REVIEW))
+    assert calls == [0.9], "the CODE_REVIEW profile must fingerprint the same resolved value"
 
 
 def test_rejected_submission_is_not_short_circuited(monkeypatch: pytest.MonkeyPatch) -> None:

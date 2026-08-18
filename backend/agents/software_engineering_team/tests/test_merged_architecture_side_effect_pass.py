@@ -12,7 +12,9 @@ from code_review_agent.merged_architecture_side_effect_pass import (
 from code_review_agent.models import CodeReviewInput
 from code_review_agent.profiles import ReviewProfile
 from tests.submission_pass_two_call_client import (
+    MutationFindingClient,
     SubmissionPassTwoCallClient,
+    mutation_finding_payload,
     wire_run_agent_via_reasoning_for_test_clients,
     wire_run_agent_via_reasoning_with_raw,
 )
@@ -792,6 +794,44 @@ def test_reasoning_system_prompt_reflects_mutation_toggle(monkeypatch: pytest.Mo
     find_architecture_and_side_effect_issues(DummyLLMClient(), _input())
     assert "mutation-vs-replaced-code" not in captured["reasoning_system_prompt"]
     assert "Side-Effect / Blast-Radius Impact" in captured["reasoning_system_prompt"]
+
+
+def _mutation_finding_client() -> MutationFindingClient:
+    return MutationFindingClient(
+        anchor=_MERGED_PASS_ANCHOR,
+        response_with_finding={
+            "architecture_findings": [],
+            "side_effect_findings": [mutation_finding_payload()],
+        },
+        response_without_finding={"architecture_findings": [], "side_effect_findings": []},
+    )
+
+
+def test_fires_mutation_finding_when_before_image_present() -> None:
+    """A mutation-contract side-effect finding is produced when the
+    submission carries a before-image for the changed file."""
+    arch, side = find_architecture_and_side_effect_issues(
+        _mutation_finding_client(),
+        _input(files={"app/main.py": "def bar():\n    return 2\n"}).model_copy(
+            update={"replaced_content": {"app/main.py": "def bar():\n    return 1\n"}}
+        ),
+    )
+    assert arch == []
+    assert len(side) == 1
+    assert side[0].category == "side-effects"
+    assert "app/caller.py" in side[0].description
+
+
+def test_no_speculative_finding_without_before_image() -> None:
+    """The identical scripted reply logic produces no finding when there is
+    no before-image to react to -- the mutation sub-check cannot speculate
+    about a prior version it was never shown."""
+    arch, side = find_architecture_and_side_effect_issues(
+        _mutation_finding_client(),
+        _input(files={"app/main.py": "def bar():\n    return 2\n"}),
+    )
+    assert arch == []
+    assert side == []
 
 
 def test_render_manifest_lists_every_path() -> None:

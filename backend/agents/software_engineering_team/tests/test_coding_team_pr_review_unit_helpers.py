@@ -645,7 +645,7 @@ class TestRunReviewerUnit:
         assert provider.calls[0]["pre_numbered"] is False
         assert provider.calls[0]["files"] == {"a.py": "content"}
 
-    def test_surface_plus_hunk_files_two_prenumbred_calls(self, monkeypatch) -> None:
+    def test_surface_plus_hunk_files_two_pre_numbered_calls(self, monkeypatch) -> None:
         self._patch_collaborators(monkeypatch)
         surface_out = _FakeOutput(["s"], "s", "")
         hunk_out = _FakeOutput(["h"], "", "h")
