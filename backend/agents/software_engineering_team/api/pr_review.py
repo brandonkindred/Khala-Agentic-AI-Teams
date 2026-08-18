@@ -2046,6 +2046,10 @@ def _run_pr_review_body(
 
             _tag_review_issues_for_scope(output, mode, pr, files)
 
+            # Skip gathering changed-file content / building the task description
+            # when the LLM scope pass would not run anyway (flag off): both are
+            # otherwise-unused work in that case.
+            scope_llm_enabled = env_flag_enabled(_SCOPE_LLM_PASS_ENV)
             partition = _partition_review_issues(
                 output,
                 client,
@@ -2055,9 +2059,11 @@ def _run_pr_review_body(
                 mode.valid_by_path,
                 mode.changed_by_path,
                 provider=provider,
-                changed_context=_files_for_scope(mode),
+                changed_context=(_files_for_scope(mode) if scope_llm_enabled else None),
                 task_description=(
                     f"Review pull request #{getattr(pr, 'number', '')}: {getattr(pr, 'title', '') or ''}"
+                    if scope_llm_enabled
+                    else ""
                 ),
             )
             posting = _post_review_comments(

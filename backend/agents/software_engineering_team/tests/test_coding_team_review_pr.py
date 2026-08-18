@@ -3428,7 +3428,10 @@ class TestFixedRunPrReview:
         assert len(calls) == 1
         assert calls[0]["findings"] == [issue]
         assert calls[0]["task_description"] == "Review pull request #7: Add feature"
-        assert isinstance(calls[0]["changed_context"], dict)
+        # Not just "is a dict" -- the PR's changed file (a.py, per the default
+        # _FakeReviewClient patch) must actually be present as grounding content.
+        assert "a.py" in calls[0]["changed_context"]
+        assert calls[0]["changed_context"]["a.py"]
 
     def test_scope_llm_pass_out_of_scope_verdict_routes_to_proposal(self, review_app) -> None:
         """A decisive out-of-scope LLM verdict routes an otherwise-postable finding
