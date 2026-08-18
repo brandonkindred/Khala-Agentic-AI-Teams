@@ -3,9 +3,11 @@ Unit tests for :class:`V2TeamConfig` — construction, immutability, and
 parity against each code-v2 team's real ``ToolAgentKind``/``PROFILE``/
 accessibility-clause values — independent of any orchestrator consumption
 (none exists yet; see the class docstring). ``StackProfile``'s own
-construction/invariant/frozen behavior is covered by ``test_stack_profile.py``
-and is not re-tested here — ``V2TeamConfig`` composes it rather than
-duplicating its fields.
+construction/invariant/frozen behavior is covered in full by
+``test_stack_profile.py``; this module includes one targeted test showing
+that the ``"_default"`` invariant is enforced by ``StackProfile`` before
+``V2TeamConfig`` ever sees it — ``V2TeamConfig`` composes ``StackProfile``
+rather than duplicating its fields or its invariant.
 """
 
 from __future__ import annotations
@@ -77,7 +79,7 @@ def test_empty_tool_agent_kinds_and_review_clause_construct_cleanly():
     assert config.extra_review_clause == ""
 
 
-def test_extra_review_clause_is_settable_to_non_empty_text():
+def test_extra_review_clause_preserves_non_empty_text():
     """A non-empty extra review clause is preserved unchanged on the instance."""
     kwargs = dict(_CONFIG_KWARGS, extra_review_clause="Also verify accessibility.")
     config = V2TeamConfig(**kwargs)
