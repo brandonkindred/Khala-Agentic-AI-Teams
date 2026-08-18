@@ -176,7 +176,6 @@ export const routes: Routes = [
         title: 'Metrics',
         data: { breadcrumb: 'Metrics' },
       },
-      { path: 'agent-provisioning', redirectTo: '/agent-studio/provisioning', pathMatch: 'full' },
       {
         path: 'product-delivery',
         loadComponent: () =>
@@ -276,15 +275,6 @@ export const routes: Routes = [
         data: { breadcrumb: 'Sales' },
       },
       {
-        path: 'agentic-teams',
-        loadComponent: () =>
-          import('./components/agent-team-studio/agentic-team-dashboard/agentic-team-dashboard.component').then(
-            (m) => m.AgenticTeamDashboardComponent,
-          ),
-        title: 'Agentic Teams',
-        data: { breadcrumb: 'Agentic Teams' },
-      },
-      {
         path: 'startup-advisor',
         loadComponent: () =>
           import('./components/startup-advisor-dashboard/startup-advisor-dashboard.component').then(
@@ -292,24 +282,6 @@ export const routes: Routes = [
           ),
         title: 'Startup Advisor',
         data: { breadcrumb: 'Startup Advisor' },
-      },
-      {
-        path: 'persona-testing',
-        loadComponent: () =>
-          import('./components/agent-team-studio/persona-testing-dashboard/persona-testing-dashboard.component').then(
-            (m) => m.PersonaTestingDashboardComponent,
-          ),
-        title: 'Testing Personas',
-        data: { breadcrumb: 'Testing Personas' },
-      },
-      {
-        path: 'persona-testing/audit/:runId',
-        loadComponent: () =>
-          import('./components/agent-team-studio/persona-test-audit-panel/persona-test-audit-panel.component').then(
-            (m) => m.PersonaTestAuditPanelComponent,
-          ),
-        title: 'Testing Personas Audit',
-        data: { breadcrumb: 'Audit' },
       },
       {
         path: 'deepthought',

@@ -252,19 +252,24 @@ class LLMClient:
         return [self._config_from_entry(entry, llm_config) for entry in entries[start:]]
 
     def _config_from_entry(self, entry, llm_config) -> _ProviderConfig:
-        """Map one stored provider entry to native Strands settings."""
+        """Map one stored provider entry to native Strands settings.
+
+        ``model``/``base_url``/``api_key`` are guarded against ``None`` before
+        stripping — the store guarantees ``str``, but callers in tests (and any
+        future construction path) may pass a bare object with unset fields.
+        """
         provider = self._normalize_provider(entry.provider)
-        model = entry.model.strip() or llm_config.resolve_model_for_provider(
+        model = (entry.model or "").strip() or llm_config.resolve_model_for_provider(
             None, provider=provider
         )
         base_url = ""
         if provider == "ollama":
-            base_url = entry.base_url.strip() or llm_config.resolve_base_url()
+            base_url = (entry.base_url or "").strip() or llm_config.resolve_base_url()
         return _ProviderConfig(
             provider,
             base_url,
             model,
-            entry.api_key.strip(),
+            (entry.api_key or "").strip(),
             entry_id=entry.id,
         )
 

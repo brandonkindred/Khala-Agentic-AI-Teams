@@ -2,39 +2,62 @@
 
 from __future__ import annotations
 
-from llm_service import LLMClient, get_strands_model
-from llm_service.strands_model import resolve_strands_model
+from typing import Any, Dict
+
+from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
 from software_engineering_team.devops_team.models import (
     DevOpsCompletionPackage,
     GitOperationsMetadata,
     HandoffInfo,
     ReleaseReadiness,
 )
-from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .models import DocumentationRunbookInput, DocumentationRunbookOutput
 from .prompts import DOC_RUNBOOK_PROMPT
 
 
-class DocumentationRunbookAgent:
-    def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
-        self._model = resolve_strands_model(
-            llm_client, agent_key="devops", get_strands_model_fn=get_strands_model
-        )
+class DocumentationRunbookAgent(DevOpsSingleShotAgent):
+    """Produces runbook/documentation artifacts and the completion package.
 
-    def run(self, input_data: DocumentationRunbookInput) -> DocumentationRunbookOutput:
-        context = (
+    Invariants: instance state is limited to ``llm`` and ``_model`` from the
+    base. ``run`` is deterministic for identical inputs and the resolved
+    model: repeated identical calls may return a cached result and skip the
+    LLM. Cache reads/writes are fail-open and gated by ``CACHE_ENV_VAR``.
+    """
+
+    PROMPT = DOC_RUNBOOK_PROMPT
+    temperature = None
+    think = None
+    CACHE_NAMESPACE = "devops:doc_runbook:v1"
+    CACHE_ENV_VAR = "DEVOPS_DOC_RUNBOOK_CACHE_SIZE"
+    OUTPUT_MODEL = DocumentationRunbookOutput
+
+    def build_context(self, input_data: DocumentationRunbookInput) -> str:
+        """Build the runbook prompt context from the task and its artifacts.
+
+        Preconditions: ``input_data`` is a valid ``DocumentationRunbookInput``.
+        Postconditions: returns the same context string shape the
+        pre-migration agent appended after the prompt separator.
+        """
+        return (
             f"task_id={input_data.task_id}\n"
             f"task_title={input_data.task_title}\n"
             f"artifacts={list(input_data.artifacts.keys())}\n"
             f"quality_gates={input_data.quality_gates}\n"
             f"notes={input_data.notes}\n"
         )
-        data = complete_json_with_continuation(
-            self._model, DOC_RUNBOOK_PROMPT + "\n\n---\n\n" + context
-        )
+
+    def build_output(
+        self, input_data: DocumentationRunbookInput, data: Dict[str, Any]
+    ) -> DocumentationRunbookOutput:
+        """Map the LLM JSON dict onto ``DocumentationRunbookOutput``.
+
+        Preconditions: ``data`` is the dict from ``complete_json_with_continuation``.
+        Postconditions: returns a ``DocumentationRunbookOutput`` whose
+        ``files`` are the LLM-generated documentation content and whose
+        ``completion_package`` is assembled from ``input_data`` (not the LLM
+        reply) with a fixed rolling/rollback-available release posture.
+        """
         completion = DevOpsCompletionPackage(
             task_id=input_data.task_id,
             status="completed",
@@ -54,3 +77,8 @@ class DocumentationRunbookAgent:
             completion_package=completion,
             summary=data.get("summary", ""),
         )
+
+
+def clear_review_cache() -> None:
+    """Drop every cached documentation runbook result. Intended for test teardown."""
+    DocumentationRunbookAgent.clear_cache()

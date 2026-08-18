@@ -142,17 +142,16 @@ _EXPECTED_STORYTELLER_PROMPT = (
 )
 
 _EXPECTED_ARCHETYPE_ANALYST_PROMPT = (
-    "You are a Brand Archetype Analyst. Review the brand story from Inputs from previous "
-    "nodes and the strategic core, then select 1-2 brand archetypes (e.g. The Sage, The "
-    "Creator, The Explorer). Carry forward brand_story, hero_narrative, and "
-    "boilerplate_variants unchanged, and add:\n"
+    "You are a Brand Archetype Analyst. Using the brand story from Inputs from previous "
+    "nodes and the strategic core as read-only context, select 1-2 brand archetypes (e.g. "
+    "The Sage, The Creator, The Explorer) that fit the narrative, and add:\n"
     "1. brand_archetypes — for each archetype: archetype (name), rationale (why this fits), "
     "and personality_traits (3-5 traits)"
 )
 
 _EXPECTED_TAGLINE_WRITER_PROMPT = (
-    "You are a Tagline Writer. Using Inputs from previous nodes (brand story, archetypes) "
-    "and the strategic core, carry forward every prior narrative field unchanged and add:\n"
+    "You are a Tagline Writer. Using the brand story and archetypes from Inputs from "
+    "previous nodes and the strategic core as read-only context, add:\n"
     "1. tagline — a memorable brand tagline (max 8 words)\n"
     "2. tagline_rationale — why this tagline works\n"
     "3. elevator_pitches — three variants: tier '5-second' pitch, tier '30-second' pitch, "
@@ -161,7 +160,7 @@ _EXPECTED_TAGLINE_WRITER_PROMPT = (
 
 _EXPECTED_MESSAGE_MAPPER_PROMPT = (
     "You are a Message Mapper. Using all prior narrative fields from Inputs from previous "
-    "nodes, carry them forward unchanged and add:\n"
+    "nodes as read-only context, add:\n"
     "1. messaging_framework — 3-4 messaging pillars, each with: pillar, key_message, and proof_points\n"
     "2. audience_message_maps — one per audience segment, each with: audience_segment, "
     "primary_message, supporting_messages, and tone_adjustments"
@@ -169,15 +168,15 @@ _EXPECTED_MESSAGE_MAPPER_PROMPT = (
 
 _EXPECTED_PERSONA_BUILDER_PROMPT = (
     "You are a Persona Builder. Using audience segments and all prior narrative fields "
-    "from Inputs from previous nodes, carry those fields forward unchanged and create:\n"
+    "from Inputs from previous nodes as read-only context, create:\n"
     "1. persona_profiles — 2-3 persona profiles, each with: name, role, demographics, "
     "psychographics, goals, frustrations, media_habits, jobs_to_be_done"
 )
 
 _EXPECTED_VOICE_PRINCIPLES_DRAFTER_PROMPT = (
     "You are a Voice Principles Drafter. Using all prior narrative fields from Inputs from "
-    "previous nodes and the mission's desired_voice, carry the prior fields forward "
-    "unchanged and produce writing_guidelines:\n"
+    "previous nodes and the mission's desired_voice as read-only context, produce "
+    "writing_guidelines:\n"
     "1. voice_principles — 3-4 principles (e.g. 'Use a confident, human voice')\n"
     "2. style_dos — 3-4 writing best practices\n"
     "3. style_donts — 3-4 things to avoid\n"
@@ -784,11 +783,11 @@ _MIGRATED_SCHEMA_DERIVED_PROMPT_SPEC_NAMES: tuple[str, ...] = (
     "_BRAND_RULES_CODIFIER_PROMPT",
 )
 
-# Phase-2 cumulative-carry-forward chain: each bound model inherits every
-# upstream field via subclassing, so schema-derivation would emit lines for
-# fields the prompt intentionally omits (carried forward in prose instead).
-# Removing that inheritance is story 5b's job, not this one's — see the
-# ``AgentPromptSpec``/``models.py`` module docstrings.
+# Phase-2 specialist chain: migrating these five to schema-derived prompts
+# (dropping hand-written ``fields=`` in favor of ``AgentPromptSpec.structured_output``)
+# is story 5a's job, not this one's — story 5b flattened the bound models
+# (models.py) into own-field-only schemas, but generating each prompt's field
+# list from that schema is a separate migration, still pending.
 _STILL_FIELDS_BASED_PROMPT_SPEC_NAMES: tuple[str, ...] = (
     "_ARCHETYPE_ANALYST_PROMPT",
     "_TAGLINE_WRITER_PROMPT",
@@ -809,9 +808,9 @@ def test_migrated_specs_are_schema_derived_not_hand_written() -> None:
     Postconditions:
         Every migrated spec has an empty ``fields`` tuple and a non-None
         ``structured_output``; every deliberately-unmigrated spec (the
-        Phase-2 cumulative-carry-forward chain, out of scope per story 5b)
-        keeps the opposite: a non-empty ``fields`` tuple and no
-        ``structured_output``. Guards against a migrated spec silently
+        Phase-2 specialist chain, schema-derived prompt migration out of
+        scope per story 5a) keeps the opposite: a non-empty ``fields`` tuple
+        and no ``structured_output``. Guards against a migrated spec silently
         regressing back onto hand-written ``PromptFieldSpec`` entries, or
         the reverse.
     """

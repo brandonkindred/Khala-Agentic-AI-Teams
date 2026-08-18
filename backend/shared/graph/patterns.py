@@ -10,10 +10,35 @@ from __future__ import annotations
 from typing import Union
 
 from strands import Agent
-from strands.multiagent.graph import Graph, GraphBuilder
+from strands.multiagent.graph import Graph, GraphBuilder, GraphNode
 from strands.multiagent.swarm import Swarm
 
 NodeType = Union[Agent, Graph, Swarm]
+
+
+def wire_fan_out_fan_in(
+    builder: GraphBuilder,
+    agents: list[tuple[str, NodeType]],
+    fan_in_node: GraphNode,
+) -> None:
+    """Wire a fan-out/fan-in topology onto an already-open *builder*.
+
+    Lower-level counterpart to :func:`build_fan_out_fan_in` for callers that must
+    keep composing *builder* afterward (e.g. adding more nodes/edges downstream of
+    *fan_in_node*) instead of receiving a finished ``Graph``.
+
+    Preconditions:
+        *agents* is non-empty. *fan_in_node* is the ``GraphNode`` already returned
+        by ``builder.add_node(...)`` on the same *builder*.
+    Postconditions:
+        Every ``(node_id, agent)`` pair is added as a node on *builder*, edged to
+        *fan_in_node*, and registered as an entry point.
+    """
+    assert agents, "agents must be non-empty"
+    for node_id, agent in agents:
+        node = builder.add_node(agent, node_id=node_id)
+        builder.set_entry_point(node_id)
+        builder.add_edge(node, fan_in_node)
 
 
 def build_fan_out_fan_in(
@@ -39,6 +64,10 @@ def build_fan_out_fan_in(
     node_timeout:
         Per-node timeout in seconds.
 
+    Preconditions:
+        *agents* is non-empty (enforced by the delegated
+        :func:`wire_fan_out_fan_in`, which raises ``AssertionError`` otherwise).
+
     Returns
     -------
     Graph
@@ -50,11 +79,7 @@ def build_fan_out_fan_in(
     builder.set_node_timeout(node_timeout)
 
     comp_node = builder.add_node(compositor[1], node_id=compositor[0])
-
-    for node_id, agent in agents:
-        fan_node = builder.add_node(agent, node_id=node_id)
-        builder.set_entry_point(node_id)
-        builder.add_edge(fan_node, comp_node)
+    wire_fan_out_fan_in(builder, agents, comp_node)
 
     return builder.build()
 

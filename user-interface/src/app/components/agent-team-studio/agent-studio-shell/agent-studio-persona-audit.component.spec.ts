@@ -7,8 +7,8 @@ import { AgentStudioPersonaAuditComponent } from './agent-studio-persona-audit.c
 
 @Component({ selector: 'app-persona-test-audit-panel', standalone: true, template: '' })
 class StubAuditPanelComponent {
-  @Input() backLink = '/persona-testing';
-  @Input() backLabel = 'Back to Testing Personas';
+  @Input() backLink = '/agent-studio';
+  @Input() backLabel = 'Back to Agent Studio';
 }
 
 describe('AgentStudioPersonaAuditComponent', () => {

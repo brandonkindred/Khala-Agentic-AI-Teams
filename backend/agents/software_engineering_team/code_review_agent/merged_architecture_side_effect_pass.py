@@ -48,6 +48,7 @@ from .prompts import (
     build_merged_architecture_side_effect_reasoning_system_prompt,
 )
 from .repo_reader import RepoReader
+from .side_effect_consolidation import MUTATION_ANALYSIS_ENV, effective_replaced_content
 from .submission_pass_runner import FileBatch, run_submission_pass
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,11 @@ def find_architecture_and_side_effect_issues(
           ``CodebaseIndex.full_content_complete``). Architecture is forced off
           when there is no architecture payload and no ``repo_reader`` /
           ``existing_codebase`` evidence.
+        - When the side-effect half is enabled, whether it also runs the
+          mutation-vs-replaced-code contract sub-check is gated by
+          ``CODE_REVIEW_MUTATION_ANALYSIS`` (default on): when disabled,
+          ``input_data.replaced_content`` is never shown to the model and the
+          no-prior-version guard stays absolute for every file.
         - Starts with one think-then-format call over the full changed-file
           set. On an overflow-shaped failure the shared runner bisects the
           file list (never truncating content); findings from every recovered
@@ -153,6 +159,17 @@ def _run_pass(
     Postconditions:
         - Same contract as the public entry, minus the env/profile early
           returns the caller already handled.
+        - Resolves ``mutation_on`` from ``CODE_REVIEW_MUTATION_ANALYSIS``
+          (default on) and passes it to
+          :func:`~code_review_agent.prompts.build_merged_architecture_side_effect_reasoning_system_prompt`,
+          so Part 2's reasoning system prompt includes the mutation-vs-replaced-code
+          contract sub-check only when the toggle is on (and ``side_on`` is
+          True). Each batch's user prompt is built with ``replaced_content``
+          gated through
+          :func:`~code_review_agent.side_effect_consolidation.effective_replaced_content`
+          (``input_data.replaced_content`` when ``mutation_on``, else ``None``):
+          when the toggle is off, the before-image is hidden from the model
+          entirely, never merely passed through with an instruction to ignore it.
         - Delegates the think-then-format ``Agent`` pair and reactive overflow
           bisect recovery to
           :func:`~code_review_agent.submission_pass_runner.run_submission_pass`,
@@ -166,8 +183,9 @@ def _run_pass(
     if not index.files:
         return [], []
 
+    mutation_on = env_flag_enabled(MUTATION_ANALYSIS_ENV)
     reasoning_system_prompt = build_merged_architecture_side_effect_reasoning_system_prompt(
-        arch_on=arch_on, side_on=side_on
+        arch_on=arch_on, side_on=side_on, mutation_on=mutation_on
     )
     formatting_instructions = build_merged_architecture_side_effect_formatting_instructions(
         arch_on=arch_on, side_on=side_on
@@ -186,7 +204,7 @@ def _run_pass(
             batch_index=batch.index,
             total_batches=batch.total,
             is_partial=batch.is_partial,
-            replaced_content=input_data.replaced_content,
+            replaced_content=effective_replaced_content(input_data, mutation_on),
         )
 
     def _parse_batch_reply(raw: str) -> Tuple[List[CodeReviewIssue], List[CodeReviewIssue]]:

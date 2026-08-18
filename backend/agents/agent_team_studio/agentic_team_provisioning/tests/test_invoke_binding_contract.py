@@ -30,39 +30,12 @@ from agent_platform.registry.models import (
     SourceInfo,
 )
 from agent_team_studio.agentic_team_provisioning.runtime import agent_builder
-
-
-class _FakeResult:
-    """Mimics a strands AgentResult: text is obtained via ``str(result)``."""
-
-    def __init__(self, text: str) -> None:
-        self.message = {"role": "assistant", "content": [{"text": text}]}
-        self._text = text
-
-    def __str__(self) -> str:
-        return self._text
-
-
-class _FakeStrandsAgent:
-    """Records the system prompt + tools it was built with; echoes a fixed reply."""
-
-    last_system_prompt: str | None = None
-    last_tools: object = None
-
-    def __init__(self, **kwargs) -> None:
-        type(self).last_system_prompt = kwargs.get("system_prompt")
-        type(self).last_tools = kwargs.get("tools")
-
-    def __call__(self, message: str) -> _FakeResult:
-        return _FakeResult("ok")
+from shared.agent_invoke.tests.fake_strands import patch_strands_agent
 
 
 @pytest.fixture
 def fake_strands(monkeypatch: pytest.MonkeyPatch):
-    _FakeStrandsAgent.last_system_prompt = None
-    _FakeStrandsAgent.last_tools = None
-    monkeypatch.setattr(agent_builder, "StrandsAgent", _FakeStrandsAgent)
-    return _FakeStrandsAgent
+    return patch_strands_agent(monkeypatch, agent_builder)
 
 
 def _manifest(**kwargs) -> AgentManifest:
@@ -193,6 +166,43 @@ async def test_manifest_expertise_binds_from_team(fake_strands, monkeypatch: pyt
     await agent_builder.invoke_generated_agent(_body(manifest.id))
 
     assert "Expertise: demo" in fake_strands.last_system_prompt
+
+
+@pytest.mark.asyncio
+async def test_body_expertise_overrides_manifest_team(
+    fake_strands, monkeypatch: pytest.MonkeyPatch
+):
+    """An explicit body ``expertise`` wins over the manifest team.
+
+    Plain (green now): guards the override direction — see
+    ``test_body_role_overrides_manifest_default``."""
+    manifest = _manifest(team="demo")
+    _install_manifest(monkeypatch, manifest)
+
+    await agent_builder.invoke_generated_agent(_body(manifest.id, expertise=["custom"]))
+
+    assert "Expertise: custom" in fake_strands.last_system_prompt
+    assert "Expertise: demo" not in fake_strands.last_system_prompt
+
+
+@pytest.mark.asyncio
+async def test_body_capabilities_override_manifest_default(
+    fake_strands, monkeypatch: pytest.MonkeyPatch
+):
+    """The manifest has no capabilities concept — ``persona_from_manifest``
+    always yields ``[]`` for it — so an omitted body ``capabilities`` renders no
+    ``Capabilities:`` line, while an explicit body value is honored for this
+    invoke, per the same presence-test precedence every other field follows."""
+    manifest = _manifest()
+    _install_manifest(monkeypatch, manifest)
+
+    # Omitted → manifest default is empty, no Capabilities line at all.
+    await agent_builder.invoke_generated_agent(_body(manifest.id))
+    assert "Capabilities:" not in fake_strands.last_system_prompt
+
+    # Explicit → request value is honored.
+    await agent_builder.invoke_generated_agent(_body(manifest.id, capabilities=["negotiation"]))
+    assert "Capabilities: negotiation" in fake_strands.last_system_prompt
 
 
 @pytest.mark.asyncio
