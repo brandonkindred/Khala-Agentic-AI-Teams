@@ -157,6 +157,48 @@ describe('AgentStudioStateService', () => {
     expect(service.hasConsumedHandoff('t-1::a')).toBe(false);
   });
 
+  it('starts with no persona live-run id', () => {
+    expect(service.personaLiveRunId()).toBeNull();
+    expect(service.personaLiveRunStartedAtMs()).toBeNull();
+    expect(service.personaLiveRunEndedAtMs()).toBeNull();
+  });
+
+  it('setPersonaLiveRunId persists the id until reset or a team change', () => {
+    service.setTeamId('team-1');
+    service.setPersonaLiveRunId('run-1');
+    service.setPersonaLiveRunStartedAtMs(1_000);
+    service.setPersonaLiveRunEndedAtMs(2_000);
+    expect(service.personaLiveRunId()).toBe('run-1');
+    service.setTeamId('team-1');
+    expect(service.personaLiveRunId()).toBe('run-1');
+    expect(service.personaLiveRunStartedAtMs()).toBe(1_000);
+    expect(service.personaLiveRunEndedAtMs()).toBe(2_000);
+    service.setTeamId('team-2');
+    expect(service.personaLiveRunId()).toBeNull();
+    expect(service.personaLiveRunStartedAtMs()).toBeNull();
+    expect(service.personaLiveRunEndedAtMs()).toBeNull();
+  });
+
+  it('setPersonaLiveRunId(null) clears the id and both timestamps directly', () => {
+    service.setPersonaLiveRunId('run-1');
+    service.setPersonaLiveRunStartedAtMs(1_000);
+    service.setPersonaLiveRunEndedAtMs(2_000);
+    service.setPersonaLiveRunId(null);
+    expect(service.personaLiveRunId()).toBeNull();
+    expect(service.personaLiveRunStartedAtMs()).toBeNull();
+    expect(service.personaLiveRunEndedAtMs()).toBeNull();
+  });
+
+  it('reset clears the persona live-run id', () => {
+    service.setPersonaLiveRunId('run-1');
+    service.setPersonaLiveRunStartedAtMs(1_000);
+    service.setPersonaLiveRunEndedAtMs(2_000);
+    service.reset();
+    expect(service.personaLiveRunId()).toBeNull();
+    expect(service.personaLiveRunStartedAtMs()).toBeNull();
+    expect(service.personaLiveRunEndedAtMs()).toBeNull();
+  });
+
   describe('Stage-1 build sub-stepper', () => {
     it('starts at sub-stage 0 (Start)', () => {
       expect(service.activeBuildSubStage()).toBe(0);

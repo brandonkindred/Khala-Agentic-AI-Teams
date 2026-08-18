@@ -2,6 +2,7 @@ import { Component, Input } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { MatDialog } from '@angular/material/dialog';
+import { provideRouter, Router } from '@angular/router';
 import { of, throwError, Subject, tap } from 'rxjs';
 import { vi } from 'vitest';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
@@ -146,6 +147,7 @@ describe('AgentStudioPersonaComponent', () => {
       imports: [AgentStudioPersonaComponent, NoopAnimationsModule],
       providers: [
         AgentStudioStateService,
+        provideRouter([]),
         { provide: AgentStudioFacade, useValue: facade },
       ],
     }).overrideComponent(AgentStudioPersonaComponent, {
@@ -1398,5 +1400,216 @@ describe('AgentStudioPersonaComponent', () => {
     vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.runAnnouncement()).toBe('The persona is answering a question.');
+  });
+
+  it('does not show View full audit when there is no current run', () => {
+    build();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).not.toContain('View full audit');
+  });
+
+  it('shows View full audit after a run exists and navigates to the Studio audit route', () => {
+    build();
+    fixture.detectChanges();
+    const router = TestBed.inject(Router);
+    const nav = vi.spyOn(router, 'navigate').mockResolvedValue(true);
+    component.launch();
+    vi.advanceTimersByTime(0);
+    fixture.detectChanges();
+    expect(component.run()).toBeTruthy();
+    const btn = Array.from(
+      fixture.nativeElement.querySelectorAll('button') as NodeListOf<HTMLButtonElement>,
+    ).find((b) => b.textContent?.includes('View full audit'));
+    expect(btn).toBeTruthy();
+    btn?.click();
+    expect(nav).toHaveBeenCalledWith(['/agent-studio', 'persona-run', 'run-1']);
+    expect(nav.mock.calls.some((c) => String(c[0]).includes('persona-testing'))).toBe(false);
+  });
+
+  it('openFullAudit is a no-op when there is no run', () => {
+    build();
+    fixture.detectChanges();
+    const router = TestBed.inject(Router);
+    const nav = vi.spyOn(router, 'navigate').mockResolvedValue(true);
+    component.openFullAudit();
+    expect(nav).not.toHaveBeenCalled();
+  });
+
+  it('resumes an in-progress run after the component is recreated', () => {
+    build();
+    facade.getPersonaRunStatus.mockReturnValue(of(statusWithJob({ status: 'polling_build' })));
+    fixture.detectChanges();
+    component.launch();
+    vi.advanceTimersByTime(0);
+    fixture.detectChanges();
+    expect(state.personaLiveRunId()).toBe('run-1');
+    expect(component.runInProgress()).toBe(true);
+
+    fixture.destroy();
+    fixture = TestBed.createComponent(AgentStudioPersonaComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+    vi.advanceTimersByTime(0);
+    fixture.detectChanges();
+
+    expect(component.run()?.run_id).toBe('run-1');
+    expect(component.runInProgress()).toBe(true);
+    expect(fixture.nativeElement.querySelector('.persona__stop')).toBeTruthy();
+  });
+
+  it('preserves elapsed time when the component is recreated mid-run', () => {
+    vi.useFakeTimers();
+    try {
+      build();
+      facade.getPersonaRunStatus.mockReturnValue(of(statusWithJob({ status: 'polling_build' })));
+      fixture.detectChanges();
+      component.launch();
+      vi.advanceTimersByTime(5_000);
+      expect(component.elapsedSec()).toBe(5);
+
+      fixture.destroy();
+      fixture = TestBed.createComponent(AgentStudioPersonaComponent);
+      component = fixture.componentInstance;
+      fixture.detectChanges();
+
+      expect(component.elapsedSec()).toBe(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('caps elapsed time at the run\'s updated_at when it finished while unmounted', () => {
+    vi.useFakeTimers();
+    try {
+      build();
+      const launchedAt = new Date(Date.now()).toISOString();
+      facade.getPersonaRunStatus.mockReturnValue(
+        of(statusWithJob({ status: 'polling_build', created_at: launchedAt })),
+      );
+      fixture.detectChanges();
+      component.launch();
+      vi.advanceTimersByTime(5_000);
+      expect(component.elapsedSec()).toBe(5);
+      const finishedAt = new Date(Date.now()).toISOString();
+
+      fixture.destroy();
+      vi.advanceTimersByTime(60_000);
+      facade.getPersonaRunStatus.mockReturnValue(
+        of(
+          statusWithJob({
+            status: 'completed',
+            created_at: launchedAt,
+            updated_at: finishedAt,
+          }),
+        ),
+      );
+
+      fixture = TestBed.createComponent(AgentStudioPersonaComponent);
+      component = fixture.componentInstance;
+      fixture.detectChanges();
+      vi.advanceTimersByTime(0);
+
+      expect(component.runTerminal()).toBe(true);
+      expect(component.elapsedSec()).toBe(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not include the idle gap when a restarted run finishes while unmounted', () => {
+    vi.useFakeTimers();
+    try {
+      const launchedAt = new Date(Date.now()).toISOString();
+      const firstFinishedAt = new Date(Date.now()).toISOString();
+      build();
+      facade.getPersonaRunStatus.mockReturnValue(
+        of(
+          statusWithJob({
+            status: 'completed',
+            created_at: launchedAt,
+            updated_at: firstFinishedAt,
+          }),
+        ),
+      );
+      fixture.detectChanges();
+      component.launch();
+      vi.advanceTimersByTime(0);
+      expect(component.runTerminal()).toBe(true);
+      expect(state.personaLiveRunEndedAtMs()).not.toBeNull();
+
+      fixture.destroy();
+      vi.advanceTimersByTime(60_000);
+      const secondFinishedAt = new Date(Date.now()).toISOString();
+      facade.getPersonaRunStatus.mockReturnValue(
+        of(
+          statusWithJob({
+            status: 'completed',
+            created_at: launchedAt,
+            updated_at: secondFinishedAt,
+          }),
+        ),
+      );
+      fixture = TestBed.createComponent(AgentStudioPersonaComponent);
+      component = fixture.componentInstance;
+      fixture.detectChanges();
+      vi.advanceTimersByTime(0);
+
+      expect(component.runTerminal()).toBe(true);
+      expect(component.elapsedSec()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reseeds elapsed when a persisted terminal run is running again', () => {
+    vi.useFakeTimers();
+    try {
+      build();
+      facade.getPersonaRunStatus.mockReturnValue(
+        of({ run_id: 'run-1', status: 'completed', decisions: [] }),
+      );
+      fixture.detectChanges();
+      component.launch();
+      vi.advanceTimersByTime(0);
+      expect(component.runTerminal()).toBe(true);
+      expect(state.personaLiveRunEndedAtMs()).not.toBeNull();
+
+      fixture.destroy();
+      facade.getPersonaRunStatus.mockReturnValue(
+        of({ run_id: 'run-1', status: 'polling_build', decisions: [] }),
+      );
+      fixture = TestBed.createComponent(AgentStudioPersonaComponent);
+      component = fixture.componentInstance;
+      fixture.detectChanges();
+      vi.advanceTimersByTime(0);
+
+      expect(component.runTerminal()).toBe(false);
+      expect(component.elapsedSec()).toBe(0);
+      expect(state.personaLiveRunEndedAtMs()).toBeNull();
+      vi.advanceTimersByTime(3_000);
+      expect(component.elapsedSec()).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('restores a completed run after the component is recreated', () => {
+    build();
+    fixture.detectChanges();
+    component.launch();
+    vi.advanceTimersByTime(0);
+    fixture.detectChanges();
+    expect(component.runTerminal()).toBe(true);
+
+    fixture.destroy();
+    fixture = TestBed.createComponent(AgentStudioPersonaComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+    vi.advanceTimersByTime(0);
+    fixture.detectChanges();
+
+    expect(component.run()?.run_id).toBe('run-1');
+    expect(component.runTerminal()).toBe(true);
+    expect(fixture.nativeElement.textContent).toContain('View full audit');
   });
 });

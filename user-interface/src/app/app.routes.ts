@@ -139,6 +139,23 @@ export const routes: Routes = [
           ),
         title: 'Agent Studio',
         data: { breadcrumb: 'Agent Studio' },
+        children: [
+          {
+            path: '',
+            loadComponent: () =>
+              import(
+                './components/agent-team-studio/agent-studio-shell/agent-studio-stage-host.component'
+              ).then((m) => m.AgentStudioStageHostComponent),
+          },
+          {
+            path: 'persona-run/:runId',
+            loadComponent: () =>
+              import(
+                './components/agent-team-studio/agent-studio-shell/agent-studio-persona-audit.component'
+              ).then((m) => m.AgentStudioPersonaAuditComponent),
+            data: { hideStudioFooter: true },
+          },
+        ],
       },
       {
         path: 'agent-studio/provisioning',

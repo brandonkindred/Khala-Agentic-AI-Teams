@@ -78,6 +78,31 @@ def _clear_coordinator_caches() -> None:
             mod.clear_submission_outcome_cache()
 
 
+# Same dual-identity story as ``_COORDINATOR_IDENTITIES`` above, for
+# qa_agent's shared review-result cache.
+_QA_AGENT_IDENTITIES = (
+    "qa_agent.agent",
+    "software_engineering_team.qa_agent.agent",
+)
+
+
+def _clear_qa_review_cache() -> None:
+    """Clear the QA-agent review-result cache on every loaded module identity.
+
+    Preconditions:
+        - None. Identities that are not present in ``sys.modules`` are skipped
+          (an unimported module cannot have populated its cache).
+
+    Postconditions:
+        - For each loaded identity in ``_QA_AGENT_IDENTITIES``, the shared
+          review-result cache namespace is empty.
+    """
+    for name in _QA_AGENT_IDENTITIES:
+        mod = sys.modules.get(name)
+        if mod is not None:
+            mod.clear_review_cache()
+
+
 def _ensure_real_modules() -> None:
     """Evict synthetic module stubs other test files may have installed.
 
@@ -170,6 +195,25 @@ def _reset_code_review_chunk_cache(monkeypatch: pytest.MonkeyPatch):
     yield
     _clear_coordinator_caches()
     clear_compaction_cache()
+
+
+@pytest.fixture(autouse=True)
+def _reset_qa_review_cache():
+    """Clear the process-global QA review-result cache around every test.
+
+    Mirrors ``_reset_code_review_chunk_cache`` above, for the same reason:
+    several ``test_qa_agent*.py`` tests reuse a byte-identical ``QAInput``
+    (or a locally-scoped dummy-client class whose name — the model
+    fingerprint's fallback identifier — collides across test functions,
+    e.g. two distinct tests each defining their own ``_AllPassClient``)
+    across test functions that expect independent LLM invocations. Without a
+    reset, one test's cached outcome could be served to another. Clearing an
+    empty cache is trivially cheap, so this runs for every SE test
+    unconditionally.
+    """
+    _clear_qa_review_cache()
+    yield
+    _clear_qa_review_cache()
 
 
 def pytest_configure(config: pytest.Config) -> None:
