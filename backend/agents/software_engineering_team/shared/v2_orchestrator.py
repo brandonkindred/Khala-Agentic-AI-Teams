@@ -1078,7 +1078,7 @@ class ConfigDrivenV2DevelopmentAgent(BaseV2DevelopmentAgent):
           or ``self.config``.
         """
         built_kinds = frozenset(
-            kind.value if hasattr(kind, "value") else str(kind) for kind in tool_agents
+            str(kind.value if hasattr(kind, "value") else kind) for kind in tool_agents
         )
         expected_kinds = self.tool_agent_kinds
         if built_kinds == expected_kinds:

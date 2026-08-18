@@ -110,6 +110,19 @@ class TestValidateToolAgents:
         agent = ConfigDrivenV2DevelopmentAgent(MagicMock(), config)
         agent._validate_tool_agents({_Kind("security"): object(), _Kind("testing_qa"): object()})
 
+    def test_passes_with_non_string_value_keys(self):
+        """A ``.value`` that isn't already a ``str`` (unlike the real per-team
+        ``(str, Enum)`` ``ToolAgentKind`` members) is still normalized via
+        ``str()`` before comparison against ``tool_agent_kinds: FrozenSet[str]``."""
+
+        class _IntValuedKind:
+            def __init__(self, value: int) -> None:
+                self.value = value
+
+        config = _make_config(tool_agent_kinds=frozenset({"1", "2"}))
+        agent = ConfigDrivenV2DevelopmentAgent(MagicMock(), config)
+        agent._validate_tool_agents({_IntValuedKind(1): object(), _IntValuedKind(2): object()})
+
     def test_raises_on_missing_kind(self):
         config = _make_config(tool_agent_kinds=frozenset({"security", "testing_qa"}))
         agent = ConfigDrivenV2DevelopmentAgent(MagicMock(), config)
