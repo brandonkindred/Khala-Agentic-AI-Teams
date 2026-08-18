@@ -56,11 +56,24 @@ class _FakeClient:
         self.messages = _FakeMessages(ctx, capture)
 
 
-def _text_message(text, *, stop_reason="end_turn", input_tokens=11, output_tokens=7):
+def _text_message(
+    text,
+    *,
+    stop_reason="end_turn",
+    input_tokens=11,
+    output_tokens=7,
+    cache_read_input_tokens=None,
+    cache_creation_input_tokens=None,
+):
+    usage_kwargs = {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    if cache_read_input_tokens is not None:
+        usage_kwargs["cache_read_input_tokens"] = cache_read_input_tokens
+    if cache_creation_input_tokens is not None:
+        usage_kwargs["cache_creation_input_tokens"] = cache_creation_input_tokens
     return SimpleNamespace(
         content=[SimpleNamespace(type="text", text=text)],
         stop_reason=stop_reason,
-        usage=SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens),
+        usage=SimpleNamespace(**usage_kwargs),
     )
 
 
@@ -727,6 +740,30 @@ def test_telemetry_recorded_with_tokens():
     assert rec["completion_tokens"] == 8
     assert rec["total_tokens"] == 20
     assert rec["status"] == "success"
+    # SDK usage object with no cache activity reported -> defaults to zero.
+    assert rec["cache_read_tokens"] == 0
+    assert rec["cache_creation_tokens"] == 0
+
+
+def test_telemetry_recorded_with_cache_tokens():
+    from llm_service import telemetry
+
+    telemetry.clear_call_log()
+    client, _ = _make_client(
+        _text_message(
+            '{"ok": 1}',
+            input_tokens=12,
+            output_tokens=8,
+            cache_read_input_tokens=500,
+            cache_creation_input_tokens=200,
+        )
+    )
+    client.complete_json("q", objective="record me")
+    calls = telemetry.get_recent_calls()
+    assert calls, "expected a telemetry record"
+    rec = calls[-1]
+    assert rec["cache_read_tokens"] == 500
+    assert rec["cache_creation_tokens"] == 200
 
 
 def test_complete_requires_objective():
