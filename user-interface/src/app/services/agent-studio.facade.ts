@@ -184,6 +184,27 @@ export class AgentStudioFacade {
     return this.agenticTeamApi.addAgentFromRegistry(teamId, manifestId);
   }
 
+  /**
+   * Add a registry agent to a team's roster on explicit user request (the
+   * Browse-agents overlay's "select" action) — unlike `addAgentToTeam`, this
+   * performs no session-scoped dedup: a deliberate, repeatable user action
+   * must never silently no-op because the same `(teamId, manifestId)` pair
+   * was consumed once before by an unrelated auto-add or an earlier manual
+   * add-then-delete.
+   *
+   * Preconditions: `teamId` and `manifestId` are non-empty strings naming a
+   *   team and a registry agent to add right now.
+   * Postconditions: on success, the agent is added to the team's roster and
+   *   the returned `AgenticTeamAgent` is emitted; the session's
+   *   handoff-consumed set (`AgentStudioStateService.hasConsumedHandoff`) is
+   *   left untouched — a later Stage-2-handoff auto-add for the same pair is
+   *   unaffected by this call. On error, the error propagates unchanged (no
+   *   state written).
+   */
+  addAgentFromCatalog(teamId: string, manifestId: string): Observable<AgenticTeamAgent> {
+    return this.agenticTeamApi.addAgentFromRegistry(teamId, manifestId);
+  }
+
   // -------------------------------------------------------------------------
   // Stage 4 — Test Team w/ Personas
   // -------------------------------------------------------------------------

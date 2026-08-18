@@ -17,8 +17,11 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatSelectModule } from '@angular/material/select';
+import { MatTooltipModule } from '@angular/material/tooltip';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
+import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
+import { AgentStudioSlideOutComponent } from './agent-studio-slide-out/agent-studio-slide-out.component';
 import { ProcessDesignerChatComponent } from '../../process-designer-chat/process-designer-chat.component';
 import type {
   AgenticTeam,
@@ -53,6 +56,9 @@ import type {
     MatIconModule,
     MatInputModule,
     MatSelectModule,
+    MatTooltipModule,
+    AgentCatalogComponent,
+    AgentStudioSlideOutComponent,
     ProcessDesignerChatComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -78,6 +84,11 @@ export class AgentStudioComposeTeamComponent implements OnInit {
   readonly showCreateForm = signal(false);
   readonly creating = signal(false);
   readonly createError = signal<string | null>(null);
+
+  /** Whether the Browse-agents overlay is open. */
+  readonly browseOpen = signal(false);
+  /** Message for the most recent failed catalog add, or null. */
+  readonly browseAddError = signal<string | null>(null);
 
   readonly selectedTeamId = computed(() => this.state.teamId());
   readonly selectedProcessId = computed(() => this.state.processId());
@@ -287,6 +298,63 @@ export class AgentStudioComposeTeamComponent implements OnInit {
         error: (err) => {
           this.creating.set(false);
           this.createError.set(err?.error?.detail ?? 'Failed to create team');
+        },
+      });
+  }
+
+  /**
+   * Open the Browse-agents overlay.
+   *
+   * Preconditions: `selectedTeamId()` is non-null (the template's trigger is
+   *   disabled otherwise, but this method itself defensively no-ops too).
+   * Postconditions: `browseOpen()` is true iff a team was selected; unchanged
+   *   otherwise.
+   */
+  openBrowse(): void {
+    if (!this.selectedTeamId()) return;
+    this.browseAddError.set(null);
+    this.browseOpen.set(true);
+  }
+
+  /**
+   * Close the Browse-agents overlay.
+   *
+   * Preconditions: none.
+   * Postconditions: `browseOpen()` is false.
+   */
+  closeBrowse(): void {
+    this.browseOpen.set(false);
+  }
+
+  /**
+   * Handle a catalog selection from the Browse-agents overlay: add the
+   * chosen agent to the currently selected team's roster.
+   *
+   * Preconditions: `manifestId` is a non-empty registry agent id emitted by
+   *   the catalog's `requestRun` output; `selectedTeamId()` is non-null
+   *   (guaranteed by `openBrowse`'s guard — the overlay cannot be open
+   *   otherwise).
+   * Postconditions: on success, the overlay closes, `browseAddError()` is
+   *   null, and the embedded roster panel is asked to refresh
+   *   (`chat?.refreshRoster()`) so the newly added agent appears without a
+   *   full team reload. On failure, the overlay stays open and
+   *   `browseAddError()` carries a message so the user can retry without
+   *   losing their place in the catalog.
+   */
+  onBrowseSelect(manifestId: string): void {
+    const teamId = this.selectedTeamId();
+    if (!teamId) return;
+    this.browseAddError.set(null);
+    this.facade
+      .addAgentFromCatalog(teamId, manifestId)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: () => {
+          this.closeBrowse();
+          this.chat?.refreshRoster();
+        },
+        error: (err) => {
+          this.browseAddError.set(err?.error?.detail ?? 'Could not add this agent — try again.');
         },
       });
   }
