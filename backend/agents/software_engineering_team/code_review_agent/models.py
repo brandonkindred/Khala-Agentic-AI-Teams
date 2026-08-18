@@ -824,11 +824,20 @@ class CodeReviewInput(BaseModel):
           the diff's removed-hunk side with no extra fetch) supplies only the
           hunk-scoped removed/context excerpt, omitting unchanged lines
           outside a hunk. Default ``None`` and ignored by the review logic
-          when absent (behaves exactly as today); no pass consumes it yet. It
-          is still folded into the submission-level cache key via
-          ``model_dump`` (see ``mapping._submission_fingerprint``), so a
-          verdict computed with a before-image is never served from a cache
-          entry computed without one.
+          when absent (behaves exactly as today). When
+          ``CODE_REVIEW_MUTATION_ANALYSIS`` is enabled (default on), the
+          side-effect-impact pass (standalone and merged) renders it as a
+          per-path "Replaced (pre-change) content" prompt section and reasons
+          over it via the mutation-vs-replaced-code contract sub-check. When
+          that toggle is disabled, the before-image is hidden from the model
+          entirely -- not merely told to ignore it -- so the prompt is
+          byte-identical to a review with no ``replaced_content`` at all.
+          Regardless of the toggle, it is still folded into the
+          submission-level cache key via ``model_dump`` (see
+          ``mapping._submission_fingerprint``), so a verdict computed with a
+          before-image is never served from a cache entry computed without
+          one, and a verdict computed with the toggle on is never served to a
+          run with it off (or vice versa).
         - ``skip_tail_passes`` is honored by the in-process coordinator; the
           Temporal workflow path does not yet thread it through.
     """
@@ -858,8 +867,12 @@ class CodeReviewInput(BaseModel):
         "populated this field. Default None; ignored by the review logic when absent (behaves "
         "exactly as today). Carried through the submission-level cache key so a verdict "
         "computed with a before-image is never served from a cache entry computed without "
-        "one. Reserved for before-image blast-radius / contract-change analysis; no pass "
-        "consumes it yet.",
+        "one, and a verdict computed with CODE_REVIEW_MUTATION_ANALYSIS on is never served "
+        "to a run with it off (or vice versa). When that toggle is enabled (default on), "
+        "the side-effect-impact pass (standalone and merged) renders this as a per-path "
+        "'Replaced (pre-change) content' prompt section and reasons over it via the "
+        "mutation-vs-replaced-code contract sub-check; when disabled, this field is hidden "
+        "from the model entirely (not merely told to ignore it).",
     )
     spec_content: str = Field(
         default="",

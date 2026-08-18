@@ -78,9 +78,10 @@ from .models import CodeReviewInput, CodeReviewIssue, coerce_line, is_no_op_sugg
 from .profiles import ReviewProfile
 from .prompts import (
     SIDE_EFFECT_IMPACT_FORMATTING_INSTRUCTIONS,
-    SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT,
+    build_side_effect_impact_reasoning_system_prompt,
 )
 from .repo_reader import DEFAULT_MAX_LISTED_FILES, DiskRepoReader, RepoReader
+from .side_effect_consolidation import MUTATION_ANALYSIS_ENV, effective_replaced_content
 from .submission_pass_runner import FileBatch, run_submission_pass
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,14 @@ logger = logging.getLogger(__name__)
 # Default-on toggle: an explicit ``CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS=false``/``0``/``no``
 # disables the pass (see docs/ENV_VARS.md). Any other value (or unset) leaves it enabled.
 _PASS_ENV = "CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS"
+
+# The mutation-vs-replaced-code contract sub-check's toggle name (and the shared
+# ``effective_replaced_content`` gating helper) live in ``side_effect_consolidation``
+# -- despite the name, that module has no LLM/tool/Agent dependencies of its own
+# (env-var name strings, pure finding-grouping logic, and this one pure helper --
+# see its module docstring), not a tail pass. See ``MUTATION_ANALYSIS_ENV``'s
+# docstring there for why it lives there: mapping.py's cache fingerprint must be
+# able to import it without pulling in a tail-pass module.
 
 _ALLOWED_CATEGORIES = frozenset({"side-effects", "documentation"})
 _ALLOWED_SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
@@ -700,6 +709,16 @@ def _run_pass(
     Postconditions:
         - Same contract as :func:`find_side_effect_impact_issues`, minus the
           env-toggle/profile early returns the caller already handled.
+        - Resolves ``mutation_on`` from ``CODE_REVIEW_MUTATION_ANALYSIS``
+          (default on) and passes it to
+          :func:`~code_review_agent.prompts.build_side_effect_impact_reasoning_system_prompt`,
+          so the reasoning system prompt includes the mutation-vs-replaced-code
+          contract sub-check only when the toggle is on. Each batch's user
+          prompt is built with ``replaced_content`` gated through
+          :func:`~code_review_agent.side_effect_consolidation.effective_replaced_content`
+          (``input_data.replaced_content`` when ``mutation_on``, else ``None``):
+          when the toggle is off, the before-image is hidden from the model
+          entirely, never merely passed through with an instruction to ignore it.
         - Delegates ``Agent`` construction and reactive overflow bisect recovery
           to
           :func:`~code_review_agent.submission_pass_runner.run_submission_pass`,
@@ -717,6 +736,7 @@ def _run_pass(
 
     pre_numbered = _effective_pre_numbered(input_data, index)
     tools = _build_side_effect_tools(index)
+    mutation_on = env_flag_enabled(MUTATION_ANALYSIS_ENV)
 
     def _build_prompt_for_batch(batch: FileBatch) -> str:
         return _build_prompt(
@@ -725,7 +745,7 @@ def _run_pass(
             batch_index=batch.index,
             total_batches=batch.total,
             is_partial=batch.is_partial,
-            replaced_content=input_data.replaced_content,
+            replaced_content=effective_replaced_content(input_data, mutation_on),
         )
 
     def _parse_batch_reply(raw: str) -> List[CodeReviewIssue]:
@@ -738,7 +758,9 @@ def _run_pass(
     results = run_submission_pass(
         llm,
         changed_files=list(index.files.items()),
-        reasoning_system_prompt=SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT,
+        reasoning_system_prompt=build_side_effect_impact_reasoning_system_prompt(
+            mutation_on=mutation_on
+        ),
         formatting_instructions=SIDE_EFFECT_IMPACT_FORMATTING_INSTRUCTIONS,
         build_prompt=_build_prompt_for_batch,
         tools=tools,

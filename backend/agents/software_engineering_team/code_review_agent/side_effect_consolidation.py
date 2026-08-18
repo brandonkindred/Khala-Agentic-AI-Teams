@@ -35,7 +35,7 @@ from .function_boundaries import (
     enclosing_construct,
     strip_numbered_prefixes,
 )
-from .models import CodeReviewIssue
+from .models import CodeReviewInput, CodeReviewIssue
 
 _SIDE_EFFECT_CATEGORY = "side-effects"
 
@@ -46,6 +46,43 @@ _SIDE_EFFECT_CATEGORY = "side-effects"
 # temporal/activities.py, mapping.py's cache fingerprint) imports this constant
 # rather than re-spelling the env var name, so a rename can't silently drift.
 SIDE_EFFECT_CONSOLIDATION_ENV = "CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION"
+
+# Default-on toggle for the mutation-vs-replaced-code contract sub-check inside
+# the side-effect / blast-radius pass (see side_effect_impact_pass.py): an
+# explicit ``CODE_REVIEW_MUTATION_ANALYSIS=false``/``0``/``no`` disables it (see
+# docs/ENV_VARS.md). Any other value (or unset) leaves it enabled. Defined here
+# rather than in a tail-pass module, mirroring ``SIDE_EFFECT_CONSOLIDATION_ENV``
+# immediately above: this is a neutral, side-effect-free location so the
+# low-level cache/fingerprint layer (mapping.py) never has to import a tail-pass
+# module just to read a toggle name. Every caller (side_effect_impact_pass.py,
+# merged_architecture_side_effect_pass.py, coordinator.py, mapping.py's cache
+# fingerprint) imports this constant rather than re-spelling the env var name.
+MUTATION_ANALYSIS_ENV = "CODE_REVIEW_MUTATION_ANALYSIS"
+
+
+def effective_replaced_content(
+    input_data: CodeReviewInput, mutation_on: bool
+) -> Optional[Dict[str, str]]:
+    """The before-image to show the model, gated by the mutation-analysis toggle.
+
+    Single source of truth for the "hide replaced_content entirely when the
+    toggle is off" rule, so ``side_effect_impact_pass._run_pass`` and
+    ``merged_architecture_side_effect_pass._run_pass`` share one implementation
+    instead of duplicating ``input_data.replaced_content if mutation_on else
+    None`` at each call site.
+
+    Preconditions: none.
+
+    Postconditions:
+        - Returns ``input_data.replaced_content`` unchanged when ``mutation_on``
+          is True.
+        - Returns ``None`` when ``mutation_on`` is False, regardless of whether
+          ``input_data.replaced_content`` is set -- the before-image must be
+          hidden from the model entirely in that case, not merely passed
+          through with an instruction to ignore it. Pure; never raises.
+    """
+    return input_data.replaced_content if mutation_on else None
+
 
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
