@@ -22,7 +22,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Iterable, List, NamedTuple, Optional, get_origin
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Iterable,
+    List,
+    NamedTuple,
+    Optional,
+    get_origin,
+    get_type_hints,
+)
 
 from pydantic import BaseModel, ValidationError
 from strands.multiagent.graph import GraphBuilder
@@ -260,11 +270,16 @@ def _merge_named_fragments(
     if not isinstance(nested_results, dict):
         return None
 
-    list_fields = {
-        name
-        for name, field in model_class.model_fields.items()
-        if get_origin(field.annotation) is list
-    }
+    # ``field.annotation`` can still be an unresolved ``ForwardRef`` (e.g.
+    # ``VisualIdentityOutput.mood_board_candidates: List["MoodBoardConcept"]``,
+    # forward-referencing a class defined later in models.py) even though the
+    # model itself validates fine -- Pydantic resolves forward refs lazily for
+    # validation but doesn't retroactively rewrite ``model_fields[...].annotation``.
+    # ``get_type_hints`` forces that resolution, so a list field isn't
+    # misdetected as scalar (which would silently overwrite instead of
+    # collecting its fragments, then fail model validation).
+    resolved_hints = get_type_hints(model_class)
+    list_fields = {name for name, hint in resolved_hints.items() if get_origin(hint) is list}
 
     merged: dict[str, Any] = {}
     found_ids: set[str] = set()
@@ -1252,6 +1267,9 @@ def _parse_model_from_text(text: str, model_class: type[BaseModel]) -> Optional[
         return None
 
 
+_NO_RESULT_ATTR = object()
+
+
 def _locate_node_result(result: Any, node_id: str) -> Optional[Any]:
     """Walk a Strands graph invocation ``result`` down to one node's result.
 
@@ -1260,12 +1278,23 @@ def _locate_node_result(result: Any, node_id: str) -> Optional[Any]:
         one); ``node_id`` identifies the node to fetch.
     Postconditions:
         Returns the ``NodeResult`` for ``node_id`` when ``result`` exposes a
-        ``result`` mapping (duck-typed via ``.get``) that contains ``node_id``
-        and the fetched value itself wraps a ``result``; returns ``None`` for
-        any missing/malformed link in that chain (no ``result`` attr, not a
-        mapping, node id absent, or a node result without a ``result``).
+        node-id-keyed mapping (duck-typed via ``.get``) that contains
+        ``node_id`` and the fetched value itself wraps a ``result``; returns
+        ``None`` for any missing/malformed link in that chain (mapping
+        attribute absent or not a mapping, node id absent, or a node result
+        without a ``result``).
+
+        The mapping is read from ``result.result`` when that attribute is
+        present at all (even if ``None`` or not mapping-shaped — preserves
+        every existing caller/test double built against this historical
+        attribute name), and only falls back to ``result.results`` (plural)
+        when ``.result`` is genuinely absent -- the shape real Strands
+        ``GraphResult``/``MultiAgentResult`` objects use (they carry no
+        ``.result`` attribute at all, only ``.results``).
     """
-    result_obj = getattr(result, "result", None)
+    result_obj = getattr(result, "result", _NO_RESULT_ATTR)
+    if result_obj is _NO_RESULT_ATTR:
+        result_obj = getattr(result, "results", None)
     if result_obj is None or not hasattr(result_obj, "get"):
         return None
     node_result = result_obj.get(node_id)
