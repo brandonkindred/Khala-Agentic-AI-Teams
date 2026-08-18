@@ -8,13 +8,14 @@ Provides:
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, Optional
 
 from strands import Agent
 from strands.multiagent.graph import GraphBuilder, GraphNode
 
 from branding_team.models import BrandPhase
-from llm_service import get_strands_model
+from shared.graph import OutputMode
+from shared.graph import build_agent as _shared_build_agent
 
 # ---------------------------------------------------------------------------
 # Agent-key tiers (per-phase LLM routing)
@@ -76,8 +77,6 @@ def phase_agent_key(phase: BrandPhase) -> str:
 # Agent factory
 # ---------------------------------------------------------------------------
 
-OutputMode = Literal["json", "text"]
-
 
 def build_agent(
     *,
@@ -91,12 +90,14 @@ def build_agent(
 ) -> Agent:
     """Create a ``strands.Agent`` pre-configured for branding work.
 
-    The backing model is the project's centralized ``LLMClientModel`` resolved
-    via ``get_strands_model(agent_key, response_format=output_mode)`` — this
+    Thin wrapper over the cross-team :func:`shared.graph.build_agent` that
+    pins the branding-specific default ``agent_key="branding"`` (the shared
+    factory defaults to ``None``, which falls back to the bare ``LLM_MODEL``
+    env var instead of branding's own tier). The backing model is the
+    project's centralized ``LLMClientModel`` resolved via
+    ``get_strands_model(agent_key, response_format=output_mode)`` — this
     routes through Ollama (or any configured ``LLM_PROVIDER``) and inherits
     retries, telemetry, and per-agent model routing (``LLM_MODEL_<agent_key>``).
-    Passing a bare model string here would make Strands treat it as a Bedrock
-    model ID and fail with ``NoCredentialsError`` outside AWS.
 
     Parameters
     ----------
@@ -130,21 +131,15 @@ def build_agent(
         (see also the "LLM routing (agent_key tiers)" section of
         ``README.md``).
     """
-    if output_mode not in ("json", "text"):
-        raise ValueError(f"output_mode must be 'json' or 'text', got {output_mode!r}")
-    kwargs: dict[str, Any] = {
-        "name": name,
-        "system_prompt": system_prompt,
-        "model": get_strands_model(agent_key, response_format=output_mode),
-        "callback_handler": None,
-    }
-    if structured_output is not None:
-        kwargs["structured_output_model"] = structured_output
-    if tools:
-        kwargs["tools"] = tools
-    if description:
-        kwargs["description"] = description
-    return Agent(**kwargs)
+    return _shared_build_agent(
+        name=name,
+        system_prompt=system_prompt,
+        output_mode=output_mode,
+        structured_output=structured_output,
+        tools=tools,
+        description=description,
+        agent_key=agent_key,
+    )
 
 
 # ---------------------------------------------------------------------------
