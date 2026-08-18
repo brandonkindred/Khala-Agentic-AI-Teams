@@ -168,12 +168,12 @@ class SECodeEngineProvider:
             at this boundary too.
         """
         from llm_service import get_client
-        from software_engineering_team.code_review_agent.models import CodeReviewInput
+        from software_engineering_team.code_review_agent.models import build_code_review_input
         from software_engineering_team.code_review_agent.scope_classifier import classify_scope
 
         input_data = None
         if changed_context:
-            input_data = CodeReviewInput(
+            input_data = build_code_review_input(
                 files=dict(changed_context), task_description=task_description
             )
 
