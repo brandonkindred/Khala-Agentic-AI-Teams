@@ -176,7 +176,10 @@ class StrategyLabCycleWorkflow:
         call when absent — its ``regime_summary_enabled`` flag and
         ``max_design_reentries`` value are read here), ``run_id`` (the owning
         run's id -- absent/``None`` disables design-attempt checkpointing for
-        every attempt in this cycle, see ``ADR-012``), ``cycle_index`` (this
+        every attempt in this cycle, since checkpointing needs a stable run
+        identifier to correlate attempts against (``ADR-012``,
+        ``system_design/adr/ADR-012-strategy-lab-design-attempt-checkpoint-contract.md``)),
+        ``cycle_index`` (this
         cycle's 0-based index within the run -- absent/``None`` disables live
         SSE progress publishing for every attempt in this cycle, since
         ``StrategyLabProgressEvent.cycle_index`` is a required field on the
@@ -433,20 +436,28 @@ def _terminal_sse_event(
         ``StrategyLabBatchWorkflow.run``'s own ``status`` local can hold.
     Postconditions:
         Returns a JSON-shaped dict with a ``"type"`` key matching one of the
-        three event shapes above.
+        three event shapes above. ``completed_batches``/``total_batches`` are
+        included only in the ``"complete"`` case's returned dict -- neither
+        the ``"cancelled"`` nor the ``"error"`` shape carries them, matching
+        ``StrategyLabCancelledEvent``/``StrategyLabErrorDetailEvent`` (neither
+        models those fields either).
     Raises:
         ``AssertionError`` if ``status`` is not one of ``_TERMINAL_STATUSES``
         -- a caller precondition violation (the batch workflow's own status
         local produced a value this function was never told to expect), never
         silently coerced into a misleading "complete" event for an
-        unrecognized status.
+        unrecognized status. Raised via an explicit ``if``/``raise`` rather
+        than a bare ``assert`` statement so the check survives even when
+        Python runs with ``-O``/``PYTHONOPTIMIZE=1`` (which strips asserts).
     """
-    assert status in _TERMINAL_STATUSES, f"_terminal_sse_event: unexpected status {status!r}"
+    if status not in _TERMINAL_STATUSES:
+        raise AssertionError(f"_terminal_sse_event: unexpected status {status!r}")
     if status == "cancelled":
         return {"type": "cancelled", "detail": "Run cancelled."}
     if status in ("failed", "interrupted"):
         return {"type": "error", "detail": f"Run {status}.", "terminal_status": status}
-    assert status in ("completed", "completed_with_errors")
+    if status not in ("completed", "completed_with_errors"):
+        raise AssertionError(f"_terminal_sse_event: unexpected status {status!r}")
     message = (
         f"Run completed with {errored_count} errored and {skipped_count} skipped cycle(s)."
         if errored_count
@@ -574,6 +585,19 @@ class StrategyLabBatchWorkflow:
         # silently committing (shared.fencing.check_fencing_token).
         generation = int(batch_input.get("generation", _DEFAULT_FENCING_GENERATION))
 
+        # Gates the three new-in-this-change SSE publish call sites below
+        # (cycle_skipped / cycle_complete / terminal). Called here, before any
+        # activity/child-workflow command in this method, so any run already
+        # in flight when this ships (which by definition already executed
+        # past this point under the old code) replays with this False and
+        # simply doesn't publish for the remainder of its lifetime -- the
+        # existing, already-safe degraded behavior (no live SSE events), not
+        # a replay non-determinism error. Mirrors
+        # ai_systems_team/temporal/workflows.py's established use of
+        # workflow.patched for this exact purpose (see its own module
+        # docstring / README for the pattern).
+        sse_events_enabled = workflow.patched("strategy-lab-sse-run-events")
+
         wf_config = batch_input.get("workflow_config")
         if wf_config is None:
             wf_config = await _exec(act.resolve_workflow_config_activity)
@@ -603,19 +627,6 @@ class StrategyLabBatchWorkflow:
         # Approximated forward from the resume offset, matching
         # completed_indices' own resume-seed approximation just above.
         completed_batches_count = start_batch_idx
-
-        # Gates the three new-in-this-change SSE publish call sites below
-        # (cycle_skipped / cycle_complete / terminal). Called once, near the
-        # top of run() before any activity/child-workflow command, so any run
-        # already in flight when this ships (which by definition already
-        # executed past this point under the old code) replays with this
-        # False and simply doesn't publish for the remainder of its lifetime
-        # -- the existing, already-safe degraded behavior (no live SSE
-        # events), not a replay non-determinism error. Mirrors
-        # ai_systems_team/temporal/workflows.py's established use of
-        # workflow.patched for this exact purpose (see its own module
-        # docstring / README for the pattern).
-        sse_events_enabled = workflow.patched("strategy-lab-sse-run-events")
 
         for batch_idx in range(start_batch_idx, batch_count):
             within_start = start_within_batch if batch_idx == start_batch_idx else 0

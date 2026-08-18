@@ -1062,6 +1062,7 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     """
     from fastapi import HTTPException
 
+    from investment_team.api import job_event_bus
     from investment_team.models import (
         BacktestConfig,
         CodeRevision,
@@ -1376,9 +1377,10 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             unit tests -- via :func:`shared.temporal.activity_utils.is_cancelled`).
         Postconditions:
             Returns normally when not cancelled. Raises
-            :class:`_DesignAttemptCancelled` when ``activity.is_cancelled()``
-            is True -- checked FIRST and unconditionally, before any publish
-            attempt, so a publish failure can never mask a real cancellation.
+            :class:`_DesignAttemptCancelled` when ``is_cancelled()`` (the
+            :mod:`shared.temporal.activity_utils` helper) returns True --
+            checked FIRST and unconditionally, before any publish attempt, so
+            a publish failure can never mask a real cancellation.
             When ``progress_publish_enabled`` and ``phase`` maps onto a
             frontend-recognized phase-stepper id (``_PROGRESS_PHASE_MAP``),
             best-effort publishes a ``progress`` SSE event carrying the
@@ -1396,8 +1398,6 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         if mapped_phase is None:
             return
         try:
-            from investment_team.api import job_event_bus
-
             event: Dict[str, Any] = {
                 "type": "progress",
                 "cycle_index": cycle_index,
@@ -1777,14 +1777,20 @@ def publish_run_event_activity(params: Dict[str, Any]) -> None:
     cross-process bridge needed.
 
     Preconditions:
-        ``params`` = ``{"run_id": str, "event": <JSON-shaped dict with a
-        "type" key>}``.
+        ``params`` has ``"run_id"`` (str) and ``"event"`` (a JSON-shaped
+        dict) keys -- violating this is a caller bug, not covered by the
+        best-effort contract below: it raises ``KeyError``, uncaught, since
+        ``run_id``/``event`` are extracted before the ``try`` block. ``event``
+        need not carry a ``"type"`` key; when absent, ``event_type=None`` is
+        passed to ``job_event_bus.publish`` (its own ``event_type`` is
+        optional).
     Postconditions:
-        Always returns ``None``, even when the publish itself fails -- a lost
-        live-progress/results-refresh update must never fail or retry the
-        underlying run, so any exception is logged and swallowed rather than
-        raised (mirrors ``run_design_attempt_activity``'s progress-checkpoint
-        closure).
+        Always returns ``None`` once ``run_id``/``event`` have been
+        extracted -- a failure of the ``job_event_bus.publish`` call itself
+        (as opposed to a malformed ``params``) is logged and swallowed rather
+        than raised, since a lost live-progress/results-refresh update must
+        never fail or retry the underlying run (mirrors
+        ``run_design_attempt_activity``'s progress-checkpoint closure).
     """
     from investment_team.api import job_event_bus
 
