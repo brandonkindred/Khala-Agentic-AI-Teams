@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
+from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent, _as_bool
 
 from .models import CICDPipelineAgentInput, CICDPipelineAgentOutput
 from .prompts import CICD_PIPELINE_PROMPT
@@ -54,12 +54,14 @@ class CICDPipelineAgent(DevOpsSingleShotAgent):
 
         Preconditions: ``data`` is the dict from ``complete_json_with_continuation``.
         Postconditions: returns ``CICDPipelineAgentOutput`` with the same field
-        defaults as the pre-migration agent.
+        defaults as the pre-migration agent, including
+        ``required_gates_present=_as_bool(data.get("required_gates_present", False))``
+        (absent / ``"false"`` / other non-true values → False).
         """
         return CICDPipelineAgentOutput(
             artifacts=data.get("artifacts") or {},
             pipeline_job_graph_summary=data.get("pipeline_job_graph_summary", ""),
-            required_gates_present=bool(data.get("required_gates_present", False)),
+            required_gates_present=_as_bool(data.get("required_gates_present", False)),
             summary=data.get("summary", ""),
             risks=data.get("risks") or [],
         )
