@@ -25,6 +25,15 @@ from branding_team.graphs.phase2_narrative import build_phase2_graph
 from branding_team.graphs.shared import serialize_mission
 from branding_team.shared.coro_runner import run_coroutine
 from branding_team.tests.conftest import make_mission
+
+# These four stub builders are private (``_``-prefixed) implementation
+# details of DummyLLMClient's Phase 2 routing, not a published test API.
+# They're imported anyway -- deliberately -- because this test's whole point
+# is to compare Voice's real captured input against the *exact* deterministic
+# content the other five specialists' dummy turns produce; duplicating that
+# content by hand here would silently drift from the real stubs and defeat
+# the regression check. A future refactor of the dummy client's internals is
+# expected to require updating these imports.
 from llm_service.clients.dummy import (
     DummyLLMClient,
     _branding_phase2_archetypes_stub,
@@ -35,7 +44,7 @@ from llm_service.clients.dummy import (
 )
 
 
-def _run_phase2_graph_capturing_chat_calls() -> list[dict[str, Any]]:
+def _run_phase2_graph_capturing_chat_calls() -> tuple[list[dict[str, Any]], str]:
     """Run the real Phase 2 graph under the dummy provider, recording every
     ``DummyLLMClient.chat`` call's ``messages``/``tools`` in invocation order.
 
@@ -43,11 +52,13 @@ def _run_phase2_graph_capturing_chat_calls() -> list[dict[str, Any]]:
         ``LLM_PROVIDER=dummy`` (set by ``tests/conftest.py`` for the whole
         suite).
     Postconditions:
-        Returns one entry per real ``chat()`` call Strands made while running
-        ``build_phase2_graph().invoke_async(task)`` to completion, each a
-        ``{"messages": ..., "tools": ...}`` dict -- the exact arguments that
-        call received, captured before delegating to the real implementation
-        so the run's own output is unaffected.
+        Returns ``(calls, task)``: one entry per real ``chat()`` call Strands
+        made while running ``build_phase2_graph().invoke_async(task)`` to
+        completion, each a ``{"messages": ..., "tools": ...}`` dict -- the
+        exact arguments that call received, captured before delegating to
+        the real implementation so the run's own output is unaffected -- and
+        the exact ``task`` string the graph was invoked with, so callers
+        never need to recompute an equivalent one themselves.
     """
     captured_calls: list[dict[str, Any]] = []
     original_chat = DummyLLMClient.chat
@@ -63,7 +74,7 @@ def _run_phase2_graph_capturing_chat_calls() -> list[dict[str, Any]]:
     )
     with patch.object(DummyLLMClient, "chat", spy_chat):
         run_coroutine(build_phase2_graph().invoke_async(task))
-    return captured_calls
+    return captured_calls, task
 
 
 def _find_voice_call(captured_calls: list[dict[str, Any]]) -> dict[str, Any]:
@@ -89,8 +100,23 @@ def _plain_text(messages: list[dict[str, Any]]) -> str:
     """Concatenate every message's raw ``content`` string, without re-encoding
     as JSON -- ``json.dumps(messages)`` would backslash-escape the quotes
     already inside each message's own JSON-shaped content, inflating length
-    comparisons with encoding noise rather than real payload size."""
-    return "\n".join(str(m.get("content", "")) for m in messages)
+    comparisons with encoding noise rather than real payload size.
+
+    Preconditions:
+        Every message's ``content`` is a plain string -- true for every real
+        ``DummyLLMClient.chat()`` call this test observes. Asserted rather
+        than silently ``str()``-coerced, so a future Strands message-shape
+        change (e.g. structured content blocks) fails loudly here instead of
+        comparing against a meaningless Python repr.
+    """
+    parts: list[str] = []
+    for m in messages:
+        content = m.get("content", "")
+        assert isinstance(content, str), (
+            f"expected str message content, got {type(content).__name__}"
+        )
+        parts.append(content)
+    return "\n".join(parts)
 
 
 def test_voice_step_input_excludes_full_upstream_narrative_payload() -> None:
@@ -104,14 +130,16 @@ def test_voice_step_input_excludes_full_upstream_narrative_payload() -> None:
     single-predecessor edge chain is broken (e.g. a fan-in that hands every
     upstream node's output to Voice at once).
     """
-    captured_calls = _run_phase2_graph_capturing_chat_calls()
+    captured_calls, task = _run_phase2_graph_capturing_chat_calls()
     assert len(captured_calls) == 6, (
         f"expected one chat() call per Phase 2 specialist, got {len(captured_calls)}"
     )
 
     voice_messages = _find_voice_call(captured_calls)["messages"]
     voice_text = _plain_text(voice_messages)
-    user_content = next(m["content"] for m in voice_messages if m.get("role") == "user")
+    user_messages = [m for m in voice_messages if m.get("role") == "user"]
+    assert len(user_messages) == 1, "expected exactly one user message in Voice's turn"
+    user_content = user_messages[0]["content"]
 
     story_stub = _branding_phase2_story_stub()
     archetypes_stub = _branding_phase2_archetypes_stub()
@@ -136,16 +164,13 @@ def test_voice_step_input_excludes_full_upstream_narrative_payload() -> None:
     # Size assertion, relative to a concrete pre-refactor baseline proxy.
     # Voice's user-turn content is "Original Task: <task>" plus Strands'
     # "Inputs from previous nodes" section for its one predecessor
-    # (PersonaBuilder) -- i.e. the task, PersonaBuilder's own dumped
-    # fragment, and a small fixed label overhead. A cumulative-inheritance
-    # regression would instead add whole extra fragments (171-648 chars
-    # each, per story/archetypes/tagline/messaging above) on top of that --
-    # far bigger than the label-formatting margin allowed here.
-    mission = make_mission()
-    task = (
-        f"Create a comprehensive brand strategy for the following company.\n\n"
-        f"Branding Mission:\n{serialize_mission(mission)}"
-    )
+    # (PersonaBuilder) -- i.e. the task (the exact string the graph was
+    # invoked with, returned above rather than recomputed here), PersonaBuilder's
+    # own dumped fragment, and a small fixed label overhead. A
+    # cumulative-inheritance regression would instead add whole extra
+    # fragments (171-648 chars each, per story/archetypes/tagline/messaging
+    # above) on top of that -- far bigger than the label-formatting margin
+    # allowed here.
     persona_fragment_size = len(json.dumps(personas_stub, separators=(",", ":")))
     # Observed overhead is ~78 chars; margin is well under the smallest excluded fragment (171).
     label_formatting_margin = 150
