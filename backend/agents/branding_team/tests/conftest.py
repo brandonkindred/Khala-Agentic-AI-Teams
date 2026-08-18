@@ -14,6 +14,21 @@ import pytest
 os.environ.setdefault("LLM_PROVIDER", "dummy")
 
 from branding_team.models import BrandingMission  # noqa: E402
+from branding_team.shared.phase_output_cache import clear_phase_output_cache  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _reset_phase_output_cache():
+    """Clear the process-global phase-output cache around every test.
+
+    ``PhaseOutputCache`` now wraps a namespaced ``shared.cache`` singleton
+    (see ``phase_output_cache.py``), shared by every instance in this
+    process. Without a reset, one test's cached phase output could be served
+    to another test constructing an unrelated ``PhaseOutputCache()``.
+    """
+    clear_phase_output_cache()
+    yield
+    clear_phase_output_cache()
 
 
 def pytest_configure(config: pytest.Config) -> None:

@@ -10,11 +10,12 @@ stop the agent loop (``stop_loop=True``), so they never call
 
 Edges are a *single-predecessor chain*. Strands' readiness check treats
 multiple incoming edges as OR (any one satisfied predecessor makes the
-node ready), so a cumulative fan-in would launch every downstream agent
-as soon as Storyteller finished. Instead, each specialist's
-``structured_output`` model *carries forward* upstream fields so the
-immediate predecessor already exposes the full prior narrative in
-``Inputs from previous nodes``.
+node ready), so a fan-in would launch every downstream agent as soon as
+Storyteller finished. The single-predecessor edge into each node is what
+makes Strands auto-populate ``Inputs from previous nodes`` with the
+immediate predecessor's typed output; each specialist's own-field
+``structured_output`` model (Story 5b Step 1) only ever emits its own new
+fields and reads the predecessor's output from there as read-only context.
 """
 
 from __future__ import annotations
@@ -48,7 +49,7 @@ def build_phase2_graph() -> Graph:
         Storyteller → ArchetypeAnalyst → TaglineWriter → MessageMapper
             → PersonaBuilder → VoicePrinciplesDrafter
 
-    Each node emits a cumulative ``structured_output`` fragment; the
+    Each node emits its own disjoint ``structured_output`` fragment; the
     orchestrator merges them into ``NarrativeMessagingOutput``.
 
     Preconditions:

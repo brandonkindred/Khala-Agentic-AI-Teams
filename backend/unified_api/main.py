@@ -651,6 +651,45 @@ def _stop_in_process_temporal_workers() -> None:
         logger.warning("in-process Temporal worker shutdown failed", exc_info=True)
 
 
+async def _cancel_and_await_task(task: asyncio.Task | None, *, label: str) -> None:
+    """Cancel *task* and await it so its cleanup finishes before shutdown continues.
+
+    ``task.cancel()`` alone only schedules ``CancelledError`` for the task's
+    next await point — without also awaiting it, the task's ``finally``
+    blocks may not run before the process exits, any exception it raises is
+    never surfaced, and asyncio can log "Task was destroyed but it is
+    pending" at interpreter shutdown. Awaiting here forces the cancellation
+    (and any cleanup it triggers) to complete before this shutdown step
+    returns.
+
+    Preconditions:
+        - ``task`` is either ``None`` or an ``asyncio.Task`` created on the
+          currently running event loop.
+        - ``label`` names the task for the warning log line if it raises
+          something other than ``asyncio.CancelledError``.
+
+    Postconditions:
+        - If ``task`` is ``None``, returns immediately (no-op).
+        - Otherwise ``task.cancel()`` has been called and, on return, the
+          task is done — its ``finally`` blocks have already run.
+        - ``asyncio.CancelledError`` from the awaited task is suppressed and
+          never logged (the expected result of cancelling it). Any other
+          exception raised by the task is caught and logged via
+          ``logger.warning(..., exc_info=True)``, matching the neighboring
+          shutdown steps below, and never re-raised, so one task's teardown
+          failure cannot abort the rest of shutdown.
+    """
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.warning("%s task raised during shutdown", label, exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator; each numbered step is one registration/boot  # pragma: no cover - startup requires live Postgres schema registration, Temporal worker boot, and sub-app mounting
     """Application lifespan: register Postgres schemas, register assistant
@@ -870,15 +909,11 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
 
     yield
 
-    if cognition_scheduler_task is not None:
-        cognition_scheduler_task.cancel()
-    if graph_sync_task is not None:
-        graph_sync_task.cancel()
-    if run_pruner_task is not None:
-        run_pruner_task.cancel()
-    if sandbox_reaper_task is not None:
-        sandbox_reaper_task.cancel()
-    health_task.cancel()
+    await _cancel_and_await_task(cognition_scheduler_task, label="cognition scheduler")
+    await _cancel_and_await_task(graph_sync_task, label="cognition graph sync")
+    await _cancel_and_await_task(run_pruner_task, label="console run pruner")
+    await _cancel_and_await_task(sandbox_reaper_task, label="sandbox reaper")
+    await _cancel_and_await_task(health_task, label="health check loop")
 
     # Close the Graphiti client (and its Neo4j driver) owned by shared.neo4j.
     try:

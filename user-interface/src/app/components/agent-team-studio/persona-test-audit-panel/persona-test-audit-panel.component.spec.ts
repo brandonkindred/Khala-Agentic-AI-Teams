@@ -131,22 +131,22 @@ describe('PersonaTestAuditPanelComponent', () => {
     expect(component.getTaskStatus('t1')).toBe('');
   });
 
-  it('defaults the back link to /persona-testing', () => {
+  it('defaults the back link to /agent-studio', () => {
     buildFixture();
-    fixture.detectChanges();
-    const link = fixture.nativeElement.querySelector('a.back-link') as HTMLAnchorElement;
-    expect(link.getAttribute('href')).toBe('/persona-testing');
-    expect(link.textContent).toContain('Back to Testing Personas');
-  });
-
-  it('renders a custom backLink and backLabel when provided', () => {
-    buildFixture();
-    component.backLink = '/agent-studio';
-    component.backLabel = 'Back to Agent Studio';
     fixture.detectChanges();
     const link = fixture.nativeElement.querySelector('a.back-link') as HTMLAnchorElement;
     expect(link.getAttribute('href')).toBe('/agent-studio');
     expect(link.textContent).toContain('Back to Agent Studio');
-    expect(link.textContent).not.toContain('Testing Personas');
+  });
+
+  it('renders a custom backLink and backLabel when provided', () => {
+    buildFixture();
+    component.backLink = '/agent-studio/persona-run/123';
+    component.backLabel = 'Back to run';
+    fixture.detectChanges();
+    const link = fixture.nativeElement.querySelector('a.back-link') as HTMLAnchorElement;
+    expect(link.getAttribute('href')).toBe('/agent-studio/persona-run/123');
+    expect(link.textContent).toContain('Back to run');
+    expect(link.textContent).not.toContain('Back to Agent Studio');
   });
 });

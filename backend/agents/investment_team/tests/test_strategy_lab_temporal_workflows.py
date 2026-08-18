@@ -310,6 +310,61 @@ def test_run_defaults_run_id_and_generation_when_cycle_input_predates_them():
     assert seen["generation"] == wf._DEFAULT_FENCING_GENERATION
 
 
+def test_run_threads_cycle_index_into_design_attempt_params():
+    """``cycle_input``'s ``cycle_index`` must reach every
+    ``run_design_attempt_activity`` call's params verbatim -- this is what lets
+    that activity's progress-publish checkpoint attach the right
+    ``StrategyLabProgressEvent.cycle_index`` (a required field on the
+    frontend)."""
+    seen: List[Any] = []
+
+    def _attempt(args):
+        seen.append(args[0]["cycle_index"])
+        return _record_outcome()
+
+    handlers = {
+        "resolve_workflow_config_activity": lambda a: _WF_CONFIG,
+        "run_design_attempt_activity": _attempt,
+    }
+    with _patch_execute(handlers):
+        _run(
+            {
+                "run_id": "run-1",
+                "cycle_index": 4,
+                "prior_records": [],
+                "config": _config_dict(),
+                "convergence_tracker_state": {},
+            }
+        )
+    assert seen == [4]
+
+
+def test_run_defaults_cycle_index_to_none_when_cycle_input_predates_it():
+    """A ``cycle_input`` from a workflow-history replay predating this field
+    must still run -- ``cycle_index`` defaults to ``None`` (disabling live
+    progress publishing for the attempt, never a crash)."""
+    seen: List[Any] = []
+
+    def _attempt(args):
+        seen.append(args[0]["cycle_index"])
+        return _record_outcome()
+
+    handlers = {
+        "resolve_workflow_config_activity": lambda a: _WF_CONFIG,
+        "run_design_attempt_activity": _attempt,
+    }
+    with _patch_execute(handlers):
+        _run(
+            {
+                "run_id": "run-1",
+                "prior_records": [],
+                "config": _config_dict(),
+                "convergence_tracker_state": {},
+            }
+        )
+    assert seen == [None]
+
+
 # ---------------------------------------------------------------------------
 # Re-entry loop — SpecImplementabilityError surfaced as a structured outcome
 # ---------------------------------------------------------------------------
