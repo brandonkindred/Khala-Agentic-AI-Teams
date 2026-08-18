@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 from shared.concurrency import parallel_map
+from shared.env import env_flag_enabled
 from software_engineering_team.activity import ActivityBridge
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.advisory_lock import advisory_lock
@@ -1502,6 +1503,53 @@ class ReviewIssuePartition(NamedTuple):
     standalone_comments: List[str]
 
 
+_SCOPE_LLM_PASS_ENV = "CODE_REVIEW_SCOPE_LLM_PASS"
+
+
+def _classify_review_scope(
+    provider: Any,
+    issues: List[Any],
+    changed_context: Optional[Dict[str, str]],
+    task_description: str,
+) -> Optional[List[Any]]:
+    """LLM in/out-of-scope verdicts for ``issues``, or ``None`` when unavailable.
+
+    Preconditions:
+        - ``issues`` is ``output.issues`` (already FP-filtered by the review
+          engine before ``_run_reviewer`` returns).
+        - ``provider`` is the same engine provider used to run the review, or
+          ``None`` (a caller that does not wire classification, e.g. a legacy
+          test calling :func:`_partition_review_issues` directly).
+    Postconditions:
+        - Returns ``None`` — meaning "no verdicts; the caller falls back to
+          its own heuristic for every finding" — when ``issues`` is empty,
+          ``provider`` is ``None``, :data:`_SCOPE_LLM_PASS_ENV` is disabled
+          (``env_flag_enabled``, default-on), the provider call raises, or the
+          returned list's length does not match ``issues``.
+        - Otherwise returns ``provider.classify_issue_scope(issues,
+          changed_context, task_description)`` unchanged — a list positionally
+          aligned 1:1 with ``issues``.
+        - Never raises: any failure is logged and degrades to ``None``.
+    """
+    if not issues or provider is None or not env_flag_enabled(_SCOPE_LLM_PASS_ENV):
+        return None
+    try:
+        verdicts = provider.classify_issue_scope(issues, changed_context, task_description)
+        if verdicts is None or len(verdicts) != len(issues):
+            got = None if verdicts is None else len(verdicts)
+            raise ValueError(
+                f"classify_issue_scope returned {got} verdicts for {len(issues)} issues"
+            )
+        return verdicts
+    except Exception as exc:  # noqa: BLE001 — must never break the review
+        logger.warning(
+            "PR review: LLM scope classification skipped (%s: %s)",
+            type(exc).__name__,
+            scrub_token_from_text(str(exc)),
+        )
+        return None
+
+
 def _partition_review_issues(
     output: Any,
     client: Any,
@@ -1510,6 +1558,9 @@ def _partition_review_issues(
     pr_number: int,
     valid_by_path: Dict[str, List[int]],
     changed_by_path: Dict[str, List[int]],
+    provider: Any = None,
+    changed_context: Optional[Dict[str, str]] = None,
+    task_description: str = "",
 ) -> ReviewIssuePartition:
     """Split the reviewer's raw findings into PR-scoped issues and pre-existing-bug proposals.
 
@@ -1523,20 +1574,29 @@ def _partition_review_issues(
         - ``valid_by_path``/``changed_by_path`` are the maps
           :func:`_decide_review_mode` built for the same file set.
         - ``client`` is an open ``GitHubClient``.
+        - ``provider``/``changed_context``/``task_description`` are optional;
+          a caller that omits them gets exactly the tag-based split described
+          below, with no LLM classification attempted.
     Postconditions:
-        - An issue tagged ``pre_existing=True`` is kept in
-          ``preexisting_issues`` unless :func:`is_within_diff` against
-          ``changed_by_path`` proves it lies on a line this PR actually
-          ADDED, in which case it is overridden into ``pr_issues``. An issue
-          that omits the tag (or from a caller that never asks for it)
-          defaults ``pre_existing=False`` and is treated as a PR finding —
-          this deliberately includes a finding naming a file outside the
-          diff (e.g. "module X is imported but was never added"): such a
-          finding is exactly the kind ``false_positive_filter.py`` already
-          keeps rather than treats as noise (a missing file/module the PR
-          should have added is a real, in-scope defect, not a pre-existing
-          one), so only the reviewer's own tag — never file/diff membership
-          alone — routes a finding to proposals.
+        - Each issue's in/out-of-scope verdict is resolved in priority order:
+          (1) a decisive verdict from :func:`_classify_review_scope` (the LLM
+          classifier, gated behind :data:`_SCOPE_LLM_PASS_ENV`) when one was
+          returned for that issue; (2) otherwise today's heuristic — ``not
+          getattr(issue, "pre_existing", False)``; (3) regardless of (1)/(2),
+          :func:`is_within_diff` against ``changed_by_path`` unconditionally
+          forces in-scope when it proves the issue lies on a line this PR
+          actually ADDED — a finding on an added line cannot legitimately be
+          out-of-scope, whichever source decided otherwise. An issue resolved
+          in-scope goes to ``pr_issues``; otherwise ``preexisting_issues``.
+          With the LLM pass off, unavailable, or degraded to "unknown" for an
+          issue, this collapses to the tag-only heuristic: an issue without
+          the ``pre_existing`` tag (or from a caller that never asks for it)
+          defaults to a PR finding — this deliberately includes a finding
+          naming a file outside the diff (e.g. "module X is imported but was
+          never added"): such a finding is exactly the kind
+          ``false_positive_filter.py`` already keeps rather than treats as
+          noise (a missing file/module the PR should have added is a real,
+          in-scope defect, not a pre-existing one).
         - ``proposals`` is :func:`_detect_duplicate_proposals` applied to
           ``proposal_from_findings`` over each :func:`group_similar_findings`
           group of ``preexisting_issues``, with any proposal matched to an
@@ -1567,35 +1627,40 @@ def _partition_review_issues(
     # Defects in the code the PR added or modified drive the review
     # (comments + REQUEST_CHANGES); pre-existing bugs the reviewer noticed
     # in unchanged code are NOT posted on this PR — they become GitHub-issue
-    # proposals a human approves later on the Code Review page. A finding
-    # without the tag defaults to a PR finding (reviews now tag via
-    # _diff_first_focus, but any caller that doesn't ask still
-    # behaves exactly as before). The LLM's self-reported tag is not trusted
-    # unconditionally: a finding whose file/line is verified to be a line
-    # this PR actually ADDED (per is_within_diff against changed_by_path —
-    # deliberately narrower than valid_by_path, which would also match
-    # unchanged context lines) cannot legitimately be "pre-existing,
-    # unchanged code", so a mistagged pre_existing=true is overridden back to
-    # a PR finding rather than silently skipping review.
+    # proposals a human approves later on the Code Review page.
     #
-    # Deliberately NOT gated on whether the finding's file is in the diff at
-    # all: a finding naming a file outside the diff is very often "this PR
-    # should have added/modified file X but didn't" — a genuine, in-scope
-    # defect, not a pre-existing one — and false_positive_filter.py already
-    # keeps exactly this kind of "unresolved path" finding rather than
-    # dropping it as noise. Forcing every off-diff-file finding to
-    # preexisting_issues would silently swallow that class of real,
-    # PR-blocking finding. The mis-anchoring failure mode that once
-    # motivated such a gate (an off-diff finding posted against an unrelated
+    # The LLM scope classifier (gated behind CODE_REVIEW_SCOPE_LLM_PASS) is the
+    # primary source of truth per finding when it returns a decisive verdict;
+    # a finding it could not decide (or that the pass is off/failed for) falls
+    # back to the reviewer's self-reported pre_existing tag. A finding without
+    # the tag (or from a caller that never asks for it) defaults to a PR
+    # finding — this deliberately includes a finding naming a file outside the
+    # diff (e.g. "module X is imported but was never added"): such a finding
+    # is exactly the kind false_positive_filter.py already keeps rather than
+    # treats as noise (a missing file/module the PR should have added is a
+    # real, in-scope defect, not a pre-existing one). The mis-anchoring
+    # failure mode that could
+    # otherwise result (an off-diff finding posted against an unrelated
     # changed file) is fixed below instead, by giving it its own standalone
     # comment rather than a borrowed file anchor.
+    #
+    # Whichever source decides out-of-scope, is_within_diff against
+    # changed_by_path (deliberately narrower than valid_by_path, which would
+    # also match unchanged context lines) unconditionally overrides back to
+    # in-scope when it proves the finding lies on a line this PR actually
+    # ADDED — such a finding cannot legitimately be "pre-existing, unchanged
+    # code", whether it was the classifier or the tag heuristic that said so.
+    verdicts = _classify_review_scope(provider, output.issues, changed_context, task_description)
     pr_issues: List[Any] = []
     preexisting_issues: List[Any] = []
-    for i in output.issues:
-        if getattr(i, "pre_existing", False) and not is_within_diff(i, changed_by_path):
-            preexisting_issues.append(i)
-        else:
-            pr_issues.append(i)
+    for idx, i in enumerate(output.issues):
+        verdict = verdicts[idx] if verdicts is not None else None
+        in_scope = verdict.in_scope if verdict is not None else None
+        if in_scope is None:
+            in_scope = not getattr(i, "pre_existing", False)
+        if not in_scope and is_within_diff(i, changed_by_path):
+            in_scope = True
+        (pr_issues if in_scope else preexisting_issues).append(i)
     # Similar findings (same category, near-identical description — e.g. the
     # same "bare import" pattern flagged across several files) are combined
     # into one proposal so a human is offered one issue per kind of problem,
@@ -1989,6 +2054,11 @@ def _run_pr_review_body(
                 pr_number,
                 mode.valid_by_path,
                 mode.changed_by_path,
+                provider=provider,
+                changed_context=_files_for_scope(mode),
+                task_description=(
+                    f"Review pull request #{getattr(pr, 'number', '')}: {getattr(pr, 'title', '') or ''}"
+                ),
             )
             posting = _post_review_comments(
                 client, owner, repo, pr_number, pr, reviewer_login, output, partition
