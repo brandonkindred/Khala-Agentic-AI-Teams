@@ -174,7 +174,36 @@ def _generate_getting_started(
     credentials: Optional[GeneratedCredentials],
     result: ToolProvisionResult,
 ) -> str:
-    """Generate getting-started text for a tool."""
+    """Generate getting-started text for a tool, preferring an explicit
+    template, then LLM generation, then a deterministic fallback.
+
+    Execution order:
+      1. If `onboarding_config.getting_started` is set, use it as a
+         template, substituting `{username}`, `{connection_string}`, and
+         any `credentials.extra` keys (each value passed through
+         `sanitize_prompt_var`), and return it directly — no LLM call is
+         made.
+      2. Otherwise, request a completion from the LLM client resolved by
+         `llm_service.get_client(agent_key="agent_provisioning_team.documentation")`.
+         A `DummyLLMClient` result is treated as "unconfigured" rather
+         than used, so its generic canned text is never returned.
+      3. If step 2 is unconfigured, resolves to `DummyLLMClient`, or
+         raises for any other reason, the exception is logged and a
+         deterministic template is built from `tool_name`, whether
+         `credentials.connection_string` is present, and
+         `result.permissions`.
+
+    Preconditions:
+        tool_name is non-empty. onboarding_config is not None (callers
+        only invoke this after resolving a tool definition from the
+        manifest). result is not None. credentials may be None when a
+        tool was provisioned without generated credentials.
+
+    Postconditions:
+        Returns a non-empty str. Never raises: any exception from the
+        LLM path is caught and replaced by the deterministic fallback
+        text.
+    """
     if onboarding_config.getting_started:
         text = onboarding_config.getting_started
 
