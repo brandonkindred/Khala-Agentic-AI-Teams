@@ -129,7 +129,7 @@ from .chunking import (
     split_block_into_segments,
 )
 from .false_positive_filter import CodebaseIndex, filter_false_positives
-from .finding_combination import combine_findings
+from .finding_combination import combine_findings, resolve_combine_similarity_threshold
 from .mapping import (
     _cached_review_chunk,
     _chunk_cache_key,
@@ -711,9 +711,13 @@ def run_coordinator(
           reviewed* by any worker sharing the configured cache (Redis when
           ``REDIS_URL`` / ``REDIS_HOST`` is set, otherwise this process's
           in-memory LRU) — same code + context + model + output-affecting
-          toggles including ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``,
-          ``CODE_REVIEW_SPEC_COMPLIANCE_PASS``, and
-          ``CODE_REVIEW_MUTATION_ANALYSIS``; no unreviewed ranges — returns
+          toggles including ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION`` (folded
+          in only for the ``CODE_REVIEW`` profile, the only profile it can
+          affect), the combine-similarity threshold
+          (``CODE_REVIEW_COMBINE_SIMILARITY_THRESHOLD``, folded in for every
+          profile since it affects every profile's finding combination, not
+          just ``CODE_REVIEW``'s side-effects), ``CODE_REVIEW_SPEC_COMPLIANCE_PASS``,
+          and ``CODE_REVIEW_MUTATION_ANALYSIS``; no unreviewed ranges — returns
           the recorded approved output with no LLM call at all — unless a
           ``repo_reader`` is given, in which case this short-circuit never
           fires (a verdict that reads the rest of the repository cannot be
@@ -783,6 +787,26 @@ def run_coordinator(
         input_data.profile == ReviewProfile.CODE_REVIEW
     )
 
+    # Same rationale again: ``combine_findings``'s ``consolidate_side_effects``
+    # flag only changes output for ``side-effects``-category findings, and
+    # those are only ever produced by ``find_architecture_and_side_effect_issues``
+    # under ``ReviewProfile.CODE_REVIEW`` (it short-circuits to no findings on
+    # every other profile) -- so a profile-blind env read would fingerprint
+    # other profiles as flag-sensitive when the toggle can never affect them.
+    side_effect_consolidation_enabled = env_flag_enabled(SIDE_EFFECT_CONSOLIDATION_ENV) and (
+        input_data.profile == ReviewProfile.CODE_REVIEW
+    )
+
+    # Unlike the three toggles above, the combine-similarity threshold is NOT
+    # profile-gated: ``combine_findings`` (via ``_run_tail_passes``) runs for
+    # every profile and this threshold governs the generic proximity/same-anchor
+    # merge rules for *every* finding category, not just ``side-effects`` --
+    # so it is genuinely output-affecting for non-CODE_REVIEW submissions too.
+    # Folding in a profile restriction here (unlike the others) would itself be
+    # a bug: a threshold change could then silently fail to invalidate a cached
+    # non-CODE_REVIEW verdict the new threshold should have altered.
+    combine_similarity_threshold = resolve_combine_similarity_threshold()
+
     # Submission-level short-circuit (see module docstring's "Submission-level
     # short-circuit" section). An identical approved submission returns its
     # cached output before any LLM work. Keyed on the raw input + model +
@@ -795,7 +819,12 @@ def run_coordinator(
     cached: Optional[CodeReviewOutput] = None
     if submission_capacity > 0 and repo_reader is None:
         submission_key = _submission_fingerprint(
-            input_data, model_fingerprint, spec_compliance_single_pass, mutation_analysis_enabled
+            input_data,
+            model_fingerprint,
+            spec_compliance_single_pass,
+            mutation_analysis_enabled,
+            side_effect_consolidation_enabled,
+            combine_similarity_threshold,
         )
         cache = get_shared_cache(_submission_cache_namespace())
         # shared.cache is fail-open, but keep an explicit local guard so a
