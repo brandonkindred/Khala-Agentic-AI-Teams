@@ -92,7 +92,12 @@ describe('AgentStudioPersonaComponent a11y', () => {
     await setup();
     const fixture = TestBed.createComponent(AgentStudioPersonaComponent);
     fixture.detectChanges(); // loads team + personas → launcher
+    // pollWhile's immediate poll fires via a timer(0); flush it with fake
+    // timers so the run status lands before rendering is asserted below.
+    vi.useFakeTimers();
     fixture.componentInstance.launch(); // start a run → live-run panel
+    vi.advanceTimersByTime(0);
+    vi.useRealTimers();
     fixture.detectChanges();
 
     // Guard: the rich live-run state actually rendered before auditing.
