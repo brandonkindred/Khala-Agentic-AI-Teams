@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from code_review_agent import mapping
-from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE, CODE_TO_REVIEW_HEADER
+from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE
 from code_review_agent.chunking import _bisect_segment
 from code_review_agent.coordinator import (
     MAX_CODE_REVIEW_ISSUES,
@@ -54,6 +54,9 @@ from code_review_agent.models import (
 )
 from pydantic import ValidationError
 from strands.models.model import Model
+from tests.chunk_review_prompt_routing import (
+    is_chunk_map_reasoning_prompt as _is_chunk_map_reasoning_prompt,
+)
 
 from llm_service import (
     LLMClient,
@@ -66,6 +69,11 @@ from llm_service import (
 from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
 
+# The prefix wrap_with_analysis_delimiters (via_reasoning.py) puts on every
+# formatting-pass prompt, used throughout this file's test doubles to route a
+# complete_json call to either the reasoning-pass or formatting-pass branch.
+_ANALYSIS_DELIMITER = "--- ANALYSIS"
+
 # Grace period for a buggy late progress notification to (wrongly) land before the
 # test asserts none arrived after a map failure. Small by design; the preceding
 # ``wait(timeout=10)`` already guarantees the worker finished, so this only guards
@@ -75,11 +83,6 @@ _LATE_NOTIFY_GRACE_PERIOD_S = 0.1
 # Headroom under the map-chunk char budget so near-cap files cannot pack into
 # one chunk (forces separate map units in multi-file recovery/parallelism tests).
 _MAP_CHUNK_SEPARATION_HEADROOM = 2_000
-
-
-def _is_chunk_map_reasoning_prompt(prompt: str) -> bool:
-    """True when ``prompt`` is the map-phase chunk reasoning user message."""
-    return CODE_TO_REVIEW_HEADER in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +266,7 @@ class _ScriptedClient(DummyLLMClient):
         think: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        if "--- ANALYSIS" not in prompt:
+        if _ANALYSIS_DELIMITER not in prompt:
             return super().complete_json(
                 prompt,
                 temperature=temperature,
@@ -1224,7 +1227,7 @@ class _SelectiveRaiser(DummyLLMClient):
     def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         with self._lock:
             self.prompts.append(prompt)
-            if self.marker in prompt and "--- ANALYSIS" not in prompt:
+            if self.marker in prompt and _ANALYSIS_DELIMITER not in prompt:
                 raise self.exc
         return super().complete_json(prompt, **kwargs)
 
@@ -1357,10 +1360,11 @@ class _HalfTimingDummyDelegate:
         # delimiters, which the raw reasoning prompt (and the per-half marker
         # text within it) never contains -- so the pass is identified by
         # content, not by call order (concurrent halves interleave calls).
-        if "--- ANALYSIS" in prompt:
-            key = self._pending_half
-            if key is not None:
+        if _ANALYSIS_DELIMITER in prompt:
+            with self._lock:
+                key = self._pending_half
                 self._pending_half = None
+            if key is not None:
                 return self._half_review_response(key)
             return self._inner.complete_json(prompt, **kwargs)
         is_chunk_review = _is_chunk_map_reasoning_prompt(prompt)
@@ -1454,7 +1458,7 @@ class _TimedDummyHalfClient(DummyLLMClient):
         # Both passes land on ``complete_json`` now; the formatting pass is
         # identified by its "--- ANALYSIS" wrapper (see
         # ``_HalfTimingDummyDelegate`` for the same technique).
-        if "--- ANALYSIS" in prompt:
+        if _ANALYSIS_DELIMITER in prompt:
             self._pending_half = None
             return super().complete_json(prompt, **kwargs)
         is_chunk_review = _is_chunk_map_reasoning_prompt(prompt)
@@ -3117,7 +3121,7 @@ def test_rejecting_chunk_with_only_a_summary_degrades_instead_of_blocking() -> N
         _B_MARKER = "B_CHUNK_REJECT_SUMMARY_ONLY"
 
         def complete_json(self, prompt: str, **kwargs: Any) -> Any:
-            if "--- ANALYSIS" not in prompt:
+            if _ANALYSIS_DELIMITER not in prompt:
                 if (
                     _is_chunk_map_reasoning_prompt(prompt)
                     and "### b.py ###" in prompt
@@ -3178,7 +3182,7 @@ def test_silent_rejection_never_borrows_an_approving_chunks_summary() -> None:
         _B_MARKER = "B_CHUNK_SILENT_REJECT"
 
         def complete_json(self, prompt: str, **kwargs: Any) -> Any:
-            if "--- ANALYSIS" not in prompt:
+            if _ANALYSIS_DELIMITER not in prompt:
                 if (
                     _is_chunk_map_reasoning_prompt(prompt)
                     and "### b.py ###" in prompt
@@ -3239,7 +3243,7 @@ def test_no_stale_progress_reports_after_map_failure() -> None:
             self.slow_finished = threading.Event()
 
         def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-            if "--- ANALYSIS" in prompt or not _is_chunk_map_reasoning_prompt(prompt):
+            if _ANALYSIS_DELIMITER in prompt or not _is_chunk_map_reasoning_prompt(prompt):
                 return super().complete_json(prompt, **kwargs)
             if "FAILME" in prompt:
                 assert slow_started.wait(timeout=10), "slow chunk must start first"

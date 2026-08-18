@@ -182,6 +182,9 @@ def test_chunk_review_records_reasoning_and_formatting_transcript_entries(
     for entry in reasoning_entries:
         assert entry[1]["system_prompt"] == reasoning_system
     assert formatting_entry[1]["system_prompt"] == format_system
+    # record_transcript_entry(stage, target, prompt, response, *, ...) -- response is
+    # positional-only (everything after it is keyword-only), so args[3] is exactly
+    # ``response``; there is no keyword fallback to assert against instead.
     assert "ok" in formatting_entry[0][3]
 
 

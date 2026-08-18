@@ -17,10 +17,12 @@ import threading
 from typing import Any
 
 import pytest
+from tests.chunk_review_prompt_routing import (
+    is_chunk_map_reasoning_prompt as _is_chunk_map_reasoning_prompt,
+)
 
 from llm_service import LLMSemanticExhaustionError
 from llm_service.clients.dummy import DummyLLMClient
-from software_engineering_team.code_review_agent.chunk_reviewer import CODE_TO_REVIEW_HEADER
 
 
 @pytest.fixture(autouse=True)
@@ -57,22 +59,6 @@ def _task(**overrides):
     )
     base.update(overrides)
     return Task(**base)
-
-
-def _is_chunk_map_reasoning_prompt(prompt: str) -> bool:
-    """True when ``prompt`` is the map-phase chunk reasoning user message.
-
-    ``_run_chunk_review`` now runs the reasoning pass through a real Strands
-    ``Agent`` (``run_agent_via_reasoning``); ``DummyLLMClient.chat()``
-    delegates to ``complete_json`` for BOTH the reasoning pass (reached via
-    the agent's ``chat()`` call) and the formatting pass (a direct
-    ``complete_json`` call). Only the reasoning pass's raw prompt carries
-    ``CODE_TO_REVIEW_HEADER`` -- the formatting pass's prompt is the
-    reasoning prose wrapped in ``wrap_with_analysis_delimiters``'s
-    "--- ANALYSIS" markers instead. Identically named/defined helper in
-    ``test_code_review_coordinator.py``.
-    """
-    return CODE_TO_REVIEW_HEADER in prompt
 
 
 class _ScriptedClient(DummyLLMClient):

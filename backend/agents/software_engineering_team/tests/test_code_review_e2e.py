@@ -35,6 +35,11 @@ from software_engineering_team.shared.context_sizing import (
 # is what these property tests assert.
 _BIG_CONTEXT_TOKENS = 1_000_000
 
+# The prefix wrap_with_analysis_delimiters (via_reasoning.py) puts on every
+# formatting-pass prompt, used below to route a complete_json call to either
+# the reasoning-pass or formatting-pass branch of a test double.
+_ANALYSIS_DELIMITER = "--- ANALYSIS"
+
 
 class _BigCtxRecorder(DummyLLMClient):
     """1M-context client that records every reasoning-pass prompt and
@@ -59,7 +64,7 @@ class _BigCtxRecorder(DummyLLMClient):
         return _BIG_CONTEXT_TOKENS
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        if "--- ANALYSIS" not in prompt:
+        if _ANALYSIS_DELIMITER not in prompt:
             with self._lock:
                 self.prompts.append(prompt)
         return {
@@ -142,7 +147,7 @@ class _CiteFirstPrefixed(DummyLLMClient):
         return _BIG_CONTEXT_TOKENS
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Any:
-        if "--- ANALYSIS" not in prompt:
+        if _ANALYSIS_DELIMITER not in prompt:
             if CODE_TO_REVIEW_HEADER in prompt:
                 # Match the splitter's generic original-line prefix ("N: <code>"),
                 # not the synthetic content's "line" token, so the test stays robust
@@ -224,7 +229,7 @@ class _FailOneFile(DummyLLMClient):
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         if (
-            "--- ANALYSIS" not in prompt
+            _ANALYSIS_DELIMITER not in prompt
             and CODE_TO_REVIEW_HEADER in prompt
             and self.marker in prompt
         ):
