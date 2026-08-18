@@ -180,6 +180,26 @@ def test_make_channel_guide_rejects_blank_channel_or_description() -> None:
         _make_channel_guide("website", 123, ChannelGuidelineOutput)
 
 
+def test_make_channel_guide_rejects_non_lowercase_identifier_channel() -> None:
+    """``channel`` must be a lowercase identifier suitable for use in an agent name.
+
+    A non-empty string that isn't a lowercase identifier (e.g. mixed case or
+    containing a hyphen) must be rejected before it's interpolated into the
+    built agent's name as ``f"{channel}_guide"``.
+    """
+    from branding_team.agents import _make_channel_guide
+    from branding_team.models import ChannelGuidelineOutput
+
+    with pytest.raises(ValueError, match="channel must be a lowercase identifier"):
+        _make_channel_guide("Website", "some description", ChannelGuidelineOutput)
+    with pytest.raises(ValueError, match="channel must be a lowercase identifier"):
+        _make_channel_guide("website-v2", "some description", ChannelGuidelineOutput)
+    with pytest.raises(ValueError, match="channel must be a lowercase identifier"):
+        _make_channel_guide("2website", "some description", ChannelGuidelineOutput)
+    with pytest.raises(ValueError, match="channel must be a lowercase identifier"):
+        _make_channel_guide("web site", "some description", ChannelGuidelineOutput)
+
+
 def test_make_channel_guide_rejects_non_basemodel_structured_output() -> None:
     """Documented structured_output precondition is enforced before construction.
 

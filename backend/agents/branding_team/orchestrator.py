@@ -20,9 +20,20 @@ Phase gate logic:
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Iterable, List, NamedTuple, Optional, get_origin
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Iterable,
+    List,
+    NamedTuple,
+    Optional,
+    get_origin,
+    get_type_hints,
+)
 
 from pydantic import BaseModel, ValidationError
 from strands.multiagent.graph import GraphBuilder
@@ -231,9 +242,13 @@ def _merge_named_fragments(
 ) -> Optional[BaseModel]:
     """Merge every recognized child's ``structured_output`` into one phase output.
 
-    Shared by Phase 1 (graph fan-out), Phase 2 (sequential graph), and Phase 4
-    (graph fan-out): each wraps several named agents as a single top-level
-    node whose nested ``MultiAgentResult.results`` is keyed by node/agent id.
+    The sole merge implementation for all five phases: each wraps several
+    named agents as a single top-level node whose nested
+    ``MultiAgentResult.results`` is keyed by node/agent id. Phase 1 and
+    Phase 2 bind ``node_merge``/``require_all`` directly as a
+    ``functools.partial`` in ``_PHASE_SPEC``; Phases 3-5 go through a thin
+    per-phase wrapper (``_merge_phase3_fragments`` etc.) that does the same
+    binding by construction.
 
     Preconditions:
         ``node_result`` is the ``NodeResult`` for a single top-level graph node
@@ -260,11 +275,16 @@ def _merge_named_fragments(
     if not isinstance(nested_results, dict):
         return None
 
-    list_fields = {
-        name
-        for name, field in model_class.model_fields.items()
-        if get_origin(field.annotation) is list
-    }
+    # ``field.annotation`` can still be an unresolved ``ForwardRef`` (e.g.
+    # ``VisualIdentityOutput.mood_board_candidates: List["MoodBoardConcept"]``,
+    # forward-referencing a class defined later in models.py) even though the
+    # model itself validates fine -- Pydantic resolves forward refs lazily for
+    # validation but doesn't retroactively rewrite ``model_fields[...].annotation``.
+    # ``get_type_hints`` forces that resolution, so a list field isn't
+    # misdetected as scalar (which would silently overwrite instead of
+    # collecting its fragments, then fail model validation).
+    resolved_hints = get_type_hints(model_class)
+    list_fields = {name for name, hint in resolved_hints.items() if get_origin(hint) is list}
 
     merged: dict[str, Any] = {}
     found_ids: set[str] = set()
@@ -290,62 +310,6 @@ def _merge_named_fragments(
         return None
 
 
-def _merge_phase1_fragments(node_result: Any, model_class: type[BaseModel]) -> Optional[BaseModel]:
-    """Merge every Phase 1 fan-out node's ``structured_output`` into one phase output.
-
-    Phase 1 wraps six agents (five parallel specialists + a synthesizer) as a
-    single top-level ``"phase1_strategic_core"`` node (see
-    ``graphs/top_level.py``); the specialists' fragments are just as real as
-    the synthesizer's, but a flat ``get_agent_results()[-1]`` only ever sees
-    the last (synthesizer) result. This walks the nested ``MultiAgentResult``
-    directly — keyed by node id, per ``strands.multiagent.base.MultiAgentResult``
-    — to recover each specialist's own typed output.
-
-    Preconditions:
-        ``node_result`` is the ``NodeResult`` for a single top-level graph node
-        (may or may not wrap a nested multi-agent result).
-    Postconditions:
-        Returns a validated ``model_class`` instance merging every recognized
-        Phase 1 node's ``structured_output`` when at least one was found;
-        returns None when ``node_result`` doesn't wrap a nested multi-agent
-        result, none of ``_PHASE1_NODE_MERGE``'s node ids are present (e.g.
-        every other phase, which uses different node ids), or the merged
-        data fails validation — in every None case the caller falls back to
-        its existing single-agent-result logic unchanged.
-    """
-    return _merge_named_fragments(node_result, model_class, _PHASE1_NODE_MERGE)
-
-
-def _merge_phase2_fragments(node_result: Any, model_class: type[BaseModel]) -> Optional[BaseModel]:
-    """Merge every Phase 2 specialist's ``structured_output`` into one phase output.
-
-    Phase 2 wraps six sequential Graph agents as a single top-level
-    ``"phase2_narrative"`` node (see ``graphs/top_level.py`` /
-    ``graphs/phase2_narrative.py``); a flat ``get_agent_results()[-1]`` only
-    ever sees VoicePrinciplesDrafter. This recovers each agent's typed
-    fragment the same way Phase 1 does. All six specialists must be present
-    — a partial run (e.g. entry agent only) must not validate as a complete
-    ``NarrativeMessagingOutput`` via field defaults.
-
-    Each specialist's ``structured_output`` is an own-field-only model (Story
-    5b Step 1): upstream narrative reaches it only as read-only context via
-    the single-predecessor edge chain's ``Inputs from previous nodes``, never
-    as a field it re-emits. So no two of the six fragments can ever set the
-    same flat key, and the flat union merge below is deterministic.
-
-    Preconditions:
-        ``node_result`` is the ``NodeResult`` for a single top-level graph node
-        (may or may not wrap a nested multi-agent result).
-    Postconditions:
-        Returns a validated ``model_class`` instance merging every Phase 2
-        agent's ``structured_output`` when all of ``_PHASE2_NODE_MERGE``'s
-        node ids were found; returns None when any specialist is missing or
-        the merged data fails validation — same None contract as
-        ``_merge_phase1_fragments``.
-    """
-    return _merge_named_fragments(node_result, model_class, _PHASE2_NODE_MERGE, require_all=True)
-
-
 def _merge_phase3_fragments(node_result: Any, model_class: type[BaseModel]) -> Optional[BaseModel]:
     """Merge every Phase 3 node's ``structured_output`` into one phase output.
 
@@ -365,7 +329,7 @@ def _merge_phase3_fragments(node_result: Any, model_class: type[BaseModel]) -> O
         node ids were found -- the three moodboard conceptualists each contribute
         one element of ``mood_board_candidates``; returns None when any node is
         missing or the merged data fails validation -- same None contract as
-        ``_merge_phase1_fragments``.
+        ``_merge_named_fragments``.
     """
     return _merge_named_fragments(node_result, model_class, _PHASE3_NODE_MERGE, require_all=True)
 
@@ -388,7 +352,7 @@ def _merge_phase4_fragments(node_result: Any, model_class: type[BaseModel]) -> O
         node ids were found — the six ``*_guide`` fragments each contribute one
         element of ``channel_guidelines``; returns None when any specialist is
         missing or the merged data fails validation — same None contract as
-        ``_merge_phase1_fragments``.
+        ``_merge_named_fragments``.
     """
     return _merge_named_fragments(node_result, model_class, _PHASE4_NODE_MERGE, require_all=True)
 
@@ -411,7 +375,7 @@ def _merge_phase5_fragments(node_result: Any, model_class: type[BaseModel]) -> O
         ``_PHASE5_NODE_MERGE``'s node ids were found -- every specialist's
         fields land flat since none of them nest under a shared key; returns
         None when any specialist is missing or the merged data fails
-        validation -- same None contract as ``_merge_phase1_fragments``.
+        validation -- same None contract as ``_merge_named_fragments``.
     """
     return _merge_named_fragments(node_result, model_class, _PHASE5_NODE_MERGE, require_all=True)
 
@@ -471,13 +435,15 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
         build_phase1_graph,
         "phase1_strategic_core",
         PHASE_OUTPUT_MODELS[BrandPhase.STRATEGIC_CORE],
-        merge_fn=_merge_phase1_fragments,
+        merge_fn=functools.partial(_merge_named_fragments, node_merge=_PHASE1_NODE_MERGE),
     ),
     BrandPhase.NARRATIVE_MESSAGING: _PhaseSpec(
         build_phase2_graph,
         "phase2_narrative",
         PHASE_OUTPUT_MODELS[BrandPhase.NARRATIVE_MESSAGING],
-        merge_fn=_merge_phase2_fragments,
+        merge_fn=functools.partial(
+            _merge_named_fragments, node_merge=_PHASE2_NODE_MERGE, require_all=True
+        ),
     ),
     BrandPhase.VISUAL_IDENTITY: _PhaseSpec(
         build_phase3_graph,
@@ -1247,6 +1213,9 @@ def _parse_model_from_text(text: str, model_class: type[BaseModel]) -> Optional[
         return None
 
 
+_NO_RESULT_ATTR = object()
+
+
 def _locate_node_result(result: Any, node_id: str) -> Optional[Any]:
     """Walk a Strands graph invocation ``result`` down to one node's result.
 
@@ -1255,12 +1224,23 @@ def _locate_node_result(result: Any, node_id: str) -> Optional[Any]:
         one); ``node_id`` identifies the node to fetch.
     Postconditions:
         Returns the ``NodeResult`` for ``node_id`` when ``result`` exposes a
-        ``result`` mapping (duck-typed via ``.get``) that contains ``node_id``
-        and the fetched value itself wraps a ``result``; returns ``None`` for
-        any missing/malformed link in that chain (no ``result`` attr, not a
-        mapping, node id absent, or a node result without a ``result``).
+        node-id-keyed mapping (duck-typed via ``.get``) that contains
+        ``node_id`` and the fetched value itself wraps a ``result``; returns
+        ``None`` for any missing/malformed link in that chain (mapping
+        attribute absent or not a mapping, node id absent, or a node result
+        without a ``result``).
+
+        The mapping is read from ``result.result`` when that attribute is
+        present at all (even if ``None`` or not mapping-shaped — preserves
+        every existing caller/test double built against this historical
+        attribute name), and only falls back to ``result.results`` (plural)
+        when ``.result`` is genuinely absent -- the shape real Strands
+        ``GraphResult``/``MultiAgentResult`` objects use (they carry no
+        ``.result`` attribute at all, only ``.results``).
     """
-    result_obj = getattr(result, "result", None)
+    result_obj = getattr(result, "result", _NO_RESULT_ATTR)
+    if result_obj is _NO_RESULT_ATTR:
+        result_obj = getattr(result, "results", None)
     if result_obj is None or not hasattr(result_obj, "get"):
         return None
     node_result = result_obj.get(node_id)
