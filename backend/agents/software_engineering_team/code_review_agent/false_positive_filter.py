@@ -1321,8 +1321,89 @@ def _truncate_for_log(text: Optional[str], max_len: int = 400) -> str:
     return text[:max_len] + "..."
 
 
-def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
+# Cap on identical (tool, arguments) calls a single verification run may
+# repeat before every further repeat gets a note telling the model it
+# already has this information appended to the (still-real) result. Guards
+# against a verifier that keeps re-asking the same question -- e.g. after
+# its conversation manager evicts the earlier tool result under context
+# pressure -- instead of converging on a verdict.
+_MAX_DUPLICATE_TOOL_CALLS = 2
+
+# Hard cap on total tool calls (of any kind) a single verification run may
+# make before every further call skips its real lookup entirely and returns
+# a stop directive instead, bounding the cost of a verifier that never
+# converges regardless of how varied its calls are.
+_MAX_TOTAL_TOOL_CALLS = 40
+
+
+def _make_call_tracker() -> Callable[..., Tuple[bool, Optional[str]]]:
+    """Build a fresh, independent per-run duplicate-call/total-budget tracker.
+
+    Every tool in one verification run must share exactly one tracker for the
+    run-level budget to actually be a run-level cap: ``_build_tools`` creates
+    one internally by default, but a caller that adds further tools alongside
+    it (e.g. ``side_effect_impact_pass.build_side_effect_tools``'s
+    ``search_repository``, or ``merged_architecture_side_effect_pass``'s
+    ``list_changed_files``) must call this once, pass the result to
+    ``_build_tools(index, track_call=...)``, and wrap its own extra tool(s)
+    with the same callable -- otherwise those extra tools escape the budget
+    entirely and the run-level cap only bounds the seven tools built here.
+
+    Postconditions:
+        Returns a ``_track_call(tool_name, *args)`` callable closed over its
+        own independent counters (never shared with any other tracker
+        returned by this function). Calling it records one tool invocation:
+        returns ``(True, directive)`` once total calls through this tracker
+        exceed ``_MAX_TOTAL_TOOL_CALLS`` -- callers must return ``directive``
+        as-is instead of doing any real work. Otherwise returns ``(False,
+        note)``: ``note`` is a string to append to the tool's normal result
+        starting on the ``(_MAX_DUPLICATE_TOOL_CALLS + 1)``th call through
+        this tracker with this exact ``(tool_name, args)`` signature (i.e.
+        the first call beyond the allowed ``_MAX_DUPLICATE_TOOL_CALLS``
+        repeats), else ``None``. The signature is keyed on ``repr(args)``
+        rather than ``args`` itself so an unhashable model-supplied argument (e.g. a list
+        where a string was expected) still tracks correctly instead of
+        raising -- tools built against this tracker must never raise on bad
+        input.
+    """
+    call_counts: Dict[str, int] = {}
+    total_calls = 0
+
+    def _track_call(tool_name: str, *args: Any) -> Tuple[bool, Optional[str]]:
+        nonlocal total_calls
+        total_calls += 1
+        if total_calls > _MAX_TOTAL_TOOL_CALLS:
+            return True, (
+                f"Error: tool call budget ({_MAX_TOTAL_TOOL_CALLS} calls) exhausted "
+                "for this verification pass. Stop investigating and respond now with "
+                "your final verdict, using only what you have already found."
+            )
+        key = f"{tool_name}:{args!r}"
+        count = call_counts.get(key, 0) + 1
+        call_counts[key] = count
+        if count > _MAX_DUPLICATE_TOOL_CALLS:
+            return False, (
+                f"[You have already called {tool_name} with these exact arguments "
+                f"{count - 1} time(s) in this session -- repeating it will not reveal "
+                "new information. Use what you already found and answer now.]"
+            )
+        return False, None
+
+    return _track_call
+
+
+def _build_tools(
+    index: CodebaseIndex,
+    *,
+    track_call: Callable[..., Tuple[bool, Optional[str]]] | None = None,
+) -> List[Callable[..., Any]]:
     """Build strands tools bound to ``index`` for one verification agent.
+
+    Preconditions:
+        - When given, ``track_call`` is a callable previously returned by
+          ``_make_call_tracker`` (typically because the caller is also
+          building further tools of its own that must share the same
+          run-level budget -- see ``_make_call_tracker``'s docstring).
 
     Postconditions:
         - Returns seven tools (``read_file``, ``read_lines``, ``read_function``,
@@ -1340,7 +1421,18 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
           be told apart from a genuine read failure reported as an
           "Error: ..." string (see ``_agent_read_the_cited_file`` for why
           that distinction matters).
+        - Every call is tracked, via ``track_call`` when given, else a fresh
+          tracker created internally (so an existing caller that wants only
+          these seven tools needs no changes). Every call is tracked by
+          exact ``(tool name, arguments)``. Once a signature repeats more
+          than ``_MAX_DUPLICATE_TOOL_CALLS`` times, its (still-real) result
+          gets a note appended telling the model it already has this
+          information. Once the tracker's total tool calls exceed
+          ``_MAX_TOTAL_TOOL_CALLS``, every further call short-circuits --
+          skipping its real lookup -- and returns a stop directive telling
+          the model to finalize its verdict now.
     """
+    _track_call = track_call if track_call is not None else _make_call_tracker()
 
     @tool
     def read_file(path: str) -> Dict[str, Any]:
@@ -1360,8 +1452,26 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
             "Error: ..." message if the path is unknown or ambiguous. Never
             raises (returning ``status="error"`` instead of raising keeps a
             bad path a self-correcting tool message rather than an error that
-            aborts the agent loop).
+            aborts the agent loop). Every call is tracked: a call repeated
+            with identical arguments beyond ``_MAX_DUPLICATE_TOOL_CALLS``
+            still returns this, with a note appended saying so; once this
+            run's ``_MAX_TOTAL_TOOL_CALLS`` budget is exhausted, the text is
+            a ``status="error"`` stop directive instead (see ``_track_call``).
+            That ``status="error"`` is intentional, not incidental: a
+            budget-exhausted call never actually delivered the file's
+            content to the model, so ``_agent_read_the_cited_file`` must
+            treat it exactly like any other failed read -- "not grounded" --
+            for the same fail-safe reason it treats every other non-success
+            ``read_file`` call that way (see that function's docstring). If
+            an earlier call in the same run already read ``file_path`` with
+            ``status="success"``, that earlier grounding stands regardless
+            of what a later, budget-exhausted call for a different path
+            returns; only a ``file_path`` read that itself never succeeds
+            stays ungrounded, and a budget cutoff is exactly such a case.
         """
+        skip, note = _track_call("read_file", path)
+        if skip:
+            return {"status": "error", "content": [{"text": note}]}
         try:
             content, error = index._read(path)
         except Exception as exc:
@@ -1372,8 +1482,10 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
                 ],
             }
         if content is not None:
-            return {"status": "success", "content": [{"text": content}]}
-        return {"status": "error", "content": [{"text": error}]}
+            text = f"{content}\n\n{note}" if note else content
+            return {"status": "success", "content": [{"text": text}]}
+        text = f"{error}\n\n{note}" if note else error
+        return {"status": "error", "content": [{"text": text}]}
 
     @tool
     def read_lines(path: str, start: int, end: int) -> str:
@@ -1393,16 +1505,25 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
 
         Returns:
             A header plus ``N| content`` lines, or an ``Error: ...`` message.
+            A call repeated with identical arguments beyond
+            ``_MAX_DUPLICATE_TOOL_CALLS`` still returns this, with a note
+            appended saying so; once this run's ``_MAX_TOTAL_TOOL_CALLS``
+            budget is exhausted, this becomes a stop directive instead (see
+            ``_track_call``).
         """
+        skip, note = _track_call("read_lines", path, start, end)
+        if skip:
+            return note
         try:
-            return index.read_lines(path, start, end)
+            result = index.read_lines(path, start, end)
         except Exception as exc:
-            return (
+            result = (
                 f"Error: could not read_lines {path!r} [{start}:{end}]: {type(exc).__name__}: {exc}"
             )
+        return f"{result}\n\n{note}" if note else result
 
     @tool
-    def read_function(path: str, name_or_line) -> str:
+    def read_function(path: str, name_or_line: int | str) -> str:
         """Read one function/method/class body by line number or exact name.
 
         Pass a positive integer for line-based lookup, or a name such as
@@ -1417,8 +1538,17 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
 
         Returns:
             Header plus ``N| content`` lines, or an ``Error: ...`` message.
+            A call repeated with identical arguments beyond
+            ``_MAX_DUPLICATE_TOOL_CALLS`` still returns this, with a note
+            appended saying so; once this run's ``_MAX_TOTAL_TOOL_CALLS``
+            budget is exhausted, this becomes a stop directive instead (see
+            ``_track_call``).
         """
-        try:
+        skip, note = _track_call("read_function", path, name_or_line)
+        if skip:
+            return note
+
+        def _compute() -> str:
             if isinstance(name_or_line, bool):
                 return f"Error: name_or_line must be a line number or name, got {name_or_line!r}."
             if isinstance(name_or_line, int):
@@ -1428,24 +1558,36 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
             if isinstance(name_or_line, str):
                 return index.read_function_by_name(path, name_or_line)
             return f"Error: name_or_line must be a line number or name, got {name_or_line!r}."
+
+        try:
+            result = _compute()
         except Exception as exc:
-            return (
+            result = (
                 f"Error: could not read_function {path!r} ({name_or_line!r}): "
                 f"{type(exc).__name__}: {exc}"
             )
+        return f"{result}\n\n{note}" if note else result
 
     @tool
     def list_files() -> str:
         """List every file path available to read in the code under review.
 
         Returns:
-            One path per line. Read any of them with read_file(path).
+            One path per line. Read any of them with read_file(path). A call
+            repeated beyond ``_MAX_DUPLICATE_TOOL_CALLS`` still returns this,
+            with a note appended saying so; once this run's
+            ``_MAX_TOTAL_TOOL_CALLS`` budget is exhausted, this becomes a
+            stop directive instead (see ``_track_call``).
         """
+        skip, note = _track_call("list_files")
+        if skip:
+            return note
         try:
             paths = index.list_files()
-            return "\n".join(paths) if paths else "(no files available)"
+            result = "\n".join(paths) if paths else "(no files available)"
         except Exception as exc:
-            return f"Error: could not list files: {type(exc).__name__}: {exc}"
+            result = f"Error: could not list files: {type(exc).__name__}: {exc}"
+        return f"{result}\n\n{note}" if note else result
 
     @tool
     def search_codebase(query: str) -> str:
@@ -1465,15 +1607,25 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
             query: The substring to search for (e.g. a function or class name).
 
         Returns:
-            Matching "path:line: text" lines, or a message that nothing matched.
+            Matching "path:line: text" lines, or a message that nothing
+            matched. A call repeated with an identical query beyond
+            ``_MAX_DUPLICATE_TOOL_CALLS`` still returns this, with a note
+            appended saying so; once this run's ``_MAX_TOTAL_TOOL_CALLS``
+            budget is exhausted, this becomes a stop directive instead (see
+            ``_track_call``).
         """
+        skip, note = _track_call("search_codebase", query)
+        if skip:
+            return note
         try:
             matches = index.search(query)
             if not matches:
-                return f"No matches for {query!r}."
-            return "\n".join(f"{path}:{lineno}: {text}" for path, lineno, text in matches)
+                result = f"No matches for {query!r}."
+            else:
+                result = "\n".join(f"{path}:{lineno}: {text}" for path, lineno, text in matches)
         except Exception as exc:
-            return f"Error: could not search for {query!r}: {type(exc).__name__}: {exc}"
+            result = f"Error: could not search for {query!r}: {type(exc).__name__}: {exc}"
+        return f"{result}\n\n{note}" if note else result
 
     @tool
     def find_function_at_line(path: str, line_number: int) -> str:
@@ -1491,9 +1643,17 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
             The name and line range of the innermost enclosing function, method,
             or class (Python files), or the start line of the best-guess enclosing
             construct (all other languages). Returns an error string if the path
-            is not readable; never raises.
+            is not readable; never raises. A call repeated with identical
+            arguments beyond ``_MAX_DUPLICATE_TOOL_CALLS`` still returns this,
+            with a note appended saying so; once this run's
+            ``_MAX_TOTAL_TOOL_CALLS`` budget is exhausted, this becomes a
+            stop directive instead (see ``_track_call``).
         """
-        try:
+        skip, note = _track_call("find_function_at_line", path, line_number)
+        if skip:
+            return note
+
+        def _compute() -> str:
             if not isinstance(line_number, int) or isinstance(line_number, bool) or line_number < 1:
                 return f"Error: line_number must be a positive integer, got {line_number!r}."
             resolved = index.resolve_path(path)
@@ -1519,8 +1679,12 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
             return _find_heuristic_function_at_line(
                 stripped, physical, display_path, display_line=line_number, line_mapper=mapper
             )
+
+        try:
+            result = _compute()
         except Exception as exc:
-            return f"Error: could not inspect {path!r} at line {line_number}: {type(exc).__name__}: {exc}"
+            result = f"Error: could not inspect {path!r} at line {line_number}: {type(exc).__name__}: {exc}"
+        return f"{result}\n\n{note}" if note else result
 
     @tool
     def find_references(symbol: str) -> str:
@@ -1536,12 +1700,21 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
 
         Returns:
             Newline-separated reference blocks with excerpts, or a message
-            that nothing matched / access is limited to this submission.
+            that nothing matched / access is limited to this submission. A
+            call repeated with an identical symbol beyond
+            ``_MAX_DUPLICATE_TOOL_CALLS`` still returns this, with a note
+            appended saying so; once this run's ``_MAX_TOTAL_TOOL_CALLS``
+            budget is exhausted, this becomes a stop directive instead (see
+            ``_track_call``).
         """
+        skip, note = _track_call("find_references", symbol)
+        if skip:
+            return note
         try:
-            return index.find_references(symbol)
+            result = index.find_references(symbol)
         except Exception as exc:
-            return f"Error: could not find references for {symbol!r}: {type(exc).__name__}: {exc}"
+            result = f"Error: could not find references for {symbol!r}: {type(exc).__name__}: {exc}"
+        return f"{result}\n\n{note}" if note else result
 
     return [
         read_file,
@@ -1865,7 +2038,14 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
     that could disagree with what THIS call actually returned -- e.g. a
     repo-reader backed by a network call that fails transiently during the
     model's tool call but happens to succeed on a later, separate check. Only
-    the specific invocation's own recorded result counts.
+    the specific invocation's own recorded result counts. A ``read_file``
+    call this run's tool-call budget cuts off (see ``read_file``'s own
+    docstring) also reports ``status="error"``, by the same logic: the
+    file's content was never actually delivered on that call, so it must
+    count as ungrounded exactly like any other failed read, not as a
+    special case -- an earlier call in the same run that already read
+    ``file_path`` with ``status="success"`` still grounds the batch
+    regardless of what a later, budget-exhausted call returns.
 
     No separate truncation check is needed on top of ``status``: Strands'
     default ``SlidingWindowConversationManager`` would otherwise recover from

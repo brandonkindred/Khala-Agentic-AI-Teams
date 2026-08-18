@@ -1123,6 +1123,75 @@ def test_reasoning_only_logs_info_not_warning(
     assert not any(lvl == "WARNING" and "reasoning only" in msg for lvl, msg in records)
 
 
+def test_reasoning_only_with_no_tool_calls_still_logs_reasoning_only(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Positive counterpart to
+    ``test_reasoning_then_tool_calls_does_not_log_reasoning_only``: a turn
+    with reasoning, no text content, and no ``tool_calls`` at all is a
+    genuine reasoning-only turn that DOES need the empty-response retry
+    ladder -- the "reasoning only (no content) ... will retry" line must
+    still fire for it. This locks in the other side of the
+    ``tool_call_buffers`` gate added to that log line: it is suppressed
+    exactly when the turn also carries ``tool_calls``, not for every
+    empty-text-content turn regardless of ``tool_calls``."""
+    import logging
+
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "0")
+    sse = [
+        'data: {"choices":[{"delta":{"reasoning":"thinking, no tool call this time"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    cms = [
+        _stream_cm(200, sse_lines=sse),
+        _stream_cm(200, sse_lines=list(sse)),
+    ]
+    with (
+        patch("httpx.Client") as mock_client_cls,
+        caplog.at_level(logging.INFO, logger="llm_service.clients.ollama"),
+    ):
+        mock_client_cls.return_value = _multi_attempt_client(cms)
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        with pytest.raises(LLMSemanticExhaustionError):
+            client.complete_json("q", objective="test", temperature=0)
+    records = [(r.levelname, r.getMessage()) for r in caplog.records]
+    assert any(lvl == "INFO" and "reasoning only" in msg for lvl, msg in records)
+
+
+def test_reasoning_then_tool_calls_does_not_log_reasoning_only(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A turn with reasoning but no text content, that goes on to return
+    ``tool_calls``, must NOT log the "reasoning only (no content) ... will
+    retry" line -- that line's own text says the empty-response handler will
+    retry, but a tool-calling turn is returned as a success one function call
+    later and no retry ever happens. Logging it anyway is a false alarm that
+    makes a normal tool-calling turn look like the start of a stuck loop."""
+    import logging
+
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    sse_lines = [
+        'data: {"choices":[{"delta":{"reasoning":"let me check"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search_codebase","arguments":"{\\"query\\": \\"foo\\"}"}}]},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+        "data: [DONE]",
+    ]
+    tools = [{"type": "function", "function": {"name": "search_codebase"}}]
+    mock_client, _ = _make_streaming_mock(200, sse_lines)
+    with (
+        patch("httpx.Client") as mock_client_cls,
+        caplog.at_level(logging.INFO, logger="llm_service.clients.ollama"),
+    ):
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete_json("q", objective="test", tools=tools)
+    assert "__tool_calls__" in result
+    records = [(r.levelname, r.getMessage()) for r in caplog.records]
+    assert not any("reasoning only" in msg for _lvl, msg in records)
+
+
 def test_extract_json_implicit_truncation_raises_for_continuation() -> None:
     """A reply cut off mid-value must raise (not be repaired) so the caller's
     implicit-truncation handler triggers multi-turn continuation. This holds even
