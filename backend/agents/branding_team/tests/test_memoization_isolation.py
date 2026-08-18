@@ -6,14 +6,16 @@ from the Story 2a memoization primitives (phase_input_hash, PhaseOutputCache).
 guarded here. ``api/conversation.py`` deliberately references
 ``PhaseOutputCache`` as of Story 2c Step 1 (``_get_or_create_phase_cache``),
 holding a per-conversation storage slot -- so it, too, is no longer guarded
-here. It does not yet construct an ``orchestrator.run(phase_cache=...)`` call
-site; this guard is a blunt presence check that can't structurally
-distinguish "holds a cache" from "consumes one," so that remaining wiring
-step is left to be verified by other means. Consuming these primitives
-anywhere else in the conversation/assistant layer is separate follow-on work
--- this test makes that boundary a structural, enforced fact instead of a
-one-time assertion, so a future wiring change fails here until this file is
-deliberately updated alongside it.
+here. As of Story 2c Step 2, both chat call sites also construct an
+``orchestrator.run(phase_cache=...)`` call via ``_run_orchestrator_if_ready``;
+this guard is a blunt presence check that can't structurally distinguish
+"holds a cache" from "consumes one," so that wiring is verified by
+``tests/test_conversation_flow.py`` and
+``tests/test_conversation_phase_cache.py`` instead. Consuming these
+primitives anywhere else in the conversation/assistant layer is separate
+follow-on work -- this test makes that boundary a structural, enforced fact
+instead of a one-time assertion, so a future wiring change fails here until
+this file is deliberately updated alongside it.
 """
 
 from __future__ import annotations

@@ -7,7 +7,7 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { ActivatedRoute, NavigationEnd, Router, RouterOutlet } from '@angular/router';
 import { Observable, filter, map } from 'rxjs';
 import type { AgentStudioDraft } from '../../../models/agent-studio.model';
-import { STUDIO_STAGES } from '../../../models/agent-studio.model';
+import { STAGE_INDEX, STUDIO_STAGES } from '../../../models/agent-studio.model';
 import { HasUnsavedChanges } from '../../../core/unsaved-changes.guard';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService, handoffEquals } from '../../../services/agent-studio-state.service';
@@ -27,12 +27,6 @@ import {
   type SaveDraftDialogData,
   type SaveDraftDialogResult,
 } from './save-draft-dialog/save-draft-dialog.component';
-
-/** Stage indices for `navigateToStage` (mirrors `agent-studio-persona.component.ts`'s convention). */
-const STAGE_BUILD = 0;
-const STAGE_TEST = 1;
-const STAGE_COMPOSE = 2;
-const STAGE_PERSONAS = 3;
 
 /** `draft.payload` is an opaque, backend-unvalidated blob (spec §3.5) — never
  *  trust a field's type without checking it first. */
@@ -487,7 +481,7 @@ export class AgentStudioShellComponent implements HasUnsavedChanges {
         next: (process) => {
           if (token !== this.loadDraftToken) return;
           this.state.setComposeProcessStatus(process.status);
-          this.state.navigateToStage(process.status === 'complete' ? STAGE_PERSONAS : STAGE_COMPOSE);
+          this.state.navigateToStage(process.status === 'complete' ? STAGE_INDEX.personas : STAGE_INDEX.compose);
           this.finishSuccessfulDraftLoad();
         },
         error: () => {
@@ -498,19 +492,19 @@ export class AgentStudioShellComponent implements HasUnsavedChanges {
           // over from an earlier, unrelated in-session action) rather than
           // risk it wrongly satisfying the Stage-3→4 gate.
           this.state.setComposeProcessStatus(null);
-          this.state.navigateToStage(STAGE_COMPOSE);
+          this.state.navigateToStage(STAGE_INDEX.compose);
           this.finishSuccessfulDraftLoad();
         },
       });
       return;
     }
     if (teamId) {
-      this.state.navigateToStage(STAGE_COMPOSE);
+      this.state.navigateToStage(STAGE_INDEX.compose);
     } else if (this.state.registryAgentId()) {
-      this.state.navigateToStage(STAGE_TEST);
+      this.state.navigateToStage(STAGE_INDEX.test);
     } else {
       this.state.resetBuildSubStage();
-      this.state.navigateToStage(STAGE_BUILD);
+      this.state.navigateToStage(STAGE_INDEX.build);
     }
     this.finishSuccessfulDraftLoad();
   }

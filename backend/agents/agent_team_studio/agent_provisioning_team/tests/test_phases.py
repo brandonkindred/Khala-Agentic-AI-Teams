@@ -2253,3 +2253,60 @@ def test_documentation_getting_started_template_substitutes_username(tmp_path: P
     rendered = result.onboarding.tools[0].getting_started
     assert "user=u1" in rendered
     assert "extra=5432" in rendered
+
+
+def test_documentation_getting_started_template_sanitizes_credentials(tmp_path: Path) -> None:
+    """Credential values interpolated into a getting_started template are sanitized."""
+    from agent_team_studio.agent_provisioning_team.models import (
+        GeneratedCredentials,
+        ToolProvisionResult,
+    )
+    from agent_team_studio.agent_provisioning_team.phases.documentation import run_documentation
+    from agent_team_studio.agent_provisioning_team.shared.tool_manifest import (
+        ToolDefinition,
+        ToolManifest,
+    )
+
+    manifest = ToolManifest(
+        tools=[
+            ToolDefinition(
+                name="pg",
+                provisioner="postgres_provisioner",
+                config={},
+                onboarding={
+                    "description": "PG",
+                    "getting_started": "user={username} conn={connection_string} note={note}",
+                },
+            ),
+        ]
+    )
+
+    creds = GeneratedCredentials(
+        tool_name="pg",
+        username="u1\x00",
+        password="p",
+        connection_string="conn\x00string",
+        extra={"note": "hi\x00there"},
+    )
+    tool_results = [
+        ToolProvisionResult(
+            tool_name="pg",
+            success=True,
+            permissions=["ALL"],
+            provisioner_key="postgres_provisioner",
+        )
+    ]
+
+    result = run_documentation(
+        agent_id="a1",
+        manifest=manifest,
+        credentials={"pg": creds},
+        tool_results=tool_results,
+        workspace_path=str(tmp_path),
+    )
+
+    rendered = result.onboarding.tools[0].getting_started
+    assert "\x00" not in rendered
+    assert "user=u1" in rendered
+    assert "conn=connstring" in rendered
+    assert "note=hithere" in rendered

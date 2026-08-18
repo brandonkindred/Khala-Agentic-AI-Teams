@@ -180,11 +180,13 @@ def _generate_getting_started(
 
         if credentials:
             if credentials.username:
-                text = text.replace("{username}", credentials.username)
+                text = text.replace("{username}", sanitize_prompt_var(credentials.username))
             if credentials.connection_string:
-                text = text.replace("{connection_string}", credentials.connection_string)
+                text = text.replace(
+                    "{connection_string}", sanitize_prompt_var(credentials.connection_string)
+                )
             for key, value in credentials.extra.items():
-                text = text.replace(f"{{{key}}}", str(value))
+                text = text.replace(f"{{{key}}}", sanitize_prompt_var(str(value)))
 
         return text
 
