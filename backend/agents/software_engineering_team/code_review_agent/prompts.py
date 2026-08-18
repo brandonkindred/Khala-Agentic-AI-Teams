@@ -351,6 +351,11 @@ SIDE_EFFECT_IMPACT_PROMPT = (
 def build_side_effect_impact_reasoning_system_prompt(*, mutation_on: bool) -> str:
     """Build the standalone side-effect pass's reasoning system prompt for one toggle state.
 
+    Args:
+        mutation_on: True to include the mutation-vs-replaced-code contract
+            sub-check (``CODE_REVIEW_MUTATION_ANALYSIS`` enabled); False to
+            omit it and keep the no-prior-version guard absolute.
+
     Preconditions: none.
 
     Postconditions:
@@ -401,6 +406,12 @@ def _build_merged_architecture_side_effect_reasoning_system_prompt(side_effect_b
     :func:`build_merged_architecture_side_effect_reasoning_system_prompt` can
     never drift apart -- only ``side_effect_body`` differs between them.
 
+    Args:
+        side_effect_body: The fully-assembled Part 2 instruction body to embed
+            verbatim -- the caller passes either ``_SIDE_EFFECT_IMPACT_BODY``
+            (mutation-on) or ``_SIDE_EFFECT_IMPACT_BODY_NO_MUTATION``
+            (mutation-off).
+
     Preconditions: none.
     Postconditions: returns the intro, both part headers/bodies, and the
         shared prose-instruction closer, in that order.
@@ -432,9 +443,29 @@ def build_merged_architecture_side_effect_reasoning_system_prompt(
 ) -> str:
     """Build the merged-pass reasoning system prompt for enabled halves.
 
-    ``mutation_on`` (default True, mirroring ``CODE_REVIEW_MUTATION_ANALYSIS``'s
-    default-on behavior) selects which side-effect body variant Part 2 uses when
-    ``side_on`` is True; it has no effect when ``side_on`` is False.
+    Args:
+        arch_on: True to include Part 1 (architecture-consistency /
+            cross-codebase-redundancy).
+        side_on: True to include Part 2 (side-effect / blast-radius impact).
+        mutation_on: Default True, mirroring ``CODE_REVIEW_MUTATION_ANALYSIS``'s
+            default-on behavior. Selects which side-effect body variant Part 2
+            uses when ``side_on`` is True; has no effect when ``side_on`` is
+            False.
+
+    Preconditions:
+        - At least one of ``arch_on`` / ``side_on`` is True.
+
+    Postconditions:
+        - Returns ``MERGED_ARCHITECTURE_SIDE_EFFECT_REASONING_SYSTEM_PROMPT``
+          when both halves are on and ``mutation_on`` is True.
+        - When both halves are on and ``mutation_on`` is False, returns the same
+          shape built from ``_SIDE_EFFECT_IMPACT_BODY_NO_MUTATION`` instead (via
+          :func:`_build_merged_architecture_side_effect_reasoning_system_prompt`).
+        - When only one half is on, returns a prompt that includes only that
+          half's instruction body and explicitly forbids the other half.
+
+    Raises:
+        ValueError: If both ``arch_on`` and ``side_on`` are False.
     """
     if not arch_on and not side_on:
         raise ValueError(
