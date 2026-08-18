@@ -184,6 +184,13 @@ def _run_pass(
     pre_numbered = side_pass._effective_pre_numbered(input_data, index)
 
     def _build_prompt_for_batch(batch: FileBatch) -> str:
+        # This is the ONLY place this pass reads ``input_data.replaced_content``
+        # (verify: it appears nowhere else in this module) -- when ``mutation_on``
+        # is False the before-image is hidden from the model entirely, not merely
+        # passed through with an instruction to ignore it. ``index``/its tools
+        # (``read_file``, ``list_files``, etc.) are built from ``index.files``
+        # only and never touch ``replaced_content``, so there is no other path
+        # through which it could reach the model regardless of this toggle.
         return _build_prompt(
             index,
             arch_body,

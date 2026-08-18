@@ -711,8 +711,9 @@ def run_coordinator(
           reviewed* by any worker sharing the configured cache (Redis when
           ``REDIS_URL`` / ``REDIS_HOST`` is set, otherwise this process's
           in-memory LRU) — same code + context + model + output-affecting
-          toggles including ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION`` and
-          ``CODE_REVIEW_SPEC_COMPLIANCE_PASS``; no unreviewed ranges — returns
+          toggles including ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``,
+          ``CODE_REVIEW_SPEC_COMPLIANCE_PASS``, and
+          ``CODE_REVIEW_MUTATION_ANALYSIS``; no unreviewed ranges — returns
           the recorded approved output with no LLM call at all — unless a
           ``repo_reader`` is given, in which case this short-circuit never
           fires (a verdict that reads the rest of the repository cannot be

@@ -91,9 +91,11 @@ logger = logging.getLogger(__name__)
 _PASS_ENV = "CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS"
 
 # The mutation-vs-replaced-code contract sub-check's toggle name lives in
-# ``side_effect_consolidation`` (a neutral, side-effect-free module), not here --
-# see ``MUTATION_ANALYSIS_ENV``'s docstring there for why (mapping.py's cache
-# fingerprint must be able to import it without pulling in a tail-pass module).
+# ``side_effect_consolidation`` -- despite the name, that module is constants-only
+# (env-var name strings plus pure finding-grouping logic; no LLM/tool/Agent
+# dependencies of its own -- see its module docstring), not a tail pass. See
+# ``MUTATION_ANALYSIS_ENV``'s docstring there for why it lives there: mapping.py's
+# cache fingerprint must be able to import it without pulling in a tail-pass module.
 
 _ALLOWED_CATEGORIES = frozenset({"side-effects", "documentation"})
 _ALLOWED_SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
@@ -703,6 +705,13 @@ def _run_pass(
     mutation_on = env_flag_enabled(MUTATION_ANALYSIS_ENV)
 
     def _build_prompt_for_batch(batch: FileBatch) -> str:
+        # This is the ONLY place this pass reads ``input_data.replaced_content``
+        # (verify: it appears nowhere else in this module) -- when ``mutation_on``
+        # is False the before-image is hidden from the model entirely, not merely
+        # passed through with an instruction to ignore it. ``index``/its tools
+        # (``read_file``, ``list_files``, etc.) are built from ``index.files``
+        # only and never touch ``replaced_content``, so there is no other path
+        # through which it could reach the model regardless of this toggle.
         return _build_prompt(
             index,
             content_items=batch.items,
