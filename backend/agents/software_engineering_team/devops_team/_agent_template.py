@@ -63,13 +63,13 @@ from pydantic import BaseModel
 
 from llm_service import LLMClient, get_strands_model
 from llm_service.strands_model import model_fingerprint, resolve_strands_model
-from software_engineering_team.devops_team._llm_cache import (
+from software_engineering_team.shared.llm import complete_json_with_continuation
+from software_engineering_team.shared.llm_response_cache import (
     build_cache_key,
     cache_capacity,
     get_cached_result,
     set_cached_result,
 )
-from software_engineering_team.shared.llm import complete_json_with_continuation
 
 
 class DevOpsSingleShotAgent:
@@ -148,8 +148,12 @@ class DevOpsSingleShotAgent:
         Postconditions:
             If ``pre_call`` returns non-``None``, that value is returned and
             the LLM is not called (no cache lookup either — nothing was
-            hashed yet). Otherwise, when ``CACHE_NAMESPACE`` is set and the
-            resolved capacity is ``> 0``, a cache hit (byte-identical
+            hashed yet). Otherwise, when ``CACHE_NAMESPACE`` and
+            ``CACHE_ENV_VAR`` are both set (non-empty) AND the resolved
+            capacity is ``> 0`` — all three conditions gate caching; a
+            subclass with ``CACHE_NAMESPACE`` set but ``CACHE_ENV_VAR`` left
+            empty (the default) never caches, regardless of
+            ``CACHE_DEFAULT_SIZE`` — a cache hit (byte-identical
             ``input_data`` and resolved model) returns the prior
             ``OUTPUT_MODEL`` instance without invoking the LLM. On a cache
             miss, a disabled cache, or any cache-backend error, returns
@@ -172,7 +176,8 @@ class DevOpsSingleShotAgent:
             capacity = cache_capacity(self.CACHE_ENV_VAR, self.CACHE_DEFAULT_SIZE)
             if capacity > 0:
                 assert self.OUTPUT_MODEL is not None, (
-                    f"{type(self).__name__}.OUTPUT_MODEL must be set when CACHE_NAMESPACE is set"
+                    f"{type(self).__name__}.OUTPUT_MODEL must be set when CACHE_NAMESPACE and "
+                    "CACHE_ENV_VAR are set and capacity > 0"
                 )
                 cache_key = build_cache_key(input_data, model_fingerprint(self._model))
                 cached = get_cached_result(

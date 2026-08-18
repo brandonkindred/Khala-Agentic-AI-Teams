@@ -6,14 +6,14 @@ import logging
 
 from llm_service import LLMClient, get_strands_model
 from llm_service.strands_model import model_fingerprint, resolve_strands_model
-from software_engineering_team.devops_team._llm_cache import (
+from software_engineering_team.shared.llm import complete_json_with_continuation
+from software_engineering_team.shared.llm_response_cache import (
     build_cache_key,
     cache_capacity,
     clear_cache,
     get_cached_result,
     set_cached_result,
 )
-from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .models import IaCDebugInput, IaCDebugOutput, IaCExecutionError
 from .prompts import INFRA_DEBUG_PROMPT
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 _FIXABLE_TYPES = frozenset({"syntax", "validation"})
 
 # Shared review-result cache: keyed on the whole IaCDebugInput content plus
-# the resolved model. See ``devops_team._llm_cache`` for the shared
+# the resolved model. See ``shared.llm_response_cache`` for the shared
 # implementation.
 _CACHE_NAMESPACE = "devops:infra_debug:v1"
 _CACHE_ENV_VAR = "DEVOPS_INFRA_DEBUG_CACHE_SIZE"

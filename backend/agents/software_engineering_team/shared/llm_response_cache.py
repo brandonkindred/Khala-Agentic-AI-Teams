@@ -1,23 +1,26 @@
-"""Shared LLM-response cache wiring for devops_team single-shot agents.
+"""Shared single-shot LLM-response cache wiring, keyed on a whole Pydantic input.
 
-Every devops_team specialist agent that makes its own single-shot LLM
-design/review call (as opposed to the stateless CLI-wrapping ``tool_agents``,
-or ``ChangeReviewAgent``, which delegates entirely to
-``code_review_agent.CodeReviewAgent`` and so has no LLM call of its own to
-cache) shares the same cache shape: hash the whole structured Pydantic input
-plus the resolved review model, check ``shared.cache`` before calling the
-LLM, and write the result back after a genuine (non-fallback) call. This
-module factors that shape out of ``qa_agent.agent`` (the closest existing
-analogue — a single atomic call caching a whole input/output pair, not
-``code_review_agent``'s multi-chunk map/reduce cache) so each of the eight
-devops call sites only wires four small constants instead of re-deriving the
-hashing/get/set/fail-open boilerplate by hand.
+Several single-shot review/design agents across this team cache one whole
+structured input → whole structured output pair: hash the entire Pydantic
+input model plus the resolved review model, check ``shared.cache`` before
+calling the LLM, and write the result back after a genuine (non-fallback)
+call. ``qa_agent.agent.QAExpertAgent.run`` and every ``devops_team``
+specialist agent that makes its own single-shot LLM call share this exact
+shape; this module factors it out so each consumer only wires four small
+constants (namespace stem, env var name, default capacity, output model)
+instead of re-deriving the hashing/get/set/fail-open boilerplate by hand.
+
+Not every single-shot cache in this team uses this module: the V2 tool-agent
+review cache (``shared/llm_tool_agent_base.py``) keys on the concrete class
+identity plus the *rendered prompt* rather than a structured input model
+(tool agents don't share one common Pydantic input shape), so it has its own
+narrower implementation.
 
 Invariants:
     - No function here ever raises for a cache-backend failure (Redis down,
       corrupt entry, etc.) — every operation is fail-open, matching
       ``shared.cache``'s own contract plus a belt-and-braces local
-      ``try/except`` (mirrors ``qa_agent.agent``'s cache block).
+      ``try/except``.
 """
 
 from __future__ import annotations
@@ -45,8 +48,7 @@ def cache_namespace(stem: str) -> str:
     Postconditions:
         - Returns ``stem`` with the current cache build id appended (see
           ``shared.cache.with_cache_build_id``), so a deploy is automatically
-          a cold cache. Lazily imported to avoid an import cycle, mirroring
-          ``qa_agent.agent._review_cache_namespace``.
+          a cold cache. Lazily imported to avoid an import cycle.
     """
     from shared.cache import with_cache_build_id  # noqa: PLC0415
 
@@ -71,10 +73,9 @@ def cache_capacity(env_var: str, default: int) -> int:
 def build_cache_key(input_data: BaseModel, model_fp: str) -> str:
     """Hash of the whole input model plus the resolved review model.
 
-    Same key design as ``qa_agent.agent._review_cache_key`` /
-    ``code_review_agent.mapping._submission_fingerprint``: keys the entire
-    input model so any field change naturally busts the key with no explicit
-    invalidation logic to maintain, including any embedded ``DevOpsTaskSpec``.
+    Same key design as ``code_review_agent.mapping._submission_fingerprint``:
+    keys the entire input model so any field change naturally busts the key
+    with no explicit invalidation logic to maintain.
 
     Preconditions:
         - ``input_data`` is a valid Pydantic model instance.

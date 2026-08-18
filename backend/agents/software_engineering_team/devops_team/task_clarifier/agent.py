@@ -6,14 +6,14 @@ from typing import List
 
 from llm_service import LLMClient, get_strands_model
 from llm_service.strands_model import model_fingerprint, resolve_strands_model
-from software_engineering_team.devops_team._llm_cache import (
+from software_engineering_team.shared.llm import complete_json_with_continuation
+from software_engineering_team.shared.llm_response_cache import (
     build_cache_key,
     cache_capacity,
     clear_cache,
     get_cached_result,
     set_cached_result,
 )
-from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .models import (
     ClarificationGap,
@@ -25,7 +25,7 @@ from .prompts import DEVOPS_TASK_CLARIFIER_PROMPT
 # Shared review-result cache: keyed on the whole DevOpsTaskClarifierInput
 # content plus the resolved model. Only covers the LLM-backed tail of run()
 # — the deterministic gaps check above it always runs and never touches the
-# cache. See ``devops_team._llm_cache`` for the shared implementation.
+# cache. See ``shared.llm_response_cache`` for the shared implementation.
 _CACHE_NAMESPACE = "devops:task_clarifier:v1"
 _CACHE_ENV_VAR = "DEVOPS_TASK_CLARIFIER_CACHE_SIZE"
 _CACHE_DEFAULT_SIZE = 128
@@ -37,9 +37,19 @@ def clear_task_clarifier_cache() -> None:
 
 
 class DevOpsTaskClarifierAgent:
-    """Ensures task input is complete and safe before execution."""
+    """Ensures task input is complete and safe before execution.
+
+    Invariants: instance state is limited to ``llm`` and ``_model``; ``run``
+    is stateless across calls.
+    """
 
     def __init__(self, llm_client: LLMClient) -> None:
+        """Store the review client and resolve its Strands model.
+
+        Preconditions: ``llm_client`` is not ``None`` (an ``LLMClient``).
+        Postconditions: ``self.llm`` is the stored client; ``self._model`` is
+        the resolved Strands model under ``agent_key="devops"``.
+        """
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
         self._model = resolve_strands_model(
@@ -47,6 +57,24 @@ class DevOpsTaskClarifierAgent:
         )
 
     def run(self, input_data: DevOpsTaskClarifierInput) -> DevOpsTaskClarifierOutput:
+        """Validate the task spec is complete and, if so, ask the LLM to review it.
+
+        Preconditions:
+            ``input_data`` is a valid ``DevOpsTaskClarifierInput``.
+        Postconditions:
+            When any deterministic gap is found (missing goal/cloud/
+            environments/acceptance-criteria/secrets-source, a
+            staging-or-production environment with no rollback plan, or a
+            production environment with no approval gate in scope), returns
+            ``approved_for_execution=False`` immediately with those gaps —
+            no LLM call, no cache lookup. Otherwise, a cache hit
+            (byte-identical ``input_data`` and resolved model) returns the
+            prior result without invoking the LLM. A cache miss, a disabled
+            cache (``DEVOPS_TASK_CLARIFIER_CACHE_SIZE=0``), or any
+            cache-backend error falls open to a genuine call, and every
+            result reaching the cache-write step is written back (this
+            method has no fallback branch of its own past the gaps check).
+        """
         spec = input_data.task_spec
         gaps: List[ClarificationGap] = []
 

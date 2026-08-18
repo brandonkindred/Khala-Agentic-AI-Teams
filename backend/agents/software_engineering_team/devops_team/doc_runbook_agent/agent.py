@@ -4,13 +4,6 @@ from __future__ import annotations
 
 from llm_service import LLMClient, get_strands_model
 from llm_service.strands_model import model_fingerprint, resolve_strands_model
-from software_engineering_team.devops_team._llm_cache import (
-    build_cache_key,
-    cache_capacity,
-    clear_cache,
-    get_cached_result,
-    set_cached_result,
-)
 from software_engineering_team.devops_team.models import (
     DevOpsCompletionPackage,
     GitOperationsMetadata,
@@ -18,12 +11,19 @@ from software_engineering_team.devops_team.models import (
     ReleaseReadiness,
 )
 from software_engineering_team.shared.llm import complete_json_with_continuation
+from software_engineering_team.shared.llm_response_cache import (
+    build_cache_key,
+    cache_capacity,
+    clear_cache,
+    get_cached_result,
+    set_cached_result,
+)
 
 from .models import DocumentationRunbookInput, DocumentationRunbookOutput
 from .prompts import DOC_RUNBOOK_PROMPT
 
 # Shared review-result cache: keyed on the whole DocumentationRunbookInput
-# content plus the resolved model. See ``devops_team._llm_cache`` for the
+# content plus the resolved model. See ``shared.llm_response_cache`` for the
 # shared implementation.
 _CACHE_NAMESPACE = "devops:doc_runbook:v1"
 _CACHE_ENV_VAR = "DEVOPS_DOC_RUNBOOK_CACHE_SIZE"
@@ -36,7 +36,19 @@ def clear_doc_runbook_cache() -> None:
 
 
 class DocumentationRunbookAgent:
+    """Produces runbook/documentation artifacts and the completion package.
+
+    Invariants: instance state is limited to the injectable ``llm`` client
+    and the resolved Strands ``_model``; ``run`` is stateless across calls.
+    """
+
     def __init__(self, llm_client: LLMClient) -> None:
+        """Store the review client and resolve its Strands model.
+
+        Preconditions: ``llm_client`` is not ``None`` (an ``LLMClient``).
+        Postconditions: ``self.llm`` is the stored client; ``self._model`` is
+        the resolved Strands model under ``agent_key="devops"``.
+        """
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
         self._model = resolve_strands_model(
@@ -44,6 +56,24 @@ class DocumentationRunbookAgent:
         )
 
     def run(self, input_data: DocumentationRunbookInput) -> DocumentationRunbookOutput:
+        """Generate runbook/documentation files and the completion package.
+
+        Preconditions:
+            ``input_data`` is a valid ``DocumentationRunbookInput``.
+        Postconditions:
+            Returns a ``DocumentationRunbookOutput`` whose ``files`` are the
+            LLM-generated documentation content and whose
+            ``completion_package`` is assembled from ``input_data`` (not the
+            LLM reply) with a fixed rolling/rollback-available release
+            posture. A cache hit (byte-identical ``input_data`` and resolved
+            model) returns the prior result without invoking the LLM. A
+            cache miss, a disabled cache (``DEVOPS_DOC_RUNBOOK_CACHE_SIZE=0``),
+            or any cache-backend error falls open to a genuine call. Every
+            result reaching the cache-write step is written back — this
+            method has no fallback branch of its own (unlike
+            ``DevSecOpsReviewAgent.run``), so there is no non-genuine result
+            to exclude.
+        """
         capacity = cache_capacity(_CACHE_ENV_VAR, _CACHE_DEFAULT_SIZE)
         cache_key = None
         if capacity > 0:

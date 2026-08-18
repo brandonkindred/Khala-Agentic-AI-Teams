@@ -4,7 +4,8 @@ Mirrors ``test_qa_agent_cache.py``'s conventions for the analogous single-shot
 whole-input cache: a ``_CountingClient`` counts LLM invocations so a hit (no
 call) can be distinguished from a miss (a call). Every devops_team specialist
 that makes its own single-shot LLM call shares one implementation
-(``devops_team._llm_cache``), so the two representative agents below —
+(``shared.llm_response_cache``, also used by ``qa_agent``), so the two
+representative agents below —
 ``InfrastructureAsCodeAgent`` (design-phase, wired through the shared
 ``DevOpsSingleShotAgent.run()``) and ``DevSecOpsReviewAgent`` (review-phase,
 wired at its own call site around ``run_single_shot_review``) — get the full
@@ -26,7 +27,6 @@ from llm_service.clients.dummy import DummyLLMClient
 from llm_service.strands_model import model_fingerprint
 from shared.cache import MemoryBackend, get_shared_cache, reset_shared_cache_state
 from shared.cache import factory as factory_mod
-from software_engineering_team.devops_team import _llm_cache as cache_mod
 from software_engineering_team.devops_team.cicd_pipeline_agent import (
     CICDPipelineAgent,
     CICDPipelineAgentInput,
@@ -38,9 +38,6 @@ from software_engineering_team.devops_team.deployment_strategy_agent import (
 from software_engineering_team.devops_team.devsecops_review_agent import (
     DevSecOpsReviewAgent,
     DevSecOpsReviewInput,
-)
-from software_engineering_team.devops_team.devsecops_review_agent import (
-    agent as devsecops_agent_mod,
 )
 from software_engineering_team.devops_team.doc_runbook_agent import (
     DocumentationRunbookAgent,
@@ -55,6 +52,7 @@ from software_engineering_team.devops_team.task_clarifier import (
     DevOpsTaskClarifierAgent,
     DevOpsTaskClarifierInput,
 )
+from software_engineering_team.shared import llm_response_cache as cache_mod
 
 
 class _CountingClient(DummyLLMClient):
@@ -92,6 +90,22 @@ class _ScriptedClient(DummyLLMClient):
         resp = self._responses[min(self.calls, len(self._responses) - 1)]
         self.calls += 1
         return dict(resp)
+
+
+class _RaisingCache:
+    """Cache backend that raises on every mutating/read operation."""
+
+    def get(self, key: str) -> None:
+        raise RuntimeError("boom")
+
+    def set(self, key: str, value: bytes, *, max_entries: int) -> None:
+        raise RuntimeError("boom")
+
+    def delete(self, key: str) -> None:
+        raise RuntimeError("boom")
+
+    def clear(self) -> None:
+        pass
 
 
 def _task_spec(**overrides: object) -> DevOpsTaskSpec:
@@ -167,19 +181,6 @@ def test_iac_redis_unavailable_falls_back_to_memory_cache(monkeypatch: pytest.Mo
 def test_iac_cache_backend_error_falls_open_to_correct_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _RaisingCache:
-        def get(self, key: str) -> None:
-            raise RuntimeError("boom")
-
-        def set(self, key: str, value: bytes, *, max_entries: int) -> None:
-            raise RuntimeError("boom")
-
-        def delete(self, key: str) -> None:
-            raise RuntimeError("boom")
-
-        def clear(self) -> None:
-            pass
-
     monkeypatch.setattr(cache_mod, "get_shared_cache", lambda namespace: _RaisingCache())
 
     client = _CountingClient(_IAC_RESPONSE)
@@ -242,7 +243,7 @@ def test_devsecops_redis_unavailable_falls_back_to_memory_cache(
     monkeypatch.setattr(factory_mod, "_build_redis_client", lambda: None)
     reset_shared_cache_state()
     try:
-        namespace = cache_mod.cache_namespace(devsecops_agent_mod._CACHE_NAMESPACE)
+        namespace = cache_mod.cache_namespace(DevSecOpsReviewAgent.CACHE_NAMESPACE)
         assert isinstance(get_shared_cache(namespace), MemoryBackend)
 
         client = _CountingClient(_DEVSECOPS_CLEAN_RESPONSE)
@@ -261,19 +262,6 @@ def test_devsecops_redis_unavailable_falls_back_to_memory_cache(
 def test_devsecops_cache_backend_error_falls_open_to_correct_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _RaisingCache:
-        def get(self, key: str) -> None:
-            raise RuntimeError("boom")
-
-        def set(self, key: str, value: bytes, *, max_entries: int) -> None:
-            raise RuntimeError("boom")
-
-        def delete(self, key: str) -> None:
-            raise RuntimeError("boom")
-
-        def clear(self) -> None:
-            pass
-
     monkeypatch.setattr(cache_mod, "get_shared_cache", lambda namespace: _RaisingCache())
 
     client = _CountingClient(_DEVSECOPS_CLEAN_RESPONSE)
@@ -301,7 +289,7 @@ def test_devsecops_fallback_result_is_never_cached() -> None:
     assert result.approved is False
 
     key = cache_mod.build_cache_key(input_data, model_fingerprint(agent._model))
-    cache = get_shared_cache(cache_mod.cache_namespace(devsecops_agent_mod._CACHE_NAMESPACE))
+    cache = get_shared_cache(cache_mod.cache_namespace(DevSecOpsReviewAgent.CACHE_NAMESPACE))
     assert cache.get(key) is None
 
 
@@ -319,7 +307,7 @@ def test_devsecops_cache_disabled_via_env_is_passthrough(monkeypatch: pytest.Mon
 
 # ---------------------------------------------------------------------------
 # Lighter hit/miss coverage for the remaining six specialist agents -- each
-# exercises the same shared ``devops_team._llm_cache`` helper already given
+# exercises the same shared ``shared.llm_response_cache`` helper already given
 # full fail-open/corrupt-entry/disabled-cache coverage above.
 # ---------------------------------------------------------------------------
 

@@ -28,6 +28,7 @@ from llm_service.clients.dummy import DummyLLMClient
 from llm_service.strands_model import model_fingerprint
 from shared.cache import MemoryBackend, get_shared_cache, reset_shared_cache_state
 from shared.cache import factory as factory_mod
+from software_engineering_team.shared import llm_response_cache as cache_mod
 
 _CLEAN_RESPONSE: Dict[str, Any] = {
     "bugs_found": [],
@@ -133,10 +134,10 @@ def test_cache_backend_error_falls_open_to_correct_result(monkeypatch: pytest.Mo
         def clear(self) -> None:
             # Not exercised by run() itself; only needed so the autouse
             # conftest teardown (which calls clear_review_cache()) doesn't
-            # blow up while agent_mod.get_shared_cache is still monkeypatched.
+            # blow up while cache_mod.get_shared_cache is still monkeypatched.
             pass
 
-    monkeypatch.setattr(agent_mod, "get_shared_cache", lambda namespace: _RaisingCache())
+    monkeypatch.setattr(cache_mod, "get_shared_cache", lambda namespace: _RaisingCache())
 
     client = _CountingClient(_CLEAN_RESPONSE)
     agent = QAExpertAgent(client)

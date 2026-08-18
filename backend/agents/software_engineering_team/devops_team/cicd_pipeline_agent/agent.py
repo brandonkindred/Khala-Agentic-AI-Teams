@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
-from software_engineering_team.devops_team._llm_cache import clear_cache
+from software_engineering_team.shared.llm_response_cache import clear_cache
 
 from .models import CICDPipelineAgentInput, CICDPipelineAgentOutput
 from .prompts import CICD_PIPELINE_PROMPT
