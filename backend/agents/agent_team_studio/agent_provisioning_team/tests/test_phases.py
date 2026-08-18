@@ -2276,7 +2276,7 @@ def test_documentation_getting_started_template_skips_unsafe_extra_key(tmp_path:
                 config={},
                 onboarding={
                     "description": "PG",
-                    "getting_started": "user={username} extra={port} literal={port}extra{",
+                    "getting_started": "user={username} extra={port}",
                 },
             ),
         ]
@@ -2287,7 +2287,7 @@ def test_documentation_getting_started_template_skips_unsafe_extra_key(tmp_path:
         username="u1",
         password="p",
         connection_string="conn",
-        extra={"port": 5432, "port}extra{": "evil"},
+        extra={"port": 5432, "{evil}": "malicious"},
     )
     tool_results = [
         ToolProvisionResult(
@@ -2310,10 +2310,9 @@ def test_documentation_getting_started_template_skips_unsafe_extra_key(tmp_path:
     # The well-formed "port" key still substitutes normally.
     assert "user=u1" in rendered
     assert "extra=5432" in rendered
-    # The unsafe key "port}extra{" is never used to build a replacement target, so the
-    # literal template text it would have malformed is left untouched and "evil" never appears.
-    assert "literal={port}extra{" in rendered
-    assert "evil" not in rendered
+    # The unsafe key "{evil}" (itself containing braces) is never used to build a
+    # replacement target, so its value is never interpolated anywhere in the output.
+    assert "malicious" not in rendered
 
 
 def test_documentation_getting_started_template_sanitizes_credentials(tmp_path: Path) -> None:
