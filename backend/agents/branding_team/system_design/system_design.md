@@ -376,18 +376,26 @@ each phase's hash always reflects the upstream outputs actually used this
 call, a changed upstream phase naturally invalidates every downstream
 phase's cached entry without any separate invalidation step.
 
-The conversation layer (`api/conversation.py`,
-`api/routes/conversations.py`, `assistant/agent.py`, `assistant/store.py`,
-`assistant/prompts.py`) remains unwired — no caller yet constructs or
-threads a `PhaseOutputCache` through a session (that's Story 2c).
-`tests/test_memoization_isolation.py` still enforces this structurally for
-those five files (it no longer guards `orchestrator.py`, which is
-deliberately wired) — it parses each file's source with `ast` and fails if
-either symbol appears, so a future change that wires the cache into the
-conversation layer must update this test deliberately rather than regress
+`api/conversation.py` holds a storage slot but does not yet consume it:
+`_get_or_create_phase_cache()` returns a `PhaseOutputCache` retained
+per-conversation (in-memory only, keyed by `conversation_id`, created empty
+on a fresh conversation and returned unchanged on later turns) from both
+`_create_branding_conversation_impl` and `_send_branding_conversation_message_impl`
+(Story 2c Step 1), but no call site threads that cache into `orchestrator.run`
+yet — a mission edit still recomputes every phase. The rest of the
+conversation layer (`api/routes/conversations.py`, `assistant/agent.py`,
+`assistant/store.py`, `assistant/prompts.py`) remains fully unwired — no
+caller there constructs or references a `PhaseOutputCache` at all.
+`tests/test_memoization_isolation.py` enforces the fully-unwired boundary
+structurally for those four files (it no longer guards `orchestrator.py`,
+which is deliberately wired, or `api/conversation.py`, which deliberately
+holds the storage slot) — it parses each file's source with `ast` and fails
+if either symbol appears, so a future change that wires the cache into any
+of those four modules must update this test deliberately rather than regress
 it silently. Recomputing only from the *earliest* changed phase (skipping
-graph-build work for untouched trailing phases) and persisting a
-`phase_cache` across interactive re-runs are separate, later steps of
+graph-build work for untouched trailing phases) and passing the
+`api/conversation.py` cache into `orchestrator.run` across interactive
+re-runs are separate, later steps of
 Story 2b/2c — this step only establishes the per-phase hit/miss check.
 
 ## LLM integration
