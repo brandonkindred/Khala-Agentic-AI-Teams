@@ -1191,10 +1191,15 @@ tool-verified caller elsewhere in the system — and `documentation` — a
 docstring/comment that no longer matches the implementation (a
 documentation-accuracy problem, not a side effect, reported under its own
 category rather than mislabeled as `side-effects`).
-This pass is only ever given CURRENT file content, never a prior revision, so
-it judges behavior as written now rather than comparing against history. It
-never removes or alters any finding the map phase, the false-positive filter,
-or the architecture pass already produced. `search_repository` requires a
+This pass is only ever given CURRENT file content, never a prior revision, with
+one narrow exception: a file with a before-image populated on
+`CodeReviewInput.replaced_content` (see `CODE_REVIEW_MUTATION_ANALYSIS` below)
+shows that before-image alongside the current content, and the pass may reason
+over that shown block specifically — never any other prior version it was not
+given. Absent that one case, it judges behavior as written now rather than
+comparing against history. It never removes or alters any finding the map
+phase, the false-positive filter, or the architecture pass already produced.
+`search_repository` requires a
 repository reader to be attached (the GitHub PR-review path and the
 software-engineering pipeline both supply one; without one, this pass can
 still find callers within the submission's own files via `search_codebase`).
@@ -1216,6 +1221,37 @@ the other two passes already have in that case.
 Any setup or LLM failure is fail-safe: it is logged and yields no additional
 findings, so a broken pass never blocks or changes the rest of the review. Set
 to `false`/`0`/`no` to disable the pass (any other value, or unset, leaves it
+enabled).
+
+### CODE_REVIEW_MUTATION_ANALYSIS
+Default-on toggle for the mutation-vs-replaced-code contract sub-check inside
+the side-effect / blast-radius pass above (both the standalone Temporal
+activity and the in-process merged pass). When a file has a before-image on
+`CodeReviewInput.replaced_content` (rendered as a per-path "Replaced
+(pre-change) content" prompt section), this sub-check compares the file's
+current content against that shown before-image for data/variable-mutation
+differences (a different return value/type, a different mutation of
+shared/passed-in state, a different exception, a different ordering/timing
+guarantee), assesses whether the difference changed the enclosing
+function/class's observable contract, and — only when the contract changed —
+uses `find_references` (falling back to `search_repository`) and
+`read_file`/`read_function`/`read_lines` to inspect real callers and decide,
+in Design-by-Contract terms, whether the new code or its callers are the
+defect. This is the *only* case in which the pass's general "never assume a
+prior version" guard is relaxed, and only for the specific file whose
+before-image is actually shown — a file with no `replaced_content` entry gets
+none of it, and the guard stays absolute for every other file regardless of
+this toggle. Findings still ride the pass's existing `side-effects`
+category/schema; there is no new category and no schema change. When
+disabled, `replaced_content` is never shown to the model at all (not merely
+ignored), so the pass's prompt and behavior are identical to before this
+sub-check existed. Output-affecting, so it participates in
+`mapping._submission_fingerprint` (the `__mutation_analysis__` payload entry,
+alongside `__side_effect_consolidation__` and
+`__spec_compliance_single_pass__`) — flipping this toggle invalidates the
+in-process coordinator's submission-level short-circuit cache, so a verdict
+computed under one toggle state is never served to a run under the other. Set
+to `false`/`0`/`no` to disable (any other value, or unset, leaves it
 enabled).
 
 ### CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION

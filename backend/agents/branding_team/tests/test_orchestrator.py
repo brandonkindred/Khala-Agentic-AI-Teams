@@ -91,6 +91,7 @@ from branding_team.models import (
     WritingGuidelinesOutput,
 )
 from branding_team.orchestrator import (
+    _PHASE_SPEC,
     _merge_phase3_fragments,
     _merge_phase4_fragments,
     _merge_phase5_fragments,
@@ -850,6 +851,16 @@ def test_extract_phase_output_uses_structured_output_when_present() -> None:
     assert output.brand_promise == agent_result.structured_output.brand_promise
 
 
+def test_phase_spec_every_entry_declares_merge_fn() -> None:
+    """All five phases now merge their fan-out fragments in Python (Phases 1-2
+    always did; Phases 3-5 dropped their LLM compositors in stories 1a/1b/1c).
+    No entry may silently fall back to the single-agent extraction default —
+    guard the invariant so a future phase addition can't regress it."""
+    assert set(_PHASE_SPEC) == set(PHASE_ORDER)
+    for phase, spec in _PHASE_SPEC.items():
+        assert spec.merge_fn is not None, f"{phase} has no merge_fn"
+
+
 def _phase1_leaf_node(structured_output) -> MagicMock:
     """A mock NodeResult for a single fan-out/fan-in leaf agent.
 
@@ -1280,22 +1291,12 @@ def _phase4_nested_node_result() -> MagicMock:
     return node_result
 
 
-def _assert_every_field_populated(
-    model: BaseModel, *, exclude: frozenset[str] = frozenset()
-) -> None:
+def _assert_every_field_populated(model: BaseModel) -> None:
     """Fail with the offending field names if any field on ``model`` was left
     at an empty/falsy value — used to prove a set of merged fragments
     collectively covers every field on the target schema, so a future field
-    added without a producing specialist is caught automatically.
-
-    ``exclude`` skips fields known to have no producing node yet (see
-    ``_PHASE3_UNCOVERED_FIELDS``); leave it empty for schemas where every
-    field is expected to be covered."""
-    empty = [
-        name
-        for name in type(model).model_fields
-        if name not in exclude and not getattr(model, name)
-    ]
+    added without a producing specialist is caught automatically."""
+    empty = [name for name in type(model).model_fields if not getattr(model, name)]
     assert not empty, f"{type(model).__name__} fields left empty: {empty}"
 
 
@@ -1998,22 +1999,13 @@ def test_extract_phase_output_merges_every_phase3_fragment() -> None:
     ]
 
 
-_PHASE3_UNCOVERED_FIELDS = frozenset({"data_visualization_style", "digital_adaptations"})
-# VisualIdentityOutput fields with no producing node under the current three
-# moodboard conceptualists + converge_decider + seven-specialist set (and none
-# under the removed visual_compositor before it, either). Changing an agent's
-# prompt or output schema to cover them is out of scope for the Python-merge
-# migration this test suite locks in; tracked separately.
-
-
 def test_phase3_fragments_collectively_populate_every_output_field() -> None:
     """Schema-coverage guard: the three moodboard conceptualists,
     converge_decider, and the seven post-converge specialists' fragments must
     collectively populate every VisualIdentityOutput field they can produce,
     checked generically against the model's own field list (not a hardcoded
     enumeration) so a field added later without a producing node fails this
-    test instead of silently shipping empty. See _PHASE3_UNCOVERED_FIELDS for
-    the two fields no current node produces."""
+    test instead of silently shipping empty."""
     mock_result = MagicMock()
     mock_result.result = {"phase3_visual": _phase3_nested_node_result()}
 
@@ -2023,7 +2015,7 @@ def test_phase3_fragments_collectively_populate_every_output_field() -> None:
 
     assert degraded is False
     assert isinstance(output, VisualIdentityOutput)
-    _assert_every_field_populated(output, exclude=_PHASE3_UNCOVERED_FIELDS)
+    _assert_every_field_populated(output)
 
 
 def test_full_run_phase3_not_degraded_with_eleven_fragments() -> None:
@@ -2055,7 +2047,7 @@ def test_full_run_phase3_not_degraded_with_eleven_fragments() -> None:
     assert result.degraded_phases == []
     assert isinstance(result.visual_identity, VisualIdentityOutput)
     assert result.visual_identity.creative_refinement.winning_candidate_title == "Modern Confidence"
-    _assert_every_field_populated(result.visual_identity, exclude=_PHASE3_UNCOVERED_FIELDS)
+    _assert_every_field_populated(result.visual_identity)
 
 
 def test_merge_phase3_fragments_rejects_incomplete_specialist_set() -> None:
@@ -2500,7 +2492,7 @@ def test_run_with_phase_cache_hit_reuses_output_without_invoking_phase() -> None
         )
 
     mock_run_single_phase.assert_not_called()
-    assert result.strategic_core is cached_output
+    assert result.strategic_core == cached_output
     assert result.narrative_messaging is None
 
 
@@ -2546,7 +2538,7 @@ def test_run_with_phase_cache_recomputes_downstream_phase_when_upstream_changes(
     with patch.object(
         orchestrator, "run_single_phase", side_effect=_run_single_phase_fixture_side_effect
     ) as mock_run_single_phase:
-        result = orchestrator.run(
+        orchestrator.run(
             mission=mission,
             human_review=HumanReview(approved=False),
             target_phase=BrandPhase.NARRATIVE_MESSAGING,
@@ -2555,7 +2547,6 @@ def test_run_with_phase_cache_recomputes_downstream_phase_when_upstream_changes(
 
     called_phases = [call.args[1] for call in mock_run_single_phase.call_args_list]
     assert called_phases == [BrandPhase.STRATEGIC_CORE, BrandPhase.NARRATIVE_MESSAGING]
-    assert result.narrative_messaging is not stale_narrative
 
 
 def test_run_with_phase_cache_never_caches_a_degraded_output() -> None:
@@ -2616,8 +2607,8 @@ def test_run_with_phase_cache_reuses_multiple_cached_upstream_phases() -> None:
 
     called_phases = [call.args[1] for call in mock_run_single_phase.call_args_list]
     assert called_phases == [BrandPhase.VISUAL_IDENTITY]
-    assert result.strategic_core is cached_strategic_core
-    assert result.narrative_messaging is cached_narrative
+    assert result.strategic_core == cached_strategic_core
+    assert result.narrative_messaging == cached_narrative
     assert result.visual_identity is not None
     assert result.channel_activation is None
 
@@ -2675,9 +2666,9 @@ def test_run_with_phase_cache_cascades_recompute_through_three_phase_chain() -> 
         assert cached is not None
         fresh_upstream[phase] = cached
 
-    assert result.strategic_core is fresh_upstream[BrandPhase.STRATEGIC_CORE]
-    assert result.narrative_messaging is fresh_upstream[BrandPhase.NARRATIVE_MESSAGING]
-    assert result.visual_identity is fresh_upstream[BrandPhase.VISUAL_IDENTITY]
+    assert result.strategic_core == fresh_upstream[BrandPhase.STRATEGIC_CORE]
+    assert result.narrative_messaging == fresh_upstream[BrandPhase.NARRATIVE_MESSAGING]
+    assert result.visual_identity == fresh_upstream[BrandPhase.VISUAL_IDENTITY]
 
 
 # ---------------------------------------------------------------------------

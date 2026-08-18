@@ -36,7 +36,7 @@ from .graphs.phase2_narrative import build_phase2_graph
 from .graphs.phase3_visual import build_phase3_graph
 from .graphs.phase4_channel import build_phase4_graph
 from .graphs.phase5_governance import build_phase5_graph
-from .graphs.shared import PHASE_ORDER, phase_index, serialize_mission
+from .graphs.shared import PHASE_ORDER, PHASE_OUTPUT_MODELS, phase_index, serialize_mission
 from .graphs.top_level import (
     DEFAULT_EXECUTION_TIMEOUT_SECONDS,
     DEFAULT_NODE_TIMEOUT_SECONDS,
@@ -84,11 +84,13 @@ _PHASE1_NODE_MERGE: dict[str, Optional[str]] = {
 
 
 # Phase 2 linear Graph node id -> nest-under key on NarrativeMessagingOutput,
-# or None to merge fields in flat. Each specialist's structured_output is a
-# cumulative carry-forward model (see models.py). Merge uses prefer_first so
-# upstream-owned keys are not overwritten by later re-emissions; require_all
-# still insists every specialist actually ran. VoicePrinciplesDrafter already
-# nests writing_guidelines in its own schema — no remap needed.
+# or None to merge fields in flat. Each specialist's structured_output is an
+# own-field-only model (Story 5b Step 1; see models.py) -- no two of the six
+# fragments can set the same flat key, so prefer_first is a defensive no-op
+# here rather than load-bearing collision-avoidance (its removal is Story 5b
+# Step 3). require_all still insists every specialist actually ran.
+# VoicePrinciplesDrafter already nests writing_guidelines in its own schema —
+# no remap needed.
 _PHASE2_NODE_MERGE: dict[str, Optional[str]] = {
     "Storyteller": None,
     "ArchetypeAnalyst": None,
@@ -266,9 +268,10 @@ def _merge_named_fragments(
         single-value-assignment behavior.
 
         When ``prefer_first`` is True, the first child that sets a flat key
-        wins (later dumps do not overwrite). Phase 2 needs this because each
-        specialist's cumulative ``structured_output`` re-emits upstream fields
-        that a real LLM may rewrite.
+        wins (later dumps do not overwrite). Phase 2 passes this defensively:
+        since Story 5b Step 1 each specialist's ``structured_output`` is an
+        own-field-only model, so no two fragments can set the same flat key
+        and the guard is currently a no-op there (its removal is Step 3).
     """
     nested_results = getattr(getattr(node_result, "result", None), "results", None)
     if not isinstance(nested_results, dict):
@@ -342,9 +345,11 @@ def _merge_phase2_fragments(node_result: Any, model_class: type[BaseModel]) -> O
     — a partial run (e.g. entry agent only) must not validate as a complete
     ``NarrativeMessagingOutput`` via field defaults.
 
-    Cumulative carry-forward models re-emit upstream fields; merge keeps the
-    first value for each key so a later specialist cannot overwrite the
-    authoritative upstream fragment (e.g. Voice rewriting ``brand_story``).
+    Each specialist's ``structured_output`` is an own-field-only model (Story
+    5b Step 1): upstream narrative reaches it only as read-only context via
+    the single-predecessor edge chain's ``Inputs from previous nodes``, never
+    as a field it re-emits. ``prefer_first`` is therefore a defensive no-op
+    here (no two fragments can set the same flat key); its removal is Step 3.
 
     Preconditions:
         ``node_result`` is the ``NodeResult`` for a single top-level graph node
@@ -487,34 +492,34 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
     BrandPhase.STRATEGIC_CORE: _PhaseSpec(
         build_phase1_graph,
         "phase1_strategic_core",
-        StrategicCoreOutput,
+        PHASE_OUTPUT_MODELS[BrandPhase.STRATEGIC_CORE],
         merge_fn=_merge_phase1_fragments,
     ),
     BrandPhase.NARRATIVE_MESSAGING: _PhaseSpec(
         build_phase2_graph,
         "phase2_narrative",
-        NarrativeMessagingOutput,
+        PHASE_OUTPUT_MODELS[BrandPhase.NARRATIVE_MESSAGING],
         merge_fn=_merge_phase2_fragments,
         check_structured_output=False,
     ),
     BrandPhase.VISUAL_IDENTITY: _PhaseSpec(
         build_phase3_graph,
         "phase3_visual",
-        VisualIdentityOutput,
+        PHASE_OUTPUT_MODELS[BrandPhase.VISUAL_IDENTITY],
         merge_fn=_merge_phase3_fragments,
         check_structured_output=False,
     ),
     BrandPhase.CHANNEL_ACTIVATION: _PhaseSpec(
         build_phase4_graph,
         "phase4_channel",
-        ChannelActivationOutput,
+        PHASE_OUTPUT_MODELS[BrandPhase.CHANNEL_ACTIVATION],
         merge_fn=_merge_phase4_fragments,
         check_structured_output=False,
     ),
     BrandPhase.GOVERNANCE: _PhaseSpec(
         build_phase5_graph,
         "phase5_governance",
-        GovernanceOutput,
+        PHASE_OUTPUT_MODELS[BrandPhase.GOVERNANCE],
         merge_fn=_merge_phase5_fragments,
         check_structured_output=False,
     ),

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import pytest
 from code_review_agent.false_positive_filter import CodebaseIndex
-from code_review_agent.models import CodeReviewIssue
-from code_review_agent.side_effect_consolidation import consolidate_side_effect_issues
+from code_review_agent.models import CodeReviewInput, CodeReviewIssue
+from code_review_agent.side_effect_consolidation import (
+    consolidate_side_effect_issues,
+    effective_replaced_content,
+)
 
 
 def _issue(**kwargs) -> CodeReviewIssue:
@@ -510,3 +513,36 @@ def test_unanchored_citation_merge_keeps_known_file_anchor() -> None:
     assert result[0].line == 2
     assert "foo's contract changed" in result[0].description
     assert "blast radius" in result[0].description
+
+
+# --------------------------------------------------------------------------- effective_replaced_content
+
+
+def test_effective_replaced_content_passes_through_when_mutation_on() -> None:
+    replaced = {"app/foo.py": "def foo():\n    return 0\n"}
+    input_data = CodeReviewInput(
+        files={"app/foo.py": "def foo():\n    return 1\n"},
+        task_description="change return value",
+        replaced_content=replaced,
+    )
+    assert effective_replaced_content(input_data, mutation_on=True) == replaced
+
+
+def test_effective_replaced_content_hidden_when_mutation_off() -> None:
+    """The before-image is hidden entirely when the toggle is off, regardless
+    of whether ``replaced_content`` is populated."""
+    input_data = CodeReviewInput(
+        files={"app/foo.py": "def foo():\n    return 1\n"},
+        task_description="change return value",
+        replaced_content={"app/foo.py": "def foo():\n    return 0\n"},
+    )
+    assert effective_replaced_content(input_data, mutation_on=False) is None
+
+
+def test_effective_replaced_content_none_when_absent_regardless_of_toggle() -> None:
+    input_data = CodeReviewInput(
+        files={"app/foo.py": "def foo():\n    return 1\n"},
+        task_description="change return value",
+    )
+    assert effective_replaced_content(input_data, mutation_on=True) is None
+    assert effective_replaced_content(input_data, mutation_on=False) is None

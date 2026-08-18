@@ -44,7 +44,7 @@ export class PersonaTestAuditPanelComponent implements OnInit, OnDestroy {
    * Preconditions: a non-empty absolute-from-root path (leading `/`).
    * Postconditions: the template's back `routerLink` equals this value.
    */
-  @Input() backLink = '/persona-testing';
+  @Input() backLink = '/agent-studio';
 
   /**
    * Visible label for the header back control.
@@ -52,7 +52,7 @@ export class PersonaTestAuditPanelComponent implements OnInit, OnDestroy {
    * Preconditions: a non-empty string.
    * Postconditions: the template renders this text next to the back icon.
    */
-  @Input() backLabel = 'Back to Testing Personas';
+  @Input() backLabel = 'Back to Agent Studio';
 
   runId = '';
   run: PersonaTestRunDetail | null = null;
