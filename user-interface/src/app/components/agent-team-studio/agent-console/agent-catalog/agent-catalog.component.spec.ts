@@ -64,7 +64,13 @@ describe('AgentCatalogComponent', () => {
 
   const auditorDetail: AgentDetail = {
     ...writerDetail,
-    manifest: { ...writerDetail.manifest, id: 'soc2.auditor', tags: ['compliance', 'requires-live-integration'] },
+    manifest: {
+      ...writerDetail.manifest,
+      id: 'soc2.auditor',
+      team: 'soc2',
+      name: 'Auditor',
+      tags: ['compliance', 'requires-live-integration'],
+    },
   };
 
   let api: CatalogApiMock;

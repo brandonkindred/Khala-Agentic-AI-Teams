@@ -47,7 +47,13 @@ describe('AgentRunnerComponent', () => {
 
   const liveIntegrationDetail: AgentDetail = {
     ...writerDetail,
-    manifest: { ...writerDetail.manifest, id: 'soc2.auditor', tags: ['requires-live-integration'] },
+    manifest: {
+      ...writerDetail.manifest,
+      id: 'soc2.auditor',
+      team: 'soc2',
+      name: 'Auditor',
+      tags: ['requires-live-integration'],
+    },
   };
 
   const coldHandle: SandboxHandle = {
@@ -139,14 +145,15 @@ describe('AgentRunnerComponent', () => {
     };
     dialogOpen = vi.fn();
 
-    await TestBed.configureTestingModule({
+    TestBed.configureTestingModule({
       imports: [AgentRunnerComponent, NoopAnimationsModule],
       providers: [
         { provide: AgentCatalogApiService, useValue: catalogApi },
         { provide: AgentRunnerApiService, useValue: runnerApi },
       ],
-    }).compileComponents();
+    });
     TestBed.overrideProvider(MatDialog, { useValue: { open: dialogOpen } });
+    await TestBed.compileComponents();
 
     fixture = TestBed.createComponent(AgentRunnerComponent);
     component = fixture.componentInstance;
@@ -435,14 +442,19 @@ describe('AgentRunnerComponent', () => {
 
       expect(runnerApi.getSandbox).toHaveBeenCalledTimes(2);
       expect(component.sandbox()).toEqual(warmHandle);
+      vi.useRealTimers();
     });
 
-    it('unsubscribes the sandbox poll on destroy', () => {
+    it('stops polling the sandbox after destroy', () => {
+      vi.useFakeTimers();
       selectWriter();
-      const sub = (component as unknown as { sandboxPollSub: { unsubscribe: () => void } | null }).sandboxPollSub;
-      const unsubscribeSpy = sub ? vi.spyOn(sub, 'unsubscribe') : null;
+      expect(runnerApi.getSandbox).toHaveBeenCalledTimes(1);
+
       fixture.destroy();
-      if (unsubscribeSpy) expect(unsubscribeSpy).toHaveBeenCalled();
+      vi.advanceTimersByTime(5000);
+
+      expect(runnerApi.getSandbox).toHaveBeenCalledTimes(1);
+      vi.useRealTimers();
     });
 
     it('is a no-op to warm/teardown when no agent is selected', () => {
@@ -526,13 +538,14 @@ describe('AgentRunnerComponent', () => {
     it('handles a successful invoke and refreshes history', () => {
       const envelope: InvokeEnvelope = { output: { ok: true }, duration_ms: 42, trace_id: 'trace-1234', logs_tail: [] };
       runnerApi.invoke.mockReturnValue(of(new HttpResponse({ status: 200, body: envelope })));
-      const refreshSpy = component.historyPanel ? vi.spyOn(component.historyPanel, 'refresh') : undefined;
+      expect(component.historyPanel).toBeTruthy();
+      const refreshSpy = vi.spyOn(component.historyPanel!, 'refresh');
 
       component.run();
 
       expect(component.running()).toBe(false);
       expect(component.lastResponse()).toEqual(envelope);
-      if (refreshSpy) expect(refreshSpy).toHaveBeenCalled();
+      expect(refreshSpy).toHaveBeenCalled();
     });
 
     it('treats a 202 response as a warming notice, not a result', () => {
