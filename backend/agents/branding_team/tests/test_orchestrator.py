@@ -1219,6 +1219,61 @@ def test_extract_phase_output_rejects_incomplete_phase2_fragments() -> None:
     assert output.tagline == ""
 
 
+def test_full_run_phase2_not_degraded_with_six_fragments() -> None:
+    """Phase 2's real runtime shape is six separate specialist fragments, not
+    the single flat block _mock_graph_result's default gives every phase
+    (which never actually exercises _merge_phase2_fragments, since it bails
+    out unless node_result.result.results is a dict). Wire that real shape
+    through orchestrator.run() end-to-end and confirm the Python merge keeps
+    Phase 2 out of degraded_phases, fully populates its output, and -- with
+    the prefer_first rewrite guard gone -- that every specialist's
+    authoritative field value survives unrewritten all the way through
+    _assemble_team_output, not just the direct _extract_phase_output call
+    test_extract_phase_output_merges_every_phase2_fragment already covers."""
+    mock_result = _mock_graph_result(ALL_PHASES)
+    mock_result.result["phase2_narrative"] = _phase2_nested_node_result()
+
+    async def mock_invoke_async(task, **kwargs):
+        return mock_result
+
+    with patch(
+        "branding_team.orchestrator.build_branding_graph",
+        return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+    ):
+        orchestrator = BrandingTeamOrchestrator()
+        result = orchestrator.run(
+            mission=make_mission(
+                company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                values=["clarity", "trust", "momentum"],
+            ),
+            human_review=HumanReview(approved=True),
+        )
+
+    assert result.degraded_phases == []
+    assert isinstance(result.narrative_messaging, NarrativeMessagingOutput)
+    _assert_every_field_populated(result.narrative_messaging)
+
+    narrative = result.narrative_messaging
+    assert narrative.brand_story == "Origin story about shipping on-brand experiences."
+    assert narrative.hero_narrative == "Brand that ships with the product."
+    assert narrative.boilerplate_variants == ["short bio", "medium bio", "long bio"]
+    assert [a.archetype for a in narrative.brand_archetypes] == ["The Creator"]
+    assert narrative.tagline == "Ship brand with the product"
+    assert narrative.tagline_rationale == "Ties cohesion to shipping speed."
+    assert [p.tier for p in narrative.elevator_pitches] == ["5-second", "30-second", "2-minute"]
+    assert [p.pillar for p in narrative.messaging_framework] == ["Cohesion", "Speed", "Clarity"]
+    assert [m.audience_segment for m in narrative.audience_message_maps] == [
+        "Enterprise product leaders"
+    ]
+    assert [p.name for p in narrative.persona_profiles] == ["Alex Rivera", "Jordan Lee"]
+    assert narrative.writing_guidelines.voice_principles == ["Confident", "Human", "Concrete"]
+    assert narrative.writing_guidelines.editorial_quality_bar == [
+        "States who it's for",
+        "Cites proof",
+        "Matches tone",
+    ]
+
+
 def test_extract_phase_output_degrades_when_not_phase1_shaped() -> None:
     """A node whose nested result isn't Phase 1's known node-id set (e.g. a
     foreign/garbled nested result) must degrade to defaults, not accept the
