@@ -886,27 +886,48 @@ regardless of what the pipeline is doing at any given moment.
 """
 
 
-def _design_attempt_cancellation_checkpoint(phase: str, data: Dict[str, Any]) -> None:
-    """``emit``-shaped checkpoint: raise once cancellation is observed.
+# Maps the internal orchestrator phase vocabulary (``emit()``'s ``phase``
+# argument, threaded through strategy_lab/orchestrator*.py) onto the
+# frontend's closed 4-entry phase-stepper set
+# (user-interface/src/app/components/strategy-lab/phase-stepper/
+# phase-stepper.component.ts). The two vocabularies don't otherwise line up
+# -- forwarding a raw internal phase name verbatim would silently render as
+# "no phase" on the stepper (its own doc comment: "an unrecognized id is
+# treated as 'no phase'"). ``telemetry``/``phase_transition``/other unmapped
+# phases are internal/diagnostic only (high-frequency, no user-facing
+# meaning) and deliberately excluded -- an unmapped phase is not published at
+# all rather than falling through to some default.
+_PROGRESS_PHASE_MAP: Dict[str, str] = {
+    "designing": "ideating",
+    "design_review": "ideating",
+    "design_repair": "ideating",
+    "coding": "coding",
+    "backtesting": "backtesting",
+    "aligning": "analyzing",
+    "complete": "analyzing",
+}
 
-    Threaded as the ``emit`` callback into ``_run_design_attempt`` (and
-    therefore invoked at every sub-phase step of the design/synthesis/
-    refinement/alignment/verification/analysis pipeline), so this is the
-    "between steps" cancellation check the owning activity relies on. Does
-    not itself call ``activity.heartbeat()`` -- heartbeat *delivery* is owned
-    by the background ``BackgroundHeartbeat`` wrapping the whole call (see
-    ``_DESIGN_ATTEMPT_HEARTBEAT_INTERVAL_S``); this only checks state.
-
-    Preconditions:
-        None (safe to call outside a real activity context -- direct-call
-        unit tests -- via :func:`shared.temporal.activity_utils.is_cancelled`).
-    Postconditions:
-        Returns normally when not cancelled. Raises
-        :class:`_DesignAttemptCancelled` when ``activity.is_cancelled()`` is
-        True.
-    """
-    if is_cancelled():
-        raise _DesignAttemptCancelled()
+# Whitelist of ``data`` keys ``StrategyLabProgressEvent`` actually models
+# (user-interface/src/app/models/investment.model.ts); every ``emit()`` call
+# site across the orchestrator mixins passes far more (``alignment_round``,
+# ``deflated_sharpe``, ``issues_preview``, ...) that the frontend has no
+# field for -- forward only what it can render rather than inventing new
+# frontend fields for the rest.
+_PROGRESS_EVENT_FIELDS: Tuple[str, ...] = (
+    "sub_phase",
+    "refinement_round",
+    "strategy",
+    "metrics",
+    "checks_passed",
+    "checks_total",
+    "symbols_count",
+    "bars_count",
+    "trades_count",
+    "execution_time",
+    "failure_phase",
+    "changes_made",
+    "is_winning",
+)
 
 
 @activity.defn(name="strategy_lab_run_design_attempt", no_thread_cancel_exception=True)
@@ -930,8 +951,11 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     (``BackgroundHeartbeat``, every ``_DESIGN_ATTEMPT_HEARTBEAT_INTERVAL_S``
     seconds) while ``_run_design_attempt`` runs, and checks
     ``activity.is_cancelled()`` at every ``emit`` checkpoint the pipeline
-    already threads through each phase
-    (:func:`_design_attempt_cancellation_checkpoint`). ``no_thread_cancel_exception=True``
+    already threads through each phase (the local
+    ``_design_attempt_progress_checkpoint`` closure defined just above the
+    ``try`` block below, which also best-effort publishes a mapped
+    ``progress`` SSE event per checkpoint -- see its own docstring).
+    ``no_thread_cancel_exception=True``
     disables the SDK's own asynchronous thread-injected cancellation so this
     checkpoint is the only cancellation-delivery path -- otherwise the SDK's
     injection can land at an arbitrary point in the call tree (including
@@ -968,6 +992,11 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             read and write no-op) -- this is the default for any caller that
             predates ``ADR-012``, including this file's own direct-call unit
             tests.
+          - ``cycle_index`` (optional): this cycle's 0-based index within the
+            run. Absent or ``None`` disables live SSE progress publishing for
+            this attempt (``StrategyLabProgressEvent.cycle_index`` is
+            required on the frontend, so a missing index means "don't
+            publish" rather than "publish malformed").
           - ``generation`` (int, default ``1``): the fencing generation the
             calling workflow incarnation was dispatched with, mirroring
             ``persist_run_state_activity``'s own default-generation
@@ -1115,6 +1144,14 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     design_attempt_index = params.get("design_attempt", 0)
     cycle_scope = _infer_cycle_scope_from_activity_context()
     checkpoint_enabled = run_id is not None and cycle_scope is not None
+    # Absent for a params dict from a workflow-history replay predating this
+    # field (see StrategyLabCycleWorkflow.run's own docstring) -- the
+    # cancellation-checkpoint closure below treats a missing cycle_index the
+    # same way checkpoint_enabled treats a missing run_id/cycle_scope: skip
+    # the optional side-channel rather than publish a malformed event
+    # (StrategyLabProgressEvent.cycle_index is required on the frontend).
+    cycle_index = params.get("cycle_index")
+    progress_publish_enabled = run_id is not None and cycle_index is not None
 
     resume_spec = None
     resume_rationale = None
@@ -1321,6 +1358,62 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         # unit test) this raises and BackgroundHeartbeat swallows it.
         activity.heartbeat()
 
+    def _design_attempt_progress_checkpoint(phase: str, data: Dict[str, Any]) -> None:
+        """``emit``-shaped checkpoint: check cancellation, then best-effort publish progress.
+
+        The ``emit`` callback threaded into ``_run_design_attempt`` (and
+        therefore invoked at every sub-phase step of the design/synthesis/
+        refinement/alignment/verification/analysis pipeline) -- a closure
+        (mirroring ``_write_checkpoint``/``_delete_checkpoint``/``_beat``
+        above) so it can close over this activity's ``run_id``/
+        ``cycle_index``. Does not itself call ``activity.heartbeat()`` --
+        heartbeat *delivery* is owned by the background ``BackgroundHeartbeat``
+        wrapping the whole call (see ``_DESIGN_ATTEMPT_HEARTBEAT_INTERVAL_S``);
+        this only checks state and (best-effort) publishes.
+
+        Preconditions:
+            None (safe to call outside a real activity context -- direct-call
+            unit tests -- via :func:`shared.temporal.activity_utils.is_cancelled`).
+        Postconditions:
+            Returns normally when not cancelled. Raises
+            :class:`_DesignAttemptCancelled` when ``activity.is_cancelled()``
+            is True -- checked FIRST and unconditionally, before any publish
+            attempt, so a publish failure can never mask a real cancellation.
+            When ``progress_publish_enabled`` and ``phase`` maps onto a
+            frontend-recognized phase-stepper id (``_PROGRESS_PHASE_MAP``),
+            best-effort publishes a ``progress`` SSE event carrying the
+            mapped phase and ``data``'s fields whitelisted to
+            ``_PROGRESS_EVENT_FIELDS``. An unmapped ``phase`` (e.g.
+            ``telemetry``, ``phase_transition``) or a publish failure is a
+            silent no-op, never raised -- a lost live-progress update must
+            never fail or retry the underlying design attempt.
+        """
+        if is_cancelled():
+            raise _DesignAttemptCancelled()
+        if not progress_publish_enabled:
+            return
+        mapped_phase = _PROGRESS_PHASE_MAP.get(phase)
+        if mapped_phase is None:
+            return
+        try:
+            from investment_team.api import job_event_bus
+
+            event: Dict[str, Any] = {
+                "type": "progress",
+                "cycle_index": cycle_index,
+                "phase": mapped_phase,
+            }
+            event.update({k: data[k] for k in _PROGRESS_EVENT_FIELDS if k in data})
+            job_event_bus.publish(run_id, event, event_type="progress")
+        except Exception:  # noqa: BLE001 -- best-effort UX side-channel, see docstring
+            logger.warning(
+                "design attempt progress publish failed for run %s cycle %s phase %s",
+                run_id,
+                cycle_index,
+                phase,
+                exc_info=True,
+            )
+
     try:
         with (
             BackgroundHeartbeat(
@@ -1336,7 +1429,7 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 prior_records=prior_records,
                 config=config,
                 signal_brief=signal_brief,
-                emit=_design_attempt_cancellation_checkpoint,
+                emit=_design_attempt_progress_checkpoint,
                 exclude_asset_classes=params.get("exclude_asset_classes"),
                 directives=list(params.get("directives") or []),
                 design_attempt=design_attempt_index,
@@ -1668,6 +1761,46 @@ def merge_wave_results_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     return {"primary_tracker_state": primary.to_wire_dict(), "merge_errors": merge_errors}
 
 
+@activity.defn(name="strategy_lab_publish_run_event")
+def publish_run_event_activity(params: Dict[str, Any]) -> None:
+    """Best-effort SSE publish for a strategy-lab run (fire-and-forget UX side-channel).
+
+    Wraps ``investment_team.api.job_event_bus.publish`` verbatim. Exists as an
+    activity solely because ``StrategyLabBatchWorkflow.run`` (workflow code,
+    sandboxed) cannot do I/O directly -- this is the side-effect boundary it
+    calls at each point it needs to notify live SSE subscribers: a skipped
+    cycle, a finalized cycle, and the run's terminal status. The Strategy Lab
+    worker runs in-process with the FastAPI app (see
+    ``investment_team.temporal.worker.start_investment_temporal_worker_thread``),
+    so this reaches the same in-memory subscriber list
+    ``GET /strategy-lab/runs/{run_id}/stream`` reads from directly -- no
+    cross-process bridge needed.
+
+    Preconditions:
+        ``params`` = ``{"run_id": str, "event": <JSON-shaped dict with a
+        "type" key>}``.
+    Postconditions:
+        Always returns ``None``, even when the publish itself fails -- a lost
+        live-progress/results-refresh update must never fail or retry the
+        underlying run, so any exception is logged and swallowed rather than
+        raised (mirrors ``run_design_attempt_activity``'s progress-checkpoint
+        closure).
+    """
+    from investment_team.api import job_event_bus
+
+    run_id = params["run_id"]
+    event = params["event"]
+    try:
+        job_event_bus.publish(run_id, event, event_type=event.get("type"))
+    except Exception:  # noqa: BLE001 -- best-effort UX side-channel, see docstring
+        logger.warning(
+            "strategy lab run-event publish failed for run %s event %s",
+            run_id,
+            event.get("type"),
+            exc_info=True,
+        )
+
+
 ACTIVITIES = [
     compute_regime_summary_activity,
     persist_run_state_activity,
@@ -1680,6 +1813,7 @@ ACTIVITIES = [
     external_terminal_status_activity,
     finalize_cycle_record_activity,
     merge_wave_results_activity,
+    publish_run_event_activity,
 ]
 
 __all__ = [
@@ -1692,6 +1826,7 @@ __all__ = [
     "build_short_circuit_record_activity",
     "compute_regime_summary_activity",
     "persist_run_state_activity",
+    "publish_run_event_activity",
     "resolve_workflow_config_activity",
     "run_design_attempt_activity",
     "snapshot_prior_records_activity",

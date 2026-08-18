@@ -63,13 +63,21 @@ class _Harness:
 
     ``child_results`` maps a child workflow id → the dict the child returns, or an
     ``Exception`` to simulate a failed cycle. ``activity_handlers`` maps activity
-    function name → ``(args) -> result``.
+    function name → ``(args) -> result``. ``patched_result`` stands in for
+    ``workflow.patched("strategy-lab-sse-run-events")`` — real workflow code, so
+    it needs its own mock the same way ``execute_activity``/
+    ``start_child_workflow`` do; defaults to ``True`` (the "fresh execution, not
+    replaying a pre-SSE-events history" case) so existing tests exercise the new
+    publish call sites by default. A test asserting the False (in-flight-at-deploy
+    replay) branch skips them instead passes ``patched_result=False``.
     """
 
     def __init__(
         self,
         child_results: Dict[str, Any],
         activity_handlers: Dict[str, Any],
+        *,
+        patched_result: bool = True,
     ) -> None:
         self.child_results = child_results
         self.activity_handlers = activity_handlers
@@ -79,6 +87,8 @@ class _Harness:
         # lets a test prove all children in a wave start before any is awaited.
         self.start_count_at_await: List[int] = []
         self.activity_calls: List[str] = []
+        self.patched_result = patched_result
+        self.patched_calls: List[str] = []
 
     async def start_child_workflow(self, _wf_run, arg, *, id, **_kw):  # noqa: A002
         self.child_starts.append(id)
@@ -101,10 +111,15 @@ class _Harness:
             raise AssertionError(f"unexpected activity call: {name}")
         return handler(args)
 
+    def patched(self, patch_id: str) -> bool:
+        self.patched_calls.append(patch_id)
+        return self.patched_result
+
     def patch(self):
         return (
             mock.patch("temporalio.workflow.start_child_workflow", self.start_child_workflow),
             mock.patch("temporalio.workflow.execute_activity", self.execute_activity),
+            mock.patch("temporalio.workflow.patched", self.patched),
         )
 
 
@@ -125,6 +140,7 @@ def _default_activity_handlers(**overrides: Any) -> Dict[str, Any]:
         "is_run_cancelled_activity": lambda a: False,
         "external_terminal_status_activity": lambda a: None,
         "resolve_workflow_config_activity": lambda a: _WF_CONFIG,
+        "publish_run_event_activity": lambda a: None,
     }
     handlers.update(overrides)
     return handlers
@@ -143,8 +159,8 @@ def _child_skipped() -> Dict[str, Any]:
 
 
 def _run(batch_input: Dict[str, Any], harness: _Harness) -> Dict[str, Any]:
-    p1, p2 = harness.patch()
-    with p1, p2:
+    p1, p2, p3 = harness.patch()
+    with p1, p2, p3:
         return asyncio.run(wf.StrategyLabBatchWorkflow().run(batch_input))
 
 
@@ -193,6 +209,21 @@ def test_each_cycle_gets_the_batch_scoped_cache_key():
     assert harness.child_start_args["run-1-c1"]["batch_cache_key"] == "run-1-b0"
     assert harness.child_start_args["run-1-c2"]["batch_cache_key"] == "run-1-b1"
     assert harness.child_start_args["run-1-c3"]["batch_cache_key"] == "run-1-b1"
+
+
+def test_each_cycle_input_carries_its_own_cycle_index():
+    """Every child's ``cycle_input`` carries the same 0-based ``cycle_index``
+    baked into its deterministic child-workflow id (``f"{run_id}-c{cycle_index}"``)
+    -- this is what lets ``run_design_attempt_activity``'s progress-publish
+    checkpoint attach a ``StrategyLabProgressEvent.cycle_index``."""
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(),
+    )
+    _run(_batch_input(), harness)
+
+    assert harness.child_start_args["run-1-c0"]["cycle_index"] == 0
+    assert harness.child_start_args["run-1-c1"]["cycle_index"] == 1
 
 
 def test_all_children_in_wave_start_before_any_is_awaited():
@@ -873,6 +904,158 @@ def test_generation_defaults_to_one_when_absent_from_batch_input():
     assert captured_persist_args
     for args in captured_persist_args:
         assert args[3] == 1
+
+
+# ---------------------------------------------------------------------------
+# SSE run-event publishing — cycle_skipped / cycle_complete / terminal
+# complete/error/cancelled, via publish_run_event_activity.
+# ---------------------------------------------------------------------------
+
+
+def test_batch_publishes_cycle_complete_after_each_finalized_cycle():
+    published: List[Dict[str, Any]] = []
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(
+            publish_run_event_activity=lambda a: published.append(a[0]),
+        ),
+    )
+    _run(_batch_input(), harness)
+
+    cycle_complete = [
+        p["event"]
+        for p in published
+        if p["run_id"] == "run-1" and p["event"]["type"] == "cycle_complete"
+    ]
+    assert [e["cycle_index"] for e in cycle_complete] == [0, 1]
+    assert [e["record_id"] for e in cycle_complete] == ["rec-0", "rec-1"]
+    assert [e["completed_cycles"] for e in cycle_complete] == [1, 2]
+    assert all(e["batch_index"] == 1 for e in cycle_complete)
+
+
+def test_batch_publishes_cycle_skipped_for_a_no_market_data_cycle():
+    published: List[Dict[str, Any]] = []
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_skipped()},
+        activity_handlers=_default_activity_handlers(
+            publish_run_event_activity=lambda a: published.append(a[0]),
+        ),
+    )
+    _run(_batch_input(), harness)
+
+    skipped = [p["event"] for p in published if p["event"]["type"] == "cycle_skipped"]
+    assert len(skipped) == 1
+    assert skipped[0] == {
+        "type": "cycle_skipped",
+        "cycle_index": 1,
+        "reason": "no_market_data",
+        "batch_index": 1,
+    }
+    # A skipped cycle is never finalized, so it never gets a cycle_complete too.
+    assert [p["event"]["type"] for p in published if p["event"]["type"] == "cycle_complete"] == [
+        "cycle_complete"
+    ]
+
+
+def test_batch_publishes_terminal_complete_event_on_clean_finish():
+    published: List[Dict[str, Any]] = []
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(
+            publish_run_event_activity=lambda a: published.append(a[0]),
+        ),
+    )
+    _run(_batch_input(), harness)
+
+    terminal = [
+        p["event"] for p in published if p["event"]["type"] in ("complete", "error", "cancelled")
+    ]
+    assert len(terminal) == 1
+    assert terminal[0]["type"] == "complete"
+    assert terminal[0]["status"] == "completed"
+    assert terminal[0]["completed_count"] == 2
+    assert terminal[0]["skipped_count"] == 0
+    assert terminal[0]["errored_count"] == 0
+    assert terminal[0]["completed_batches"] == 1
+    assert terminal[0]["total_batches"] == 1
+
+
+def test_batch_publishes_terminal_error_event_for_external_failure():
+    published: List[Dict[str, Any]] = []
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(
+            external_terminal_status_activity=lambda a: "failed",
+            publish_run_event_activity=lambda a: published.append(a[0]),
+        ),
+    )
+    result = _run(_batch_input(), harness)
+
+    assert result["status"] == "failed"
+    terminal = [
+        p["event"] for p in published if p["event"]["type"] in ("complete", "error", "cancelled")
+    ]
+    assert len(terminal) == 1
+    assert terminal[0] == {"type": "error", "detail": "Run failed.", "terminal_status": "failed"}
+
+
+def test_batch_publishes_terminal_cancelled_event():
+    published: List[Dict[str, Any]] = []
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(
+            external_terminal_status_activity=lambda a: "cancelled",
+            publish_run_event_activity=lambda a: published.append(a[0]),
+        ),
+    )
+    result = _run(_batch_input(), harness)
+
+    assert result["status"] == "cancelled"
+    terminal = [
+        p["event"] for p in published if p["event"]["type"] in ("complete", "error", "cancelled")
+    ]
+    assert terminal == [{"type": "cancelled", "detail": "Run cancelled."}]
+
+
+def test_batch_terminal_complete_event_counts_errored_cycles():
+    published: List[Dict[str, Any]] = []
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": RuntimeError("boom")},
+        activity_handlers=_default_activity_handlers(
+            publish_run_event_activity=lambda a: published.append(a[0]),
+        ),
+    )
+    result = _run(_batch_input(), harness)
+
+    assert result["status"] == "completed_with_errors"
+    terminal = [p["event"] for p in published if p["event"]["type"] == "complete"]
+    assert len(terminal) == 1
+    assert terminal[0]["status"] == "completed_with_errors"
+    assert terminal[0]["errored_count"] == 1
+    assert terminal[0]["completed_count"] == 1
+
+
+def test_no_sse_events_published_when_not_patched():
+    """A run already in flight when SSE publishing shipped replays with
+    ``workflow.patched(...)`` False and simply never publishes for the rest of
+    its lifetime — the pre-existing, already-safe degraded behavior, not an
+    error. The run's own return value/persisted state is unaffected."""
+    published: List[Dict[str, Any]] = []
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(
+            publish_run_event_activity=lambda a: published.append(a[0]),
+        ),
+        patched_result=False,
+    )
+    result = _run(_batch_input(), harness)
+
+    assert published == []
+    assert harness.patched_calls == ["strategy-lab-sse-run-events"]
+    assert result["status"] == "completed"
+    assert sorted(result["completed_record_ids"]) == ["rec-0", "rec-1"]
+    # publish_run_event_activity itself is simply never called at all.
+    assert "publish_run_event_activity" not in harness.activity_calls
 
 
 # ---------------------------------------------------------------------------
