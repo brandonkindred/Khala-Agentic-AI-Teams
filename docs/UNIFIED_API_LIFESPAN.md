@@ -165,7 +165,7 @@ unless workflows are restored.
 
 Order is load-bearing so buffered `llm_call_records` are not lost:
 
-1. Cancel cognition scheduler, graph sync, console pruner, sandbox reaper, and the health loop.
+1. Cancel cognition scheduler, graph sync, console pruner, sandbox reaper, and the health loop, then await each one (`_cancel_and_await_task`) so its cleanup finishes and any non-cancellation exception is logged before shutdown continues.
 2. `close_graphiti()`.
 3. `_stop_in_process_temporal_workers()` (`stop_all_team_workers`) — sandbox activities can still invoke the LLM; they must finish before the observer unregisters. (Studio no longer has Temporal activities — its authoring CRUD is in-process — so the only remaining LLM invocations from this step are the sandbox's; the in-process Agent Studio authoring pool is shut down separately in step 4.)
 4. `shutdown_authoring_executor()` — Agent Studio in-process authoring pool, gated on `TEAM_CONFIGS["agent_studio"].enabled` so a disabled team is never imported. Rejects new CRUD submits; daemon workers are not joined (a stalled LLM HTTP call cannot be cancelled from another thread, and CPython `ThreadPoolExecutor` atexit would otherwise block reload for up to `resolve_timeout()` / 3600s).
