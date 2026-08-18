@@ -951,10 +951,9 @@ def test_batch_publishes_cycle_skipped_for_a_no_market_data_cycle():
         "reason": "no_market_data",
         "batch_index": 1,
     }
-    # A skipped cycle is never finalized, so it never gets a cycle_complete too.
-    assert [p["event"]["type"] for p in published if p["event"]["type"] == "cycle_complete"] == [
-        "cycle_complete"
-    ]
+    # A skipped cycle is never finalized, so only the one non-skipped cycle
+    # (run-1-c0) gets a cycle_complete -- never two.
+    assert sum(1 for p in published if p["event"]["type"] == "cycle_complete") == 1
 
 
 def test_batch_publishes_terminal_complete_event_on_clean_finish():
@@ -1033,6 +1032,22 @@ def test_batch_terminal_complete_event_counts_errored_cycles():
     assert terminal[0]["status"] == "completed_with_errors"
     assert terminal[0]["errored_count"] == 1
     assert terminal[0]["completed_count"] == 1
+
+
+def test_terminal_sse_event_rejects_an_unexpected_status():
+    """An unexpected status (not one of the 5 documented values) is a caller
+    precondition violation -- it must raise, never be silently coerced into a
+    misleading "complete" event via the fallback branch."""
+    with pytest.raises(AssertionError):
+        wf._terminal_sse_event(
+            status="not_a_real_status",
+            completed_count=0,
+            skipped_count=0,
+            errored_count=0,
+            errored_details=[],
+            completed_batches=0,
+            total_batches=1,
+        )
 
 
 def test_no_sse_events_published_when_not_patched():

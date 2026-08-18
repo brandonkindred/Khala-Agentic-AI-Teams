@@ -397,6 +397,16 @@ def _snapshot_tracker_wire(primary_state: Dict[str, Any]) -> Dict[str, Any]:
     return convergence_tracker_to_wire(convergence_tracker_from_wire(primary_state).snapshot())
 
 
+# The only five values StrategyLabBatchWorkflow.run's own `status` local can
+# hold (external_terminal_status_activity's documented return values, plus
+# the "completed"/"completed_with_errors" happy-path fallback). Enumerated
+# explicitly so _terminal_sse_event can enforce its precondition rather than
+# silently misclassifying an unexpected value as "complete".
+_TERMINAL_STATUSES = frozenset(
+    {"cancelled", "failed", "interrupted", "completed", "completed_with_errors"}
+)
+
+
 def _terminal_sse_event(
     *,
     status: str,
@@ -419,16 +429,24 @@ def _terminal_sse_event(
     no I/O, so this runs directly in workflow code rather than an activity.
 
     Preconditions:
-        ``status`` is one of the five values ``StrategyLabBatchWorkflow.run``'s
-        own ``status`` local can hold.
+        ``status`` is one of ``_TERMINAL_STATUSES`` -- the five values
+        ``StrategyLabBatchWorkflow.run``'s own ``status`` local can hold.
     Postconditions:
         Returns a JSON-shaped dict with a ``"type"`` key matching one of the
         three event shapes above.
+    Raises:
+        ``AssertionError`` if ``status`` is not one of ``_TERMINAL_STATUSES``
+        -- a caller precondition violation (the batch workflow's own status
+        local produced a value this function was never told to expect), never
+        silently coerced into a misleading "complete" event for an
+        unrecognized status.
     """
+    assert status in _TERMINAL_STATUSES, f"_terminal_sse_event: unexpected status {status!r}"
     if status == "cancelled":
         return {"type": "cancelled", "detail": "Run cancelled."}
     if status in ("failed", "interrupted"):
         return {"type": "error", "detail": f"Run {status}.", "terminal_status": status}
+    assert status in ("completed", "completed_with_errors")
     message = (
         f"Run completed with {errored_count} errored and {skipped_count} skipped cycle(s)."
         if errored_count
