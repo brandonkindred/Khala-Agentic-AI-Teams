@@ -155,3 +155,93 @@ def test_run_pr_code_review_defaults_replaced_content_to_none(fake_code_review_a
         progress_callback="cb",
     )
     assert out.review_input.replaced_content is None
+
+
+def test_classify_issue_scope_delegates_to_scope_classifier(monkeypatch) -> None:
+    """Delegates straight through to ``scope_classifier.classify_scope``, passing
+    ``findings`` unchanged and adapting ``changed_context``/``task_description``
+    into a ``CodeReviewInput``. The verify-model client comes from
+    ``model_resolution.resolve_code_review_verify_client`` -- the same
+    Ollama-pinned resolver the sibling verification passes use -- not a bare
+    ``get_client`` call."""
+    import software_engineering_team.code_review_agent.model_resolution as model_resolution
+    import software_engineering_team.code_review_agent.scope_classifier as sc
+
+    captured: dict = {}
+    sentinel = ["verdict-a", "verdict-b"]
+
+    def _fake_classify_scope(issues, *, llm=None, input_data=None, **kwargs):
+        captured["issues"] = issues
+        captured["llm"] = llm
+        captured["input_data"] = input_data
+        return sentinel
+
+    def _fake_resolve_client():
+        return "the-pinned-client"
+
+    monkeypatch.setattr(sc, "classify_scope", _fake_classify_scope)
+    monkeypatch.setattr(model_resolution, "resolve_code_review_verify_client", _fake_resolve_client)
+
+    findings = ["f1", "f2"]
+    out = SECodeEngineProvider().classify_issue_scope(
+        findings, {"a.py": "x = 1\n"}, "review this PR"
+    )
+
+    assert out is sentinel
+    assert captured["issues"] is findings
+    assert captured["llm"] == "the-pinned-client"
+    assert captured["input_data"].files == {"a.py": "x = 1\n"}
+    assert captured["input_data"].task_description == "review this PR"
+
+
+@pytest.mark.parametrize("changed_context", [None, {}])
+def test_classify_issue_scope_empty_changed_context_omits_input_data(
+    monkeypatch, changed_context
+) -> None:
+    """A falsy ``changed_context`` (``None`` or ``{}``) never constructs a
+    ``CodeReviewInput`` -- which would raise on empty ``files`` -- so
+    ``classify_scope`` receives ``input_data=None``."""
+    import software_engineering_team.code_review_agent.model_resolution as model_resolution
+    import software_engineering_team.code_review_agent.scope_classifier as sc
+
+    captured: dict = {}
+
+    def _fake_classify_scope(issues, *, llm=None, input_data=None, **kwargs):
+        captured["input_data"] = input_data
+        return []
+
+    monkeypatch.setattr(sc, "classify_scope", _fake_classify_scope)
+    monkeypatch.setattr(
+        model_resolution, "resolve_code_review_verify_client", lambda: "the-pinned-client"
+    )
+
+    SECodeEngineProvider().classify_issue_scope(["f1"], changed_context, "desc")
+
+    assert captured["input_data"] is None
+
+
+def test_classify_issue_scope_client_resolution_failure_degrades_to_none_llm(monkeypatch) -> None:
+    """A client-resolution failure (e.g. no LLM provider configured) never
+    propagates -- ``classify_scope`` receives ``llm=None`` and degrades every
+    finding to "unknown" itself, matching its own never-raises contract."""
+    import software_engineering_team.code_review_agent.model_resolution as model_resolution
+    import software_engineering_team.code_review_agent.scope_classifier as sc
+
+    captured: dict = {}
+
+    def _fake_classify_scope(issues, *, llm=None, input_data=None, **kwargs):
+        captured["llm"] = llm
+        return []
+
+    def _raising_resolve_client():
+        raise RuntimeError("no provider configured")
+
+    monkeypatch.setattr(sc, "classify_scope", _fake_classify_scope)
+    monkeypatch.setattr(
+        model_resolution, "resolve_code_review_verify_client", _raising_resolve_client
+    )
+
+    out = SECodeEngineProvider().classify_issue_scope(["f1"], None, "desc")
+
+    assert out == []
+    assert captured["llm"] is None
