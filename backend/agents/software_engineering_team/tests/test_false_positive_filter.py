@@ -2923,6 +2923,53 @@ def test_agent_read_the_cited_file_false_for_a_framework_level_tool_failure() ->
     assert _agent_read_the_cited_file(agent, idx, "app/main.py") is False
 
 
+def test_agent_read_the_cited_file_false_when_budget_exhausted_before_reading_it() -> None:
+    """Integration: read_file's own status="error" stop directive on
+    tool-call budget exhaustion (see _build_tools's _track_call) is exactly
+    the fail-safe "not grounded" signal _agent_read_the_cited_file relies
+    on for any other failed read -- this is intentional, not a status-string
+    misclassification: the file's content was never actually delivered on
+    that call, so it must count as ungrounded like any other failed read.
+    Proves the tool and the checker compose correctly end to end, not just
+    that each independently returns the right status/verdict in isolation."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    tools = _build_tools(idx)
+    list_files = next(t for t in tools if t.tool_name == "list_files")
+    read_file = next(t for t in tools if t.tool_name == "read_file")
+    for _ in range(_MAX_TOTAL_TOOL_CALLS):
+        list_files()
+    result = read_file("app/main.py")
+    assert result["status"] == "error"
+    assert "tool call budget" in result["content"][0]["text"]
+
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="app/main.py"),
+            _tool_result_message("t1", result["content"][0]["text"], status=result["status"]),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "app/main.py") is False
+
+
+def test_agent_read_the_cited_file_true_when_earlier_call_already_grounded_it() -> None:
+    """An earlier successful read_file(file_path) call grounds the batch
+    regardless of what a LATER, budget-exhausted call for the same path
+    returns -- exactly the guarantee read_file's own docstring documents:
+    only a file_path read that itself never succeeds stays ungrounded."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="app/main.py"),
+            _tool_result_message("t1", "x = 1\n", status="success"),
+            _tool_use_message("assistant", "t2", "read_file", path="app/main.py"),
+            _tool_result_message(
+                "t2", "Error: tool call budget (40 calls) exhausted ...", status="error"
+            ),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "app/main.py") is True
+
+
 def test_agent_read_the_cited_file_true_when_real_content_starts_with_error() -> None:
     """A successful read_file() whose real file content happens to start with
     the literal text "Error:" (e.g. a checked-in log fixture or diagnostic

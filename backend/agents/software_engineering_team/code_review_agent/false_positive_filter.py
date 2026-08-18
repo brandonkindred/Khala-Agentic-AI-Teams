@@ -1357,10 +1357,11 @@ def _make_call_tracker() -> Callable[..., Tuple[bool, Optional[str]]]:
         exceed ``_MAX_TOTAL_TOOL_CALLS`` -- callers must return ``directive``
         as-is instead of doing any real work. Otherwise returns ``(False,
         note)``: ``note`` is a string to append to the tool's normal result
-        once this ``(tool_name, args)`` signature has been called more than
-        ``_MAX_DUPLICATE_TOOL_CALLS`` times through this tracker, else
-        ``None``. The signature is keyed on ``repr(args)`` rather than
-        ``args`` itself so an unhashable model-supplied argument (e.g. a list
+        starting on the ``(_MAX_DUPLICATE_TOOL_CALLS + 1)``th call through
+        this tracker with this exact ``(tool_name, args)`` signature (i.e.
+        the first call beyond the allowed ``_MAX_DUPLICATE_TOOL_CALLS``
+        repeats), else ``None``. The signature is keyed on ``repr(args)``
+        rather than ``args`` itself so an unhashable model-supplied argument (e.g. a list
         where a string was expected) still tracks correctly instead of
         raising -- tools built against this tracker must never raise on bad
         input.
@@ -1456,6 +1457,17 @@ def _build_tools(
             still returns this, with a note appended saying so; once this
             run's ``_MAX_TOTAL_TOOL_CALLS`` budget is exhausted, the text is
             a ``status="error"`` stop directive instead (see ``_track_call``).
+            That ``status="error"`` is intentional, not incidental: a
+            budget-exhausted call never actually delivered the file's
+            content to the model, so ``_agent_read_the_cited_file`` must
+            treat it exactly like any other failed read -- "not grounded" --
+            for the same fail-safe reason it treats every other non-success
+            ``read_file`` call that way (see that function's docstring). If
+            an earlier call in the same run already read ``file_path`` with
+            ``status="success"``, that earlier grounding stands regardless
+            of what a later, budget-exhausted call for a different path
+            returns; only a ``file_path`` read that itself never succeeds
+            stays ungrounded, and a budget cutoff is exactly such a case.
         """
         skip, note = _track_call("read_file", path)
         if skip:
@@ -1511,7 +1523,7 @@ def _build_tools(
         return f"{result}\n\n{note}" if note else result
 
     @tool
-    def read_function(path: str, name_or_line) -> str:
+    def read_function(path: str, name_or_line: int | str) -> str:
         """Read one function/method/class body by line number or exact name.
 
         Pass a positive integer for line-based lookup, or a name such as
@@ -2026,7 +2038,14 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
     that could disagree with what THIS call actually returned -- e.g. a
     repo-reader backed by a network call that fails transiently during the
     model's tool call but happens to succeed on a later, separate check. Only
-    the specific invocation's own recorded result counts.
+    the specific invocation's own recorded result counts. A ``read_file``
+    call this run's tool-call budget cuts off (see ``read_file``'s own
+    docstring) also reports ``status="error"``, by the same logic: the
+    file's content was never actually delivered on that call, so it must
+    count as ungrounded exactly like any other failed read, not as a
+    special case -- an earlier call in the same run that already read
+    ``file_path`` with ``status="success"`` still grounds the batch
+    regardless of what a later, budget-exhausted call returns.
 
     No separate truncation check is needed on top of ``status``: Strands'
     default ``SlidingWindowConversationManager`` would otherwise recover from
