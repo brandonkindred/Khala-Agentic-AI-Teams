@@ -176,7 +176,6 @@ export const routes: Routes = [
         title: 'Metrics',
         data: { breadcrumb: 'Metrics' },
       },
-      { path: 'agent-provisioning', redirectTo: '/agent-studio/provisioning', pathMatch: 'full' },
       {
         path: 'product-delivery',
         loadComponent: () =>
