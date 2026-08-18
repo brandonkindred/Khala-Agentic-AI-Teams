@@ -303,11 +303,10 @@ def make_storyteller() -> Agent:
 
 _ARCHETYPE_ANALYST_PROMPT = AgentPromptSpec(
     opening=(
-        "You are a Brand Archetype Analyst. Review the brand story from Inputs from previous "
-        f"nodes and the strategic core, then select {BRAND_ARCHETYPES_MIN}-{BRAND_ARCHETYPES_MAX} "
-        "brand archetypes (e.g. The Sage, The "
-        "Creator, The Explorer). Carry forward brand_story, hero_narrative, and "
-        "boilerplate_variants unchanged, and add:"
+        "You are a Brand Archetype Analyst. Using the brand story from Inputs from previous "
+        f"nodes and the strategic core as read-only context, select {BRAND_ARCHETYPES_MIN}-"
+        f"{BRAND_ARCHETYPES_MAX} brand archetypes (e.g. The Sage, The Creator, The Explorer) "
+        "that fit the narrative, and add:"
     ),
     fields=(
         PromptFieldSpec(
@@ -342,8 +341,8 @@ def make_archetype_analyst() -> Agent:
 
 _TAGLINE_WRITER_PROMPT = AgentPromptSpec(
     opening=(
-        "You are a Tagline Writer. Using Inputs from previous nodes (brand story, archetypes) "
-        "and the strategic core, carry forward every prior narrative field unchanged and add:"
+        "You are a Tagline Writer. Using the brand story and archetypes from Inputs from "
+        "previous nodes and the strategic core as read-only context, add:"
     ),
     fields=(
         PromptFieldSpec("tagline", "a memorable brand tagline (max 8 words)"),
@@ -380,7 +379,7 @@ def make_tagline_writer() -> Agent:
 _MESSAGE_MAPPER_PROMPT = AgentPromptSpec(
     opening=(
         "You are a Message Mapper. Using all prior narrative fields from Inputs from previous "
-        "nodes, carry them forward unchanged and add:"
+        "nodes as read-only context, add:"
     ),
     fields=(
         PromptFieldSpec(
@@ -420,7 +419,7 @@ def make_message_mapper() -> Agent:
 _PERSONA_BUILDER_PROMPT = AgentPromptSpec(
     opening=(
         "You are a Persona Builder. Using audience segments and all prior narrative fields "
-        "from Inputs from previous nodes, carry those fields forward unchanged and create:"
+        "from Inputs from previous nodes as read-only context, create:"
     ),
     fields=(
         PromptFieldSpec(
@@ -456,8 +455,8 @@ def make_persona_builder() -> Agent:
 _VOICE_PRINCIPLES_DRAFTER_PROMPT = AgentPromptSpec(
     opening=(
         "You are a Voice Principles Drafter. Using all prior narrative fields from Inputs from "
-        "previous nodes and the mission's desired_voice, carry the prior fields forward "
-        "unchanged and produce writing_guidelines:"
+        "previous nodes and the mission's desired_voice as read-only context, produce "
+        "writing_guidelines:"
     ),
     fields=(
         PromptFieldSpec(

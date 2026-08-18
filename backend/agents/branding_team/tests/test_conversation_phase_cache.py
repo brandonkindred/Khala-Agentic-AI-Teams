@@ -20,7 +20,7 @@ import pytest
 
 import branding_team.api.conversation as conversation
 from branding_team.api.models import CreateConversationRequest, SendMessageRequest
-from branding_team.models import BrandPhase
+from branding_team.models import BrandPhase, StrategicCoreOutput
 from branding_team.shared.phase_output_cache import PhaseOutputCache
 from branding_team.tests._memory_stores import install_memory_stores
 from branding_team.tests.conftest import make_mission
@@ -36,22 +36,33 @@ def test_get_or_create_phase_cache_starts_empty_for_a_fresh_conversation() -> No
 def test_get_or_create_phase_cache_is_retained_across_calls() -> None:
     """Same conversation_id -> same instance, and mutations are visible later."""
     conversation_id = str(uuid4())
+    output = StrategicCoreOutput(brand_purpose="Ship calm software")
     first = conversation._get_or_create_phase_cache(conversation_id)
-    first.put(BrandPhase.STRATEGIC_CORE, "hash-1", MagicMock())
+    first.put(BrandPhase.STRATEGIC_CORE, "hash-1", output)
 
     second = conversation._get_or_create_phase_cache(conversation_id)
     assert second is first
-    assert second.get(BrandPhase.STRATEGIC_CORE, "hash-1") is not None
+    assert second.get(BrandPhase.STRATEGIC_CORE, "hash-1") == output
 
 
-def test_get_or_create_phase_cache_isolates_different_conversations() -> None:
+def test_get_or_create_phase_cache_returns_distinct_handles_per_conversation() -> None:
+    """Different conversation_ids get distinct Python objects from the registry.
+
+    ``PhaseOutputCache`` is a thin view over a process-wide shared cache (see
+    ``PhaseOutputCache``'s own module docstring and
+    ``test_phase_output_cache.py::test_two_instances_share_the_same_backing_cache``)
+    rather than private per-instance storage, so this deliberately does not
+    assert cache-level isolation between conversations -- two handles for
+    different conversation_ids still address the same underlying entries for
+    a given (phase, input_hash). What this registry does guarantee is that it
+    doesn't accidentally hand back the same handle object for two different
+    conversation_ids.
+    """
     first_id, second_id = str(uuid4()), str(uuid4())
     first_cache = conversation._get_or_create_phase_cache(first_id)
     second_cache = conversation._get_or_create_phase_cache(second_id)
 
     assert first_cache is not second_cache
-    first_cache.put(BrandPhase.STRATEGIC_CORE, "hash-1", MagicMock())
-    assert second_cache.get(BrandPhase.STRATEGIC_CORE, "hash-1") is None
 
 
 def test_get_or_create_phase_cache_thread_safe(monkeypatch: pytest.MonkeyPatch) -> None:

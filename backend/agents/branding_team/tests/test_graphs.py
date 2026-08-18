@@ -63,8 +63,9 @@ def test_build_phase2_swarm_alias_returns_graph() -> None:
 def test_build_phase2_graph_wires_linear_chain() -> None:
     """Phase 2 uses a single-predecessor chain (Strands multi-in edges are OR-ready).
 
-    Upstream narrative travels via cumulative ``structured_output`` models, not
-    fan-in edges.
+    Upstream narrative reaches each specialist as read-only context via the
+    edge-injected ``Inputs from previous nodes``, not fan-in edges or a
+    carry-forward ``structured_output`` model.
     """
     from branding_team.graphs.phase2_narrative import _PHASE2_NODE_ORDER
 

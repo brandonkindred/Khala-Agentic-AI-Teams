@@ -1748,6 +1748,13 @@ class VoiceToneOutput(BaseModel):
     ``language_dos``/``language_donts`` cardinalities are single-sourced from
     ``LANGUAGE_DOS_*`` / ``LANGUAGE_DONTS_*`` (the same constants the prompt
     interpolates).
+
+    ``voice_tone_spectrum``'s "2-3 examples" phrase is prompt guidance only,
+    not a single-sourced constraint: unlike the fields above, no
+    ``Field(min_length=2, max_length=3)`` backs it — the per-entry
+    ``VoiceToneEntryOutput.examples`` list only requires ``min_length=1``
+    (non-blank). There is no drift to fix; this is an intentional exception
+    to the single-sourcing pattern documented at the top of this file.
     """
 
     voice_tone_spectrum: List[VoiceToneEntryOutput] = Field(

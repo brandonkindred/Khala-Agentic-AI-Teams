@@ -248,6 +248,7 @@ def test_batch_run_touches_no_restricted_callable():
         "merge_wave_results_activity": lambda a: {"primary_tracker_state": {"ok": True}},
         "is_run_cancelled_activity": lambda a: False,
         "external_terminal_status_activity": lambda a: None,
+        "publish_run_event_activity": lambda a: None,
     }
     batch_input = {
         "run_id": "run-1",
@@ -264,6 +265,13 @@ def test_batch_run_touches_no_restricted_callable():
         with (
             _patch_execute(handlers),
             mock.patch("temporalio.workflow.start_child_workflow", _fake_start_child),
+            # workflow.patched("strategy-lab-sse-run-events") is real workflow
+            # code too -- needs its own mock the same way execute_activity/
+            # start_child_workflow do (see test_strategy_lab_batch_workflow.py's
+            # _Harness.patched for the same need). True here so this test still
+            # exercises the SSE-publish call sites under sandbox restrictions,
+            # not just the pre-SSE-events code path.
+            mock.patch("temporalio.workflow.patched", lambda _patch_id: True),
             _sandbox_restrictions(),
         ):
             result = loop.run_until_complete(wf.StrategyLabBatchWorkflow().run(batch_input))
