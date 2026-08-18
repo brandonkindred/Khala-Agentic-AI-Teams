@@ -211,7 +211,10 @@ async def test_cross_team_concurrency_uses_distinct_sandboxes() -> None:
     """Two agents from different teams launched in parallel get two containers
     with two distinct loopback ports."""
     a = ("blogging.planner", SMOKE_MATRIX[0][2])
-    b = ("branding.design_system_codifier", SMOKE_MATRIX[3][2])
+    design_payload = next(
+        row[2] for row in SMOKE_MATRIX if row[0] == "branding.design_system_codifier"
+    )
+    b = ("branding.design_system_codifier", design_payload)
     async with httpx.AsyncClient(timeout=httpx.Timeout(INVOKE_TIMEOUT_S)) as client:
         ra, rb = await asyncio.gather(
             _invoke(client, a[0], a[1]),

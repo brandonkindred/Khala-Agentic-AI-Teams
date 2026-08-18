@@ -449,9 +449,10 @@ class _PhaseSpec(NamedTuple):
         merge_fn: When the phase's node wraps several named sub-agents whose
             fragments must be merged into one ``model_cls`` (Phase 1's fan-out,
             Phase 2's sequential graph, Phase 3's, Phase 4's, and Phase 5's
-            fan-out), the merge function to try first. ``None`` for phases
-            whose terminal node's own output already is the complete phase
-            output (Phase 1's positioning_synthesizer). Invariant: a merge
+            fan-out), the merge function to try first. All five current phases
+            supply one; ``None`` remains valid for a hypothetical future phase
+            whose terminal node's own output is already the complete phase
+            output — none of today's five needs it. Invariant: a merge
             function must return ``None`` to signal "could not merge" — never
             a default-constructed ``model_cls()`` — since
             ``_extract_phase_output`` trusts any non-``None`` return as a

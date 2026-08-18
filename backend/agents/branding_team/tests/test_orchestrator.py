@@ -847,7 +847,12 @@ def test_extract_phase_output_uses_structured_output_when_present() -> None:
 
 
 def _phase1_leaf_node(structured_output) -> MagicMock:
-    """A mock NodeResult for a single Phase 1 fan-out/fan-in leaf agent."""
+    """A mock NodeResult for a single fan-out/fan-in leaf agent.
+
+    Despite the name (it was introduced for Phase 1), this is the shared
+    generic helper reused by every phase's tests below — Phase 2, 4, and 5's
+    fixtures all wrap their fragments with it too, not just Phase 1's.
+    """
     agent_result = MagicMock()
     agent_result.message = {"content": []}
     agent_result.structured_output = structured_output
@@ -2201,6 +2206,8 @@ def test_extract_phase_output_rejects_incomplete_phase3_fragments() -> None:
     complete VisualIdentityOutput (``check_structured_output`` is False for
     Phase 3, same guard Phase 2, Phase 4, and Phase 5 already rely on)."""
     single_fragment = {
+        # CreativeRefinementDecision is converge_decider's real structured_output
+        # type (see agents.py:make_converge_decider) -- not a Phase 1 model.
         "converge_decider": _phase1_leaf_node(
             CreativeRefinementDecision(winning_candidate_title="Modern Confidence")
         ),

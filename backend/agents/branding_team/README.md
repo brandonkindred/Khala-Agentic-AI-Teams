@@ -144,7 +144,7 @@ Per-phase participating nodes. Node identifiers are the explicit `node_id` value
 
 Every pipeline agent (all `make_*` factories in `agents.py`) resolves an explicit `agent_key` instead of falling through to `build_agent()`'s implicit `"branding"` default. `agent_key` is `build_agent()`'s pass-through to the centralized `get_strands_model(agent_key, ...)` resolver (`llm_service`), which — per agent_key — checks an `LLM_MODEL_<agent_key>` env override before falling back to the global `LLM_MODEL` / provider default. This lets each tier below be pinned to a different model via env vars alone, with no change to `build_agent()`'s resolution mechanism or to any factory's own logic.
 
-Specialist factories pass `agent_key=` to `build_agent()` directly (a phase-scoped constant, e.g. `_PHASE1_AGENT_KEY = phase_agent_key(BrandPhase.STRATEGIC_CORE)` in `agents.py`). No phase has a compositor node — every phase's fragments are merged deterministically in Python by the orchestrator — so a phase's specialist factories are the only users of its tier.
+Specialist factories pass `agent_key=` to `build_agent()` directly (a phase-scoped constant, e.g. `_PHASE1_AGENT_KEY = phase_agent_key(BrandPhase.STRATEGIC_CORE)` in `agents.py`). No phase has a compositor node — every phase's fragments are merged deterministically in Python by the orchestrator's per-phase `merge_fn` (Phase 1 and Phase 2 already worked this way; Phase 3 now joins Phase 4 and Phase 5 in using the same pattern) — so a phase's specialist factories are the only users of its tier.
 
 **Naming scheme:** `branding_<tier>` (underscores so `LLM_MODEL_<agent_key>` is a valid shell identifier), where `<tier>` is one of:
 
