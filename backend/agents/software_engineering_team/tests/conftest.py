@@ -103,6 +103,32 @@ def _clear_qa_review_cache() -> None:
             mod.clear_review_cache()
 
 
+# Same dual-identity story again, for BaseReviewToolAgent's shared
+# default-one-shot-review cache (backend/frontend V2 security, testing/QA,
+# accessibility, performance, UX tool agents all share this one namespace).
+_TOOL_AGENT_BASE_IDENTITIES = (
+    "shared.tool_agent_base",
+    "software_engineering_team.shared.tool_agent_base",
+)
+
+
+def _clear_tool_agent_review_cache() -> None:
+    """Clear the tool-agent review cache on every loaded module identity.
+
+    Preconditions:
+        - None. Identities that are not present in ``sys.modules`` are skipped
+          (an unimported module cannot have populated its cache).
+
+    Postconditions:
+        - For each loaded identity in ``_TOOL_AGENT_BASE_IDENTITIES``, the
+          shared review-result cache namespace is empty.
+    """
+    for name in _TOOL_AGENT_BASE_IDENTITIES:
+        mod = sys.modules.get(name)
+        if mod is not None:
+            mod.clear_tool_agent_review_cache()
+
+
 def _ensure_real_modules() -> None:
     """Evict synthetic module stubs other test files may have installed.
 
@@ -214,6 +240,23 @@ def _reset_qa_review_cache():
     _clear_qa_review_cache()
     yield
     _clear_qa_review_cache()
+
+
+@pytest.fixture(autouse=True)
+def _reset_tool_agent_review_cache():
+    """Clear the process-global tool-agent review cache around every test.
+
+    Mirrors ``_reset_qa_review_cache`` above, for the same reason: several
+    ``BaseReviewToolAgent`` subclass tests (security, testing/QA, …) build a
+    byte-identical prompt from a fixed ``current_files``/``task_description``
+    fixture across otherwise-independent test functions. Without a reset,
+    one test's cached LLM response could be served to another, silently
+    skipping the LLM call the next test expects. Clearing an empty cache is
+    trivially cheap, so this runs for every SE test unconditionally.
+    """
+    _clear_tool_agent_review_cache()
+    yield
+    _clear_tool_agent_review_cache()
 
 
 def pytest_configure(config: pytest.Config) -> None:
