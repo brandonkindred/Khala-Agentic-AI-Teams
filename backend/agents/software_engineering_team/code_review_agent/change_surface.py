@@ -7,8 +7,9 @@ without headers) via ``CodeReviewInput.files=``.
 
 This module locks types, signatures, and empty/no-op builder contracts.
 ``expand_touched_ranges`` expands touched lines via Python AST when possible,
-otherwise a heuristic start or capped context window. ``extract_touched_lines``
-wraps GitHub unified-patch helpers for added-only touched lines. The rendered
+otherwise a heuristic start or capped context window. Added-only touched
+lines are read directly from ``parse_valid_lines(patch, added_only=True)``
+(``github_source.pr_review_mapping``). The rendered
 body marks each added/modified (touched) line with a leading ``+`` gutter
 column and each enclosing context line with a space, so the reviewer has direct
 evidence of the change surface; the marker sits before the line number and never
@@ -51,7 +52,6 @@ __all__ = [
     "build_change_surface_from_pairs",
     "build_change_surface_from_patches",
     "expand_touched_ranges",
-    "extract_touched_lines",
     "render_patch_hunks",
     "unified_diffs_from_pairs",
 ]
@@ -137,24 +137,6 @@ def _mapping_has_nonblank_value(mapping: Mapping[str, str]) -> bool:
         - Returns False for ``{}`` and for mappings whose values are all blank.
     """
     return any((value or "").strip() for value in mapping.values())
-
-
-def extract_touched_lines(patch: str) -> frozenset[int]:
-    """Return added-only new-file line numbers from one file's unified patch.
-
-    Preconditions:
-        - ``patch`` is one file's unified-diff text (GitHub ``files[].patch``
-          style), or empty / blank for binary / oversized / unchanged files.
-
-    Postconditions:
-        - Returns a frozenset of 1-based new-file line numbers that appear as
-          added (``+``) lines in the patch.
-        - Context (`` ``), removed (``-``), and ``\\ No newline at end of file``
-          markers are never included.
-        - Empty or blank ``patch`` → empty frozenset.
-        - Never raises.
-    """
-    return frozenset(parse_valid_lines(patch or "", added_only=True))
 
 
 def render_patch_hunks(patch: str) -> str:
@@ -258,9 +240,9 @@ def _pre_number_ranges(
         - ``ranges`` is a sequence of inclusive 1-based ``LineRange`` values
           (caller should merge first when desired).
         - ``touched`` is any collection of 1-based new-file line numbers that
-          were added/modified (e.g. ``extract_touched_lines(patch)``); it is
-          consulted only for membership, so any ``Collection[int]`` is accepted.
-          May be empty.
+          were added/modified (e.g. ``parse_valid_lines(patch, added_only=True)``);
+          it is consulted only for membership, so any ``Collection[int]`` is
+          accepted. May be empty.
 
     Postconditions:
         - Emits a column-aligned ``N| <line>`` gutter for each line in each
@@ -317,7 +299,7 @@ def _assemble_path_block(path: str, patch: str, content: str) -> Optional[str]:
 
     Postconditions:
         - Blank ``content`` → ``None``.
-        - Empty ``extract_touched_lines(patch)`` → ``None``.
+        - Empty ``parse_valid_lines(patch, added_only=True)`` → ``None``.
         - Otherwise expands, merges, and pre-numbers, marking the added/modified
           (touched) lines distinctly from enclosing context (see
           ``_pre_number_ranges``); empty body → ``None``.
@@ -325,7 +307,7 @@ def _assemble_path_block(path: str, patch: str, content: str) -> Optional[str]:
     """
     if not (content or "").strip():
         return None
-    touched = extract_touched_lines(patch)
+    touched = parse_valid_lines(patch or "", added_only=True)
     if not touched:
         return None
     ranges = expand_touched_ranges(content, touched, path=path)

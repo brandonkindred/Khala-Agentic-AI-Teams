@@ -112,7 +112,7 @@ def test_write_rows_noop_when_postgres_off(monkeypatch) -> None:
 def test_write_rows_inserts_tuple(fake_db) -> None:
     rec = _Rec()
     row = us.record_to_row(rec)
-    assert len(row) == 18
+    assert len(row) == 20
     assert row[1] == "blogging"
     assert row[4] == 10
     assert row[5] == 5
@@ -121,6 +121,8 @@ def test_write_rows_inserts_tuple(fake_db) -> None:
     assert row[9] == ""
     assert row[10] == 0.0
     assert row[11] == ""
+    assert row[18] == 0  # cache_read_tokens defaults to 0 when absent from the record
+    assert row[19] == 0  # cache_creation_tokens defaults to 0 when absent from the record
     n = us.write_rows([row])
     assert n == 1
     sql, params = fake_db.executed[0]
@@ -298,6 +300,50 @@ def test_fetch_summary_24h_and_all(fake_db) -> None:
     assert "ts >=" in fake_db.executed[0][0]
 
 
+def test_fetch_summary_totals_cache_tokens_and_defaults_to_zero(fake_db) -> None:
+    """Cache totals sum from the persisted columns; absent rows default to 0."""
+    fake_db._fetchall = [
+        {
+            "bucket": "total",
+            "model": None,
+            "agent_key": None,
+            "calls": 2,
+            "prompt_tokens": 30,
+            "completion_tokens": 10,
+            "total_tokens": 40,
+            "cache_read_tokens": 500,
+            "cache_creation_tokens": 200,
+            "error_count": 0,
+        }
+    ]
+    summary = us.fetch_summary(window="24h")
+    assert summary["total_cache_read_tokens"] == 500
+    assert summary["total_cache_creation_tokens"] == 200
+
+    fake_db.executed.clear()
+    fake_db._fetchall = [
+        {
+            "bucket": "total",
+            "model": None,
+            "agent_key": None,
+            "calls": 1,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "error_count": 0,
+        }
+    ]
+    no_cache_summary = us.fetch_summary(window="24h")
+    assert no_cache_summary["total_cache_read_tokens"] == 0
+    assert no_cache_summary["total_cache_creation_tokens"] == 0
+
+
+def test_empty_summary_includes_zeroed_cache_totals() -> None:
+    empty = us.empty_summary(window="24h", team=None)
+    assert empty["total_cache_read_tokens"] == 0
+    assert empty["total_cache_creation_tokens"] == 0
+
+
 def test_fetch_summary_query_failure_returns_empty(fake_db) -> None:
     fake_db._raise = True
     summary = us.fetch_summary(window="24h", team="blogging")
@@ -364,6 +410,8 @@ def test_record_to_row_and_fetch_recent_preserve_call_metadata(fake_db) -> None:
         request_id="req-1",
         task_id="task-2",
         phase="execute",
+        cache_read_tokens=500,
+        cache_creation_tokens=200,
     )
     row = us.record_to_row(rec)
     assert row[7] == 42
@@ -376,6 +424,8 @@ def test_record_to_row_and_fetch_recent_preserve_call_metadata(fake_db) -> None:
     assert row[15] == "req-1"
     assert row[16] == "task-2"
     assert row[17] == "execute"
+    assert row[18] == 500
+    assert row[19] == 200
 
     ts = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
     fake_db._fetchall = [
@@ -398,6 +448,8 @@ def test_record_to_row_and_fetch_recent_preserve_call_metadata(fake_db) -> None:
             "request_id": "req-1",
             "task_id": "task-2",
             "phase": "execute",
+            "cache_read_tokens": 500,
+            "cache_creation_tokens": 200,
         }
     ]
     rows = us.fetch_recent(window="all", limit=1)
@@ -415,6 +467,8 @@ def test_record_to_row_and_fetch_recent_preserve_call_metadata(fake_db) -> None:
             "status": "success",
             "cost_usd": 0.12,
             "outcome": "success",
+            "cache_read_tokens": 500,
+            "cache_creation_tokens": 200,
             "error_type": "TimeoutError",
             "job_id": "job-9",
             "objective": "draft",
@@ -485,6 +539,8 @@ def test_ensure_table_executes_ddl(monkeypatch) -> None:
     assert "ADD COLUMN IF NOT EXISTS caller_tag" in joined
     assert "ADD COLUMN IF NOT EXISTS cost_usd" in joined
     assert "ADD COLUMN IF NOT EXISTS outcome" in joined
+    assert "ADD COLUMN IF NOT EXISTS cache_read_tokens" in joined
+    assert "ADD COLUMN IF NOT EXISTS cache_creation_tokens" in joined
 
 
 def test_ensure_table_exception_leaves_flag_false(monkeypatch) -> None:
