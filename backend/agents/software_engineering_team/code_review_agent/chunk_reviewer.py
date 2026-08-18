@@ -110,6 +110,58 @@ def _guess_language_from_label(file_path_or_label: str) -> Optional[str]:
     return "python" if ext in _PYTHON_FILE_EXTS else None
 
 
+def _build_shared_review_prefix(
+    spec_excerpt: str,
+    architecture_overview: str,
+    existing_codebase_excerpt: str,
+    spec_compliance_single_pass: bool,
+) -> list[str]:
+    """Render the map-phase prompt segment shared by every chunk in one run.
+
+    Groups the three context blocks that are identical across every chunk of
+    a coordinator run — the spec excerpt, the architecture overview, and the
+    existing-codebase excerpt — into one contiguous run of prompt lines, with
+    no per-chunk content interleaved between them. ``_run_chunk_review`` is
+    the single call site that appends this segment to ``context_parts``,
+    ahead of every per-chunk-varying block, so a future caching-aware prompt
+    assembly has one obvious place to mark the joined result as a stable,
+    cacheable prefix.
+
+    Preconditions:
+        - ``spec_excerpt``, ``architecture_overview``, and
+          ``existing_codebase_excerpt`` are strings (each may be empty).
+        - ``spec_compliance_single_pass`` mirrors
+          ``ChunkReviewInput.spec_compliance_single_pass``: when true, the
+          coordinator runs a dedicated post-dedupe spec-compliance pass
+          instead (see ADR-010), so the spec-excerpt block is omitted here
+          regardless of whether ``spec_excerpt`` is set.
+
+    Postconditions:
+        - Returns the prompt lines for whichever of the three blocks are
+          present, in this fixed order: spec excerpt (only when
+          ``spec_excerpt`` is truthy AND ``spec_compliance_single_pass`` is
+          false), architecture overview (whenever ``architecture_overview``
+          is truthy), existing-codebase excerpt (whenever
+          ``existing_codebase_excerpt`` is truthy) — reusing the exact
+          headers (``**Project specification (excerpt):**`` /
+          ``**Architecture:**`` / ``**Existing codebase (excerpt):**``) and
+          ``---`` delimiters this prompt has always used for these blocks.
+        - Returns ``[]`` when all three blocks are absent/suppressed.
+        - Never raises; never truncates or otherwise transforms the inputs
+          (the coordinator has already bounded them).
+    """
+    parts: list[str] = []
+    if spec_excerpt and not spec_compliance_single_pass:
+        parts.extend(["", "**Project specification (excerpt):**", "---", spec_excerpt, "---"])
+    if architecture_overview:
+        parts.extend(["", "**Architecture:**", architecture_overview])
+    if existing_codebase_excerpt:
+        parts.extend(
+            ["", "**Existing codebase (excerpt):**", "---", existing_codebase_excerpt, "---"]
+        )
+    return parts
+
+
 class ChunkReviewAgent:
     """The map step of the map-reduce code review: review exactly one chunk.
 
@@ -209,7 +261,11 @@ def _run_chunk_review(
           prompt entirely rather than passed through — the coordinator runs a
           dedicated post-dedupe spec-compliance pass instead (see ADR-010).
           ``architecture_overview`` and ``existing_codebase_excerpt`` are
-          always passed through verbatim regardless of the flag.
+          always passed through verbatim regardless of the flag. These three
+          blocks are assembled as one contiguous segment (via
+          ``_build_shared_review_prefix``) ahead of every per-chunk block
+          (segment note, file/label, sibling surface, code chunk) in the
+          composed prompt.
         - Buffers one ``chunk_review`` transcript entry (target
           ``input_data.file_path_or_label``) per LLM call the via-reasoning
           path makes: the reasoning ``complete`` call, then each
@@ -256,10 +312,7 @@ def _run_chunk_review(
         language = _guess_language_from_label(input_data.file_path_or_label) or "typescript"
 
     context_parts = [CHUNK_REVIEW_NOTE, REVIEW_GUARDRAILS_NOTE]
-    if input_data.segment_note:
-        context_parts.extend(["**Segment notes:**", input_data.segment_note, ""])
     context_parts += [
-        f"**Files in this chunk:** {input_data.file_path_or_label}",
         f"**Language:** {language}",
         f"**Task description:** {input_data.task_description}",
     ]
@@ -282,18 +335,23 @@ def _run_chunk_review(
                 *[f"- {d}" for d in input_data.user_decisions],
             ]
         )
-    if spec_excerpt and not input_data.spec_compliance_single_pass:
-        context_parts.extend(
-            [
-                "",
-                "**Project specification (excerpt):**",
-                "---",
-                spec_excerpt,
-                "---",
-            ]
+
+    # Shared review prefix: identical across every chunk in this run. Kept
+    # contiguous, with all per-chunk-varying content below, so this is the
+    # single place a future caching-aware assembly would mark it as a stable
+    # prefix (see _build_shared_review_prefix).
+    context_parts.extend(
+        _build_shared_review_prefix(
+            spec_excerpt,
+            architecture_overview,
+            existing_codebase_excerpt,
+            input_data.spec_compliance_single_pass,
         )
-    if architecture_overview:
-        context_parts.extend(["", "**Architecture:**", architecture_overview])
+    )
+
+    if input_data.segment_note:
+        context_parts.extend(["**Segment notes:**", input_data.segment_note, ""])
+    context_parts.append(f"**Files in this chunk:** {input_data.file_path_or_label}")
     sibling_surface = input_data.sibling_surface or ""
     if sibling_surface:
         context_parts.extend(
@@ -305,16 +363,6 @@ def _run_chunk_review(
                 "class, or export). Do not flag symbols that are still present.",
                 "---",
                 sibling_surface,
-                "---",
-            ]
-        )
-    if existing_codebase_excerpt:
-        context_parts.extend(
-            [
-                "",
-                "**Existing codebase (excerpt):**",
-                "---",
-                existing_codebase_excerpt,
                 "---",
             ]
         )
