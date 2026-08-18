@@ -381,16 +381,21 @@ registration entirely (no assistant sub-app is ever mounted, regardless of
 traffic) — team proxy routes and health checks are unaffected.
 
 ### UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER
-Agent Studio Temporal worker toggle (default: true). When true and Temporal
-is configured (`TEMPORAL_ADDRESS` set), the unified-api `lifespan` calls the
-Agent Studio worker starter; that starter no-ops when there are no authoring
-workflows to register. When Temporal is not configured, the lifespan skips
-the call (and the `agent_platform.studio.temporal.worker` import) entirely
-rather than calling a no-op starter. Authoring CRUD (conversations / clone /
-save) always uses in-process `AgentStudioService` and does not require
-`agent-studio-queue` either way. Set this flag to `false`/`0`/`no` to skip
-the starter call regardless of Temporal configuration. Other teams' Temporal
-workers are unaffected.
+Agent Studio authoring CRUD (conversations / clone / save) is served by **direct
+dispatch**: a bounded in-process thread pool that calls the `AgentStudioService`
+singleton directly, with no Temporal workflow and no dependency on
+`agent-studio-queue`. This is the supported authoring path regardless of this
+flag or of Temporal configuration.
+
+This flag only toggles the legacy `agent-studio-queue` Temporal worker starter
+(default: true), a no-op left over from before authoring CRUD was demoted off
+Temporal. When true and Temporal is configured (`TEMPORAL_ADDRESS` set), the
+unified-api `lifespan` calls that starter, which no-ops because there are no
+authoring workflows left to register. When Temporal is not configured, the
+lifespan skips the call (and the `agent_platform.studio.temporal.worker`
+import) entirely rather than calling a no-op starter. Set this flag to
+`false`/`0`/`no` to skip the starter call regardless of Temporal configuration.
+Other teams' Temporal workers are unaffected.
 
 ### ENABLE_LOG_API
 Exposes HTTP log endpoint.
