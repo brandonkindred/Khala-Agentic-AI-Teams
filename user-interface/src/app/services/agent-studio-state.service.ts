@@ -27,16 +27,23 @@ function handoffHasAnyId(h: AgentStudioHandoffState): boolean {
   );
 }
 
+/** `undefined` and `null` both mean "no id" (matching `handoffHasAnyId`'s
+ *  `!= null`) — a field can end up `undefined` at runtime from an
+ *  untyped/external source even though the type only declares `string | null`. */
+function normalizeId(value: string | null | undefined): string | null {
+  return value ?? null;
+}
+
 /** Whether two handoff snapshots carry the same five ids. Shared with the
  *  Studio shell's load-conflict guard so handoff-field changes can't drift
  *  between two copies of the same comparison. */
 export function handoffEquals(a: AgentStudioHandoffState, b: AgentStudioHandoffState): boolean {
   return (
-    a.registryAgentId === b.registryAgentId &&
-    a.teamId === b.teamId &&
-    a.processId === b.processId &&
-    a.personaId === b.personaId &&
-    a.draftAgentId === b.draftAgentId
+    normalizeId(a.registryAgentId) === normalizeId(b.registryAgentId) &&
+    normalizeId(a.teamId) === normalizeId(b.teamId) &&
+    normalizeId(a.processId) === normalizeId(b.processId) &&
+    normalizeId(a.personaId) === normalizeId(b.personaId) &&
+    normalizeId(a.draftAgentId) === normalizeId(b.draftAgentId)
   );
 }
 

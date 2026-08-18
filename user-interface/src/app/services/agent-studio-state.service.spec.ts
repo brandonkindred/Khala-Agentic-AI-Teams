@@ -264,6 +264,17 @@ describe('AgentStudioStateService', () => {
       expect(service.teamId()).toBe('team-2');
     });
 
+    it('treats a snapshot field of undefined the same as null (defensive against an untyped external source)', () => {
+      service.markSaved({
+        registryAgentId: undefined as unknown as string | null,
+        teamId: null,
+        processId: null,
+        personaId: null,
+        draftAgentId: null,
+      });
+      expect(service.isDirty()).toBe(false);
+    });
+
     it('becomes dirty again when an id changes after markClean', () => {
       service.setTeamId('team-1');
       service.markClean();

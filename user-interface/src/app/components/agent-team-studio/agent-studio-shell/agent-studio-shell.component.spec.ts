@@ -525,6 +525,22 @@ describe('AgentStudioShellComponent', () => {
       expect(component.state.registryAgentId()).toBe('local-1');
     });
 
+    it('Save first when unbound saves a new draft then hydrates the chosen draft', () => {
+      component.state.setRegistryAgentId('local-1');
+      const saveClosed = new Subject<AgentStudioDraftSummary>();
+      openSpy
+        .mockReturnValueOnce({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>)
+        .mockReturnValueOnce({ afterClosed: () => saveClosed.asObservable() } as unknown as ReturnType<MatDialog['open']>);
+      facade.loadDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
+      component.loadDraft('d-1');
+      saveClosed.next({ draft_id: 'new-1', name: 'Saved', updated_at: '2026-01-01T00:00:00Z' });
+      saveClosed.complete();
+      expect(facade.loadDraft).toHaveBeenCalledWith('d-1');
+      expect(component.state.currentDraftId()).toBe('d-1');
+      expect(component.state.registryAgentId()).toBe('reg-1');
+      expect(component.state.isDirty()).toBe(false);
+    });
+
     it('Save first when unbound does not hydrate if the handoff changes during the save dialog', () => {
       component.state.setRegistryAgentId('local-1');
       const saveClosed = new Subject<AgentStudioDraftSummary>();
