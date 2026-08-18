@@ -110,3 +110,20 @@ export interface PersonaChatHistory {
   run_id: string;
   messages: PersonaChatMessage[];
 }
+
+/**
+ * Terminal statuses for persona-test runs: once a run reports one of these it will not change
+ * again, so polling can stop. Includes both the British ('cancelled') and American ('canceled')
+ * spellings because the backend pipeline status string is not normalized at the source.
+ */
+export const PERSONA_RUN_TERMINAL_STATUSES: readonly string[] = [
+  'completed',
+  'failed',
+  'cancelled',
+  'canceled',
+];
+
+/** True once a persona-test run has reached a terminal (no-longer-changing) state. */
+export function isPersonaRunTerminal(status: string | null | undefined): boolean {
+  return !!status && PERSONA_RUN_TERMINAL_STATUSES.includes(status);
+}
