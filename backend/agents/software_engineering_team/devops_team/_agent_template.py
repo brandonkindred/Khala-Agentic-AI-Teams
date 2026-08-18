@@ -63,12 +63,15 @@ from pydantic import BaseModel
 
 from llm_service import LLMClient, get_strands_model
 from llm_service.strands_model import model_fingerprint, resolve_strands_model
+from shared.cache import get_shared_cache
 from software_engineering_team.shared.llm import complete_json_with_continuation
-from software_engineering_team.shared.llm_response_cache import (
-    build_cache_key,
-    cache_capacity,
-    get_cached_result,
-    set_cached_result,
+from software_engineering_team.shared.review_result_cache import (
+    build_review_cache_key,
+    cache_capacity_for,
+    cache_namespace_for,
+    clear_review_cache_namespace,
+    get_cached_review_result,
+    set_cached_review_result,
 )
 
 
@@ -173,18 +176,16 @@ class DevOpsSingleShotAgent:
         cache_key: Optional[str] = None
         capacity = 0
         if self.CACHE_NAMESPACE and self.CACHE_ENV_VAR:
-            capacity = cache_capacity(self.CACHE_ENV_VAR, self.CACHE_DEFAULT_SIZE)
+            capacity = cache_capacity_for(self.CACHE_ENV_VAR, self.CACHE_DEFAULT_SIZE)
             if capacity > 0:
                 assert self.OUTPUT_MODEL is not None, (
                     f"{type(self).__name__}.OUTPUT_MODEL must be set when CACHE_NAMESPACE and "
                     "CACHE_ENV_VAR are set and capacity > 0"
                 )
-                cache_key = build_cache_key(input_data, model_fingerprint(self._model))
-                cached = get_cached_result(
-                    self.CACHE_NAMESPACE,
-                    cache_key,
-                    self.OUTPUT_MODEL,
-                    log_prefix=type(self).__name__,
+                cache_key = build_review_cache_key(input_data, model_fingerprint(self._model))
+                cache = get_shared_cache(cache_namespace_for(self.CACHE_NAMESPACE))
+                cached = get_cached_review_result(
+                    type(self).__name__, cache, cache_key, self.OUTPUT_MODEL
                 )
                 if cached is not None:
                     return cached
@@ -202,8 +203,27 @@ class DevOpsSingleShotAgent:
         result = self.build_output(input_data, data)
 
         if cache_key is not None:
-            set_cached_result(
-                self.CACHE_NAMESPACE, cache_key, result, capacity, log_prefix=type(self).__name__
+            cache = get_shared_cache(cache_namespace_for(self.CACHE_NAMESPACE))
+            set_cached_review_result(
+                type(self).__name__, cache, cache_key, result, capacity=capacity
             )
 
         return result
+
+    @classmethod
+    def clear_cache(cls) -> None:
+        """Drop every cached result for this subclass. Intended for test teardown.
+
+        Preconditions:
+            - None.
+        Postconditions:
+            - A no-op when ``cls.CACHE_NAMESPACE`` is unset (caching disabled
+              for this subclass). Otherwise this process's view of the
+              namespace is empty when the call returns (best-effort across
+              Redis), fail-open on any backend error.
+        """
+        if not cls.CACHE_NAMESPACE:
+            return
+        clear_review_cache_namespace(
+            cls.__name__, lambda: get_shared_cache(cache_namespace_for(cls.CACHE_NAMESPACE))
+        )

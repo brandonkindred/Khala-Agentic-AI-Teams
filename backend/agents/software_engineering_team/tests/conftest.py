@@ -104,19 +104,19 @@ def _clear_qa_review_cache() -> None:
 
 
 # devops_team's eight single-shot specialist agents each carry their own
-# LLM-response cache (namespace + clear function) rather than one shared
-# module, so this table pairs each agent's module suffix with its clear
-# function name; the loop below tries both the bare and dotted import
-# identity for each, same dual-identity story as ``_QA_AGENT_IDENTITIES``.
-_DEVOPS_LLM_CACHE_MODULES = (
-    ("iac_agent.agent", "clear_iac_cache"),
-    ("cicd_pipeline_agent.agent", "clear_cicd_cache"),
-    ("deployment_strategy_agent.agent", "clear_deployment_strategy_cache"),
-    ("devsecops_review_agent.agent", "clear_devsecops_cache"),
-    ("task_clarifier.agent", "clear_task_clarifier_cache"),
-    ("infra_debug_agent.agent", "clear_infra_debug_cache"),
-    ("infra_patch_agent.agent", "clear_infra_patch_cache"),
-    ("doc_runbook_agent.agent", "clear_doc_runbook_cache"),
+# review-result cache under a uniform ``clear_review_cache()`` name (same
+# convention as ``_QA_AGENT_IDENTITIES``/``_SECURITY_AGENT_IDENTITIES``
+# below), so this table only needs each agent's module suffix; the loop
+# tries both the bare and dotted import identity for each.
+_DEVOPS_LLM_CACHE_MODULE_SUFFIXES = (
+    "iac_agent.agent",
+    "cicd_pipeline_agent.agent",
+    "deployment_strategy_agent.agent",
+    "devsecops_review_agent.agent",
+    "task_clarifier.agent",
+    "infra_debug_agent.agent",
+    "infra_patch_agent.agent",
+    "doc_runbook_agent.agent",
 )
 _DEVOPS_MODULE_PREFIXES = ("devops_team.", "software_engineering_team.devops_team.")
 
@@ -131,14 +131,14 @@ def _clear_devops_llm_caches() -> None:
     Postconditions:
         - For each loaded identity (bare ``devops_team.<x>.agent`` and
           dotted ``software_engineering_team.devops_team.<x>.agent``) of
-          every module in ``_DEVOPS_LLM_CACHE_MODULES``, that module's cache
-          namespace is empty.
+          every module in ``_DEVOPS_LLM_CACHE_MODULE_SUFFIXES``, that
+          module's cache namespace is empty.
     """
-    for suffix, clear_fn_name in _DEVOPS_LLM_CACHE_MODULES:
+    for suffix in _DEVOPS_LLM_CACHE_MODULE_SUFFIXES:
         for prefix in _DEVOPS_MODULE_PREFIXES:
             mod = sys.modules.get(prefix + suffix)
             if mod is not None:
-                getattr(mod, clear_fn_name)()
+                mod.clear_review_cache()
 
 
 # Same dual-identity story again, for BaseReviewToolAgent's shared

@@ -1,16 +1,22 @@
 """Tests for devops_team specialist agents' shared LLM-response caches.
 
-Mirrors ``test_qa_agent_cache.py``'s conventions for the analogous single-shot
-whole-input cache: a ``_CountingClient`` counts LLM invocations so a hit (no
-call) can be distinguished from a miss (a call). Every devops_team specialist
-that makes its own single-shot LLM call shares one implementation
-(``shared.llm_response_cache``, also used by ``qa_agent``), so the two
-representative agents below —
-``InfrastructureAsCodeAgent`` (design-phase, wired through the shared
+Mirrors ``test_qa_agent_cache.py``'s / ``test_security_agent_cache.py``'s
+conventions for the analogous single-shot whole-input cache: a
+``_CountingClient`` counts LLM invocations so a hit (no call) can be
+distinguished from a miss (a call). Every devops_team specialist that makes
+its own single-shot LLM call shares one implementation
+(``software_engineering_team.shared.review_result_cache``, also used by
+``qa_agent`` and ``security_agent``), so the two representative agents below
+— ``InfrastructureAsCodeAgent`` (design-phase, wired through the shared
 ``DevOpsSingleShotAgent.run()``) and ``DevSecOpsReviewAgent`` (review-phase,
 wired at its own call site around ``run_single_shot_review``) — get the full
 hit/miss/fallback suite, while the remaining agents get a lighter hit+miss
 check since they exercise the same shared helper.
+
+Each agent module resolves and holds its own ``get_shared_cache`` (from
+``shared.cache``) at its call site rather than through the shared helper
+module, so that is the seam backend-error tests monkeypatch — matching
+``test_qa_agent_cache.py``'s convention of patching ``agent_mod.get_shared_cache``.
 
 The caches themselves are cleared around every test by the autouse
 ``_reset_devops_llm_caches`` fixture in ``conftest.py``, so tests do not
@@ -27,6 +33,7 @@ from llm_service.clients.dummy import DummyLLMClient
 from llm_service.strands_model import model_fingerprint
 from shared.cache import MemoryBackend, get_shared_cache, reset_shared_cache_state
 from shared.cache import factory as factory_mod
+from software_engineering_team.devops_team import _agent_template
 from software_engineering_team.devops_team.cicd_pipeline_agent import (
     CICDPipelineAgent,
     CICDPipelineAgentInput,
@@ -38,6 +45,9 @@ from software_engineering_team.devops_team.deployment_strategy_agent import (
 from software_engineering_team.devops_team.devsecops_review_agent import (
     DevSecOpsReviewAgent,
     DevSecOpsReviewInput,
+)
+from software_engineering_team.devops_team.devsecops_review_agent import (
+    agent as devsecops_agent_mod,
 )
 from software_engineering_team.devops_team.doc_runbook_agent import (
     DocumentationRunbookAgent,
@@ -52,7 +62,7 @@ from software_engineering_team.devops_team.task_clarifier import (
     DevOpsTaskClarifierAgent,
     DevOpsTaskClarifierInput,
 )
-from software_engineering_team.shared import llm_response_cache as cache_mod
+from software_engineering_team.shared import review_result_cache as cache_mod
 
 
 class _CountingClient(DummyLLMClient):
@@ -162,7 +172,7 @@ def test_iac_redis_unavailable_falls_back_to_memory_cache(monkeypatch: pytest.Mo
     monkeypatch.setattr(factory_mod, "_build_redis_client", lambda: None)
     reset_shared_cache_state()
     try:
-        namespace = cache_mod.cache_namespace(InfrastructureAsCodeAgent.CACHE_NAMESPACE)
+        namespace = cache_mod.cache_namespace_for(InfrastructureAsCodeAgent.CACHE_NAMESPACE)
         assert isinstance(get_shared_cache(namespace), MemoryBackend)
 
         client = _CountingClient(_IAC_RESPONSE)
@@ -181,7 +191,7 @@ def test_iac_redis_unavailable_falls_back_to_memory_cache(monkeypatch: pytest.Mo
 def test_iac_cache_backend_error_falls_open_to_correct_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(cache_mod, "get_shared_cache", lambda namespace: _RaisingCache())
+    monkeypatch.setattr(_agent_template, "get_shared_cache", lambda namespace: _RaisingCache())
 
     client = _CountingClient(_IAC_RESPONSE)
     agent = InfrastructureAsCodeAgent(client)
@@ -243,7 +253,7 @@ def test_devsecops_redis_unavailable_falls_back_to_memory_cache(
     monkeypatch.setattr(factory_mod, "_build_redis_client", lambda: None)
     reset_shared_cache_state()
     try:
-        namespace = cache_mod.cache_namespace(DevSecOpsReviewAgent.CACHE_NAMESPACE)
+        namespace = cache_mod.cache_namespace_for(DevSecOpsReviewAgent.CACHE_NAMESPACE)
         assert isinstance(get_shared_cache(namespace), MemoryBackend)
 
         client = _CountingClient(_DEVSECOPS_CLEAN_RESPONSE)
@@ -262,7 +272,7 @@ def test_devsecops_redis_unavailable_falls_back_to_memory_cache(
 def test_devsecops_cache_backend_error_falls_open_to_correct_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(cache_mod, "get_shared_cache", lambda namespace: _RaisingCache())
+    monkeypatch.setattr(devsecops_agent_mod, "get_shared_cache", lambda namespace: _RaisingCache())
 
     client = _CountingClient(_DEVSECOPS_CLEAN_RESPONSE)
     agent = DevSecOpsReviewAgent(client)
@@ -288,8 +298,8 @@ def test_devsecops_fallback_result_is_never_cached() -> None:
     result = agent.run(input_data)
     assert result.approved is False
 
-    key = cache_mod.build_cache_key(input_data, model_fingerprint(agent._model))
-    cache = get_shared_cache(cache_mod.cache_namespace(DevSecOpsReviewAgent.CACHE_NAMESPACE))
+    key = cache_mod.build_review_cache_key(input_data, model_fingerprint(agent._model))
+    cache = get_shared_cache(cache_mod.cache_namespace_for(DevSecOpsReviewAgent.CACHE_NAMESPACE))
     assert cache.get(key) is None
 
 
@@ -307,8 +317,8 @@ def test_devsecops_cache_disabled_via_env_is_passthrough(monkeypatch: pytest.Mon
 
 # ---------------------------------------------------------------------------
 # Lighter hit/miss coverage for the remaining six specialist agents -- each
-# exercises the same shared ``shared.llm_response_cache`` helper already given
-# full fail-open/corrupt-entry/disabled-cache coverage above.
+# exercises the same shared ``review_result_cache`` helper already given full
+# fail-open/corrupt-entry/disabled-cache coverage above.
 # ---------------------------------------------------------------------------
 
 

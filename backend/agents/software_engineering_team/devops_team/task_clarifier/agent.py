@@ -6,13 +6,15 @@ from typing import List
 
 from llm_service import LLMClient, get_strands_model
 from llm_service.strands_model import model_fingerprint, resolve_strands_model
+from shared.cache import get_shared_cache
 from software_engineering_team.shared.llm import complete_json_with_continuation
-from software_engineering_team.shared.llm_response_cache import (
-    build_cache_key,
-    cache_capacity,
-    clear_cache,
-    get_cached_result,
-    set_cached_result,
+from software_engineering_team.shared.review_result_cache import (
+    build_review_cache_key,
+    cache_capacity_for,
+    cache_namespace_for,
+    clear_review_cache_namespace,
+    get_cached_review_result,
+    set_cached_review_result,
 )
 
 from .models import (
@@ -22,18 +24,32 @@ from .models import (
 )
 from .prompts import DEVOPS_TASK_CLARIFIER_PROMPT
 
+_CACHE_LABEL = "DevOpsTaskClarifier"
+
 # Shared review-result cache: keyed on the whole DevOpsTaskClarifierInput
 # content plus the resolved model. Only covers the LLM-backed tail of run()
 # — the deterministic gaps check above it always runs and never touches the
-# cache. See ``shared.llm_response_cache`` for the shared implementation.
-_CACHE_NAMESPACE = "devops:task_clarifier:v1"
-_CACHE_ENV_VAR = "DEVOPS_TASK_CLARIFIER_CACHE_SIZE"
-_CACHE_DEFAULT_SIZE = 128
+# cache. The shared policy lives in
+# ``software_engineering_team.shared.review_result_cache``; this module
+# supplies only its own namespace stem, env var, capacity default, and
+# output model.
+_REVIEW_CACHE_NAMESPACE = "devops:task_clarifier:v1"
+DEFAULT_REVIEW_CACHE_SIZE = 128  # DEVOPS_TASK_CLARIFIER_CACHE_SIZE, floor 0
 
 
-def clear_task_clarifier_cache() -> None:
+def _review_cache_namespace() -> str:
+    """Shared-cache namespace for task clarifier results (includes build id)."""
+    return cache_namespace_for(_REVIEW_CACHE_NAMESPACE)
+
+
+def _review_cache_size() -> int:
+    """Resolve the review cache capacity from the environment."""
+    return cache_capacity_for("DEVOPS_TASK_CLARIFIER_CACHE_SIZE", DEFAULT_REVIEW_CACHE_SIZE)
+
+
+def clear_review_cache() -> None:
     """Drop every cached task clarifier result. Intended for test teardown."""
-    clear_cache(_CACHE_NAMESPACE, log_prefix="DevOpsTaskClarifierAgent")
+    clear_review_cache_namespace(_CACHE_LABEL, lambda: get_shared_cache(_review_cache_namespace()))
 
 
 class DevOpsTaskClarifierAgent:
@@ -147,15 +163,13 @@ class DevOpsTaskClarifierAgent:
                 clarification_requests=[g.message for g in gaps if g.blocking],
             )
 
-        capacity = cache_capacity(_CACHE_ENV_VAR, _CACHE_DEFAULT_SIZE)
+        capacity = _review_cache_size()
         cache_key = None
         if capacity > 0:
-            cache_key = build_cache_key(input_data, model_fingerprint(self._model))
-            cached = get_cached_result(
-                _CACHE_NAMESPACE,
-                cache_key,
-                DevOpsTaskClarifierOutput,
-                log_prefix="DevOpsTaskClarifierAgent",
+            cache_key = build_review_cache_key(input_data, model_fingerprint(self._model))
+            cache = get_shared_cache(_review_cache_namespace())
+            cached = get_cached_review_result(
+                _CACHE_LABEL, cache, cache_key, DevOpsTaskClarifierOutput
             )
             if cached is not None:
                 return cached
@@ -182,8 +196,7 @@ class DevOpsTaskClarifierAgent:
         )
 
         if cache_key is not None:
-            set_cached_result(
-                _CACHE_NAMESPACE, cache_key, result, capacity, log_prefix="DevOpsTaskClarifierAgent"
-            )
+            cache = get_shared_cache(_review_cache_namespace())
+            set_cached_review_result(_CACHE_LABEL, cache, cache_key, result, capacity=capacity)
 
         return result

@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
-from software_engineering_team.shared.llm_response_cache import clear_cache
 
 from .models import CICDPipelineAgentInput, CICDPipelineAgentOutput
 from .prompts import CICD_PIPELINE_PROMPT
@@ -64,6 +63,6 @@ class CICDPipelineAgent(DevOpsSingleShotAgent):
         )
 
 
-def clear_cicd_cache() -> None:
+def clear_review_cache() -> None:
     """Drop every cached CI/CD pipeline agent result. Intended for test teardown."""
-    clear_cache(CICDPipelineAgent.CACHE_NAMESPACE, log_prefix="CICDPipelineAgent")
+    CICDPipelineAgent.clear_cache()

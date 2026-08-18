@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
-from software_engineering_team.shared.llm_response_cache import clear_cache
 
 from .models import DeploymentStrategyAgentInput, DeploymentStrategyAgentOutput
 from .prompts import DEPLOYMENT_STRATEGY_PROMPT
@@ -90,6 +89,6 @@ class DeploymentStrategyAgent(DevOpsSingleShotAgent):
         )
 
 
-def clear_deployment_strategy_cache() -> None:
+def clear_review_cache() -> None:
     """Drop every cached deployment strategy agent result. Intended for test teardown."""
-    clear_cache(DeploymentStrategyAgent.CACHE_NAMESPACE, log_prefix="DeploymentStrategyAgent")
+    DeploymentStrategyAgent.clear_cache()

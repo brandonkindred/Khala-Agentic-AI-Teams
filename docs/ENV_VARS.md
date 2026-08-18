@@ -1357,8 +1357,8 @@ model).
 ### DEVOPS_IAC_CACHE_SIZE / DEVOPS_CICD_CACHE_SIZE / DEVOPS_DEPLOYMENT_STRATEGY_CACHE_SIZE / DEVOPS_DEVSECOPS_CACHE_SIZE / DEVOPS_TASK_CLARIFIER_CACHE_SIZE / DEVOPS_INFRA_DEBUG_CACHE_SIZE / DEVOPS_INFRA_PATCH_CACHE_SIZE / DEVOPS_DOC_RUNBOOK_CACHE_SIZE
 Max entries in each `devops_team` specialist agent's own shared LLM-response
 cache (`shared.cache`; the get/set/key/clear boilerplate lives in
-`software_engineering_team.shared.llm_response_cache`, shared by all eight
-devops agents **and** `qa_agent`). See
+`software_engineering_team.shared.review_result_cache`, shared by all eight
+devops agents **and** `qa_agent` / `security_agent`). See
 [`software_engineering_team/README.md`](../backend/agents/software_engineering_team/README.md#caching-sharedcache--redis):
 one cache per agent — `InfrastructureAsCodeAgent`, `CICDPipelineAgent`, and
 `DeploymentStrategyAgent` (all three wired through the shared

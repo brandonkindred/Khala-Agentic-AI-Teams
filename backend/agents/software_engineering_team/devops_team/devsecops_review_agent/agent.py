@@ -6,13 +6,15 @@ import logging
 
 from llm_service import LLMClient, get_strands_model
 from llm_service.strands_model import model_fingerprint, resolve_strands_model
+from shared.cache import get_shared_cache
 from software_engineering_team.shared.llm import DEFAULT_JSON_SYSTEM_PROMPT
-from software_engineering_team.shared.llm_response_cache import (
-    build_cache_key,
-    cache_capacity,
-    clear_cache,
-    get_cached_result,
-    set_cached_result,
+from software_engineering_team.shared.review_result_cache import (
+    build_review_cache_key,
+    cache_capacity_for,
+    cache_namespace_for,
+    clear_review_cache_namespace,
+    get_cached_review_result,
+    set_cached_review_result,
 )
 from software_engineering_team.shared.security_service import derive_approved
 from software_engineering_team.shared.single_shot_review import run_single_shot_review
@@ -22,10 +24,15 @@ from .prompts import DEVSECOPS_REVIEW_PROMPT
 
 logger = logging.getLogger(__name__)
 
+_CACHE_LABEL = "DevSecOps"
 
-def clear_devsecops_cache() -> None:
+
+def clear_review_cache() -> None:
     """Drop every cached DevSecOps review result. Intended for test teardown."""
-    clear_cache(DevSecOpsReviewAgent.CACHE_NAMESPACE, log_prefix="DevSecOpsReviewAgent")
+    clear_review_cache_namespace(
+        _CACHE_LABEL,
+        lambda: get_shared_cache(cache_namespace_for(DevSecOpsReviewAgent.CACHE_NAMESPACE)),
+    )
 
 
 class DevSecOpsReviewAgent:
@@ -38,10 +45,13 @@ class DevSecOpsReviewAgent:
     # Shared review-result cache: keyed on the whole DevSecOpsReviewInput
     # content plus the resolved review model, so a byte-identical
     # resubmission (e.g. a retry cycle) skips the LLM call entirely. Same
-    # shape as qa_agent's review cache and as
-    # ``DevOpsSingleShotAgent`` subclasses' ``CACHE_NAMESPACE``/
-    # ``CACHE_ENV_VAR`` attrs — see ``shared.llm_response_cache`` for the
-    # shared implementation.
+    # shape as qa_agent's / security_agent's review cache — the shared
+    # policy lives in
+    # ``software_engineering_team.shared.review_result_cache``; this class
+    # supplies only its own namespace stem, env var, capacity default, and
+    # output model. Public (mirrors ``DevOpsSingleShotAgent`` subclasses'
+    # ``CACHE_NAMESPACE``) so tests reference this constant rather than a
+    # private module attribute.
     CACHE_NAMESPACE = "devops:devsecops:v1"
     CACHE_ENV_VAR = "DEVOPS_DEVSECOPS_CACHE_SIZE"
     CACHE_DEFAULT_SIZE = 128
@@ -92,16 +102,12 @@ class DevSecOpsReviewAgent:
             f"artifacts={list(input_data.artifacts.keys())}\n"
         )
 
-        capacity = cache_capacity(self.CACHE_ENV_VAR, self.CACHE_DEFAULT_SIZE)
+        capacity = cache_capacity_for(self.CACHE_ENV_VAR, self.CACHE_DEFAULT_SIZE)
         cache_key = None
         if capacity > 0:
-            cache_key = build_cache_key(input_data, model_fingerprint(self._model))
-            cached = get_cached_result(
-                self.CACHE_NAMESPACE,
-                cache_key,
-                DevSecOpsReviewOutput,
-                log_prefix="DevSecOpsReviewAgent",
-            )
+            cache_key = build_review_cache_key(input_data, model_fingerprint(self._model))
+            cache = get_shared_cache(cache_namespace_for(self.CACHE_NAMESPACE))
+            cached = get_cached_review_result(_CACHE_LABEL, cache, cache_key, DevSecOpsReviewOutput)
             if cached is not None:
                 return cached
 
@@ -134,8 +140,7 @@ class DevSecOpsReviewAgent:
         )
 
         if cache_key is not None:
-            set_cached_result(
-                self.CACHE_NAMESPACE, cache_key, result, capacity, log_prefix="DevSecOpsReviewAgent"
-            )
+            cache = get_shared_cache(cache_namespace_for(self.CACHE_NAMESPACE))
+            set_cached_review_result(_CACHE_LABEL, cache, cache_key, result, capacity=capacity)
 
         return result

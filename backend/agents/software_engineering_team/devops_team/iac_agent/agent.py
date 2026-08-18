@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
-from software_engineering_team.shared.llm_response_cache import clear_cache
 
 from .models import IaCAgentInput, IaCAgentOutput
 from .prompts import IAC_AGENT_PROMPT
@@ -57,6 +56,6 @@ class InfrastructureAsCodeAgent(DevOpsSingleShotAgent):
         )
 
 
-def clear_iac_cache() -> None:
+def clear_review_cache() -> None:
     """Drop every cached IaC agent result. Intended for test teardown."""
-    clear_cache(InfrastructureAsCodeAgent.CACHE_NAMESPACE, log_prefix="IaCAgent")
+    InfrastructureAsCodeAgent.clear_cache()
