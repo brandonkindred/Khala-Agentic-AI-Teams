@@ -415,6 +415,12 @@ def test_entrypoint_binds_saved_generated_persona_after_save(
         )
         assert response.status_code == 200, response.text
 
+        # Exact "Role:"/"Skills:"/"Expertise:" labels are a deliberate choice, not an
+        # oversight: they match the sibling assertions in
+        # test_stage2_binding_after_save.py (e.g.
+        # test_pipeline_stage2_binds_saved_persona_after_save), which pin the same
+        # build_system_prompt label lines. Kept consistent rather than softened here
+        # so a label/ordering regression is caught the same way on every Stage-2 path.
         prompt = fake_strands.last_system_prompt
         assert "Role: Audits vendor contracts" in prompt
         assert "Skills: legal, contracts" in prompt
