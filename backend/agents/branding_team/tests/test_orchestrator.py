@@ -845,10 +845,14 @@ def test_extract_phase_output_uses_structured_output_when_present() -> None:
     rather than the message's text blocks; extraction must check that field before
     falling back to text or it silently discards the agent's real output.
 
-    Calls the private ``_extract_phase_output`` helper directly: the public
-    ``run``/``run_phase`` APIs always go through a full graph invoke, which
-    cannot isolate the structured-output-vs-text branch without rebuilding the
-    entire Strands result shape around this one field.
+    Uses an unrecognized node id (absent from ``_SPEC_BY_NODE_ID``) so the spec
+    lookup misses and extraction runs with ``spec=None`` -- every real phase now
+    declares a ``merge_fn``, so a recognized node id would try that first
+    instead of exercising this fallback. Calls the private
+    ``_extract_phase_output`` helper directly: the public ``run``/``run_phase``
+    APIs always go through a full graph invoke, which cannot isolate the
+    structured-output-vs-text branch without rebuilding the entire Strands
+    result shape around this one field.
     """
     agent_result = MagicMock()
     agent_result.message = {"content": []}
@@ -864,10 +868,10 @@ def test_extract_phase_output_uses_structured_output_when_present() -> None:
     node_result.get_agent_results.return_value = [agent_result]
 
     mock_result = MagicMock()
-    mock_result.result = {"phase1_strategic_core": node_result}
+    mock_result.result = {"unrecognized_node": node_result}
 
     output, degraded = BrandingTeamOrchestrator._extract_phase_output(
-        mock_result, "phase1_strategic_core", StrategicCoreOutput
+        mock_result, "unrecognized_node", StrategicCoreOutput
     )
 
     assert degraded is False
@@ -1215,10 +1219,13 @@ def test_extract_phase_output_rejects_incomplete_phase2_fragments() -> None:
     assert output.tagline == ""
 
 
-def test_extract_phase_output_falls_back_when_not_phase1_shaped() -> None:
-    """A node whose nested result isn't Phase 1/2's known node-id set (e.g. every
-    other phase) must fall through to the existing single-agent-result logic
-    unchanged — fragment merges are additive, never a regression."""
+def test_extract_phase_output_degrades_when_not_phase1_shaped() -> None:
+    """A node whose nested result isn't Phase 1's known node-id set (e.g. a
+    foreign/garbled nested result) must degrade to defaults, not accept the
+    last agent's own fragment as the complete StrategicCoreOutput -- merge_fn
+    returning None means Phase 1's only legitimate extraction path failed,
+    same guard every other phase already relies on (compare
+    ``test_extract_phase_output_rejects_incomplete_phase4_fragments``)."""
     agent_result = MagicMock()
     agent_result.message = {"content": []}
     agent_result.structured_output = PositioningOutput(
@@ -1240,10 +1247,8 @@ def test_extract_phase_output_falls_back_when_not_phase1_shaped() -> None:
         mock_result, "phase1_strategic_core", StrategicCoreOutput
     )
 
-    assert degraded is False
-    assert isinstance(output, StrategicCoreOutput)
-    assert output.positioning_statement == "Fallback statement."
-    assert output.brand_promise == "Fallback promise."
+    assert degraded is True
+    assert output == StrategicCoreOutput()
 
 
 def _channel_guide_output(channel: str) -> ChannelGuidelineOutput:
@@ -1476,8 +1481,8 @@ def test_merge_phase4_fragments_rejects_incomplete_specialist_set() -> None:
 def test_extract_phase_output_rejects_incomplete_phase4_fragments() -> None:
     """Without channel_compositor, a partial Phase 4 run (merge_fn returns
     None) must degrade to defaults, not accept one specialist's own fragment
-    as the complete ChannelActivationOutput (``check_structured_output`` is
-    False for Phase 4, same guard Phase 2 already relies on)."""
+    as the complete ChannelActivationOutput (Phase 4's spec has a merge_fn,
+    same guard Phase 2 already relies on)."""
     nested_results = {
         "brand_experience_principler": _leaf_node_result(
             BrandExperiencePrinciplesOutput(
@@ -1786,8 +1791,8 @@ def test_merge_phase5_fragments_rejects_incomplete_specialist_set() -> None:
 def test_extract_phase_output_rejects_incomplete_phase5_fragments() -> None:
     """Without governance_compositor, a partial Phase 5 run (merge_fn returns
     None) must degrade to defaults, not accept one specialist's own fragment
-    as the complete GovernanceOutput (``check_structured_output`` is False for
-    Phase 5, same guard Phase 2 and Phase 4 already rely on)."""
+    as the complete GovernanceOutput (Phase 5's spec has a merge_fn, same
+    guard Phase 2 and Phase 4 already rely on)."""
     node_result = MagicMock()
     single_fragment = {
         "ownership_definer": _leaf_node_result(
@@ -2117,8 +2122,8 @@ def test_merge_phase3_fragments_rejects_incomplete_specialist_set() -> None:
 def test_extract_phase_output_rejects_incomplete_phase3_fragments() -> None:
     """Without visual_compositor, a partial Phase 3 run (merge_fn returns
     None) must degrade to defaults, not accept one node's own fragment as the
-    complete VisualIdentityOutput (``check_structured_output`` is False for
-    Phase 3, same guard Phase 2, Phase 4, and Phase 5 already rely on)."""
+    complete VisualIdentityOutput (Phase 3's spec has a merge_fn, same guard
+    Phase 2, Phase 4, and Phase 5 already rely on)."""
     single_fragment = {
         # CreativeRefinementDecision is converge_decider's real structured_output
         # type (see agents.py:make_converge_decider) -- not a Phase 1 model.
@@ -2341,19 +2346,42 @@ def test_extract_from_single_agent_falls_back_to_text() -> None:
 
 
 def test_extract_from_single_agent_skips_structured_when_spec_disallows() -> None:
-    """When ``spec.check_structured_output`` is False the structured field is
-    ignored and extraction falls through to text (here empty → None)."""
+    """When ``spec.merge_fn`` is set the structured field is ignored and
+    extraction falls through to text (here empty → None) -- a spec with a
+    merge_fn has multiple named children, so a lone agent's fragment must
+    never be accepted as the complete phase output."""
     from branding_team.orchestrator import _extract_from_single_agent, _PhaseSpec
 
     spec = _PhaseSpec(
         builder_fn=lambda: None,
         node_id="phase2_narrative",
         model_cls=StrategicCoreOutput,
-        check_structured_output=False,
+        merge_fn=lambda *_: None,
     )
     node = _leaf_node_result(_full_strategic_core())  # message content is empty
 
     assert _extract_from_single_agent(node, StrategicCoreOutput, spec) is None
+
+
+def test_extract_from_single_agent_checks_structured_when_spec_has_no_merge_fn() -> None:
+    """A present spec with no merge_fn (the documented "single-node phase with
+    no compositor" case) still allows the last agent's own structured_output
+    to be accepted -- ``spec is None`` is not the only path to this fallback;
+    ``spec.merge_fn is None`` is the real condition it stands in for."""
+    from branding_team.orchestrator import _extract_from_single_agent, _PhaseSpec
+
+    core = _full_strategic_core()
+    node = _leaf_node_result(core)
+    spec = _PhaseSpec(
+        builder_fn=lambda: None,
+        node_id="phase1_strategic_core",
+        model_cls=StrategicCoreOutput,
+    )  # merge_fn defaults to None
+
+    parsed = _extract_from_single_agent(node, StrategicCoreOutput, spec)
+
+    assert isinstance(parsed, StrategicCoreOutput)
+    assert parsed.positioning_statement == core.positioning_statement
 
 
 def test_extract_from_single_agent_no_agent_results_returns_none() -> None:

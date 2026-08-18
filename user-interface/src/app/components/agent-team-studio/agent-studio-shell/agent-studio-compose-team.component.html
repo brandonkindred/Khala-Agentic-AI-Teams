@@ -96,24 +96,12 @@
 </div>
 
 @if (browseOpen()) {
-  <div class="browse-scrim" (click)="closeBrowse()" aria-hidden="true"></div>
-  <aside
-    class="browse-panel"
-    role="dialog"
-    aria-modal="true"
-    aria-label="Browse agents"
-    cdkTrapFocus
-    [cdkTrapFocusAutoCapture]="true"
-    (keydown.escape)="closeBrowse()"
+  <app-agent-studio-slide-out
+    [open]="browseOpen()"
+    heading="Browse agents"
+    closeButtonLabel="Close browse agents panel"
+    (closeRequested)="closeBrowse()"
   >
-    <header class="browse-head">
-      <h2>Browse agents</h2>
-      <button mat-icon-button type="button" aria-label="Close browse agents panel" (click)="closeBrowse()">
-        <mat-icon aria-hidden="true">close</mat-icon>
-      </button>
-    </header>
-    <div class="browse-body">
-      <app-agent-catalog (requestRun)="onBrowseSelect($event)" />
-    </div>
-  </aside>
+    <app-agent-catalog (requestRun)="onBrowseSelect($event)" />
+  </app-agent-studio-slide-out>
 }

@@ -1,0 +1,28 @@
+@if (open) {
+  <div class="studio-slide-out__scrim" (click)="onScrimClick()" aria-hidden="true"></div>
+  <aside
+    class="studio-slide-out__panel"
+    role="dialog"
+    aria-modal="true"
+    [attr.aria-label]="heading"
+    [style.width]="panelWidth"
+    cdkTrapFocus
+    [cdkTrapFocusAutoCapture]="true"
+    (keydown.escape)="onEscape()"
+  >
+    <header class="studio-slide-out__head">
+      <h2>{{ heading }}</h2>
+      <button
+        mat-icon-button
+        type="button"
+        [attr.aria-label]="closeButtonLabel ?? 'Close ' + heading"
+        (click)="onCloseButtonClick()"
+      >
+        <mat-icon aria-hidden="true">close</mat-icon>
+      </button>
+    </header>
+    <div class="studio-slide-out__body">
+      <ng-content />
+    </div>
+  </aside>
+}
