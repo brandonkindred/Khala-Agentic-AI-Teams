@@ -30,17 +30,30 @@ from software_engineering_team.shared.v2_models import (
 )
 
 
-def test_microtask_status_union_covers_both_teams_members() -> None:
-    shared_values = {member.value for member in MicrotaskStatus}
-    for member in FrontendMicrotaskStatus:
-        assert member.value in shared_values
-    for member in BackendMicrotaskStatus:
-        assert member.value in shared_values
+def test_backend_and_frontend_status_are_the_shared_enum() -> None:
+    """Post-hoist, each team's ``models.py`` re-exports this shared enum rather
+    than shadowing it with a team-local definition, so the meaningful
+    invariant is identity, not value-subset containment."""
+    assert BackendMicrotaskStatus is MicrotaskStatus
+    assert FrontendMicrotaskStatus is MicrotaskStatus
 
 
 def test_microtask_status_values_have_no_collisions() -> None:
     values = [member.value for member in MicrotaskStatus]
     assert len(values) == len(set(values)) == 12
+
+
+@pytest.mark.parametrize("member", list(MicrotaskStatus))
+def test_microtask_status_member_is_settable_and_round_trips(member: MicrotaskStatus) -> None:
+    """Exercises every ``MicrotaskStatus`` member by name (not just via enum
+    iteration), including the members frontend_code_v2_team gained from the
+    hoist (``IN_CODE_REVIEW``, ``IN_QA_TESTING``, ``IN_SECURITY_TESTING``)
+    and members neither team's own tests ever assert by name
+    (``IN_PROGRESS``, ``IN_DOCUMENTATION``)."""
+    microtask = Microtask(id="mt-1", status=member)
+
+    assert microtask.status == member
+    assert Microtask.model_validate(microtask.model_dump()).status == member
 
 
 def test_microtask_required_id_raises() -> None:
