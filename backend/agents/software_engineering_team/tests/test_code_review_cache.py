@@ -263,13 +263,13 @@ def test_replaced_content_changes_submission_fingerprint() -> None:
     without = _one_file_input()
     with_before = _one_file_input(replaced_content={"app/a.py": "def f():\n    return 0\n"})
 
-    fp_without = mapping._submission_fingerprint(without, "model-A", False)
-    fp_with = mapping._submission_fingerprint(with_before, "model-A", False)
+    fp_without = mapping._submission_fingerprint(without, "model-A", False, False)
+    fp_with = mapping._submission_fingerprint(with_before, "model-A", False, False)
     assert fp_without != fp_with
 
     # The no-before-image case reproduces today's key exactly (absent behaves as
     # before this field existed): a second identical no-before-image input matches.
-    assert mapping._submission_fingerprint(_one_file_input(), "model-A", False) == fp_without
+    assert mapping._submission_fingerprint(_one_file_input(), "model-A", False, False) == fp_without
 
 
 def test_identical_replaced_content_matches_submission_fingerprint() -> None:
@@ -279,37 +279,31 @@ def test_identical_replaced_content_matches_submission_fingerprint() -> None:
     one = _one_file_input(replaced_content=before)
     two = _one_file_input(replaced_content=dict(before))
     assert mapping._submission_fingerprint(
-        one, "model-A", False
-    ) == mapping._submission_fingerprint(two, "model-A", False)
+        one, "model-A", False, False
+    ) == mapping._submission_fingerprint(two, "model-A", False, False)
 
     other = _one_file_input(replaced_content={"app/a.py": "def f():\n    return 1\n"})
     assert mapping._submission_fingerprint(
-        one, "model-A", False
-    ) != mapping._submission_fingerprint(other, "model-A", False)
+        one, "model-A", False, False
+    ) != mapping._submission_fingerprint(other, "model-A", False, False)
 
 
-def test_mutation_analysis_toggle_changes_submission_fingerprint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``CODE_REVIEW_MUTATION_ANALYSIS`` is output-affecting (it decides whether a
+def test_mutation_analysis_flag_changes_submission_fingerprint() -> None:
+    """``mutation_analysis_enabled`` is output-affecting (it decides whether a
     replaced-content before-image is shown to the model and whether the
     mutation-vs-replaced-code sub-check runs), so it must flip the submission
     fingerprint like the other output-affecting toggles -- otherwise the
     coordinator's short-circuit cache could serve a verdict computed under one
-    toggle state to a run under the other."""
+    state to a run under the other. Like ``spec_compliance_single_pass``, this
+    is a caller-resolved (already profile-folded) boolean, not an env var the
+    fingerprint helper reads itself -- see
+    ``test_mutation_analysis_flag_passed_to_fingerprint_is_profile_gated``."""
     input_data = _one_file_input(replaced_content={"app/a.py": "def f():\n    return 0\n"})
 
-    monkeypatch.delenv("CODE_REVIEW_MUTATION_ANALYSIS", raising=False)
-    fp_default_on = mapping._submission_fingerprint(input_data, "model-A", False)
+    fp_off = mapping._submission_fingerprint(input_data, "model-A", False, False)
+    fp_on = mapping._submission_fingerprint(input_data, "model-A", False, True)
 
-    monkeypatch.setenv("CODE_REVIEW_MUTATION_ANALYSIS", "false")
-    fp_off = mapping._submission_fingerprint(input_data, "model-A", False)
-
-    monkeypatch.setenv("CODE_REVIEW_MUTATION_ANALYSIS", "true")
-    fp_explicit_on = mapping._submission_fingerprint(input_data, "model-A", False)
-
-    assert fp_default_on != fp_off
-    assert fp_explicit_on == fp_default_on
+    assert fp_off != fp_on
 
 
 def test_cache_hit_reproduces_findings_without_consulting_model() -> None:
@@ -1137,9 +1131,11 @@ def test_spec_compliance_flag_passed_to_fingerprint_is_profile_gated(
     original = coord._submission_fingerprint
     calls: list = []
 
-    def _spy(input_data, model_fingerprint, spec_compliance_single_pass):
+    def _spy(input_data, model_fingerprint, spec_compliance_single_pass, mutation_analysis_enabled):
         calls.append(spec_compliance_single_pass)
-        return original(input_data, model_fingerprint, spec_compliance_single_pass)
+        return original(
+            input_data, model_fingerprint, spec_compliance_single_pass, mutation_analysis_enabled
+        )
 
     monkeypatch.setattr(coord, "_submission_fingerprint", _spy)
 
@@ -1149,6 +1145,49 @@ def test_spec_compliance_flag_passed_to_fingerprint_is_profile_gated(
     assert calls == [False], (
         "the flag is CODE_REVIEW-only; a non-CODE_REVIEW profile must fingerprint "
         "as spec-compliance-pass=False regardless of the env var"
+    )
+
+    calls.clear()
+    run_coordinator(client, _one_file_input(profile=ReviewProfile.CODE_REVIEW))
+    assert calls == [True], "the CODE_REVIEW profile must fingerprint the env var as-is"
+
+
+def test_mutation_analysis_flag_passed_to_fingerprint_is_profile_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run_coordinator`` computes the ``CODE_REVIEW_MUTATION_ANALYSIS`` decision
+    exactly once and passes the *already profile-gated* result into
+    ``_submission_fingerprint`` -- the fingerprint helper itself never reads the raw
+    env var. Mirrors
+    ``test_spec_compliance_flag_passed_to_fingerprint_is_profile_gated`` for the
+    mutation-analysis toggle.
+
+    Regression test: a profile-blind env read inside the fingerprint helper would
+    fingerprint a non-``CODE_REVIEW`` submission as flag-sensitive whenever the env
+    var happens to be set, even though neither side-effect pass ever honors the
+    toggle (or shows ``replaced_content`` to the model) outside ``CODE_REVIEW`` --
+    causing needless cache misses. Spying on the call site (rather than inferring it
+    from cache hit/miss side effects) proves the exact boolean the coordinator
+    resolved and threaded through.
+    """
+    monkeypatch.setenv("CODE_REVIEW_MUTATION_ANALYSIS", "true")
+    original = coord._submission_fingerprint
+    calls: list = []
+
+    def _spy(input_data, model_fingerprint, spec_compliance_single_pass, mutation_analysis_enabled):
+        calls.append(mutation_analysis_enabled)
+        return original(
+            input_data, model_fingerprint, spec_compliance_single_pass, mutation_analysis_enabled
+        )
+
+    monkeypatch.setattr(coord, "_submission_fingerprint", _spy)
+
+    client = _CountingClient(_APPROVED)
+    run_coordinator(client, _one_file_input(profile=ReviewProfile.SPEC_CONFORMANCE))
+
+    assert calls == [False], (
+        "the flag is CODE_REVIEW-only; a non-CODE_REVIEW profile must fingerprint "
+        "as mutation-analysis=False regardless of the env var"
     )
 
     calls.clear()

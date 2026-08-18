@@ -159,7 +159,7 @@ from .models import (
 )
 from .profiles import ReviewProfile
 from .repo_reader import RepoReader
-from .side_effect_consolidation import SIDE_EFFECT_CONSOLIDATION_ENV
+from .side_effect_consolidation import MUTATION_ANALYSIS_ENV, SIDE_EFFECT_CONSOLIDATION_ENV
 from .synthesis import synthesize_review_findings, synthesize_spec_compliance
 from .transcript import model_label, record_transcript_entry
 
@@ -770,6 +770,18 @@ def run_coordinator(
         CODE_REVIEW_SPEC_COMPLIANCE_PASS_ENV, default=False
     ) and (input_data.profile == ReviewProfile.CODE_REVIEW)
 
+    # Same rationale as ``spec_compliance_single_pass`` above: the mutation-vs-
+    # replaced-code contract sub-check (and the ``replaced_content`` before-image
+    # it consumes) only ever runs under ``ReviewProfile.CODE_REVIEW`` -- both
+    # ``side_effect_impact_pass`` and ``merged_architecture_side_effect_pass``
+    # short-circuit to no findings on any other profile -- so a profile-blind
+    # env read would fingerprint non-``CODE_REVIEW`` submissions as
+    # flag-sensitive when the toggle can never actually affect their output,
+    # causing needless cache misses whenever the env var happens to be set.
+    mutation_analysis_enabled = env_flag_enabled(MUTATION_ANALYSIS_ENV) and (
+        input_data.profile == ReviewProfile.CODE_REVIEW
+    )
+
     # Submission-level short-circuit (see module docstring's "Submission-level
     # short-circuit" section). An identical approved submission returns its
     # cached output before any LLM work. Keyed on the raw input + model +
@@ -782,7 +794,7 @@ def run_coordinator(
     cached: Optional[CodeReviewOutput] = None
     if submission_capacity > 0 and repo_reader is None:
         submission_key = _submission_fingerprint(
-            input_data, model_fingerprint, spec_compliance_single_pass
+            input_data, model_fingerprint, spec_compliance_single_pass, mutation_analysis_enabled
         )
         cache = get_shared_cache(_submission_cache_namespace())
         # shared.cache is fail-open, but keep an explicit local guard so a

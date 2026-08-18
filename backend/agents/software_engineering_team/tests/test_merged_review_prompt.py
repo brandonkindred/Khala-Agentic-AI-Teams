@@ -278,8 +278,9 @@ def test_side_effect_body_guard_names_the_one_narrow_exception_by_default() -> N
 
 
 def test_side_effect_body_no_mutation_omits_subcheck_and_stays_absolute() -> None:
-    """The disabled (mutation-off) body variant must be byte-identical to the
-    pre-mutation-analysis body: no sub-check, and an unconditional guard."""
+    """The disabled (mutation-off) body variant must omit the mutation sub-check
+    (and its "Replaced (pre-change) content" / "EXCEPT" cross-references) and
+    retain the absolute, unconditional no-prior-version guard."""
     assert "mutation-vs-replaced-code" not in _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION
     assert "Replaced (pre-change) content" not in _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION
     assert (

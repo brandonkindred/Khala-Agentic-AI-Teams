@@ -47,6 +47,18 @@ _SIDE_EFFECT_CATEGORY = "side-effects"
 # rather than re-spelling the env var name, so a rename can't silently drift.
 SIDE_EFFECT_CONSOLIDATION_ENV = "CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION"
 
+# Default-on toggle for the mutation-vs-replaced-code contract sub-check inside
+# the side-effect / blast-radius pass (see side_effect_impact_pass.py): an
+# explicit ``CODE_REVIEW_MUTATION_ANALYSIS=false``/``0``/``no`` disables it (see
+# docs/ENV_VARS.md). Any other value (or unset) leaves it enabled. Defined here
+# rather than in a tail-pass module, mirroring ``SIDE_EFFECT_CONSOLIDATION_ENV``
+# immediately above: this is a neutral, side-effect-free location so the
+# low-level cache/fingerprint layer (mapping.py) never has to import a tail-pass
+# module just to read a toggle name. Every caller (side_effect_impact_pass.py,
+# merged_architecture_side_effect_pass.py, coordinator.py, mapping.py's cache
+# fingerprint) imports this constant rather than re-spelling the env var name.
+MUTATION_ANALYSIS_ENV = "CODE_REVIEW_MUTATION_ANALYSIS"
+
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
 # Extensions resolved via the AST-based enclosing_construct (exact ranges).

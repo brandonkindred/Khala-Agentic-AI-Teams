@@ -48,15 +48,13 @@ from .prompts import (
     build_merged_architecture_side_effect_reasoning_system_prompt,
 )
 from .repo_reader import RepoReader
+from .side_effect_consolidation import MUTATION_ANALYSIS_ENV
 from .submission_pass_runner import FileBatch, run_submission_pass
 
 logger = logging.getLogger(__name__)
 
 _ARCH_ENV = "CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS"
 _SIDE_ENV = "CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS"
-# Single source of truth for this env-var name is ``side_pass.MUTATION_ANALYSIS_ENV``
-# (also imported by ``mapping._submission_fingerprint``), so it can never drift
-# between the three call sites.
 
 
 def find_architecture_and_side_effect_issues(
@@ -174,7 +172,7 @@ def _run_pass(
     if not index.files:
         return [], []
 
-    mutation_on = env_flag_enabled(side_pass.MUTATION_ANALYSIS_ENV)
+    mutation_on = env_flag_enabled(MUTATION_ANALYSIS_ENV)
     reasoning_system_prompt = build_merged_architecture_side_effect_reasoning_system_prompt(
         arch_on=arch_on, side_on=side_on, mutation_on=mutation_on
     )

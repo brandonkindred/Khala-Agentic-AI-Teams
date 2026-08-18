@@ -104,7 +104,6 @@ from .models import (
     notify_review_progress,
 )
 from .side_effect_consolidation import SIDE_EFFECT_CONSOLIDATION_ENV
-from .side_effect_impact_pass import MUTATION_ANALYSIS_ENV
 
 logger = logging.getLogger(__name__)
 
@@ -1005,7 +1004,10 @@ def _context_fingerprint(base_input: Dict, model_fingerprint: str) -> str:
 
 
 def _submission_fingerprint(
-    input_data: CodeReviewInput, model_fingerprint: str, spec_compliance_single_pass: bool
+    input_data: CodeReviewInput,
+    model_fingerprint: str,
+    spec_compliance_single_pass: bool,
+    mutation_analysis_enabled: bool,
 ) -> str:
     """Hash the whole raw submission plus the resolved model.
 
@@ -1017,36 +1019,41 @@ def _submission_fingerprint(
         - ``input_data`` is a valid ``CodeReviewInput``.
         - ``model_fingerprint`` is ``_review_model_fingerprint(llm)`` for the
           client that would run the review.
-        - ``spec_compliance_single_pass`` is the caller's already-resolved decision
-          (``run_coordinator``'s single per-run computation, already folding in the
-          ``CODE_REVIEW`` profile restriction) — this function never reads the
-          ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` env var itself, so a non-``CODE_REVIEW``
-          submission is never fingerprinted as flag-sensitive merely because the
-          env var happens to be set (which would cause needless cache misses on
-          every such submission).
+        - ``spec_compliance_single_pass`` and ``mutation_analysis_enabled`` are
+          the caller's already-resolved decisions (``run_coordinator``'s single
+          per-run computation, already folding in the ``CODE_REVIEW`` profile
+          restriction each toggle shares with the pass(es) it gates) — this
+          function never reads the ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` or
+          ``CODE_REVIEW_MUTATION_ANALYSIS`` env vars itself, so a non-``CODE_REVIEW``
+          submission is never fingerprinted as flag-sensitive merely because
+          either env var happens to be set (which would cause needless cache
+          misses on every such submission, since neither toggle can affect a
+          non-``CODE_REVIEW`` review's output).
 
     Postconditions:
         - Returns a hex digest that changes whenever **any** input field (or the
           resolved model) changes, and also whenever an output-affecting toggle —
-          ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``, ``CODE_REVIEW_MUTATION_ANALYSIS``,
-          or the caller's resolved ``spec_compliance_single_pass`` decision — flips.
-          It is derived from ``input_data.model_dump()`` plus those toggles, so it
-          keys on the whole input (not a hand-picked subset) plus consolidation,
-          mutation-analysis, and spec-compliance-pass identity: a new
-          ``CodeReviewInput`` field is hashed automatically and can never be
-          silently dropped. Two submissions collide only when their full inputs
-          and toggle settings are identical, so a hit means the review would be
-          the same work — in particular, an identical ``CODE_REVIEW``-profile
-          submission approved with ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` off can
-          never be served from cache once the flag is on, since that would
-          silently skip the post-dedupe ``synthesize_spec_compliance`` pass the
-          flag adds; likewise a submission whose ``replaced_content`` was reviewed
-          with ``CODE_REVIEW_MUTATION_ANALYSIS`` off (before-image hidden from the
-          model, no mutation-vs-replaced-code sub-check) can never be served from
-          cache to a run with the toggle on, and vice versa. (Every current field
-          is verdict-affecting, so this is exactly the submission identity; a
-          future non-verdict field would only cause extra misses — full
-          re-reviews — never a stale hit.)
+          ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``, the combine-similarity
+          threshold (``__combine_similarity_threshold__``), or the caller's
+          resolved ``spec_compliance_single_pass``/``mutation_analysis_enabled``
+          decisions — flips. It is derived from ``input_data.model_dump()`` plus
+          those toggles, so it keys on the whole input (not a hand-picked subset)
+          plus consolidation, combine-similarity-threshold, mutation-analysis, and
+          spec-compliance-pass identity: a new ``CodeReviewInput`` field is hashed
+          automatically and can never be silently dropped. Two submissions
+          collide only when their full inputs and toggle settings are identical,
+          so a hit means the review would be the same work — in particular, an
+          identical ``CODE_REVIEW``-profile submission approved with
+          ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` off can never be served from cache
+          once the flag is on, since that would silently skip the post-dedupe
+          ``synthesize_spec_compliance`` pass the flag adds; likewise a
+          ``CODE_REVIEW``-profile submission whose ``replaced_content`` was
+          reviewed with ``CODE_REVIEW_MUTATION_ANALYSIS`` off (before-image
+          hidden from the model, no mutation-vs-replaced-code sub-check) can
+          never be served from cache to a run with the toggle on, and vice versa.
+          (Every current field is verdict-affecting, so this is exactly the
+          submission identity; a future non-verdict field would only cause extra
+          misses — full re-reviews — never a stale hit.)
         - Computed from raw fields only (no compaction/LLM), so the short-circuit
           it guards fires before any model call. Deterministic (``sort_keys``),
           so a stored approval survives across coordinator calls in a process.
@@ -1067,7 +1074,7 @@ def _submission_fingerprint(
     payload["__side_effect_consolidation__"] = env_flag_enabled(SIDE_EFFECT_CONSOLIDATION_ENV)
     payload["__combine_similarity_threshold__"] = resolve_combine_similarity_threshold()
     payload["__spec_compliance_single_pass__"] = spec_compliance_single_pass
-    payload["__mutation_analysis__"] = env_flag_enabled(MUTATION_ANALYSIS_ENV)
+    payload["__mutation_analysis__"] = mutation_analysis_enabled
     return _stable_json_digest(payload)
 
 
