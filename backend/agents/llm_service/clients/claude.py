@@ -44,6 +44,7 @@ from ..attribution import (
     caller_team as _caller_team,
 )
 from ..backoff import parse_rate_limit_retry_config, rate_limit_backoff_sleep
+from ..cache_breakpoint import CacheBreakpoint
 from ..concurrency import get_llm_semaphore
 from ..interface import (
     LLMClient,
@@ -73,6 +74,11 @@ _JSON_ONLY_INSTRUCTION = (
     "no explanatory text, no Markdown, no code fences. If you must use a code block, "
     "put only the JSON object inside it with no surrounding text."
 )
+
+# Anthropic's wire-level cache-control breakpoint for a ``CacheBreakpoint``-marked
+# segment. Always the base ephemeral breakpoint (no TTL) — ``CacheBreakpoint``
+# (Step 1) carries no TTL field to select a longer-lived one.
+_CACHE_CONTROL_EPHEMERAL = {"type": "ephemeral"}
 
 
 def _caller_tag() -> str:
@@ -175,15 +181,30 @@ def _require_text(name: str, value: str) -> None:
         raise ValueError(f"{name} must be a non-empty string")
 
 
-def _json_system(system_prompt: Optional[str], tools: Optional[list]) -> Optional[str]:
+def _json_system(
+    system_prompt: "str | list[dict] | None", tools: Optional[list]
+) -> "str | list[dict] | None":
     """Build the system prompt for JSON mode.
 
+    ``system_prompt`` is either the plain string form used everywhere today, or
+    the Anthropic content-block list form produced by :func:`_to_anthropic_messages`
+    when a ``CacheBreakpoint`` segment was present — in the latter case the
+    JSON-only instruction is appended as one more plain trailing text block
+    (never carrying ``cache_control``) rather than string-concatenated.
+
     Preconditions: none.
-    Postconditions: when ``tools`` are present, returns the stripped ``system_prompt``
-        (or ``None``) WITHOUT the JSON-only instruction — it would fight the tool-use
-        protocol; otherwise appends ``_JSON_ONLY_INSTRUCTION`` (alone when there is no
+    Postconditions: when ``tools`` are present, returns ``system_prompt`` unchanged
+        for the list form (or ``None`` when the list is empty), or the stripped
+        string form (or ``None`` when blank) — in both cases WITHOUT the
+        JSON-only instruction, since it would fight the tool-use protocol;
+        otherwise appends ``_JSON_ONLY_INSTRUCTION`` (alone when there is no
         system prompt). Never raises.
     """
+    if isinstance(system_prompt, list):
+        if tools:
+            return system_prompt or None
+        instruction_block = {"type": "text", "text": _JSON_ONLY_INSTRUCTION}
+        return [*system_prompt, instruction_block] if system_prompt else [instruction_block]
     base = system_prompt.strip() if system_prompt and system_prompt.strip() else ""
     if tools:
         return base or None
@@ -349,13 +370,18 @@ class ClaudeLLMClient(LLMClient):
     def _invoke(
         self,
         *,
-        system: Optional[str],
+        system: "str | list[dict] | None",
         messages: list,
         tools: Optional[list],
         think: "bool | str | None",
         max_tokens: int,
     ) -> Any:
         """Stream one request and return the final Anthropic message.
+
+        ``system`` is either a plain string or the Anthropic content-block list
+        form (one or more of whose blocks may carry ``cache_control``) — the
+        Anthropic SDK accepts both, and ``kwargs["system"] = system`` below is
+        passed through unchanged regardless of which shape it is.
 
         The network exchange runs under the process-global concurrency gate
         (``get_llm_semaphore``), released as soon as the stream context exits, so
@@ -455,7 +481,7 @@ class ClaudeLLMClient(LLMClient):
     def _invoke_with_rate_limit_retry(
         self,
         *,
-        system: Optional[str],
+        system: "str | list[dict] | None",
         messages: list,
         tools: Optional[list],
         think: "bool | str | None",
@@ -668,6 +694,14 @@ class ClaudeLLMClient(LLMClient):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def supports_prompt_caching(self) -> bool:
+        """The Anthropic wire protocol supports ``cache_control`` breakpoints.
+
+        Postconditions: always returns ``True`` (see ``LLMClient.supports_prompt_caching``
+            for the contract). Synchronous, no network call, never raises.
+        """
+        return True
 
     def complete_json(
         self,
@@ -919,7 +953,43 @@ def _retry_after_seconds(error: Any) -> Optional[float]:
     return value if value > 0 else None
 
 
-def _to_anthropic_messages(messages: list) -> tuple[str, list]:
+def _render_anthropic_system(parts: list) -> "str | list[dict]":
+    """Render accumulated system parts into Anthropic's ``system`` parameter shape.
+
+    ``parts`` holds, in order, every ``role:"system"`` content item collected by
+    :func:`_to_anthropic_messages` — plain non-empty strings, and/or
+    ``CacheBreakpoint`` markers a caller placed in a list-typed system message
+    (see ``llm_service.cache_breakpoint`` and ``strands_adapter.stream``).
+
+    Preconditions: every item in ``parts`` is a non-empty ``str`` or a
+        ``CacheBreakpoint`` — the sole caller (:func:`_to_anthropic_messages`)
+        only ever appends non-empty strings, and ``CacheBreakpoint`` itself
+        cannot hold empty text (validated at construction). An empty string is
+        a caller bug, not a case this function silently tolerates.
+    Postconditions:
+        - When no item is a ``CacheBreakpoint``, returns ``"\\n\\n".join(parts)``
+          — byte-identical to this function's pre-caching behavior, so a request
+          with no marked prefix is completely unaffected.
+        - Otherwise returns a list of Anthropic text-block dicts, one per part in
+          order: a ``CacheBreakpoint`` becomes ``{"type": "text", "text": ...,
+          "cache_control": {"type": "ephemeral"}}``; a plain string becomes
+          ``{"type": "text", "text": ...}`` with no ``cache_control`` key. Never
+          raises.
+    """
+    if not any(isinstance(p, CacheBreakpoint) for p in parts):
+        return "\n\n".join(parts)
+    blocks: list[dict] = []
+    for part in parts:
+        if isinstance(part, CacheBreakpoint):
+            blocks.append(
+                {"type": "text", "text": part.text, "cache_control": dict(_CACHE_CONTROL_EPHEMERAL)}
+            )
+        elif isinstance(part, str):
+            blocks.append({"type": "text", "text": part})
+    return blocks
+
+
+def _to_anthropic_messages(messages: list) -> "tuple[str | list[dict], list]":
     """Translate an OpenAI-style chat ``messages`` list to Anthropic shape.
 
     Anthropic carries the system prompt as a top-level parameter (not a
@@ -928,7 +998,11 @@ def _to_anthropic_messages(messages: list) -> tuple[str, list]:
     is what makes :func:`llm_service.tool_loop.complete_json_with_tool_loop` work
     under the Claude provider:
 
-    - ``role:"system"`` entries are concatenated into the returned system text.
+    - ``role:"system"`` entries are concatenated into the returned system text —
+      or, when a ``role:"system"`` message's ``content`` is a list containing a
+      ``CacheBreakpoint`` marker, rendered as an Anthropic content-block list
+      with ``cache_control`` on the marked segment (see
+      :func:`_render_anthropic_system`).
     - ``role:"assistant"`` with ``tool_calls`` becomes an assistant turn whose
       content is ``tool_use`` blocks (plus any leading text); string ``arguments``
       are parsed to a dict (Anthropic requires an object ``input``). Any signed
@@ -955,14 +1029,18 @@ def _to_anthropic_messages(messages: list) -> tuple[str, list]:
         after their assistant turn) and neither re-orders nor rejects out-of-order
         tool results — it only flushes pending results on the next non-tool message,
         so a mis-ordered list is faithfully (and possibly invalidly) translated.
-    Postconditions: returns ``(system_text, anthropic_messages)`` where every
-        emitted entry has role ``user``/``assistant`` and Anthropic-valid
-        (non-empty) content, and every emitted ``tool_result`` has a matching
-        ``tool_use`` earlier in the list (orphans are dropped, logged at debug, so
-        Anthropic never sees a dangling ``tool_result``). Never raises for a
+    Postconditions: returns ``(system, anthropic_messages)`` where ``system`` is
+        a plain ``str`` (identical to this function's pre-caching behavior) unless
+        a ``CacheBreakpoint`` marker was present in a system message, in which
+        case it is a list of Anthropic text-block dicts (see
+        :func:`_render_anthropic_system`); every emitted ``anthropic_messages``
+        entry has role ``user``/``assistant`` and Anthropic-valid (non-empty)
+        content, and every emitted ``tool_result`` has a matching ``tool_use``
+        earlier in the list (orphans are dropped, logged at debug, so Anthropic
+        never sees a dangling ``tool_result``). Never raises for a
         reasonably-shaped list.
     """
-    system_parts: list[str] = []
+    system_parts: list = []  # str and/or CacheBreakpoint items, in order
     out: list[dict] = []
     pending_tool_results: list[dict] = []
     emitted_tool_use_ids: set[str] = set()
@@ -1001,8 +1079,19 @@ def _to_anthropic_messages(messages: list) -> tuple[str, list]:
         # Any non-tool message ends the current run of tool results.
         _flush_tool_results()
         if role == "system":
-            if isinstance(content, str) and content:
-                system_parts.append(content)
+            if isinstance(content, str):
+                if content:
+                    system_parts.append(content)
+            elif isinstance(content, list):
+                # Structured system content (``strands_adapter.stream`` inserts
+                # this form when a ``CacheBreakpoint`` is present) — preserve
+                # non-empty string parts and ``CacheBreakpoint`` markers in
+                # order instead of collapsing to one string, so
+                # _render_anthropic_system can attach cache_control to the
+                # marked segment(s).
+                for item in content:
+                    if isinstance(item, CacheBreakpoint) or (isinstance(item, str) and item):
+                        system_parts.append(item)
             continue
         if role == "assistant":
             tool_calls = msg.get("tool_calls") or []
@@ -1061,4 +1150,4 @@ def _to_anthropic_messages(messages: list) -> tuple[str, list]:
             elif content:
                 out.append({"role": "user", "content": content})
     _flush_tool_results()
-    return "\n\n".join(system_parts), out
+    return _render_anthropic_system(system_parts), out

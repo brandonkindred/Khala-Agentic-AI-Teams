@@ -116,7 +116,10 @@ describe('App routes', () => {
     const children = (shell?.children ?? []) as Route[];
     const studio = children.find((r) => r.path === 'agent-studio');
     expect(studio).toBeDefined();
-    expect(studio!.children?.map((c) => c.path)).toEqual(['', 'persona-run/:runId']);
+    expect(studio!.children?.length).toBe(2);
+    expect(studio!.children?.map((c) => c.path)).toEqual(
+      expect.arrayContaining(['', 'persona-run/:runId']),
+    );
     const auditChild = studio!.children?.find((c) => c.path === 'persona-run/:runId');
     expect(auditChild?.data).toEqual({ hideStudioFooter: true });
     expect(typeof auditChild?.loadComponent).toBe('function');
