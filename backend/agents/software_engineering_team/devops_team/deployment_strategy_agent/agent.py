@@ -36,10 +36,15 @@ class DeploymentStrategyAgent(DevOpsSingleShotAgent):
     """Produce deployment strategy artifacts via a single structured LLM call.
 
     Invariants: instance state is limited to ``llm`` and ``_model`` from the
-    base; ``run`` is stateless across calls.
+    base. ``run`` is deterministic for identical inputs and the resolved
+    model: repeated identical calls may return a cached result and skip the
+    LLM. Cache reads/writes are fail-open and gated by ``CACHE_ENV_VAR``.
     """
 
     PROMPT = DEPLOYMENT_STRATEGY_PROMPT
+    CACHE_NAMESPACE = "devops:deploy_strategy:v1"
+    CACHE_ENV_VAR = "DEVOPS_DEPLOYMENT_STRATEGY_CACHE_SIZE"
+    OUTPUT_MODEL = DeploymentStrategyAgentOutput
 
     def build_context(self, input_data: DeploymentStrategyAgentInput) -> str:
         """Build the deployment prompt context from the task spec.
@@ -84,3 +89,8 @@ class DeploymentStrategyAgent(DevOpsSingleShotAgent):
             alerting_configured=_as_bool(data.get("alerting_configured")),
             summary=data.get("summary", ""),
         )
+
+
+def clear_review_cache() -> None:
+    """Drop every cached deployment strategy agent result. Intended for test teardown."""
+    DeploymentStrategyAgent.clear_cache()

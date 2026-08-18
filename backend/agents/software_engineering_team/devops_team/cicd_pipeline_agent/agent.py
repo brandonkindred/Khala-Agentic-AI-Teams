@@ -14,10 +14,15 @@ class CICDPipelineAgent(DevOpsSingleShotAgent):
     """Produce CI/CD pipeline artifacts via a single structured LLM call.
 
     Invariants: instance state is limited to ``llm`` and ``_model`` from the
-    base; ``run`` is stateless across calls.
+    base. ``run`` is deterministic for identical inputs and the resolved
+    model: repeated identical calls may return a cached result and skip the
+    LLM. Cache reads/writes are fail-open and gated by ``CACHE_ENV_VAR``.
     """
 
     PROMPT = CICD_PIPELINE_PROMPT
+    CACHE_NAMESPACE = "devops:cicd:v1"
+    CACHE_ENV_VAR = "DEVOPS_CICD_CACHE_SIZE"
+    OUTPUT_MODEL = CICDPipelineAgentOutput
 
     def build_context(self, input_data: CICDPipelineAgentInput) -> str:
         """Build the CI/CD prompt context from the task spec and existing pipeline.
@@ -58,3 +63,8 @@ class CICDPipelineAgent(DevOpsSingleShotAgent):
             summary=data.get("summary", ""),
             risks=data.get("risks") or [],
         )
+
+
+def clear_review_cache() -> None:
+    """Drop every cached CI/CD pipeline agent result. Intended for test teardown."""
+    CICDPipelineAgent.clear_cache()
