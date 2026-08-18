@@ -10,10 +10,12 @@ Covers:
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 
@@ -185,21 +187,31 @@ def _injectable_manifest(agent_id: str):
     )
 
 
+def _boot_with_injected_manifest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, manifest) -> FastAPI:
+    """Write ``manifest`` to the injection file and boot the real ``_build_app()``.
+
+    Shared by every case that needs a manifest absent from the sandbox's on-disk
+    registry to boot via ``SANDBOX_AGENT_MANIFEST_FILE`` — the same env-var/JSON
+    contract the provisioner uses for a dynamically-registered (Studio-saved or
+    agentic-generated) agent.
+    """
+    from agent_sandbox_runtime.entrypoint import _build_app
+
+    manifest_file = tmp_path / "agent-manifest.json"
+    manifest_file.write_text(json.dumps(manifest.model_dump(mode="json")), encoding="utf-8")
+    monkeypatch.setenv("SANDBOX_AGENT_ID", manifest.id)
+    monkeypatch.setenv("SANDBOX_AGENT_MANIFEST_FILE", str(manifest_file))
+    return _build_app()
+
+
 def test_injected_manifest_lets_unknown_agent_boot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A dynamically-registered agent absent from the sandbox's on-disk registry
     boots when its manifest is injected via ``SANDBOX_AGENT_MANIFEST_FILE``."""
-    import json
-
     from agent_platform.registry import get_registry
-    from agent_sandbox_runtime.entrypoint import _build_app
 
     agent_id = "agent_team_studio.agent_studio.injected-xyz"
-    manifest_file = tmp_path / "agent-manifest.json"
-    manifest_file.write_text(json.dumps(_injectable_manifest(agent_id).model_dump(mode="json")), encoding="utf-8")
-    monkeypatch.setenv("SANDBOX_AGENT_ID", agent_id)
-    monkeypatch.setenv("SANDBOX_AGENT_MANIFEST_FILE", str(manifest_file))
     try:
-        _build_app()  # must NOT SystemExit
+        _boot_with_injected_manifest(monkeypatch, tmp_path, _injectable_manifest(agent_id))  # must NOT SystemExit
         assert get_registry().get(agent_id) is not None
     finally:
         get_registry().unregister(agent_id)
@@ -223,8 +235,6 @@ def test_malformed_injected_manifest_falls_through_to_unknown_gate(
 
 
 def test_maybe_register_injected_manifest_registers_valid(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    import json
-
     from agent_sandbox_runtime.entrypoint import _maybe_register_injected_manifest
 
     manifest_file = tmp_path / "agent-manifest.json"
@@ -259,3 +269,162 @@ def test_maybe_register_injected_manifest_noop_when_file_missing(
     fake_registry = type("R", (), {"register": lambda self, m: called.append(m)})()
     _maybe_register_injected_manifest(fake_registry)  # no-op, no raise
     assert called == []
+
+
+# ---------------------------------------------------------------------------
+# Stage-2 binding: does an injected manifest's saved persona actually drive
+# the invoked agent, not just get registered?
+#
+# The tests above prove injection *registers* a manifest. These close the gap:
+# they inject a manifest carrying the real generated-agent entrypoint, boot the
+# real ``_build_app()``, and post an invoke through it, asserting the composed
+# system prompt reflects the saved persona — not just the shim in isolation.
+#
+# The Strands model call is faked by *string* target
+# (``agent_team_studio.agentic_team_provisioning.runtime.agent_builder.StrandsAgent``)
+# rather than a top-level import: agent_sandbox_runtime is platform infrastructure
+# that stays team-agnostic (only ``agent_platform`` / ``shared.*`` in its own import
+# graph), matching production — the real sandbox process never imports a domain app
+# either, it only resolves a manifest's ``source.entrypoint`` string dynamically at
+# dispatch time. The generated-producer manifest is likewise built from
+# ``shared.manifests`` primitives (the same ones
+# ``agent_team_studio.agentic_team_provisioning.manifest_generation.build_agent_manifest``
+# itself delegates to) rather than importing that domain builder directly.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_strands(monkeypatch: pytest.MonkeyPatch):
+    """Swap the real strands model for a recorder (no network call).
+
+    Uses the shared double from ``shared.agent_invoke.tests.fake_strands`` (the
+    same one ``agentic_team_provisioning``'s own test suites use) rather than a
+    third local copy, patched by string target so this file's own import graph
+    never gains a static dependency on the domain app.
+    """
+    from shared.agent_invoke.tests.fake_strands import patch_strands_agent
+
+    return patch_strands_agent(
+        monkeypatch,
+        "agent_team_studio.agentic_team_provisioning.runtime.agent_builder.StrandsAgent",
+    )
+
+
+def _generated_style_manifest(agent_name: str, summary: str, skill_tags: list[str]):
+    """Build a manifest equivalent to what
+    ``agent_team_studio.agentic_team_provisioning.manifest_generation.build_agent_manifest``
+    would produce, using only the ``shared.manifests`` primitives that builder itself
+    delegates to — so this platform test never imports the domain app.
+    """
+    from agent_platform.registry.models import SourceInfo
+    from shared.manifests import (
+        AGENT_ANATOMY_REF,
+        GENERATED_AGENT_ENTRYPOINT,
+        GENERATED_AGENT_INPUT_REF,
+        GENERATED_AGENT_OUTPUT_REF,
+        build_manifest,
+        default_cognition_block,
+        io_schema,
+    )
+
+    team = "agentic_team_provisioning"
+    return build_manifest(
+        id=f"{team}.{agent_name.lower().replace(' ', '-')}-test",
+        team=team,
+        name=agent_name,
+        summary=summary,
+        tags=["generated", team, *skill_tags],
+        inputs=io_schema(
+            None,
+            schema_ref=GENERATED_AGENT_INPUT_REF,
+            ref_description="Roster metadata + user message.",
+            inline_description="Authored input schema.",
+        ),
+        outputs=io_schema(
+            None,
+            schema_ref=GENERATED_AGENT_OUTPUT_REF,
+            ref_description="The agent's response text.",
+            inline_description="Authored output schema.",
+        ),
+        cognition=default_cognition_block(),
+        source=SourceInfo(entrypoint=GENERATED_AGENT_ENTRYPOINT, anatomy_ref=AGENT_ANATOMY_REF),
+    )
+
+
+def test_entrypoint_binds_saved_studio_persona_after_save(
+    fake_strands, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A real container boot dispatches an invoke through the saved Studio persona.
+
+    Unlike a registration-only check, this proves the point of injection
+    end-to-end: the actual sandbox process (``_build_app()``, including the
+    single-agent guard middleware and ``_maybe_register_injected_manifest``)
+    invokes the saved ``role`` / ``system_prompt`` even though the request body
+    carries neither.
+    """
+    from agent_platform.registry import get_registry
+    from agent_platform.studio.models import AgentDefinition
+    from agent_platform.studio.registration import build_studio_agent_manifest
+
+    manifest = build_studio_agent_manifest(
+        AgentDefinition(
+            name="Contract Auditor",
+            role="Audits vendor contracts",
+            tags=["legal", "contracts"],
+            system_prompt="Always cite the clause number.",
+        )
+    )
+    try:
+        app = _boot_with_injected_manifest(monkeypatch, tmp_path, manifest)
+        client = TestClient(app)
+
+        response = client.post(
+            f"/_agents/{manifest.id}/invoke",
+            json={"agent_name": manifest.name, "message": "Review this MSA."},
+        )
+        assert response.status_code == 200, response.text
+
+        prompt = fake_strands.last_system_prompt
+        assert "Role: Audits vendor contracts" in prompt
+        assert "Always cite the clause number." in prompt
+    finally:
+        get_registry().unregister(manifest.id)
+        get_registry.cache_clear()
+
+
+def test_entrypoint_binds_saved_generated_persona_after_save(
+    fake_strands, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Producer parity: an agentic-generated-style manifest binds through a real
+    container boot too.
+
+    Mirrors the Studio-producer test above but with a manifest shaped like
+    ``build_agent_manifest``'s output, proving the container-boot binding is
+    entrypoint-level, not Studio-specific.
+    """
+    from agent_platform.registry import get_registry
+
+    manifest = _generated_style_manifest("Contract Auditor", "Audits vendor contracts", ["legal", "contracts"])
+    try:
+        app = _boot_with_injected_manifest(monkeypatch, tmp_path, manifest)
+        client = TestClient(app)
+
+        response = client.post(
+            f"/_agents/{manifest.id}/invoke",
+            json={"agent_name": manifest.name, "message": "Review this MSA."},
+        )
+        assert response.status_code == 200, response.text
+
+        # Exact "Role:"/"Skills:"/"Expertise:" labels are a deliberate choice, not an
+        # oversight: they match the sibling assertions in
+        # test_stage2_binding_after_save.py (e.g.
+        # test_pipeline_stage2_binds_saved_persona_after_save), which pin the same
+        # build_system_prompt label lines. Kept consistent rather than softened here
+        # so a label/ordering regression is caught the same way on every Stage-2 path.
+        prompt = fake_strands.last_system_prompt
+        assert "Role: Audits vendor contracts" in prompt
+        assert "Skills: legal, contracts" in prompt
+        assert "Expertise: agentic_team_provisioning" in prompt
+    finally:
+        get_registry().unregister(manifest.id)
+        get_registry.cache_clear()
