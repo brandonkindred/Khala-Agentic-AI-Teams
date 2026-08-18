@@ -635,6 +635,26 @@ def test_coerce_finding_carries_through_pre_existing_tag() -> None:
     ]
 
 
+def test_coerce_finding_carries_through_omission_tag() -> None:
+    """The model's optional omission tag (the positive signal for "this
+    change should have added or modified file X but didn't", distinct from
+    pre_existing) survives conversion, tolerates string encodings, and
+    defaults False when absent -- mirrors
+    test_coerce_finding_carries_through_pre_existing_tag."""
+    tagged_true = _coerce_finding({"category": "side-effects", "description": "d1", "omission": True})
+    tagged_str = _coerce_finding({"category": "side-effects", "description": "d2", "omission": "true"})
+    tagged_false_str = _coerce_finding(
+        {"category": "side-effects", "description": "d3", "omission": "false"}
+    )
+    untagged = _coerce_finding({"category": "side-effects", "description": "d4"})
+    assert [f.omission for f in (tagged_true, tagged_str, tagged_false_str, untagged)] == [
+        True,
+        True,
+        False,
+        False,
+    ]
+
+
 @pytest.mark.parametrize(
     "item",
     [
@@ -964,6 +984,37 @@ def test_finds_and_returns_new_findings() -> None:
     assert len(result) == 1
     assert result[0].category == "side-effects"
     assert "app/caller.py" in result[0].description
+
+
+def test_finds_and_returns_new_findings_tags_omission() -> None:
+    """End-to-end: a finding the model tags omission=true carries that tag
+    all the way through to the returned CodeReviewIssue -- mirrors
+    test_finds_and_returns_new_findings, proving
+    SideEffectImpactFindingLLM.omission actually reaches
+    CodeReviewIssue.omission via _coerce_finding, not just the schema."""
+
+    class _FindingsClient(SubmissionPassTwoCallClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _SIDE_EFFECT_PASS_ANCHOR in self.latest_reasoning_prompt():
+                return {
+                    "findings": [
+                        {
+                            "severity": "high",
+                            "category": "documentation",
+                            "file_path": "app/main.py",
+                            "description": "the task required updating README.md but it wasn't",
+                            "suggestion": "update README.md to document bar()'s new behavior",
+                            "pre_existing": False,
+                            "omission": True,
+                        }
+                    ]
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = find_side_effect_impact_issues(_FindingsClient(), _input())
+    assert len(result) == 1
+    assert result[0].omission is True
+    assert result[0].pre_existing is False
 
 
 @pytest.mark.parametrize(

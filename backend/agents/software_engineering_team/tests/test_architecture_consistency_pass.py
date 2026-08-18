@@ -454,6 +454,27 @@ def test_coerce_finding_carries_through_pre_existing_tag() -> None:
     ]
 
 
+def test_coerce_finding_carries_through_omission_tag() -> None:
+    """The model's optional omission tag (the positive signal for "this
+    change should have added or modified file X but didn't", distinct from
+    pre_existing) survives conversion, tolerates string encodings, and
+    defaults False when absent -- mirrors
+    test_coerce_finding_carries_through_pre_existing_tag and
+    side_effect_impact_pass._coerce_finding's identical convention."""
+    tagged_true = _coerce_finding({"category": "architecture", "description": "d1", "omission": True})
+    tagged_str = _coerce_finding({"category": "architecture", "description": "d2", "omission": "true"})
+    tagged_false_str = _coerce_finding(
+        {"category": "refactor", "description": "d3", "omission": "false"}
+    )
+    untagged = _coerce_finding({"category": "refactor", "description": "d4"})
+    assert [f.omission for f in (tagged_true, tagged_str, tagged_false_str, untagged)] == [
+        True,
+        True,
+        False,
+        False,
+    ]
+
+
 def test_coerce_finding_coerces_line_and_unknown_severity() -> None:
     finding = _coerce_finding(
         {
@@ -697,6 +718,39 @@ def test_finds_and_returns_new_findings_tags_pre_existing() -> None:
     )
     assert len(result) == 1
     assert result[0].pre_existing is True
+
+
+def test_finds_and_returns_new_findings_tags_omission() -> None:
+    """End-to-end: a finding the model tags omission=true carries that tag
+    all the way through to the returned CodeReviewIssue -- mirrors
+    test_finds_and_returns_new_findings_tags_pre_existing, proving
+    ArchitectureConsistencyFindingLLM.omission actually reaches
+    CodeReviewIssue.omission via _coerce_finding, not just the schema."""
+
+    class _FindingsClient(SubmissionPassTwoCallClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in self.latest_reasoning_prompt():
+                return {
+                    "findings": [
+                        {
+                            "severity": "medium",
+                            "category": "architecture",
+                            "file_path": "app/main.py",
+                            "description": "the change should have added a migration module",
+                            "suggestion": "add app/migrations/xyz.py",
+                            "pre_existing": False,
+                            "omission": True,
+                        }
+                    ]
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = find_architecture_and_redundancy_issues(
+        _FindingsClient(), _input(architecture=_arch())
+    )
+    assert len(result) == 1
+    assert result[0].omission is True
+    assert result[0].pre_existing is False
 
 
 def test_finds_and_returns_new_findings_with_pre_numbered_input() -> None:

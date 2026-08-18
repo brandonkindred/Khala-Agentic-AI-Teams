@@ -167,6 +167,26 @@ def test_numeric_pre_existing_is_rejected_by_strict_bool() -> None:
         ChunkReviewIssueLLM.model_validate({"description": "d", "pre_existing": 1})
 
 
+def test_numeric_omission_is_rejected_by_strict_bool() -> None:
+    """``omission`` is ``StrictBool`` for the same reason as ``pre_existing``
+    (see ``test_numeric_pre_existing_is_rejected_by_strict_bool``): a stray
+    numeric value must never be silently coerced into an affirmative flag."""
+    with pytest.raises(ValidationError):
+        ChunkReviewIssueLLM.model_validate({"description": "d", "omission": 1})
+
+
+def test_omission_flag_round_trips_true() -> None:
+    """A model-set ``omission: true`` survives schema validation unchanged,
+    independent of ``pre_existing`` (an omission always pairs with
+    ``pre_existing: false``, but the schema itself does not enforce that --
+    it only carries whatever the model actually reports)."""
+    issue = ChunkReviewIssueLLM.model_validate(
+        {"description": "d", "omission": True, "pre_existing": False}
+    )
+    assert issue.omission is True
+    assert issue.pre_existing is False
+
+
 def test_empty_top_level_response_is_rejected() -> None:
     """An empty top-level response (a fully truncated reply) is rejected: all
     four fields are required, so this is a schema-validation failure rather
@@ -337,6 +357,7 @@ def test_issue_defaults_match_current_hand_rolled_fallbacks() -> None:
     assert issue.description == ""
     assert issue.suggestion == ""
     assert issue.pre_existing is False
+    assert issue.omission is False
 
 
 def test_json_schema_renders_for_generate_structured() -> None:

@@ -437,6 +437,20 @@ class CodeReviewIssue(BaseModel):
         "deterministically — see api/pr_review.py::_partition_review_issues for why a missing "
         "file/module is deliberately NOT treated as pre-existing). Default False.",
     )
+    omission: bool = Field(
+        default=False,
+        description="True when this issue is a required add/modify the change under review did "
+        "NOT make — e.g. the task/spec called for a new or updated file/module and the change "
+        "left it out — as distinct from `pre_existing` (a bug in code the change did not touch). "
+        "An omission always pairs with `pre_existing=False`: it stays in scope for this change, "
+        "it just was not delivered. Populated by chunk-review and auxiliary-pass coercion from "
+        "the model's own tag (see `chunking._issues_from_chunk_output`, "
+        "`architecture_consistency_pass._coerce_finding`, "
+        "`side_effect_impact_pass._coerce_finding`); not yet consumed by any routing/posting "
+        "logic — a future change to api/pr_review.py::_partition_review_issues is expected to "
+        "gate on this flag so an omission stays in-scope even when its file is outside the "
+        "diff. Default False.",
+    )
 
 
 # Public: the canonical severity vocabulary for this engine. Other agents that
@@ -507,6 +521,13 @@ class ChunkReviewIssueLLM(BaseModel):
     ``StrictBool`` keeps that policy intact by rejecting non-bool input
     outright (driving ``complete_validated``'s corrective retry) instead of
     silently coercing it before it ever reaches that downstream check.
+
+    ``omission`` is likewise ``StrictBool``, for the identical rationale.
+
+    Postconditions:
+        - ``omission`` defaults to ``False`` when the model omits the field
+          from its reply — an absent field is never misread as an
+          affirmative omission signal.
     """
 
     severity: CodeReviewIssueSeverity = Field(
@@ -554,6 +575,14 @@ class ChunkReviewIssueLLM(BaseModel):
         description="True when this issue is a bug in code the change under review did NOT add or "
         "modify — a pre-existing defect in unrelated, unchanged code — rather than a defect the "
         "change introduced. Default False.",
+    )
+    omission: StrictBool = Field(
+        default=False,
+        description="True when this issue is a required add/modify the change did NOT make — "
+        "e.g. the task/spec required a new or updated file/module and the change omitted it — as "
+        "opposed to a bug in code the change touched or an unrelated pre-existing defect. "
+        "Distinct from `pre_existing`: an omission always pairs with `pre_existing: false` (it is "
+        "in-scope for this change, just not delivered), never `pre_existing: true`. Default False.",
     )
 
 
@@ -698,6 +727,15 @@ class ArchitectureConsistencyFindingLLM(BaseModel):
         "canonical wording). Per the merged prompt's Part 1 tagging guidance, that means the "
         "specific construct the finding is about looks untouched by this submission's actual work.",
     )
+    omission: StrictBool = Field(
+        default=False,
+        description="True when this finding is actually a required add/modify the change did NOT "
+        "make (mirrors CodeReviewIssue.omission's canonical wording), rather than an architecture "
+        "contradiction or cross-codebase redundancy in existing content — expected to be rare for "
+        "this pass's two categories, but the field exists for cross-schema consistency with "
+        "ChunkReviewIssueLLM/SideEffectImpactFindingLLM. Always pairs with `pre_existing: false` "
+        "when set. Default False.",
+    )
 
 
 class SideEffectImpactFindingLLM(BaseModel):
@@ -755,6 +793,15 @@ class SideEffectImpactFindingLLM(BaseModel):
         "the change introduced (mirrors CodeReviewIssue.pre_existing's canonical wording). Per "
         "the merged prompt's Part 2 tagging guidance, that means the function(s) the finding is "
         "about look untouched by this submission's actual work.",
+    )
+    omission: StrictBool = Field(
+        default=False,
+        description="True when this finding is actually a required add/modify the change did NOT "
+        "make (mirrors CodeReviewIssue.omission's canonical wording), rather than a caller-impact "
+        "side effect or documentation mismatch in existing content — expected to be rare for this "
+        "pass's two categories, but the field exists for cross-schema consistency with "
+        "ChunkReviewIssueLLM/ArchitectureConsistencyFindingLLM. Always pairs with `pre_existing: "
+        "false` when set. Default False.",
     )
 
 

@@ -509,6 +509,8 @@ def _issues_from_chunk_output(chunk: ReviewChunk, raw_issues: List[dict]) -> Lis
         - ``pre_existing`` reflects the LLM's optional per-issue tag (coerced via
           ``_coerce_bool``); it defaults to False when the field is absent, so a
           reviewer/gate that never emits it is unaffected.
+        - ``omission`` is likewise coerced via ``_coerce_bool`` from the LLM's
+          optional per-issue tag, defaulting to False when absent.
         - An item whose ``suggestion`` is, in its entirety, a no-op phrasing
           (e.g. "No changes needed.") is dropped (see ``is_no_op_suggestion``):
           the reviewer's own suggested fix says there is nothing to do, so it
@@ -549,6 +551,7 @@ def _issues_from_chunk_output(chunk: ReviewChunk, raw_issues: List[dict]) -> Lis
                 description=description,
                 suggestion=suggestion,
                 pre_existing=_coerce_bool(item.get("pre_existing")),
+                omission=_coerce_bool(item.get("omission")),
             )
         )
     return issues

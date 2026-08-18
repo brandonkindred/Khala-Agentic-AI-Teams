@@ -2846,6 +2846,26 @@ def test_pre_existing_tag_is_carried_through_and_defaults_false() -> None:
     assert [i.pre_existing for i in issues] == [True, True, False, False]
 
 
+def test_omission_tag_is_carried_through_and_defaults_false() -> None:
+    """The optional ``omission`` tag (the positive signal for "this change
+    should have added or modified file X but didn't", distinct from
+    ``pre_existing``) survives conversion, tolerates string encodings, and
+    defaults False when absent -- mirrors
+    ``test_pre_existing_tag_is_carried_through_and_defaults_false``."""
+    seg = FileSegment(path="a.py", content="x = 1\ny = 2\nz = 3", total_lines=3)
+    chunk = ReviewChunk(segments=[seg])
+    issues = _issues_from_chunk_output(
+        chunk,
+        [
+            {"description": "tagged bool", "line": 1, "omission": True},
+            {"description": "tagged str", "line": 2, "omission": "true"},
+            {"description": "tagged false str", "line": 3, "omission": "false"},
+            {"description": "untagged", "line": 1},
+        ],
+    )
+    assert [i.omission for i in issues] == [True, True, False, False]
+
+
 _NO_OP_SUGGESTIONS = [
     "No changes needed.",
     "no changes needed",

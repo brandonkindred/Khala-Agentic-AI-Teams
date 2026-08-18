@@ -442,6 +442,9 @@ def _coerce_finding(item: object) -> Optional[CodeReviewIssue]:
           by the PR-review whole-file path to route a finding about code this
           submission did NOT add or modify to a human-review proposal instead
           of a blocking PR comment (see ``CodeReviewIssue.pre_existing``).
+        - ``omission`` is likewise coerced via ``chunking._coerce_bool`` from
+          the model's optional per-finding tag, defaulting to ``False`` when
+          absent (see ``CodeReviewIssue.omission``).
     """
     if not isinstance(item, dict):
         return None
@@ -465,6 +468,7 @@ def _coerce_finding(item: object) -> Optional[CodeReviewIssue]:
         description=description,
         suggestion=suggestion,
         pre_existing=_coerce_bool(item.get("pre_existing")),
+        omission=_coerce_bool(item.get("omission")),
     )
 
 
