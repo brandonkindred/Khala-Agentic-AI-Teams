@@ -864,6 +864,8 @@ def _make_channel_guide(
     """
     if not isinstance(channel, str) or not channel.strip():
         raise ValueError("channel must be a non-empty string")
+    if not re.fullmatch(r"[a-z][a-z0-9_]*", channel):
+        raise ValueError("channel must be a lowercase identifier (e.g. 'website')")
     if not isinstance(description, str) or not description.strip():
         raise ValueError("description must be a non-empty string")
     if not (isinstance(structured_output, type) and issubclass(structured_output, BaseModel)):
