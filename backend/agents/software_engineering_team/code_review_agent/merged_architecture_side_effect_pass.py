@@ -48,7 +48,7 @@ from .prompts import (
     build_merged_architecture_side_effect_reasoning_system_prompt,
 )
 from .repo_reader import RepoReader
-from .side_effect_consolidation import MUTATION_ANALYSIS_ENV
+from .side_effect_consolidation import MUTATION_ANALYSIS_ENV, effective_replaced_content
 from .submission_pass_runner import FileBatch, run_submission_pass
 
 logger = logging.getLogger(__name__)
@@ -159,6 +159,17 @@ def _run_pass(
     Postconditions:
         - Same contract as the public entry, minus the env/profile early
           returns the caller already handled.
+        - Resolves ``mutation_on`` from ``CODE_REVIEW_MUTATION_ANALYSIS``
+          (default on) and passes it to
+          :func:`~code_review_agent.prompts.build_merged_architecture_side_effect_reasoning_system_prompt`,
+          so Part 2's reasoning system prompt includes the mutation-vs-replaced-code
+          contract sub-check only when the toggle is on (and ``side_on`` is
+          True). Each batch's user prompt is built with ``replaced_content``
+          gated through
+          :func:`~code_review_agent.side_effect_consolidation.effective_replaced_content`
+          (``input_data.replaced_content`` when ``mutation_on``, else ``None``):
+          when the toggle is off, the before-image is hidden from the model
+          entirely, never merely passed through with an instruction to ignore it.
         - Delegates the think-then-format ``Agent`` pair and reactive overflow
           bisect recovery to
           :func:`~code_review_agent.submission_pass_runner.run_submission_pass`,
@@ -184,13 +195,6 @@ def _run_pass(
     pre_numbered = side_pass._effective_pre_numbered(input_data, index)
 
     def _build_prompt_for_batch(batch: FileBatch) -> str:
-        # This is the ONLY place this pass reads ``input_data.replaced_content``
-        # (verify: it appears nowhere else in this module) -- when ``mutation_on``
-        # is False the before-image is hidden from the model entirely, not merely
-        # passed through with an instruction to ignore it. ``index``/its tools
-        # (``read_file``, ``list_files``, etc.) are built from ``index.files``
-        # only and never touch ``replaced_content``, so there is no other path
-        # through which it could reach the model regardless of this toggle.
         return _build_prompt(
             index,
             arch_body,
@@ -200,7 +204,7 @@ def _run_pass(
             batch_index=batch.index,
             total_batches=batch.total,
             is_partial=batch.is_partial,
-            replaced_content=input_data.replaced_content if mutation_on else None,
+            replaced_content=effective_replaced_content(input_data, mutation_on),
         )
 
     def _parse_batch_reply(raw: str) -> Tuple[List[CodeReviewIssue], List[CodeReviewIssue]]:

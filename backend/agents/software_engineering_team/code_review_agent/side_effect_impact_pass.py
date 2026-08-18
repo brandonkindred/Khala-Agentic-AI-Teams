@@ -81,7 +81,7 @@ from .prompts import (
     build_side_effect_impact_reasoning_system_prompt,
 )
 from .repo_reader import DEFAULT_MAX_LISTED_FILES, DiskRepoReader, RepoReader
-from .side_effect_consolidation import MUTATION_ANALYSIS_ENV
+from .side_effect_consolidation import MUTATION_ANALYSIS_ENV, effective_replaced_content
 from .submission_pass_runner import FileBatch, run_submission_pass
 
 logger = logging.getLogger(__name__)
@@ -90,12 +90,13 @@ logger = logging.getLogger(__name__)
 # disables the pass (see docs/ENV_VARS.md). Any other value (or unset) leaves it enabled.
 _PASS_ENV = "CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS"
 
-# The mutation-vs-replaced-code contract sub-check's toggle name lives in
-# ``side_effect_consolidation`` -- despite the name, that module is constants-only
-# (env-var name strings plus pure finding-grouping logic; no LLM/tool/Agent
-# dependencies of its own -- see its module docstring), not a tail pass. See
-# ``MUTATION_ANALYSIS_ENV``'s docstring there for why it lives there: mapping.py's
-# cache fingerprint must be able to import it without pulling in a tail-pass module.
+# The mutation-vs-replaced-code contract sub-check's toggle name (and the shared
+# ``effective_replaced_content`` gating helper) live in ``side_effect_consolidation``
+# -- despite the name, that module has no LLM/tool/Agent dependencies of its own
+# (env-var name strings, pure finding-grouping logic, and this one pure helper --
+# see its module docstring), not a tail pass. See ``MUTATION_ANALYSIS_ENV``'s
+# docstring there for why it lives there: mapping.py's cache fingerprint must be
+# able to import it without pulling in a tail-pass module.
 
 _ALLOWED_CATEGORIES = frozenset({"side-effects", "documentation"})
 _ALLOWED_SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
@@ -708,6 +709,16 @@ def _run_pass(
     Postconditions:
         - Same contract as :func:`find_side_effect_impact_issues`, minus the
           env-toggle/profile early returns the caller already handled.
+        - Resolves ``mutation_on`` from ``CODE_REVIEW_MUTATION_ANALYSIS``
+          (default on) and passes it to
+          :func:`~code_review_agent.prompts.build_side_effect_impact_reasoning_system_prompt`,
+          so the reasoning system prompt includes the mutation-vs-replaced-code
+          contract sub-check only when the toggle is on. Each batch's user
+          prompt is built with ``replaced_content`` gated through
+          :func:`~code_review_agent.side_effect_consolidation.effective_replaced_content`
+          (``input_data.replaced_content`` when ``mutation_on``, else ``None``):
+          when the toggle is off, the before-image is hidden from the model
+          entirely, never merely passed through with an instruction to ignore it.
         - Delegates ``Agent`` construction and reactive overflow bisect recovery
           to
           :func:`~code_review_agent.submission_pass_runner.run_submission_pass`,
@@ -728,20 +739,13 @@ def _run_pass(
     mutation_on = env_flag_enabled(MUTATION_ANALYSIS_ENV)
 
     def _build_prompt_for_batch(batch: FileBatch) -> str:
-        # This is the ONLY place this pass reads ``input_data.replaced_content``
-        # (verify: it appears nowhere else in this module) -- when ``mutation_on``
-        # is False the before-image is hidden from the model entirely, not merely
-        # passed through with an instruction to ignore it. ``index``/its tools
-        # (``read_file``, ``list_files``, etc.) are built from ``index.files``
-        # only and never touch ``replaced_content``, so there is no other path
-        # through which it could reach the model regardless of this toggle.
         return _build_prompt(
             index,
             content_items=batch.items,
             batch_index=batch.index,
             total_batches=batch.total,
             is_partial=batch.is_partial,
-            replaced_content=input_data.replaced_content if mutation_on else None,
+            replaced_content=effective_replaced_content(input_data, mutation_on),
         )
 
     def _parse_batch_reply(raw: str) -> List[CodeReviewIssue]:
