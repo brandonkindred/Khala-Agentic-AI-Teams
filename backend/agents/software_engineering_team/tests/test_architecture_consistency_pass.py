@@ -461,8 +461,12 @@ def test_coerce_finding_carries_through_omission_tag() -> None:
     defaults False when absent -- mirrors
     test_coerce_finding_carries_through_pre_existing_tag and
     side_effect_impact_pass._coerce_finding's identical convention."""
-    tagged_true = _coerce_finding({"category": "architecture", "description": "d1", "omission": True})
-    tagged_str = _coerce_finding({"category": "architecture", "description": "d2", "omission": "true"})
+    tagged_true = _coerce_finding(
+        {"category": "architecture", "description": "d1", "omission": True}
+    )
+    tagged_str = _coerce_finding(
+        {"category": "architecture", "description": "d2", "omission": "true"}
+    )
     tagged_false_str = _coerce_finding(
         {"category": "refactor", "description": "d3", "omission": "false"}
     )

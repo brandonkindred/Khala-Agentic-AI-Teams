@@ -641,8 +641,12 @@ def test_coerce_finding_carries_through_omission_tag() -> None:
     pre_existing) survives conversion, tolerates string encodings, and
     defaults False when absent -- mirrors
     test_coerce_finding_carries_through_pre_existing_tag."""
-    tagged_true = _coerce_finding({"category": "side-effects", "description": "d1", "omission": True})
-    tagged_str = _coerce_finding({"category": "side-effects", "description": "d2", "omission": "true"})
+    tagged_true = _coerce_finding(
+        {"category": "side-effects", "description": "d1", "omission": True}
+    )
+    tagged_str = _coerce_finding(
+        {"category": "side-effects", "description": "d2", "omission": "true"}
+    )
     tagged_false_str = _coerce_finding(
         {"category": "side-effects", "description": "d3", "omission": "false"}
     )
