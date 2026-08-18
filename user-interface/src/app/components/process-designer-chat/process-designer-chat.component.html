@@ -155,6 +155,27 @@
                   >
                     {{ agent.source === 'registry' ? '✦' : '⚙' }}
                   </span>
+                  @if (agent.source === 'registry') {
+                    <button
+                      mat-icon-button
+                      class="agent-test-btn"
+                      [matTooltip]="testAgentTooltip"
+                      [attr.aria-label]="'Test ' + agent.agent_name"
+                      (click)="onTestAgent(agent, $event)"
+                    >
+                      <mat-icon>play_circle</mat-icon>
+                    </button>
+                  } @else {
+                    <button
+                      mat-icon-button
+                      class="agent-test-btn"
+                      disabled
+                      [matTooltip]="testAgentDisabledTooltip"
+                      [attr.aria-label]="'Test ' + agent.agent_name + ' (unavailable for generated agents)'"
+                    >
+                      <mat-icon>play_circle</mat-icon>
+                    </button>
+                  }
                   <button
                     mat-icon-button
                     class="agent-delete-btn"

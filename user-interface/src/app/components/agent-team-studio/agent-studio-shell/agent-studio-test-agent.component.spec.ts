@@ -3,6 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
+import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
 import { AgentRunnerComponent } from '../agent-console/agent-runner/agent-runner.component';
 import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
 
@@ -17,6 +18,13 @@ class StubAgentRunnerComponent {
   @Output() readonly requestCatalogReturn = new EventEmitter<void>();
 }
 
+/** Stand-in for the catalog: same selector + the one output the Browse-agents
+ *  slide-out wires, so no catalog HTTP fetch runs in these unit tests. */
+@Component({ selector: 'app-agent-catalog', standalone: true, template: '' })
+class StubAgentCatalogComponent {
+  @Output() readonly requestRun = new EventEmitter<string>();
+}
+
 describe('AgentStudioTestAgentComponent', () => {
   let fixture: ComponentFixture<AgentStudioTestAgentComponent>;
   let component: AgentStudioTestAgentComponent;
@@ -28,8 +36,8 @@ describe('AgentStudioTestAgentComponent', () => {
       providers: [AgentStudioStateService],
     })
       .overrideComponent(AgentStudioTestAgentComponent, {
-        remove: { imports: [AgentRunnerComponent] },
-        add: { imports: [StubAgentRunnerComponent] },
+        remove: { imports: [AgentRunnerComponent, AgentCatalogComponent] },
+        add: { imports: [StubAgentRunnerComponent, StubAgentCatalogComponent] },
       })
       .compileComponents();
 
@@ -79,5 +87,69 @@ describe('AgentStudioTestAgentComponent', () => {
     const runner = fixture.debugElement.query(By.directive(StubAgentRunnerComponent));
     (runner.componentInstance as StubAgentRunnerComponent).requestCatalogReturn.emit();
     expect(state.activeStage()).toBe(0);
+  });
+
+  describe('Browse agents slide-out', () => {
+    beforeEach(() => {
+      state.setRegistryAgentId('blogging.planner');
+      fixture.detectChanges();
+    });
+
+    it('keeps the slide-out closed until requested', () => {
+      expect(component.browseOpen()).toBe(false);
+      expect(fixture.nativeElement.querySelector('app-agent-catalog')).toBeNull();
+    });
+
+    it('opens and closes the slide-out via its buttons', () => {
+      fixture.nativeElement.querySelector('.studio-test__browse-btn').click();
+      fixture.detectChanges();
+      expect(component.browseOpen()).toBe(true);
+      expect(fixture.nativeElement.querySelector('app-agent-catalog')).toBeTruthy();
+
+      fixture.nativeElement.querySelector('.studio-test__browse-head button').click();
+      fixture.detectChanges();
+      expect(component.browseOpen()).toBe(false);
+      expect(fixture.nativeElement.querySelector('app-agent-catalog')).toBeNull();
+    });
+
+    it('closes the slide-out when the scrim is clicked', () => {
+      component.openBrowse();
+      fixture.detectChanges();
+      fixture.nativeElement.querySelector('.studio-test__scrim').click();
+      fixture.detectChanges();
+      expect(component.browseOpen()).toBe(false);
+    });
+
+    it('closes the slide-out on Escape', () => {
+      component.openBrowse();
+      fixture.detectChanges();
+      const panel = fixture.nativeElement.querySelector('.studio-test__browse-panel');
+      panel.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      fixture.detectChanges();
+      expect(component.browseOpen()).toBe(false);
+    });
+
+    it('marks the panel as a focus-trapping modal', () => {
+      component.openBrowse();
+      fixture.detectChanges();
+      const panel = fixture.nativeElement.querySelector('.studio-test__browse-panel');
+      expect(panel.getAttribute('aria-modal')).toBe('true');
+      expect(panel.getAttribute('role')).toBe('dialog');
+      expect(panel.hasAttribute('cdkTrapFocus')).toBe(true);
+    });
+
+    it('selecting an agent re-points the handoff id and closes the slide-out', () => {
+      component.openBrowse();
+      fixture.detectChanges();
+      const catalog = fixture.debugElement.query(By.directive(StubAgentCatalogComponent));
+      (catalog.componentInstance as StubAgentCatalogComponent).requestRun.emit('soc2.auditor');
+      fixture.detectChanges();
+
+      expect(state.registryAgentId()).toBe('soc2.auditor');
+      expect(component.browseOpen()).toBe(false);
+      expect(fixture.nativeElement.querySelector('.studio-test__agent').textContent).toContain(
+        'soc2.auditor',
+      );
+    });
   });
 });
