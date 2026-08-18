@@ -5,6 +5,7 @@ This is phase 5 of the provisioning workflow.
 """
 
 import logging
+import re
 from typing import Callable, Dict, List, Optional
 
 from llm_service import DummyLLMClient, LLMNotConfiguredError, get_client
@@ -34,6 +35,10 @@ _TOOL_DOC_SYSTEM = (
     "You are the tool documentation writer. Write a short, accurate getting-started "
     "blurb for an AI agent that just received credentials for the named tool."
 )
+# `credentials.extra` keys are interpolated into a `{key}` replacement target (not
+# sanitized like the values are — sanitize_prompt_var deliberately allows braces).
+# Restrict to safe identifiers so a stray brace/special char can't malform the target.
+_SAFE_EXTRA_KEY = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 def run_documentation(
@@ -215,6 +220,13 @@ def _generate_getting_started(
                     "{connection_string}", sanitize_prompt_var(credentials.connection_string)
                 )
             for key, value in credentials.extra.items():
+                if not _SAFE_EXTRA_KEY.match(key):
+                    logger.warning(
+                        "Skipping unsafe extra key %r for %s getting-started template",
+                        key,
+                        tool_name,
+                    )
+                    continue
                 text = text.replace(f"{{{key}}}", sanitize_prompt_var(str(value)))
 
         return text
