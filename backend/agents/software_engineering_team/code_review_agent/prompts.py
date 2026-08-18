@@ -391,13 +391,32 @@ Return a single JSON object with exactly two keys — one per part above. Never 
 An empty list for either key (or both) is a valid and expected outcome when that part finds nothing — it is never a failure. Return `{"architecture_findings": [], "side_effect_findings": []}` when neither part finds anything. Do not add any key other than "architecture_findings"/"side_effect_findings".
 """
 
+
+def _build_merged_architecture_side_effect_reasoning_system_prompt(side_effect_body: str) -> str:
+    """Assemble the "both halves on" merged reasoning system prompt.
+
+    Single source of truth for that shape, so
+    ``MERGED_ARCHITECTURE_SIDE_EFFECT_REASONING_SYSTEM_PROMPT`` (the
+    mutation-on case) and the mutation-off case in
+    :func:`build_merged_architecture_side_effect_reasoning_system_prompt` can
+    never drift apart -- only ``side_effect_body`` differs between them.
+
+    Preconditions: none.
+    Postconditions: returns the intro, both part headers/bodies, and the
+        shared prose-instruction closer, in that order.
+    """
+    return (
+        _MERGED_ARCHITECTURE_SIDE_EFFECT_INTRO
+        + "\n\n## Part 1: Architecture Consistency & Cross-Codebase Redundancy\n\n"
+        + _ARCHITECTURE_CONSISTENCY_BODY
+        + "\n\n## Part 2: Side-Effect / Blast-Radius Impact\n\n"
+        + side_effect_body
+        + _SUBMISSION_PASS_PROSE_INSTRUCTION
+    )
+
+
 MERGED_ARCHITECTURE_SIDE_EFFECT_REASONING_SYSTEM_PROMPT = (
-    _MERGED_ARCHITECTURE_SIDE_EFFECT_INTRO
-    + "\n\n## Part 1: Architecture Consistency & Cross-Codebase Redundancy\n\n"
-    + _ARCHITECTURE_CONSISTENCY_BODY
-    + "\n\n## Part 2: Side-Effect / Blast-Radius Impact\n\n"
-    + _SIDE_EFFECT_IMPACT_BODY
-    + _SUBMISSION_PASS_PROSE_INSTRUCTION
+    _build_merged_architecture_side_effect_reasoning_system_prompt(_SIDE_EFFECT_IMPACT_BODY)
 )
 MERGED_ARCHITECTURE_SIDE_EFFECT_FORMATTING_INSTRUCTIONS = (
     _MERGED_ARCHITECTURE_SIDE_EFFECT_OUTPUT_FORMAT + JSON_OUTPUT_INSTRUCTION
@@ -428,14 +447,7 @@ def build_merged_architecture_side_effect_reasoning_system_prompt(
     if arch_on and side_on:
         if mutation_on:
             return MERGED_ARCHITECTURE_SIDE_EFFECT_REASONING_SYSTEM_PROMPT
-        return (
-            _MERGED_ARCHITECTURE_SIDE_EFFECT_INTRO
-            + "\n\n## Part 1: Architecture Consistency & Cross-Codebase Redundancy\n\n"
-            + _ARCHITECTURE_CONSISTENCY_BODY
-            + "\n\n## Part 2: Side-Effect / Blast-Radius Impact\n\n"
-            + side_effect_body
-            + _SUBMISSION_PASS_PROSE_INSTRUCTION
-        )
+        return _build_merged_architecture_side_effect_reasoning_system_prompt(side_effect_body)
 
     parts: list[str] = []
     if arch_on:
