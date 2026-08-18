@@ -15,13 +15,30 @@ from tests.submission_pass_two_call_client import (
     MutationFindingClient,
     SubmissionPassTwoCallClient,
     mutation_finding_payload,
+    wire_run_agent_via_reasoning_for_test_clients,
     wire_run_agent_via_reasoning_with_raw,
 )
 
 from llm_service.clients.dummy import DummyLLMClient
 from shared.dev_models.models import SystemArchitecture
 
-pytest_plugins = ["tests.submission_pass_two_call_client"]
+
+@pytest.fixture(autouse=True)
+def _wire_submission_pass_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route the submission-pass runner's ``run_agent_via_reasoning`` through the
+    two-call test stub for every test in this module.
+
+    File-scoped (a plain module-level fixture, not a ``pytest_plugins``
+    registration): a fixture defined directly in a test module only applies to
+    that module's own tests, so this cannot leak into sibling test files under
+    pytest-xdist the way a ``pytest_plugins`` registration would (each xdist
+    worker collects the whole test tree, so a session-wide plugin's autouse
+    fixtures would otherwise apply to every test the worker runs).
+    """
+    import code_review_agent.submission_pass_runner as runner_mod
+
+    wire_run_agent_via_reasoning_for_test_clients(monkeypatch, runner_mod)
+
 
 _MERGED_PASS_ANCHOR = "Merged submission pass:"
 

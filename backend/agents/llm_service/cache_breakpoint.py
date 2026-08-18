@@ -43,6 +43,23 @@ class CacheBreakpoint:
           instances with equal ``text`` compare equal and hash equal
           (inherited dataclass behavior), so callers may deduplicate or use
           a ``CacheBreakpoint`` as a dict/set key.
+        - Duck-types as a single-key ``{"text": ...}`` mapping (``__contains__``/
+          ``__getitem__``, below) so a ``CacheBreakpoint`` placed directly in a
+          Strands ``Agent``'s ``system_prompt=`` list — a plain
+          ``list[SystemContentBlock]`` of dict-shaped blocks — survives
+          Strands' own ``split_system_prompt`` (called both at ``Agent``
+          construction and again by the event loop on every turn), which
+          does ``block["text"] for block in system_prompt if "text" in
+          block`` and returns the list unchanged as the second element of its
+          result. Without this, a bare dataclass instance in that list raises
+          ``TypeError`` (``"text" in block`` fails for a non-``Mapping``).
+          This is additive only: every existing consumer of
+          ``CacheBreakpoint`` (``strands_adapter._system_prompt_content_segments``,
+          ``clients.claude._render_cache_aware_parts``) checks
+          ``isinstance(x, CacheBreakpoint)`` before falling back to dict-like
+          access, so this protocol never changes their behavior — it only
+          makes the marker itself survive Strands' own internal list
+          processing before those consumers ever see it.
 
     ``text`` must be the *exact* prefix content, byte-for-byte, that the
     caller intends the provider to cache — this module does not normalize,
@@ -64,3 +81,22 @@ class CacheBreakpoint:
         """
         if not isinstance(self.text, str) or not self.text:
             raise ValueError("CacheBreakpoint.text must be a non-empty string")
+
+    def __contains__(self, key: object) -> bool:
+        """``"text" in breakpoint`` — the only key this marker exposes.
+
+        Preconditions: none.
+        Postconditions: returns ``key == "text"``; never raises.
+        """
+        return key == "text"
+
+    def __getitem__(self, key: str) -> str:
+        """``breakpoint["text"]`` — the only key this marker exposes.
+
+        Preconditions: ``key`` should be ``"text"`` (see ``__contains__``).
+        Postconditions: returns ``self.text`` for ``key == "text"``; raises
+            ``KeyError`` for any other key.
+        """
+        if key == "text":
+            return self.text
+        raise KeyError(key)

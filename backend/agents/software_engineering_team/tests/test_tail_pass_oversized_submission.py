@@ -24,10 +24,29 @@ from code_review_agent.merged_architecture_side_effect_pass import (
     find_architecture_and_side_effect_issues,
 )
 from code_review_agent.models import CodeReviewInput, CodeReviewIssue
-from tests.submission_pass_two_call_client import SubmissionPassTwoCallClient
+from tests.submission_pass_two_call_client import (
+    SubmissionPassTwoCallClient,
+    wire_run_agent_via_reasoning_for_test_clients,
+)
 from tests.test_false_positive_filter import _SimulatesFileReadToolCall
 
-pytest_plugins = ["tests.submission_pass_two_call_client"]
+
+@pytest.fixture(autouse=True)
+def _wire_submission_pass_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route the submission-pass runner's ``run_agent_via_reasoning`` through the
+    two-call test stub for every test in this module.
+
+    File-scoped (a plain module-level fixture, not a ``pytest_plugins``
+    registration): a fixture defined directly in a test module only applies to
+    that module's own tests, so this cannot leak into sibling test files under
+    pytest-xdist the way a ``pytest_plugins`` registration would (each xdist
+    worker collects the whole test tree, so a session-wide plugin's autouse
+    fixtures would otherwise apply to every test the worker runs).
+    """
+    import code_review_agent.submission_pass_runner as runner_mod
+
+    wire_run_agent_via_reasoning_for_test_clients(monkeypatch, runner_mod)
+
 
 _MERGED_PASS_ANCHOR = "Merged submission pass:"
 
