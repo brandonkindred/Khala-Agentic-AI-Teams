@@ -64,6 +64,10 @@ def build_fan_out_fan_in(
     node_timeout:
         Per-node timeout in seconds.
 
+    Preconditions:
+        *agents* is non-empty (enforced by the delegated
+        :func:`wire_fan_out_fan_in`, which raises ``AssertionError`` otherwise).
+
     Returns
     -------
     Graph

@@ -49,6 +49,19 @@ def test_build_fan_out_fan_in_accepts_custom_graph_id_and_timeouts() -> None:
         node_timeout=10.0,
     )
     assert isinstance(graph, Graph)
+    assert graph.id == "custom_graph"
+    assert graph.execution_timeout == 30.0
+    assert graph.node_timeout == 10.0
+
+
+def test_build_fan_out_fan_in_defaults_graph_id_and_timeouts() -> None:
+    graph = build_fan_out_fan_in(
+        agents=[("a", _agent("a"))],
+        compositor=("comp", _agent("comp")),
+    )
+    assert graph.id == "fan_out_fan_in"
+    assert graph.execution_timeout == 600.0
+    assert graph.node_timeout == 180.0
 
 
 def test_wire_fan_out_fan_in_wires_onto_open_builder() -> None:
