@@ -17,27 +17,11 @@ from llm_service.interface import (
     LLMTemporaryError,
     LLMTruncatedError,
 )
+from llm_service.tests._fakes import _FakeStreamCtx, _text_message
 
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
-
-
-class _FakeStreamCtx:
-    def __init__(self, message=None, exc=None):
-        self._message = message
-        self._exc = exc
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_a):
-        return False
-
-    def get_final_message(self):
-        if self._exc is not None:
-            raise self._exc
-        return self._message
 
 
 class _FakeMessages:
@@ -54,27 +38,6 @@ class _FakeMessages:
 class _FakeClient:
     def __init__(self, ctx, capture):
         self.messages = _FakeMessages(ctx, capture)
-
-
-def _text_message(
-    text,
-    *,
-    stop_reason="end_turn",
-    input_tokens=11,
-    output_tokens=7,
-    cache_read_input_tokens=None,
-    cache_creation_input_tokens=None,
-):
-    usage_kwargs = {"input_tokens": input_tokens, "output_tokens": output_tokens}
-    if cache_read_input_tokens is not None:
-        usage_kwargs["cache_read_input_tokens"] = cache_read_input_tokens
-    if cache_creation_input_tokens is not None:
-        usage_kwargs["cache_creation_input_tokens"] = cache_creation_input_tokens
-    return SimpleNamespace(
-        content=[SimpleNamespace(type="text", text=text)],
-        stop_reason=stop_reason,
-        usage=SimpleNamespace(**usage_kwargs),
-    )
 
 
 def _tool_message(name, tool_input, *, tool_id="toolu_1"):

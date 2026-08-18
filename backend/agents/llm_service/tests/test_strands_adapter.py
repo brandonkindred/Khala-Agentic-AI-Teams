@@ -26,6 +26,7 @@ from llm_service.strands_adapter import (
 from llm_service.strands_adapter import (
     _get_strands_model as get_strands_model,
 )
+from llm_service.tests._fakes import _drain
 
 
 @pytest.fixture(autouse=True)
@@ -96,18 +97,6 @@ class _RecordingClient(LLMClient):
         }
         self.chat_calls.append(call)
         return self.response
-
-
-def _drain(gen) -> List[Dict[str, Any]]:
-    """Drain a Strands async stream into a list for easy assertions."""
-
-    async def _run() -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
-        async for event in gen:
-            out.append(event)
-        return out
-
-    return asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------
