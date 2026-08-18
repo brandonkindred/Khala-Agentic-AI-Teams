@@ -1,7 +1,7 @@
 """Construction tests for the branding Strands graphs + agent factories.
 
-These exercise the graph builders (``graphs/*``), the ``build_agent`` / ``build_compositor``
-helpers and phase-order utilities (``graphs/shared``), and — transitively, since building the
+These exercise the graph builders (``graphs/*``), the ``build_agent`` helper and
+phase-order utilities (``graphs/shared``), and — transitively, since building the
 graphs instantiates every node — the ~35 agent factories in ``agents.py``. They
 run under ``LLM_PROVIDER=dummy`` (no real LLM, no Postgres): construction resolves
 a dummy Strands model and never invokes it.
@@ -21,11 +21,9 @@ from branding_team.graphs.phase3_visual import build_phase3_graph
 from branding_team.graphs.phase4_channel import build_phase4_graph
 from branding_team.graphs.phase5_governance import build_phase5_graph
 from branding_team.graphs.shared import (
-    COMPOSITOR_AGENT_KEY,
     PHASE_ORDER,
     PHASE_TITLES,
     build_agent,
-    build_compositor,
     phase_agent_key,
     phase_index,
     phase_order_text,
@@ -40,7 +38,6 @@ from branding_team.graphs.top_level import (
 from branding_team.models import (
     BrandingMission,
     BrandPhase,
-    VisualIdentityOutput,
 )
 from branding_team.tests.conftest import make_mission
 
@@ -89,7 +86,10 @@ def test_build_phase3_graph_wires_diverge_and_fan_out() -> None:
     sequencing cannot drive the moodboard conceptualists. There is no
     intermediate CreativeDirector collector node — the three conceptualists
     fan directly into converge_decider, the same shape as Phase 1's fan-in
-    into positioning_synthesizer.
+    into positioning_synthesizer. The seven post-converge specialists are
+    terminal nodes with no compositor — their typed fragments are merged into
+    ``VisualIdentityOutput`` in Python by the orchestrator's Phase-3
+    ``merge_fn``, not by an LLM fan-in node.
     """
     from branding_team.graphs.phase3_visual import (
         _PHASE3_CONCEPTUALIST_VARIANTS,
@@ -111,9 +111,11 @@ def test_build_phase3_graph_wires_diverge_and_fan_out() -> None:
     for conceptualist in conceptualists:
         assert (conceptualist, "converge_decider") in edges
 
+    assert "visual_compositor" not in node_ids
+    edge_sources = {frm for frm, _to in edges}
     for specialist in _PHASE3_SPECIALIST_FACTORIES:
         assert ("converge_decider", specialist) in edges
-        assert (specialist, "visual_compositor") in edges
+        assert specialist not in edge_sources, f"{specialist} must be terminal"
 
 
 def test_make_moodboard_conceptualist_rejects_blank_variant() -> None:
@@ -266,46 +268,15 @@ def test_phase5_prompts_drop_redundant_json_reminder() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Compositor (fan-in join) nodes — migrated to structured_output=
-# ---------------------------------------------------------------------------
-
-# The remaining phase-3 compositor is an inline ``build_agent()`` call in the
-# graph file (not an ``agents.py`` factory), so it is reached through the
-# built graph's node executor rather than a factory. It carries its own
-# ``structured_output=`` model instead of a prose "output valid JSON" reminder,
-# which forces Strands' typed tool call and removes the compositor's reliance on
-# the free-text ``_parse_model_from_text`` recovery path. Phase 4 and Phase 5 no
-# longer have a compositor (see ``test_build_phase4_graph_wires_pure_fan_out``
-# and ``test_build_phase5_graph_wires_pure_fan_out``).
-_COMPOSITOR_CASES = [
-    (build_phase3_graph, "visual_compositor", VisualIdentityOutput),
-]
-
-
-@pytest.mark.parametrize(
-    "build_graph,node_id,output_model",
-    _COMPOSITOR_CASES,
-    ids=[node_id for _build, node_id, _model in _COMPOSITOR_CASES],
-)
-def test_compositor_uses_structured_output_and_drops_json_reminder(
-    build_graph, node_id, output_model
-) -> None:
-    """Each fan-in compositor passes ``structured_output=`` and no longer names
-    a raw-JSON output format in its prose — the Pydantic schema is the contract.
-    """
-    graph = build_graph()
-    executor = graph.nodes[node_id].executor
-
-    # The Pydantic schema is wired as the agent's structured-output model
-    # (Strands stores the ``structured_output_model=`` ctor arg here)...
-    assert getattr(executor, "_default_structured_output_model", None) is output_model
-    # ...and the redundant "output valid JSON" prose instruction is gone.
-    assert "valid JSON" not in executor.system_prompt, node_id
-
-
-# ---------------------------------------------------------------------------
 # Top-level builder — each target_phase exercises a different gating branch
 # ---------------------------------------------------------------------------
+
+# No phase has a compositor node anymore — Phase 1's synthesizer, Phase 2's
+# linear chain, and Phase 3/4/5's pure fan-outs are all merged in Python by
+# the orchestrator's per-phase ``merge_fn`` (or, for Phase 1/2, their own
+# terminal/cumulative agent output). See ``test_build_phase3_graph_wires_diverge_and_fan_out``,
+# ``test_build_phase4_graph_wires_pure_fan_out``, and
+# ``test_build_phase5_graph_wires_pure_fan_out``.
 
 
 def test_default_graph_timeout_constants() -> None:
@@ -393,20 +364,6 @@ def test_build_agent_default_agent_key_is_branding() -> None:
     assert _resolved_agent_key(agent) == "branding"
 
 
-def test_build_compositor_pins_compositor_agent_key() -> None:
-    """``build_compositor`` is the one call site that decides the compositor tier;
-    callers cannot override or omit it (no ``agent_key`` parameter is exposed)."""
-    agent = build_compositor(name="a7", system_prompt="assemble")
-    assert isinstance(agent, Agent)
-    assert agent.name == "a7"
-    assert _resolved_agent_key(agent) == COMPOSITOR_AGENT_KEY
-
-
-def test_build_compositor_forwards_description() -> None:
-    agent = build_compositor(name="a8", system_prompt="assemble", description="joins things")
-    assert agent.description == "joins things"
-
-
 # ---------------------------------------------------------------------------
 # Per-phase agent_key tiers (graphs/shared.phase_agent_key + agents.py wiring)
 # ---------------------------------------------------------------------------
@@ -420,9 +377,9 @@ def test_phase_agent_key_derives_from_phase_value() -> None:
     assert phase_agent_key(BrandPhase.GOVERNANCE) == "branding_governance"
 
 
-def test_phase_and_compositor_agent_keys_are_shell_safe() -> None:
+def test_phase_agent_keys_are_shell_safe() -> None:
     """Keys must be valid identifiers so ``LLM_MODEL_<agent_key>`` can be exported."""
-    keys = [phase_agent_key(phase) for phase in PHASE_ORDER] + [COMPOSITOR_AGENT_KEY]
+    keys = [phase_agent_key(phase) for phase in PHASE_ORDER]
     for key in keys:
         assert key.isidentifier(), key
         assert "." not in key
@@ -488,7 +445,6 @@ def test_phase3_factories_use_visual_identity_agent_key() -> None:
     from branding_team.agents import (
         make_color_system_builder,
         make_converge_decider,
-        make_creative_director,
         make_design_system_codifier,
         make_iconography_director,
         make_logo_specifier,
@@ -500,7 +456,6 @@ def test_phase3_factories_use_visual_identity_agent_key() -> None:
 
     expected = phase_agent_key(BrandPhase.VISUAL_IDENTITY)
     for factory in (
-        make_creative_director,
         make_converge_decider,
         make_logo_specifier,
         make_color_system_builder,
@@ -564,17 +519,6 @@ def test_phase5_factories_use_governance_agent_key() -> None:
         make_brand_rules_codifier,
     ):
         assert _resolved_agent_key(factory()) == expected, factory.__name__
-
-
-def test_compositor_nodes_use_compositor_agent_key() -> None:
-    """The remaining phase-terminal join agent uses the cross-phase compositor tier,
-    not its own phase's agent_key. Phases 4 and 5 have no compositor node."""
-    graphs = {
-        "visual_compositor": build_phase3_graph(),
-    }
-    for node_id, graph in graphs.items():
-        compositor_agent = graph.nodes[node_id].executor
-        assert _resolved_agent_key(compositor_agent) == COMPOSITOR_AGENT_KEY, node_id
 
 
 # ---------------------------------------------------------------------------

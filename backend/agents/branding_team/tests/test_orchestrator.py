@@ -49,6 +49,8 @@ from branding_team.models import (
     ChannelGuideline,
     ChannelGuidelineOutput,
     ColorEntry,
+    ColorEntryOutput,
+    ColorPaletteSystemOutput,
     CompetitiveSnapshot,
     CoreValue,
     CoreValueOutput,
@@ -60,6 +62,9 @@ from branding_team.models import (
     ElevatorPitchOutput,
     EvolutionFrameworkOutput,
     GovernanceOutput,
+    IconographyOutput,
+    LogoSuiteOutput,
+    LogoUsageRuleOutput,
     MessagingFrameworkOutput,
     MessagingPillarOutput,
     MoodBoardConcept,
@@ -67,20 +72,29 @@ from branding_team.models import (
     OwnershipOutput,
     PersonaProfileOutput,
     PersonaProfilesOutput,
+    PhotographyVideoOutput,
     PositioningOutput,
     PurposeVisionOutput,
     StrategicCoreOutput,
     TaglineOutput,
     TrainingOnboardingOutput,
     TypographySpec,
+    TypographySpecOutput,
+    TypographySystemOutput,
     VisualIdentityOutput,
+    VoiceToneEntryOutput,
+    VoiceToneOutput,
     WikiEntry,
     WikiEntryOutput,
     WritingGuidelines,
     WritingGuidelinesBody,
     WritingGuidelinesOutput,
 )
-from branding_team.orchestrator import _merge_phase4_fragments, _merge_phase5_fragments
+from branding_team.orchestrator import (
+    _merge_phase3_fragments,
+    _merge_phase4_fragments,
+    _merge_phase5_fragments,
+)
 from branding_team.shared.memoization import phase_input_hash
 from branding_team.shared.phase_output_cache import PhaseOutputCache
 from branding_team.store import BrandVersionAppendConflict
@@ -836,49 +850,13 @@ def test_extract_phase_output_uses_structured_output_when_present() -> None:
     assert output.brand_promise == agent_result.structured_output.brand_promise
 
 
-@pytest.mark.parametrize(
-    "node_id,full_output,model_cls",
-    [
-        ("phase3_visual", _full_visual_identity(), VisualIdentityOutput),
-    ],
-    ids=["phase3_visual"],
-)
-def test_extract_compositor_output_uses_structured_output_not_text_parse(
-    node_id, full_output, model_cls
-) -> None:
-    """The Phase 3 compositor passes ``structured_output=``, so its typed
-    payload lands on ``AgentResult.structured_output`` and extraction
-    consumes it via the structured path — ``_parse_model_from_text`` is never
-    reached. The empty ``message`` proves the result is taken from the
-    structured field, not recovered from any text block. Phase 4 and Phase 5
-    have no compositor (``check_structured_output=False``), so they're
-    excluded here — see ``test_extract_phase_output_merges_every_phase4_fragment``/
-    ``test_extract_phase_output_rejects_incomplete_phase4_fragments`` and
-    ``test_extract_phase_output_merges_every_phase5_fragment``/
-    ``test_extract_phase_output_rejects_incomplete_phase5_fragments``.
-    """
-    agent_result = MagicMock()
-    agent_result.message = {"content": []}
-    agent_result.structured_output = full_output
-
-    node_result = MagicMock()
-    node_result.get_agent_results.return_value = [agent_result]
-
-    mock_result = MagicMock()
-    mock_result.result = {node_id: node_result}
-
-    with patch("branding_team.orchestrator._parse_model_from_text") as mock_parse:
-        output, degraded = BrandingTeamOrchestrator._extract_phase_output(
-            mock_result, node_id, model_cls
-        )
-
-    assert degraded is False
-    assert output == full_output
-    mock_parse.assert_not_called()
-
-
 def _phase1_leaf_node(structured_output) -> MagicMock:
-    """A mock NodeResult for a single Phase 1 fan-out/fan-in leaf agent."""
+    """A mock NodeResult for a single fan-out/fan-in leaf agent.
+
+    Despite the name (it was introduced for Phase 1), this is the shared
+    generic helper reused by every phase's tests below — Phase 2, 4, and 5's
+    fixtures all wrap their fragments with it too, not just Phase 1's.
+    """
     agent_result = MagicMock()
     agent_result.message = {"content": []}
     agent_result.structured_output = structured_output
@@ -1948,6 +1926,316 @@ def test_extract_phase_output_rejects_incomplete_phase5_fragments() -> None:
     assert output == GovernanceOutput()
 
 
+def _phase3_specialist_fragments() -> dict[str, BaseModel]:
+    """The eleven Phase-3 node ids -> the structured_output fragment each emits.
+
+    Three moodboard conceptualists, converge_decider, and seven post-converge
+    specialists -- the full set ``_PHASE3_NODE_MERGE`` requires. Every string
+    field is non-empty and every bounded list meets its schema's min/max, since
+    these are the strict agent-facing "Output" twins (see models.py module
+    docstring) which reject blanks.
+    """
+    return {
+        "MoodBoardConceptualist_Editorial": MoodBoardConcept(
+            title="Modern Confidence",
+            visual_direction="Clean grids with generous whitespace.",
+            color_story=["midnight blue", "warm white"],
+            typography_direction="Geometric sans, confident weights.",
+            image_style=["studio product shots", "candid team photography"],
+        ),
+        "MoodBoardConceptualist_Minimalist": MoodBoardConcept(
+            title="Quiet Precision",
+            visual_direction="Monochrome, restrained, plenty of negative space.",
+            color_story=["off-white", "graphite"],
+            typography_direction="Single grotesk family, tight tracking.",
+            image_style=["macro texture shots", "architectural details"],
+        ),
+        "MoodBoardConceptualist_Bold": MoodBoardConcept(
+            title="Kinetic Signal",
+            visual_direction="High-contrast, energetic, motion-forward.",
+            color_story=["electric blue", "signal orange"],
+            typography_direction="Variable weight display type.",
+            image_style=["dynamic action shots", "layered graphic overlays"],
+        ),
+        "converge_decider": CreativeRefinementDecision(
+            winning_candidate_title="Modern Confidence",
+            scoring_criteria=["Audience resonance", "Distinctiveness", "Feasibility"],
+            scores_by_candidate={
+                "Modern Confidence": 8.5,
+                "Quiet Precision": 7.0,
+                "Kinetic Signal": 6.5,
+            },
+            rationale="Best aligns with brand values and cross-channel consistency.",
+            workshop_prompts=[
+                "Does this direction feel distinct from competitors?",
+                "Can this scale across every channel?",
+                "Does it hold up in monochrome?",
+            ],
+            decision_criteria=["Audience resonance", "Distinctiveness", "Feasibility"],
+        ),
+        "logo_specifier": LogoSuiteOutput(
+            logo_suite=[
+                LogoUsageRuleOutput(
+                    variant="primary",
+                    usage_context="Default usage on light backgrounds.",
+                    minimum_size="24px",
+                    clear_space="1x logo height on all sides.",
+                ),
+                LogoUsageRuleOutput(
+                    variant="monochrome",
+                    usage_context="Single-color print or low-contrast contexts.",
+                    minimum_size="24px",
+                    clear_space="1x logo height on all sides.",
+                ),
+                LogoUsageRuleOutput(
+                    variant="icon-only",
+                    usage_context="App icons and favicons.",
+                    minimum_size="16px",
+                    clear_space="0.5x icon height on all sides.",
+                ),
+                LogoUsageRuleOutput(
+                    variant="reversed",
+                    usage_context="Dark backgrounds and photography overlays.",
+                    minimum_size="24px",
+                    clear_space="1x logo height on all sides.",
+                ),
+            ],
+        ),
+        "color_system_builder": ColorPaletteSystemOutput(
+            color_palette=[
+                ColorEntryOutput(
+                    name=name,
+                    hex_value=hex_value,
+                    usage=usage,
+                    psychological_rationale=rationale,
+                )
+                for name, hex_value, usage, rationale in [
+                    ("Midnight", "#1a1a2e", "Primary background", "Conveys depth and authority"),
+                    (
+                        "Signal Orange",
+                        "#ff6b35",
+                        "Primary accent/CTA",
+                        "Draws the eye, conveys energy",
+                    ),
+                    (
+                        "Warm White",
+                        "#f7f5f2",
+                        "Primary text on dark",
+                        "Softens contrast, feels approachable",
+                    ),
+                    (
+                        "Graphite",
+                        "#3a3a4a",
+                        "Secondary text",
+                        "Grounds the palette without competing",
+                    ),
+                    ("Sky Tint", "#c9d6e3", "Supporting/backgrounds", "Adds air and openness"),
+                ]
+            ],
+        ),
+        "typography_builder": TypographySystemOutput(
+            typography_system=[
+                TypographySpecOutput(
+                    role=role,
+                    font_family=font,
+                    weight_range=weights,
+                    usage_notes=notes,
+                )
+                for role, font, weights, notes in [
+                    ("display", "Inter", "600-800", "Headlines and hero statements."),
+                    ("body", "Inter", "400-500", "Paragraph copy and UI labels."),
+                    ("caption", "Inter", "400", "Fine print and metadata."),
+                ]
+            ],
+        ),
+        "iconography_director": IconographyOutput(
+            iconography_style="1.5px line weight, 4px corner radius, no fill.",
+            illustration_style="Flat, geometric, two-tone with the accent color.",
+        ),
+        "photography_video_director": PhotographyVideoOutput(
+            photography_direction="Natural light, candid moments, warm color grading.",
+            video_direction="Confident pacing, minimal cuts, ambient sound.",
+            motion_principles=[
+                "Ease in, never linear",
+                "Motion always has purpose",
+                "Respect reduced-motion preferences",
+            ],
+        ),
+        "voice_tone_builder": VoiceToneOutput(
+            voice_tone_spectrum=[
+                VoiceToneEntryOutput(
+                    context="marketing",
+                    tone="Confident and warm",
+                    examples=["We built this for teams who move fast."],
+                ),
+            ],
+            language_dos=[
+                "Use plain language",
+                "Lead with the customer's outcome",
+                "Use active voice",
+                "Be specific with numbers",
+            ],
+            language_donts=[
+                "Avoid jargon",
+                "Avoid hyperbole",
+                "Avoid passive voice",
+                "Avoid unverifiable superlatives",
+            ],
+        ),
+        "design_system_codifier": DesignSystemDefinition(
+            design_principles=["Clarity over decoration", "Consistency at scale"],
+            foundation_tokens=["Color tokens: primary/secondary", "Spacing scale: 4px base"],
+            component_standards=["Buttons: size variants", "Cards: consistent padding"],
+        ),
+    }
+
+
+def _phase3_nested_node_result(*, omit: str = "") -> MagicMock:
+    """A mock NodeResult wrapping the Phase-3 nodes' fragments, shaped like
+    the real nested MultiAgentResult.results Strands returns.
+
+    ``omit`` drops one node id from the set (used to build an incomplete
+    node set for the rejection tests below).
+    """
+    nested_results = {
+        node_id: _phase1_leaf_node(fragment)
+        for node_id, fragment in _phase3_specialist_fragments().items()
+        if node_id != omit
+    }
+
+    inner_multi_result = MagicMock()
+    inner_multi_result.results = nested_results
+
+    node_result = MagicMock()
+    node_result.result = inner_multi_result
+    node_result.get_agent_results.return_value = [
+        node.get_agent_results.return_value[0] for node in nested_results.values()
+    ]
+    return node_result
+
+
+def test_extract_phase_output_merges_every_phase3_fragment() -> None:
+    """Phase 3 wraps eleven nodes (three conceptualists, converge_decider, and
+    seven specialists) as one top-level node; each contributes a fragment that
+    must survive the merge -- the three conceptualists' MoodBoardConcept
+    fragments append into mood_board_candidates, converge_decider's decision
+    nests under creative_refinement, and design_system_codifier's definition
+    nests under design_system."""
+    node_result = _phase3_nested_node_result()
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase3_visual": node_result}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase3_visual", VisualIdentityOutput
+    )
+
+    assert degraded is False
+    assert isinstance(output, VisualIdentityOutput)
+    assert {c.title for c in output.mood_board_candidates} == {
+        "Modern Confidence",
+        "Quiet Precision",
+        "Kinetic Signal",
+    }
+    assert output.creative_refinement.winning_candidate_title == "Modern Confidence"
+    assert len(output.logo_suite) == 4
+    assert len(output.color_palette) == 5
+    assert len(output.typography_system) == 3
+    assert output.iconography_style == "1.5px line weight, 4px corner radius, no fill."
+    assert output.illustration_style == "Flat, geometric, two-tone with the accent color."
+    assert output.photography_direction == "Natural light, candid moments, warm color grading."
+    assert output.video_direction == "Confident pacing, minimal cuts, ambient sound."
+    assert len(output.motion_principles) == 3
+    assert len(output.voice_tone_spectrum) == 1
+    assert len(output.language_dos) == 4
+    assert len(output.language_donts) == 4
+    assert output.design_system.design_principles == [
+        "Clarity over decoration",
+        "Consistency at scale",
+    ]
+
+
+def test_full_run_phase3_not_degraded_with_eleven_fragments() -> None:
+    """Phase 3's real runtime shape is eleven separate node fragments, not the
+    single flat block _mock_graph_result's default gives every phase (which
+    never actually exercises _merge_phase3_fragments, since it bails out
+    unless node_result.result.results is a dict). Wire that real shape
+    through orchestrator.run() end-to-end and confirm the Python merge keeps
+    Phase 3 out of degraded_phases."""
+    mock_result = _mock_graph_result(ALL_PHASES)
+    mock_result.result["phase3_visual"] = _phase3_nested_node_result()
+
+    async def mock_invoke_async(task, **kwargs):
+        return mock_result
+
+    with patch(
+        "branding_team.orchestrator.build_branding_graph",
+        return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+    ):
+        orchestrator = BrandingTeamOrchestrator()
+        result = orchestrator.run(
+            mission=make_mission(
+                company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                values=["clarity", "trust", "momentum"],
+            ),
+            human_review=HumanReview(approved=True),
+        )
+
+    assert result.degraded_phases == []
+    assert isinstance(result.visual_identity, VisualIdentityOutput)
+    assert result.visual_identity.creative_refinement.winning_candidate_title == "Modern Confidence"
+
+
+def test_merge_phase3_fragments_rejects_incomplete_specialist_set() -> None:
+    """A Phase 3 run missing one node (e.g. design_system_codifier never
+    completed) must not validate as a complete VisualIdentityOutput via field
+    defaults -- every field on it defaults to empty/absent, so a partial
+    merge would otherwise pass validation silently.
+
+    Tested directly against ``_merge_phase3_fragments`` (require_all=True) as
+    a focused unit test of the merge function in isolation. See
+    ``test_extract_phase_output_rejects_incomplete_phase3_fragments`` for the
+    end-to-end path through ``_extract_phase_output``.
+    """
+    node_result = _phase3_nested_node_result(omit="design_system_codifier")
+
+    merged = _merge_phase3_fragments(node_result, VisualIdentityOutput)
+
+    assert merged is None
+
+
+def test_extract_phase_output_rejects_incomplete_phase3_fragments() -> None:
+    """Without visual_compositor, a partial Phase 3 run (merge_fn returns
+    None) must degrade to defaults, not accept one node's own fragment as the
+    complete VisualIdentityOutput (``check_structured_output`` is False for
+    Phase 3, same guard Phase 2, Phase 4, and Phase 5 already rely on)."""
+    single_fragment = {
+        # CreativeRefinementDecision is converge_decider's real structured_output
+        # type (see agents.py:make_converge_decider) -- not a Phase 1 model.
+        "converge_decider": _phase1_leaf_node(
+            CreativeRefinementDecision(winning_candidate_title="Modern Confidence")
+        ),
+    }
+    inner_multi_result = MagicMock()
+    inner_multi_result.results = single_fragment
+
+    node_result = MagicMock()
+    node_result.result = inner_multi_result
+    node_result.get_agent_results.return_value = [
+        single_fragment["converge_decider"].get_agent_results.return_value[0]
+    ]
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase3_visual": node_result}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase3_visual", VisualIdentityOutput
+    )
+
+    assert degraded is True
+    assert output == VisualIdentityOutput()
+
+
 def _text_node_result(text: str) -> MagicMock:
     """A mock NodeResult whose single agent result carries raw ``text`` and
     no ``structured_output``, forcing extraction down the
@@ -2280,7 +2568,12 @@ def test_apply_fragment_list_field_appends_each_fragment() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Story 2b Step 1: run(phase_cache=...) -- per-phase hit/miss check
+# Story 2b Step 1 & Step 2: run(phase_cache=...) -- per-phase hit/miss check,
+# and recomputation from the earliest changed phase cascading to every
+# downstream phase (each phase's input hash folds in the full mission and
+# every upstream output, so a change anywhere upstream -- or in the mission
+# itself -- necessarily changes the hash, and therefore forces a miss, for
+# that phase and every phase after it in the same call).
 # ---------------------------------------------------------------------------
 
 _PHASE_FIXTURES: dict[BrandPhase, Any] = {
@@ -2411,3 +2704,105 @@ def test_run_with_phase_cache_never_caches_a_degraded_output() -> None:
     assert result.degraded_phases == [BrandPhase.STRATEGIC_CORE]
     expected_hash = phase_input_hash(BrandPhase.STRATEGIC_CORE, mission, {})
     assert cache.get(BrandPhase.STRATEGIC_CORE, expected_hash) is None
+
+
+def test_run_with_phase_cache_reuses_multiple_cached_upstream_phases() -> None:
+    """Two already-cached, still-valid upstream phases are both reused -- neither
+    is re-invoked -- when the run is extended to a new, not-yet-cached
+    downstream phase (a genuine "downstream-only" extension, not just a
+    single-phase cache hit in isolation)."""
+    mission = make_mission()
+    cache = PhaseOutputCache()
+
+    cached_strategic_core = _full_strategic_core()
+    cache.put(
+        BrandPhase.STRATEGIC_CORE,
+        phase_input_hash(BrandPhase.STRATEGIC_CORE, mission, {}),
+        cached_strategic_core,
+    )
+    cached_narrative = _full_narrative()
+    cache.put(
+        BrandPhase.NARRATIVE_MESSAGING,
+        phase_input_hash(
+            BrandPhase.NARRATIVE_MESSAGING,
+            mission,
+            {BrandPhase.STRATEGIC_CORE: cached_strategic_core},
+        ),
+        cached_narrative,
+    )
+    orchestrator = BrandingTeamOrchestrator()
+
+    with patch.object(
+        orchestrator, "run_single_phase", side_effect=_run_single_phase_fixture_side_effect
+    ) as mock_run_single_phase:
+        result = orchestrator.run(
+            mission=mission,
+            human_review=HumanReview(approved=False),
+            target_phase=BrandPhase.VISUAL_IDENTITY,
+            phase_cache=cache,
+        )
+
+    called_phases = [call.args[1] for call in mock_run_single_phase.call_args_list]
+    assert called_phases == [BrandPhase.VISUAL_IDENTITY]
+    assert result.strategic_core is cached_strategic_core
+    assert result.narrative_messaging is cached_narrative
+    assert result.visual_identity is not None
+    assert result.channel_activation is None
+
+
+def test_run_with_phase_cache_cascades_recompute_through_three_phase_chain() -> None:
+    """A changed earliest-phase input (a mission field, which every phase's hash
+    includes) invalidates the STRATEGIC_CORE cache entry and cascades a miss
+    through every downstream phase in a three-phase chain; each recomputed
+    phase's fresh output is written back to the cache for later reuse."""
+    stale_mission = make_mission(company_name="Stale Co")
+    mission = make_mission(company_name="Fresh Co")
+    cache = PhaseOutputCache()
+
+    # Pre-populate the cache as if a prior run completed for `stale_mission`,
+    # forming a fully self-consistent hash chain across three phases.
+    stale_upstream: dict[BrandPhase, Any] = {}
+    for phase in (
+        BrandPhase.STRATEGIC_CORE,
+        BrandPhase.NARRATIVE_MESSAGING,
+        BrandPhase.VISUAL_IDENTITY,
+    ):
+        stale_output = _PHASE_FIXTURES[phase]()
+        cache.put(phase, phase_input_hash(phase, stale_mission, stale_upstream), stale_output)
+        stale_upstream[phase] = stale_output
+
+    orchestrator = BrandingTeamOrchestrator()
+
+    with patch.object(
+        orchestrator, "run_single_phase", side_effect=_run_single_phase_fixture_side_effect
+    ) as mock_run_single_phase:
+        result = orchestrator.run(
+            mission=mission,
+            human_review=HumanReview(approved=False),
+            target_phase=BrandPhase.VISUAL_IDENTITY,
+            phase_cache=cache,
+        )
+
+    called_phases = [call.args[1] for call in mock_run_single_phase.call_args_list]
+    assert called_phases == [
+        BrandPhase.STRATEGIC_CORE,
+        BrandPhase.NARRATIVE_MESSAGING,
+        BrandPhase.VISUAL_IDENTITY,
+    ]
+
+    # The cache now holds the freshly recomputed chain -- for `mission`, not
+    # `stale_mission` -- ready for reuse by a later caller.
+    fresh_upstream: dict[BrandPhase, Any] = {}
+    for phase in (
+        BrandPhase.STRATEGIC_CORE,
+        BrandPhase.NARRATIVE_MESSAGING,
+        BrandPhase.VISUAL_IDENTITY,
+    ):
+        expected_hash = phase_input_hash(phase, mission, fresh_upstream)
+        cached = cache.get(phase, expected_hash)
+        assert cached is not None
+        fresh_upstream[phase] = cached
+
+    assert result.strategic_core is fresh_upstream[BrandPhase.STRATEGIC_CORE]
+    assert result.narrative_messaging is fresh_upstream[BrandPhase.NARRATIVE_MESSAGING]
+    assert result.visual_identity is fresh_upstream[BrandPhase.VISUAL_IDENTITY]
