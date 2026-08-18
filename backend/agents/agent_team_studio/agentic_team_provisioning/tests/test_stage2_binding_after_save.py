@@ -42,40 +42,13 @@ from agent_team_studio.agentic_team_provisioning.roster_resolve import resolve_p
 from agent_team_studio.agentic_team_provisioning.runtime import agent_builder
 from agent_team_studio.agentic_team_provisioning.runtime.pipeline_runner import PipelineRunner
 from shared.agent_invoke import mount_invoke_shim
-
-
-class _FakeResult:
-    """Mimics a strands ``AgentResult``: text is obtained via ``str(result)``."""
-
-    def __init__(self, text: str) -> None:
-        self.message = {"role": "assistant", "content": [{"text": text}]}
-        self._text = text
-
-    def __str__(self) -> str:
-        return self._text
-
-
-class _FakeStrandsAgent:
-    """Records the system prompt + tools it was built with; echoes a fixed reply."""
-
-    last_system_prompt: str | None = None
-    last_tools: object = None
-
-    def __init__(self, **kwargs) -> None:
-        type(self).last_system_prompt = kwargs.get("system_prompt")
-        type(self).last_tools = kwargs.get("tools")
-
-    def __call__(self, message: str) -> _FakeResult:
-        return _FakeResult("ok")
+from shared.agent_invoke.tests.fake_strands import patch_strands_agent
 
 
 @pytest.fixture
 def fake_strands(monkeypatch: pytest.MonkeyPatch):
     """Swap the real strands model for the recording double (no network call)."""
-    _FakeStrandsAgent.last_system_prompt = None
-    _FakeStrandsAgent.last_tools = None
-    monkeypatch.setattr(agent_builder, "StrandsAgent", _FakeStrandsAgent)
-    return _FakeStrandsAgent
+    return patch_strands_agent(monkeypatch, agent_builder)
 
 
 @pytest.fixture

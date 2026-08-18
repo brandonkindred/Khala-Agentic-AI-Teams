@@ -33,7 +33,13 @@ from typing import Any, Optional, Union
 
 from strands.models.model import Model as _StrandsModel
 
-from llm_service import LLMClient, LLMClientModel, get_strands_model, with_model_override
+from llm_service import (
+    LLMClient,
+    LLMClientModel,
+    get_client,
+    get_strands_model,
+    with_model_override,
+)
 from llm_service.config import AGENT_DEFAULT_MODELS, ENV_LLM_MODEL
 
 _VERIFY_AGENT_KEY = "code_review_verify"
@@ -245,6 +251,35 @@ def resolve_code_review_verify_model(
     else:
         base = get_strands_model(_VERIFY_AGENT_KEY, **kwargs)
     return _apply_code_review_verify_model_pin(base)
+
+
+def resolve_code_review_verify_client(llm: Optional[LLMClient] = None) -> LLMClient:
+    """Resolve a pinned, raw ``LLMClient`` for verify-key single-shot callers.
+
+    Companion to :func:`resolve_code_review_verify_model` for callers that need
+    a plain ``LLMClient`` (e.g. ``run_single_shot_review``'s ``complete_json``
+    path) rather than a strands ``Model`` for an ``Agent`` — ``LLMClientModel``
+    does not expose ``complete_json``, so those callers cannot consume the
+    other resolver's return value directly. Applies the same Ollama failover
+    pin (:func:`_apply_code_review_verify_model_pin`) so single-shot verify
+    passes (e.g. :mod:`scope_classifier`) behave identically to the
+    strands-``Agent``-based sibling passes (``false_positive_filter``,
+    ``scope_filter``) instead of silently picking up a heavier, non-blank
+    provider-list ``entry.model``.
+
+    Preconditions: ``llm`` is a pre-resolved ``LLMClient`` (the test-injection
+        path) or ``None``.
+
+    Postconditions:
+        - Returns ``llm`` unchanged when given.
+        - Otherwise returns ``get_client("code_review_verify")`` with Ollama
+          failover candidates pinned to the verify key's per-agent env /
+          ``AGENT_DEFAULT_MODELS`` entry; Claude candidates keep their
+          configured model (see :func:`_apply_code_review_verify_model_pin`).
+    """
+    if llm is not None:
+        return llm
+    return _apply_code_review_verify_model_pin(get_client(_VERIFY_AGENT_KEY))
 
 
 def thinking_override_supported(llm: "Union[LLMClient, _StrandsModel]") -> bool:
