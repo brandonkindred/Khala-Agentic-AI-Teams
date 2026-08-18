@@ -29,16 +29,11 @@ and no Postgres is required (the registry is in-process).
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
-from agent_sandbox_runtime.entrypoint import _build_app
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from agent_platform.registry.loader import AgentRegistry
-from agent_platform.registry.models import AgentManifest
 from agent_platform.studio.models import AgentDefinition
 from agent_platform.studio.registration import build_studio_agent_manifest
 from agent_team_studio.agentic_team_provisioning.manifest_generation import build_agent_manifest
@@ -116,24 +111,6 @@ def _shim_client() -> TestClient:
     app = FastAPI()
     mount_invoke_shim(app)
     return TestClient(app)
-
-
-def _boot_with_injected_manifest(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, manifest: AgentManifest
-) -> FastAPI:
-    """Write ``manifest`` to the sandbox injection file and boot the real container app.
-
-    Mirrors how the provisioner hands a dynamically-registered (Studio-saved or
-    agentic-generated) manifest to ``agent_sandbox_runtime.entrypoint``: the manifest
-    is absent from the sandbox image's on-disk registry, so it is serialized to
-    ``SANDBOX_AGENT_MANIFEST_FILE`` and registered by ``_build_app()`` itself before
-    the single-agent guard and shim ever see a request.
-    """
-    manifest_file = tmp_path / "agent-manifest.json"
-    manifest_file.write_text(json.dumps(manifest.model_dump(mode="json")), encoding="utf-8")
-    monkeypatch.setenv("SANDBOX_AGENT_ID", manifest.id)
-    monkeypatch.setenv("SANDBOX_AGENT_MANIFEST_FILE", str(manifest_file))
-    return _build_app()
 
 
 # --- Stage-1 save wiring the Stage-2 invoke depends on ------------------------
@@ -403,81 +380,3 @@ def test_sandbox_invoke_stage2_never_grants_tools_for_generated_agent(
     )
     assert response.status_code == 200
     assert fake_strands.last_tools == []
-
-
-# --- Sandbox invoke Stage-2, real container boot (bound today → green) -------
-#
-# The cases above exercise the shared invoke shim (`mount_invoke_shim`) mounted on
-# a bare `FastAPI()` app — real evidence of the save -> shim -> dispatch ->
-# entrypoint wiring, but not of the actual sandbox *container* process.
-# `agent_sandbox_runtime.entrypoint._build_app()` is the real Docker `CMD`; it has
-# its own bootstrap step (`_maybe_register_injected_manifest`) that registers a
-# provision-time-injected manifest — a Studio save or a generated agent, absent
-# from the image's on-disk registry — before the single-agent guard middleware and
-# the shim ever see a request. These cases close that second layer: they inject a
-# manifest built via the real Stage-1 save builders, boot the real `_build_app()`,
-# and post an invoke through it.
-
-
-def test_entrypoint_binds_saved_studio_persona_after_save(
-    fake_strands, registry: AgentRegistry, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
-    """A real container boot dispatches an invoke through the saved Studio persona.
-
-    Unlike a registration-only check, this proves the point of injection
-    end-to-end: the actual sandbox process (``_build_app()``, including the
-    single-agent guard middleware and ``_maybe_register_injected_manifest``)
-    invokes the saved ``role`` / ``system_prompt`` even though the request body
-    carries neither.
-    """
-    manifest = build_studio_agent_manifest(
-        AgentDefinition(
-            name="Contract Auditor",
-            role="Audits vendor contracts",
-            tags=["legal", "contracts"],
-            system_prompt="Always cite the clause number.",
-        )
-    )
-    app = _boot_with_injected_manifest(monkeypatch, tmp_path, manifest)
-    client = TestClient(app)
-
-    response = client.post(
-        f"/_agents/{manifest.id}/invoke",
-        json={"agent_name": manifest.name, "message": "Review this MSA."},
-    )
-    assert response.status_code == 200, response.text
-
-    prompt = fake_strands.last_system_prompt
-    assert "Role: Audits vendor contracts" in prompt
-    assert "Always cite the clause number." in prompt
-
-
-def test_entrypoint_binds_saved_generated_persona_after_save(
-    fake_strands, registry: AgentRegistry, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
-    """Producer parity: an agentic-generated manifest binds through a real container
-    boot too.
-
-    Mirrors the Studio-producer test above but saves via ``build_agent_manifest``,
-    proving the container-boot binding is entrypoint-level, not Studio-specific —
-    the same parity the shim-level suite already establishes for the shared shim.
-    """
-    manifest = build_agent_manifest(
-        "agentic_team_provisioning",
-        agent_name="Contract Auditor",
-        summary="Audits vendor contracts",
-        skill_tags=["legal", "contracts"],
-    )
-    app = _boot_with_injected_manifest(monkeypatch, tmp_path, manifest)
-    client = TestClient(app)
-
-    response = client.post(
-        f"/_agents/{manifest.id}/invoke",
-        json={"agent_name": manifest.name, "message": "Review this MSA."},
-    )
-    assert response.status_code == 200, response.text
-
-    prompt = fake_strands.last_system_prompt
-    assert "Role: Audits vendor contracts" in prompt
-    assert "Skills: legal, contracts" in prompt
-    assert "Expertise: agentic_team_provisioning" in prompt

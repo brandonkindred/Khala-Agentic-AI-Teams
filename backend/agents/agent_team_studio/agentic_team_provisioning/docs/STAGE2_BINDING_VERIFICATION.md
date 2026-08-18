@@ -69,22 +69,31 @@ per-agent sandbox — has its own bootstrap step
 (`_maybe_register_injected_manifest`) that registers a provision-time-injected
 manifest (a Studio save or a generated agent, absent from the image's on-disk
 registry) before the single-agent guard middleware and the shim ever see a
-request. Two cases in this same suite close that second layer: they inject a
-manifest built via the real Stage-1 save builders, boot the real `_build_app()`,
-and post an invoke through it — reusing the `fake_strands`/`registry` fixtures
-above rather than duplicating them.
+request. `agent_sandbox_runtime/tests/test_entrypoint.py` closes that second
+layer: it injects a manifest carrying the real generated-agent entrypoint, boots
+the real `_build_app()`, and posts an invoke through it.
 
-These cases live here rather than in `agent_sandbox_runtime/tests/` because
-`agent_sandbox_runtime` is platform infrastructure that stays team-agnostic (it
-only imports `agent_platform` / `shared.*`, never a domain app); a test that
-builds a manifest via `agentic_team_provisioning`'s own builders belongs in this
-domain app's test tree, which imports `agent_sandbox_runtime.entrypoint`
-downward — the same direction production code already depends.
+`agent_sandbox_runtime` is platform infrastructure that stays team-agnostic — it
+only imports `agent_platform` / `shared.*` in its own source, never a domain app
+— so these cases build their manifests from `agent_platform.studio` (Studio
+producer) and from `shared.manifests` primitives directly (generated producer;
+the same primitives `agentic_team_provisioning.manifest_generation.build_agent_manifest`
+itself delegates to) rather than importing that domain builder. The one
+unavoidable domain-app reference — faking the Strands call inside
+`agent_builder.py` so the test makes no real network call — is patched by
+*string* target (`monkeypatch.setattr("agent_team_studio...agent_builder.StrandsAgent", ...)`)
+rather than a top-level import, matching how production itself only ever
+resolves a manifest's `source.entrypoint` string dynamically at dispatch time.
+
+```bash
+cd backend
+.venv/bin/pytest agent_sandbox_runtime/tests/test_entrypoint.py -v -rxX
+```
 
 | Test | Result | What it proves |
 |---|---|---|
 | `test_entrypoint_binds_saved_studio_persona_after_save` | PASS | A real container boot (`_build_app()`), not just the shim in isolation, dispatches an invoke through the saved Studio `role`/`system_prompt`. |
-| `test_entrypoint_binds_saved_generated_persona_after_save` | PASS | Same container-boot binding holds for an agentic-generated producer. |
+| `test_entrypoint_binds_saved_generated_persona_after_save` | PASS | Same container-boot binding holds for an agentic-generated-style producer. |
 
 ## Manual checklist (UI reproduction)
 
