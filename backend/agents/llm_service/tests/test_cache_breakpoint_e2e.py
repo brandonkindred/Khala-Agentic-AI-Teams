@@ -16,7 +16,6 @@ That is what this module asserts.
 
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
@@ -27,6 +26,7 @@ from llm_service.cache_breakpoint import CacheBreakpoint
 from llm_service.clients.claude import ClaudeLLMClient
 from llm_service.interface import reset_complete_json_observer_state
 from llm_service.strands_adapter import LLMClientModel
+from llm_service.tests._fakes import _drain, _FakeStreamCtx, _text_message
 
 
 @pytest.fixture(autouse=True)
@@ -34,45 +34,6 @@ def _reset_observer_turns() -> None:
     reset_complete_json_observer_state()
     yield
     reset_complete_json_observer_state()
-
-
-def _drain(gen) -> List[Dict[str, Any]]:
-    """Drain a Strands async stream into a list for easy assertions."""
-
-    async def _run() -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
-        async for event in gen:
-            out.append(event)
-        return out
-
-    return asyncio.run(_run())
-
-
-def _cache_message(text: str, *, cache_read_input_tokens: int, cache_creation_input_tokens: int):
-    return SimpleNamespace(
-        content=[SimpleNamespace(type="text", text=text)],
-        stop_reason="end_turn",
-        usage=SimpleNamespace(
-            input_tokens=11,
-            output_tokens=7,
-            cache_read_input_tokens=cache_read_input_tokens,
-            cache_creation_input_tokens=cache_creation_input_tokens,
-        ),
-    )
-
-
-class _FakeStreamCtx:
-    def __init__(self, message: Any) -> None:
-        self._message = message
-
-    def __enter__(self) -> "_FakeStreamCtx":
-        return self
-
-    def __exit__(self, *_a: Any) -> bool:
-        return False
-
-    def get_final_message(self) -> Any:
-        return self._message
 
 
 class _SequentialFakeMessages:
@@ -86,12 +47,14 @@ class _SequentialFakeMessages:
 
     def stream(self, **kwargs: Any) -> _FakeStreamCtx:
         self.captured_calls.append(kwargs)
-        return _FakeStreamCtx(self._messages.pop(0))
+        return _FakeStreamCtx(message=self._messages.pop(0))
 
 
 def _make_claude_client(messages: List[Any]) -> tuple[ClaudeLLMClient, _SequentialFakeMessages]:
     fake_messages = _SequentialFakeMessages(messages)
     client = ClaudeLLMClient(model="claude-opus-4-8", api_key="sk-test")
+    # Same private-seam injection as test_claude_client.py::_make_client — ClaudeLLMClient
+    # has no public constructor arg for the underlying Anthropic SDK client.
     client._client = SimpleNamespace(messages=fake_messages)
     return client, fake_messages
 
@@ -107,8 +70,8 @@ def test_repeated_cache_breakpoint_prefix_yields_cache_hit_with_stable_output() 
 
     client, fake_messages = _make_claude_client(
         [
-            _cache_message('{"ok": 1}', cache_read_input_tokens=0, cache_creation_input_tokens=180),
-            _cache_message('{"ok": 1}', cache_read_input_tokens=180, cache_creation_input_tokens=0),
+            _text_message('{"ok": 1}', cache_read_input_tokens=0, cache_creation_input_tokens=180),
+            _text_message('{"ok": 1}', cache_read_input_tokens=180, cache_creation_input_tokens=0),
         ]
     )
     model = LLMClientModel(client)
@@ -126,6 +89,7 @@ def test_repeated_cache_breakpoint_prefix_yields_cache_hit_with_stable_output() 
 
     assert first_events == second_events  # no output change for identical input
 
+    assert len(fake_messages.captured_calls) == 2
     first_system = fake_messages.captured_calls[0]["system"]
     second_system = fake_messages.captured_calls[1]["system"]
     assert first_system == second_system
