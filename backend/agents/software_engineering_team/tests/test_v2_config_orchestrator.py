@@ -17,7 +17,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from tests._v2_config_fixtures import make_stack_profile as _make_stack_profile
 
 from shared.dev_models.models import Task, TaskStatus, TaskType
 from software_engineering_team.shared.phases.execution import ReviewDependencies
@@ -25,6 +24,8 @@ from software_engineering_team.shared.stack_profile import StackProfile
 from software_engineering_team.shared.v2_models import Phase
 from software_engineering_team.shared.v2_orchestrator import ConfigDrivenV2DevelopmentAgent
 from software_engineering_team.shared.v2_team_config import V2TeamConfig
+
+from ._v2_config_fixtures import make_stack_profile as _make_stack_profile
 
 
 def _make_config(

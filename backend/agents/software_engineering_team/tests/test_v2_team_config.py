@@ -15,9 +15,10 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
-from tests._v2_config_fixtures import make_stack_profile as _make_stack_profile
 
 from software_engineering_team.shared.v2_team_config import V2TeamConfig
+
+from ._v2_config_fixtures import make_stack_profile as _make_stack_profile
 
 _CONFIG_KWARGS = dict(
     stack_profile=_make_stack_profile(),

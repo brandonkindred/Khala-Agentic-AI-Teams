@@ -59,9 +59,15 @@ class BaseV2DevelopmentAgent:
     functions, review classes, git-branch tool-agent kind) into
     ``_run_development_workflow``.
 
-    Invariants: instance state is limited to ``llm`` and ``_repo_context_cache``,
-    so a subclass built via ``__new__`` and given those two attributes behaves
-    identically to a constructed one.
+    Invariants: this base's own instance state is limited to ``llm`` and
+    ``_repo_context_cache``, so ``BaseV2DevelopmentAgent`` itself (and a
+    subclass that adds no instance state of its own, e.g.
+    ``BackendDevelopmentAgent``/``FrontendDevelopmentAgent``) built via
+    ``__new__`` and given those two attributes behaves identically to a
+    constructed one. A subclass that extends instance state (e.g.
+    :class:`ConfigDrivenV2DevelopmentAgent`'s ``self.config``) documents its
+    own, wider construction contract instead — this invariant does not carry
+    over to it automatically.
     """
 
     PROFILE: StackProfile
@@ -999,7 +1005,13 @@ class ConfigDrivenV2DevelopmentAgent(BaseV2DevelopmentAgent):
     Invariants: ``self.config`` is set once at construction and never
     reassigned; every property/method below is a pure read through it (or
     through the ``StackProfile`` it composes), so two instances built from the
-    same config always agree.
+    same config always agree. This deliberately widens
+    ``BaseV2DevelopmentAgent``'s two-attribute ``__new__``-construction
+    contract: a ``__new__``-constructed instance of this subclass
+    specifically (bypassing ``__init__``) must also set ``self.config`` —
+    the base class's ``llm``/``_repo_context_cache`` pair is necessary but
+    not sufficient here, since every property/method above reads
+    ``self.config``.
     """
 
     def __init__(self, llm_client: LLMClient, config: V2TeamConfig) -> None:
