@@ -137,11 +137,20 @@ def test_resolve_code_review_verify_model_preserves_model_id_for_claude_active(
 
     ``with_model_override`` leaves Claude candidates on their configured model;
     relabeling ``model_id`` to the Ollama pin would mis-report observability.
+
+    The adapter's original ``model_id`` and the pinned backing's active
+    ``.model`` are deliberately distinct values here: if they were equal (as
+    in an earlier version of this test), the assertion could not tell
+    "preserved the original" apart from "relabeled to whatever the active
+    backing reports" -- both would produce the same expected string. Distinct
+    values make the assertion actually exercise the preservation behavior the
+    test name and docstring claim.
     """
     backing = MagicMock(name="failover_client")
     base = LLMClientModel(backing, agent_key="code_review_verify", model_id="claude-sonnet-4-5")
     pinned_backing = MagicMock(name="pinned_failover")
-    pinned_backing.model = "claude-sonnet-4-5"  # Claude path: pin ignored
+    # Distinct from base's model_id -- see docstring above.
+    pinned_backing.model = "claude-opus-4-8"  # Claude path: pin ignored
 
     monkeypatch.setattr(model_resolution, "get_strands_model", lambda *_a, **_k: base)
     monkeypatch.setattr(
@@ -152,6 +161,8 @@ def test_resolve_code_review_verify_model_preserves_model_id_for_claude_active(
     result = model_resolution.resolve_code_review_verify_model(MagicMock())
     assert isinstance(result, LLMClientModel)
     assert result.client is pinned_backing
+    # The ORIGINAL adapter model_id survives, not the active backing's model
+    # (which would be "claude-opus-4-8" if the code incorrectly relabeled).
     assert result.get_config()["model_id"] == "claude-sonnet-4-5"
 
 
