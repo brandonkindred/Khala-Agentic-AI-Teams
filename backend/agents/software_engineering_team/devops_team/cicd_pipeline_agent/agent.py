@@ -10,6 +10,28 @@ from .models import CICDPipelineAgentInput, CICDPipelineAgentOutput
 from .prompts import CICD_PIPELINE_PROMPT
 
 
+def _as_bool(value: Any) -> bool:
+    """Coerce an LLM-provided flag to a strict boolean.
+
+    JSON booleans already parse to ``bool``; this guards the common schema drift
+    where a model emits the STRING ``"false"``/``"true"``. ``bool("false")`` is
+    True, so a naive cast would report required gates as present when the model
+    said the opposite. Only a real ``True`` or an explicit true-like string
+    (``true``/``1``/``yes``, case-insensitive) counts.
+
+    Preconditions:
+        - ``value`` is arbitrary parsed-JSON content (bool, str, number, None, ...).
+    Postconditions:
+        - Returns a bool; anything not unambiguously true (including
+          ``"false"``/``"0"``/``"no"``/None/other strings/numbers) returns False.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return False
+
+
 class CICDPipelineAgent(DevOpsSingleShotAgent):
     """Produce CI/CD pipeline artifacts via a single structured LLM call.
 
@@ -49,12 +71,14 @@ class CICDPipelineAgent(DevOpsSingleShotAgent):
 
         Preconditions: ``data`` is the dict from ``complete_json_with_continuation``.
         Postconditions: returns ``CICDPipelineAgentOutput`` with the same field
-        defaults as the pre-migration agent.
+        defaults as the pre-migration agent, including
+        ``required_gates_present=_as_bool(data.get("required_gates_present", False))``
+        (absent / ``"false"`` / other non-true values → False).
         """
         return CICDPipelineAgentOutput(
             artifacts=data.get("artifacts") or {},
             pipeline_job_graph_summary=data.get("pipeline_job_graph_summary", ""),
-            required_gates_present=bool(data.get("required_gates_present", False)),
+            required_gates_present=_as_bool(data.get("required_gates_present", False)),
             summary=data.get("summary", ""),
             risks=data.get("risks") or [],
         )

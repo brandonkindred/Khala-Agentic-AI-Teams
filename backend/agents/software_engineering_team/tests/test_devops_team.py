@@ -903,6 +903,72 @@ class TestCICDPipelineAgent:
         context = agent.build_context(CICDPipelineAgentInput(task_spec=_base_task_spec()))
         assert "cluster provisioning" in context
 
+    def test_build_output_required_gates_present_missing_defaults_false(self) -> None:
+        from software_engineering_team.devops_team.cicd_pipeline_agent import (
+            CICDPipelineAgent,
+            CICDPipelineAgentInput,
+        )
+
+        agent = CICDPipelineAgent(_StubClient({}))
+        out = agent.build_output(
+            CICDPipelineAgentInput(task_spec=_base_task_spec()),
+            {"summary": "ok"},
+        )
+        assert out.required_gates_present is False
+
+    def test_build_output_required_gates_present_false(self) -> None:
+        from software_engineering_team.devops_team.cicd_pipeline_agent import (
+            CICDPipelineAgent,
+            CICDPipelineAgentInput,
+        )
+
+        agent = CICDPipelineAgent(_StubClient({}))
+        out = agent.build_output(
+            CICDPipelineAgentInput(task_spec=_base_task_spec()),
+            {"required_gates_present": False},
+        )
+        assert out.required_gates_present is False
+
+    def test_build_output_required_gates_present_true(self) -> None:
+        from software_engineering_team.devops_team.cicd_pipeline_agent import (
+            CICDPipelineAgent,
+            CICDPipelineAgentInput,
+        )
+
+        agent = CICDPipelineAgent(_StubClient({}))
+        out = agent.build_output(
+            CICDPipelineAgentInput(task_spec=_base_task_spec()),
+            {"required_gates_present": True},
+        )
+        assert out.required_gates_present is True
+
+    def test_build_output_required_gates_present_string_false_is_false(self) -> None:
+        """Schema-drift ``\"false\"`` must not become True via Python truthiness."""
+        from software_engineering_team.devops_team.cicd_pipeline_agent import (
+            CICDPipelineAgent,
+            CICDPipelineAgentInput,
+        )
+
+        agent = CICDPipelineAgent(_StubClient({}))
+        out = agent.build_output(
+            CICDPipelineAgentInput(task_spec=_base_task_spec()),
+            {"required_gates_present": "false"},
+        )
+        assert out.required_gates_present is False
+
+    def test_build_output_required_gates_present_string_true_is_true(self) -> None:
+        from software_engineering_team.devops_team.cicd_pipeline_agent import (
+            CICDPipelineAgent,
+            CICDPipelineAgentInput,
+        )
+
+        agent = CICDPipelineAgent(_StubClient({}))
+        out = agent.build_output(
+            CICDPipelineAgentInput(task_spec=_base_task_spec()),
+            {"required_gates_present": "TRUE"},
+        )
+        assert out.required_gates_present is True
+
 
 class TestDeploymentStrategyAgent:
     def test_run_returns_strategy(self) -> None:
