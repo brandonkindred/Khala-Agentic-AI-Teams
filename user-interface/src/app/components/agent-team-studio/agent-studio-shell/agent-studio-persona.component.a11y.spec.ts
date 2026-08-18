@@ -1,5 +1,6 @@
 import { TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { provideRouter } from '@angular/router';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
@@ -82,6 +83,7 @@ describe('AgentStudioPersonaComponent a11y', () => {
       imports: [AgentStudioPersonaComponent, NoopAnimationsModule],
       providers: [
         AgentStudioStateService,
+        provideRouter([]),
         { provide: AgentStudioFacade, useValue: facade },
       ],
     }).compileComponents();
