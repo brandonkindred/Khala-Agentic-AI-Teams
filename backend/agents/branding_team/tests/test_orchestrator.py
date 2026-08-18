@@ -9,6 +9,7 @@ correctly assembles ``TeamOutput`` from it.
 
 import asyncio
 import json
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -20,6 +21,7 @@ from branding_team import (
     HumanReview,
     WorkflowStatus,
 )
+from branding_team.graphs.shared import PHASE_ORDER
 from branding_team.models import (
     ApprovalWorkflowOutput,
     ApprovalWorkflowsOutput,
@@ -93,6 +95,8 @@ from branding_team.orchestrator import (
     _merge_phase4_fragments,
     _merge_phase5_fragments,
 )
+from branding_team.shared.memoization import phase_input_hash
+from branding_team.shared.phase_output_cache import PhaseOutputCache
 from branding_team.store import BrandVersionAppendConflict
 from branding_team.tests.conftest import make_mission
 
@@ -2561,3 +2565,137 @@ def test_apply_fragment_list_field_appends_each_fragment() -> None:
     )
 
     assert merged == {"channel_guidelines": [{"channel": "web"}, {"channel": "social"}]}
+
+
+# ---------------------------------------------------------------------------
+# Story 2b Step 1: run(phase_cache=...) -- per-phase hit/miss check
+# ---------------------------------------------------------------------------
+
+_PHASE_FIXTURES: dict[BrandPhase, Any] = {
+    BrandPhase.STRATEGIC_CORE: _full_strategic_core,
+    BrandPhase.NARRATIVE_MESSAGING: _full_narrative,
+    BrandPhase.VISUAL_IDENTITY: _full_visual_identity,
+    BrandPhase.CHANNEL_ACTIVATION: _full_channel_activation,
+    BrandPhase.GOVERNANCE: _full_governance,
+}
+
+
+def _run_single_phase_fixture_side_effect(mission, phase, prior_outputs=None):
+    """Stand-in for ``run_single_phase``: return the canned fixture for ``phase``."""
+    return _PHASE_FIXTURES[phase](), False
+
+
+def test_run_without_phase_cache_never_calls_run_single_phase() -> None:
+    """Omitting ``phase_cache`` (the default) preserves the monolithic-graph path."""
+    orchestrator = BrandingTeamOrchestrator()
+    with (
+        _patch_graph_invoke(ALL_PHASES),
+        patch.object(orchestrator, "run_single_phase") as mock_run_single_phase,
+    ):
+        result = orchestrator.run(
+            mission=make_mission(),
+            human_review=HumanReview(approved=True),
+        )
+
+    mock_run_single_phase.assert_not_called()
+    assert result.status == WorkflowStatus.READY_FOR_ROLLOUT
+    assert result.strategic_core is not None
+
+
+def test_run_with_phase_cache_hit_reuses_output_without_invoking_phase() -> None:
+    """A cache entry whose hash matches is reused; the phase is never invoked."""
+    mission = make_mission()
+    cached_output = _full_strategic_core()
+    cache = PhaseOutputCache()
+    cache.put(
+        BrandPhase.STRATEGIC_CORE,
+        phase_input_hash(BrandPhase.STRATEGIC_CORE, mission, {}),
+        cached_output,
+    )
+    orchestrator = BrandingTeamOrchestrator()
+
+    with patch.object(orchestrator, "run_single_phase") as mock_run_single_phase:
+        result = orchestrator.run(
+            mission=mission,
+            human_review=HumanReview(approved=False),
+            target_phase=BrandPhase.STRATEGIC_CORE,
+            phase_cache=cache,
+        )
+
+    mock_run_single_phase.assert_not_called()
+    assert result.strategic_core is cached_output
+    assert result.narrative_messaging is None
+
+
+def test_run_with_phase_cache_miss_falls_through_and_populates_cache() -> None:
+    """An empty cache falls through to normal per-phase execution and gets populated."""
+    mission = make_mission()
+    cache = PhaseOutputCache()
+    orchestrator = BrandingTeamOrchestrator()
+
+    with patch.object(
+        orchestrator, "run_single_phase", side_effect=_run_single_phase_fixture_side_effect
+    ) as mock_run_single_phase:
+        result = orchestrator.run(
+            mission=mission,
+            human_review=HumanReview(approved=True),
+            phase_cache=cache,
+        )
+
+    assert mock_run_single_phase.call_count == len(PHASE_ORDER)
+    assert result.status == WorkflowStatus.READY_FOR_ROLLOUT
+
+    upstream: dict[BrandPhase, Any] = {}
+    for phase in PHASE_ORDER:
+        expected_hash = phase_input_hash(phase, mission, upstream)
+        cached = cache.get(phase, expected_hash)
+        assert cached is not None
+        upstream[phase] = cached
+
+
+def test_run_with_phase_cache_recomputes_downstream_phase_when_upstream_changes() -> None:
+    """A stale cache entry for a downstream phase (keyed by outdated upstream) misses."""
+    mission = make_mission()
+    cache = PhaseOutputCache()
+    stale_upstream = {BrandPhase.STRATEGIC_CORE: StrategicCoreOutput(brand_purpose="stale")}
+    stale_narrative = _full_narrative()
+    cache.put(
+        BrandPhase.NARRATIVE_MESSAGING,
+        phase_input_hash(BrandPhase.NARRATIVE_MESSAGING, mission, stale_upstream),
+        stale_narrative,
+    )
+    orchestrator = BrandingTeamOrchestrator()
+
+    with patch.object(
+        orchestrator, "run_single_phase", side_effect=_run_single_phase_fixture_side_effect
+    ) as mock_run_single_phase:
+        result = orchestrator.run(
+            mission=mission,
+            human_review=HumanReview(approved=False),
+            target_phase=BrandPhase.NARRATIVE_MESSAGING,
+            phase_cache=cache,
+        )
+
+    called_phases = [call.args[1] for call in mock_run_single_phase.call_args_list]
+    assert called_phases == [BrandPhase.STRATEGIC_CORE, BrandPhase.NARRATIVE_MESSAGING]
+    assert result.narrative_messaging is not stale_narrative
+
+
+def test_run_with_phase_cache_never_caches_a_degraded_output() -> None:
+    """A degraded phase output is returned but never stored in the cache."""
+    mission = make_mission()
+    cache = PhaseOutputCache()
+    degraded_output = StrategicCoreOutput()
+    orchestrator = BrandingTeamOrchestrator()
+
+    with patch.object(orchestrator, "run_single_phase", return_value=(degraded_output, True)):
+        result = orchestrator.run(
+            mission=mission,
+            human_review=HumanReview(approved=False),
+            target_phase=BrandPhase.STRATEGIC_CORE,
+            phase_cache=cache,
+        )
+
+    assert result.degraded_phases == [BrandPhase.STRATEGIC_CORE]
+    expected_hash = phase_input_hash(BrandPhase.STRATEGIC_CORE, mission, {})
+    assert cache.get(BrandPhase.STRATEGIC_CORE, expected_hash) is None

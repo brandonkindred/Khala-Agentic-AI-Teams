@@ -17,18 +17,20 @@ The router is included from `unified_api/main.py` at import time when
 `TEAM_CONFIGS["agent_studio"]` is enabled — catalog:
 [`docs/UNIFIED_API_LIFESPAN.md`](../../../../docs/UNIFIED_API_LIFESPAN.md).
 
-### Dispatch
+### Dispatch (direct, in-process)
 
-Authoring CRUD (start conversation / send message / clone / save) runs in-process via
-`agent_platform.studio.temporal.dispatch`: each route handler's call runs on a small
-fixed pool of daemon worker threads (bounded by `AUTHORING_TIMEOUT_S`, matching the
-former Temporal activity timeout) that call the process-wide `AgentStudioService`
-singleton (`runtime.get_studio_service()`) directly. These are request/response
-operations, not durable or long-running work, so they do **not** start Temporal
-workflows — the former 1-activity authoring workflows are gone, and a configured
-Temporal cluster is never required for these paths. The service's native
-`ValueError`/`LookupError` propagate unchanged; the routes map them to 400/404.
-`shutdown_authoring_executor()` is part of unified-API lifespan teardown.
+**Direct dispatch is the supported path for authoring CRUD** (start conversation /
+send message / clone / save): it runs entirely in-process via
+`agent_platform.studio.temporal.dispatch`, with no Temporal workflow and no
+dependency on a Temporal cluster or the `agent-studio-queue` worker. Each route
+handler's call runs on a small fixed pool of daemon worker threads (bounded by
+`AUTHORING_TIMEOUT_S`, matching the former Temporal activity timeout) that call the
+process-wide `AgentStudioService` singleton (`runtime.get_studio_service()`)
+directly. These are request/response operations, not durable or long-running work,
+so they do **not** start Temporal workflows — the former 1-activity authoring
+workflows are gone. The service's native `ValueError`/`LookupError` propagate
+unchanged; the routes map them to 400/404. `shutdown_authoring_executor()` is part
+of unified-API lifespan teardown.
 
 The `temporal/` package name and `agent-studio-queue` task queue constant are kept for
 now (empty `WORKFLOWS`/`ACTIVITIES`, a no-op worker starter) rather than removed

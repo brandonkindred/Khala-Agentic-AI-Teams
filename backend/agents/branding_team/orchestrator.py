@@ -58,6 +58,8 @@ from .models import (
     VisualIdentityOutput,
     WorkflowStatus,
 )
+from .shared.memoization import phase_input_hash
+from .shared.phase_output_cache import PhaseOutputCache
 
 if TYPE_CHECKING:
     from .store import BrandingStore
@@ -622,6 +624,7 @@ class BrandingTeamOrchestrator:
         include_market_research: bool = False,
         include_design_assets: bool = False,
         target_phase: Optional[BrandPhase] = None,
+        phase_cache: Optional[PhaseOutputCache] = None,
     ) -> TeamOutput:
         """Run the branding pipeline up to and including *target_phase*
         (default: all phases). When *target_phase* is None, every phase is
@@ -638,6 +641,8 @@ class BrandingTeamOrchestrator:
               every phase runs).
             - When ``store`` and ``brand_id`` are supplied, ``store`` implements
               ``get_brand``/``get_brand_by_id``/``append_brand_version``.
+            - ``phase_cache`` is a ``PhaseOutputCache`` instance (possibly
+              empty) or ``None``.
 
         Postconditions:
             - Returns a fully populated ``TeamOutput``.
@@ -647,30 +652,45 @@ class BrandingTeamOrchestrator:
               during the run (``append_brand_version`` returns ``None``), so the
               caller can mark the run as failed instead of reporting success
               without persistence.
+            - When ``phase_cache`` is ``None`` (the default), execution is
+              identical to omitting it entirely -- the pipeline always runs as
+              one monolithic graph invocation, exactly as before this
+              parameter existed.
+            - When ``phase_cache`` is supplied, each phase up to
+              ``target_phase`` is run in isolation (see
+              ``_run_phases_with_cache``): a phase whose input hash matches a
+              cached entry reuses that cached output instead of being
+              invoked; a miss runs the phase via ``run_single_phase`` and, if
+              the result is not degraded, stores it in ``phase_cache`` for a
+              future call.
         """
         # ---- Resolve brand from store if applicable ----
         mission, resolved_client_id = self._resolve_mission(mission, store, client_id, brand_id)
 
         stop_idx = phase_index(target_phase) if target_phase else len(PHASE_ORDER) - 1
 
-        # ---- Build and invoke the graph ----
-        graph = build_branding_graph(target_phase=target_phase)
-        task = (
-            f"Create a comprehensive brand strategy for the following company.\n\n"
-            f"Branding Mission:\n{serialize_mission(mission)}"
-        )
-        result = run_coroutine(graph.invoke_async(task))
+        if phase_cache is None:
+            # ---- Build and invoke the graph ----
+            graph = build_branding_graph(target_phase=target_phase)
+            task = (
+                f"Create a comprehensive brand strategy for the following company.\n\n"
+                f"Branding Mission:\n{serialize_mission(mission)}"
+            )
+            result = run_coroutine(graph.invoke_async(task))
 
-        # ---- Extract phase outputs from graph node results (table-driven) ----
-        # min_idx is a phase's position in PHASE_ORDER, which _PHASE_SPEC's
-        # order always matches.
-        phase_specs = [_PHASE_SPEC[phase] for phase in PHASE_ORDER]
-        extractions = [
-            self._extract_phase_output(result, spec.node_id, spec.model_cls)
-            if stop_idx >= min_idx
-            else (None, False)
-            for min_idx, spec in enumerate(phase_specs)
-        ]
+            # ---- Extract phase outputs from graph node results (table-driven) ----
+            # min_idx is a phase's position in PHASE_ORDER, which _PHASE_SPEC's
+            # order always matches.
+            phase_specs = [_PHASE_SPEC[phase] for phase in PHASE_ORDER]
+            extractions = [
+                self._extract_phase_output(result, spec.node_id, spec.model_cls)
+                if stop_idx >= min_idx
+                else (None, False)
+                for min_idx, spec in enumerate(phase_specs)
+            ]
+        else:
+            extractions = self._run_phases_with_cache(mission, stop_idx, phase_cache)
+
         strategic_core, narrative, visual_identity, channel_activation, governance = (
             output for output, _ in extractions
         )
@@ -716,6 +736,62 @@ class BrandingTeamOrchestrator:
                 )
 
         return output
+
+    def _run_phases_with_cache(
+        self,
+        mission: BrandingMission,
+        stop_idx: int,
+        cache: PhaseOutputCache,
+    ) -> List[tuple[Optional[BaseModel], bool]]:
+        """Run each phase up to ``stop_idx`` in isolation, reusing cache hits.
+
+        Unlike the monolithic-graph path this replaces, each phase is invoked
+        one at a time via ``run_single_phase`` so a cache hit can genuinely
+        skip invoking that phase, rather than discarding a freshly computed
+        result in favor of the cached one.
+
+        Preconditions:
+            - ``stop_idx`` is a valid index into ``PHASE_ORDER`` (as computed
+              by ``run`` from ``target_phase``).
+            - ``cache`` is a ``PhaseOutputCache`` instance (possibly empty).
+        Postconditions:
+            - Returns exactly ``len(PHASE_ORDER)`` ``(output, degraded)``
+              pairs in ``PHASE_ORDER`` order, matching the shape and contract
+              of the monolithic path's extraction list: phases beyond
+              ``stop_idx`` are ``(None, False)``.
+            - Each phase's input hash is computed from ``mission`` and the
+              upstream outputs actually produced earlier in this same call
+              (cache hits or fresh runs) -- never from a previous call's
+              accumulated state -- so a changed upstream phase naturally
+              yields a different hash for every downstream phase, causing
+              them to miss and recompute without any separate invalidation
+              step.
+            - Only a non-degraded phase output is ever stored in ``cache``; a
+              degraded (default-constructed) output is returned but never
+              cached, so a transient parse failure cannot poison a later call.
+        """
+        upstream_models: dict[BrandPhase, BaseModel] = {}
+        prior_outputs: dict[str, dict] = {}
+        extractions: List[tuple[Optional[BaseModel], bool]] = []
+        for min_idx, phase in enumerate(PHASE_ORDER):
+            if stop_idx < min_idx:
+                extractions.append((None, False))
+                continue
+
+            input_hash = phase_input_hash(phase, mission, upstream_models)
+            cached_output = cache.get(phase, input_hash)
+            if cached_output is not None:
+                output, degraded = cached_output, False
+            else:
+                output, degraded = self.run_single_phase(mission, phase, prior_outputs)
+                if not degraded:
+                    cache.put(phase, input_hash, output)
+
+            extractions.append((output, degraded))
+            upstream_models[phase] = output
+            prior_outputs[phase.value] = output.model_dump(mode="json")
+
+        return extractions
 
     def run_single_phase(
         self,

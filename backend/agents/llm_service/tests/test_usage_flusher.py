@@ -46,6 +46,22 @@ def test_observer_enqueues_without_db_io(monkeypatch) -> None:
     assert called["n"] == 0
 
 
+def test_observer_buffers_cache_tokens(monkeypatch) -> None:
+    monkeypatch.setattr(usage_flusher, "is_postgres_enabled", lambda: True)
+    usage_flusher._usage_observer(_Rec(cache_read_tokens=500, cache_creation_tokens=200))
+    row = usage_flusher._snapshot_buffer()[0]
+    assert row[18] == 500
+    assert row[19] == 200
+
+
+def test_observer_defaults_cache_tokens_to_zero(monkeypatch) -> None:
+    monkeypatch.setattr(usage_flusher, "is_postgres_enabled", lambda: True)
+    usage_flusher._usage_observer(_Rec())
+    row = usage_flusher._snapshot_buffer()[0]
+    assert row[18] == 0
+    assert row[19] == 0
+
+
 def test_observer_skips_when_postgres_off(monkeypatch) -> None:
     monkeypatch.setattr(usage_flusher, "is_postgres_enabled", lambda: False)
     usage_flusher._usage_observer(_Rec())
