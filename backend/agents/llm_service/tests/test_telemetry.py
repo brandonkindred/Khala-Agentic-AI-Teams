@@ -246,3 +246,52 @@ def test_usage_summary_window_hours_none_is_all_time() -> None:
     summary = telemetry.get_usage_summary(window_hours=None)
     assert summary["total_calls"] >= 1
     assert summary["window_hours"] == 0.0
+
+
+def test_record_llm_call_defaults_cache_tokens_to_zero() -> None:
+    rec = record_llm_call(team="t", agent_key="a", model="m", prompt_tokens=10, completion_tokens=5)
+    assert rec.cache_read_tokens == 0
+    assert rec.cache_creation_tokens == 0
+    d = rec.to_dict()
+    assert d["cache_read_tokens"] == 0
+    assert d["cache_creation_tokens"] == 0
+
+
+def test_record_llm_call_carries_cache_tokens_when_present() -> None:
+    rec = record_llm_call(
+        team="t",
+        agent_key="a",
+        model="claude-opus-4-8",
+        prompt_tokens=10,
+        completion_tokens=5,
+        cache_read_tokens=100,
+        cache_creation_tokens=50,
+    )
+    assert rec.cache_read_tokens == 100
+    assert rec.cache_creation_tokens == 50
+    d = rec.to_dict()
+    assert d["cache_read_tokens"] == 100
+    assert d["cache_creation_tokens"] == 50
+
+
+def test_usage_summary_totals_cache_tokens_and_defaults_to_zero() -> None:
+    telemetry.clear_call_log()
+    telemetry.record_llm_call(
+        team="blogging",
+        agent_key="writer",
+        model="claude-opus-4-8",
+        prompt_tokens=10,
+        completion_tokens=5,
+        cache_read_tokens=100,
+        cache_creation_tokens=50,
+    )
+    telemetry.record_llm_call(
+        team="blogging",
+        agent_key="writer",
+        model="deepseek-v4-pro:cloud",
+        prompt_tokens=20,
+        completion_tokens=5,
+    )
+    summary = telemetry.get_usage_summary(team="blogging", window_hours=24)
+    assert summary["total_cache_read_tokens"] == 100
+    assert summary["total_cache_creation_tokens"] == 50

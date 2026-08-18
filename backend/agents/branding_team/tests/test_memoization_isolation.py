@@ -1,9 +1,12 @@
-"""Regression guard: orchestrator.py and the conversation layer stay
-unwired from the Story 2a memoization primitives (phase_input_hash,
-PhaseOutputCache). Consuming them is separate follow-on work (stories 2b
-and 2c) -- this test makes that boundary a structural, enforced fact
-instead of a one-time assertion, so a future wiring change fails here
-until this file is deliberately updated alongside it.
+"""Regression guard: the conversation layer stays unwired from the Story 2a
+memoization primitives (phase_input_hash, PhaseOutputCache).
+
+``orchestrator.py`` deliberately wires both primitives as of Story 2b Step 1
+(``BrandingTeamOrchestrator._run_phases_with_cache``), so it is no longer
+guarded here. Consuming them in the conversation/assistant layer is separate
+follow-on work (story 2c) -- this test makes that boundary a structural,
+enforced fact instead of a one-time assertion, so a future wiring change
+fails here until this file is deliberately updated alongside it.
 """
 
 from __future__ import annotations
@@ -14,7 +17,6 @@ from types import ModuleType
 
 import pytest
 
-from branding_team import orchestrator as branding_orchestrator
 from branding_team.api import conversation as api_conversation
 from branding_team.api.routes import conversations as conversations_routes
 from branding_team.assistant import agent as assistant_agent
@@ -25,7 +27,6 @@ _FORBIDDEN_SYMBOL_NAMES = {"phase_input_hash", "PhaseOutputCache"}
 _FORBIDDEN_MODULE_SUBSTRINGS = ("memoization", "phase_output_cache")
 
 _GUARDED_MODULES: tuple[tuple[str, ModuleType], ...] = (
-    ("orchestrator.py", branding_orchestrator),
     ("api/conversation.py", api_conversation),
     ("api/routes/conversations.py", conversations_routes),
     ("assistant/agent.py", assistant_agent),

@@ -20,8 +20,8 @@ backend/agents/branding_team/
 │   ├── coro_runner.py        # run_coroutine — runs a coroutine from sync code (orchestrator, market_research adapter)
 │   ├── job_store.py          # Team's JobServiceClient singleton + guarded RUNNING/COMPLETED/FAILED transition helpers
 │   ├── json_recovery.py      # recover_json_object — tolerant JSON recovery; wired into orchestrator.py + assistant/agent.py
-│   ├── memoization.py        # phase_input_hash — deterministic per-phase input hash (pure, not yet wired)
-│   └── phase_output_cache.py # PhaseOutputCache — in-memory phase-output cache (pure, not yet wired)
+│   ├── memoization.py        # phase_input_hash — deterministic per-phase input hash; wired into orchestrator.run(phase_cache=...)
+│   └── phase_output_cache.py # PhaseOutputCache — in-memory phase-output cache; wired into orchestrator.run(phase_cache=...)
 ├── api/
 │   ├── main.py              # FastAPI app-assembly hub + re-exports
 │   ├── models.py            # Request/response models
@@ -312,9 +312,9 @@ is not set.
 
 `shared/memoization.py` and `shared/phase_output_cache.py` are a pair of
 pure, side-effect-free primitives for detecting when a pipeline phase's
-inputs are unchanged from a prior run. Neither is called from
-`orchestrator.run()` or the conversation layer today — they exist as
-independently-testable building blocks for a future caller.
+inputs are unchanged from a prior run. As of Story 2b Step 1,
+`orchestrator.run()` consumes both (see "Wiring status" below); the
+conversation layer does not yet.
 
 ### phase_input_hash
 
@@ -347,15 +347,38 @@ only in the instance's lifetime.
 
 ### Wiring status
 
-Both modules are unwired: nothing in `orchestrator.py` or the
-conversation layer (`api/conversation.py`, `api/routes/conversations.py`,
-`assistant/agent.py`, `assistant/store.py`, `assistant/prompts.py`)
-imports or references `phase_input_hash` or `PhaseOutputCache`.
-`tests/test_memoization_isolation.py` enforces this structurally — it
-parses each of those six files' source with `ast` and fails if either
-symbol appears, so a future change that wires the cache into the
-orchestrator or the conversation layer must update this test
-deliberately rather than regress it silently.
+`orchestrator.py` is wired: `run()` accepts an optional `phase_cache:
+PhaseOutputCache` (`orchestrator.py:568`). When it's `None` (the default),
+`run()` is unchanged — one monolithic `build_branding_graph` invocation
+covering every phase up to `target_phase`, exactly as before this
+parameter existed. When a `phase_cache` is supplied, `run()` instead calls
+`_run_phases_with_cache()` (`orchestrator.py:681`), which walks
+`PHASE_ORDER` one phase at a time: for each phase it computes
+`phase_input_hash(phase, mission, upstream_outputs)` from the mission and
+every upstream output produced so far *this call* (cache hits or fresh
+runs), checks it against `phase_cache.get()`, and on a hit reuses the
+cached output without invoking the phase. On a miss it runs the phase via
+`run_single_phase()` (the same per-phase isolation `run_single_phase()` has
+always used for Temporal activities) and, only if the result isn't
+degraded, stores it with `phase_cache.put()` — a degraded output is never
+cached, so a transient parse failure can't poison a later call. Because
+each phase's hash always reflects the upstream outputs actually used this
+call, a changed upstream phase naturally invalidates every downstream
+phase's cached entry without any separate invalidation step.
+
+The conversation layer (`api/conversation.py`,
+`api/routes/conversations.py`, `assistant/agent.py`, `assistant/store.py`,
+`assistant/prompts.py`) remains unwired — no caller yet constructs or
+threads a `PhaseOutputCache` through a session (that's Story 2c).
+`tests/test_memoization_isolation.py` still enforces this structurally for
+those five files (it no longer guards `orchestrator.py`, which is
+deliberately wired) — it parses each file's source with `ast` and fails if
+either symbol appears, so a future change that wires the cache into the
+conversation layer must update this test deliberately rather than regress
+it silently. Recomputing only from the *earliest* changed phase (skipping
+graph-build work for untouched trailing phases) and persisting a
+`phase_cache` across interactive re-runs are separate, later steps of
+Story 2b/2c — this step only establishes the per-phase hit/miss check.
 
 ## LLM integration
 
