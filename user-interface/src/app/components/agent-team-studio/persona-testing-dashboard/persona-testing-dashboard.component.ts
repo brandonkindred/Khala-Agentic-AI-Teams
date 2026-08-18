@@ -13,6 +13,7 @@ import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { PersonaTestingApiService } from '../../../services/persona-testing-api.service';
 import { JobActionsService } from '../../../services/job-actions.service';
 import { DashboardShellComponent } from '../../../shared/dashboard-shell/dashboard-shell.component';
+import { isPersonaRunTerminal } from '../../../models';
 import type {
   JobSource,
   PersonaInfo,
@@ -32,7 +33,6 @@ import {
 
 const TEAM_SOURCE: JobSource = 'user_agent_founder';
 const POLL_RUNS_MS = 15_000;
-const TERMINAL_STATUSES = ['completed', 'failed'];
 const RESUMABLE_STATUSES = new Set<string>(['failed', 'interrupted', 'agent_crash']);
 // Dynamic agentic-team target keys (`agentic_team:<id>`). This legacy dialog has
 // no process selector and can't supply the `process_id` those targets require, so
@@ -230,7 +230,7 @@ export class PersonaTestingDashboardComponent implements OnInit, OnDestroy {
   }
 
   canStop(run: PersonaTestRun): boolean {
-    return !TERMINAL_STATUSES.includes(run.status);
+    return !isPersonaRunTerminal(run.status);
   }
 
   canResume(run: PersonaTestRun): boolean {
@@ -238,7 +238,7 @@ export class PersonaTestingDashboardComponent implements OnInit, OnDestroy {
   }
 
   canRestart(run: PersonaTestRun): boolean {
-    return TERMINAL_STATUSES.includes(run.status) || RESUMABLE_STATUSES.has(run.status);
+    return isPersonaRunTerminal(run.status) || RESUMABLE_STATUSES.has(run.status);
   }
 
   private refreshPersonas(): void {
@@ -249,8 +249,8 @@ export class PersonaTestingDashboardComponent implements OnInit, OnDestroy {
 
   private applyRuns(runs: PersonaTestRun[]): void {
     this.allRuns = runs;
-    this.runningRuns = runs.filter((r) => !TERMINAL_STATUSES.includes(r.status));
-    this.completedRuns = runs.filter((r) => TERMINAL_STATUSES.includes(r.status));
+    this.runningRuns = runs.filter((r) => !isPersonaRunTerminal(r.status));
+    this.completedRuns = runs.filter((r) => isPersonaRunTerminal(r.status));
   }
 
   private refreshRuns(): void {

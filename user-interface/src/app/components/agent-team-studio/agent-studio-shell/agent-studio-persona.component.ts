@@ -22,6 +22,7 @@ import type {
   ProcessDefinition,
   TestPipelineRun,
 } from '../../../models/agentic-team.model';
+import { isPersonaRunTerminal } from '../../../models/persona-testing.model';
 import type { PersonaInfo, PersonaTestRunDetail } from '../../../models/persona-testing.model';
 import { AgenticTeamTestPanelComponent } from '../agentic-team-test-panel/agentic-team-test-panel.component';
 import {
@@ -30,12 +31,6 @@ import {
   type PersonaEditorDialogResult,
 } from '../persona-testing-dashboard/persona-editor-dialog.component';
 
-/**
- * Persona-test run statuses that are terminal (polling stops). Both the British
- * ('cancelled') and American ('canceled') spellings are accepted because the
- * backend pipeline status string is not normalized at the source.
- */
-const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'canceled']);
 /** Live-run poll cadence (ms). Matches the founder run's coarse 15–30s ticks. */
 const POLL_MS = 10_000;
 /** Upper bound on the launch (`POST /start`) request so a hung call can't wedge the UI. */
@@ -206,7 +201,7 @@ export class AgentStudioPersonaComponent implements OnInit {
 
   readonly runTerminal = computed(() => {
     const r = this.run();
-    return r ? TERMINAL_STATUSES.has(r.status) : false;
+    return r ? isPersonaRunTerminal(r.status) : false;
   });
 
   /**
@@ -220,7 +215,7 @@ export class AgentStudioPersonaComponent implements OnInit {
    */
   readonly pipelineTerminal = computed(() => {
     const s = this.pipelineRun()?.status;
-    return s ? TERMINAL_STATUSES.has(s) : false;
+    return s ? isPersonaRunTerminal(s) : false;
   });
 
   /**
@@ -636,7 +631,7 @@ export class AgentStudioPersonaComponent implements OnInit {
             return throwError(() => err);
           }),
         ),
-      (detail) => TERMINAL_STATUSES.has(detail.status),
+      (detail) => isPersonaRunTerminal(detail.status),
       { intervalMs: POLL_MS, onError: 'continue' },
     )
       .pipe(takeUntilDestroyed(this.destroyRef))
@@ -658,7 +653,7 @@ export class AgentStudioPersonaComponent implements OnInit {
       this.error.set(null);
     }
     this.run.set(detail);
-    const terminal = TERMINAL_STATUSES.has(detail.status);
+    const terminal = isPersonaRunTerminal(detail.status);
     // Piggyback a pipeline-run read on the founder poll (same 10s cadence, no
     // second poller to manage) to refresh the real step/WAIT progress. Skipped
     // once terminal: the progress UI is hidden then, so the read would be wasted.
