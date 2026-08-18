@@ -105,7 +105,7 @@ To reproduce the same result by hand against a running stack:
 2. **Stage 2 — pipeline / test-chat.** Run the saved agent through a pipeline step
    or the Studio test-chat. Confirm the reply reflects the saved role (these paths
    are bound today).
-3. **Stage 2 — sandbox invoke.** `POST /api/agents/{agent_id}/invoke` with **only**
+3. **Stage 2 — sandbox invoke.** `POST /_agents/{agent_id}/invoke` with **only**
    `{"agent_name", "message"}` (omit `role` / `skills` / `system_prompt`). The run
    is driven by the saved role and the authored `executing`-state prompt without
    re-supplying them in the body.

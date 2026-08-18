@@ -973,8 +973,11 @@ class BrandingTeamOrchestrator:
         store: Optional["BrandingStore"] = None,
         client_id: Optional[str] = None,
         brand_id: Optional[str] = None,
+        phase_cache: Optional[PhaseOutputCache] = None,
     ) -> TeamOutput:
-        """Convenience method: run the pipeline up to (and including) a specific phase."""
+        """Convenience method: run the pipeline up to (and including) a specific
+        phase. Accepts an optional ``phase_cache`` to reuse cached phase
+        outputs (see ``run()``)."""
         return self.run(
             mission=mission,
             human_review=human_review,
@@ -983,6 +986,7 @@ class BrandingTeamOrchestrator:
             client_id=client_id,
             brand_id=brand_id,
             target_phase=phase,
+            phase_cache=phase_cache,
         )
 
     @staticmethod
