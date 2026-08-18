@@ -14,10 +14,15 @@ class InfrastructureAsCodeAgent(DevOpsSingleShotAgent):
     """Produce IaC artifacts for a devops task via a single structured LLM call.
 
     Invariants: instance state is limited to ``llm`` and ``_model`` from the
-    base; ``run`` is stateless across calls.
+    base. ``run`` is deterministic for identical inputs and the resolved
+    model: repeated identical calls may return a cached result and skip the
+    LLM. Cache reads/writes are fail-open and gated by ``CACHE_ENV_VAR``.
     """
 
     PROMPT = IAC_AGENT_PROMPT
+    CACHE_NAMESPACE = "devops:iac:v1"
+    CACHE_ENV_VAR = "DEVOPS_IAC_CACHE_SIZE"
+    OUTPUT_MODEL = IaCAgentOutput
 
     def build_context(self, input_data: IaCAgentInput) -> str:
         """Build the IaC prompt context from the task spec and repo summary.
@@ -51,3 +56,8 @@ class InfrastructureAsCodeAgent(DevOpsSingleShotAgent):
             destructive_changes_detected=bool(data.get("destructive_changes_detected", False)),
             blast_radius_notes=data.get("blast_radius_notes") or [],
         )
+
+
+def clear_review_cache() -> None:
+    """Drop every cached IaC agent result. Intended for test teardown."""
+    InfrastructureAsCodeAgent.clear_cache()
