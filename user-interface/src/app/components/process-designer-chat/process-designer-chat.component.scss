@@ -397,6 +397,24 @@
   }
 }
 
+.agent-test-btn {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  line-height: 32px;
+  color: var(--kh-text-muted);
+
+  mat-icon {
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+  }
+
+  &:not(:disabled):hover {
+    color: var(--kh-accent-text);
+  }
+}
+
 .agent-delete-btn {
   flex-shrink: 0;
   width: 32px;

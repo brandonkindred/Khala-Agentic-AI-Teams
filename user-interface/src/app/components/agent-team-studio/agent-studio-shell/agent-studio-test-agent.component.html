@@ -5,6 +5,10 @@
         <mat-icon aria-hidden="true">smart_toy</mat-icon>
         <span>agent:&nbsp;<strong>{{ id }}</strong></span>
       </span>
+      <button mat-stroked-button type="button" class="studio-test__browse-btn" (click)="openBrowse()">
+        <mat-icon aria-hidden="true">search</mat-icon>
+        Browse agents ▾
+      </button>
     </div>
     <app-agent-runner [preselectedAgentId]="id" (requestCatalogReturn)="onReturnToBuild()" />
   </section>
@@ -15,4 +19,27 @@
     <p>Pick or build an agent in <strong>Build</strong> first, then return here to run it in its sandbox.</p>
     <button mat-stroked-button type="button" (click)="onReturnToBuild()">← Back to Build</button>
   </div>
+}
+
+@if (browseOpen()) {
+  <div class="studio-test__scrim" (click)="closeBrowse()" aria-hidden="true"></div>
+  <aside
+    class="studio-test__browse-panel"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Browse agents"
+    cdkTrapFocus
+    [cdkTrapFocusAutoCapture]="true"
+    (keydown.escape)="closeBrowse()"
+  >
+    <header class="studio-test__browse-head">
+      <h2>Browse agents</h2>
+      <button mat-icon-button type="button" aria-label="Close browse agents panel" (click)="closeBrowse()">
+        <mat-icon aria-hidden="true">close</mat-icon>
+      </button>
+    </header>
+    <div class="studio-test__browse-body">
+      <app-agent-catalog (requestRun)="onBrowseSelect($event)" />
+    </div>
+  </aside>
 }

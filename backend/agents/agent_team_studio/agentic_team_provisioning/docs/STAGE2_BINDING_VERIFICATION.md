@@ -115,3 +115,43 @@ To reproduce the same result by hand against a running stack:
 
 Recording steps 1–4 with the observed outputs is sufficient checklist-backed
 evidence alongside the automated suite.
+
+## Epic acceptance-criteria validation (close-out)
+
+This section is the evidence artifact for closing out the runtime-binding epic
+chain (grandparent epic: "Agent Studio: bind saved manifest persona at
+generated-agent invoke time"; parent story: "Runtime binding (3/3): verify
+Stage-2/pipeline and remove unbound caveat"). Each grandparent-epic acceptance
+criterion is validated point by point against concrete evidence in this
+checkout:
+
+| Epic acceptance criterion | Evidence |
+|---|---|
+| Invoking a saved Studio agent without re-supplying persona fields uses the manifest's stored `system_prompt` / role / states | `tests/test_stage2_binding_after_save.py::test_sandbox_invoke_stage2_binds_saved_persona_after_save` (line 177) and `agent_sandbox_runtime/tests/test_entrypoint.py::test_entrypoint_binds_saved_studio_persona_after_save` (line 354) — both drive a real Stage-1 save into a real registry, then a Stage-2 invoke that omits persona fields, and assert the composed prompt reflects the saved role/`system_prompt`. |
+| Override semantics (request body vs. manifest) are documented and tested | Documented in full per-field precedence table in `system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md` ("Accepted and fully implemented"). Tested per field in `tests/test_invoke_binding_contract.py`: `role` (lines 88, 101), `skills` (117, 128, 143), `expertise` (161, 172), `capabilities` (189), `system_prompt`/`state` (226, 242, 264) — every override-able field now has a dedicated manifest-default test and a dedicated body-override test. |
+| Agentic generated agents gain the same binding behavior (no Studio-only fork) | A single shared resolver, `persona_from_manifest`/`resolve_persona` (`roster_resolve.py:40-83`), is used identically by all three invoke paths (sandbox invoke, pipeline runner, Studio test-chat) — see "The three Stage-2 invoke paths" above. Both producer types are explicitly exercised: `test_stage2_binding_after_save.py::test_sandbox_invoke_stage2_binds_saved_persona_after_save_for_generated_agent` (line 271) and `test_entrypoint.py::test_entrypoint_binds_saved_generated_persona_after_save` (line 395). |
+| Stage 2 sandbox run after Stage 1 save demonstrates bound behavior in tests or verified manual checklist | Both: the automated suite above (shim-level and real-container-boot-level), and the "Manual checklist (UI reproduction)" section above. |
+| The "advertised but unbound" caveat is removed from docs/code comments | `registration.py`'s module docstring, `agent_platform/studio/README.md`, and `backend/shared/manifests/README.md` all describe binding as landed, pointing at ADR-015; no "advertised but unbound" / "dishonest" wording remains anywhere in the codebase (verified by repo-wide grep). |
+
+### Coverage evidence
+
+The 90%-floor coverage gate in `backend/pyproject.toml` (`[tool.coverage.report]
+fail_under = 90`) only actually runs, in CI, for `agent_platform.studio`
+(`registration.py`) via the `agent_studio` matrix entry. `agentic_team_provisioning`
+(`agent_builder.py`, `roster_resolve.py`, `pipeline_runner.py`, `testing.py`),
+`shared.agent_invoke` (`shim.py`, `dispatch.py`), and `agent_sandbox_runtime`
+(`entrypoint.py`) have no dedicated CI coverage job as of this writing — a
+pre-existing gap in the CI matrix (see `.github/workflows/ci.yml`'s own comment
+on why `agentic_team_provisioning` isn't in the matrix yet), not something this
+issue is fixing. The numbers below were therefore measured directly, locally,
+scoped to each package, rather than cited from CI:
+
+| Package | Command | Result |
+|---|---|---|
+| `agent_team_studio.agentic_team_provisioning` | `pytest agent_team_studio/agentic_team_provisioning/tests/ -m "not integration" --cov=agent_team_studio.agentic_team_provisioning --cov-fail-under=90` | **95.58%** total; `runtime/agent_builder.py` 100%, `roster_resolve.py` 94%. 409 passed, 1 pre-existing failure unrelated to binding (`test_api_router_scaffold.py::test_extracted_teams_and_conversations_paths_are_mounted`, a route-mounting assertion — matches the CI workflow's own documented "pre-existing failures" note for this suite). |
+| `shared.agent_invoke` | `pytest ../shared/agent_invoke/tests/ --cov=shared.agent_invoke --cov-fail-under=90` | **94.46%** total; `shim.py` 95%, `dispatch.py` 90%. 58 passed. |
+| `agent_platform.studio` | `pytest agent_platform/studio/tests/ -m "not integration" --cov=agent_platform.studio --cov-fail-under=90` | **91.84%** total; `registration.py` 100%. 181 passed, 17 skipped (pre-existing Postgres-availability gates). |
+| `agent_sandbox_runtime` | `pytest agent_sandbox_runtime/tests/ --cov=agent_sandbox_runtime --cov-fail-under=90` | **90.62%**; `entrypoint.py` 91%. 16 passed. |
+
+All four packages clear the 90% floor. `registration.py` and `runtime/agent_builder.py`
+— the two files this epic's runtime change actually touches — are both at 100%.
