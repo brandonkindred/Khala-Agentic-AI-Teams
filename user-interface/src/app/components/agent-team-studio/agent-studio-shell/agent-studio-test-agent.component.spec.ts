@@ -2,6 +2,7 @@ import { Component, EventEmitter, Input, Output } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { STAGE_INDEX } from '../../../models/agent-studio.model';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { AgentRunnerComponent } from '../agent-console/agent-runner/agent-runner.component';
 import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
@@ -65,14 +66,14 @@ describe('AgentStudioTestAgentComponent', () => {
   });
 
   it('empty-state "Back to Build" returns the stepper to Stage 1 (Build)', () => {
-    state.navigateToStage(1); // on Test with no agent → empty state
+    state.navigateToStage(STAGE_INDEX.test); // on Test with no agent → empty state
     fixture.detectChanges();
     fixture.nativeElement.querySelector('.studio-test__empty button').click();
     expect(state.activeStage()).toBe(0);
   });
 
   it('runner "back to catalog" returns the stepper to Stage 1 (Build)', () => {
-    state.navigateToStage(1);
+    state.navigateToStage(STAGE_INDEX.test);
     state.setRegistryAgentId('soc2.auditor');
     fixture.detectChanges();
 

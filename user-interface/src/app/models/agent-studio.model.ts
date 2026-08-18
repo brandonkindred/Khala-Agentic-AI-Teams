@@ -37,6 +37,16 @@ export const STUDIO_STAGES: readonly StudioStage[] = [
 ] as const;
 
 /**
+ * 0-based index of each stage within `STUDIO_STAGES`, keyed by `StudioStageKey`.
+ * Derived from `STUDIO_STAGES` so it can never drift from the array's order — the
+ * single source of truth for `navigateToStage(index)` call sites across the shell
+ * and its child stage components.
+ */
+export const STAGE_INDEX: Readonly<Record<StudioStageKey, number>> = Object.fromEntries(
+  STUDIO_STAGES.map((stage, index) => [stage.key, index]),
+) as Readonly<Record<StudioStageKey, number>>;
+
+/**
  * Stage 1's own forward-only sub-stepper (spec §3, Stage 1: "Build Agent is
  * not a single screen — it is a three-step sub-stepper"). Index `i` is
  * sub-step number `i + 1`; `AgentStudioStateService` tracks the active index

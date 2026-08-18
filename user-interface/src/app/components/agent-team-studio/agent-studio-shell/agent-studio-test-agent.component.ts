@@ -2,6 +2,7 @@ import { ChangeDetectionStrategy, Component, computed, inject } from '@angular/c
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { AgentRunnerComponent } from '../agent-console/agent-runner/agent-runner.component';
+import { STAGE_INDEX } from '../../../models/agent-studio.model';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 
 /**
@@ -44,6 +45,6 @@ export class AgentStudioTestAgentComponent {
    * Stage 1, so returning to it means moving the stepper back to Build.
    */
   onReturnToBuild(): void {
-    this.state.navigateToStage(0);
+    this.state.navigateToStage(STAGE_INDEX.build);
   }
 }
