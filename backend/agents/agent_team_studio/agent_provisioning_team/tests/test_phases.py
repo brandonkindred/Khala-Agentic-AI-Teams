@@ -1971,15 +1971,12 @@ def test_documentation_uses_llm_summary_when_configured(tmp_path: Path) -> None:
 
     captured = {}
 
-    class _StubLLM:
-        is_configured = True
-
-        async def complete(self, req):
+    class _StubClient:
+        def complete(self, prompt, **kwargs):
             captured["called"] = True
             return "FAKE_LLM_SUMMARY"
 
-    stub = _StubLLM()
-    with patch.object(doc_mod, "_LLM", stub):
+    with patch.object(doc_mod, "get_client", lambda agent_key=None: _StubClient()):
         result = doc_mod.run_documentation(
             agent_id="a1",
             manifest=ToolManifest(),
@@ -1989,19 +1986,18 @@ def test_documentation_uses_llm_summary_when_configured(tmp_path: Path) -> None:
         )
     assert result.success is True
     assert "FAKE_LLM_SUMMARY" in result.onboarding.summary
+    assert captured["called"] is True
 
 
 def test_documentation_llm_summary_falls_back_on_exception(tmp_path: Path) -> None:
     from agent_team_studio.agent_provisioning_team.phases import documentation as doc_mod
     from agent_team_studio.agent_provisioning_team.shared.tool_manifest import ToolManifest
 
-    class _BoomLLM:
-        is_configured = True
-
-        async def complete(self, req):
+    class _BoomClient:
+        def complete(self, prompt, **kwargs):
             raise RuntimeError("api down")
 
-    with patch.object(doc_mod, "_LLM", _BoomLLM()):
+    with patch.object(doc_mod, "get_client", lambda agent_key=None: _BoomClient()):
         result = doc_mod.run_documentation(
             agent_id="a1",
             manifest=ToolManifest(),
@@ -2039,13 +2035,11 @@ def test_documentation_uses_llm_getting_started_when_configured(tmp_path: Path) 
         ]
     )
 
-    class _StubLLM:
-        is_configured = True
-
-        async def complete(self, req):
+    class _StubClient:
+        def complete(self, prompt, **kwargs):
             return "FAKE_TOOL_DOC"
 
-    with patch.object(doc_mod, "_LLM", _StubLLM()):
+    with patch.object(doc_mod, "get_client", lambda agent_key=None: _StubClient()):
         result = doc_mod.run_documentation(
             agent_id="a1",
             manifest=manifest,
@@ -2093,13 +2087,11 @@ def test_documentation_llm_getting_started_falls_back_on_exception(tmp_path: Pat
         ]
     )
 
-    class _BoomLLM:
-        is_configured = True
-
-        async def complete(self, req):
+    class _BoomClient:
+        def complete(self, prompt, **kwargs):
             raise RuntimeError("api down")
 
-    with patch.object(doc_mod, "_LLM", _BoomLLM()):
+    with patch.object(doc_mod, "get_client", lambda agent_key=None: _BoomClient()):
         result = doc_mod.run_documentation(
             agent_id="a1",
             manifest=manifest,

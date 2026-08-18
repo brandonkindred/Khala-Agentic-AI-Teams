@@ -4,8 +4,9 @@ Documentation phase: Generate onboarding packet for the agent.
 This is phase 5 of the provisioning workflow.
 """
 
-import asyncio
 from typing import Callable, Dict, List, Optional
+
+from llm_service import DummyLLMClient, LLMNotConfiguredError, get_client
 
 from ..anatomy_assets import try_materialize_anatomy_bundle
 from ..models import (
@@ -19,11 +20,8 @@ from ..prompts import (
     format_onboarding_summary_prompt,
     format_tool_getting_started_prompt,
 )
-from ..shared.llm_client import LLMClient, LLMRequest, sanitize_prompt_var
+from ..shared.prompt_sanitize import sanitize_prompt_var
 from ..shared.tool_manifest import ToolManifest
-
-# Module-level shared client; cheap to construct, no network until is_configured.
-_LLM = LLMClient()
 
 _SUMMARY_SYSTEM = (
     "You are the onboarding writer for the Khala Agent Provisioning Team. "
@@ -139,17 +137,25 @@ def _generate_summary(
     every backing service (#456), so the summary doesn't condition on
     permission level.
     """
-    if _LLM.is_configured:
-        prompt = format_onboarding_summary_prompt(
-            agent_id=sanitize_prompt_var(agent_id),
-            tool_names=sanitize_prompt_var(", ".join(tool_names or [])),
-        )
-        try:
-            return asyncio.run(
-                _LLM.complete(LLMRequest(system=_SUMMARY_SYSTEM, user=prompt, max_tokens=300))
-            ).strip()
-        except Exception:  # noqa: BLE001 — fall through to deterministic template
-            pass
+    prompt = format_onboarding_summary_prompt(
+        agent_id=sanitize_prompt_var(agent_id),
+        tool_names=sanitize_prompt_var(", ".join(tool_names or [])),
+    )
+    try:
+        client = get_client(agent_key="agent_provisioning_team.documentation")
+        if isinstance(client, DummyLLMClient):
+            # Dummy is the no-LLM test/dev harness — prefer the deterministic
+            # template over its generic canned text, same as "unconfigured".
+            raise LLMNotConfiguredError("agent_provisioning_team.documentation: dummy provider")
+        return client.complete(
+            prompt,
+            objective="generate onboarding summary",
+            system_prompt=_SUMMARY_SYSTEM,
+            temperature=0.2,
+            max_tokens=300,
+        ).strip()
+    except Exception:  # noqa: BLE001 — fall through to deterministic template
+        pass
 
     return (
         f"Your agent environment is ready with {tool_count} tool(s) configured. "
@@ -179,21 +185,29 @@ def _generate_getting_started(
 
         return text
 
-    if _LLM.is_configured:
-        prompt = format_tool_getting_started_prompt(
-            tool_name=sanitize_prompt_var(tool_name),
-            description=sanitize_prompt_var(getattr(onboarding_config, "description", "") or ""),
-            connection_details=sanitize_prompt_var(
-                "available via env var" if credentials and credentials.connection_string else "n/a"
-            ),
-            permissions=sanitize_prompt_var(", ".join(result.permissions or [])),
-        )
-        try:
-            return asyncio.run(
-                _LLM.complete(LLMRequest(system=_TOOL_DOC_SYSTEM, user=prompt, max_tokens=400))
-            ).strip()
-        except Exception:  # noqa: BLE001
-            pass
+    prompt = format_tool_getting_started_prompt(
+        tool_name=sanitize_prompt_var(tool_name),
+        description=sanitize_prompt_var(getattr(onboarding_config, "description", "") or ""),
+        connection_details=sanitize_prompt_var(
+            "available via env var" if credentials and credentials.connection_string else "n/a"
+        ),
+        permissions=sanitize_prompt_var(", ".join(result.permissions or [])),
+    )
+    try:
+        client = get_client(agent_key="agent_provisioning_team.documentation")
+        if isinstance(client, DummyLLMClient):
+            # Dummy is the no-LLM test/dev harness — prefer the deterministic
+            # template over its generic canned text, same as "unconfigured".
+            raise LLMNotConfiguredError("agent_provisioning_team.documentation: dummy provider")
+        return client.complete(
+            prompt,
+            objective="generate tool getting-started guide",
+            system_prompt=_TOOL_DOC_SYSTEM,
+            temperature=0.2,
+            max_tokens=400,
+        ).strip()
+    except Exception:  # noqa: BLE001
+        pass
 
     lines = [f"To use {tool_name}:"]
 
