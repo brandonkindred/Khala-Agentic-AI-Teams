@@ -44,7 +44,7 @@ from branding_team.agents import (
     make_typography_builder,
     make_voice_tone_builder,
 )
-from branding_team.graphs.shared import build_agent, build_fan_out_fan_in
+from branding_team.graphs.shared import build_compositor, build_fan_out_fan_in
 from branding_team.models import VisualIdentityOutput
 
 _PHASE3_CONCEPTUALIST_VARIANTS: tuple[str, ...] = ("Editorial", "Minimalist", "Bold")
@@ -119,7 +119,7 @@ def build_phase3_graph() -> Graph:
     # it carries its own ``structured_output=`` so Strands forces a typed tool
     # call — the VisualIdentityOutput schema is the contract, not a prose
     # "output JSON" reminder.
-    compositor = build_agent(
+    compositor_agent = build_compositor(
         name="visual_compositor",
         description="Assembles all visual identity fragments into a unified VisualIdentityOutput.",
         system_prompt=(
@@ -127,12 +127,12 @@ def build_phase3_graph() -> Graph:
             "VisualIdentityOutput. Combine the moodboard candidates from the diverge phase, the creative "
             "refinement decision, logo suite, color palette, typography system, iconography style, "
             "illustration style, photography direction, video direction, motion principles, voice tone "
-            "spectrum, language dos/donts, and design system."
+            "spectrum, language dos/don'ts, and design system."
         ),
         structured_output=VisualIdentityOutput,
     )
-    compositor_node = builder.add_node(compositor, node_id="visual_compositor")
+    compositor = builder.add_node(compositor_agent, node_id="visual_compositor")
     for node in fan_out_nodes:
-        builder.add_edge(node, compositor_node)
+        builder.add_edge(node, compositor)
 
     return builder.build()
