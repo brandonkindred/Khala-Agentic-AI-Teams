@@ -1018,10 +1018,10 @@ def test_extract_phase_output_merges_every_phase1_fragment() -> None:
     assert output.brand_promise == "Every touchpoint feels cohesive."
 
 
-def test_extract_phase_output_merges_every_phase2_fragment() -> None:
-    """Phase 2 wraps six sequential Graph agents as one top-level node;
-    get_agent_results()[-1] only ever sees VoicePrinciplesDrafter, so the five
-    upstream agents' fragments must be merged in separately."""
+def _phase2_nested_node_result() -> MagicMock:
+    """A mock NodeResult wrapping all six Phase-2 specialists' own-field
+    fragments, shaped like the real nested MultiAgentResult.results Strands
+    returns."""
     _story = dict(
         brand_story="Origin story about shipping on-brand experiences.",
         hero_narrative="Brand that ships with the product.",
@@ -1118,9 +1118,15 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
     node_result.get_agent_results.return_value = [
         node.get_agent_results.return_value[0] for node in nested_results.values()
     ]
+    return node_result
 
+
+def test_extract_phase_output_merges_every_phase2_fragment() -> None:
+    """Phase 2 wraps six sequential Graph agents as one top-level node;
+    get_agent_results()[-1] only ever sees VoicePrinciplesDrafter, so the five
+    upstream agents' fragments must be merged in separately."""
     mock_result = MagicMock()
-    mock_result.result = {"phase2_narrative": node_result}
+    mock_result.result = {"phase2_narrative": _phase2_nested_node_result()}
 
     output, degraded = BrandingTeamOrchestrator._extract_phase_output(
         mock_result, "phase2_narrative", NarrativeMessagingOutput
@@ -1146,6 +1152,23 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
         "Cites proof",
         "Matches tone",
     ]
+
+
+def test_phase2_fragments_collectively_populate_every_output_field() -> None:
+    """Schema-coverage guard: the six Phase-2 specialists' fragments must
+    collectively populate every field on NarrativeMessagingOutput, checked
+    generically against the model's own field list (not a hardcoded field
+    enumeration) -- mirrors test_phase3/4/5_fragments_collectively_populate_every_output_field."""
+    mock_result = MagicMock()
+    mock_result.result = {"phase2_narrative": _phase2_nested_node_result()}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase2_narrative", NarrativeMessagingOutput
+    )
+
+    assert degraded is False
+    assert isinstance(output, NarrativeMessagingOutput)
+    _assert_every_field_populated(output)
 
 
 # NOTE (Story 5b Step 1): test_extract_phase_output_phase2_prefers_upstream_owned_fields
