@@ -5,8 +5,10 @@ from __future__ import annotations
 from collections import OrderedDict
 
 from software_engineering_team.code_review_agent.change_surface import (
-    extract_touched_lines,
     unified_diffs_from_pairs,
+)
+from software_engineering_team.github_source.pr_review_mapping import (
+    parse_valid_lines,
 )
 
 
@@ -29,7 +31,7 @@ def test_new_file_when_old_contents_none() -> None:
     assert patch.startswith("--- a/a.txt\n+++ b/a.txt\n")
     assert "@@" in patch
     assert "+hello" in patch
-    assert extract_touched_lines(patch)
+    assert parse_valid_lines(patch, added_only=True)
 
 
 def test_new_file_when_key_missing_from_old_map() -> None:
@@ -40,7 +42,7 @@ def test_new_file_when_key_missing_from_old_map() -> None:
     )
     patch = out["b.txt"]
     assert "--- a/b.txt\n+++ b/b.txt\n" in patch
-    assert extract_touched_lines(patch)
+    assert parse_valid_lines(patch, added_only=True)
 
 
 def test_modified_file_diff() -> None:
@@ -54,7 +56,7 @@ def test_modified_file_diff() -> None:
     assert patch.startswith("--- a/m.txt\n+++ b/m.txt\n")
     assert "-b" in patch
     assert "+c" in patch
-    assert extract_touched_lines(patch) == frozenset({2})
+    assert parse_valid_lines(patch, added_only=True) == {2}
 
 
 def test_preserves_new_contents_key_order() -> None:
