@@ -13,14 +13,16 @@ import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { EMPTY, Subscription, catchError, interval, switchMap, timeout } from 'rxjs';
+import { EMPTY, Subscription, catchError, interval, throwError, timeout } from 'rxjs';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
+import { pollWhile } from '../../../shared/poll-while';
 import type {
   AgenticTeam,
   ProcessDefinition,
   TestPipelineRun,
 } from '../../../models/agentic-team.model';
+import { isPersonaRunTerminal } from '../../../models/persona-testing.model';
 import type { PersonaInfo, PersonaTestRunDetail } from '../../../models/persona-testing.model';
 import { AgenticTeamTestPanelComponent } from '../agentic-team-test-panel/agentic-team-test-panel.component';
 import {
@@ -29,12 +31,6 @@ import {
   type PersonaEditorDialogResult,
 } from '../persona-testing-dashboard/persona-editor-dialog.component';
 
-/**
- * Persona-test run statuses that are terminal (polling stops). Both the British
- * ('cancelled') and American ('canceled') spellings are accepted because the
- * backend pipeline status string is not normalized at the source.
- */
-const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'canceled']);
 /** Live-run poll cadence (ms). Matches the founder run's coarse 15–30s ticks. */
 const POLL_MS = 10_000;
 /** Upper bound on the launch (`POST /start`) request so a hung call can't wedge the UI. */
@@ -205,7 +201,7 @@ export class AgentStudioPersonaComponent implements OnInit {
 
   readonly runTerminal = computed(() => {
     const r = this.run();
-    return r ? TERMINAL_STATUSES.has(r.status) : false;
+    return r ? isPersonaRunTerminal(r.status) : false;
   });
 
   /**
@@ -219,7 +215,7 @@ export class AgentStudioPersonaComponent implements OnInit {
    */
   readonly pipelineTerminal = computed(() => {
     const s = this.pipelineRun()?.status;
-    return s ? TERMINAL_STATUSES.has(s) : false;
+    return s ? isPersonaRunTerminal(s) : false;
   });
 
   /**
@@ -622,48 +618,32 @@ export class AgentStudioPersonaComponent implements OnInit {
           this.elapsedSec.update((s) => s + 1);
         }
       });
-    this.pollSub = interval(POLL_MS)
-      .pipe(
-        // Handle the failure INSIDE switchMap: a transient getRunStatus error
-        // must not propagate to the outer interval subscription (that would
-        // terminate the stream permanently). catchError → EMPTY surfaces a
-        // banner and lets the next tick retry, matching the immediate-fetch
-        // comment's promise.
-        switchMap(() =>
-          this.facade.getPersonaRunStatus(runId).pipe(
-            catchError(() => {
-              this.error.set(LOST_CONTACT);
-              return EMPTY;
-            }),
-          ),
-        ),
-        takeUntilDestroyed(this.destroyRef),
-      )
-      .subscribe((detail) => this.handleStatus(detail));
-    // Fetch once immediately so the panel isn't blank for a full poll interval.
-    this.facade
-      .getPersonaRunStatus(runId)
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-        next: (detail) => this.handleStatus(detail),
-        error: () => {
-          // Guard against a stale fetch landing after a newer run was launched:
-          // only banner the run that is still active. Use the LOST_CONTACT
-          // constant so handleStatus clears it on the next good poll (it matches
-          // by value). The interval poll will retry meanwhile.
-          if (this.activeRunId === runId) {
+    // pollWhile fetches once immediately (so the panel isn't blank for a full
+    // poll interval), then every POLL_MS thereafter, until a terminal status is
+    // reached. A transient getRunStatus error is caught here (banner + rethrow)
+    // so pollWhile's onError: 'continue' swallows it and keeps polling rather
+    // than tearing the stream down.
+    this.pollSub = pollWhile(
+      () =>
+        this.facade.getPersonaRunStatus(runId).pipe(
+          catchError((err) => {
             this.error.set(LOST_CONTACT);
-          }
-        },
-      });
+            return throwError(() => err);
+          }),
+        ),
+      (detail) => isPersonaRunTerminal(detail.status),
+      { intervalMs: POLL_MS, onError: 'continue' },
+    )
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((detail) => this.handleStatus(detail));
   }
 
   /** Apply a polled status; stop polling once the run reaches a terminal state. */
   private handleStatus(detail: PersonaTestRunDetail): void {
     // Ignore a null/undefined payload (defensive against a malformed response
     // slipping past the error handler) and a stale response from a superseded
-    // run (e.g. the previous run's in-flight immediate fetch) so neither can
-    // clobber the current run or stop its poller.
+    // run (e.g. a poll that was already in flight when a new run superseded
+    // it) so neither can clobber the current run or stop its poller.
     if (!detail || detail.run_id !== this.activeRunId) {
       return;
     }
@@ -673,7 +653,7 @@ export class AgentStudioPersonaComponent implements OnInit {
       this.error.set(null);
     }
     this.run.set(detail);
-    const terminal = TERMINAL_STATUSES.has(detail.status);
+    const terminal = isPersonaRunTerminal(detail.status);
     // Piggyback a pipeline-run read on the founder poll (same 10s cadence, no
     // second poller to manage) to refresh the real step/WAIT progress. Skipped
     // once terminal: the progress UI is hidden then, so the read would be wasted.
