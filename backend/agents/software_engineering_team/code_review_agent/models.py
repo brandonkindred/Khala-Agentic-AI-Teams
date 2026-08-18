@@ -480,9 +480,9 @@ _ChunkReviewIssueCategory = Literal[
 class ChunkReviewIssueLLM(BaseModel):
     """Narrow LLM-authored shape for one issue in a chunk-review response.
 
-    Schema for ``chunk_reviewer._run_chunk_review`` to validate replies via
-    ``llm_service.complete_validated`` (see ``llm_service``'s README, "When to use which
-    entrypoint"). This is the raw per-issue shape the model is asked to
+    Schema for ``chunk_reviewer._parse_chunk_review_response`` to validate
+    replies via ``ChunkReviewLLMResponse.model_validate``. This is the raw
+    per-issue shape the model is asked to
     emit — distinct from the persisted :class:`CodeReviewIssue`, which
     additionally range-validates ``line``/``start_line`` against the cited
     file segment and resolves ``file_path`` against the chunk. That
@@ -492,10 +492,11 @@ class ChunkReviewIssueLLM(BaseModel):
     ``severity``/``category`` are typed as the exact enumerated sets the
     review prompt asks for (mirrors ``chunking._VALID_SEVERITIES``/
     ``_VALID_CATEGORIES``) instead of a free string with silent fallback
-    coercion: an out-of-set value now fails schema validation and drives
-    ``complete_validated``'s one correction retry, rather than being
-    silently rewritten to "high"/"general" as today's hand-rolled parsing
-    does in ``chunking._issues_from_chunk_output``.
+    coercion: an out-of-set value now fails schema validation and raises
+    ``LLMSchemaValidationError``, which the coordinator's chunk-level
+    recovery in ``mapping.py`` handles, rather than being silently
+    rewritten to "high"/"general" as today's hand-rolled parsing does in
+    ``chunking._issues_from_chunk_output``.
 
     ``pre_existing`` is ``StrictBool``, not plain ``bool``: Pydantic's
     default lax coercion would accept a numeric ``1``/``0`` (or "yes"/"no",
@@ -505,8 +506,8 @@ class ChunkReviewIssueLLM(BaseModel):
     truthy string counts there, and a bare number is always false, to stop
     a stray numeric value from being misread as an affirmative flag.
     ``StrictBool`` keeps that policy intact by rejecting non-bool input
-    outright (driving ``complete_validated``'s corrective retry) instead of
-    silently coercing it before it ever reaches that downstream check.
+    outright (raising ``LLMSchemaValidationError``) instead of silently
+    coercing it before it ever reaches that downstream check.
     """
 
     severity: CodeReviewIssueSeverity = Field(
@@ -560,20 +561,22 @@ class ChunkReviewIssueLLM(BaseModel):
 class ChunkReviewLLMResponse(BaseModel):
     """Narrow LLM-authored shape for one chunk-review call's response.
 
-    ``chunk_reviewer._run_chunk_review`` validates every chunk-review reply
-    against this model via ``llm_service.complete_validated``, replacing the
-    hand-rolled ``.get()``/``str()``/``bool()`` coercions the reviewer used to
-    apply to a raw ``complete_json_with_continuation`` reply.
+    ``chunk_reviewer._parse_chunk_review_response`` validates every
+    chunk-review reply against this model via
+    ``ChunkReviewLLMResponse.model_validate``, replacing the hand-rolled
+    ``.get()``/``str()``/``bool()`` coercions the reviewer used to apply to a
+    raw ``complete_json_with_continuation`` reply.
 
     All four fields are required, not defaulted: the chunk-review prompt's
-    own output-contract reminder (``FINAL_OUTPUT_CONTRACT_NOTE`` in
-    chunk_reviewer.py) explicitly tells the model to always emit exactly
-    these four keys, so a reply missing one is a truncated/malformed
+    own output-contract reminder explicitly tells the model to always emit
+    exactly these four keys, so a reply missing one is a truncated/malformed
     response, not a legitimately empty field. Defaulting them here would
     reproduce the hand-parser's permissive ``.get(..., default)`` fallbacks
     in the one place meant to demonstrate the opposite — a missing field
-    must fail validation and drive ``complete_validated``'s corrective
-    retry, not silently look like a clean, empty-issue approval.
+    must fail validation and raise ``LLMSchemaValidationError``, not
+    silently look like a clean, empty-issue approval. No local corrective
+    retry: the coordinator's chunk-level recovery (``mapping.py``) is the
+    retry layer for a rejected reply.
 
     ``approved`` must agree with whether the issues list carries an
     actionable critical/high finding, in both directions -- exactly the
@@ -586,9 +589,10 @@ class ChunkReviewLLMResponse(BaseModel):
     baseless rejection to an approval, or a contradictory approval to a
     rejection) rather than letting a malformed LLM reply be a schema
     failure. Enforcing the same rule here means that reply instead fails
-    validation and drives ``complete_validated``'s corrective retry — giving
-    the model a chance to correct itself — rather than always being
-    silently absorbed by the coordinator's safety net.
+    validation and raises ``LLMSchemaValidationError`` — the coordinator's
+    chunk-level recovery (``mapping.py``) is the retry layer for a
+    rejected reply, rather than the reply being silently absorbed by the
+    coordinator's safety net.
     """
 
     approved: bool = Field(

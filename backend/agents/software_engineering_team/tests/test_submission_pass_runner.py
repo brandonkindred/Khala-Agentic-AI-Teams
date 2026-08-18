@@ -128,10 +128,10 @@ def test_call_agent_records_full_conversation_in_transcript(monkeypatch) -> None
     site is tool-using (``tools`` may be non-empty), so recording only the
     final text would silently drop any intermediate tool-loop turns.
 
-    Stubs ``run_agent_via_reasoning`` so this assertion does not depend on a
-    live Strands Agent, and so it still holds when the session-wide
-    ``submission_pass_two_call_client`` autouse stub is loaded (as in CI
-    pytest-xdist).
+    Stubs ``run_agent_via_reasoning`` directly (via its own ``monkeypatch``
+    call below) so this assertion does not depend on a live Strands Agent,
+    overriding whatever any other module's local ``submission_pass_two_call_client``
+    wiring fixture may have already set on this same ``runner_mod`` reference.
     """
     from llm_service import llm_attribution
 
@@ -297,8 +297,9 @@ def test_call_agent_records_formatting_turn_start_times(
 
 
 def test_two_call_client_stub_invokes_on_reasoning_agent(monkeypatch) -> None:
-    """The session-wide submission-pass stub must still fire on_reasoning_agent
-    so transcript recording is not silently skipped under pytest-xdist."""
+    """The submission-pass two-call test stub must still fire on_reasoning_agent
+    so transcript recording is not silently skipped wherever another module
+    wires it in via its own local autouse fixture."""
     from tests.submission_pass_two_call_client import (
         wire_run_agent_via_reasoning_for_test_clients,
     )

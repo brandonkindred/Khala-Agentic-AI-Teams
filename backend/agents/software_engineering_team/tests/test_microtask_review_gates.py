@@ -12,8 +12,9 @@ Tests the following new functionality:
 
 from __future__ import annotations
 
+import json
+import re
 import sys
-import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 from unittest.mock import MagicMock
@@ -55,22 +56,48 @@ class _ScriptedTextClient(DummyLLMClient):
         return self._responses[-1] if self._responses else ""
 
 
+# Matches the ANALYSIS block ``via_reasoning.wrap_with_analysis_delimiters``
+# wraps around the reasoning pass's own output for the formatting-pass prompt
+# (see ``_CallableTextClient``'s docstring for why this replaces the old
+# thread-local correlation).
+_ANALYSIS_BLOCK_RE = re.compile(r"--- ANALYSIS[^\n]*---\n(.*)\n--- END ANALYSIS", re.DOTALL)
+
+
 class _CallableTextClient(DummyLLMClient):
     """Calls a user-provided function to generate each response.
 
-    Chunk review is a think-then-format split: call 1 (``complete``) carries
-    the code, call 2 (``complete_json``) is the JSON wrap. Stub matching must
-    use the reasoning prompt, not the format-pass schema text.
+    The via-reasoning split (chunk review, and the false-positive verifier's
+    own reasoning pass) is now two ``complete_json`` calls end to end: call 1
+    (reasoning) is dispatched through the Strands ``Agent``'s chat()/stream(),
+    which ``DummyLLMClient`` always routes into ``complete_json``; call 2
+    (formatting) is ``complete_json``'s own direct call, on the *original*
+    calling thread, whose prompt wraps call 1's JSON-serialized output in
+    ANALYSIS delimiters. The two calls can land on different OS threads
+    (Strands dispatches the backing ``LLMClient`` call via
+    ``asyncio.to_thread``), so correlating them via thread-local state --
+    viable pre-migration, when the reasoning pass was a synchronous
+    ``client.complete()`` call on the *same* thread as the formatting call --
+    no longer works. A literal substring of the original reasoning prompt
+    (e.g. ``"eval("``) is also not guaranteed to survive a JSON round-trip
+    (only ``"eval"`` would, inside a JSON string), so re-deriving the
+    formatting-pass answer by re-scanning its own prompt for that substring
+    is unreliable too.
+
+    Instead: recognize a formatting-pass prompt by its ANALYSIS delimiters
+    and parse call 1's dict straight back out of them -- every ``fn`` in this
+    file already returns the schema-shaped dict AS the reasoning answer (these
+    doubles model "reasoning" as directly producing the final JSON), so
+    replaying it verbatim is both correct and immune to whichever substring
+    of the original prompt happened to survive the round-trip. Falls back to
+    calling ``fn`` with the formatting prompt when the embedded text isn't
+    valid JSON (e.g. the false-positive verifier's tool-calling reasoning
+    pass, whose dummy "prose" is plain text) -- that caller is fail-safe
+    regardless of what's returned.
     """
 
     def __init__(self, fn) -> None:
         super().__init__()
         self._fn = fn
-        self._tls = threading.local()
-
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        self._tls.reasoning = prompt
-        return super().complete(prompt, **kwargs)
 
     def complete_json(
         self,
@@ -82,13 +109,12 @@ class _CallableTextClient(DummyLLMClient):
         think: bool = False,
         **kwargs: Any,
     ) -> Any:
-        reasoning = getattr(self._tls, "reasoning", "")
-        lowered = prompt.lower()
-        if reasoning and (
-            "convert the following analysis into a single json object" in lowered
-            or ("--- analysis " in lowered and "end analysis" in lowered)
-        ):
-            return self._fn(reasoning)
+        match = _ANALYSIS_BLOCK_RE.search(prompt)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except ValueError:
+                pass
         return self._fn(prompt)
 
 

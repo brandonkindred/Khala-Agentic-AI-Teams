@@ -273,17 +273,28 @@ def test_small_code_routes_through_coordinator_chunk_path() -> None:
     reviewed through the chunk-review prompt, not a separate single-call path."""
 
     class _Recorder(DummyLLMClient):
+        """Splits ``complete_json`` calls into reasoning-pass and
+        formatting-pass prompts.
+
+        ``run_agent_via_reasoning`` runs the reasoning pass through a real
+        Strands ``Agent``, whose ``chat()`` unconditionally delegates to
+        ``complete_json`` -- so both the reasoning pass (the original
+        chunk-review prompt) and the formatting pass (wrapped with a
+        ``--- ANALYSIS`` marker by ``wrap_with_analysis_delimiters``) land
+        on ``complete_json`` here instead of the reasoning pass landing on
+        ``complete``. The marker distinguishes the two.
+        """
+
         def __init__(self) -> None:
             super().__init__()
             self.reasoning_prompts: list[str] = []
             self.format_prompts: list[str] = []
 
-        def complete(self, prompt: str, **kwargs: Any) -> str:
-            self.reasoning_prompts.append(prompt)
-            return super().complete(prompt, **kwargs)
-
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            self.format_prompts.append(prompt)
+            if "--- ANALYSIS" in prompt:
+                self.format_prompts.append(prompt)
+            else:
+                self.reasoning_prompts.append(prompt)
             return super().complete_json(prompt, **kwargs)
 
     client = _Recorder()

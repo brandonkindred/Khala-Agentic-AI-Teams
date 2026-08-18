@@ -29,15 +29,15 @@ from strands import Agent
 from llm_service import get_strands_model
 from llm_service.strands_model import model_fingerprint, resolve_strands_model
 from shared.cache import get_shared_cache
-from software_engineering_team.shared.persona_agent_base import run_structured_persona
-from software_engineering_team.shared.review_result_cache import (
-    build_review_cache_key,
+from shared.cache.pydantic_cache import (
+    build_model_cache_key,
     cache_capacity_for,
     cache_namespace_for,
-    clear_review_cache_namespace,
-    get_cached_review_result,
-    set_cached_review_result,
+    clear_cache_namespace,
+    get_cached_model,
+    set_cached_model,
 )
+from software_engineering_team.shared.persona_agent_base import run_structured_persona
 from software_engineering_team.shared.security_service import derive_approved
 
 from .models import QAInput, QAOutput
@@ -60,10 +60,11 @@ _CACHE_LABEL = "QA"
 # chunk-level *policy*: every genuine outcome is cached regardless of
 # ``approved`` (see ``run()``'s ``is_fallback`` guard below), since this is a
 # single atomic call with no reduce phase to short-circuit. The shared
-# policy itself lives in
-# ``software_engineering_team.shared.review_result_cache``, imported above
-# (also used by security_agent's analogous cache); this module supplies only
-# its own namespace stem, env var, capacity default, and output model.
+# policy itself lives in ``shared.cache.pydantic_cache``, imported above
+# (also used by security_agent's analogous cache, every devops_team
+# single-shot agent, and branding_team's PhaseOutputCache); this module
+# supplies only its own namespace stem, env var, capacity default, and
+# output model.
 # Backed by shared.cache (Redis, falls open to an in-process store). Base
 # stem; ``_review_cache_namespace()`` appends build id.
 DEFAULT_REVIEW_CACHE_SIZE = 256  # QA_REVIEW_CACHE_SIZE, floor 0
@@ -102,7 +103,7 @@ def clear_review_cache() -> None:
           forcing a cold review. Intended for tests and for callers that
           must force a cold review.
     """
-    clear_review_cache_namespace(_CACHE_LABEL, lambda: get_shared_cache(_review_cache_namespace()))
+    clear_cache_namespace(_CACHE_LABEL, lambda: get_shared_cache(_review_cache_namespace()))
 
 
 def _review_cache_key(input_data: QAInput, model_fp: str) -> str:
@@ -130,7 +131,7 @@ def _review_cache_key(input_data: QAInput, model_fp: str) -> str:
           resolved model changes, and is stable (``sort_keys``) across calls
           in a process, so a byte-identical resubmission is recognized.
     """
-    return build_review_cache_key(input_data, model_fp)
+    return build_model_cache_key(input_data, model_fp)
 
 
 class QAExpertAgent:
@@ -200,7 +201,7 @@ class QAExpertAgent:
         if capacity > 0:
             cache_key = _review_cache_key(input_data, model_fingerprint(self._model))
             cache = get_shared_cache(_review_cache_namespace())
-            cached_result = get_cached_review_result(_CACHE_LABEL, cache, cache_key, QAOutput)
+            cached_result = get_cached_model(_CACHE_LABEL, cache, cache_key, QAOutput)
             if cached_result is not None:
                 logger.info(
                     "QA: review cache hit; skipping LLM call (approved=%s)",
@@ -279,7 +280,7 @@ class QAExpertAgent:
 
         if cache_key is not None and not is_fallback:
             cache = get_shared_cache(_review_cache_namespace())
-            set_cached_review_result(_CACHE_LABEL, cache, cache_key, result, capacity=capacity)
+            set_cached_model(_CACHE_LABEL, cache, cache_key, result, capacity=capacity)
 
         return result
 
