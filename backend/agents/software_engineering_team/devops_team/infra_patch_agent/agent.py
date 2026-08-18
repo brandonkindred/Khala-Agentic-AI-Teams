@@ -2,61 +2,50 @@
 
 from __future__ import annotations
 
-import logging
+from typing import Any, Dict, Optional
 
-from llm_service import LLMClient, get_strands_model
-from llm_service.strands_model import resolve_strands_model
-from software_engineering_team.shared.llm import complete_json_with_continuation
+from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
 
 from .models import IaCPatchInput, IaCPatchOutput
 from .prompts import INFRA_PATCH_PROMPT
 
-logger = logging.getLogger(__name__)
 
-
-class InfraPatchAgent:
+class InfraPatchAgent(DevOpsSingleShotAgent):
     """Produces minimal IaC artifact patches for fixable debug errors.
 
-    Given the classified errors from InfraDebugAgent and the original IaC
-    artifact contents, this agent asks an LLM to produce targeted patches to
-    the artifacts that address those errors.
+    Invariants: instance state is limited to ``llm`` and ``_model`` from the
+    base. ``run`` is deterministic for identical inputs and the resolved
+    model: repeated identical calls may return a cached result and skip the
+    LLM (unless the ``not fixable`` short-circuit fires first). Cache
+    reads/writes are fail-open and gated by ``CACHE_ENV_VAR``.
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        """Initialize the agent with an LLM client.
+    PROMPT = INFRA_PATCH_PROMPT
+    CACHE_NAMESPACE = "devops:infra_patch:v1"
+    CACHE_ENV_VAR = "DEVOPS_INFRA_PATCH_CACHE_SIZE"
+    OUTPUT_MODEL = IaCPatchOutput
 
-        Preconditions:
-            llm_client must not be None.
-        Postconditions:
-            self.llm holds the given client; self._model holds the strands
-            model resolved for the "devops" agent key.
-        """
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
-        self._model = resolve_strands_model(
-            llm_client, agent_key="devops", get_strands_model_fn=get_strands_model
-        )
+    def pre_call(self, input_data: IaCPatchInput) -> Optional[IaCPatchOutput]:
+        """Short-circuit when the debug result says the errors aren't fixable.
 
-    def run(self, input_data: IaCPatchInput) -> IaCPatchOutput:
-        """Produce patched IaC artifacts that address the given debug errors.
-
-        Preconditions:
-            input_data is a valid IaCPatchInput.
-        Postconditions:
-            When input_data.debug_output.fixable is False, returns
-            immediately an IaCPatchOutput with
-            summary="Errors are not fixable via code changes" and no
-            patched_artifacts, without calling the LLM. Otherwise returns an
-            IaCPatchOutput whose patched_artifacts maps filename to patched
-            content for every non-blank patch the LLM proposed, whose
-            summary describes the patch, and whose edits_applied counts the
-            applied edits (defaulting to the number of patched artifacts).
+        Preconditions: ``input_data`` is a valid ``IaCPatchInput``.
+        Postconditions: returns a short-circuit ``IaCPatchOutput`` with
+        ``summary="Errors are not fixable via code changes"`` and empty
+        ``patched_artifacts`` when ``input_data.debug_output.fixable`` is
+        ``False`` (no LLM call, no cache lookup); otherwise returns ``None``
+        to continue.
         """
         if not input_data.debug_output.fixable:
-            return IaCPatchOutput(
-                summary="Errors are not fixable via code changes",
-            )
+            return IaCPatchOutput(summary="Errors are not fixable via code changes")
+        return None
 
+    def build_context(self, input_data: IaCPatchInput) -> str:
+        """Build the patch prompt context from the debug errors and artifacts.
+
+        Preconditions: ``input_data`` is a valid ``IaCPatchInput``.
+        Postconditions: returns the same context string shape the
+        pre-migration agent appended after the prompt separator.
+        """
         errors_text = "\n".join(
             f"- [{e.error_type}] {e.file_path or '?'}:{e.line_number or '?'} — {e.error_message}"
             for e in input_data.debug_output.errors
@@ -66,15 +55,15 @@ class InfraPatchAgent:
         for fname, content in input_data.original_artifacts.items():
             artifacts_text += f"\n### {fname} ###\n{content}\n"
 
-        context = f"--- Errors ---\n{errors_text}\n\n--- Current Artifacts ---\n{artifacts_text}\n"
+        return f"--- Errors ---\n{errors_text}\n\n--- Current Artifacts ---\n{artifacts_text}\n"
 
-        data = complete_json_with_continuation(
-            self._model,
-            INFRA_PATCH_PROMPT + "\n\n---\n\n" + context,
-            temperature=0.1,
-            think=True,
-        )
+    def build_output(self, input_data: IaCPatchInput, data: Dict[str, Any]) -> IaCPatchOutput:
+        """Map the LLM JSON dict onto ``IaCPatchOutput``.
 
+        Preconditions: ``data`` is the dict from ``complete_json_with_continuation``.
+        Postconditions: returns an ``IaCPatchOutput`` whose ``patched_artifacts``
+        drops any blank/whitespace-only entries.
+        """
         patched = data.get("patched_artifacts") or {}
         patched = {k: v for k, v in patched.items() if v and v.strip()}
 
@@ -83,3 +72,8 @@ class InfraPatchAgent:
             summary=data.get("summary", ""),
             edits_applied=data.get("edits_applied", len(patched)),
         )
+
+
+def clear_review_cache() -> None:
+    """Drop every cached infra patch result. Intended for test teardown."""
+    InfraPatchAgent.clear_cache()
