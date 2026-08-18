@@ -26,9 +26,11 @@ class InfraPatchAgent(DevOpsSingleShotAgent):
         """Short-circuit when the debug result says the errors aren't fixable.
 
         Preconditions: ``input_data`` is a valid ``IaCPatchInput``.
-        Postconditions: returns an empty ``IaCPatchOutput`` when
-        ``input_data.debug_output.fixable`` is ``False`` (no LLM call, no
-        cache lookup); otherwise returns ``None`` to continue.
+        Postconditions: returns a short-circuit ``IaCPatchOutput`` with
+        ``summary="Errors are not fixable via code changes"`` and empty
+        ``patched_artifacts`` when ``input_data.debug_output.fixable`` is
+        ``False`` (no LLM call, no cache lookup); otherwise returns ``None``
+        to continue.
         """
         if not input_data.debug_output.fixable:
             return IaCPatchOutput(summary="Errors are not fixable via code changes")

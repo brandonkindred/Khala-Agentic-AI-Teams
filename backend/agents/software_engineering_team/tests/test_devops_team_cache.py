@@ -25,7 +25,7 @@ observe cross-test cache hits.
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, NoReturn
 
 import pytest
 
@@ -105,13 +105,13 @@ class _ScriptedClient(DummyLLMClient):
 class _RaisingCache:
     """Cache backend that raises on ``get``/``set``/``delete``; ``clear`` is a no-op."""
 
-    def get(self, key: str) -> None:
+    def get(self, key: str) -> NoReturn:
         raise RuntimeError("boom")
 
-    def set(self, key: str, value: bytes, *, max_entries: int) -> None:
+    def set(self, key: str, value: bytes, *, max_entries: int) -> NoReturn:
         raise RuntimeError("boom")
 
-    def delete(self, key: str) -> None:
+    def delete(self, key: str) -> NoReturn:
         raise RuntimeError("boom")
 
     def clear(self) -> None:
@@ -284,8 +284,10 @@ def test_devsecops_cache_backend_error_falls_open_to_correct_result(
 
 def test_devsecops_fallback_result_is_never_cached() -> None:
     """Two schema-invalid replies in a row exhaust ``run_single_shot_review``'s
-    corrective retry and raise, landing in the ``except`` fallback branch --
-    that fallback must never be written to the cache."""
+    corrective retry; the resulting validation error is caught inside
+    ``agent.run()``'s own ``except`` block and a fallback result
+    (``approved=False``) is returned to the caller -- that fallback must
+    never be written to the cache."""
     client = _ScriptedClient(
         [
             {"findings": []},  # missing required "summary" -- schema-invalid

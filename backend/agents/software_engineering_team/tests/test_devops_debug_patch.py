@@ -437,6 +437,7 @@ class TestDevOpsPipelineDebugPatchLoop:
         monkeypatch.setenv("DEVOPS_INFRA_DEBUG_CACHE_SIZE", "0")
         monkeypatch.setenv("DEVOPS_INFRA_PATCH_CACHE_SIZE", "0")
 
+        from software_engineering_team.devops_team.models import DevOpsTaskSpec
         from software_engineering_team.devops_team.orchestrator import (
             MAX_INFRA_FIX_ITERATIONS,
             DevOpsTeamLeadAgent,
@@ -514,8 +515,6 @@ class TestDevOpsPipelineDebugPatchLoop:
                 phase46_details.append(detail)
 
         agent._status_callback = capture_status  # type: ignore[assignment]
-
-        from software_engineering_team.devops_team.models import DevOpsTaskSpec
 
         spec = DevOpsTaskSpec(
             task_id="t1",

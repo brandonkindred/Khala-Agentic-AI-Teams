@@ -39,12 +39,16 @@ class DevOpsTaskClarifierAgent(DevOpsSingleShotAgent):
         """Run the deterministic completeness/safety checks on the task spec.
 
         Preconditions: ``input_data`` is a valid ``DevOpsTaskClarifierInput``.
-        Postconditions: returns ``approved_for_execution=False`` immediately
-        when any gap is found (missing goal/cloud/environments/acceptance-
-        criteria/secrets-source, a staging-or-production environment with no
-        rollback plan, or a production environment with no approval gate in
-        scope) — no LLM call, no cache lookup. Otherwise returns ``None`` to
-        continue.
+        Postconditions: returns ``None`` when no deterministic gap is found,
+        letting the caller proceed to the LLM/cached-LLM path. Returns a
+        ``DevOpsTaskClarifierOutput`` with ``approved_for_execution=False``
+        immediately when any gap is found (missing goal/cloud/environments/
+        acceptance-criteria/secrets-source, a staging-or-production
+        environment with no rollback plan, or a production environment with
+        no approval gate in scope) — no LLM call, no cache lookup; that
+        output's ``checklist`` is a copy of the module-level ``_CHECKLIST``,
+        ``gaps`` is the collected list of ``ClarificationGap`` objects, and
+        ``clarification_requests`` is the ``message`` of each blocking gap.
         """
         spec = input_data.task_spec
         gaps: List[ClarificationGap] = []
