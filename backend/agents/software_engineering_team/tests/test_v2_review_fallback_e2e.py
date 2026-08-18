@@ -17,10 +17,12 @@ import threading
 from typing import Any
 
 import pytest
+from tests.chunk_review_prompt_routing import (
+    is_chunk_map_reasoning_prompt as _is_chunk_map_reasoning_prompt,
+)
 
 from llm_service import LLMSemanticExhaustionError
 from llm_service.clients.dummy import DummyLLMClient
-from software_engineering_team.code_review_agent.chunk_reviewer import CODE_TO_REVIEW_HEADER
 
 
 @pytest.fixture(autouse=True)
@@ -60,12 +62,19 @@ def _task(**overrides):
 
 
 class _ScriptedClient(DummyLLMClient):
-    """Returns a different canned response on each ``complete_json`` call.
+    """Returns a different canned response on each formatting-pass
+    ``complete_json`` call.
 
     Copied from ``test_code_review_coordinator.py``'s ``_ScriptedClient``: a
     real ``DummyLLMClient`` (not a mock of the coordinator), so it drives the
     coordinator's actual map-reduce pipeline. Adds ``call_count`` so a test
-    can assert how many real LLM calls the pipeline made.
+    can assert how many real formatting-pass LLM calls the pipeline made.
+
+    Both the reasoning pass and the formatting pass land on
+    ``complete_json`` now (see ``_is_chunk_map_reasoning_prompt``); only the
+    formatting-pass call advances the scripted response cursor and
+    ``call_count`` -- the reasoning-pass call gets the inherited dummy
+    default, whose prose is discarded once wrapped for formatting.
     """
 
     def __init__(self, responses: list[dict[str, Any]]) -> None:
@@ -85,6 +94,15 @@ class _ScriptedClient(DummyLLMClient):
         think: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        if _is_chunk_map_reasoning_prompt(prompt):
+            return super().complete_json(
+                prompt,
+                temperature=temperature,
+                system_prompt=system_prompt,
+                tools=tools,
+                think=think,
+                **kwargs,
+            )
         with self._lock:
             self.call_count += 1
             if self._idx < len(self._responses):
@@ -106,8 +124,23 @@ class _PerFileScriptedClient(DummyLLMClient):
     each canned response's ``file_path`` is a hard-coded value independent of
     the prompt it was served to. Selecting by marker closes that gap.
 
-    Markers are matched on the reasoning ``complete`` prompt; the format
-    ``complete_json`` wrap does not carry ``### path ###`` headers.
+    Markers are matched on the reasoning-pass ``complete_json`` prompt
+    (identified via ``_is_chunk_map_reasoning_prompt``); the formatting-pass
+    ``complete_json`` wrap does not carry ``### path ###`` headers directly,
+    but DOES carry the reasoning pass's own prose verbatim (wrapped in
+    ``wrap_with_analysis_delimiters``'s "--- ANALYSIS" markers) -- real
+    map-phase calls run the reasoning pass in a Strands ``Agent`` dispatched
+    via ``asyncio.to_thread`` (a pooled worker thread) while the formatting
+    pass runs synchronously back on the calling thread, so a
+    ``threading.local`` cannot bridge state between the two calls for one
+    chunk. Instead the reasoning-pass response echoes its own marker back
+    (``{"summary": marker}``); ``chat()`` JSON-serializes that into the raw
+    prose, which the formatting prompt then wraps verbatim, so the same
+    marker is directly re-matchable there with no shared mutable state.
+
+    ``call_count`` counts REASONING-pass calls only (the opposite of
+    ``_ScriptedClient.call_count`` above, which counts formatting-pass
+    calls) -- callers comparing the two must not assume a shared meaning.
     """
 
     def __init__(self, responses_by_marker: dict[str, dict[str, Any]]) -> None:
@@ -115,42 +148,47 @@ class _PerFileScriptedClient(DummyLLMClient):
         self._responses_by_marker = dict(responses_by_marker)
         self.call_count = 0
         self._lock = threading.Lock()
-        self._tls = threading.local()
-
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        if CODE_TO_REVIEW_HEADER not in prompt:
-            return super().complete(prompt, **kwargs)
-        with self._lock:
-            self.call_count += 1
-        for marker, response in self._responses_by_marker.items():
-            if marker in prompt:
-                self._tls.pending = response
-                return "Structured prose review summary."
-        raise AssertionError(f"no scripted response matches prompt: {prompt[:200]!r}")
 
     def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-        pending = getattr(self._tls, "pending", None)
-        if pending is not None:
-            self._tls.pending = None
-            return pending
-        return super().complete_json(prompt, **kwargs)
+        if not _is_chunk_map_reasoning_prompt(prompt):
+            for marker, response in self._responses_by_marker.items():
+                if marker in prompt:
+                    return response
+            return super().complete_json(prompt, **kwargs)
+        with self._lock:
+            self.call_count += 1
+        for marker in self._responses_by_marker:
+            if marker in prompt:
+                return {"summary": f"Structured prose review summary. {marker}"}
+        raise AssertionError(f"no scripted response matches prompt: {prompt[:200]!r}")
 
 
 class _PromptCapturingClient(DummyLLMClient):
-    """Records every chunk-review reasoning prompt; always returns a clean pass."""
+    """Records every chunk-review reasoning prompt; always returns a clean pass.
+
+    Both the reasoning pass and the formatting pass land on ``complete_json``
+    now (see ``_is_chunk_map_reasoning_prompt``), so recording happens there,
+    gated to the reasoning-pass call only. The shared review-context prefix
+    (spec excerpt / architecture overview / existing-codebase excerpt --
+    see ``chunk_reviewer._build_shared_review_prefix``) is attached to the
+    reasoning ``Agent``'s SYSTEM content, not the user-turn prompt, and
+    ``DummyLLMClient.chat()`` forwards it to ``complete_json`` as the
+    ``system_prompt`` kwarg rather than folding it into ``prompt`` -- so both
+    are recorded together to keep this a faithful "what did the reasoning
+    call actually see" capture.
+    """
 
     def __init__(self) -> None:
         super().__init__()
         self.prompts: list[str] = []
         self._lock = threading.Lock()
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        if CODE_TO_REVIEW_HEADER in prompt:
+    def complete_json(
+        self, prompt: str, *, system_prompt: str | None = None, **kwargs: Any
+    ) -> dict[str, Any]:
+        if _is_chunk_map_reasoning_prompt(prompt):
             with self._lock:
-                self.prompts.append(prompt)
-        return super().complete(prompt, **kwargs)
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+                self.prompts.append(f"{prompt}\n{system_prompt or ''}")
         return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
 
@@ -161,43 +199,52 @@ class _FailBadKeepGood(DummyLLMClient):
     ``test_semantic_exhaustion_multi_file_still_separates_files`` fixture
     (``_FailWhenBadPresent``), scripted with a real finding for the surviving
     file so the translated output is non-empty.
+
+    The reasoning pass (a Strands ``Agent`` dispatched via
+    ``asyncio.to_thread``) and the formatting pass (a synchronous call back
+    on the calling thread) do not share a thread, so a ``threading.local``
+    handoff between them (as a prior version of this double used) silently
+    breaks. Instead the reasoning pass's ``good.py`` response echoes a
+    marker back; ``chat()`` JSON-serializes it into the raw prose, which the
+    formatting prompt wraps verbatim, so the marker is directly
+    re-matchable in the formatting-pass prompt with no shared mutable state.
+
+    ``call_count`` counts REASONING-pass calls only (the opposite of
+    ``_ScriptedClient.call_count`` above, which counts formatting-pass
+    calls) -- callers comparing the two must not assume a shared meaning.
     """
+
+    _GOOD_FILE_MARKER = "GOOD_FILE_REVIEWED_MARKER"
 
     def __init__(self) -> None:
         super().__init__()
         self.call_count = 0
         self._lock = threading.Lock()
-        self._tls = threading.local()
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        if CODE_TO_REVIEW_HEADER not in prompt:
-            return super().complete(prompt, **kwargs)
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        if not _is_chunk_map_reasoning_prompt(prompt):
+            if self._GOOD_FILE_MARKER in prompt:
+                return {
+                    "approved": False,
+                    "issues": [
+                        {
+                            "severity": "high",
+                            "category": "logic",
+                            "file_path": "good.py",
+                            "description": "real issue",
+                            "suggestion": "fix it",
+                        }
+                    ],
+                    "summary": "found one",
+                    "spec_compliance_notes": "",
+                }
+            return super().complete_json(prompt, **kwargs)
         with self._lock:
             self.call_count += 1
         if "### bad.py ###" in prompt:
             raise LLMSemanticExhaustionError("no content", retry_thinking_level=False)
         if "### good.py ###" in prompt:
-            self._tls.keep = True
-            return "Structured prose review summary."
-        return super().complete(prompt, **kwargs)
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-        if getattr(self._tls, "keep", False):
-            self._tls.keep = False
-            return {
-                "approved": False,
-                "issues": [
-                    {
-                        "severity": "high",
-                        "category": "logic",
-                        "file_path": "good.py",
-                        "description": "real issue",
-                        "suggestion": "fix it",
-                    }
-                ],
-                "summary": "found one",
-                "spec_compliance_notes": "",
-            }
+            return {"summary": self._GOOD_FILE_MARKER}
         return super().complete_json(prompt, **kwargs)
 
 
