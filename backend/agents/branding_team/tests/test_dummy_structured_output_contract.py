@@ -27,6 +27,23 @@ is what keeps the primary assertion honest about catching it — for the
 text-routed classes only; the six Phase 2 classes moved to
 ``test_model_routed_payload_validates_regardless_of_prompt_text`` since an
 unrouted prompt no longer breaks them, which is the point of their fix.
+
+This file's scope is deliberately bounded against two neighboring suites so the
+three don't re-accumulate the same assertion under different names:
+
+- ``test_dummy_stub_alignment.py`` owns the *strict* positive check (exact
+  field-set equality, not just ``model_validate`` not raising) for the Phase 1
+  and Phase 2 factories. ``test_dummy_payload_validates_against_agent_schema``
+  below skips those 12 cases for that reason — see
+  ``_STUB_ALIGNMENT_CASE_IDS`` — and instead covers Phase 3, 4, and 5, which
+  that file does not.
+- ``llm_service/tests/test_dummy_client.py`` owns ``DummyLLMClient``-internal
+  unit tests driven by synthetic prompts, messages, and tool specs. It never
+  builds a real ``branding_team.agents.make_*()`` factory or runs a real
+  Strands event loop, which is why the negative-path rejection test, the
+  archetype phrasing regression, and
+  ``test_real_agent_event_loop_routes_deterministically_despite_misleading_prompt``
+  stay here — nothing else exercises those real-agent paths.
 """
 
 from __future__ import annotations
@@ -172,8 +189,6 @@ _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
     ("brand_rules_codifier", branding_agents.make_brand_rules_codifier, BrandGuidelinesOutput),
 )
 
-_CASE_IDS: tuple[str, ...] = tuple(case_id for case_id, _factory, _model in _CASES)
-
 # Model classes DummyLLMClient.complete_json routes by structured_output_model
 # class name (see _branding_structured_output_stub_by_model_name in
 # llm_service.clients.dummy) rather than by scanning system-prompt text.
@@ -220,6 +235,36 @@ _PERMISSIVE_CLASS_NAMES: frozenset[str] = frozenset(
     {"BrandDiscoveryAudit", "CreativeRefinementDecision", "DesignSystemDefinition"}
 )
 
+# Case ids whose "does the dummy stub validate against the real schema"
+# property is already asserted — more strongly, via exact field-set equality
+# rather than a plain isinstance check — by
+# test_dummy_stub_alignment.py::test_dummy_stub_matches_agent_output_model.
+# Excluded only from the positive-validation parametrization below; they
+# remain in _CASES so _TEXT_ROUTED_CASES/_MODEL_ROUTED_CASES (used by the
+# rejection and model-routing tests) stay complete.
+_STUB_ALIGNMENT_CASE_IDS: frozenset[str] = frozenset(
+    {
+        "discovery_auditor",
+        "purpose_vision_writer",
+        "values_articulator",
+        "audience_segmenter",
+        "differentiation_mapper",
+        "positioning_synthesizer",
+        "storyteller",
+        "archetype_analyst",
+        "tagline_writer",
+        "message_mapper",
+        "persona_builder",
+        "voice_principles_drafter",
+    }
+)
+_SCHEMA_VALIDATION_CASES: tuple[tuple[str, Callable[[], Any], type], ...] = tuple(
+    case for case in _CASES if case[0] not in _STUB_ALIGNMENT_CASE_IDS
+)
+_SCHEMA_VALIDATION_CASE_IDS: tuple[str, ...] = tuple(
+    case_id for case_id, _factory, _model in _SCHEMA_VALIDATION_CASES
+)
+
 _TEXT_ROUTED_CASES: tuple[tuple[str, Callable[[], Any], type], ...] = tuple(
     case
     for case in _CASES
@@ -241,7 +286,8 @@ _MODEL_ROUTED_CLASSES: tuple[type, ...] = tuple(
 _MODEL_ROUTED_CLASS_NAME_IDS: tuple[str, ...] = tuple(cls.__name__ for cls in _MODEL_ROUTED_CLASSES)
 
 # Factory names covered by ``_CASES``. Parameterized factories appear once here
-# and expand to several table rows, so this is not derivable from ``_CASE_IDS``.
+# and expand to several table rows, so this is not derivable from ``_CASES``'
+# case ids.
 _FACTORIES_WITH_STRUCTURED_OUTPUT: frozenset[str] = frozenset(
     {
         "make_discovery_auditor",
@@ -340,7 +386,11 @@ def _drive_structured_output(output_model: type, system_prompt: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("_case_id", "factory", "output_model"), _CASES, ids=_CASE_IDS)
+@pytest.mark.parametrize(
+    ("_case_id", "factory", "output_model"),
+    _SCHEMA_VALIDATION_CASES,
+    ids=_SCHEMA_VALIDATION_CASE_IDS,
+)
 def test_dummy_payload_validates_against_agent_schema(
     _case_id: str, factory: Callable[[], Any], output_model: type
 ) -> None:
@@ -348,6 +398,13 @@ def test_dummy_payload_validates_against_agent_schema(
 
     Reads ``system_prompt`` off the constructed agent rather than restating it,
     so a prompt reworded in ``agents.py`` is exercised here on the next run.
+
+    Covers Phase 3, 4, and 5 only — the Phase 1/2 factories in
+    ``_STUB_ALIGNMENT_CASE_IDS`` get a strictly stronger check (exact
+    field-set equality) from
+    ``test_dummy_stub_alignment.py::test_dummy_stub_matches_agent_output_model``
+    instead, so asserting the weaker ``isinstance`` here too would be
+    redundant CI coverage of the same property.
     """
     agent = factory()
     output = _drive_structured_output(output_model, agent.system_prompt)
