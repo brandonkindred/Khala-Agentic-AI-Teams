@@ -84,6 +84,8 @@
     @if (team(); as t) {
       <app-process-designer-chat
         [team]="t"
+        testAgentTooltip="Test this agent in Stage 2"
+        testAgentDisabledTooltip="Generated agents can't be individually sandbox-tested — test the full team in Stage 4"
         (rosterChanged)="onRosterChanged($event)"
         (testAgent)="onTestAgent($event)"
       />

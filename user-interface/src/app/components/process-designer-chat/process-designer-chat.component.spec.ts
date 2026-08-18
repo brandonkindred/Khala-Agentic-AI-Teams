@@ -1,8 +1,10 @@
 import { SimpleChange } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { By } from '@angular/platform-browser';
 import { provideHttpClient } from '@angular/common/http';
 import { provideHttpClientTesting } from '@angular/common/http/testing';
 import { MatDialog } from '@angular/material/dialog';
+import { MatTooltip } from '@angular/material/tooltip';
 import { Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { ProcessDesignerChatComponent } from './process-designer-chat.component';
@@ -449,7 +451,17 @@ describe('ProcessDesignerChatComponent', () => {
     expect(emitSpy).toHaveBeenCalledWith(target);
   });
 
-  it('renders an enabled Test ▸ action for a registry-sourced roster entry', () => {
+  /** Reads the full (untruncated) MatTooltip message off `.agent-test-btn`,
+   *  rather than the reflected `ng-reflect-message` DOM attribute — Angular's
+   *  attribute-reflection serialization truncates long strings, which would
+   *  hide the very "...in Stage 2" / "...in Stage 4" suffixes these tests
+   *  need to tell the default text apart from a host override. */
+  function testBtnTooltip(index = 0): string {
+    return fixture.debugElement.queryAll(By.css('.agent-test-btn'))[index].injector.get(MatTooltip)
+      .message;
+  }
+
+  it('renders an enabled Test ▸ action for a registry-sourced roster entry, with the default tooltip', () => {
     component.rosterAgents.set([
       agent({ agent_name: 'Planner', source: 'registry', manifest_id: 'blogging.planner' }),
     ]);
@@ -458,6 +470,11 @@ describe('ProcessDesignerChatComponent', () => {
     const btn = fixture.nativeElement.querySelector('.agent-test-btn');
     expect(btn).toBeTruthy();
     expect(btn.disabled).toBe(false);
+    // No host has set `testAgentTooltip`, so this component's own generic
+    // default (not a Studio-specific stage reference) is used — this is the
+    // "no functional dependency on the embedding host" contract that keeps
+    // the legacy /agentic-teams mount from showing meaningless stage text.
+    expect(testBtnTooltip()).toBe('Test this agent');
 
     const emitSpy = vi.spyOn(component.testAgent, 'emit');
     btn.click();
@@ -466,7 +483,7 @@ describe('ProcessDesignerChatComponent', () => {
     );
   });
 
-  it('renders a disabled, tooltipped Test ▸ action for a generated roster entry', () => {
+  it('renders a disabled, tooltipped Test ▸ action for a generated roster entry, with the default tooltip', () => {
     component.rosterAgents.set([
       agent({ agent_name: 'Writer', source: 'generated' }),
     ]);
@@ -476,6 +493,27 @@ describe('ProcessDesignerChatComponent', () => {
     expect(btn).toBeTruthy();
     expect(btn.disabled).toBe(true);
     expect(btn.getAttribute('aria-label')).toContain('unavailable for generated agents');
+    expect(testBtnTooltip()).toBe(
+      "Generated agents can't be individually sandbox-tested — test the full team instead",
+    );
+  });
+
+  it('lets an embedding host override both Test ▸ tooltips (e.g. the Agent Studio Stage-3 host naming Stage 2/4 explicitly)', () => {
+    fixture.componentRef.setInput('testAgentTooltip', 'Test this agent in Stage 2');
+    fixture.componentRef.setInput(
+      'testAgentDisabledTooltip',
+      "Generated agents can't be individually sandbox-tested — test the full team in Stage 4",
+    );
+    component.rosterAgents.set([
+      agent({ agent_name: 'Planner', source: 'registry', manifest_id: 'blogging.planner' }),
+      agent({ agent_name: 'Writer', source: 'generated' }),
+    ]);
+    fixture.detectChanges();
+
+    expect(testBtnTooltip(0)).toBe('Test this agent in Stage 2');
+    expect(testBtnTooltip(1)).toBe(
+      "Generated agents can't be individually sandbox-tested — test the full team in Stage 4",
+    );
   });
 
   // ── sendMessage: optimistic append must reconcile with backend atomicity ────

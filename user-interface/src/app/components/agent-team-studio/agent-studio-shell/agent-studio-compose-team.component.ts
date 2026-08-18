@@ -22,17 +22,13 @@ import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-cata
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { ProcessDesignerChatComponent } from '../../process-designer-chat/process-designer-chat.component';
+import { STAGE_INDEX } from '../../../models/agent-studio.model';
 import type {
   AgenticTeam,
   AgenticTeamAgent,
   AgenticTeamSummary,
   RosterValidationResult,
 } from '../../../models';
-
-// Back-loop destination as a 0-based index into STUDIO_STAGES
-// (build=0, test=1, compose=2, personas=3) — mirrors the constant in
-// `agent-studio-persona.component.ts`.
-const STAGE_TEST_AGENT = 1;
 
 /**
  * Agent Studio — Stage 3 "Compose Team" (spec §3, Stage 3).
@@ -333,6 +329,6 @@ export class AgentStudioComposeTeamComponent implements OnInit {
    */
   onTestAgent(agent: AgenticTeamAgent): void {
     this.state.setRegistryAgentId(agent.manifest_id);
-    this.state.navigateToStage(STAGE_TEST_AGENT);
+    this.state.navigateToStage(STAGE_INDEX.test);
   }
 }

@@ -91,6 +91,20 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
    */
   @Output() readonly testAgent = new EventEmitter<AgenticTeamAgent>();
 
+  /**
+   * Tooltip for an enabled `Test ▸` action (registry-sourced entries). Kept
+   * generic by default — this component is also mounted by the legacy
+   * `/agentic-teams` dashboard, where a Studio-specific "Stage 2" reference
+   * would be meaningless; the Agent Studio Stage-3 host overrides this to
+   * name the stage explicitly.
+   */
+  @Input() testAgentTooltip = 'Test this agent';
+
+  /** Tooltip for a disabled `Test ▸` action (generated entries). Same
+   *  generic-by-default rationale as `testAgentTooltip`. */
+  @Input() testAgentDisabledTooltip =
+    "Generated agents can't be individually sandbox-tested — test the full team instead";
+
   @ViewChild('messagesContainer') messagesContainer!: ElementRef<HTMLDivElement>;
 
   private readonly api = inject(AgenticTeamApiService);

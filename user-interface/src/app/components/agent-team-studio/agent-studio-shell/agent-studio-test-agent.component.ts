@@ -5,6 +5,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
 import { AgentRunnerComponent } from '../agent-console/agent-runner/agent-runner.component';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
+import { STAGE_INDEX } from '../../../models/agent-studio.model';
 
 /**
  * Agent Studio — Stage 2 "Test Agent" (spec §3, Stage 2).
@@ -58,7 +59,7 @@ export class AgentStudioTestAgentComponent {
    * Stage 1, so returning to it means moving the stepper back to Build.
    */
   onReturnToBuild(): void {
-    this.state.navigateToStage(0);
+    this.state.navigateToStage(STAGE_INDEX.build);
   }
 
   openBrowse(): void {

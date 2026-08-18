@@ -159,7 +159,7 @@
                     <button
                       mat-icon-button
                       class="agent-test-btn"
-                      matTooltip="Test this agent in Stage 2"
+                      [matTooltip]="testAgentTooltip"
                       [attr.aria-label]="'Test ' + agent.agent_name"
                       (click)="onTestAgent(agent, $event)"
                     >
@@ -170,7 +170,7 @@
                       mat-icon-button
                       class="agent-test-btn"
                       disabled
-                      matTooltip="Generated agents can't be individually sandbox-tested — test the full team in Stage 4"
+                      [matTooltip]="testAgentDisabledTooltip"
                       [attr.aria-label]="'Test ' + agent.agent_name + ' (unavailable for generated agents)'"
                     >
                       <mat-icon>play_circle</mat-icon>
