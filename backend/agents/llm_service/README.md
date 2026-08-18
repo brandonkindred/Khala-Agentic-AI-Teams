@@ -296,12 +296,17 @@ Anthropic response's `cache_read_input_tokens` / `cache_creation_input_tokens`
 usage counters. Both default to `0` for providers that don't report cache
 activity, so existing records and non-Anthropic clients are unaffected.
 
-A repeated call with an identical `CacheBreakpoint`-marked prefix is safe to
-adopt on any stable prompt segment: it produces the same completion text
-whether or not that call happened to be cache-served, and is a documented
-no-op — never an error — through any client that doesn't support prompt
-caching. Only the `cache_read_tokens` / `cache_creation_tokens` telemetry
-counters differ; nothing else about the call's behavior changes.
+A repeated call with an identical `CacheBreakpoint`-marked `system_prompt_content`
+segment is safe to adopt: routed through the Strands adapter, it produces
+the same completion text whether or not that call happened to be
+cache-served, and is a documented no-op — never an error — on any client
+that doesn't support prompt caching. Only the `cache_read_tokens` /
+`cache_creation_tokens` telemetry counters differ; nothing else about the
+call's behavior changes. This guarantee is scoped to the
+`system_prompt_content` path: a `CacheBreakpoint` placed directly in a
+`LLMClient.chat()` message's `content` — bypassing the Strands adapter — is
+not flattened by `DummyLLMClient` or `OllamaLLMClient` and will error at the
+client boundary.
 
 ### Migration rule: keep pattern anchors in the **user** prompt
 
