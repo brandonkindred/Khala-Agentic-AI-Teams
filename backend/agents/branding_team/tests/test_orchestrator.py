@@ -2280,7 +2280,12 @@ def test_apply_fragment_list_field_appends_each_fragment() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Story 2b Step 1: run(phase_cache=...) -- per-phase hit/miss check
+# Story 2b Step 1 & Step 2: run(phase_cache=...) -- per-phase hit/miss check,
+# and recomputation from the earliest changed phase cascading to every
+# downstream phase (each phase's input hash folds in the full mission and
+# every upstream output, so a change anywhere upstream -- or in the mission
+# itself -- necessarily changes the hash, and therefore forces a miss, for
+# that phase and every phase after it in the same call).
 # ---------------------------------------------------------------------------
 
 _PHASE_FIXTURES: dict[BrandPhase, Any] = {
@@ -2411,3 +2416,105 @@ def test_run_with_phase_cache_never_caches_a_degraded_output() -> None:
     assert result.degraded_phases == [BrandPhase.STRATEGIC_CORE]
     expected_hash = phase_input_hash(BrandPhase.STRATEGIC_CORE, mission, {})
     assert cache.get(BrandPhase.STRATEGIC_CORE, expected_hash) is None
+
+
+def test_run_with_phase_cache_reuses_multiple_cached_upstream_phases() -> None:
+    """Two already-cached, still-valid upstream phases are both reused -- neither
+    is re-invoked -- when the run is extended to a new, not-yet-cached
+    downstream phase (a genuine "downstream-only" extension, not just a
+    single-phase cache hit in isolation)."""
+    mission = make_mission()
+    cache = PhaseOutputCache()
+
+    cached_strategic_core = _full_strategic_core()
+    cache.put(
+        BrandPhase.STRATEGIC_CORE,
+        phase_input_hash(BrandPhase.STRATEGIC_CORE, mission, {}),
+        cached_strategic_core,
+    )
+    cached_narrative = _full_narrative()
+    cache.put(
+        BrandPhase.NARRATIVE_MESSAGING,
+        phase_input_hash(
+            BrandPhase.NARRATIVE_MESSAGING,
+            mission,
+            {BrandPhase.STRATEGIC_CORE: cached_strategic_core},
+        ),
+        cached_narrative,
+    )
+    orchestrator = BrandingTeamOrchestrator()
+
+    with patch.object(
+        orchestrator, "run_single_phase", side_effect=_run_single_phase_fixture_side_effect
+    ) as mock_run_single_phase:
+        result = orchestrator.run(
+            mission=mission,
+            human_review=HumanReview(approved=False),
+            target_phase=BrandPhase.VISUAL_IDENTITY,
+            phase_cache=cache,
+        )
+
+    called_phases = [call.args[1] for call in mock_run_single_phase.call_args_list]
+    assert called_phases == [BrandPhase.VISUAL_IDENTITY]
+    assert result.strategic_core is cached_strategic_core
+    assert result.narrative_messaging is cached_narrative
+    assert result.visual_identity is not None
+    assert result.channel_activation is None
+
+
+def test_run_with_phase_cache_cascades_recompute_through_three_phase_chain() -> None:
+    """A changed earliest-phase input (a mission field, which every phase's hash
+    includes) invalidates the STRATEGIC_CORE cache entry and cascades a miss
+    through every downstream phase in a three-phase chain; each recomputed
+    phase's fresh output is written back to the cache for later reuse."""
+    stale_mission = make_mission(company_name="Stale Co")
+    mission = make_mission(company_name="Fresh Co")
+    cache = PhaseOutputCache()
+
+    # Pre-populate the cache as if a prior run completed for `stale_mission`,
+    # forming a fully self-consistent hash chain across three phases.
+    stale_upstream: dict[BrandPhase, Any] = {}
+    for phase in (
+        BrandPhase.STRATEGIC_CORE,
+        BrandPhase.NARRATIVE_MESSAGING,
+        BrandPhase.VISUAL_IDENTITY,
+    ):
+        stale_output = _PHASE_FIXTURES[phase]()
+        cache.put(phase, phase_input_hash(phase, stale_mission, stale_upstream), stale_output)
+        stale_upstream[phase] = stale_output
+
+    orchestrator = BrandingTeamOrchestrator()
+
+    with patch.object(
+        orchestrator, "run_single_phase", side_effect=_run_single_phase_fixture_side_effect
+    ) as mock_run_single_phase:
+        result = orchestrator.run(
+            mission=mission,
+            human_review=HumanReview(approved=False),
+            target_phase=BrandPhase.VISUAL_IDENTITY,
+            phase_cache=cache,
+        )
+
+    called_phases = [call.args[1] for call in mock_run_single_phase.call_args_list]
+    assert called_phases == [
+        BrandPhase.STRATEGIC_CORE,
+        BrandPhase.NARRATIVE_MESSAGING,
+        BrandPhase.VISUAL_IDENTITY,
+    ]
+
+    # The cache now holds the freshly recomputed chain -- for `mission`, not
+    # `stale_mission` -- ready for reuse by a later caller.
+    fresh_upstream: dict[BrandPhase, Any] = {}
+    for phase in (
+        BrandPhase.STRATEGIC_CORE,
+        BrandPhase.NARRATIVE_MESSAGING,
+        BrandPhase.VISUAL_IDENTITY,
+    ):
+        expected_hash = phase_input_hash(phase, mission, fresh_upstream)
+        cached = cache.get(phase, expected_hash)
+        assert cached is not None
+        fresh_upstream[phase] = cached
+
+    assert result.strategic_core is fresh_upstream[BrandPhase.STRATEGIC_CORE]
+    assert result.narrative_messaging is fresh_upstream[BrandPhase.NARRATIVE_MESSAGING]
+    assert result.visual_identity is fresh_upstream[BrandPhase.VISUAL_IDENTITY]
