@@ -16,17 +16,15 @@ That is what this module asserts.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any, Dict, List
 
 import pytest
 
 from llm_service import telemetry
 from llm_service.cache_breakpoint import CacheBreakpoint
-from llm_service.clients.claude import ClaudeLLMClient
 from llm_service.interface import reset_complete_json_observer_state
 from llm_service.strands_adapter import LLMClientModel
-from llm_service.tests._fakes import _drain, _FakeStreamCtx, _text_message
+from llm_service.tests._fakes import _drain, _make_claude_client, _text_message
 
 
 @pytest.fixture(autouse=True)
@@ -34,29 +32,6 @@ def _reset_observer_turns() -> None:
     reset_complete_json_observer_state()
     yield
     reset_complete_json_observer_state()
-
-
-class _SequentialFakeMessages:
-    """Returns one queued response per ``stream()`` call, in order, capturing
-    each call's outgoing kwargs so the test can compare wire payloads across
-    repeated calls."""
-
-    def __init__(self, messages: List[Any]) -> None:
-        self._messages = list(messages)
-        self.captured_calls: List[Dict[str, Any]] = []
-
-    def stream(self, **kwargs: Any) -> _FakeStreamCtx:
-        self.captured_calls.append(kwargs)
-        return _FakeStreamCtx(message=self._messages.pop(0))
-
-
-def _make_claude_client(messages: List[Any]) -> tuple[ClaudeLLMClient, _SequentialFakeMessages]:
-    fake_messages = _SequentialFakeMessages(messages)
-    client = ClaudeLLMClient(model="claude-opus-4-8", api_key="sk-test")
-    # Same private-seam injection as test_claude_client.py::_make_client — ClaudeLLMClient
-    # has no public constructor arg for the underlying Anthropic SDK client.
-    client._client = SimpleNamespace(messages=fake_messages)
-    return client, fake_messages
 
 
 def test_repeated_cache_breakpoint_prefix_yields_cache_hit_with_stable_output() -> None:

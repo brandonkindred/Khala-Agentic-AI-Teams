@@ -11,7 +11,13 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
-__all__ = ["_FakeStreamCtx", "_text_message", "_drain"]
+__all__ = [
+    "_FakeStreamCtx",
+    "_text_message",
+    "_drain",
+    "_SequentialFakeMessages",
+    "_make_claude_client",
+]
 
 
 class _FakeStreamCtx:
@@ -62,3 +68,37 @@ def _drain(gen) -> List[Dict[str, Any]]:
         return out
 
     return asyncio.run(_run())
+
+
+class _SequentialFakeMessages:
+    """Returns one queued response per ``stream()`` call, in order, capturing
+    each call's outgoing kwargs so the test can compare wire payloads across
+    repeated calls."""
+
+    def __init__(self, messages: List[Any]) -> None:
+        self._messages = list(messages)
+        self.captured_calls: List[Dict[str, Any]] = []
+
+    def stream(self, **kwargs: Any) -> _FakeStreamCtx:
+        self.captured_calls.append(kwargs)
+        return _FakeStreamCtx(message=self._messages.pop(0))
+
+
+def _make_claude_client(messages: List[Any]):
+    """Build a real ``ClaudeLLMClient`` wired to a scripted fake Anthropic SDK.
+
+    Postconditions:
+        Returns ``(client, fake_messages)``. ``client`` is a genuine
+        ``ClaudeLLMClient`` whose private Anthropic SDK handle has been
+        swapped for ``fake_messages`` (same private-seam injection as
+        ``test_claude_client.py``'s own client-construction helper —
+        ``ClaudeLLMClient`` has no public constructor arg for the underlying
+        SDK client), so every real code path (``chat``, ``complete_json``,
+        wire rendering, telemetry) runs unmodified against scripted replies.
+    """
+    from llm_service.clients.claude import ClaudeLLMClient
+
+    fake_messages = _SequentialFakeMessages(messages)
+    client = ClaudeLLMClient(model="claude-opus-4-8", api_key="sk-test")
+    client._client = SimpleNamespace(messages=fake_messages)
+    return client, fake_messages
