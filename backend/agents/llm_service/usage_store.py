@@ -35,6 +35,8 @@ USAGE_TABLE_DDL = (
     "prompt_tokens INTEGER NOT NULL DEFAULT 0, "
     "completion_tokens INTEGER NOT NULL DEFAULT 0, "
     "total_tokens INTEGER NOT NULL DEFAULT 0, "
+    "cache_read_tokens INTEGER NOT NULL DEFAULT 0, "
+    "cache_creation_tokens INTEGER NOT NULL DEFAULT 0, "
     "latency_ms INTEGER NOT NULL DEFAULT 0, "
     "status TEXT NOT NULL DEFAULT '', "
     "caller_tag TEXT NOT NULL DEFAULT '', "
@@ -63,6 +65,8 @@ USAGE_TABLE_ALTER_DDL = (
     "ALTER TABLE llm_call_records ADD COLUMN IF NOT EXISTS request_id TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE llm_call_records ADD COLUMN IF NOT EXISTS task_id TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE llm_call_records ADD COLUMN IF NOT EXISTS phase TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE llm_call_records ADD COLUMN IF NOT EXISTS cache_read_tokens INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE llm_call_records ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
 )
 USAGE_TABLE_STATEMENTS = (USAGE_TABLE_DDL, USAGE_TABLE_INDEX_DDL, *USAGE_TABLE_ALTER_DDL)
 
@@ -79,8 +83,8 @@ _INSERT_SQL = (
     "INSERT INTO llm_call_records (ts, team, agent_key, model, "
     "prompt_tokens, completion_tokens, total_tokens, latency_ms, status, "
     "caller_tag, cost_usd, outcome, error_type, job_id, objective, "
-    "request_id, task_id, phase) VALUES "
-    "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+    "request_id, task_id, phase, cache_read_tokens, cache_creation_tokens) VALUES "
+    "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
 
 _table_ensured = False
@@ -142,6 +146,8 @@ def empty_summary(*, window: str, team: str | None) -> dict:
         "total_prompt_tokens": 0,
         "total_completion_tokens": 0,
         "total_tokens": 0,
+        "total_cache_read_tokens": 0,
+        "total_cache_creation_tokens": 0,
         "avg_latency_ms": 0.0,
         "error_count": 0,
         "by_agent": {},
@@ -217,13 +223,17 @@ def record_to_row(record: Any) -> tuple:
         ``model``, ``prompt_tokens``, ``completion_tokens``, ``total_tokens``,
         ``latency_ms``, ``status``, plus the recent-call metadata fields
         (``caller_tag``, ``cost_usd``, ``outcome``, ``error_type``, ``job_id``,
-        ``objective``, ``request_id``, ``task_id``, ``phase``). Missing
-        numerics → 0; missing strings → ``""``; missing optional nullable
-        fields → ``None``.
-    Postconditions: returns an 18-tuple ``(ts, team, agent_key, model,
+        ``objective``, ``request_id``, ``task_id``, ``phase``,
+        ``cache_read_tokens``, ``cache_creation_tokens``). Missing numerics →
+        0; missing strings → ``""``; missing optional nullable fields →
+        ``None``.
+    Postconditions: returns a 20-tuple ``(ts, team, agent_key, model,
         prompt_tokens, completion_tokens, total_tokens, latency_ms, status,
         caller_tag, cost_usd, outcome, error_type, job_id, objective,
-        request_id, task_id, phase)`` with timezone-aware UTC ``ts``.
+        request_id, task_id, phase, cache_read_tokens, cache_creation_tokens)``
+        with timezone-aware UTC ``ts``. ``cache_read_tokens`` /
+        ``cache_creation_tokens`` default to ``0`` when the provider reports
+        no cache activity (e.g. non-Anthropic clients never pass them).
     """
     raw_ts = getattr(record, "timestamp", None)
     epoch = raw_ts if isinstance(raw_ts, (int, float)) and raw_ts > 0 else time.time()
@@ -247,13 +257,15 @@ def record_to_row(record: Any) -> tuple:
         getattr(record, "request_id", "") or "",
         getattr(record, "task_id", "") or "",
         getattr(record, "phase", "") or "",
+        int(getattr(record, "cache_read_tokens", 0) or 0),
+        int(getattr(record, "cache_creation_tokens", 0) or 0),
     )
 
 
 def write_rows(rows: Sequence[tuple]) -> int:
     """Batch-insert pre-built row tuples. Never raises.
 
-    Preconditions: each element is an 18-tuple from :func:`record_to_row`.
+    Preconditions: each element is a 20-tuple from :func:`record_to_row`.
     Postconditions: returns the number of rows written; 0 when Postgres is off,
         ``rows`` is empty, or the write failed.
     """
@@ -296,7 +308,10 @@ def fetch_summary(*, window: str, team: str | None = None) -> dict:
         or query failure). Query failure and a ``None`` cursor also set
         :data:`QUERY_FAILED_KEY` so the HTTP layer can report storage as
         unreachable. ``avg_latency_ms`` is the mean of persisted ``latency_ms``
-        (0.0 when there are no rows). ``by_model`` values have ``calls``,
+        (0.0 when there are no rows). ``total_cache_read_tokens`` /
+        ``total_cache_creation_tokens`` sum the persisted cache-token counts
+        (0 for rows/providers that never reported cache activity). ``by_model``
+        values have ``calls``,
         ``prompt_tokens``, ``completion_tokens``, ``total_tokens``, and
         ``tokens`` (alias of ``total_tokens``). Totals, ``by_model``, and
         ``by_agent`` come from one ``GROUPING SETS`` statement so they share
@@ -322,6 +337,8 @@ def fetch_summary(*, window: str, team: str | None = None) -> dict:
                 "COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, "
                 "COALESCE(SUM(completion_tokens), 0) AS completion_tokens, "
                 "COALESCE(SUM(total_tokens), 0) AS total_tokens, "
+                "COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens, "
+                "COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens, "
                 "COALESCE(AVG(latency_ms), 0) AS avg_latency_ms, "
                 "COUNT(*) FILTER (WHERE status <> 'success') AS error_count "
                 f"FROM llm_call_records{where_sql} "
@@ -357,6 +374,8 @@ def fetch_summary(*, window: str, team: str | None = None) -> dict:
             "total_prompt_tokens": int(totals.get("prompt_tokens") or 0),
             "total_completion_tokens": int(totals.get("completion_tokens") or 0),
             "total_tokens": int(totals.get("total_tokens") or 0),
+            "total_cache_read_tokens": int(totals.get("cache_read_tokens") or 0),
+            "total_cache_creation_tokens": int(totals.get("cache_creation_tokens") or 0),
             "avg_latency_ms": round(float(totals.get("avg_latency_ms") or 0), 1),
             "error_count": int(totals.get("error_count") or 0),
             "by_agent": by_agent,
@@ -374,8 +393,10 @@ def fetch_recent(*, window: str, team: str | None = None, limit: int = 100) -> l
         numeric-hours string accepted by :func:`window_hours`; ``limit`` >= 1.
     Postconditions: list of dicts matching pre-change ``get_recent_calls`` /
         ``LLMCallRecord.to_dict`` (always ``timestamp``, ``team``, ``agent_key``,
-        ``model``, ``caller_tag``, token counts, ``latency_ms``, ``status``,
-        ``cost_usd``, ``outcome``; optional ``error_type`` / ``job_id`` /
+        ``model``, ``caller_tag``, token counts (including ``cache_read_tokens``
+        / ``cache_creation_tokens``, 0 when the provider reported no cache
+        activity), ``latency_ms``, ``status``, ``cost_usd``, ``outcome``;
+        optional ``error_type`` / ``job_id`` /
         ``objective`` / ``request_id`` / ``task_id`` / ``phase`` when set),
         oldest-to-newest (the newest ``limit`` rows, most recent last). Empty
         list when Postgres is off or the window has no rows. Returns ``None``
@@ -394,7 +415,8 @@ def fetch_recent(*, window: str, team: str | None = None, limit: int = 100) -> l
             cur.execute(
                 "SELECT ts, team, agent_key, model, prompt_tokens, completion_tokens, "
                 "total_tokens, latency_ms, status, caller_tag, cost_usd, outcome, "
-                "error_type, job_id, objective, request_id, task_id, phase "
+                "error_type, job_id, objective, request_id, task_id, phase, "
+                "cache_read_tokens, cache_creation_tokens "
                 f"FROM llm_call_records{where_sql} "
                 "ORDER BY ts DESC LIMIT %s",
                 params,
@@ -436,6 +458,8 @@ def _recent_dict_from_pg(r: dict) -> dict:
         "status": r.get("status") or "",
         "cost_usd": _nonneg_float(r.get("cost_usd")),
         "outcome": r.get("outcome") or "",
+        "cache_read_tokens": int(r.get("cache_read_tokens") or 0),
+        "cache_creation_tokens": int(r.get("cache_creation_tokens") or 0),
     }
     for key in _OPTIONAL_RECENT_KEYS:
         value = r.get(key)

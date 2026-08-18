@@ -146,6 +146,32 @@ def test_worker_start_skipped_when_temporal_not_configured(monkeypatch: pytest.M
     assert warns == []
 
 
+def test_worker_start_skipped_when_temporal_address_env_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same acceptance criterion as ``test_worker_start_skipped_when_temporal_not_configured``,
+    but drives the real ``TEMPORAL_ADDRESS``-absent path instead of mocking
+    ``studio_temporal_enabled`` directly — proves the lifespan skip holds under
+    the actual worker-absent condition, not just a stubbed return value.
+
+    CRUD-level coverage that authoring still succeeds under this same
+    condition lives in ``test_agent_studio_routes.py`` /
+    ``test_agent_studio_direct_routes.py``; the dispatch-level mirror of
+    ``test_temporal_enabled.py`` lives in
+    ``agent_platform/studio/tests/test_temporal_worker_absent.py``.
+    """
+    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
+    monkeypatch.setattr(main, "UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER", True)
+    monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(True))
+    called: list[bool] = []
+    monkeypatch.setattr(
+        "agent_platform.studio.temporal.worker.start_agent_studio_temporal_worker_thread",
+        lambda: called.append(True),
+    )
+
+    main._start_agent_studio_temporal_worker()
+
+    assert called == [], "the agent-studio-queue worker must not boot when Temporal is absent"
+
+
 def test_worker_start_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom() -> bool:
         raise RuntimeError("worker exploded")
