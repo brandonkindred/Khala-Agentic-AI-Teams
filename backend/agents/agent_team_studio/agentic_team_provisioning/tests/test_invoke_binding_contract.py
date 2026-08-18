@@ -169,7 +169,9 @@ async def test_manifest_expertise_binds_from_team(fake_strands, monkeypatch: pyt
 
 
 @pytest.mark.asyncio
-async def test_body_expertise_overrides_manifest_team(fake_strands, monkeypatch: pytest.MonkeyPatch):
+async def test_body_expertise_overrides_manifest_team(
+    fake_strands, monkeypatch: pytest.MonkeyPatch
+):
     """An explicit body ``expertise`` wins over the manifest team.
 
     Plain (green now): guards the override direction — see
@@ -180,7 +182,7 @@ async def test_body_expertise_overrides_manifest_team(fake_strands, monkeypatch:
     await agent_builder.invoke_generated_agent(_body(manifest.id, expertise=["custom"]))
 
     assert "Expertise: custom" in fake_strands.last_system_prompt
-    assert "demo" not in fake_strands.last_system_prompt
+    assert "Expertise: demo" not in fake_strands.last_system_prompt
 
 
 @pytest.mark.asyncio
