@@ -11,10 +11,10 @@ import { MatExpansionModule } from '@angular/material/expansion';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { PersonaTestingApiService } from '../../../services/persona-testing-api.service';
 import { PersonaChatComponent } from '../persona-chat/persona-chat.component';
+import { isPersonaRunTerminal } from '../../../models';
 import type { PersonaTestRunDetail, PersonaDecision, RunArtifacts } from '../../../models';
 
 const POLL_MS = 10_000;
-const TERMINAL_STATUSES = ['completed', 'failed'];
 
 @Component({
   selector: 'app-persona-test-audit-panel',
@@ -55,7 +55,7 @@ export class PersonaTestAuditPanelComponent implements OnInit, OnDestroy {
     this.statusSub = timer(0, POLL_MS)
       .pipe(
         switchMap(() => {
-          if (this.run && TERMINAL_STATUSES.includes(this.run.status)) {
+          if (this.run && isPersonaRunTerminal(this.run.status)) {
             return EMPTY;
           }
           return this.api.getRunStatus(this.runId);
@@ -65,7 +65,7 @@ export class PersonaTestAuditPanelComponent implements OnInit, OnDestroy {
         next: (detail) => {
           this.run = detail;
           this.loading = false;
-          if (TERMINAL_STATUSES.includes(detail.status)) {
+          if (isPersonaRunTerminal(detail.status)) {
             this.loadArtifacts();
           }
         },
@@ -89,7 +89,7 @@ export class PersonaTestAuditPanelComponent implements OnInit, OnDestroy {
   }
 
   get isTerminal(): boolean {
-    return !!this.run && TERMINAL_STATUSES.includes(this.run.status);
+    return !!this.run && isPersonaRunTerminal(this.run.status);
   }
 
   get decisions(): PersonaDecision[] {
