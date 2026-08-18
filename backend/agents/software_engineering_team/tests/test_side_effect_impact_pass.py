@@ -24,7 +24,11 @@ from typing import Any, Dict, Optional
 
 import pytest
 from code_review_agent.coordinator import run_coordinator
-from code_review_agent.false_positive_filter import CodebaseIndex
+from code_review_agent.false_positive_filter import (
+    _MAX_DUPLICATE_TOOL_CALLS,
+    _MAX_TOTAL_TOOL_CALLS,
+    CodebaseIndex,
+)
 from code_review_agent.models import CodeReviewInput, CodeReviewIssue
 from code_review_agent.repo_reader import DiskRepoReader
 from code_review_agent.side_effect_impact_pass import (
@@ -428,6 +432,44 @@ def test_search_repository_tool_flags_truncated_scan_with_matches() -> None:
     result = search_repository("needle")
     assert "f0.py:1: needle" in result
     assert "truncated" in result.lower()
+
+
+def test_search_repository_shares_the_run_level_duplicate_call_budget() -> None:
+    """search_repository is built outside ``false_positive_filter._build_tools``,
+    but must still share that one call tracker -- a repeated identical
+    search_repository call gets the same "already called" note as the seven
+    base tools, not silent unlimited repetition."""
+    index = CodebaseIndex(
+        files={"app/main.py": "def bar(): pass\n"},
+        repo_reader=_FakeReader({"app/caller.py": "result = bar()\n"}),
+    )
+    search_repository = _tool_by_name(_build_side_effect_tools(index), "search_repository")
+    for _ in range(_MAX_DUPLICATE_TOOL_CALLS):
+        assert "already called" not in search_repository("bar(")
+    result = search_repository("bar(")
+    assert "app/caller.py:1: result = bar()" in result
+    assert "already called search_repository" in result
+
+
+def test_search_repository_shares_the_run_level_total_call_budget_with_base_tools() -> None:
+    """Calls to the seven base tools and to search_repository count against
+    ONE shared total-call budget -- exhausting it via the base tools must
+    also short-circuit search_repository, proving the run-level cap covers
+    this pass's whole tool set, not just the seven tools built by
+    ``_build_tools``."""
+    index = CodebaseIndex(
+        files={"app/main.py": "def bar(): pass\n"},
+        repo_reader=_FakeReader({"app/caller.py": "result = bar()\n"}),
+    )
+    tools = _build_side_effect_tools(index)
+    list_files = _tool_by_name(tools, "list_files")
+    search_repository = _tool_by_name(tools, "search_repository")
+    for _ in range(_MAX_TOTAL_TOOL_CALLS):
+        list_files()
+    result = search_repository("bar(")
+    assert "tool call budget" in result
+    assert "exhausted" in result
+    assert "app/caller.py" not in result
 
 
 # --------------------------------------------------------------------------- line bounds

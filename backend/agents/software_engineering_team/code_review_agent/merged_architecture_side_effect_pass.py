@@ -40,7 +40,7 @@ from .architecture_context import (
     architecture_document_text,
     architecture_evidence_available,
 )
-from .false_positive_filter import CodebaseIndex, _build_tools, code_fence_for
+from .false_positive_filter import CodebaseIndex, _build_tools, _make_call_tracker, code_fence_for
 from .models import CodeReviewInput, CodeReviewIssue
 from .profiles import ReviewProfile
 from .prompts import (
@@ -330,9 +330,19 @@ def _build_merged_pass_tools(index: CodebaseIndex, *, side_on: bool) -> list:
         - Returns the side-effect tool set when ``side_on``, else the shared
           architecture/false-positive tool set, plus ``list_changed_files`` so
           truncated manifests remain recoverable without confusing submission
-          paths with repository paths from ``list_files()``.
+          paths with repository paths from ``list_files()``. Every tool
+          returned -- including ``list_changed_files`` and, when ``side_on``,
+          ``search_repository`` -- shares one call tracker (see
+          ``false_positive_filter._make_call_tracker``), so the run-level
+          duplicate-call/total-budget guard bounds this pass's whole tool
+          set, not just its base tools.
     """
-    base = side_pass.build_side_effect_tools(index) if side_on else _build_tools(index)
+    track_call = _make_call_tracker()
+    base = (
+        side_pass.build_side_effect_tools(index, track_call=track_call)
+        if side_on
+        else _build_tools(index, track_call=track_call)
+    )
 
     @tool
     def list_changed_files(
@@ -349,16 +359,25 @@ def _build_merged_pass_tools(index: CodebaseIndex, *, side_on: bool) -> list:
 
         Returns:
             One submission path per line for this page, plus a next-offset hint
-            when more remain, or a message when none are available.
+            when more remain, or a message when none are available. A call
+            repeated with identical arguments beyond
+            ``false_positive_filter._MAX_DUPLICATE_TOOL_CALLS`` still returns
+            this, with a note appended saying so; once this run's shared
+            ``_MAX_TOTAL_TOOL_CALLS`` budget is exhausted, this becomes a
+            stop directive instead (see ``false_positive_filter._make_call_tracker``).
         """
+        skip, note = track_call("list_changed_files", offset, limit)
+        if skip:
+            return note
         try:
-            return format_changed_files_page(
+            result = format_changed_files_page(
                 list(index.files.keys()),
                 offset=offset,
                 limit=limit,
             )
         except Exception as exc:  # noqa: BLE001 - tool errors become tool messages
-            return f"Error: could not list changed files: {type(exc).__name__}: {exc}"
+            result = f"Error: could not list changed files: {type(exc).__name__}: {exc}"
+        return f"{result}\n\n{note}" if note else result
 
     return [*base, list_changed_files]
 

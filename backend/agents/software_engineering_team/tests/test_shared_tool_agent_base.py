@@ -187,6 +187,19 @@ class _FakeAgent:
         return self._response
 
 
+class _CountingFakeAgent:
+    """Like ``_FakeAgent``, but counts how many times it is actually invoked --
+    the seam a cache hit is meant to skip."""
+
+    def __init__(self, response):
+        self._response = response
+        self.calls = 0
+
+    def __call__(self, prompt):
+        self.calls += 1
+        return self._response
+
+
 def _stub_review_parser(raw):
     return {
         "issues": [
@@ -527,6 +540,100 @@ def test_review_llm_exception(monkeypatch):
     _patch_agent(monkeypatch, boom)
     out = agent.review(_Input(current_files={"a.ts": "code"}))
     assert "failed (LLM error)" in out.summary
+
+
+# ---------------------------------------------------------------------------
+# review() caching: BaseReviewToolAgent's default one-shot path is routed
+# through LlmToolAgentBase._cached_invoke_llm (shared.cache; see
+# test_llm_tool_agent_base.py for the helper's own unit tests). These tests
+# confirm the seam works end to end through review()'s full dispatch chain,
+# including its existing fallback-tier behavior. The cache is reset around
+# every test by conftest.py's autouse ``_reset_tool_agent_review_cache``.
+# ---------------------------------------------------------------------------
+
+
+def test_review_cache_hit_skips_second_llm_call(monkeypatch):
+    """Two review() calls with byte-identical current_files/task_description
+    hit the cache on the second call: the LLM is invoked only once."""
+    counting = _CountingFakeAgent("raw-review")
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    agent.llm = None
+    _patch_agent(monkeypatch, lambda *a, **k: counting)
+
+    first = agent.review(_Input(current_files={"a.ts": "code"}))
+    second = agent.review(_Input(current_files={"a.ts": "code"}))
+
+    assert counting.calls == 1
+    assert first.summary == second.summary == "Demo review: 1 issue(s) found."
+    assert [i.description for i in first.issues] == [i.description for i in second.issues]
+
+
+def test_review_cache_miss_on_changed_code_calls_llm_again(monkeypatch):
+    """A reviewed-file byte change naturally busts the cache key -- no
+    explicit invalidation logic needed."""
+    counting = _CountingFakeAgent("raw-review")
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    agent.llm = None
+    _patch_agent(monkeypatch, lambda *a, **k: counting)
+
+    agent.review(_Input(current_files={"a.ts": "code"}))
+    agent.review(_Input(current_files={"a.ts": "different code"}))
+
+    assert counting.calls == 2
+
+
+def test_review_cache_miss_on_changed_task_description_calls_llm_again(monkeypatch):
+    counting = _CountingFakeAgent("raw-review")
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    agent.llm = None
+    _patch_agent(monkeypatch, lambda *a, **k: counting)
+
+    agent.review(_Input(current_files={"a.ts": "code"}, task_description="d1"))
+    agent.review(_Input(current_files={"a.ts": "code"}, task_description="d2"))
+
+    assert counting.calls == 2
+
+
+def test_review_disabled_cache_via_zero_capacity_env_calls_llm_every_time(monkeypatch):
+    """Setting the shared tool-agent cache's capacity env var to 0 disables
+    caching; every review() call re-invokes the LLM, matching pre-cache
+    behavior."""
+    monkeypatch.setenv("TOOL_AGENT_REVIEW_CACHE_SIZE", "0")
+    counting = _CountingFakeAgent("raw-review")
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    agent.llm = None
+    _patch_agent(monkeypatch, lambda *a, **k: counting)
+
+    agent.review(_Input(current_files={"a.ts": "code"}))
+    agent.review(_Input(current_files={"a.ts": "code"}))
+
+    assert counting.calls == 2
+
+
+def test_review_llm_exception_not_cached_and_retried_on_next_call(monkeypatch):
+    """A failed review() call must not poison the cache: the next identical
+    call retries the LLM for real rather than replaying a frozen failure."""
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    agent.llm = None
+
+    def boom(*a, **k):
+        raise LLMError("err")
+
+    _patch_agent(monkeypatch, boom)
+    first = agent.review(_Input(current_files={"a.ts": "code"}))
+    assert "failed (LLM error)" in first.summary
+
+    counting = _CountingFakeAgent("raw-review")
+    _patch_agent(monkeypatch, lambda *a, **k: counting)
+    second = agent.review(_Input(current_files={"a.ts": "code"}))
+
+    assert counting.calls == 1
+    assert "1 issue(s) found." in second.summary
 
 
 # ---------------------------------------------------------------------------

@@ -12,7 +12,9 @@ import { AgenticTeamApiService } from '../../../services/agentic-team-api.servic
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import type { ProcessDefinition } from '../../../models/agentic-team.model';
 import { AgentStudioShellComponent } from './agent-studio-shell.component';
+import { DraftConflictDialogComponent } from './draft-conflict-dialog/draft-conflict-dialog.component';
 import { LoadDraftMenuComponent } from './load-draft-menu/load-draft-menu.component';
+import { SaveDraftDialogComponent } from './save-draft-dialog/save-draft-dialog.component';
 
 @Component({ selector: 'app-stub-stage-host', standalone: true, template: '' })
 class StubStageHostComponent {}
@@ -31,33 +33,42 @@ class StubNestedParentComponent {}
 describe('AgentStudioShellComponent', () => {
   let component: AgentStudioShellComponent;
   let fixture: ComponentFixture<AgentStudioShellComponent>;
-  // Stage views live on the child host, not the shell. The shell provides
-  // AgentStudioFacade at the component level, so TestBed root providers cannot
-  // replace it — override the shell's own provider. Load-draft-menu stays real
-  // and consumes this same mock. The leftover getProcess lookup is still a
-  // direct AgenticTeamApiService call.
+  // Stage views live on the routed child (AgentStudioStageHostComponent), not
+  // the shell. The shell provides AgentStudioFacade at the component level, so
+  // TestBed root providers cannot replace it — override the shell's own
+  // provider. Load-draft-menu stays real and consumes this same mock. The
+  // leftover getProcess lookup is still a direct AgenticTeamApiService call.
   let facade: {
     loadDraft: ReturnType<typeof vi.fn>;
     listDrafts: ReturnType<typeof vi.fn>;
+    saveDraft: ReturnType<typeof vi.fn>;
+    deleteDraft: ReturnType<typeof vi.fn>;
     selectAgent: ReturnType<typeof vi.fn>;
     saveAgent: ReturnType<typeof vi.fn>;
   };
   let agenticTeamApi: { getProcess: ReturnType<typeof vi.fn> };
 
+  const draft = (payload: Record<string, unknown>): AgentStudioDraft => ({
+    draft_id: 'd-1',
+    name: 'My draft',
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+    payload,
+  });
+
   beforeEach(async () => {
     facade = {
       loadDraft: vi.fn(),
       listDrafts: vi.fn().mockReturnValue(of([])),
+      saveDraft: vi.fn(),
+      deleteDraft: vi.fn().mockReturnValue(of({ draft_id: 'd-1', status: 'deleted' })),
       selectAgent: vi.fn().mockReturnValue(of({})),
       saveAgent: vi.fn().mockReturnValue(of({})),
     };
     agenticTeamApi = { getProcess: vi.fn() };
     await TestBed.configureTestingModule({
       imports: [AgentStudioShellComponent, NoopAnimationsModule],
-      providers: [
-        { provide: AgenticTeamApiService, useValue: agenticTeamApi },
-        provideRouter([]),
-      ],
+      providers: [{ provide: AgenticTeamApiService, useValue: agenticTeamApi }, provideRouter([])],
     })
       .overrideComponent(AgentStudioShellComponent, {
         remove: { providers: [AgentStudioFacade] },
@@ -111,14 +122,6 @@ describe('AgentStudioShellComponent', () => {
   });
 
   describe('Load draft', () => {
-    const draft = (payload: Record<string, unknown>): AgentStudioDraft => ({
-      draft_id: 'd-1',
-      name: 'My draft',
-      created_at: '2026-01-01T00:00:00Z',
-      updated_at: '2026-01-01T00:00:00Z',
-      payload,
-    });
-
     const process = (status: ProcessDefinition['status']): ProcessDefinition => ({
       process_id: 'proc-1',
       name: 'P',
@@ -304,11 +307,266 @@ describe('AgentStudioShellComponent', () => {
     });
 
     it('the Load-draft menu is wired to loadDraft and reflects loadingDraft as busy', () => {
-      facade.loadDraft.mockReturnValue(of(draft({})));
+      const pending = new Subject<AgentStudioDraft>();
+      facade.loadDraft.mockReturnValue(pending.asObservable());
       const menu = fixture.debugElement.query(By.directive(LoadDraftMenuComponent));
       expect(menu).toBeTruthy();
       menu.triggerEventHandler('draftSelected', 'd-1');
+      fixture.detectChanges();
+      expect(component.loadingDraft()).toBe(true);
+      expect(menu.componentInstance.busy).toBe(true);
+      pending.next(draft({}));
+      pending.complete();
       expect(component.state.currentDraftId()).toBe('d-1');
+    });
+
+    it('the Load-draft menu draftDeleted output unbinds the draft but keeps the current journey', () => {
+      component.state.setRegistryAgentId('local-1');
+      component.state.setCurrentDraft('d-1', 'My draft');
+      const menu = fixture.debugElement.query(By.directive(LoadDraftMenuComponent));
+      menu.triggerEventHandler('draftDeleted', 'd-1');
+      expect(component.state.currentDraftId()).toBeNull();
+      expect(component.state.currentDraftName()).toBeNull();
+      expect(component.state.registryAgentId()).toBe('local-1');
+    });
+
+    it('markClean after hydrate so a just-loaded draft is not dirty', () => {
+      expect(component.state.isDirty()).toBe(false);
+      facade.loadDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
+      component.loadDraft('d-1');
+      expect(component.state.registryAgentId()).toBe('reg-1');
+      expect(component.state.isDirty()).toBe(false);
+    });
+
+    it('aborts hydration when the handoff changes while loadDraft is in flight', () => {
+      const pending = new Subject<AgentStudioDraft>();
+      facade.loadDraft.mockReturnValue(pending.asObservable());
+      component.loadDraft('d-1');
+      component.state.setRegistryAgentId('local-2');
+      pending.next(draft({ registryAgentId: 'reg-1' }));
+      pending.complete();
+      expect(component.state.registryAgentId()).toBe('local-2');
+      expect(component.state.currentDraftId()).toBeNull();
+      expect(component.state.isDirty()).toBe(true);
+      expect(component.loadingDraft()).toBe(false);
+    });
+
+    it('aborts hydration when bound-draft delete dirties the session during the GET', () => {
+      component.state.setRegistryAgentId('local-1');
+      component.state.markClean();
+      component.state.setCurrentDraft('bound-1', 'Bound');
+      const pending = new Subject<AgentStudioDraft>();
+      facade.loadDraft.mockReturnValue(pending.asObservable());
+      component.loadDraft('d-2');
+      component.onDraftDeleted('bound-1');
+      pending.next(draft({ registryAgentId: 'reg-1' }));
+      pending.complete();
+      expect(component.state.registryAgentId()).toBe('local-1');
+      expect(component.state.currentDraftId()).toBeNull();
+      expect(component.state.isDirty()).toBe(true);
+      expect(component.loadingDraft()).toBe(false);
+    });
+  });
+
+  describe('Load draft conflict', () => {
+    let openSpy: ReturnType<typeof vi.spyOn<MatDialog, 'open'>>;
+
+    beforeEach(() => {
+      openSpy = vi.spyOn(MatDialog.prototype, 'open');
+    });
+    afterEach(() => {
+      openSpy.mockRestore();
+    });
+
+    it('hydrates immediately when clean and does not open the conflict dialog', () => {
+      facade.loadDraft.mockReturnValue(of(draft({})));
+      component.loadDraft('d-1');
+      expect(openSpy).not.toHaveBeenCalled();
+      expect(facade.loadDraft).toHaveBeenCalledWith('d-1');
+    });
+
+    it('Cancel leaves the session unchanged and does not call loadDraft', () => {
+      component.state.setRegistryAgentId('local-1');
+      openSpy.mockReturnValue({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
+      component.loadDraft('d-1');
+      // The spy is on MatDialog.prototype, so any dialog opened during this
+      // test would get the same mocked return value — confirm it's actually
+      // the conflict dialog, not some other dialog opened by mistake.
+      expect(openSpy.mock.calls[0][0]).toBe(DraftConflictDialogComponent);
+      const config = openSpy.mock.calls[0][1] as { disableClose?: boolean };
+      expect(config.disableClose).not.toBe(true);
+      expect(facade.loadDraft).not.toHaveBeenCalled();
+      expect(component.state.registryAgentId()).toBe('local-1');
+      expect(component.loadingDraft()).toBe(false);
+    });
+
+    it('Discard hydrates the chosen draft', () => {
+      component.state.setRegistryAgentId('local-1');
+      openSpy.mockReturnValue({ afterClosed: () => of('discard') } as unknown as ReturnType<MatDialog['open']>);
+      facade.loadDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
+      component.loadDraft('d-1');
+      expect(component.state.registryAgentId()).toBe('reg-1');
+      expect(component.state.isDirty()).toBe(false);
+    });
+
+    it('Save first when bound PUTs then hydrates the chosen draft', () => {
+      component.state.setRegistryAgentId('local-1');
+      component.state.setCurrentDraft('bound-1', 'Bound');
+      openSpy.mockReturnValue({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>);
+      facade.saveDraft.mockReturnValue(
+        of({ draft_id: 'bound-1', name: 'Bound', updated_at: '2026-01-01T00:00:00Z' }),
+      );
+      facade.loadDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
+      component.loadDraft('d-1');
+      expect(facade.saveDraft).toHaveBeenCalledWith(
+        {
+          name: 'Bound',
+          payload: expect.objectContaining({ registryAgentId: 'local-1' }),
+        },
+        'bound-1',
+      );
+      expect(facade.loadDraft).toHaveBeenCalledWith('d-1');
+      expect(component.state.registryAgentId()).toBe('reg-1');
+    });
+
+    it('Save first PUT error does not hydrate', () => {
+      component.state.setRegistryAgentId('local-1');
+      component.state.setCurrentDraft('bound-1', 'Bound');
+      openSpy.mockReturnValue({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>);
+      facade.saveDraft.mockReturnValue(throwError(() => ({ error: { detail: 'nope' } })));
+      component.loadDraft('d-1');
+      expect(facade.loadDraft).not.toHaveBeenCalled();
+      expect(component.state.registryAgentId()).toBe('local-1');
+      expect(component.loadingDraft()).toBe(false);
+    });
+
+    it('Save first keeps loadingDraft true for the duration of the PUT', () => {
+      component.state.setRegistryAgentId('local-1');
+      component.state.setCurrentDraft('bound-1', 'Bound');
+      openSpy.mockReturnValue({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>);
+      const pending = new Subject<AgentStudioDraftSummary>();
+      facade.saveDraft.mockReturnValue(pending.asObservable());
+      facade.loadDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
+      component.loadDraft('d-1');
+      expect(component.loadingDraft()).toBe(true);
+      expect(facade.loadDraft).not.toHaveBeenCalled();
+      pending.next({ draft_id: 'bound-1', name: 'Bound', updated_at: '2026-01-01T00:00:00Z' });
+      pending.complete();
+      expect(facade.loadDraft).toHaveBeenCalledWith('d-1');
+      expect(component.loadingDraft()).toBe(false);
+    });
+
+    it('Save first does not hydrate when the handoff changes during the PUT', () => {
+      component.state.setRegistryAgentId('local-1');
+      component.state.setCurrentDraft('bound-1', 'Bound');
+      openSpy.mockReturnValue({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>);
+      const pending = new Subject<AgentStudioDraftSummary>();
+      facade.saveDraft.mockReturnValue(pending.asObservable());
+      component.loadDraft('d-1');
+      component.state.setRegistryAgentId('local-2');
+      pending.next({ draft_id: 'bound-1', name: 'Bound', updated_at: '2026-01-01T00:00:00Z' });
+      pending.complete();
+      expect(facade.loadDraft).not.toHaveBeenCalled();
+      expect(component.state.registryAgentId()).toBe('local-2');
+      expect(component.state.isDirty()).toBe(true);
+      expect(component.loadingDraft()).toBe(false);
+    });
+
+    it('Save first does not hydrate when the bound draft is deleted during the PUT', () => {
+      component.state.setRegistryAgentId('local-1');
+      component.state.setCurrentDraft('bound-1', 'Bound');
+      openSpy.mockReturnValue({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>);
+      const pending = new Subject<AgentStudioDraftSummary>();
+      facade.saveDraft.mockReturnValue(pending.asObservable());
+      component.loadDraft('d-1');
+      component.onDraftDeleted('bound-1');
+      pending.next({ draft_id: 'bound-1', name: 'Bound', updated_at: '2026-01-01T00:00:00Z' });
+      pending.complete();
+      expect(facade.loadDraft).not.toHaveBeenCalled();
+      expect(component.state.currentDraftId()).toBeNull();
+      expect(component.state.registryAgentId()).toBe('local-1');
+      expect(component.state.isDirty()).toBe(true);
+      expect(component.loadingDraft()).toBe(false);
+    });
+
+    it('a second Load during save-first PUT is a no-op', () => {
+      component.state.setRegistryAgentId('local-1');
+      component.state.setCurrentDraft('bound-1', 'Bound');
+      openSpy.mockReturnValue({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>);
+      const pending = new Subject<AgentStudioDraftSummary>();
+      facade.saveDraft.mockReturnValue(pending.asObservable());
+      component.loadDraft('d-1');
+      expect(openSpy).toHaveBeenCalledTimes(1);
+      component.loadDraft('d-2');
+      expect(openSpy).toHaveBeenCalledTimes(1);
+      expect(facade.loadDraft).not.toHaveBeenCalled();
+      pending.complete();
+    });
+
+    it('Save first when unbound opens the save dialog; cancel aborts the load', () => {
+      component.state.setRegistryAgentId('local-1');
+      // First open = conflict (save). Second open = Save-draft dialog.
+      openSpy
+        .mockReturnValueOnce({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>)
+        .mockReturnValueOnce({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
+      component.loadDraft('d-1');
+      expect(openSpy).toHaveBeenCalledTimes(2);
+      expect(openSpy.mock.calls[1][0]).toBe(SaveDraftDialogComponent);
+      expect((openSpy.mock.calls[1][1] as { data: unknown }).data).toEqual(
+        expect.objectContaining({
+          draftId: null,
+          initialName: null,
+          payload: expect.objectContaining({ registryAgentId: 'local-1' }),
+        }),
+      );
+      expect(facade.loadDraft).not.toHaveBeenCalled();
+      expect(component.state.registryAgentId()).toBe('local-1');
+    });
+
+    it('Save first when unbound saves a new draft then hydrates the chosen draft', () => {
+      component.state.setRegistryAgentId('local-1');
+      const saveClosed = new Subject<AgentStudioDraftSummary>();
+      openSpy
+        .mockReturnValueOnce({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>)
+        .mockReturnValueOnce({ afterClosed: () => saveClosed.asObservable() } as unknown as ReturnType<MatDialog['open']>);
+      facade.loadDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
+      component.loadDraft('d-1');
+      saveClosed.next({ draft_id: 'new-1', name: 'Saved', updated_at: '2026-01-01T00:00:00Z' });
+      saveClosed.complete();
+      expect(facade.loadDraft).toHaveBeenCalledWith('d-1');
+      expect(component.state.currentDraftId()).toBe('d-1');
+      expect(component.state.registryAgentId()).toBe('reg-1');
+      expect(component.state.isDirty()).toBe(false);
+    });
+
+    it('Save first when unbound does not hydrate if the handoff changes during the save dialog', () => {
+      component.state.setRegistryAgentId('local-1');
+      const saveClosed = new Subject<AgentStudioDraftSummary>();
+      openSpy
+        .mockReturnValueOnce({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>)
+        .mockReturnValueOnce({ afterClosed: () => saveClosed.asObservable() } as unknown as ReturnType<MatDialog['open']>);
+      component.loadDraft('d-1');
+      component.state.setRegistryAgentId('local-2');
+      saveClosed.next({ draft_id: 'new-1', name: 'Saved', updated_at: '2026-01-01T00:00:00Z' });
+      saveClosed.complete();
+      expect(facade.loadDraft).not.toHaveBeenCalled();
+      expect(component.state.registryAgentId()).toBe('local-2');
+      expect(component.state.isDirty()).toBe(true);
+    });
+
+    it('Save first when unbound does not hydrate if the session is rebound by another load during the save dialog', () => {
+      component.state.setRegistryAgentId('local-1');
+      const saveClosed = new Subject<AgentStudioDraftSummary>();
+      openSpy
+        .mockReturnValueOnce({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>)
+        .mockReturnValueOnce({ afterClosed: () => saveClosed.asObservable() } as unknown as ReturnType<MatDialog['open']>);
+      component.loadDraft('d-1');
+      component.state.setCurrentDraft('other-1', 'Loaded');
+      component.state.markClean();
+      saveClosed.next({ draft_id: 'new-1', name: 'Saved', updated_at: '2026-01-01T00:00:00Z' });
+      saveClosed.complete();
+      expect(facade.loadDraft).not.toHaveBeenCalled();
+      expect(component.state.currentDraftId()).toBe('other-1');
     });
   });
 
@@ -387,6 +645,158 @@ describe('AgentStudioShellComponent', () => {
       component.openSaveDraftDialog();
       expect(component.state.currentDraftId()).toBeNull();
       expect(component.state.currentDraftName()).toBeNull();
+    });
+
+    it('markClean after a successful save so the session is not dirty', () => {
+      component.state.setRegistryAgentId('reg-1');
+      expect(component.state.isDirty()).toBe(true);
+      openSpy.mockReturnValue({ afterClosed: () => of(draftSummary()) } as unknown as ReturnType<MatDialog['open']>);
+      component.openSaveDraftDialog();
+      expect(component.state.isDirty()).toBe(false);
+    });
+
+    it('records the submitted payload as saved when the handoff changes while the dialog is open', () => {
+      component.state.setRegistryAgentId('reg-1');
+      const closed = new Subject<AgentStudioDraftSummary>();
+      openSpy.mockReturnValue({ afterClosed: () => closed.asObservable() } as unknown as ReturnType<MatDialog['open']>);
+      component.openSaveDraftDialog();
+      component.state.setRegistryAgentId('reg-2');
+      closed.next(draftSummary());
+      closed.complete();
+      expect(component.state.currentDraftId()).toBe('d-1');
+      expect(component.state.registryAgentId()).toBe('reg-2');
+      expect(component.state.isDirty()).toBe(true);
+    });
+
+    it('ignores a save result after the session has bound a different draft', () => {
+      component.state.setCurrentDraft('d-a', 'A');
+      const closed = new Subject<AgentStudioDraftSummary>();
+      openSpy.mockReturnValue({ afterClosed: () => closed.asObservable() } as unknown as ReturnType<MatDialog['open']>);
+      component.openSaveDraftDialog();
+      component.state.setCurrentDraft('d-b', 'B');
+      closed.next(draftSummary());
+      closed.complete();
+      expect(component.state.currentDraftId()).toBe('d-b');
+      expect(component.state.currentDraftName()).toBe('B');
+    });
+
+    it('disables the Save button while a load is in flight', () => {
+      component.loadingDraft.set(true);
+      fixture.detectChanges();
+      const button: HTMLButtonElement = fixture.nativeElement.querySelector('.studio__draft-btn');
+      expect(button.disabled).toBe(true);
+    });
+
+    it('returns afterClosed so callers can chain on success', () => {
+      openSpy.mockReturnValue({ afterClosed: () => of(draftSummary()) } as unknown as ReturnType<MatDialog['open']>);
+      const emitted: unknown[] = [];
+      component.openSaveDraftDialog().subscribe((v) => emitted.push(v));
+      expect(emitted).toEqual([draftSummary()]);
+    });
+  });
+
+  describe('Bound draft header', () => {
+    let openSpy: ReturnType<typeof vi.spyOn<MatDialog, 'open'>>;
+
+    beforeEach(() => {
+      openSpy = vi.spyOn(MatDialog.prototype, 'open');
+    });
+    afterEach(() => {
+      openSpy.mockRestore();
+    });
+
+    it('hides the name and pencil when no draft is bound', () => {
+      expect(fixture.nativeElement.querySelector('.studio__current-draft')).toBeNull();
+    });
+
+    it('shows the bound name and a rename button', () => {
+      component.state.setCurrentDraft('d-1', 'My draft');
+      fixture.detectChanges();
+      const root = fixture.nativeElement.querySelector('.studio__current-draft') as HTMLElement;
+      expect(root.textContent).toContain('My draft');
+      const btn = fixture.nativeElement.querySelector('.studio__rename-draft') as HTMLButtonElement;
+      expect(btn.getAttribute('aria-label')).toBe('Rename draft My draft');
+    });
+
+    it('pencil opens the rename dialog with the bound id and name', () => {
+      component.state.setCurrentDraft('d-1', 'My draft');
+      openSpy.mockReturnValue({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
+      component.openRenameDraftDialog();
+      const config = openSpy.mock.calls[0][1] as {
+        data: { draftId: string; initialName: string };
+        disableClose?: boolean;
+        closeOnNavigation?: boolean;
+        injector?: Injector;
+      };
+      expect(config.data).toEqual({ draftId: 'd-1', initialName: 'My draft' });
+      expect(config.disableClose).toBe(true);
+      expect(config.closeOnNavigation).toBe(false);
+      // Regression guard: RenameDraftDialogComponent injects AgentStudioFacade,
+      // which is provided on the shell (not root) — without the shell's
+      // injector here, the dialog would resolve from the root injector and
+      // throw NullInjectorError as soon as it opened.
+      expect(config.injector).toBeDefined();
+      expect(config.injector!.get(AgentStudioFacade)).toBeTruthy();
+    });
+
+    it('rename success updates the bound name and leaves the session clean', () => {
+      component.state.setRegistryAgentId('reg-1');
+      component.state.markClean();
+      component.state.setCurrentDraft('d-1', 'Old');
+      openSpy.mockReturnValue({
+        afterClosed: () => of({ draft_id: 'd-1', name: 'New', updated_at: '2026-01-01T00:00:00Z' }),
+      } as unknown as ReturnType<MatDialog['open']>);
+      component.openRenameDraftDialog();
+      expect(component.state.currentDraftName()).toBe('New');
+      expect(component.state.isDirty()).toBe(false);
+    });
+
+    it('ignores a rename result after the session has bound a different draft', () => {
+      component.state.setCurrentDraft('d-1', 'Old');
+      const closed = new Subject<AgentStudioDraftSummary>();
+      openSpy.mockReturnValue({ afterClosed: () => closed.asObservable() } as unknown as ReturnType<MatDialog['open']>);
+      component.openRenameDraftDialog();
+      component.state.setCurrentDraft('d-2', 'Loaded');
+      closed.next({ draft_id: 'd-1', name: 'New', updated_at: '2026-01-01T00:00:00Z' });
+      closed.complete();
+      expect(component.state.currentDraftId()).toBe('d-2');
+      expect(component.state.currentDraftName()).toBe('Loaded');
+    });
+
+    it('disables the rename button while a load is in flight', () => {
+      component.state.setCurrentDraft('d-1', 'My draft');
+      component.loadingDraft.set(true);
+      fixture.detectChanges();
+      const button: HTMLButtonElement = fixture.nativeElement.querySelector('.studio__rename-draft');
+      expect(button.disabled).toBe(true);
+    });
+
+    it('openRenameDraftDialog is a no-op when unbound', () => {
+      openSpy.mockReturnValue({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
+      component.openRenameDraftDialog();
+      expect(openSpy).not.toHaveBeenCalled();
+    });
+
+    it('onDraftDeleted of the current id unbinds and marks the retained handoff dirty', () => {
+      component.state.setRegistryAgentId('reg-1');
+      component.state.markClean();
+      component.state.setCurrentDraft('d-1', 'My draft');
+      component.onDraftDeleted('d-1');
+      expect(component.state.currentDraftId()).toBeNull();
+      expect(component.state.currentDraftName()).toBeNull();
+      expect(component.state.registryAgentId()).toBe('reg-1');
+      expect(component.state.isDirty()).toBe(true);
+    });
+
+    it('onDraftDeleted of a different id leaves the bound draft and snapshot alone', () => {
+      component.state.setRegistryAgentId('reg-1');
+      component.state.markClean();
+      component.state.setCurrentDraft('d-1', 'My draft');
+      component.onDraftDeleted('other');
+      expect(component.state.currentDraftId()).toBe('d-1');
+      expect(component.state.currentDraftName()).toBe('My draft');
+      expect(component.state.registryAgentId()).toBe('reg-1');
+      expect(component.state.isDirty()).toBe(false);
     });
   });
 
@@ -519,6 +929,16 @@ describe('AgentStudioShellComponent', () => {
     fixture.detectChanges();
     expect(component.activeStageDef().key).toBe('test');
     expect(component.buildForwardDisabledReason()).toBeNull();
+  });
+
+  describe('hasUnsavedChanges', () => {
+    it('mirrors state.isDirty() so the route canDeactivate guard can prompt before leaving', () => {
+      expect(component.hasUnsavedChanges()).toBe(false);
+      component.state.setRegistryAgentId('reg-1');
+      expect(component.hasUnsavedChanges()).toBe(true);
+      component.state.markClean();
+      expect(component.hasUnsavedChanges()).toBe(false);
+    });
   });
 
   it('hides the continue footer on the persona-run child and keeps handoff state', async () => {

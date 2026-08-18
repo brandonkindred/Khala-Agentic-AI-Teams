@@ -73,7 +73,7 @@ from shared.env import env_flag_enabled
 from software_engineering_team.shared.llm import extract_json_from_response
 
 from .chunking import _coerce_bool
-from .false_positive_filter import CodebaseIndex, _build_tools, _code_fence_for
+from .false_positive_filter import CodebaseIndex, _build_tools, _code_fence_for, _make_call_tracker
 from .models import CodeReviewInput, CodeReviewIssue, coerce_line, is_no_op_suggestion
 from .profiles import ReviewProfile
 from .prompts import (
@@ -229,8 +229,15 @@ def _search_repository(
     return results, incomplete
 
 
-def _build_side_effect_tools(index: CodebaseIndex) -> list:
+def _build_side_effect_tools(index: CodebaseIndex, *, track_call=None) -> list:
     """Build this pass's tools: the shared submission tools plus repo-wide search.
+
+    Preconditions:
+        - When given, ``track_call`` is a callable previously returned by
+          ``false_positive_filter._make_call_tracker`` -- typically because
+          the caller (e.g. ``merged_architecture_side_effect_pass``) is
+          layering further tools of its own on top of this set and needs all
+          of them to share one run-level budget.
 
     Postconditions:
         - Returns the seven shared tools from ``false_positive_filter._build_tools``
@@ -239,8 +246,13 @@ def _build_side_effect_tools(index: CodebaseIndex) -> list:
           plus a new ``search_repository`` tool bound to ``index`` -- the only
           tool in this set whose entire purpose is reaching beyond the
           submission's own files to find a changed function's out-of-diff
-          callers.
+          callers. All eight tools share one call tracker (``track_call``
+          when given, else one created internally), so the run-level
+          duplicate-call/total-budget guard (see
+          ``false_positive_filter._make_call_tracker``) actually bounds every
+          tool in this set, not just the seven built by ``_build_tools``.
     """
+    _track_call = track_call if track_call is not None else _make_call_tracker()
 
     @tool
     def search_repository(query: str) -> str:
@@ -261,34 +273,45 @@ def _build_side_effect_tools(index: CodebaseIndex) -> list:
             scan (the repository is larger than this tool's per-call file
             cap) is flagged explicitly rather than reported as if the whole
             repository had been searched -- follow up with targeted
-            ``list_files()``/``read_file()`` calls when this matters.
+            ``list_files()``/``read_file()`` calls when this matters. A call
+            repeated with an identical query beyond
+            ``false_positive_filter._MAX_DUPLICATE_TOOL_CALLS`` still returns
+            this, with a note appended saying so; once this run's shared
+            ``_MAX_TOTAL_TOOL_CALLS`` budget is exhausted, this becomes a
+            stop directive instead (see ``false_positive_filter._make_call_tracker``).
         """
+        skip, note = _track_call("search_repository", query)
+        if skip:
+            return note
         if index.repo_reader is None:
-            return "No repository access is available beyond this submission."
-        matches, truncated = _search_repository(index, query)
-        if not matches:
-            if truncated:
-                return (
-                    f"No matches for {query!r} in the files scanned, but the scan was "
-                    "truncated before covering the whole repository -- this does NOT prove "
-                    "the substring is absent elsewhere. Use list_files()/read_file() for a "
-                    "more targeted follow-up if this caller-impact check matters."
-                )
-            return f"No matches for {query!r} in the rest of the repository."
-        result = "\n".join(f"{path}:{lineno}: {text}" for path, lineno, text in matches)
-        if truncated:
-            result += (
-                f"\n\n(Scan truncated before covering the whole repository -- there may be "
-                f"more matches for {query!r} beyond what's shown above.)"
-            )
-        return result
+            result = "No repository access is available beyond this submission."
+        else:
+            matches, truncated = _search_repository(index, query)
+            if not matches:
+                if truncated:
+                    result = (
+                        f"No matches for {query!r} in the files scanned, but the scan was "
+                        "truncated before covering the whole repository -- this does NOT prove "
+                        "the substring is absent elsewhere. Use list_files()/read_file() for a "
+                        "more targeted follow-up if this caller-impact check matters."
+                    )
+                else:
+                    result = f"No matches for {query!r} in the rest of the repository."
+            else:
+                result = "\n".join(f"{path}:{lineno}: {text}" for path, lineno, text in matches)
+                if truncated:
+                    result += (
+                        f"\n\n(Scan truncated before covering the whole repository -- there may be "
+                        f"more matches for {query!r} beyond what's shown above.)"
+                    )
+        return f"{result}\n\n{note}" if note else result
 
-    return [*_build_tools(index), search_repository]
+    return [*_build_tools(index, track_call=_track_call), search_repository]
 
 
-def build_side_effect_tools(index: CodebaseIndex) -> list:
+def build_side_effect_tools(index: CodebaseIndex, *, track_call=None) -> list:
     """Public wrapper for :func:`_build_side_effect_tools`."""
-    return _build_side_effect_tools(index)
+    return _build_side_effect_tools(index, track_call=track_call)
 
 
 def _render_manifest(paths: List[str]) -> List[str]:

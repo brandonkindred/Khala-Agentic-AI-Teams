@@ -844,6 +844,21 @@ trades that against a larger prompt per call. This is a cap on how many
 all (see `CODE_REVIEW_FALSE_POSITIVE_FILTER` below): the model always fetches
 it via the unbounded `read_file` tool, so there is nothing to cap.
 
+### CODE_REVIEW_SCOPE_MAX_FINDINGS_PER_GROUP
+Int (default `20`, floor `1`). Cap on how many findings the LLM scope
+classifier (`code_review_agent/scope_classifier.py::classify_scope`) inlines
+into a single per-file classification call. Findings are first grouped by their
+cited file; a file whose findings exceed this cap is split into multiple
+batches of at most this size (the final batch may be smaller), each its own
+`complete_json` call, fanned out across the
+shared `CODE_REVIEW_MAP_PARALLELISM` budget. Each batch fails safe on its own —
+any client, LLM, or parse error degrades that batch's findings to an "unknown"
+verdict (a caller falls back to the free heuristic) rather than raising.
+Lowering this cap increases the number of classification calls (cost/latency)
+for files with many findings; raising it trades that against a larger prompt per
+call. A smaller default than `CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP`
+keeps each scope decision focused.
+
 ### CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES
 Int (default `8`, floor `1`). Two things, both governed by this one knob (see
 `code_review_agent/temporal/config.py::resolve_max_concurrent_activities`, the
@@ -1370,6 +1385,34 @@ real on the next call. Backend failures (Redis unavailable, corrupt entry)
 fail open to a miss/recompute, same as every other `shared.cache` consumer.
 Default `256`, floor `0` (`0` disables the cache — every call re-invokes the
 model).
+
+---
+
+## Software Engineering V2 Tool Agents
+
+### TOOL_AGENT_REVIEW_CACHE_SIZE
+Max entries in the shared V2 tool-agent review cache (`shared.cache`; owned
+by `LlmToolAgentBase._cached_invoke_llm`, wired into
+`BaseReviewToolAgent.review()`'s default one-shot LLM path). See
+[`software_engineering_team/README.md`](../backend/agents/software_engineering_team/README.md#caching-sharedcache--redis):
+one namespace/env var backs every backend and frontend V2 tool agent that
+uses that default path (security, testing/QA, accessibility, performance,
+UX's `review()`) — the key hashes the concrete class's module+qualname, the
+resolved review model, and the fully-rendered prompt (not the raw
+`current_files`/`task_description` input), so any reviewed-file byte change
+naturally busts the key with no explicit invalidation logic, and distinct
+agent classes never collide even when their rendered prompts happen to
+coincide. A cache hit skips the LLM call entirely. Same **atomic-call**
+caching *policy* as `QA_REVIEW_CACHE_SIZE`: only a genuine (non-exception)
+result is cached, so an LLM failure is retried for real on the next call
+rather than being frozen in as a permanent failure. Backend failures (Redis
+unavailable, corrupt entry) fail open to a miss/recompute, same as every
+other `shared.cache` consumer. Default `256`, floor `0` (`0` disables the
+cache — every call re-invokes the model). Out of scope: `build_runner`
+agents (build specialist) take a different review path with no LLM call to
+cache; `UxUsabilityToolAgent.plan()` and `DocumentationToolAgentBase.review()`
+override their phase method entirely and do not currently route through
+this cache.
 
 ---
 

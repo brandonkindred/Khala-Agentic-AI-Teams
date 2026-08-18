@@ -154,9 +154,9 @@ def test_worker_start_skipped_when_temporal_address_env_absent(monkeypatch: pyte
 
     CRUD-level coverage that authoring still succeeds under this same
     condition lives in ``test_agent_studio_routes.py`` /
-    ``test_agent_studio_direct_routes.py``; the dispatch-level mirror of
-    ``test_temporal_enabled.py`` lives in
-    ``agent_platform/studio/tests/test_temporal_worker_absent.py``.
+    ``test_agent_studio_direct_routes.py``; dispatch-level coverage (CRUD
+    never depends on Temporal state either way) lives in
+    ``agent_platform/studio/tests/test_direct_dispatch.py``.
     """
     monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
     monkeypatch.setattr(main, "UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER", True)
