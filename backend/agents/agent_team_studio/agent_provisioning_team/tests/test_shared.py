@@ -1,7 +1,7 @@
 """Unit tests for shared helpers.
 
 Covers job_store, environment_store, logging_context, phase_state,
-provisioner_state edge cases, llm_client, tool_manifest, and
+provisioner_state edge cases, prompt_sanitize, tool_manifest, and
 tool_agent_registry helpers that aren't already exercised in the
 integration matrix.
 """
@@ -1220,34 +1220,23 @@ def test_restore_documentation_with_none_onboarding() -> None:
 
 
 # ---------------------------------------------------------------------------
-# llm_client
+# prompt_sanitize
 # ---------------------------------------------------------------------------
 
 
-def test_llm_client_is_not_configured_by_default() -> None:
-    from agent_team_studio.agent_provisioning_team.shared.llm_client import LLMClient
-
-    assert LLMClient(model="").is_configured is False
-
-
-def test_llm_client_complete_falls_back_when_unconfigured() -> None:
-    import asyncio
-
-    from agent_team_studio.agent_provisioning_team.shared.llm_client import LLMClient, LLMRequest
-
-    client = LLMClient(model="")
-    assert asyncio.run(client.complete(LLMRequest(system="s", user="u"))) == "[llm-fallback] u"
-
-
 def test_sanitize_prompt_var_default_max() -> None:
-    from agent_team_studio.agent_provisioning_team.shared.llm_client import sanitize_prompt_var
+    from agent_team_studio.agent_provisioning_team.shared.prompt_sanitize import (
+        sanitize_prompt_var,
+    )
 
     s = sanitize_prompt_var("clean ascii")
     assert s == "clean ascii"
 
 
 def test_sanitize_prompt_var_strips_emoji() -> None:
-    from agent_team_studio.agent_provisioning_team.shared.llm_client import sanitize_prompt_var
+    from agent_team_studio.agent_provisioning_team.shared.prompt_sanitize import (
+        sanitize_prompt_var,
+    )
 
     s = sanitize_prompt_var("hi \U0001f600 there")
     # Emoji is disallowed and must be removed, not replaced with underscores.
@@ -1257,7 +1246,9 @@ def test_sanitize_prompt_var_strips_emoji() -> None:
 
 
 def test_sanitize_prompt_var_handles_none() -> None:
-    from agent_team_studio.agent_provisioning_team.shared.llm_client import sanitize_prompt_var
+    from agent_team_studio.agent_provisioning_team.shared.prompt_sanitize import (
+        sanitize_prompt_var,
+    )
 
     assert sanitize_prompt_var(None) == ""
 

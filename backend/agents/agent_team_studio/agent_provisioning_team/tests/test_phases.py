@@ -1971,15 +1971,17 @@ def test_documentation_uses_llm_summary_when_configured(tmp_path: Path) -> None:
 
     captured = {}
 
-    class _StubLLM:
-        is_configured = True
-
-        async def complete(self, req):
+    class _StubClient:
+        def complete(self, prompt, **kwargs):
             captured["called"] = True
+            captured["kwargs"] = kwargs
             return "FAKE_LLM_SUMMARY"
 
-    stub = _StubLLM()
-    with patch.object(doc_mod, "_LLM", stub):
+    def make_client(agent_key=None):
+        captured["agent_key"] = agent_key
+        return _StubClient()
+
+    with patch.object(doc_mod, "get_client", make_client):
         result = doc_mod.run_documentation(
             agent_id="a1",
             manifest=ToolManifest(),
@@ -1989,19 +1991,20 @@ def test_documentation_uses_llm_summary_when_configured(tmp_path: Path) -> None:
         )
     assert result.success is True
     assert "FAKE_LLM_SUMMARY" in result.onboarding.summary
+    assert captured["called"] is True
+    assert captured["agent_key"] == "agent_provisioning_team.documentation"
+    assert captured["kwargs"].get("max_tokens") == 300
 
 
 def test_documentation_llm_summary_falls_back_on_exception(tmp_path: Path) -> None:
     from agent_team_studio.agent_provisioning_team.phases import documentation as doc_mod
     from agent_team_studio.agent_provisioning_team.shared.tool_manifest import ToolManifest
 
-    class _BoomLLM:
-        is_configured = True
-
-        async def complete(self, req):
+    class _BoomClient:
+        def complete(self, prompt, **kwargs):
             raise RuntimeError("api down")
 
-    with patch.object(doc_mod, "_LLM", _BoomLLM()):
+    with patch.object(doc_mod, "get_client", lambda agent_key=None: _BoomClient()):
         result = doc_mod.run_documentation(
             agent_id="a1",
             manifest=ToolManifest(),
@@ -2010,6 +2013,23 @@ def test_documentation_llm_summary_falls_back_on_exception(tmp_path: Path) -> No
             workspace_path=str(tmp_path),
         )
     # Falls back to deterministic template
+    assert "tool(s) configured" in result.onboarding.summary
+
+
+def test_documentation_summary_uses_template_for_dummy_client(tmp_path: Path) -> None:
+    from agent_team_studio.agent_provisioning_team.phases import documentation as doc_mod
+    from agent_team_studio.agent_provisioning_team.shared.tool_manifest import ToolManifest
+    from llm_service import DummyLLMClient
+
+    with patch.object(doc_mod, "get_client", lambda agent_key=None: DummyLLMClient()):
+        result = doc_mod.run_documentation(
+            agent_id="a1",
+            manifest=ToolManifest(),
+            credentials={},
+            tool_results=[],
+            workspace_path=str(tmp_path),
+        )
+    # A DummyLLMClient is treated the same as "unconfigured": template, not dummy text.
     assert "tool(s) configured" in result.onboarding.summary
 
 
@@ -2039,13 +2059,22 @@ def test_documentation_uses_llm_getting_started_when_configured(tmp_path: Path) 
         ]
     )
 
-    class _StubLLM:
-        is_configured = True
+    # run_documentation also calls _generate_summary against the same stubbed
+    # client, so calls/agent_keys are collected per-call rather than
+    # overwritten — the getting-started call is picked out by its objective.
+    calls = []
+    agent_keys = []
 
-        async def complete(self, req):
+    class _StubClient:
+        def complete(self, prompt, **kwargs):
+            calls.append(kwargs)
             return "FAKE_TOOL_DOC"
 
-    with patch.object(doc_mod, "_LLM", _StubLLM()):
+    def make_client(agent_key=None):
+        agent_keys.append(agent_key)
+        return _StubClient()
+
+    with patch.object(doc_mod, "get_client", make_client):
         result = doc_mod.run_documentation(
             agent_id="a1",
             manifest=manifest,
@@ -2065,6 +2094,11 @@ def test_documentation_uses_llm_getting_started_when_configured(tmp_path: Path) 
 
     # LLM-generated docs appear in the tool's getting_started field
     assert any("FAKE_TOOL_DOC" in t.getting_started for t in result.onboarding.tools)
+    assert all(key == "agent_provisioning_team.documentation" for key in agent_keys)
+    getting_started_call = next(
+        c for c in calls if c.get("objective") == "generate tool getting-started guide"
+    )
+    assert getting_started_call.get("max_tokens") == 400
 
 
 def test_documentation_llm_getting_started_falls_back_on_exception(tmp_path: Path) -> None:
@@ -2093,13 +2127,11 @@ def test_documentation_llm_getting_started_falls_back_on_exception(tmp_path: Pat
         ]
     )
 
-    class _BoomLLM:
-        is_configured = True
-
-        async def complete(self, req):
+    class _BoomClient:
+        def complete(self, prompt, **kwargs):
             raise RuntimeError("api down")
 
-    with patch.object(doc_mod, "_LLM", _BoomLLM()):
+    with patch.object(doc_mod, "get_client", lambda agent_key=None: _BoomClient()):
         result = doc_mod.run_documentation(
             agent_id="a1",
             manifest=manifest,
@@ -2117,6 +2149,54 @@ def test_documentation_llm_getting_started_falls_back_on_exception(tmp_path: Pat
             workspace_path=str(tmp_path),
         )
     # Falls back to deterministic template (mentions env var).
+    assert any("REDIS_URL" in t.getting_started for t in result.onboarding.tools)
+
+
+def test_documentation_getting_started_uses_template_for_dummy_client(tmp_path: Path) -> None:
+    from agent_team_studio.agent_provisioning_team.models import (
+        GeneratedCredentials,
+        ToolProvisionResult,
+    )
+    from agent_team_studio.agent_provisioning_team.phases import documentation as doc_mod
+    from agent_team_studio.agent_provisioning_team.shared.tool_manifest import (
+        ToolDefinition,
+        ToolManifest,
+    )
+    from llm_service import DummyLLMClient
+
+    manifest = ToolManifest(
+        tools=[
+            ToolDefinition(
+                name="redis",
+                provisioner="redis_provisioner",
+                config={},
+                onboarding={
+                    "description": "Redis",
+                    "env_var": "REDIS_URL",
+                    "getting_started": "",
+                },
+            ),
+        ]
+    )
+
+    with patch.object(doc_mod, "get_client", lambda agent_key=None: DummyLLMClient()):
+        result = doc_mod.run_documentation(
+            agent_id="a1",
+            manifest=manifest,
+            credentials={
+                "redis": GeneratedCredentials(tool_name="redis", connection_string="redis://x")
+            },
+            tool_results=[
+                ToolProvisionResult(
+                    tool_name="redis",
+                    success=True,
+                    permissions=["+@all"],
+                    provisioner_key="redis_provisioner",
+                )
+            ],
+            workspace_path=str(tmp_path),
+        )
+    # A DummyLLMClient is treated the same as "unconfigured": template, not dummy text.
     assert any("REDIS_URL" in t.getting_started for t in result.onboarding.tools)
 
 
