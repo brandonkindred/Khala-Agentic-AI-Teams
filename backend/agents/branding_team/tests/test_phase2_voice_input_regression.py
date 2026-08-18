@@ -21,27 +21,29 @@ import json
 from typing import Any
 from unittest.mock import patch
 
+from pydantic import BaseModel
+
 from branding_team.graphs.phase2_narrative import build_phase2_graph
 from branding_team.graphs.shared import serialize_mission
+from branding_team.models import (
+    BrandArchetypesOutput,
+    BrandStoryOutput,
+    MessagingFrameworkOutput,
+    PersonaProfilesOutput,
+    TaglineOutput,
+)
 from branding_team.shared.coro_runner import run_coroutine
 from branding_team.tests.conftest import make_mission
+from llm_service import DummyLLMClient
 
-# These four stub builders are private (``_``-prefixed) implementation
-# details of DummyLLMClient's Phase 2 routing, not a published test API.
-# They're imported anyway -- deliberately -- because this test's whole point
-# is to compare Voice's real captured input against the *exact* deterministic
-# content the other five specialists' dummy turns produce; duplicating that
-# content by hand here would silently drift from the real stubs and defeat
-# the regression check. A future refactor of the dummy client's internals is
-# expected to require updating these imports.
-from llm_service.clients.dummy import (
-    DummyLLMClient,
-    _branding_phase2_archetypes_stub,
-    _branding_phase2_messaging_stub,
-    _branding_phase2_personas_stub,
-    _branding_phase2_story_stub,
-    _branding_phase2_tagline_stub,
-)
+
+def _dummy_stub(output_model: type[BaseModel]) -> dict[str, Any]:
+    """Deterministic dummy payload for ``output_model``, via the public
+    ``DummyLLMClient`` contract -- ``complete_json`` routes by
+    ``structured_output_model``'s class name, independent of prompt text
+    (see ``test_dummy_stub_alignment.py``), so the prompt here is a
+    placeholder."""
+    return DummyLLMClient().complete_json("unused", structured_output_model=output_model)
 
 
 def _run_phase2_graph_capturing_chat_calls() -> tuple[list[dict[str, Any]], str]:
@@ -141,10 +143,10 @@ def test_voice_step_input_excludes_full_upstream_narrative_payload() -> None:
     assert len(user_messages) == 1, "expected exactly one user message in Voice's turn"
     user_content = user_messages[0]["content"]
 
-    story_stub = _branding_phase2_story_stub()
-    archetypes_stub = _branding_phase2_archetypes_stub()
-    tagline_stub = _branding_phase2_tagline_stub()
-    messaging_stub = _branding_phase2_messaging_stub()
+    story_stub = _dummy_stub(BrandStoryOutput)
+    archetypes_stub = _dummy_stub(BrandArchetypesOutput)
+    tagline_stub = _dummy_stub(TaglineOutput)
+    messaging_stub = _dummy_stub(MessagingFrameworkOutput)
 
     # Non-immediate-predecessor specialists' content must not leak into
     # Voice's turn -- this is the "no full upstream payload" assertion.
@@ -158,7 +160,7 @@ def test_voice_step_input_excludes_full_upstream_narrative_payload() -> None:
     # carries its immediate predecessor's (PersonaBuilder's) read-only
     # context -- otherwise the absence assertions above would pass vacuously
     # on an empty/wrong capture.
-    personas_stub = _branding_phase2_personas_stub()
+    personas_stub = _dummy_stub(PersonaProfilesOutput)
     assert personas_stub["persona_profiles"][0]["name"] in voice_text
 
     # Size assertion, relative to a concrete pre-refactor baseline proxy.
