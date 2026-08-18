@@ -1,4 +1,11 @@
-"""Test double for submission passes after the think-then-format migration."""
+"""Test double for submission passes after the think-then-format migration.
+
+This module is imported by name (``tests.submission_pass_two_call_client``)
+rather than registered as a pytest plugin -- see the comment on
+``wire_run_agent_via_reasoning_for_test_clients`` below for why a
+module-level ``pytest_plugins = [...]`` here would leak this stub into
+unrelated test files under pytest-xdist.
+"""
 
 from __future__ import annotations
 
@@ -63,9 +70,10 @@ def wire_run_agent_via_reasoning_for_test_clients(
 
     Honors ``on_reasoning_agent`` and ``on_formatting`` the same way the real
     helper does after each pass, so transcript-recording call sites still see
-    a ``messages`` conversation and a formatting entry when this autouse stub
-    is active (pytest-xdist loads this plugin session-wide from sibling test
-    modules).
+    a ``messages`` conversation and a formatting entry when this stub is
+    active. Callers apply it via their own module-local
+    ``@pytest.fixture(autouse=True)`` (see this module's trailing comment) so
+    it wires every test in that module without leaking into sibling files.
     """
 
     def _fake(**kwargs: Any) -> Any:
@@ -97,7 +105,8 @@ def wire_run_agent_via_reasoning_with_raw(
     helper hands the pass's own ``parse`` callback a raw string unchanged, so a
     test can exercise the canonical recovery ladder on genuinely fenced /
     prose-wrapped / trailing-comma output. Call it inside the test body to
-    override the autouse wiring for that test.
+    override a module's local wiring fixture (see
+    ``wire_run_agent_via_reasoning_for_test_clients``) for that one test.
 
     Preconditions:
         ``runner_mod`` exposes a ``run_agent_via_reasoning`` attribute (the
@@ -115,8 +124,20 @@ def wire_run_agent_via_reasoning_with_raw(
     monkeypatch.setattr(runner_mod, "run_agent_via_reasoning", _fake)
 
 
-@pytest.fixture(autouse=True)
-def _submission_pass_two_call_wiring(monkeypatch: pytest.MonkeyPatch) -> None:
-    import code_review_agent.submission_pass_runner as runner_mod
-
-    wire_run_agent_via_reasoning_for_test_clients(monkeypatch, runner_mod)
+# Deliberately NOT a ``pytest.fixture`` here, and this module is deliberately
+# never registered via a module-level ``pytest_plugins = [...]`` (as it once
+# was): under pytest-xdist, each worker's own pytest session collects the
+# *entire* test tree before running its assigned subset, so a plugin
+# registered by any one file's ``pytest_plugins`` loads for that worker's
+# whole session -- its autouse fixtures then apply to every test the worker
+# runs, not just tests in the file that requested it. That silently swapped
+# this two-call stub in for ``run_agent_via_reasoning`` in unrelated test
+# modules that never imported this file, breaking any assertion elsewhere
+# that inspects a real reasoning/formatting prompt (e.g. the merged
+# architecture/side-effect tail pass's rendered prompt). Callers that want
+# this wiring applied to every test in their module must define their own
+# local ``@pytest.fixture(autouse=True)`` that calls
+# ``wire_run_agent_via_reasoning_for_test_clients`` directly -- a fixture
+# defined in a test module (as opposed to a conftest.py or a registered
+# plugin) is scoped to that module only, so it cannot leak into sibling
+# files the way the removed plugin registration did.
