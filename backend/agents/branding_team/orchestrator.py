@@ -403,7 +403,10 @@ class _PhaseSpec(NamedTuple):
             Phase 2's sequential graph, Phase 4's and Phase 5's fan-out), the
             merge function to try first. ``None`` for phases whose terminal
             node's own output already is the complete phase output (Phase 3's
-            compositor node).
+            compositor node). Invariant: a merge function must return ``None``
+            to signal "could not merge" — never a default-constructed
+            ``model_cls()`` — since ``_extract_phase_output`` trusts any
+            non-``None`` return as a successful, non-degraded extraction.
         check_structured_output: Whether the single-agent fallback may accept
             the last agent's own ``structured_output`` as the phase output.
             ``False`` for Phase 2, Phase 4, and Phase 5, whose last-seen agent
@@ -760,10 +763,13 @@ class BrandingTeamOrchestrator:
         Postconditions:
             - Returns ``(output, degraded)`` from ``_extract_phase_output``:
               ``output`` is never ``None`` (a parse failure yields a
-              default-constructed model); ``degraded`` is ``True`` iff that
-              default was used. The caller (the Temporal phase activity) owns
-              folding ``degraded`` into the run's durable degradation record —
-              this method does not persist anything itself.
+              default-constructed model); ``degraded`` is ``True`` only when
+              extraction fell through to that default-construction fallback,
+              not whenever the returned value merely looks default-shaped
+              (see ``_extract_phase_output``'s postcondition). The caller (the
+              Temporal phase activity) owns folding ``degraded`` into the
+              run's durable degradation record — this method does not persist
+              anything itself.
         """
         if phase not in _PHASE_SPEC:
             raise ValueError(f"{phase!r} is not a runnable branding phase")
@@ -1066,13 +1072,20 @@ class BrandingTeamOrchestrator:
               ``model_class`` instance on success (from the phase's merge_fn,
               structured output, or text parsing), or a default-constructed
               ``model_class()`` when none of those yield a value or the node
-              result is missing/malformed. ``degraded`` is ``True`` iff a
-              default was returned, and every such fall-through is logged
-              (with traceback for unexpected errors) rather than swallowed
-              silently. Callers that assemble a ``TeamOutput`` must fold
-              ``degraded`` phases into ``TeamOutput.degraded_phases``
-              themselves — this method does not know which ``BrandPhase`` it
-              was called for.
+              result is missing/malformed. ``degraded`` reflects which code
+              path produced ``output``, not a property of the value itself:
+              it is ``True`` only when extraction fell through every
+              recognized path to the default-construction fallback, and every
+              such fall-through is logged (with traceback for unexpected
+              errors) rather than swallowed silently. Any non-``None`` return
+              from ``spec.merge_fn`` is trusted as a successful extraction and
+              always yields ``degraded=False``, even if that value happens to
+              equal ``model_class()`` — merge functions must return ``None``,
+              never a default instance, to signal failure (see
+              ``_PhaseSpec.merge_fn``). Callers that assemble a
+              ``TeamOutput`` must fold ``degraded`` phases into
+              ``TeamOutput.degraded_phases`` themselves — this method does
+              not know which ``BrandPhase`` it was called for.
         """
         spec = _SPEC_BY_NODE_ID.get(node_id)
         try:
