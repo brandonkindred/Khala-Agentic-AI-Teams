@@ -572,6 +572,31 @@ def test_run_phase_stops_at_strategic_core() -> None:
     assert result.status == WorkflowStatus.NEEDS_HUMAN_DECISION
 
 
+def test_run_phase_forwards_phase_cache_to_run() -> None:
+    """``run_phase`` must forward ``phase_cache`` to ``run`` so a cache hit
+    is honored instead of always invoking the phase (#6671)."""
+    mission = make_mission()
+    cached_output = _full_strategic_core()
+    cache = PhaseOutputCache()
+    cache.put(
+        BrandPhase.STRATEGIC_CORE,
+        phase_input_hash(BrandPhase.STRATEGIC_CORE, mission, {}),
+        cached_output,
+    )
+    orchestrator = BrandingTeamOrchestrator()
+
+    with patch.object(orchestrator, "run_single_phase") as mock_run_single_phase:
+        result = orchestrator.run_phase(
+            mission=mission,
+            phase=BrandPhase.STRATEGIC_CORE,
+            human_review=HumanReview(approved=False),
+            phase_cache=cache,
+        )
+
+    mock_run_single_phase.assert_not_called()
+    assert result.strategic_core == cached_output
+
+
 def test_approved_partial_run_is_not_rollout_ready() -> None:
     """Approved intermediate phases must not be marked READY_FOR_ROLLOUT."""
     phase_sets = {
