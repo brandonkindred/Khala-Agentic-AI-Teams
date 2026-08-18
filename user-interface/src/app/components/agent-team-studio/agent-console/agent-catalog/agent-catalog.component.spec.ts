@@ -96,6 +96,7 @@ describe('AgentCatalogComponent', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    TestBed.resetTestingModule();
   });
 
   it('loads agents and teams on init', async () => {
@@ -119,11 +120,13 @@ describe('AgentCatalogComponent', () => {
   });
 
   it('unsubscribes the in-flight refresh request on destroy', async () => {
-    const { component, fixture } = await setup();
-    const sub = (component as unknown as { refreshSub: { unsubscribe: () => void } | null }).refreshSub;
-    const unsubscribeSpy = sub ? vi.spyOn(sub, 'unsubscribe') : null;
+    const pending$ = new Subject<AgentSummary[]>();
+    const { component, fixture } = await setup({ listAgents: vi.fn().mockReturnValue(pending$) });
+
     fixture.destroy();
-    if (unsubscribeSpy) expect(unsubscribeSpy).toHaveBeenCalled();
+    pending$.next([writer]); // emitted after destroy — must be ignored
+
+    expect(component.agents()).toEqual([]);
   });
 
   it('cancels a stale in-flight request so only the latest filter result lands', async () => {
