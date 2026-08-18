@@ -1,21 +1,27 @@
-"""Generic whole-input review-result cache shared by single-shot review agents.
+"""Generic Pydantic-model cache policy shared by every team on ``shared.cache``.
 
-``qa_agent`` and ``security_agent`` each need the same cache plumbing around
-a byte-identical-input LLM review call: a build-id-suffixed namespace, an
+Several agent teams need the same cache plumbing around a byte-identical-input
+call whose result is a Pydantic model: a build-id-suffixed namespace, an
 env-var-driven capacity floored at 0 (0 disables the cache), a whole-input
 plus resolved-model SHA-256 cache key, a get/validate/corrupt-entry-delete
 lookup, a set-on-genuine-outcome write, and a fail-open clear for tests/ops.
-Before this module, each agent hand-rolled its own copy of this policy —
-correct, but any future fix (corrupt-entry handling, capacity semantics,
-fail-open logging) had to land in two places and could silently drift.
+Current consumers: ``software_engineering_team``'s ``qa_agent``,
+``security_agent``, every ``devops_team`` single-shot agent (via
+``_agent_template.py`` and ``devsecops_review_agent``'s own call site), and
+``branding_team``'s ``PhaseOutputCache`` (per-pipeline-phase output
+memoization). Before this module, each of these hand-rolled its own copy of
+this policy — correct, but any future fix (corrupt-entry handling, capacity
+semantics, fail-open logging) had to land in every copy and could silently
+drift.
 
-This module is now the one place that policy lives. ``qa_agent.agent`` and
-``security_agent.agent`` each supply only their own namespace stem, env var
-name, capacity default, output model, and a short label for log messages.
-They still import ``shared.cache.get_shared_cache`` and resolve the cache
-object themselves at each call site (rather than this module resolving it
-internally) — this keeps ``<agent_module>.get_shared_cache`` the seam tests
-monkeypatch to simulate a broken backend, unchanged by this refactor.
+This module is now the one place that policy lives. Callers supply only
+their own namespace stem, env var name, capacity default, output model, and
+a short label for log messages. They still import
+``shared.cache.get_shared_cache`` and resolve the cache object themselves at
+each call site (rather than this module resolving it internally) — this
+keeps ``<caller_module>.get_shared_cache`` the seam tests monkeypatch to
+simulate a broken backend, unaffected by which caller is migrated onto this
+module.
 """
 
 from __future__ import annotations
@@ -31,11 +37,11 @@ from shared.env_config import env_int
 
 logger = logging.getLogger(__name__)
 
-TOutput = TypeVar("TOutput", bound=BaseModel)
+TModel = TypeVar("TModel", bound=BaseModel)
 
 
 def cache_namespace_for(stem: str) -> str:
-    """Build-id-suffixed shared-cache namespace for a review-result cache stem.
+    """Build-id-suffixed shared-cache namespace for a cache stem.
 
     Preconditions:
         - ``stem`` is a non-empty namespace stem, e.g. ``"qa:review:v1"``.
@@ -50,7 +56,7 @@ def cache_namespace_for(stem: str) -> str:
 
 
 def cache_capacity_for(env_var: str, default: int) -> int:
-    """Resolve a review cache's capacity from its environment variable.
+    """Resolve a cache's capacity from its environment variable.
 
     Preconditions:
         - ``env_var`` is the environment variable name that controls this
@@ -64,17 +70,17 @@ def cache_capacity_for(env_var: str, default: int) -> int:
     return env_int(env_var, default, 0)
 
 
-def build_review_cache_key(input_data: BaseModel, model_fp: str) -> str:
-    """Hash of the whole input model plus the resolved review model.
+def build_model_cache_key(input_data: BaseModel, model_fp: str) -> str:
+    """Hash of the whole input model plus the resolved model identity.
 
-    Keys the entire input model so any reviewed-file byte change naturally
-    busts the key with no explicit invalidation logic.
+    Keys the entire input model so any input-field change naturally busts
+    the key with no explicit invalidation logic.
 
     Preconditions:
         - ``input_data`` is a Pydantic model instance whose own fields never
           include a top-level ``__model__`` key.
-        - ``model_fp`` is a stable identifier for the resolved review model
-          (e.g. from ``llm_service.strands_model.model_fingerprint``).
+        - ``model_fp`` is a stable identifier for the resolved model (e.g.
+          from ``llm_service.strands_model.model_fingerprint``).
     Postconditions:
         - Returns a hex digest that changes whenever any input field or the
           resolved model changes, and is stable (``sort_keys``) across calls
@@ -86,29 +92,27 @@ def build_review_cache_key(input_data: BaseModel, model_fp: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
-def clear_review_cache_namespace(label: str, resolve_cache: Callable[[], object]) -> None:
-    """Fail-open clear of a review-result cache namespace.
+def clear_cache_namespace(label: str, resolve_cache: Callable[[], object]) -> None:
+    """Fail-open clear of a shared-cache namespace.
 
     Preconditions:
         - ``label`` is a short prefix for log messages (e.g. ``"QA"``,
-          ``"Security"``). ``resolve_cache`` returns a
+          ``"Security"``, ``"branding-phase"``). ``resolve_cache`` returns a
           ``shared.cache.SharedCache`` when called (or raises).
     Postconditions:
         - The namespace is empty (best-effort across Redis) when this
           returns. Any exception -- resolving the cache or clearing it -- is
           caught and logged rather than propagated, so a broken backend
           never breaks a caller (e.g. a test-teardown fixture) forcing a
-          cold review.
+          cold run.
     """
     try:
         resolve_cache().clear()
     except Exception:
-        logger.warning("%s: review cache clear failed", label, exc_info=True)
+        logger.warning("%s: cache clear failed", label, exc_info=True)
 
 
-def get_cached_review_result(
-    label: str, cache: object, cache_key: str, output_model: type[TOutput]
-) -> Optional[TOutput]:
+def get_cached_model(label: str, cache: object, cache_key: str, output_model: type[TModel]) -> Optional[TModel]:
     """Look up ``cache_key`` in ``cache``, validating against ``output_model``.
 
     Preconditions:
@@ -124,7 +128,7 @@ def get_cached_review_result(
     try:
         raw = cache.get(cache_key)
     except Exception:
-        logger.warning("%s: review cache get failed; treating as miss", label, exc_info=True)
+        logger.warning("%s: cache get failed; treating as miss", label, exc_info=True)
         return None
     if raw is None:
         return None
@@ -132,7 +136,7 @@ def get_cached_review_result(
         return output_model.model_validate_json(raw)
     except Exception:
         logger.warning(
-            "%s: corrupt review cache entry for %s; treating as miss",
+            "%s: corrupt cache entry for %s; treating as miss",
             label,
             cache_key,
             exc_info=True,
@@ -140,22 +144,17 @@ def get_cached_review_result(
         try:
             cache.delete(cache_key)
         except Exception:
-            logger.warning(
-                "%s: review cache delete failed after corrupt entry", label, exc_info=True
-            )
+            logger.warning("%s: cache delete failed after corrupt entry", label, exc_info=True)
         return None
 
 
-def set_cached_review_result(
-    label: str, cache: object, cache_key: str, result: BaseModel, *, capacity: int
-) -> None:
-    """Write a genuine review outcome back to the cache. Fail-open.
+def set_cached_model(label: str, cache: object, cache_key: str, result: BaseModel, *, capacity: int) -> None:
+    """Write a genuine result back to the cache. Fail-open.
 
     Preconditions:
         - ``label`` is a short prefix for log messages. ``cache`` is an
           already-resolved ``shared.cache.SharedCache``. ``capacity`` is the
-          caller's already-resolved (and already ``> 0``) review-cache
-          capacity.
+          caller's already-resolved (and already ``> 0``) cache capacity.
     Postconditions:
         - The entry is written best-effort. Any backend error is caught and
           logged, never propagated -- a broken cache backend never blocks a
@@ -165,20 +164,16 @@ def set_cached_review_result(
     try:
         cache.set(cache_key, payload, max_entries=capacity)
     except Exception:
-        logger.warning(
-            "%s: review cache set failed; continuing without cache write", label, exc_info=True
-        )
+        logger.warning("%s: cache set failed; continuing without cache write", label, exc_info=True)
     else:
-        logger.info(
-            "%s: cached review result under key=%s (bytes=%d)", label, cache_key, len(payload)
-        )
+        logger.info("%s: cached result under key=%s (bytes=%d)", label, cache_key, len(payload))
 
 
 __all__ = [
     "cache_namespace_for",
     "cache_capacity_for",
-    "build_review_cache_key",
-    "clear_review_cache_namespace",
-    "get_cached_review_result",
-    "set_cached_review_result",
+    "build_model_cache_key",
+    "clear_cache_namespace",
+    "get_cached_model",
+    "set_cached_model",
 ]
