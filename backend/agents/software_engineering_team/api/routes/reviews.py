@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import List, Optional
@@ -28,36 +29,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.post("/review-pr", response_model=ReviewPrResponse)
-async def post_review_pr(request: ReviewPrRequest) -> ReviewPrResponse:
-    """Start a code-reviewer-agent review of an open GitHub pull request.
-
-    Reads the PR diff via the GitHub API (no checkout), runs the SE code-review
-    agent over the changed files, and posts one PR review with inline comments.
-
-    Preconditions:
-        - A GitHub token is configured (request body or ``GITHUB_TOKEN``).
-        - ``pr_number`` names an existing pull request in ``owner/repo``.
-    Postconditions:
-        - Creates a job, starts the review hook in the background, and returns the
-          job id plus the PR URL. Poll ``GET /status/{job_id}`` for progress.
-    """
-    token = resolve_github_token(request)
-
-    # Validate the PR exists BEFORE taking the admission lock: the GitHub round-trip is
-    # the slowest step, and keeping it outside the critical section keeps admission
-    # serialization to two fast job-service writes.
+def _fetch_pr_sync(token: str, request: ReviewPrRequest):
+    """Synchronous helper: Fetch PR from GitHub."""
     with _main.GitHubClient(token=token) as client:
         try:
-            pr = client.get_pull_request(request.owner, request.repo, request.pr_number)
+            return client.get_pull_request(request.owner, request.repo, request.pr_number)
         except GitHubAPIError as e:
             raise HTTPException(status_code=502, detail=f"github api error: {e}") from e
 
-    # Cross-worker idempotency: refuse a second review while one is already running for
-    # this PR (the webhook's per-process delivery-id dedup can't see other workers; this
-    # also covers the manual UI trigger). The admission lock makes scan + job creation
-    # atomic — without it, two concurrent requests both pass the scan before either has
-    # written the github_context that makes its job visible to the other.
+
+def _create_review_job_sync(request: ReviewPrRequest, pr_url: str) -> str:
+    """Synchronous helper: Take admission lock and create the job."""
     with _main._pr_review_admission(request.owner, request.repo, request.pr_number):
         running = _main._running_review_for_pr(request.owner, request.repo, request.pr_number)
         if running:
@@ -76,22 +58,48 @@ async def post_review_pr(request: ReviewPrRequest) -> ReviewPrResponse:
                 "owner": request.owner,
                 "repo": request.repo,
                 "pr_number": request.pr_number,
-                "pr_url": pr.html_url,
+                "pr_url": pr_url,
             },
         )
+        return job_id
 
-    # Persist a row so the Code Review page can show this review's history (best-effort).
-    # The returned server-clock start time is surfaced on the response so the UI computes
-    # a live duration on one clock (this start + the completion from job status).
-    created_at = _main.record_review_start(
+
+@router.post("/review-pr", response_model=ReviewPrResponse)
+async def post_review_pr(request: ReviewPrRequest) -> ReviewPrResponse:
+    """Start a code-reviewer-agent review of an open GitHub pull request.
+
+    Reads the PR diff via the GitHub API (no checkout), runs the SE code-review
+    agent over the changed files, and posts one PR review with inline comments.
+
+    Preconditions:
+        - A GitHub token is configured (request body or ``GITHUB_TOKEN``).
+        - ``pr_number`` names an existing pull request in ``owner/repo``.
+    Postconditions:
+        - Creates a job, starts the review hook in the background, and returns the
+          job id plus the PR URL. Poll ``GET /status/{job_id}`` for progress.
+    """
+    token = resolve_github_token(request)
+
+    # 1. Offload the synchronous GitHub fetch to a background thread
+    pr = await asyncio.to_thread(_fetch_pr_sync, token, request)
+
+    # 2. Offload the synchronous admission lock and DB writes to a background thread
+    job_id = await asyncio.to_thread(_create_review_job_sync, request, pr.html_url)
+
+    # 3. Offload the start time recording (DB write) to a background thread
+    created_at = await asyncio.to_thread(
+        _main.record_review_start,
         job_id, request.owner, request.repo, request.pr_number, pr.html_url, _main._review_author()
     )
     
+    # 4. Asynchronous Temporal Dispatch
     try:
         await _main._start_pr_review_temporal(job_id, request, token)
     except Exception as exc:
         # Mark the job as failed so UI polling doesn't hang forever
-        _main.update_job(
+        # (Using to_thread since update_job is a synchronous DB call)
+        await asyncio.to_thread(
+            _main.update_job,
             job_id, 
             status="failed", 
             error=f"temporal dispatch failed: {exc}"
@@ -105,8 +113,6 @@ async def post_review_pr(request: ReviewPrRequest) -> ReviewPrResponse:
     return ReviewPrResponse(
         job_id=job_id, pr_number=request.pr_number, pr_url=pr.html_url, created_at=created_at
     )
-
-
 
 @router.get("/reviews", response_model=List[ReviewRunItem])
 def get_reviews(
