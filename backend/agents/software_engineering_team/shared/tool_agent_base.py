@@ -104,6 +104,37 @@ _REVIEW_PLACEHOLDER_RE = re.compile(r"\{(task_description|code)\}")
 # file, not to restrict normal usage.
 DEFAULT_MAX_RELEVANT_CODE_CHARS = 100_000
 
+# Shared cache for BaseReviewToolAgent's default one-shot LLM review path
+# (shared.cache; opts every subclass in at once via LlmToolAgentBase's
+# _cached_invoke_llm). One namespace/env var for the whole family: the cache
+# key already folds in the concrete class's module+qualname, so distinct
+# agents (e.g. backend vs. frontend Security) never collide. Base stem;
+# LlmToolAgentBase._cache_namespace appends the deploy build id.
+DEFAULT_REVIEW_CACHE_SIZE = 256  # TOOL_AGENT_REVIEW_CACHE_SIZE, floor 0
+_REVIEW_CACHE_NAMESPACE = "toolagent:review:v1"
+
+
+def clear_tool_agent_review_cache() -> None:
+    """Drop every cached BaseReviewToolAgent review result (tests / forced cold review).
+
+    Preconditions:
+        None.
+    Postconditions:
+        This process's view of the shared review-cache namespace is empty
+        when the call returns (best-effort across Redis). A cache backend
+        error is caught and logged rather than propagated — fails open, same
+        as every other cache operation in this module.
+    """
+    from shared.cache import get_shared_cache, with_cache_build_id
+
+    try:
+        get_shared_cache(with_cache_build_id(_REVIEW_CACHE_NAMESPACE)).clear()
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "tool_agent_base: review cache clear failed", exc_info=True
+        )
+
+
 # Placeholders filled explicitly in ``SingleIssueProblemSolveMixin.problem_solve``.
 # ``_problem_solving_kwargs`` must not return these keys (they are dropped with a
 # warning if it does), so ``str.format`` cannot raise
@@ -363,6 +394,12 @@ class BaseReviewToolAgent(LlmToolAgentBase):
     json_parse_strategy: str = "lenient"
     # review_parse_mode / uses_json_model already declared below as "text" / False
 
+    # --- LlmToolAgentBase cache recipe (opt-in; see _cached_invoke_llm) ---
+    # Every subclass shares one namespace/env var — see DEFAULT_REVIEW_CACHE_SIZE.
+    cache_namespace: str = _REVIEW_CACHE_NAMESPACE
+    cache_capacity_env: str = "TOOL_AGENT_REVIEW_CACHE_SIZE"
+    cache_default_capacity: int = DEFAULT_REVIEW_CACHE_SIZE
+
     # --- Labels (subclasses override) ------------------------------------
     name: str = "Tool"  # used for deliver and "<name> review"
     execute_label: Optional[str] = None  # defaults to ``name`` when unset
@@ -615,7 +652,14 @@ class BaseReviewToolAgent(LlmToolAgentBase):
             :attr:`build_runner` or :attr:`review_via_engine` is set, an
             unexpected exception from the runner/engine is a defect and
             propagates uncaught; see :meth:`_build_review` and
-            :meth:`_engine_review`.
+            :meth:`_engine_review`. On the default one-shot LLM path, the
+            call is routed through :meth:`LlmToolAgentBase._cached_invoke_llm`
+            (keyed on this class's identity, the resolved model, and the
+            rendered prompt): a cache hit skips the LLM call entirely; a
+            cache miss or cache-backend failure falls open to the exact same
+            ``_invoke_llm`` call this method used before caching existed, so
+            the fallback taxonomy above (skip/fail summaries, the
+            ``ValueError`` case) is unaffected by cache state.
         """
         if self.build_runner is not None:
             return self._build_review(inp)
@@ -645,7 +689,7 @@ class BaseReviewToolAgent(LlmToolAgentBase):
             code=code_text,
         )
         status, result = self._call_with_single_fallback(
-            lambda: self._invoke_llm(model, prompt),
+            lambda: self._cached_invoke_llm(model, prompt),
             log_label=review_label,
         )
         if status == "error":

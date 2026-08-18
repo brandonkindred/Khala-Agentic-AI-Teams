@@ -44,6 +44,46 @@
     }
   }
 
+  &__row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--kh-space-2);
+  }
+
+  // Overrides Material's default `width: 100%` on `mat-menu-item` so the
+  // load button sizes to its content instead of crowding out the sibling
+  // options trigger in the `&__row` flex layout.
+  &__load {
+    width: auto;
+  }
+
+  // `mat-icon-button` can't be combined with `mat-menu-item` (Angular
+  // doesn't allow two Components on one host element), so this is also a
+  // `mat-menu-item` — which is what gets it registered with MatMenu's
+  // FocusKeyManager, making it arrow-key reachable, unlike a plain
+  // `mat-icon-button` sibling. These overrides shrink its default
+  // full-width menu-item row back down to the compact icon-only square the
+  // `mat-icon-button` look provided.
+  &__options {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 0;
+    min-height: 0;
+    justify-content: center;
+    padding: var(--kh-space-2);
+
+    .mat-icon {
+      margin-right: 0;
+    }
+  }
+
+  &__body {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
   &__name {
     display: block;
     font-weight: 600;
