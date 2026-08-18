@@ -2963,7 +2963,9 @@ def test_agent_read_the_cited_file_true_when_earlier_call_already_grounded_it() 
             _tool_result_message("t1", "x = 1\n", status="success"),
             _tool_use_message("assistant", "t2", "read_file", path="app/main.py"),
             _tool_result_message(
-                "t2", "Error: tool call budget (40 calls) exhausted ...", status="error"
+                "t2",
+                f"Error: tool call budget ({_MAX_TOTAL_TOOL_CALLS} calls) exhausted ...",
+                status="error",
             ),
         ]
     )
