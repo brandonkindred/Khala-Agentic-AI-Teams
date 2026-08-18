@@ -436,9 +436,11 @@ def _terminal_sse_event(
         ``StrategyLabBatchWorkflow.run``'s own ``status`` local can hold.
     Postconditions:
         Returns a JSON-shaped dict with a ``"type"`` key matching one of the
-        three event shapes above. ``completed_batches``/``total_batches`` are
-        included only in the ``"complete"`` case's returned dict -- neither
-        the ``"cancelled"`` nor the ``"error"`` shape carries them, matching
+        three event shapes above. ``completed_count``/``skipped_count``/
+        ``errored_count``/``errored_details``/``completed_batches``/
+        ``total_batches`` are included only in the ``"complete"`` case's
+        returned dict -- neither the ``"cancelled"`` nor the ``"error"``
+        shape carries any of them, matching
         ``StrategyLabCancelledEvent``/``StrategyLabErrorDetailEvent`` (neither
         models those fields either).
     Raises:
