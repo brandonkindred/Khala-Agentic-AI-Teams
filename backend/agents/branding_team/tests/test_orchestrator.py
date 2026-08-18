@@ -845,10 +845,14 @@ def test_extract_phase_output_uses_structured_output_when_present() -> None:
     rather than the message's text blocks; extraction must check that field before
     falling back to text or it silently discards the agent's real output.
 
-    Calls the private ``_extract_phase_output`` helper directly: the public
-    ``run``/``run_phase`` APIs always go through a full graph invoke, which
-    cannot isolate the structured-output-vs-text branch without rebuilding the
-    entire Strands result shape around this one field.
+    Uses an unrecognized node id (absent from ``_SPEC_BY_NODE_ID``) so the spec
+    lookup misses and extraction runs with ``spec=None`` -- every real phase now
+    declares a ``merge_fn``, so a recognized node id would try that first
+    instead of exercising this fallback. Calls the private
+    ``_extract_phase_output`` helper directly: the public ``run``/``run_phase``
+    APIs always go through a full graph invoke, which cannot isolate the
+    structured-output-vs-text branch without rebuilding the entire Strands
+    result shape around this one field.
     """
     agent_result = MagicMock()
     agent_result.message = {"content": []}
@@ -864,10 +868,10 @@ def test_extract_phase_output_uses_structured_output_when_present() -> None:
     node_result.get_agent_results.return_value = [agent_result]
 
     mock_result = MagicMock()
-    mock_result.result = {"phase1_strategic_core": node_result}
+    mock_result.result = {"unrecognized_node": node_result}
 
     output, degraded = BrandingTeamOrchestrator._extract_phase_output(
-        mock_result, "phase1_strategic_core", StrategicCoreOutput
+        mock_result, "unrecognized_node", StrategicCoreOutput
     )
 
     assert degraded is False
@@ -886,12 +890,10 @@ def test_phase_spec_every_entry_declares_merge_fn() -> None:
         assert spec.merge_fn is not None, f"{phase} has no merge_fn"
 
 
-def _phase1_leaf_node(structured_output) -> MagicMock:
+def _leaf_node_result(structured_output) -> MagicMock:
     """A mock NodeResult for a single fan-out/fan-in leaf agent.
 
-    Despite the name (it was introduced for Phase 1), this is the shared
-    generic helper reused by every phase's tests below — Phase 2, 4, and 5's
-    fixtures all wrap their fragments with it too, not just Phase 1's.
+    Shared generic helper reused across every phase's tests below.
     """
     agent_result = MagicMock()
     agent_result.message = {"content": []}
@@ -905,14 +907,14 @@ def test_extract_phase_output_merges_every_phase1_fragment() -> None:
     """Phase 1 wraps six agents as one top-level node; get_agent_results()[-1] only
     ever sees the synthesizer, so the five specialists' fragments must be merged
     in separately or their data is silently discarded (see PR review discussion)."""
-    positioning_leaf = _phase1_leaf_node(
+    positioning_leaf = _leaf_node_result(
         PositioningOutput(
             positioning_statement="For enterprise leaders who need clarity, we deliver it.",
             brand_promise="Every touchpoint feels cohesive.",
         )
     )
     nested_results = {
-        "discovery_auditor": _phase1_leaf_node(
+        "discovery_auditor": _leaf_node_result(
             BrandDiscoveryAudit(
                 current_brand_perception="Seen as reliable but generic.",
                 market_position="Mid-market challenger.",
@@ -923,14 +925,14 @@ def test_extract_phase_output_merges_every_phase1_fragment() -> None:
                 stakeholder_insights=["Sales wants sharper differentiation"],
             )
         ),
-        "purpose_vision_writer": _phase1_leaf_node(
+        "purpose_vision_writer": _leaf_node_result(
             PurposeVisionOutput(
                 brand_purpose="Why we exist.",
                 mission_statement="What we do for customers.",
                 vision_statement="Where the brand is headed.",
             )
         ),
-        "values_articulator": _phase1_leaf_node(
+        "values_articulator": _leaf_node_result(
             CoreValuesOutput(
                 core_values=[
                     CoreValueOutput(
@@ -951,7 +953,7 @@ def test_extract_phase_output_merges_every_phase1_fragment() -> None:
                 ]
             )
         ),
-        "audience_segmenter": _phase1_leaf_node(
+        "audience_segmenter": _leaf_node_result(
             AudienceSegmentsOutput(
                 target_audience_segments=[
                     AudienceSegmentOutput(
@@ -964,7 +966,7 @@ def test_extract_phase_output_merges_every_phase1_fragment() -> None:
                 ]
             )
         ),
-        "differentiation_mapper": _phase1_leaf_node(
+        "differentiation_mapper": _leaf_node_result(
             DifferentiationPillarsOutput(
                 differentiation_pillars=[
                     DifferentiationPillarOutput(
@@ -1018,10 +1020,10 @@ def test_extract_phase_output_merges_every_phase1_fragment() -> None:
     assert output.brand_promise == "Every touchpoint feels cohesive."
 
 
-def test_extract_phase_output_merges_every_phase2_fragment() -> None:
-    """Phase 2 wraps six sequential Graph agents as one top-level node;
-    get_agent_results()[-1] only ever sees VoicePrinciplesDrafter, so the five
-    upstream agents' fragments must be merged in separately."""
+def _phase2_nested_node_result() -> MagicMock:
+    """A mock NodeResult wrapping all six Phase-2 specialists' own-field
+    fragments, shaped like the real nested MultiAgentResult.results Strands
+    returns."""
     _story = dict(
         brand_story="Origin story about shipping on-brand experiences.",
         hero_narrative="Brand that ships with the product.",
@@ -1080,7 +1082,7 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
             jobs_to_be_done=["Brief agencies quickly"],
         ),
     ]
-    voice_leaf = _phase1_leaf_node(
+    voice_leaf = _leaf_node_result(
         WritingGuidelinesOutput(
             writing_guidelines=WritingGuidelinesBody(
                 voice_principles=["Confident", "Human", "Concrete"],
@@ -1091,22 +1093,22 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
         )
     )
     nested_results = {
-        "Storyteller": _phase1_leaf_node(BrandStoryOutput(**_story)),
-        "ArchetypeAnalyst": _phase1_leaf_node(BrandArchetypesOutput(brand_archetypes=_archetypes)),
-        "TaglineWriter": _phase1_leaf_node(
+        "Storyteller": _leaf_node_result(BrandStoryOutput(**_story)),
+        "ArchetypeAnalyst": _leaf_node_result(BrandArchetypesOutput(brand_archetypes=_archetypes)),
+        "TaglineWriter": _leaf_node_result(
             TaglineOutput(
                 tagline="Ship brand with the product",
                 tagline_rationale="Ties cohesion to shipping speed.",
                 elevator_pitches=_pitches,
             )
         ),
-        "MessageMapper": _phase1_leaf_node(
+        "MessageMapper": _leaf_node_result(
             MessagingFrameworkOutput(
                 messaging_framework=_pillars,
                 audience_message_maps=_maps,
             )
         ),
-        "PersonaBuilder": _phase1_leaf_node(PersonaProfilesOutput(persona_profiles=_personas)),
+        "PersonaBuilder": _leaf_node_result(PersonaProfilesOutput(persona_profiles=_personas)),
         "VoicePrinciplesDrafter": voice_leaf,
     }
 
@@ -1118,9 +1120,15 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
     node_result.get_agent_results.return_value = [
         node.get_agent_results.return_value[0] for node in nested_results.values()
     ]
+    return node_result
 
+
+def test_extract_phase_output_merges_every_phase2_fragment() -> None:
+    """Phase 2 wraps six sequential Graph agents as one top-level node;
+    get_agent_results()[-1] only ever sees VoicePrinciplesDrafter, so the five
+    upstream agents' fragments must be merged in separately."""
     mock_result = MagicMock()
-    mock_result.result = {"phase2_narrative": node_result}
+    mock_result.result = {"phase2_narrative": _phase2_nested_node_result()}
 
     output, degraded = BrandingTeamOrchestrator._extract_phase_output(
         mock_result, "phase2_narrative", NarrativeMessagingOutput
@@ -1148,6 +1156,23 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
     ]
 
 
+def test_phase2_fragments_collectively_populate_every_output_field() -> None:
+    """Schema-coverage guard: the six Phase-2 specialists' fragments must
+    collectively populate every field on NarrativeMessagingOutput, checked
+    generically against the model's own field list (not a hardcoded field
+    enumeration) -- mirrors test_phase3/4/5_fragments_collectively_populate_every_output_field."""
+    mock_result = MagicMock()
+    mock_result.result = {"phase2_narrative": _phase2_nested_node_result()}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase2_narrative", NarrativeMessagingOutput
+    )
+
+    assert degraded is False
+    assert isinstance(output, NarrativeMessagingOutput)
+    _assert_every_field_populated(output)
+
+
 # NOTE (Story 5b Step 1): test_extract_phase_output_phase2_prefers_upstream_owned_fields
 # was removed here. Its premise -- a downstream specialist's cumulative payload
 # re-emitting (and potentially rewriting) an earlier specialist's field, with
@@ -1164,7 +1189,7 @@ def test_extract_phase_output_rejects_incomplete_phase2_fragments() -> None:
     complete NarrativeMessagingOutput via field defaults (the structured_output
     + Swarm failure mode where handoff never fired)."""
     nested_results = {
-        "Storyteller": _phase1_leaf_node(
+        "Storyteller": _leaf_node_result(
             BrandStoryOutput(
                 brand_story="Origin story.",
                 hero_narrative="Hero.",
@@ -1194,10 +1219,13 @@ def test_extract_phase_output_rejects_incomplete_phase2_fragments() -> None:
     assert output.tagline == ""
 
 
-def test_extract_phase_output_falls_back_when_not_phase1_shaped() -> None:
-    """A node whose nested result isn't Phase 1/2's known node-id set (e.g. every
-    other phase) must fall through to the existing single-agent-result logic
-    unchanged — fragment merges are additive, never a regression."""
+def test_extract_phase_output_degrades_when_not_phase1_shaped() -> None:
+    """A node whose nested result isn't Phase 1's known node-id set (e.g. a
+    foreign/garbled nested result) must degrade to defaults, not accept the
+    last agent's own fragment as the complete StrategicCoreOutput -- merge_fn
+    returning None means Phase 1's only legitimate extraction path failed,
+    same guard every other phase already relies on (compare
+    ``test_extract_phase_output_rejects_incomplete_phase4_fragments``)."""
     agent_result = MagicMock()
     agent_result.message = {"content": []}
     agent_result.structured_output = PositioningOutput(
@@ -1219,10 +1247,8 @@ def test_extract_phase_output_falls_back_when_not_phase1_shaped() -> None:
         mock_result, "phase1_strategic_core", StrategicCoreOutput
     )
 
-    assert degraded is False
-    assert isinstance(output, StrategicCoreOutput)
-    assert output.positioning_statement == "Fallback statement."
-    assert output.brand_promise == "Fallback promise."
+    assert degraded is True
+    assert output == StrategicCoreOutput()
 
 
 def _channel_guide_output(channel: str) -> ChannelGuidelineOutput:
@@ -1244,7 +1270,7 @@ def _phase4_nested_node_result() -> MagicMock:
     shaped like the real nested MultiAgentResult.results Strands returns."""
     channels = _PHASE4_CHANNELS
     nested_results = {
-        "brand_experience_principler": _phase1_leaf_node(
+        "brand_experience_principler": _leaf_node_result(
             BrandExperiencePrinciplesOutput(
                 brand_experience_principles=["Consistent", "Human", "Confident"],
                 signature_moments=["Onboarding email", "First dashboard load", "Renewal call"],
@@ -1252,10 +1278,10 @@ def _phase4_nested_node_result() -> MagicMock:
             )
         ),
         **{
-            f"{channel}_guide": _phase1_leaf_node(_channel_guide_output(channel))
+            f"{channel}_guide": _leaf_node_result(_channel_guide_output(channel))
             for channel in channels
         },
-        "brand_architecture_builder": _phase1_leaf_node(
+        "brand_architecture_builder": _leaf_node_result(
             BrandArchitectureOutput(
                 brand_architecture=[
                     BrandArchitectureRuleOutput(
@@ -1279,7 +1305,7 @@ def _phase4_nested_node_result() -> MagicMock:
                 },
             )
         ),
-        "brand_in_action_illustrator": _phase1_leaf_node(
+        "brand_in_action_illustrator": _leaf_node_result(
             BrandInActionOutput(
                 brand_in_action=[
                     BrandInActionExampleOutput(
@@ -1428,7 +1454,7 @@ def test_merge_phase4_fragments_rejects_incomplete_specialist_set() -> None:
     """
     channels = ["website", "social", "email", "partnerships", "internal"]  # events_guide omitted
     nested_results = {
-        "brand_experience_principler": _phase1_leaf_node(
+        "brand_experience_principler": _leaf_node_result(
             BrandExperiencePrinciplesOutput(
                 brand_experience_principles=["Consistent", "Human", "Confident"],
                 signature_moments=["Onboarding email", "First dashboard load", "Renewal call"],
@@ -1436,7 +1462,7 @@ def test_merge_phase4_fragments_rejects_incomplete_specialist_set() -> None:
             )
         ),
         **{
-            f"{channel}_guide": _phase1_leaf_node(_channel_guide_output(channel))
+            f"{channel}_guide": _leaf_node_result(_channel_guide_output(channel))
             for channel in channels
         },
     }
@@ -1455,10 +1481,10 @@ def test_merge_phase4_fragments_rejects_incomplete_specialist_set() -> None:
 def test_extract_phase_output_rejects_incomplete_phase4_fragments() -> None:
     """Without channel_compositor, a partial Phase 4 run (merge_fn returns
     None) must degrade to defaults, not accept one specialist's own fragment
-    as the complete ChannelActivationOutput (``check_structured_output`` is
-    False for Phase 4, same guard Phase 2 already relies on)."""
+    as the complete ChannelActivationOutput (Phase 4's spec has a merge_fn,
+    same guard Phase 2 already relies on)."""
     nested_results = {
-        "brand_experience_principler": _phase1_leaf_node(
+        "brand_experience_principler": _leaf_node_result(
             BrandExperiencePrinciplesOutput(
                 brand_experience_principles=["Consistent", "Human", "Confident"],
                 signature_moments=["Onboarding email", "First dashboard load", "Renewal call"],
@@ -1631,7 +1657,7 @@ def _phase5_nested_node_result(*, omit: str = "") -> MagicMock:
     specialist set for the rejection tests below).
     """
     nested_results = {
-        node_id: _phase1_leaf_node(fragment)
+        node_id: _leaf_node_result(fragment)
         for node_id, fragment in _phase5_specialist_fragments().items()
         if node_id != omit
     }
@@ -1765,11 +1791,11 @@ def test_merge_phase5_fragments_rejects_incomplete_specialist_set() -> None:
 def test_extract_phase_output_rejects_incomplete_phase5_fragments() -> None:
     """Without governance_compositor, a partial Phase 5 run (merge_fn returns
     None) must degrade to defaults, not accept one specialist's own fragment
-    as the complete GovernanceOutput (``check_structured_output`` is False for
-    Phase 5, same guard Phase 2 and Phase 4 already rely on)."""
+    as the complete GovernanceOutput (Phase 5's spec has a merge_fn, same
+    guard Phase 2 and Phase 4 already rely on)."""
     node_result = MagicMock()
     single_fragment = {
-        "ownership_definer": _phase1_leaf_node(
+        "ownership_definer": _leaf_node_result(
             OwnershipOutput(
                 ownership_model="Brand Director owns the system end to end.",
                 decision_authority={"logo_changes": "Brand Director"},
@@ -1967,7 +1993,7 @@ def _phase3_nested_node_result(*, omit: str = "") -> MagicMock:
     node set for the rejection tests below).
     """
     nested_results = {
-        node_id: _phase1_leaf_node(fragment)
+        node_id: _leaf_node_result(fragment)
         for node_id, fragment in _phase3_specialist_fragments().items()
         if node_id != omit
     }
@@ -2096,12 +2122,12 @@ def test_merge_phase3_fragments_rejects_incomplete_specialist_set() -> None:
 def test_extract_phase_output_rejects_incomplete_phase3_fragments() -> None:
     """Without visual_compositor, a partial Phase 3 run (merge_fn returns
     None) must degrade to defaults, not accept one node's own fragment as the
-    complete VisualIdentityOutput (``check_structured_output`` is False for
-    Phase 3, same guard Phase 2, Phase 4, and Phase 5 already rely on)."""
+    complete VisualIdentityOutput (Phase 3's spec has a merge_fn, same guard
+    Phase 2, Phase 4, and Phase 5 already rely on)."""
     single_fragment = {
         # CreativeRefinementDecision is converge_decider's real structured_output
         # type (see agents.py:make_converge_decider) -- not a Phase 1 model.
-        "converge_decider": _phase1_leaf_node(
+        "converge_decider": _leaf_node_result(
             CreativeRefinementDecision(winning_candidate_title="Modern Confidence")
         ),
     }
@@ -2294,7 +2320,7 @@ def test_extract_from_single_agent_prefers_structured_output() -> None:
     from branding_team.orchestrator import _extract_from_single_agent
 
     core = _full_strategic_core()
-    node = _phase1_leaf_node(core)
+    node = _leaf_node_result(core)
 
     parsed = _extract_from_single_agent(node, StrategicCoreOutput, None)
 
@@ -2320,19 +2346,42 @@ def test_extract_from_single_agent_falls_back_to_text() -> None:
 
 
 def test_extract_from_single_agent_skips_structured_when_spec_disallows() -> None:
-    """When ``spec.check_structured_output`` is False the structured field is
-    ignored and extraction falls through to text (here empty → None)."""
+    """When ``spec.merge_fn`` is set the structured field is ignored and
+    extraction falls through to text (here empty → None) -- a spec with a
+    merge_fn has multiple named children, so a lone agent's fragment must
+    never be accepted as the complete phase output."""
     from branding_team.orchestrator import _extract_from_single_agent, _PhaseSpec
 
     spec = _PhaseSpec(
         builder_fn=lambda: None,
         node_id="phase2_narrative",
         model_cls=StrategicCoreOutput,
-        check_structured_output=False,
+        merge_fn=lambda *_: None,
     )
-    node = _phase1_leaf_node(_full_strategic_core())  # message content is empty
+    node = _leaf_node_result(_full_strategic_core())  # message content is empty
 
     assert _extract_from_single_agent(node, StrategicCoreOutput, spec) is None
+
+
+def test_extract_from_single_agent_checks_structured_when_spec_has_no_merge_fn() -> None:
+    """A present spec with no merge_fn (the documented "single-node phase with
+    no compositor" case) still allows the last agent's own structured_output
+    to be accepted -- ``spec is None`` is not the only path to this fallback;
+    ``spec.merge_fn is None`` is the real condition it stands in for."""
+    from branding_team.orchestrator import _extract_from_single_agent, _PhaseSpec
+
+    core = _full_strategic_core()
+    node = _phase1_leaf_node(core)
+    spec = _PhaseSpec(
+        builder_fn=lambda: None,
+        node_id="phase1_strategic_core",
+        model_cls=StrategicCoreOutput,
+    )  # merge_fn defaults to None
+
+    parsed = _extract_from_single_agent(node, StrategicCoreOutput, spec)
+
+    assert isinstance(parsed, StrategicCoreOutput)
+    assert parsed.positioning_statement == core.positioning_statement
 
 
 def test_extract_from_single_agent_no_agent_results_returns_none() -> None:
@@ -2350,7 +2399,7 @@ def test_child_structured_output_valid_child() -> None:
     from branding_team.orchestrator import _child_structured_output
 
     core = _full_strategic_core()
-    child = _phase1_leaf_node(core)
+    child = _leaf_node_result(core)
 
     assert _child_structured_output(child) is core
 
@@ -2386,7 +2435,7 @@ def test_child_structured_output_non_basemodel_returns_none() -> None:
     """A child whose structured_output isn't a BaseModel is skipped."""
     from branding_team.orchestrator import _child_structured_output
 
-    child = _phase1_leaf_node({"not": "a model"})
+    child = _leaf_node_result({"not": "a model"})
 
     assert _child_structured_output(child) is None
 
