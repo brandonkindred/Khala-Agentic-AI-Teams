@@ -1,7 +1,7 @@
 python-dotenv>=1.2,<2.0
 strands-agents>=1.35,<2.0
 strands-agents-tools>=0.4,<1.0
-# Native strands.models.ollama provider used by Agent Provisioning.
+# Transitive dependency of strands-agents' native strands.models.ollama provider.
 ollama>=0.4.8,<1.0
 # Tolerant JSON repair for LLM output. Consumers import it lazily and swallow
 # ImportError by design (salvage must never crash), so a missing wheel silently

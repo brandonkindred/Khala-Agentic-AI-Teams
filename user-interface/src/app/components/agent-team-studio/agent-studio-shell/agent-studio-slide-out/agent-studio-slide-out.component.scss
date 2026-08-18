@@ -1,0 +1,44 @@
+// The modal must sit above everything that can be visible behind it — notably
+// the catalog's own detail drawer (z-index: 50) and app chrome (z-index:
+// 1000). Use a modal-layer value above both.
+.studio-slide-out__scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 1100;
+}
+
+.studio-slide-out__panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1101; // one above the scrim; both above the catalog drawer + chrome
+  display: flex;
+  flex-direction: column;
+  background: var(--kh-surface-1);
+  border-left: 1px solid var(--kh-border-subtle);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.25);
+}
+
+.studio-slide-out__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kh-space-4);
+  padding: var(--kh-space-4) var(--kh-space-5);
+  border-bottom: 1px solid var(--kh-border-subtle);
+
+  h2 {
+    margin: 0;
+    font-size: var(--kh-text-md);
+    font-weight: 600;
+    color: var(--kh-text-primary);
+  }
+}
+
+.studio-slide-out__body {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: var(--kh-space-4) var(--kh-space-5);
+}
