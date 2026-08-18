@@ -21,7 +21,7 @@ backend/agents/branding_team/
 │   ├── job_store.py          # Team's JobServiceClient singleton + guarded RUNNING/COMPLETED/FAILED transition helpers
 │   ├── json_recovery.py      # recover_json_object — tolerant JSON recovery; wired into orchestrator.py + assistant/agent.py
 │   ├── memoization.py        # phase_input_hash — deterministic per-phase input hash; wired into orchestrator.run(phase_cache=...)
-│   └── phase_output_cache.py # PhaseOutputCache — in-memory phase-output cache; wired into orchestrator.run(phase_cache=...)
+│   └── phase_output_cache.py # PhaseOutputCache — shared.cache-backed phase-output cache; wired into orchestrator.run(phase_cache=...)
 ├── api/
 │   ├── main.py              # FastAPI app-assembly hub + re-exports
 │   ├── models.py            # Request/response models
@@ -335,15 +335,25 @@ digest. `phase` must be one of the five runnable phases in
 
 ### PhaseOutputCache
 
-`shared/phase_output_cache.py:23` — a dict-backed cache holding at most
-one `(input_hash, output)` entry per `BrandPhase`. `get(phase,
-input_hash)` returns the stored output only when an entry exists for
-`phase` and its stored hash matches `input_hash` (a hit); otherwise it
-returns `None` (a miss), never raising for a mismatched hash. `put(phase,
-input_hash, output)` replaces any existing entry for `phase`. Like
-`phase_input_hash`, both methods reject `BrandPhase.COMPLETE` with
-`ValueError`. The cache performs no LLM or I/O side effects — state lives
-only in the instance's lifetime.
+`shared/phase_output_cache.py` — a thin wrapper over
+`shared.cache.get_shared_cache("branding:phase:v1")` (Redis when
+configured, else in-process memory; see `backend/shared/cache/`), keyed by
+`f"{phase.value}:{input_hash}"`. `get(phase, input_hash)` deserializes and
+returns the stored output when a live entry exists for that exact `(phase,
+input_hash)` pair (a hit); otherwise it returns `None` (a miss) — including
+when a stored entry's bytes fail to deserialize, which evicts the corrupt
+entry and is treated as a miss rather than raising. `put(phase, input_hash,
+output)` serializes `output` via `model_dump_json()` and stores it, bounded
+by the shared backend's LRU (`max_entries=64`). Because keys are
+content-addressed, a `put` under a new hash does not evict the same
+phase's entry under a different (e.g. stale) hash — both remain
+independently addressable until the LRU or `clear_phase_output_cache()`
+drops them. Like `phase_input_hash`, both `get`/`put` reject
+`BrandPhase.COMPLETE` with `ValueError`. Storage is a process-wide
+singleton per namespace (shared by every `PhaseOutputCache` instance in
+the process, not private per instance); the cache performs no LLM side
+effects, and every `shared.cache` operation is fail-open (a backend outage
+degrades to a miss/no-op, never an exception).
 
 ### Wiring status
 

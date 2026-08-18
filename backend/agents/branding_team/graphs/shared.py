@@ -8,12 +8,20 @@ Provides:
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Optional, Type
 
+from pydantic import BaseModel
 from strands import Agent
 from strands.multiagent.graph import GraphBuilder, GraphNode
 
-from branding_team.models import BrandPhase
+from branding_team.models import (
+    BrandPhase,
+    ChannelActivationOutput,
+    GovernanceOutput,
+    NarrativeMessagingOutput,
+    StrategicCoreOutput,
+    VisualIdentityOutput,
+)
 from shared.graph import OutputMode
 from shared.graph import build_agent as _shared_build_agent
 
@@ -188,6 +196,17 @@ PHASE_ORDER = [
     BrandPhase.CHANNEL_ACTIVATION,
     BrandPhase.GOVERNANCE,
 ]
+
+# Single source of truth for a phase's output model class, shared by
+# ``orchestrator._PHASE_SPEC`` (graph-result extraction) and
+# ``PhaseOutputCache`` (deserializing a cached phase output).
+PHASE_OUTPUT_MODELS: Dict[BrandPhase, Type[BaseModel]] = {
+    BrandPhase.STRATEGIC_CORE: StrategicCoreOutput,
+    BrandPhase.NARRATIVE_MESSAGING: NarrativeMessagingOutput,
+    BrandPhase.VISUAL_IDENTITY: VisualIdentityOutput,
+    BrandPhase.CHANNEL_ACTIVATION: ChannelActivationOutput,
+    BrandPhase.GOVERNANCE: GovernanceOutput,
+}
 
 
 def phase_index(phase: BrandPhase) -> int:
