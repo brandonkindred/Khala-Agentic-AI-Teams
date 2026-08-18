@@ -23,6 +23,22 @@ class InfraPatchAgent:
         )
 
     def run(self, input_data: IaCPatchInput) -> IaCPatchOutput:
+        """Produce a minimal patch to the IaC artifacts named in a fixable debug result.
+
+        Preconditions:
+            input_data is a valid IaCPatchInput.
+        Postconditions:
+            When input_data.debug_output.fixable is False, returns
+            immediately with summary="Errors are not fixable via code
+            changes" and no patched_artifacts; no LLM call is made.
+            Otherwise builds a context from the debug errors and
+            input_data.original_artifacts, calls the LLM to produce patched
+            artifact contents, drops any blank/whitespace-only entries, and
+            returns an IaCPatchOutput whose patched_artifacts holds the
+            remaining entries, whose summary is the LLM's summary, and whose
+            edits_applied is the LLM's reported count or, if absent, the
+            number of patched artifacts.
+        """
         if not input_data.debug_output.fixable:
             return IaCPatchOutput(
                 summary="Errors are not fixable via code changes",
