@@ -24,6 +24,7 @@ import time
 from typing import Any, Dict, Iterable, List, Optional
 
 import pytest
+from code_review_agent._prompt_utils import _render_finding_block, _sanitize_finding_field
 from code_review_agent.coordinator import run_coordinator
 from code_review_agent.false_positive_filter import (
     _MAX_DUPLICATE_TOOL_CALLS,
@@ -38,8 +39,6 @@ from code_review_agent.false_positive_filter import (
     _code_fence_for,
     _coerce_verdict,
     _parse_verdicts,
-    _render_finding_block,
-    _sanitize_finding_field,
     _strip_numbered_prefixes,
     _verify_max_findings_per_group,
     _verify_timeout_seconds,
@@ -2061,7 +2060,7 @@ def test_group_prompt_has_anchor_indices_and_directs_to_read_tool() -> None:
 
 def test_group_prompt_caps_oversized_task_and_acceptance_fields() -> None:
     """Task description and acceptance criteria are capped at ``_CONTEXT_FIELD_CHARS``."""
-    from code_review_agent.false_positive_filter import (
+    from code_review_agent._prompt_utils import (
         _CONTEXT_FIELD_CHARS,
         _CONTEXT_FIELD_TRUNCATION_MARKER,
     )
