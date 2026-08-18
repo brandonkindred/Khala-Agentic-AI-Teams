@@ -2678,3 +2678,47 @@ def test_run_with_phase_cache_cascades_recompute_through_three_phase_chain() -> 
     assert result.strategic_core is fresh_upstream[BrandPhase.STRATEGIC_CORE]
     assert result.narrative_messaging is fresh_upstream[BrandPhase.NARRATIVE_MESSAGING]
     assert result.visual_identity is fresh_upstream[BrandPhase.VISUAL_IDENTITY]
+
+
+# ---------------------------------------------------------------------------
+# Story 2b Step 3: thread/Temporal confinement + cached-vs-cold output parity.
+# The Temporal path (temporal/activities.py) never calls `run` -- it calls
+# `run_single_phase` directly, a method with no `phase_cache` parameter -- so
+# there is no code path by which a cache could reach it; that structural
+# guarantee is exercised from the Temporal side in test_temporal_unit.py. This
+# test instead nails down the thread-path half of the contract: a cache-driven
+# run (whether populating an empty cache or fully reusing a warm one) must
+# produce a `TeamOutput` equal to a cold monolithic-graph run over the same
+# mission -- the cache may change *how much work* a run does, never *what it
+# produces*.
+# ---------------------------------------------------------------------------
+
+
+def test_run_with_phase_cache_matches_cold_monolithic_run() -> None:
+    """A cache miss run and a fully-cached hit run both equal a cold run's TeamOutput."""
+    mission = make_mission()
+    human_review = HumanReview(approved=True)
+
+    with _patch_graph_invoke(ALL_PHASES):
+        cold_orchestrator = BrandingTeamOrchestrator()
+        cold_result = cold_orchestrator.run(mission=mission, human_review=human_review)
+
+    cache = PhaseOutputCache()
+    miss_orchestrator = BrandingTeamOrchestrator()
+    with patch.object(
+        miss_orchestrator, "run_single_phase", side_effect=_run_single_phase_fixture_side_effect
+    ):
+        miss_result = miss_orchestrator.run(
+            mission=mission, human_review=human_review, phase_cache=cache
+        )
+
+    assert miss_result == cold_result
+
+    hit_orchestrator = BrandingTeamOrchestrator()
+    with patch.object(hit_orchestrator, "run_single_phase") as mock_run_single_phase:
+        hit_result = hit_orchestrator.run(
+            mission=mission, human_review=human_review, phase_cache=cache
+        )
+
+    mock_run_single_phase.assert_not_called()
+    assert hit_result == cold_result

@@ -2,10 +2,14 @@
 
 A small, dict-backed cache container keyed by ``BrandPhase``, storing
 ``(input_hash, output)`` entries. Paired with ``phase_input_hash``
-(``shared/memoization.py``), this lets a future caller (Story 2b) detect an
-unchanged phase input and skip re-running that phase. No cache is consumed
-here — this module only provides the container and its ``get``/``put``
-helpers; ``orchestrator.run`` and the conversation layer are unmodified.
+(``shared/memoization.py``), this lets a caller detect an unchanged phase
+input and skip re-running that phase. No cache is consumed here — this
+module only provides the container and its ``get``/``put`` helpers.
+``orchestrator.run`` consumes it (Story 2b) on the thread path only via its
+optional ``phase_cache`` parameter — the Temporal path calls
+``orchestrator.run_single_phase`` directly and has no cache parameter to
+receive one. The conversation/session layer (Story 2c) does not yet carry a
+cache across turns.
 """
 
 from __future__ import annotations
