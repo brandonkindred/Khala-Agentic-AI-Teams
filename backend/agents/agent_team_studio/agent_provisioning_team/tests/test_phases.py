@@ -2009,6 +2009,23 @@ def test_documentation_llm_summary_falls_back_on_exception(tmp_path: Path) -> No
     assert "tool(s) configured" in result.onboarding.summary
 
 
+def test_documentation_summary_uses_template_for_dummy_client(tmp_path: Path) -> None:
+    from agent_team_studio.agent_provisioning_team.phases import documentation as doc_mod
+    from agent_team_studio.agent_provisioning_team.shared.tool_manifest import ToolManifest
+    from llm_service import DummyLLMClient
+
+    with patch.object(doc_mod, "get_client", lambda agent_key=None: DummyLLMClient()):
+        result = doc_mod.run_documentation(
+            agent_id="a1",
+            manifest=ToolManifest(),
+            credentials={},
+            tool_results=[],
+            workspace_path=str(tmp_path),
+        )
+    # A DummyLLMClient is treated the same as "unconfigured": template, not dummy text.
+    assert "tool(s) configured" in result.onboarding.summary
+
+
 def test_documentation_uses_llm_getting_started_when_configured(tmp_path: Path) -> None:
     from agent_team_studio.agent_provisioning_team.models import (
         GeneratedCredentials,
@@ -2109,6 +2126,54 @@ def test_documentation_llm_getting_started_falls_back_on_exception(tmp_path: Pat
             workspace_path=str(tmp_path),
         )
     # Falls back to deterministic template (mentions env var).
+    assert any("REDIS_URL" in t.getting_started for t in result.onboarding.tools)
+
+
+def test_documentation_getting_started_uses_template_for_dummy_client(tmp_path: Path) -> None:
+    from agent_team_studio.agent_provisioning_team.models import (
+        GeneratedCredentials,
+        ToolProvisionResult,
+    )
+    from agent_team_studio.agent_provisioning_team.phases import documentation as doc_mod
+    from agent_team_studio.agent_provisioning_team.shared.tool_manifest import (
+        ToolDefinition,
+        ToolManifest,
+    )
+    from llm_service import DummyLLMClient
+
+    manifest = ToolManifest(
+        tools=[
+            ToolDefinition(
+                name="redis",
+                provisioner="redis_provisioner",
+                config={},
+                onboarding={
+                    "description": "Redis",
+                    "env_var": "REDIS_URL",
+                    "getting_started": "",
+                },
+            ),
+        ]
+    )
+
+    with patch.object(doc_mod, "get_client", lambda agent_key=None: DummyLLMClient()):
+        result = doc_mod.run_documentation(
+            agent_id="a1",
+            manifest=manifest,
+            credentials={
+                "redis": GeneratedCredentials(tool_name="redis", connection_string="redis://x")
+            },
+            tool_results=[
+                ToolProvisionResult(
+                    tool_name="redis",
+                    success=True,
+                    permissions=["+@all"],
+                    provisioner_key="redis_provisioner",
+                )
+            ],
+            workspace_path=str(tmp_path),
+        )
+    # A DummyLLMClient is treated the same as "unconfigured": template, not dummy text.
     assert any("REDIS_URL" in t.getting_started for t in result.onboarding.tools)
 
 
