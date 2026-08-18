@@ -86,10 +86,26 @@ async def post_review_pr(request: ReviewPrRequest) -> ReviewPrResponse:
     created_at = _main.record_review_start(
         job_id, request.owner, request.repo, request.pr_number, pr.html_url, _main._review_author()
     )
-    await _main._start_pr_review_temporal(job_id, request, token)
+    
+    try:
+        await _main._start_pr_review_temporal(job_id, request, token)
+    except Exception as exc:
+        # Mark the job as failed so UI polling doesn't hang forever
+        _main.update_job(
+            job_id, 
+            status="failed", 
+            error=f"temporal dispatch failed: {exc}"
+        )
+        # Return a clean 503 instead of crashing the server
+        raise HTTPException(
+            status_code=503, 
+            detail=f"review dispatch failed: {exc}"
+        ) from exc
+
     return ReviewPrResponse(
         job_id=job_id, pr_number=request.pr_number, pr_url=pr.html_url, created_at=created_at
     )
+
 
 
 @router.get("/reviews", response_model=List[ReviewRunItem])
