@@ -2338,7 +2338,12 @@ class OllamaLLMClient(LLMClient):
             self._record_telemetry(status="error", error_type="semantic_exhaustion")
             raise
         except LLMTruncatedError as e:
-            self._record_telemetry(status="truncated", error_type="truncated")
+            self._record_telemetry(
+                status="truncated",
+                error_type="truncated",
+                prompt_text=prompt,
+                response_text=e.partial_content,
+            )
             record_complete_json_turn(
                 prompt, e.partial_content or "", started_monotonic=request_started
             )
