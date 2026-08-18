@@ -159,7 +159,7 @@ describe('AgentStudioBuildAgentComponent', () => {
     expect(component.provisionOpen()).toBe(true);
     expect(fixture.nativeElement.querySelector('app-agent-provisioning-panel')).toBeTruthy();
 
-    fixture.nativeElement.querySelector('.studio-build__provision-head button').click();
+    fixture.nativeElement.querySelector('.studio-slide-out__head button').click();
     fixture.detectChanges();
     expect(component.provisionOpen()).toBe(false);
     expect(fixture.nativeElement.querySelector('app-agent-provisioning-panel')).toBeNull();
@@ -168,7 +168,7 @@ describe('AgentStudioBuildAgentComponent', () => {
   it('closes the provisioning slide-out when the scrim is clicked', () => {
     component.openProvision();
     fixture.detectChanges();
-    fixture.nativeElement.querySelector('.studio-build__scrim').click();
+    fixture.nativeElement.querySelector('.studio-slide-out__scrim').click();
     fixture.detectChanges();
     expect(component.provisionOpen()).toBe(false);
   });
@@ -176,9 +176,10 @@ describe('AgentStudioBuildAgentComponent', () => {
   it('marks the provisioning panel as a focus-trapping modal', () => {
     component.openProvision();
     fixture.detectChanges();
-    const panel = fixture.nativeElement.querySelector('.studio-build__provision-panel');
+    const panel = fixture.nativeElement.querySelector('.studio-slide-out__panel');
     expect(panel.getAttribute('aria-modal')).toBe('true');
     expect(panel.getAttribute('role')).toBe('dialog');
+    expect(panel.getAttribute('aria-label')).toBe('Provision an agent');
     // CDK focus trap directive is applied (keeps Tab inside the modal).
     expect(panel.hasAttribute('cdkTrapFocus')).toBe(true);
   });
@@ -186,7 +187,7 @@ describe('AgentStudioBuildAgentComponent', () => {
   it('closes the provisioning slide-out on Escape', () => {
     component.openProvision();
     fixture.detectChanges();
-    const panel = fixture.nativeElement.querySelector('.studio-build__provision-panel');
+    const panel = fixture.nativeElement.querySelector('.studio-slide-out__panel');
     panel.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     fixture.detectChanges();
     expect(component.provisionOpen()).toBe(false);

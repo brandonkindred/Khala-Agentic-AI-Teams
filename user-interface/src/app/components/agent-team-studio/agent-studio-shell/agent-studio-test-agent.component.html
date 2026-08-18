@@ -22,24 +22,12 @@
 }
 
 @if (browseOpen()) {
-  <div class="studio-test__scrim" (click)="closeBrowse()" aria-hidden="true"></div>
-  <aside
-    class="studio-test__browse-panel"
-    role="dialog"
-    aria-modal="true"
-    aria-label="Browse agents"
-    cdkTrapFocus
-    [cdkTrapFocusAutoCapture]="true"
-    (keydown.escape)="closeBrowse()"
+  <app-agent-studio-slide-out
+    [open]="browseOpen()"
+    heading="Browse agents"
+    closeButtonLabel="Close browse agents panel"
+    (closeRequested)="closeBrowse()"
   >
-    <header class="studio-test__browse-head">
-      <h2>Browse agents</h2>
-      <button mat-icon-button type="button" aria-label="Close browse agents panel" (click)="closeBrowse()">
-        <mat-icon aria-hidden="true">close</mat-icon>
-      </button>
-    </header>
-    <div class="studio-test__browse-body">
-      <app-agent-catalog (requestRun)="onBrowseSelect($event)" />
-    </div>
-  </aside>
+    <app-agent-catalog (requestRun)="onBrowseSelect($event)" />
+  </app-agent-studio-slide-out>
 }
