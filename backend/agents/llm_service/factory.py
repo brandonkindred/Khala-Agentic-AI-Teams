@@ -459,14 +459,13 @@ def _build_entry_client(
     """
     timeout = llm_config.resolve_timeout(agent_key)
     if entry.provider == "claude":
-        model = entry.model.strip() or llm_config.resolve_claude_model(agent_key)
+        model = entry.model or llm_config.resolve_claude_model(agent_key)
         return _build_claude_concrete(model, entry.api_key, timeout, on_reasoning, rate_limit_max_retries)
     elif entry.provider == "runpod":
-        model = entry.model.strip() or llm_config.resolve_model(agent_key)
-        base_url = entry.base_url.strip()  # always stored; no env fallback for RunPod
-        return _build_runpod_concrete(model, base_url, timeout, on_reasoning, rate_limit_max_retries, entry.api_key)
-    model = (model_override or "").strip() or entry.model.strip() or llm_config.resolve_model(agent_key)
-    base_url = entry.base_url.strip() or llm_config.resolve_base_url()
+        model = entry.model or llm_config.resolve_model(agent_key)
+        return _build_runpod_concrete(model, entry.base_url, timeout, on_reasoning, rate_limit_max_retries, entry.api_key)
+    model = (model_override or "").strip() or entry.model or llm_config.resolve_model(agent_key)
+    base_url = entry.base_url or llm_config.resolve_base_url()
     # The entry carries its own key (empty → no Authorization header, i.e. a local
     # Ollama endpoint). No env fallback — a Cloud entry must store its own key.
     return _build_ollama_concrete(model, base_url, timeout, on_reasoning, rate_limit_max_retries, entry.api_key)
