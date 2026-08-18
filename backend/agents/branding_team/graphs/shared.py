@@ -22,31 +22,24 @@ from shared.graph import build_agent as _shared_build_agent
 # ---------------------------------------------------------------------------
 
 # Every pipeline agent passes an explicit ``agent_key`` instead of resolving
-# ``build_agent``'s implicit "branding" default. The scheme is:
-#
-# - ``branding_<phase value>`` (via ``phase_agent_key``) for each phase's
-#   specialist agents — reusing ``BrandPhase``'s own enum values so the tier
-#   and the phase it routes can never drift apart. Underscores keep the key
-#   a valid shell/Compose identifier so ``LLM_MODEL_<agent_key>`` can be
-#   exported (``LLM_MODEL_branding_strategic_core``). This groups each
-#   phase's mix of open-ended strategic/creative work (e.g. Phase 1's
-#   positioning_synthesizer, Phase 2's Storyteller) alongside its more
-#   bounded extraction/list-generation specialists (e.g. Phase 5's
-#   asset_wiki_planner) under one dial, so ops can tune per-phase cost/
-#   quality via ``LLM_MODEL_branding_<phase>`` without a code change.
-# - ``branding_compositor`` (``COMPOSITOR_AGENT_KEY``, via ``build_compositor``)
-#   for the remaining phase-terminal join agent — ``visual_compositor`` —
-#   that assembles a phase's full set of upstream fragments into that
-#   phase's structured output. This is a distinct role from any single
-#   phase's specialists (broad-context synthesis across many fragments,
-#   not one bounded task), so it gets its own tier rather than inheriting
-#   its phase's key. Phases 4 and 5 have no compositor: their fragments
-#   are merged deterministically in Python instead.
+# ``build_agent``'s implicit "branding" default: ``branding_<phase value>``
+# (via ``phase_agent_key``) for each phase's specialist agents — reusing
+# ``BrandPhase``'s own enum values so the tier and the phase it routes can
+# never drift apart. Underscores keep the key a valid shell/Compose
+# identifier so ``LLM_MODEL_<agent_key>`` can be exported
+# (``LLM_MODEL_branding_strategic_core``). This groups each phase's mix of
+# open-ended strategic/creative work (e.g. Phase 1's positioning_synthesizer,
+# Phase 2's Storyteller) alongside its more bounded extraction/list-
+# generation specialists (e.g. Phase 5's asset_wiki_planner) under one dial,
+# so ops can tune per-phase cost/quality via ``LLM_MODEL_branding_<phase>``
+# without a code change. No phase has a compositor node anymore (Phase 3's
+# ``visual_compositor`` was the last one; its fragments are now merged
+# deterministically in Python, same as Phases 4 and 5), so there is no
+# separate compositor tier.
 #
 # ``BrandComplianceAgent`` (outside the graph) is deliberately excluded: it
 # is a keyword-matching ``@dataclass`` with no LLM call, so no agent_key
 # applies to it.
-COMPOSITOR_AGENT_KEY = "branding_compositor"
 
 
 # ``str.isidentifier()`` accepts Unicode letters (PEP 3131), which are valid
@@ -134,9 +127,9 @@ def build_agent(
         ``LLM_MODEL_<agent_key>`` override (if any) resolves the backing
         model. Defaults to ``"branding"`` for callers that don't need
         per-tier routing; every pipeline call site instead passes one of the
-        ``branding_<phase>`` / ``branding_compositor`` tiers documented on
-        :func:`phase_agent_key` and ``COMPOSITOR_AGENT_KEY`` below (see also
-        the "LLM routing (agent_key tiers)" section of ``README.md``).
+        ``branding_<phase>`` tiers documented on :func:`phase_agent_key`
+        (see also the "LLM routing (agent_key tiers)" section of
+        ``README.md``).
     """
     return _shared_build_agent(
         name=name,
@@ -146,52 +139,6 @@ def build_agent(
         tools=tools,
         description=description,
         agent_key=agent_key,
-    )
-
-
-def build_compositor(
-    *,
-    name: str,
-    system_prompt: str,
-    description: str = "",
-    structured_output: Any | None = None,
-) -> Agent:
-    """Create a phase-terminal join agent on the shared ``branding_compositor`` tier.
-
-    Thin wrapper over :func:`build_agent` that pins ``agent_key=COMPOSITOR_AGENT_KEY``,
-    keeping that routing decision at one call site rather than inlining
-    ``build_agent(..., agent_key=COMPOSITOR_AGENT_KEY)`` in the phase file
-    (``visual_compositor``, the only remaining compositor — Phases 4 and 5
-    now merge their fragments deterministically in Python instead). Always
-    JSON mode (every compositor assembles its phase's fragments into a
-    structured ``*Output`` document).
-
-    Parameters
-    ----------
-    name:
-        Unique agent name (used as graph node ID), e.g. ``"visual_compositor"``.
-    system_prompt:
-        Full system prompt describing what to assemble.
-    description:
-        Short human-readable description of the agent's purpose.
-    structured_output:
-        Optional Pydantic model forwarded to :func:`build_agent`. Each
-        compositor's output shape is its phase's ``*Output`` model, assembled
-        from prose-described fragments in the prompt — passing that model
-        here forces Strands' structured-output tool instead of relying on a
-        prose "output JSON" reminder in the prompt.
-
-    Postconditions:
-        Returns a ``build_agent(agent_key=COMPOSITOR_AGENT_KEY)`` result — see
-        that function's contract.
-    """
-    return build_agent(
-        name=name,
-        system_prompt=system_prompt,
-        description=description,
-        output_mode="json",
-        structured_output=structured_output,
-        agent_key=COMPOSITOR_AGENT_KEY,
     )
 
 
@@ -213,8 +160,7 @@ def build_fan_out_fan_in(
 
     *fan_in_node* is any collector node already on *builder* — a regular
     phase specialist (e.g. Phase 1's ``positioning_synthesizer``, Phase 3's
-    ``CreativeDirector``) or a :func:`build_compositor` result. It is not
-    required to be a compositor: this helper predates that concept and wires
+    ``converge_decider``). No phase has a compositor node; this helper wires
     plain fan-out/fan-in topology generically.
 
     Preconditions:
