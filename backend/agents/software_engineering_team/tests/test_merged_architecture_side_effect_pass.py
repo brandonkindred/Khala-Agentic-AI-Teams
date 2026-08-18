@@ -12,7 +12,9 @@ from code_review_agent.merged_architecture_side_effect_pass import (
 from code_review_agent.models import CodeReviewInput
 from code_review_agent.profiles import ReviewProfile
 from tests.submission_pass_two_call_client import (
+    MutationFindingClient,
     SubmissionPassTwoCallClient,
+    mutation_finding_payload,
     wire_run_agent_via_reasoning_with_raw,
 )
 
@@ -777,42 +779,22 @@ def test_reasoning_system_prompt_reflects_mutation_toggle(monkeypatch: pytest.Mo
     assert "Side-Effect / Blast-Radius Impact" in captured["reasoning_system_prompt"]
 
 
-class _MutationFindingClient(SubmissionPassTwoCallClient):
-    """Returns a mutation-contract side-effect finding only when the merged
-    pass actually showed the model a before-image (i.e. the "Replaced
-    (pre-change) content" section reached the prompt alongside the merged
-    pass's anchor). Used by both
-    ``test_fires_mutation_finding_when_before_image_present`` and
-    ``test_no_speculative_finding_without_before_image`` so the pair proves
-    the *same* finding path fires with a before-image and goes silent
-    without one, rather than asserting two unrelated behaviors."""
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        reasoning_prompt = self.latest_reasoning_prompt()
-        if _MERGED_PASS_ANCHOR in reasoning_prompt and "Replaced (pre-change) content" in reasoning_prompt:
-            return {
-                "architecture_findings": [],
-                "side_effect_findings": [
-                    {
-                        "severity": "high",
-                        "category": "side-effects",
-                        "file_path": "app/main.py",
-                        "description": (
-                            "bar() now returns 2 instead of the shown before-image's 1; "
-                            "app/caller.py still expects the old contract"
-                        ),
-                        "suggestion": "update app/caller.py for the new return value",
-                    }
-                ],
-            }
-        return {"architecture_findings": [], "side_effect_findings": []}
+def _mutation_finding_client() -> MutationFindingClient:
+    return MutationFindingClient(
+        anchor=_MERGED_PASS_ANCHOR,
+        response_with_finding={
+            "architecture_findings": [],
+            "side_effect_findings": [mutation_finding_payload()],
+        },
+        response_without_finding={"architecture_findings": [], "side_effect_findings": []},
+    )
 
 
 def test_fires_mutation_finding_when_before_image_present() -> None:
     """A mutation-contract side-effect finding is produced when the
     submission carries a before-image for the changed file."""
     arch, side = find_architecture_and_side_effect_issues(
-        _MutationFindingClient(),
+        _mutation_finding_client(),
         _input(files={"app/main.py": "def bar():\n    return 2\n"}).model_copy(
             update={"replaced_content": {"app/main.py": "def bar():\n    return 1\n"}}
         ),
@@ -828,7 +810,7 @@ def test_no_speculative_finding_without_before_image() -> None:
     no before-image to react to -- the mutation sub-check cannot speculate
     about a prior version it was never shown."""
     arch, side = find_architecture_and_side_effect_issues(
-        _MutationFindingClient(),
+        _mutation_finding_client(),
         _input(files={"app/main.py": "def bar():\n    return 2\n"}),
     )
     assert arch == []

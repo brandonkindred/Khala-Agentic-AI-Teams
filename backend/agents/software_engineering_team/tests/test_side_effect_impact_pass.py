@@ -43,7 +43,9 @@ from code_review_agent.side_effect_impact_pass import (
     find_side_effect_impact_issues,
 )
 from tests.submission_pass_two_call_client import (
+    MutationFindingClient,
     SubmissionPassTwoCallClient,
+    mutation_finding_payload,
     wire_run_agent_via_reasoning_with_raw,
 )
 
@@ -763,40 +765,19 @@ def test_reasoning_system_prompt_reflects_mutation_toggle(monkeypatch: pytest.Mo
     assert "mutation-vs-replaced-code" not in captured["reasoning_system_prompt"]
 
 
-class _MutationFindingClient(SubmissionPassTwoCallClient):
-    """Returns a mutation-contract finding only when the pass actually showed
-    the model a before-image (i.e. the "Replaced (pre-change) content"
-    section reached the prompt alongside this pass's anchor). Used by both
-    ``test_fires_mutation_finding_when_before_image_present`` and
-    ``test_no_speculative_finding_without_before_image`` so the pair proves
-    the *same* finding path fires with a before-image and goes silent
-    without one, rather than asserting two unrelated behaviors."""
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        reasoning_prompt = self.latest_reasoning_prompt()
-        if _SIDE_EFFECT_PASS_ANCHOR in reasoning_prompt and "Replaced (pre-change) content" in reasoning_prompt:
-            return {
-                "findings": [
-                    {
-                        "severity": "high",
-                        "category": "side-effects",
-                        "file_path": "app/main.py",
-                        "description": (
-                            "bar() now returns 2 instead of the shown before-image's 1; "
-                            "app/caller.py still expects the old contract"
-                        ),
-                        "suggestion": "update app/caller.py for the new return value",
-                    }
-                ]
-            }
-        return {"findings": []}
+def _mutation_finding_client() -> MutationFindingClient:
+    return MutationFindingClient(
+        anchor=_SIDE_EFFECT_PASS_ANCHOR,
+        response_with_finding={"findings": [mutation_finding_payload()]},
+        response_without_finding={"findings": []},
+    )
 
 
 def test_fires_mutation_finding_when_before_image_present() -> None:
     """A mutation-contract finding is produced when the submission carries a
     before-image for the changed file."""
     result = find_side_effect_impact_issues(
-        _MutationFindingClient(),
+        _mutation_finding_client(),
         CodeReviewInput(
             files={"app/main.py": "def bar():\n    return 2\n"},
             task_description="wire up bar",
@@ -813,7 +794,7 @@ def test_no_speculative_finding_without_before_image() -> None:
     no before-image to react to -- the mutation sub-check cannot speculate
     about a prior version it was never shown."""
     result = find_side_effect_impact_issues(
-        _MutationFindingClient(),
+        _mutation_finding_client(),
         CodeReviewInput(
             files={"app/main.py": "def bar():\n    return 2\n"},
             task_description="wire up bar",
