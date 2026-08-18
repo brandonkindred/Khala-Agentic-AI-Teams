@@ -18,6 +18,8 @@ import agent_platform.studio.temporal.dispatch as dispatch
 from agent_platform.studio.models import AgentDefinition, ConversationStateResponse
 from agent_platform.studio.registration import build_studio_agent_manifest
 
+pytestmark = pytest.mark.usefixtures("_forbid_temporal_execute")
+
 # ── start_conversation ──────────────────────────────────────────────────────────
 
 

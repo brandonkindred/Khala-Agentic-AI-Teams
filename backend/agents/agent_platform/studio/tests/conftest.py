@@ -10,13 +10,17 @@ import agent_platform.studio.temporal.dispatch as dispatch
 from agent_platform.studio.service import AgentStudioService
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture()
 def _forbid_temporal_execute(monkeypatch: pytest.MonkeyPatch) -> None:
     """Authoring CRUD must never start a Temporal workflow, regardless of Temporal state.
 
-    Shared across the dispatch test suite (``test_direct_dispatch.py``,
-    ``test_temporal_enabled.py``, ``test_temporal_worker_absent.py``) so the
-    guard is defined once rather than re-implemented per file.
+    Not autouse here: this guard is specific to the dispatch contract, not a
+    suite-wide invariant, so a future non-CRUD test added to this directory
+    is not forced to opt out of it. Each dispatch test file
+    (``test_direct_dispatch.py``, ``test_temporal_enabled.py``,
+    ``test_temporal_worker_absent.py``) opts in with
+    ``pytestmark = pytest.mark.usefixtures("_forbid_temporal_execute")`` so
+    the guard is still defined once rather than re-implemented per file.
     """
 
     def _boom(*_a, **_k):
