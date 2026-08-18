@@ -39,6 +39,7 @@ from shared.repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
 from software_engineering_team.shared.stack_profile import StackProfile
 from software_engineering_team.shared.team_lead_base import make_job_updater
+from software_engineering_team.shared.text_utils import merge_extra_requirements
 from software_engineering_team.shared.tool_agent_runners import build_tool_runners
 from software_engineering_team.shared.v2_models import MicrotaskReviewFailedError, Phase
 from software_engineering_team.shared.v2_team_config import V2TeamConfig
@@ -1092,10 +1093,10 @@ class ConfigDrivenV2DevelopmentAgent(BaseV2DevelopmentAgent):
     def build_task_requirements(self, base_requirements: str) -> str:
         """Merge this team's extra review clause into a base requirements string.
 
-        Mirrors ``shared.v2_review.run_coordinator_llm_review``'s
-        ``extra_task_requirements`` handling exactly (blank-line separator
-        when both sides are non-empty, verbatim when ``base_requirements`` is
-        empty, unchanged when there is no clause), so this is a drop-in
+        Delegates to the shared ``merge_extra_requirements`` helper — the
+        same one ``shared.v2_review.run_coordinator_llm_review`` uses for its
+        ``extra_task_requirements`` handling — rather than duplicating the
+        blank-line-separator-or-verbatim merge rule, so this is a drop-in
         source for that parameter once a concrete team wires this config
         through instead of a hard-coded module constant.
 
@@ -1106,12 +1107,7 @@ class ConfigDrivenV2DevelopmentAgent(BaseV2DevelopmentAgent):
           non-empty, or the clause verbatim when it is empty. Pure; no side
           effects.
         """
-        clause = self.extra_review_clause
-        if not clause:
-            return base_requirements
-        if base_requirements:
-            return f"{base_requirements}\n\n{clause}"
-        return clause
+        return merge_extra_requirements(base_requirements, self.extra_review_clause)
 
     def _read_repo_code(self, repo_path: Path, max_chars: Optional[int] = None) -> str:
         """Read the repo briefing using ``self.config.stack_profile``.

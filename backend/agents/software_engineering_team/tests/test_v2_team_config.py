@@ -15,30 +15,9 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
+from tests._v2_config_fixtures import make_stack_profile as _make_stack_profile
 
-from software_engineering_team.shared.stack_profile import StackProfile
 from software_engineering_team.shared.v2_team_config import V2TeamConfig
-
-
-def _make_stack_profile(
-    default_language: str = "python", conventions_by_language: dict | None = None
-) -> StackProfile:
-    """Minimal synthetic ``StackProfile`` for tests that don't need a real team's."""
-    return StackProfile(
-        name="test",
-        default_language=default_language,
-        planning_language_label="Language",
-        planning_progress_label="language",
-        conventions_by_language=conventions_by_language or {"_default": "PY"},
-        has_language_conventions=True,
-        build_verify_label="test_code_v2",
-        detect_language=lambda _p, _t: default_language,
-        repo_extensions=frozenset({".py"}),
-        repo_exclude_dirs=frozenset({".git"}),
-        repo_max_chars=1000,
-        detect_tooling=lambda _p: (True, True),
-    )
-
 
 _CONFIG_KWARGS = dict(
     stack_profile=_make_stack_profile(),

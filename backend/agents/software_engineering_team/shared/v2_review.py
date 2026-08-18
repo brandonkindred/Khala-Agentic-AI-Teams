@@ -80,6 +80,7 @@ from software_engineering_team.shared.review_progress import (
     call_code_review_agent,
 )
 from software_engineering_team.shared.security_service import is_blocking
+from software_engineering_team.shared.text_utils import merge_extra_requirements
 from software_engineering_team.shared.v2_models import Phase, ReviewIssue, ReviewResult
 
 logger = logging.getLogger(__name__)
@@ -370,13 +371,7 @@ def run_coordinator_llm_review(
           call beyond the map phase.
     """
     ctx = review_context or ReviewContext()
-    task_requirements = task.requirements or ""
-    if extra_task_requirements:
-        task_requirements = (
-            f"{task_requirements}\n\n{extra_task_requirements}"
-            if task_requirements
-            else extra_task_requirements
-        )
+    task_requirements = merge_extra_requirements(task.requirements or "", extra_task_requirements)
 
     from software_engineering_team.code_review_agent.models import (
         CodeReviewInput as _CodeReviewInput,

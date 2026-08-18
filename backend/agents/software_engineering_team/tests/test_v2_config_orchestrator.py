@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from tests._v2_config_fixtures import make_stack_profile as _make_stack_profile
 
 from shared.dev_models.models import Task, TaskStatus, TaskType
 from software_engineering_team.shared.phases.execution import ReviewDependencies
@@ -26,38 +27,13 @@ from software_engineering_team.shared.v2_orchestrator import ConfigDrivenV2Devel
 from software_engineering_team.shared.v2_team_config import V2TeamConfig
 
 
-def _make_stack_profile(
-    *,
-    default_language: str = "python",
-    conventions_by_language: dict | None = None,
-    repo_extensions: frozenset | None = None,
-    repo_exclude_dirs: frozenset | None = None,
-    repo_max_chars: int = 1000,
-    detect_tooling=None,
-) -> StackProfile:
-    """Minimal synthetic ``StackProfile`` — mirrors ``test_v2_team_config.py``."""
-    return StackProfile(
-        name="test",
-        default_language=default_language,
-        planning_language_label="Language",
-        planning_progress_label="language",
-        conventions_by_language=conventions_by_language or {"_default": "PY"},
-        has_language_conventions=True,
-        build_verify_label="test_code_v2",
-        detect_language=lambda _p, _t: default_language,
-        repo_extensions=repo_extensions or frozenset({".py"}),
-        repo_exclude_dirs=repo_exclude_dirs or frozenset({".git"}),
-        repo_max_chars=repo_max_chars,
-        detect_tooling=detect_tooling or (lambda _p: (True, True)),
-    )
-
-
 def _make_config(
     *,
     stack_profile: StackProfile | None = None,
     tool_agent_kinds: frozenset = frozenset({"security", "testing_qa"}),
     extra_review_clause: str = "",
 ) -> V2TeamConfig:
+    """Build a minimal V2TeamConfig for tests, defaulting to a synthetic StackProfile."""
     return V2TeamConfig(
         stack_profile=stack_profile or _make_stack_profile(),
         tool_agent_kinds=tool_agent_kinds,
