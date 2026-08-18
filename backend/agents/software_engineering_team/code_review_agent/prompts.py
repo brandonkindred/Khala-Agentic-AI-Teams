@@ -276,9 +276,13 @@ def _build_side_effect_impact_body(*, mutation_on: bool) -> str:
     Preconditions: none.
 
     Postconditions:
-        - Always includes the persona/"what a side effect is" header, section A
-          (caller-breaking side effect), section B (documentation mismatch), the
-          `pre_existing` tagging guidance, and the hard rules, unchanged.
+        - Always present (never omitted or reordered): the persona/"what a side
+          effect is" header, the no-prior-version guard, section A
+          (caller-breaking side effect), section B (documentation mismatch) with
+          the `pre_existing` tagging guidance, and the hard rules. The guard and
+          hard-rules *text* is chosen from one of two variants based on
+          ``mutation_on`` (see below) -- "always present" does not mean the
+          wording is identical between toggle states.
         - When ``mutation_on`` is True, additionally includes the
           mutation-vs-replaced-code contract check (between section A and
           section B) and uses guard/hard-rule wording that names it as the one
@@ -462,7 +466,10 @@ def build_merged_architecture_side_effect_reasoning_system_prompt(
           shape built from ``_SIDE_EFFECT_IMPACT_BODY_NO_MUTATION`` instead (via
           :func:`_build_merged_architecture_side_effect_reasoning_system_prompt`).
         - When only one half is on, returns a prompt that includes only that
-          half's instruction body and explicitly forbids the other half.
+          half's instruction body and explicitly forbids the other half; when
+          that half is the side-effect half (``side_on`` True, ``arch_on``
+          False), ``mutation_on`` still selects its body variant exactly as in
+          the both-halves-on case above.
 
     Raises:
         ValueError: If both ``arch_on`` and ``side_on`` are False.
@@ -518,6 +525,15 @@ def build_merged_architecture_side_effect_prompt(
 ) -> str:
     """Build the merged-pass system prompt for the halves that are actually enabled.
 
+    Args:
+        arch_on: True to include Part 1 (architecture-consistency /
+            cross-codebase-redundancy).
+        side_on: True to include Part 2 (side-effect / blast-radius impact).
+        mutation_on: Default True, mirroring ``CODE_REVIEW_MUTATION_ANALYSIS``'s
+            default-on behavior. Selects which side-effect body variant Part 2
+            uses when ``side_on`` is True; has no effect when ``side_on`` is
+            False.
+
     Preconditions:
         - At least one of ``arch_on`` / ``side_on`` is True.
 
@@ -532,6 +548,9 @@ def build_merged_architecture_side_effect_prompt(
           guard absolute); has no effect when ``side_on`` is False.
         - Always uses the dual-key output format so the merged pass parser stays
           unchanged.
+
+    Raises:
+        ValueError: If both ``arch_on`` and ``side_on`` are False.
     """
     if not arch_on and not side_on:
         raise ValueError("build_merged_architecture_side_effect_prompt requires arch_on or side_on")
