@@ -17,28 +17,8 @@ from temporalio.exceptions import ApplicationError
 import agent_platform.studio.temporal.dispatch as dispatch
 from agent_platform.studio.models import AgentDefinition, ConversationStateResponse
 from agent_platform.studio.registration import build_studio_agent_manifest
-from agent_platform.studio.service import AgentStudioService
 
-
-@pytest.fixture(autouse=True)
-def _forbid_temporal_execute(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CRUD must never start a workflow."""
-
-    def _boom(*_a, **_k):
-        raise AssertionError("direct path must not call execute_workflow_sync")
-
-    monkeypatch.setattr("shared.temporal.execute_workflow_sync", _boom, raising=False)
-    if hasattr(dispatch, "execute_workflow_sync"):
-        monkeypatch.setattr(dispatch, "execute_workflow_sync", _boom)
-
-
-@pytest.fixture()
-def service(monkeypatch: pytest.MonkeyPatch) -> Mock:
-    """Mock installed at the lazy-import seam ``_direct_service()`` uses."""
-    svc = Mock(spec=AgentStudioService)
-    monkeypatch.setattr("agent_platform.studio.runtime.get_studio_service", lambda: svc)
-    return svc
-
+pytestmark = pytest.mark.usefixtures("_forbid_temporal_execute")
 
 # ── start_conversation ──────────────────────────────────────────────────────────
 
