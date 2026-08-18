@@ -375,15 +375,27 @@ def classify_scope(
     workers = max(
         1, max_workers if max_workers is not None else min(_scope_parallelism(), len(batches))
     )
-    batch_results = parallel_map(
-        batches,
-        _classify_one_batch,
-        max_workers=workers,
-        skip_none=False,
-    )
-
-    verdicts: Dict[int, ScopeClassification] = {}
-    for result in batch_results:
-        if result:
-            verdicts.update(result)
-    return [verdicts.get(i, UNKNOWN) for i in range(n)]
+    # Guard the fan-out itself, not just each worker: _classify_one_batch already
+    # swallows its own exceptions, but a failure in parallel_map's orchestration
+    # (thread-pool creation, worker-propagation, a future behavior change) would
+    # otherwise escape and break the unconditional never-raises contract. Degrade
+    # to all-unknown so the caller can still fall back to the heuristic.
+    try:
+        batch_results = parallel_map(
+            batches,
+            _classify_one_batch,
+            max_workers=workers,
+            skip_none=False,
+        )
+        verdicts: Dict[int, ScopeClassification] = {}
+        for result in batch_results:
+            if result:
+                verdicts.update(result)
+        return [verdicts.get(i, UNKNOWN) for i in range(n)]
+    except Exception as exc:  # noqa: BLE001 — orchestration failure must never break the review
+        logger.warning(
+            "ScopeClassifier: parallel fan-out failed (%s: %s); returning all-unknown",
+            type(exc).__name__,
+            exc,
+        )
+        return [UNKNOWN] * n

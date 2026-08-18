@@ -283,6 +283,57 @@ def test_prompt_includes_task_and_file_context() -> None:
     assert "def f():" in prompt
 
 
+def test_batch_prompt_excludes_uncited_file_content() -> None:
+    """Precondition: ``input_data.files`` holds two files; findings cite each separately.
+
+    Postcondition: each per-file batch prompt inlines only its own cited file's
+    source — content from the other file never leaks into the batch, directly
+    validating batching by cited file.
+    """
+    captured: List[str] = []
+
+    def _responder(prompt: str) -> Dict[str, Any]:
+        captured.append(prompt)
+        return {"verdicts": [{"index": 0, "in_scope": True, "reason": "r"}]}
+
+    stub = _Stub(_responder)
+    input_data = CodeReviewInput(
+        files={"a.py": "AAA_UNIQUE_MARKER = 1\n", "b.py": "BBB_UNIQUE_MARKER = 2\n"},
+    )
+    classify_scope(
+        [_issue(file_path="a.py"), _issue(file_path="b.py")],
+        llm=stub,
+        input_data=input_data,
+    )
+    assert len(captured) == 2
+    a_prompt = next(p for p in captured if "AAA_UNIQUE_MARKER" in p)
+    b_prompt = next(p for p in captured if "BBB_UNIQUE_MARKER" in p)
+    assert "BBB_UNIQUE_MARKER" not in a_prompt  # b.py's source never leaks into a.py's batch
+    assert "AAA_UNIQUE_MARKER" not in b_prompt
+
+
+def test_parallel_map_failure_degrades_to_unknown(monkeypatch: Any) -> None:
+    """Precondition: ``parallel_map`` orchestration itself raises.
+
+    Postcondition: ``classify_scope`` degrades to all-unknown rather than
+    propagating, so the never-raises contract holds end-to-end and callers can
+    still fall back to the heuristic.
+    """
+    import code_review_agent.scope_classifier as sc
+
+    def _boom(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("thread-pool creation failed")
+
+    monkeypatch.setattr(sc, "parallel_map", _boom)
+
+    def _responder(_prompt: str) -> Dict[str, Any]:
+        return {"verdicts": [{"index": 0, "in_scope": True, "reason": "r"}]}
+
+    stub = _Stub(_responder)
+    out = classify_scope([_issue(file_path="a.py"), _issue(file_path="b.py")], llm=stub)
+    assert out == [UNKNOWN, UNKNOWN]
+
+
 # --------------------------------------------------------------------------- #
 # Pure-helper units
 # --------------------------------------------------------------------------- #

@@ -23,16 +23,18 @@ def is_unscripted_dummy(llm: Any) -> bool:
     Postconditions: ``True`` iff ``llm`` or ``llm.client`` is exactly
         ``DummyLLMClient`` (not a subclass used as a test stub), so the no-LLM
         harness short-circuits while scripted stubs still run the real path.
-        Pure; never raises — a caller object whose ``.client`` descriptor itself
-        raises (e.g. a ``@property`` raising ``ValueError``) degrades to
-        ``False`` rather than propagating.
+        Pure; **never raises unconditionally** — any failure (a misbehaving
+        ``.client`` descriptor, or the lazy ``DummyLLMClient`` import itself
+        failing) degrades to ``False`` rather than propagating. A ``False`` on a
+        failed import is safe: the object cannot be a ``DummyLLMClient`` the
+        importer couldn't even load.
     """
-    from llm_service.clients.dummy import DummyLLMClient
-
-    if type(llm) is DummyLLMClient:
-        return True
     try:
+        from llm_service.clients.dummy import DummyLLMClient
+
+        if type(llm) is DummyLLMClient:
+            return True
         inner = getattr(llm, "client", None)
-    except Exception:  # noqa: BLE001 — a misbehaving .client must not break the never-raises contract
+        return type(inner) is DummyLLMClient
+    except Exception:  # noqa: BLE001 — import / descriptor failure must not break the never-raises contract
         return False
-    return type(inner) is DummyLLMClient

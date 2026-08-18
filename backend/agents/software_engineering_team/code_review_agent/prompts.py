@@ -473,7 +473,7 @@ SCOPE_CLASSIFY_FORMATTING_INSTRUCTIONS = (
     "Reply with a single JSON object and nothing else, in exactly this shape:\n"
     '{"verdicts": [{"index": <int>, "in_scope": <true|false|"unknown">, '
     '"reason": "<one short sentence>"}]}\n'
-    "Include one entry per finding, using the finding's index. Set in_scope to "
-    "true for IN SCOPE and false for OUT OF SCOPE. If you truly cannot decide a "
-    'finding, omit it (or set its in_scope to "unknown").'
+    "Include exactly one entry per finding, using the finding's index. Set "
+    'in_scope to true for IN SCOPE, false for OUT OF SCOPE, and "unknown" when '
+    "you genuinely cannot decide. Do not omit entries."
 )
