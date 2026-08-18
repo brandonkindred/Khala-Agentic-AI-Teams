@@ -8,10 +8,9 @@ Provides:
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from strands import Agent
-from strands.multiagent.graph import GraphBuilder, GraphNode
 
 from branding_team.models import BrandPhase
 from shared.graph import OutputMode
@@ -140,41 +139,6 @@ def build_agent(
         description=description,
         agent_key=agent_key,
     )
-
-
-# ---------------------------------------------------------------------------
-# Fan-out/fan-in wiring
-# ---------------------------------------------------------------------------
-
-
-def build_fan_out_fan_in(
-    builder: GraphBuilder,
-    agents: list[tuple[str, Callable[[], Agent]]],
-    fan_in_node: GraphNode,
-) -> None:
-    """Wire a fan-out/fan-in topology onto *builder*.
-
-    For each ``(node_id, factory)`` pair in *agents*: builds the node via
-    ``factory()``, adds it to *builder*, wires an edge from it to
-    *fan_in_node*, and marks it as a graph entry point.
-
-    *fan_in_node* is any collector node already on *builder* — a regular
-    phase specialist (e.g. Phase 1's ``positioning_synthesizer``, Phase 3's
-    ``converge_decider``). No phase has a compositor node; this helper wires
-    plain fan-out/fan-in topology generically.
-
-    Preconditions:
-        *agents* is non-empty. *fan_in_node* is the ``GraphNode`` already
-        returned by ``builder.add_node(...)`` on the same *builder*.
-    Postconditions:
-        Every ``(node_id, factory)`` pair is added as a node on *builder*,
-        edged to *fan_in_node*, and registered as an entry point.
-    """
-    assert agents, "agents must be non-empty"
-    for node_id, factory in agents:
-        node = builder.add_node(factory(), node_id=node_id)
-        builder.add_edge(node, fan_in_node)
-        builder.set_entry_point(node_id)
 
 
 # ---------------------------------------------------------------------------
