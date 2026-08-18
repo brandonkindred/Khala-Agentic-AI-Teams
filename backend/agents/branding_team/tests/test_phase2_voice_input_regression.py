@@ -171,10 +171,16 @@ def test_voice_step_input_excludes_full_upstream_narrative_payload() -> None:
     # own dumped fragment, and a small fixed label overhead. A
     # cumulative-inheritance regression would instead add whole extra
     # fragments (171-648 chars each, per story/archetypes/tagline/messaging
-    # above) on top of that -- far bigger than the label-formatting margin
-    # allowed here.
-    persona_fragment_size = len(json.dumps(personas_stub, separators=(",", ":")))
-    # Observed overhead is ~78 chars; margin is well under the smallest excluded fragment (171).
-    label_formatting_margin = 150
-    expected_upper_bound = len(task) + persona_fragment_size + label_formatting_margin
+    # above) on top of that -- far bigger than the margin allowed here.
+    #
+    # ``json.dumps`` with its default (spaced) separators, not the compact
+    # ``separators=(",", ":")`` form, is used deliberately: it's a generous
+    # upper bound on however Strands actually serializes the predecessor
+    # fragment (compact or spaced), so this bound doesn't assume a specific
+    # wire format. Observed real overhead beyond task + this estimate is
+    # ~40 chars; the margin below is well under the smallest excluded
+    # fragment (171 chars), so a leaked fragment still fails this assertion.
+    persona_fragment_size = len(json.dumps(personas_stub))
+    formatting_margin = 150
+    expected_upper_bound = len(task) + persona_fragment_size + formatting_margin
     assert len(user_content) <= expected_upper_bound
