@@ -17,7 +17,20 @@ from .prompts import DOC_RUNBOOK_PROMPT
 
 
 class DocumentationRunbookAgent:
+    """Produce documentation/runbook artifacts and the devops completion package.
+
+    Invariants: instance state is limited to ``llm`` and the resolved Strands
+    ``_model``; ``run`` is stateless across calls.
+    """
+
     def __init__(self, llm_client: LLMClient) -> None:
+        """Resolve the devops-routed Strands model.
+
+        Preconditions: ``llm_client`` is not ``None`` (an ``LLMClient`` or a
+        Strands ``Model``).
+        Postconditions: ``self.llm`` is the passed client; ``self._model`` is
+        the resolved Strands model under ``agent_key="devops"``.
+        """
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
         self._model = resolve_strands_model(
