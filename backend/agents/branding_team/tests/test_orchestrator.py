@@ -91,6 +91,7 @@ from branding_team.models import (
     WritingGuidelinesOutput,
 )
 from branding_team.orchestrator import (
+    _PHASE_SPEC,
     _merge_phase3_fragments,
     _merge_phase4_fragments,
     _merge_phase5_fragments,
@@ -848,6 +849,16 @@ def test_extract_phase_output_uses_structured_output_when_present() -> None:
     assert isinstance(output, StrategicCoreOutput)
     assert output.positioning_statement == agent_result.structured_output.positioning_statement
     assert output.brand_promise == agent_result.structured_output.brand_promise
+
+
+def test_phase_spec_every_entry_declares_merge_fn() -> None:
+    """All five phases now merge their fan-out fragments in Python (Phases 1-2
+    always did; Phases 3-5 dropped their LLM compositors in stories 1a/1b/1c).
+    No entry may silently fall back to the single-agent extraction default —
+    guard the invariant so a future phase addition can't regress it."""
+    assert set(_PHASE_SPEC) == set(PHASE_ORDER)
+    for phase, spec in _PHASE_SPEC.items():
+        assert spec.merge_fn is not None, f"{phase} has no merge_fn"
 
 
 def _phase1_leaf_node(structured_output) -> MagicMock:
