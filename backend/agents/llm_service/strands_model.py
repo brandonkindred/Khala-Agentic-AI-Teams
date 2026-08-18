@@ -118,20 +118,26 @@ def model_fingerprint(model: Any) -> str:
         - Returns the first non-empty ``model_id``/``model_name``/``model``
           string attribute found on ``model`` (or, for a ``dict``-shaped
           ``.config``, the same three keys within it), else
-          ``type(model).__name__``. Never raises. The value is identity-only
-          — safe to hash into a cache key or log for display, never a
-          secret.
+          ``type(model).__name__``. Never raises — a raising descriptor/
+          property anywhere in the probe (an attribute access, ``isinstance``,
+          or ``dict.get``) falls back to the type name exactly like a missing
+          attribute would, rather than propagating. The value is
+          identity-only — safe to hash into a cache key or log for display,
+          never a secret.
     """
-    for attr in ("model_id", "model_name", "model"):
-        value = getattr(model, attr, None)
-        if isinstance(value, str) and value:
-            return value
-    config = getattr(model, "config", None)
-    if isinstance(config, dict):
-        for key in ("model_id", "model_name", "model"):
-            candidate = config.get(key)
-            if isinstance(candidate, str) and candidate:
-                return candidate
+    try:
+        for attr in ("model_id", "model_name", "model"):
+            value = getattr(model, attr, None)
+            if isinstance(value, str) and value:
+                return value
+        config = getattr(model, "config", None)
+        if isinstance(config, dict):
+            for key in ("model_id", "model_name", "model"):
+                candidate = config.get(key)
+                if isinstance(candidate, str) and candidate:
+                    return candidate
+    except Exception:
+        pass
     return type(model).__name__
 
 

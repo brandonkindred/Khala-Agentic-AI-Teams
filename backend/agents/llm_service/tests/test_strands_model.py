@@ -79,3 +79,26 @@ def test_model_fingerprint_ignores_non_dict_config() -> None:
 def test_model_fingerprint_falls_back_to_type_name() -> None:
     assert model_fingerprint(_Bare()) == "_Bare"
     assert model_fingerprint(object()) == "object"
+
+
+def test_model_fingerprint_survives_attribute_that_raises() -> None:
+    """A raising descriptor/property must fall back to the type name, not
+    propagate -- ``model_fingerprint`` promises 'Never raises'."""
+
+    class _Angry:
+        @property
+        def model_id(self) -> str:
+            raise RuntimeError("no touching")
+
+    assert model_fingerprint(_Angry()) == "_Angry"
+
+
+def test_model_fingerprint_survives_config_that_raises() -> None:
+    """A raising ``.config`` descriptor is swallowed the same way."""
+
+    class _AngryConfig:
+        @property
+        def config(self) -> dict:
+            raise RuntimeError("no touching")
+
+    assert model_fingerprint(_AngryConfig()) == "_AngryConfig"
