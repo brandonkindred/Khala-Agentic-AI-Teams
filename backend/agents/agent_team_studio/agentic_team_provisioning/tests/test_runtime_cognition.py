@@ -11,40 +11,12 @@ import pytest
 
 from agent_cognition.tools.channel import runtime_channel
 from agent_team_studio.agentic_team_provisioning.runtime import agent_builder
-
-
-class _FakeResult:
-    """Mimics a strands AgentResult: ``.message`` is a structured dict and the
-    text is only obtainable via ``str(result)`` (the SDK's content-join)."""
-
-    def __init__(self, text: str) -> None:
-        self.message = {"role": "assistant", "content": [{"text": text}]}
-        self._text = text
-
-    def __str__(self) -> str:
-        return self._text
-
-
-class _FakeStrandsAgent:
-    """Records the system prompt + tools it was built with; echoes a fixed reply."""
-
-    last_system_prompt: str | None = None
-    last_tools: object = None
-
-    def __init__(self, **kwargs) -> None:
-        type(self).last_system_prompt = kwargs.get("system_prompt")
-        type(self).last_tools = kwargs.get("tools")
-
-    def __call__(self, message: str) -> _FakeResult:
-        return _FakeResult("ok")
+from shared.agent_invoke.tests.fake_strands import patch_strands_agent
 
 
 @pytest.fixture
 def fake_strands(monkeypatch: pytest.MonkeyPatch):
-    _FakeStrandsAgent.last_system_prompt = None
-    _FakeStrandsAgent.last_tools = None
-    monkeypatch.setattr(agent_builder, "StrandsAgent", _FakeStrandsAgent)
-    return _FakeStrandsAgent
+    return patch_strands_agent(monkeypatch, agent_builder)
 
 
 _ADVISORY = {"text": "Never reveal secrets.", "mode": "advisory", "priority": 100}
