@@ -1528,8 +1528,11 @@ def _classify_review_scope(
         - Returns ``None`` — meaning "no verdicts; the caller falls back to
           its own heuristic for every finding" — when ``issues`` is empty,
           ``provider`` is ``None``, :data:`_SCOPE_LLM_PASS_ENV` is disabled
-          (``env_flag_enabled``, default-on), the provider call raises, or the
-          returned list's length does not match ``issues``.
+          (``env_flag_enabled``, default-on), the provider call raises, the
+          returned list's length does not match ``issues``, or any element of
+          it lacks an ``in_scope`` attribute (a structurally malformed
+          verdict must degrade exactly like an exception or a length
+          mismatch — never propagate an ``AttributeError`` to the caller).
         - Otherwise returns ``provider.classify_issue_scope(issues,
           changed_context, task_description)`` unchanged — a list positionally
           aligned 1:1 with ``issues``.
@@ -1544,6 +1547,9 @@ def _classify_review_scope(
             raise ValueError(
                 f"classify_issue_scope returned {got} verdicts for {len(issues)} issues"
             )
+        for idx, v in enumerate(verdicts):
+            if not hasattr(v, "in_scope"):
+                raise ValueError(f"verdict at index {idx} missing in_scope attribute")
         return verdicts
     except Exception as exc:  # noqa: BLE001 — must never break the review
         logger.warning(
@@ -1597,13 +1603,16 @@ def _partition_review_issues(
           :func:`_classify_review_scope` (the LLM classifier, gated behind
           :data:`_SCOPE_LLM_PASS_ENV`) when one was returned for that issue —
           except a decisive out-of-scope verdict is itself discarded (treated
-          as step (2) instead) when ``removed_by_path`` shows the issue's
-          cited file has any deleted lines, since the classifier never sees
-          deleted content and so cannot reliably rule such a finding
-          out-of-scope (mirrors ``scope_filter.apply_scope_verdicts``'s
-          identical distrust of an unconfident/ungrounded verdict on a file
-          with deletions — this pass's verdicts are never grounded, so the
-          distrust applies unconditionally rather than only when unconfident);
+          as step (2) instead) when
+          :func:`scope_filter._cited_file_has_deletions` (the same
+          ``_normalize_path``-based matcher :func:`is_within_diff` uses)
+          shows the issue's cited file has any deleted lines in
+          ``removed_by_path``, since the classifier never sees deleted
+          content and so cannot reliably rule such a finding out-of-scope
+          (mirrors ``scope_filter.apply_scope_verdicts``'s identical distrust
+          of an unconfident/ungrounded verdict on a file with deletions —
+          this pass's verdicts are never grounded, so the distrust applies
+          unconditionally rather than only when unconfident);
           (2) otherwise today's heuristic — ``not getattr(issue, "pre_existing",
           False)``; (3) regardless of (1)/(2), :func:`is_within_diff` against
           ``changed_by_path`` unconditionally forces in-scope when it proves
@@ -1684,6 +1693,10 @@ def _partition_review_issues(
     # could silently route one to a proposal and defeat the fail-closed
     # CODE_REVIEW_BLOCK_ON_UNREVIEWED gate (choose_event below only reacts to
     # partition.pr_issues).
+    from software_engineering_team.code_review_agent.scope_filter import (
+        _cited_file_has_deletions,
+    )
+
     classifiable = [i for i in output.issues if not _is_not_reviewed_coverage_finding(i)]
     raw_verdicts = _classify_review_scope(provider, classifiable, changed_context, task_description)
     verdicts_by_id = (
@@ -1695,12 +1708,15 @@ def _partition_review_issues(
     for i in output.issues:
         verdict = verdicts_by_id.get(id(i))
         in_scope = verdict.in_scope if verdict is not None else None
-        if in_scope is False and removed_by_path.get((getattr(i, "file_path", "") or "").strip()):
+        if in_scope is False and _cited_file_has_deletions(i, removed_by_path):
             # The classifier never sees deleted lines (its Protocol has no
             # removed_by_path input), so it cannot reliably rule a finding
             # out-of-scope when this file's diff includes deletions — distrust
             # a decisive negative verdict here, mirroring scope_filter's own
             # distrust of an unconfident/ungrounded verdict on such a file.
+            # _cited_file_has_deletions applies the same file-path matching
+            # is_within_diff uses (leading ./, leading /, unique-basename
+            # fallback), not just an exact/stripped match.
             in_scope = None
         if in_scope is None:
             in_scope = not getattr(i, "pre_existing", False)

@@ -5956,6 +5956,67 @@ class TestPartitionReviewIssuesScopeLlmPass:
         assert result.pr_issues == []
         assert result.preexisting_issues == [issue]
 
+    def test_classifier_malformed_verdict_falls_back_to_heuristic_for_all_findings(
+        self,
+    ) -> None:
+        """A verdict list of the right length but containing a structurally
+        malformed element (no in_scope attribute) must degrade exactly like an
+        exception or a length mismatch -- never let an AttributeError escape
+        _partition_review_issues and break the whole review."""
+        from software_engineering_team.api import pr_review
+
+        tagged = _FakeReviewIssue("medium", line=1, file_path="a.py", pre_existing=True)
+        untagged = _FakeReviewIssue("low", line=1, file_path="b.py", pre_existing=False)
+        output = _FakeOutput(issues=[tagged, untagged])
+        # Right length (2), but neither element carries an in_scope attribute.
+        provider = _FakeScopeProvider([object(), object()])
+
+        result = pr_review._partition_review_issues(
+            output,
+            _ScopeLlmFakeGitHubClient(),
+            "o",
+            "r",
+            7,
+            {"a.py": [], "b.py": []},
+            {"a.py": [], "b.py": []},
+            provider=provider,
+        )
+        # Matches exactly what the tag-only heuristic (provider=None) would do.
+        assert result.pr_issues == [untagged]
+        assert result.preexisting_issues == [tagged]
+
+    def test_deletion_guard_normalizes_file_path_like_is_within_diff(self) -> None:
+        """The deletion-file guard reuses scope_filter's _cited_file_has_deletions,
+        which matches file paths the same way is_within_diff does (leading './',
+        leading '/', unique-basename fallback) -- not a bare exact/stripped
+        match -- so it still fires when the finding's file_path and
+        removed_by_path's key differ only by a leading './'."""
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.code_review_agent.scope_classifier import (
+            ScopeClassification,
+        )
+
+        issue = _FakeReviewIssue("medium", line=1, file_path="./a.py", pre_existing=False)
+        output = _FakeOutput(issues=[issue])
+        provider = _FakeScopeProvider(
+            [ScopeClassification(in_scope=False, reason="looks pre-existing")]
+        )
+
+        result = pr_review._partition_review_issues(
+            output,
+            _ScopeLlmFakeGitHubClient(),
+            "o",
+            "r",
+            7,
+            {"a.py": []},
+            {"a.py": []},
+            provider=provider,
+            removed_by_path={"a.py": [10, 11]},  # keyed without the leading "./"
+        )
+        # Verdict distrusted despite the leading "./" mismatch -> tag heuristic wins.
+        assert result.pr_issues == [issue]
+        assert result.preexisting_issues == []
+
     def test_scope_llm_pass_disabled_skips_classifier(self, monkeypatch) -> None:
         from software_engineering_team.api import pr_review
         from software_engineering_team.code_review_agent.scope_classifier import (
