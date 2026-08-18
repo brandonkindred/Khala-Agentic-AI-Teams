@@ -1,8 +1,7 @@
-import { Component, inject, Input, OnInit, OnDestroy } from '@angular/core';
+import { Component, DestroyRef, inject, Input, OnInit } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, RouterLink } from '@angular/router';
-import { Subscription, timer, EMPTY } from 'rxjs';
-import { switchMap } from 'rxjs/operators';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTabsModule } from '@angular/material/tabs';
@@ -11,6 +10,7 @@ import { MatExpansionModule } from '@angular/material/expansion';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { PersonaTestingApiService } from '../../../services/persona-testing-api.service';
 import { PersonaChatComponent } from '../persona-chat/persona-chat.component';
+import { pollWhile } from '../../../shared/poll-while';
 import { isPersonaRunTerminal } from '../../../models';
 import type { PersonaTestRunDetail, PersonaDecision, RunArtifacts } from '../../../models';
 
@@ -33,10 +33,10 @@ const POLL_MS = 10_000;
   templateUrl: './persona-test-audit-panel.component.html',
   styleUrl: './persona-test-audit-panel.component.scss',
 })
-export class PersonaTestAuditPanelComponent implements OnInit, OnDestroy {
+export class PersonaTestAuditPanelComponent implements OnInit {
   private readonly api = inject(PersonaTestingApiService);
   private readonly route = inject(ActivatedRoute);
-  private statusSub: Subscription | null = null;
+  private readonly destroyRef = inject(DestroyRef);
 
   /**
    * Router path for the header back control.
@@ -44,7 +44,7 @@ export class PersonaTestAuditPanelComponent implements OnInit, OnDestroy {
    * Preconditions: a non-empty absolute-from-root path (leading `/`).
    * Postconditions: the template's back `routerLink` equals this value.
    */
-  @Input() backLink = '/persona-testing';
+  @Input() backLink = '/agent-studio';
 
   /**
    * Visible label for the header back control.
@@ -52,7 +52,7 @@ export class PersonaTestAuditPanelComponent implements OnInit, OnDestroy {
    * Preconditions: a non-empty string.
    * Postconditions: the template renders this text next to the back icon.
    */
-  @Input() backLabel = 'Back to Testing Personas';
+  @Input() backLabel = 'Back to Agent Studio';
 
   runId = '';
   run: PersonaTestRunDetail | null = null;
@@ -68,15 +68,12 @@ export class PersonaTestAuditPanelComponent implements OnInit, OnDestroy {
       return;
     }
 
-    this.statusSub = timer(0, POLL_MS)
-      .pipe(
-        switchMap(() => {
-          if (this.run && isPersonaRunTerminal(this.run.status)) {
-            return EMPTY;
-          }
-          return this.api.getRunStatus(this.runId);
-        }),
-      )
+    pollWhile(
+      () => this.api.getRunStatus(this.runId),
+      (detail) => isPersonaRunTerminal(detail.status),
+      { intervalMs: POLL_MS, onError: 'stop' },
+    )
+      .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (detail) => {
           this.run = detail;
@@ -92,10 +89,6 @@ export class PersonaTestAuditPanelComponent implements OnInit, OnDestroy {
       });
 
     this.loadArtifacts();
-  }
-
-  ngOnDestroy(): void {
-    this.statusSub?.unsubscribe();
   }
 
   private loadArtifacts(): void {

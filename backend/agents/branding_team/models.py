@@ -25,15 +25,17 @@ subclass enforces constraints at the type level regardless of how it is
 instantiated. ``isinstance(CoreValueOutput(...), CoreValue)`` holds because
 the generated class is a real subclass of the soft base.
 
-This pattern does not apply to the Phase 2 cumulative-inheritance chain
-(``BrandStoryOutput`` → … → ``WritingGuidelinesOutput``) or to the remaining
-hand-written sibling pair that was never collapsed (``ChannelGuideline`` /
-``ChannelGuidelineOutput``). ``BrandDiscoveryAudit``, ``MoodBoardConcept``,
-``CreativeRefinementDecision``, and ``DesignSystemDefinition`` were each
-fully collapsed to a single model (used both as their agent's
-``structured_output`` and as the corresponding phase output's
-``default_factory`` merge target) rather than split into this soft/strict
-pair, since a no-argument-constructible default is needed either way.
+This pattern does not apply to the remaining hand-written sibling pair that
+was never collapsed (``ChannelGuideline`` / ``ChannelGuidelineOutput``).
+``BrandDiscoveryAudit``, ``MoodBoardConcept``, ``CreativeRefinementDecision``,
+and ``DesignSystemDefinition`` were each fully collapsed to a single model
+(used both as their agent's ``structured_output`` and as the corresponding
+phase output's ``default_factory`` merge target) rather than split into this
+soft/strict pair, since a no-argument-constructible default is needed either
+way. The Phase 2 specialist models (``BrandStoryOutput`` … ``WritingGuidelinesOutput``)
+used to be a cumulative-inheritance chain, exempted from this pattern; Story
+5b Step 1 flattened them into six independent own-field models instead — see
+each class's docstring.
 """
 
 from __future__ import annotations
@@ -754,13 +756,15 @@ class BrandStoryOutput(BaseModel):
     )
 
 
-class BrandArchetypesOutput(BrandStoryOutput):
-    """Story carry-forward plus brand archetypes.
+class BrandArchetypesOutput(BaseModel):
+    """Agent-facing brand archetypes schema.
 
-    Inherits the Storyteller fields so a linear Graph predecessor's
-    ``structured_output`` already exposes the brand story to TaglineWriter
-    (Strands Graph node inputs only include direct dependency results, and
-    multi-in edges use OR-ready semantics so cumulative fan-in is unsafe).
+    Own-field-only Phase 2 specialist model (Story 5b Step 1): contains only
+    ArchetypeAnalyst's field. The chain that used to carry Storyteller's
+    fields forward via subclassing is gone — Storyteller's output reaches
+    ``NarrativeMessagingOutput`` exclusively through the orchestrator's flat
+    union-merge of all six Phase 2 node fragments (``_merge_phase2_fragments``
+    in ``orchestrator.py``), not through subclassing.
     Uses ``BrandArchetypeOutput`` (not the soft ``BrandArchetype``) so each
     archetype's fields are individually required — a blank archetype must
     fail validation instead of silently passing.
@@ -771,9 +775,12 @@ class BrandArchetypesOutput(BrandStoryOutput):
     )
 
 
-class TaglineOutput(BrandArchetypesOutput):
-    """Prior narrative carry-forward plus tagline / elevator pitches.
+class TaglineOutput(BaseModel):
+    """Agent-facing tagline / elevator pitches schema.
 
+    Own-field-only Phase 2 specialist model (Story 5b Step 1): contains only
+    TaglineWriter's fields — see ``BrandArchetypesOutput`` for why upstream
+    fields are no longer inherited.
     Uses ``ElevatorPitchOutput`` (not the soft ``ElevatorPitch``) so each of
     the ``ELEVATOR_PITCHES_COUNT`` pitch tiers is individually required — a
     blank tier or blank pitch must fail validation instead of silently passing.
@@ -786,9 +793,12 @@ class TaglineOutput(BrandArchetypesOutput):
     )
 
 
-class MessagingFrameworkOutput(TaglineOutput):
-    """Prior narrative carry-forward plus messaging framework / audience maps.
+class MessagingFrameworkOutput(BaseModel):
+    """Agent-facing messaging framework / audience maps schema.
 
+    Own-field-only Phase 2 specialist model (Story 5b Step 1): contains only
+    MessageMapper's fields — see ``BrandArchetypesOutput`` for why upstream
+    fields are no longer inherited.
     Uses ``MessagingPillarOutput``/``AudienceMessageMapOutput`` (not the soft
     ``MessagingPillar``/``AudienceMessageMap``) so each nested item's fields
     are individually required — a blank pillar or audience segment must fail
@@ -801,9 +811,12 @@ class MessagingFrameworkOutput(TaglineOutput):
     audience_message_maps: List[AudienceMessageMapOutput] = Field(min_length=1)
 
 
-class PersonaProfilesOutput(MessagingFrameworkOutput):
-    """Prior narrative carry-forward plus persona profiles.
+class PersonaProfilesOutput(BaseModel):
+    """Agent-facing persona profiles schema.
 
+    Own-field-only Phase 2 specialist model (Story 5b Step 1): contains only
+    PersonaBuilder's field — see ``BrandArchetypesOutput`` for why upstream
+    fields are no longer inherited.
     Uses ``PersonaProfileOutput`` (not the soft ``PersonaProfile``) so each
     persona's fields are individually required — a blank-name persona must
     fail validation instead of silently producing empty output.
@@ -838,18 +851,20 @@ class WritingGuidelinesBody(BaseModel):
     )
 
 
-class WritingGuidelinesOutput(PersonaProfilesOutput):
-    """Full Phase 2 carry-forward plus nested writing guidelines.
+class WritingGuidelinesOutput(BaseModel):
+    """Agent-facing nested writing guidelines schema.
 
-    VoicePrinciplesDrafter is last in the linear Graph, so its payload must
-    include every upstream fragment plus ``writing_guidelines`` in the shape
-    ``NarrativeMessagingOutput`` expects (no nest-under remap needed).
+    Own-field-only Phase 2 specialist model (Story 5b Step 1): contains only
+    VoicePrinciplesDrafter's field (nested ``writing_guidelines``) — see
+    ``BrandArchetypesOutput`` for why upstream fields are no longer inherited.
+    VoicePrinciplesDrafter's position as last node in the linear Graph no
+    longer matters for schema shape now that the orchestrator merges all six
+    node fragments directly rather than only reading the last node's payload.
 
-    Not a twin of ``WritingGuidelines`` despite the similar name — this class
-    inherits ten fields from ``PersonaProfilesOutput``'s cumulative carry-forward
-    chain on top of its own nested ``writing_guidelines`` field, a different
-    shape and purpose than the flat merge-target ``WritingGuidelines``. Story 3b
-    Step 1 finding: not comparable, not safe to collapse.
+    Not a twin of ``WritingGuidelines`` despite the similar name — this
+    class's one field is nested (``WritingGuidelinesBody``), a different
+    shape and purpose than the flat merge-target ``WritingGuidelines``. Story
+    3b Step 1 finding: not comparable, not safe to collapse.
     """
 
     writing_guidelines: WritingGuidelinesBody
@@ -990,8 +1005,6 @@ class VisualIdentityOutput(BaseModel):
     photography_direction: str = ""
     video_direction: str = ""
     motion_principles: List[str] = Field(default_factory=list)
-    data_visualization_style: str = ""
-    digital_adaptations: List[str] = Field(default_factory=list)
     voice_tone_spectrum: List[VoiceToneEntry] = Field(default_factory=list)
     language_dos: List[str] = Field(default_factory=list)
     language_donts: List[str] = Field(default_factory=list)
@@ -1733,6 +1746,13 @@ class VoiceToneOutput(BaseModel):
     ``language_dos``/``language_donts`` cardinalities are single-sourced from
     ``LANGUAGE_DOS_*`` / ``LANGUAGE_DONTS_*`` (the same constants the prompt
     interpolates).
+
+    ``voice_tone_spectrum``'s "2-3 examples" phrase is prompt guidance only,
+    not a single-sourced constraint: unlike the fields above, no
+    ``Field(min_length=2, max_length=3)`` backs it — the per-entry
+    ``VoiceToneEntryOutput.examples`` list only requires ``min_length=1``
+    (non-blank). There is no drift to fix; this is an intentional exception
+    to the single-sourcing pattern documented at the top of this file.
     """
 
     voice_tone_spectrum: List[VoiceToneEntryOutput] = Field(

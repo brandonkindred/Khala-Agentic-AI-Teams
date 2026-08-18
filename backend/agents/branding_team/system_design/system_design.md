@@ -21,7 +21,7 @@ backend/agents/branding_team/
 │   ├── job_store.py          # Team's JobServiceClient singleton + guarded RUNNING/COMPLETED/FAILED transition helpers
 │   ├── json_recovery.py      # recover_json_object — tolerant JSON recovery; wired into orchestrator.py + assistant/agent.py
 │   ├── memoization.py        # phase_input_hash — deterministic per-phase input hash; wired into orchestrator.run(phase_cache=...)
-│   └── phase_output_cache.py # PhaseOutputCache — in-memory phase-output cache; wired into orchestrator.run(phase_cache=...)
+│   └── phase_output_cache.py # PhaseOutputCache — shared.cache-backed phase-output cache; wired into orchestrator.run(phase_cache=...)
 ├── api/
 │   ├── main.py              # FastAPI app-assembly hub + re-exports
 │   ├── models.py            # Request/response models
@@ -330,29 +330,39 @@ equal-but-distinct instances and different `upstream_outputs` insertion
 order) always hash identically; any changed mission field, changed
 upstream output field, or added/removed upstream entry changes the
 digest. `phase` must be one of the five runnable phases in
-`graphs/shared.py:145-151` (`PHASE_ORDER`); `BrandPhase.COMPLETE` raises
+`graphs/shared.py:184-190` (`PHASE_ORDER`); `BrandPhase.COMPLETE` raises
 `ValueError`.
 
 ### PhaseOutputCache
 
-`shared/phase_output_cache.py:23` — a dict-backed cache holding at most
-one `(input_hash, output)` entry per `BrandPhase`. `get(phase,
-input_hash)` returns the stored output only when an entry exists for
-`phase` and its stored hash matches `input_hash` (a hit); otherwise it
-returns `None` (a miss), never raising for a mismatched hash. `put(phase,
-input_hash, output)` replaces any existing entry for `phase`. Like
-`phase_input_hash`, both methods reject `BrandPhase.COMPLETE` with
-`ValueError`. The cache performs no LLM or I/O side effects — state lives
-only in the instance's lifetime.
+`shared/phase_output_cache.py` — a thin wrapper over
+`shared.cache.get_shared_cache("branding:phase:v1")` (Redis when
+configured, else in-process memory; see `backend/shared/cache/`), keyed by
+`f"{phase.value}:{input_hash}"`. `get(phase, input_hash)` deserializes and
+returns the stored output when a live entry exists for that exact `(phase,
+input_hash)` pair (a hit); otherwise it returns `None` (a miss) — including
+when a stored entry's bytes fail to deserialize, which evicts the corrupt
+entry and is treated as a miss rather than raising. `put(phase, input_hash,
+output)` serializes `output` via `model_dump_json()` and stores it, bounded
+by the shared backend's LRU (`max_entries=64`). Because keys are
+content-addressed, a `put` under a new hash does not evict the same
+phase's entry under a different (e.g. stale) hash — both remain
+independently addressable until the LRU or `clear_phase_output_cache()`
+drops them. Like `phase_input_hash`, both `get`/`put` reject
+`BrandPhase.COMPLETE` with `ValueError`. Storage is a process-wide
+singleton per namespace (shared by every `PhaseOutputCache` instance in
+the process, not private per instance); the cache performs no LLM side
+effects, and every `shared.cache` operation is fail-open (a backend outage
+degrades to a miss/no-op, never an exception).
 
 ### Wiring status
 
 `orchestrator.py` is wired: `run()` accepts an optional `phase_cache:
-PhaseOutputCache` (`orchestrator.py:568`). When it's `None` (the default),
+PhaseOutputCache` (`orchestrator.py:616`). When it's `None` (the default),
 `run()` is unchanged — one monolithic `build_branding_graph` invocation
 covering every phase up to `target_phase`, exactly as before this
 parameter existed. When a `phase_cache` is supplied, `run()` instead calls
-`_run_phases_with_cache()` (`orchestrator.py:681`), which walks
+`_run_phases_with_cache()` (`orchestrator.py:746`), which walks
 `PHASE_ORDER` one phase at a time: for each phase it computes
 `phase_input_hash(phase, mission, upstream_outputs)` from the mission and
 every upstream output produced so far *this call* (cache hits or fresh
@@ -366,18 +376,26 @@ each phase's hash always reflects the upstream outputs actually used this
 call, a changed upstream phase naturally invalidates every downstream
 phase's cached entry without any separate invalidation step.
 
-The conversation layer (`api/conversation.py`,
-`api/routes/conversations.py`, `assistant/agent.py`, `assistant/store.py`,
-`assistant/prompts.py`) remains unwired — no caller yet constructs or
-threads a `PhaseOutputCache` through a session (that's Story 2c).
-`tests/test_memoization_isolation.py` still enforces this structurally for
-those five files (it no longer guards `orchestrator.py`, which is
-deliberately wired) — it parses each file's source with `ast` and fails if
-either symbol appears, so a future change that wires the cache into the
-conversation layer must update this test deliberately rather than regress
+`api/conversation.py` holds a storage slot but does not yet consume it:
+`_get_or_create_phase_cache()` returns a `PhaseOutputCache` retained
+per-conversation (in-memory only, keyed by `conversation_id`, created empty
+on a fresh conversation and returned unchanged on later turns) from both
+`_create_branding_conversation_impl` and `_send_branding_conversation_message_impl`
+(Story 2c Step 1), but no call site threads that cache into `orchestrator.run`
+yet — a mission edit still recomputes every phase. The rest of the
+conversation layer (`api/routes/conversations.py`, `assistant/agent.py`,
+`assistant/store.py`, `assistant/prompts.py`) remains fully unwired — no
+caller there constructs or references a `PhaseOutputCache` at all.
+`tests/test_memoization_isolation.py` enforces the fully-unwired boundary
+structurally for those four files (it no longer guards `orchestrator.py`,
+which is deliberately wired, or `api/conversation.py`, which deliberately
+holds the storage slot) — it parses each file's source with `ast` and fails
+if either symbol appears, so a future change that wires the cache into any
+of those four modules must update this test deliberately rather than regress
 it silently. Recomputing only from the *earliest* changed phase (skipping
-graph-build work for untouched trailing phases) and persisting a
-`phase_cache` across interactive re-runs are separate, later steps of
+graph-build work for untouched trailing phases) and passing the
+`api/conversation.py` cache into `orchestrator.run` across interactive
+re-runs are separate, later steps of
 Story 2b/2c — this step only establishes the per-phase hit/miss check.
 
 ## LLM integration

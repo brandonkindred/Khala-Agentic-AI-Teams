@@ -419,13 +419,25 @@ class TestDevOpsPipelineDebugPatchLoop:
     debug output, and convergence when a patch resolves the execution failure.
     """
 
-    def test_loop_terminates_after_max_iterations(self) -> None:
+    def test_loop_terminates_after_max_iterations(self, monkeypatch: Any) -> None:
         """Always-failing execution runs exactly MAX_INFRA_FIX_ITERATIONS debug attempts.
 
         Also spot-checks Phase 4.6 status details contain
         ``iteration {i}/{MAX_INFRA_FIX_ITERATIONS}`` for each attempt
         (i from 1 through ``MAX_INFRA_FIX_ITERATIONS``).
+
+        Disables InfraDebugAgent/InfraPatchAgent's LLM-response caches: this
+        test's scripted mocks return byte-identical debug/patch input from
+        one iteration onward (the always-failing exec tool and the patch
+        agent's fixed canned output never change), so a real cache would
+        correctly serve later iterations from cache -- a scripted-client
+        artifact this test isn't exercising, and one that would desync the
+        exact ``_ScriptedClient`` response count this test asserts on.
         """
+        monkeypatch.setenv("DEVOPS_INFRA_DEBUG_CACHE_SIZE", "0")
+        monkeypatch.setenv("DEVOPS_INFRA_PATCH_CACHE_SIZE", "0")
+
+        from software_engineering_team.devops_team.models import DevOpsTaskSpec
         from software_engineering_team.devops_team.orchestrator import (
             MAX_INFRA_FIX_ITERATIONS,
             DevOpsTeamLeadAgent,
@@ -511,8 +523,6 @@ class TestDevOpsPipelineDebugPatchLoop:
                 phase46_details.append(detail)
 
         agent._status_callback = capture_status  # type: ignore[assignment]
-
-        from software_engineering_team.devops_team.models import DevOpsTaskSpec
 
         spec = DevOpsTaskSpec(
             task_id="t1",

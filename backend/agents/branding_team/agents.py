@@ -303,11 +303,10 @@ def make_storyteller() -> Agent:
 
 _ARCHETYPE_ANALYST_PROMPT = AgentPromptSpec(
     opening=(
-        "You are a Brand Archetype Analyst. Review the brand story from Inputs from previous "
-        f"nodes and the strategic core, then select {BRAND_ARCHETYPES_MIN}-{BRAND_ARCHETYPES_MAX} "
-        "brand archetypes (e.g. The Sage, The "
-        "Creator, The Explorer). Carry forward brand_story, hero_narrative, and "
-        "boilerplate_variants unchanged, and add:"
+        "You are a Brand Archetype Analyst. Using the brand story from Inputs from previous "
+        f"nodes and the strategic core as read-only context, select {BRAND_ARCHETYPES_MIN}-"
+        f"{BRAND_ARCHETYPES_MAX} brand archetypes (e.g. The Sage, The Creator, The Explorer) "
+        "that fit the narrative, and add:"
     ),
     fields=(
         PromptFieldSpec(
@@ -326,9 +325,10 @@ def make_archetype_analyst() -> Agent:
         Returns an ``Agent`` named ``ArchetypeAnalyst`` whose structured
         output is a ``BrandArchetypesOutput`` selecting brand archetypes
         (count bounded by ``BRAND_ARCHETYPES_MIN``/``BRAND_ARCHETYPES_MAX``)
-        with rationale and personality traits, carrying
-        forward the prior narrative fields unchanged. The agent is
-        routed through the ``branding_narrative_messaging`` agent_key tier.
+        with rationale and personality traits — its own field only, the
+        Storyteller fragment is merged in separately by the orchestrator.
+        The agent is routed through the ``branding_narrative_messaging``
+        agent_key tier.
     """
     return build_agent(
         name="ArchetypeAnalyst",
@@ -341,8 +341,8 @@ def make_archetype_analyst() -> Agent:
 
 _TAGLINE_WRITER_PROMPT = AgentPromptSpec(
     opening=(
-        "You are a Tagline Writer. Using Inputs from previous nodes (brand story, archetypes) "
-        "and the strategic core, carry forward every prior narrative field unchanged and add:"
+        "You are a Tagline Writer. Using the brand story and archetypes from Inputs from "
+        "previous nodes and the strategic core as read-only context, add:"
     ),
     fields=(
         PromptFieldSpec("tagline", "a memorable brand tagline (max 8 words)"),
@@ -361,8 +361,9 @@ def make_tagline_writer() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``TaglineWriter`` whose structured
-        output is a ``TaglineOutput`` adding a tagline, tagline
-        rationale, and elevator pitches to the prior narrative fields.
+        output is a ``TaglineOutput`` containing a tagline, tagline
+        rationale, and elevator pitches — its own fields only, merged
+        with the other five specialists' fragments by the orchestrator.
         The agent is routed through the ``branding_narrative_messaging``
         agent_key tier.
     """
@@ -378,7 +379,7 @@ def make_tagline_writer() -> Agent:
 _MESSAGE_MAPPER_PROMPT = AgentPromptSpec(
     opening=(
         "You are a Message Mapper. Using all prior narrative fields from Inputs from previous "
-        "nodes, carry them forward unchanged and add:"
+        "nodes as read-only context, add:"
     ),
     fields=(
         PromptFieldSpec(
@@ -400,9 +401,10 @@ def make_message_mapper() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``MessageMapper`` whose structured
-        output is a ``MessagingFrameworkOutput`` adding a messaging
-        framework and per-segment audience message maps to the prior
-        narrative fields. The agent is routed through the
+        output is a ``MessagingFrameworkOutput`` containing a messaging
+        framework and per-segment audience message maps — its own fields
+        only, merged with the other five specialists' fragments by the
+        orchestrator. The agent is routed through the
         ``branding_narrative_messaging`` agent_key tier.
     """
     return build_agent(
@@ -417,7 +419,7 @@ def make_message_mapper() -> Agent:
 _PERSONA_BUILDER_PROMPT = AgentPromptSpec(
     opening=(
         "You are a Persona Builder. Using audience segments and all prior narrative fields "
-        "from Inputs from previous nodes, carry those fields forward unchanged and create:"
+        "from Inputs from previous nodes as read-only context, create:"
     ),
     fields=(
         PromptFieldSpec(
@@ -435,9 +437,10 @@ def make_persona_builder() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``PersonaBuilder`` whose structured
-        output is a ``PersonaProfilesOutput`` adding persona profiles (count
-        bounded by ``PERSONA_PROFILES_MIN``/``PERSONA_PROFILES_MAX``) to the
-        prior narrative fields. The agent is routed through the
+        output is a ``PersonaProfilesOutput`` containing persona profiles
+        (count bounded by ``PERSONA_PROFILES_MIN``/``PERSONA_PROFILES_MAX``)
+        — its own field only, merged with the other five specialists'
+        fragments by the orchestrator. The agent is routed through the
         ``branding_narrative_messaging`` agent_key tier.
     """
     return build_agent(
@@ -452,8 +455,8 @@ def make_persona_builder() -> Agent:
 _VOICE_PRINCIPLES_DRAFTER_PROMPT = AgentPromptSpec(
     opening=(
         "You are a Voice Principles Drafter. Using all prior narrative fields from Inputs from "
-        "previous nodes and the mission's desired_voice, carry the prior fields forward "
-        "unchanged and produce writing_guidelines:"
+        "previous nodes and the mission's desired_voice as read-only context, produce "
+        "writing_guidelines:"
     ),
     fields=(
         PromptFieldSpec(
@@ -478,11 +481,11 @@ def make_voice_principles_drafter() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``VoicePrinciplesDrafter`` whose
-        structured output is a ``WritingGuidelinesOutput`` adding voice
-        principles, style dos/don'ts, and an editorial quality bar to the
-        prior narrative fields — the final step in narrative development.
-        The agent is routed through the ``branding_narrative_messaging``
-        agent_key tier.
+        structured output is a ``WritingGuidelinesOutput`` containing voice
+        principles, style dos/don'ts, and an editorial quality bar — its own
+        field only, merged with the other five specialists' fragments by the
+        orchestrator. The final step in narrative development. The agent is
+        routed through the ``branding_narrative_messaging`` agent_key tier.
     """
     return build_agent(
         name="VoicePrinciplesDrafter",
@@ -859,13 +862,12 @@ def _make_channel_guide(
         routed through the ``branding_channel_activation`` agent_key
         tier.
     """
-    assert isinstance(channel, str) and channel.strip(), "channel must be a non-empty string"
-    assert isinstance(description, str) and description.strip(), (
-        "description must be a non-empty string"
-    )
-    assert isinstance(structured_output, type) and issubclass(structured_output, BaseModel), (
-        "structured_output must be a Pydantic BaseModel subclass"
-    )
+    if not isinstance(channel, str) or not channel.strip():
+        raise ValueError("channel must be a non-empty string")
+    if not isinstance(description, str) or not description.strip():
+        raise ValueError("description must be a non-empty string")
+    if not (isinstance(structured_output, type) and issubclass(structured_output, BaseModel)):
+        raise ValueError("structured_output must be a Pydantic BaseModel subclass")
     return build_agent(
         name=f"{channel}_guide",
         description=f"Defines brand guidelines for the {channel} channel.",

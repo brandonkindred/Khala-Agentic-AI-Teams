@@ -91,6 +91,7 @@ from branding_team.models import (
     WritingGuidelinesOutput,
 )
 from branding_team.orchestrator import (
+    _PHASE_SPEC,
     _merge_phase3_fragments,
     _merge_phase4_fragments,
     _merge_phase5_fragments,
@@ -571,6 +572,31 @@ def test_run_phase_stops_at_strategic_core() -> None:
     assert result.status == WorkflowStatus.NEEDS_HUMAN_DECISION
 
 
+def test_run_phase_forwards_phase_cache_to_run() -> None:
+    """``run_phase`` must forward ``phase_cache`` to ``run`` so a cache hit
+    is honored instead of always invoking the phase (#6671)."""
+    mission = make_mission()
+    cached_output = _full_strategic_core()
+    cache = PhaseOutputCache()
+    cache.put(
+        BrandPhase.STRATEGIC_CORE,
+        phase_input_hash(BrandPhase.STRATEGIC_CORE, mission, {}),
+        cached_output,
+    )
+    orchestrator = BrandingTeamOrchestrator()
+
+    with patch.object(orchestrator, "run_single_phase") as mock_run_single_phase:
+        result = orchestrator.run_phase(
+            mission=mission,
+            phase=BrandPhase.STRATEGIC_CORE,
+            human_review=HumanReview(approved=False),
+            phase_cache=cache,
+        )
+
+    mock_run_single_phase.assert_not_called()
+    assert result.strategic_core == cached_output
+
+
 def test_approved_partial_run_is_not_rollout_ready() -> None:
     """Approved intermediate phases must not be marked READY_FOR_ROLLOUT."""
     phase_sets = {
@@ -850,6 +876,16 @@ def test_extract_phase_output_uses_structured_output_when_present() -> None:
     assert output.brand_promise == agent_result.structured_output.brand_promise
 
 
+def test_phase_spec_every_entry_declares_merge_fn() -> None:
+    """All five phases now merge their fan-out fragments in Python (Phases 1-2
+    always did; Phases 3-5 dropped their LLM compositors in stories 1a/1b/1c).
+    No entry may silently fall back to the single-agent extraction default —
+    guard the invariant so a future phase addition can't regress it."""
+    assert set(_PHASE_SPEC) == set(PHASE_ORDER)
+    for phase, spec in _PHASE_SPEC.items():
+        assert spec.merge_fn is not None, f"{phase} has no merge_fn"
+
+
 def _phase1_leaf_node(structured_output) -> MagicMock:
     """A mock NodeResult for a single fan-out/fan-in leaf agent.
 
@@ -1046,14 +1082,6 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
     ]
     voice_leaf = _phase1_leaf_node(
         WritingGuidelinesOutput(
-            **_story,
-            brand_archetypes=_archetypes,
-            tagline="Ship brand with the product",
-            tagline_rationale="Ties cohesion to shipping speed.",
-            elevator_pitches=_pitches,
-            messaging_framework=_pillars,
-            audience_message_maps=_maps,
-            persona_profiles=_personas,
             writing_guidelines=WritingGuidelinesBody(
                 voice_principles=["Confident", "Human", "Concrete"],
                 style_dos=["Lead with outcome", "Use active voice", "Name the audience"],
@@ -1064,13 +1092,9 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
     )
     nested_results = {
         "Storyteller": _phase1_leaf_node(BrandStoryOutput(**_story)),
-        "ArchetypeAnalyst": _phase1_leaf_node(
-            BrandArchetypesOutput(**_story, brand_archetypes=_archetypes)
-        ),
+        "ArchetypeAnalyst": _phase1_leaf_node(BrandArchetypesOutput(brand_archetypes=_archetypes)),
         "TaglineWriter": _phase1_leaf_node(
             TaglineOutput(
-                **_story,
-                brand_archetypes=_archetypes,
                 tagline="Ship brand with the product",
                 tagline_rationale="Ties cohesion to shipping speed.",
                 elevator_pitches=_pitches,
@@ -1078,27 +1102,11 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
         ),
         "MessageMapper": _phase1_leaf_node(
             MessagingFrameworkOutput(
-                **_story,
-                brand_archetypes=_archetypes,
-                tagline="Ship brand with the product",
-                tagline_rationale="Ties cohesion to shipping speed.",
-                elevator_pitches=_pitches,
                 messaging_framework=_pillars,
                 audience_message_maps=_maps,
             )
         ),
-        "PersonaBuilder": _phase1_leaf_node(
-            PersonaProfilesOutput(
-                **_story,
-                brand_archetypes=_archetypes,
-                tagline="Ship brand with the product",
-                tagline_rationale="Ties cohesion to shipping speed.",
-                elevator_pitches=_pitches,
-                messaging_framework=_pillars,
-                audience_message_maps=_maps,
-                persona_profiles=_personas,
-            )
-        ),
+        "PersonaBuilder": _phase1_leaf_node(PersonaProfilesOutput(persona_profiles=_personas)),
         "VoicePrinciplesDrafter": voice_leaf,
     }
 
@@ -1140,154 +1148,15 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
     ]
 
 
-def test_extract_phase_output_phase2_prefers_upstream_owned_fields() -> None:
-    """Later carry-forward dumps must not overwrite earlier specialists' fields.
-
-    A real LLM may rewrite inherited ``brand_story`` when Voice emits its
-    cumulative payload; merge keeps Storyteller's authoritative value.
-    """
-    _story = dict(
-        brand_story="Authoritative origin from Storyteller.",
-        hero_narrative="Authoritative hero from Storyteller.",
-        boilerplate_variants=["short bio", "medium bio", "long bio"],
-    )
-    _rewritten = dict(
-        brand_story="Rewritten by VoicePrinciplesDrafter.",
-        hero_narrative="Rewritten hero.",
-        boilerplate_variants=["v-short", "v-medium", "v-long"],
-    )
-    _archetypes = [
-        BrandArchetypeOutput(
-            archetype="The Creator",
-            rationale="Inventive.",
-            personality_traits=["Imaginative", "Original"],
-        )
-    ]
-    _pitches = [
-        ElevatorPitchOutput(tier="5-second", pitch="a"),
-        ElevatorPitchOutput(tier="30-second", pitch="b"),
-        ElevatorPitchOutput(tier="2-minute", pitch="c"),
-    ]
-    _pillars = [
-        MessagingPillarOutput(
-            pillar="Cohesion", key_message="One voice everywhere.", proof_points=["Style guide"]
-        ),
-        MessagingPillarOutput(
-            pillar="Speed", key_message="Ship weekly.", proof_points=["Release cadence"]
-        ),
-        MessagingPillarOutput(
-            pillar="Clarity", key_message="Say it simply.", proof_points=["Plain-language copy"]
-        ),
-    ]
-    _maps = [
-        AudienceMessageMapOutput(
-            audience_segment="Enterprise product leaders",
-            primary_message="Ship on-brand, faster.",
-            supporting_messages=["Consistent across every touchpoint"],
-            tone_adjustments="Confident, outcome-focused",
-        )
-    ]
-    _personas = [
-        PersonaProfileOutput(
-            name="Alex Rivera",
-            role="VP of Product",
-            demographics="35-44, urban, enterprise SaaS",
-            psychographics="Outcome-driven, skeptical of hype",
-            goals=["Ship cohesive experiences"],
-            frustrations=["Inconsistent brand touchpoints"],
-            media_habits=["Industry newsletters"],
-            jobs_to_be_done=["Align teams on brand voice"],
-        ),
-        PersonaProfileOutput(
-            name="Jordan Lee",
-            role="Head of Marketing",
-            demographics="28-34, remote, mid-market",
-            psychographics="Data-driven, values clarity",
-            goals=["Grow brand recall"],
-            frustrations=["Fragmented messaging"],
-            media_habits=["Design newsletters"],
-            jobs_to_be_done=["Brief agencies quickly"],
-        ),
-    ]
-    guidelines = WritingGuidelinesBody(
-        voice_principles=["Confident", "Human", "Concrete"],
-        style_dos=["Lead with outcome", "Use active voice", "Name the audience"],
-        style_donts=["Empty superlatives", "Bury the offer", "Mix slang with claims"],
-        editorial_quality_bar=["States who it's for", "Cites proof", "Matches tone"],
-    )
-    nested_results = {
-        "Storyteller": _phase1_leaf_node(BrandStoryOutput(**_story)),
-        "ArchetypeAnalyst": _phase1_leaf_node(
-            BrandArchetypesOutput(**_rewritten, brand_archetypes=_archetypes)
-        ),
-        "TaglineWriter": _phase1_leaf_node(
-            TaglineOutput(
-                **_rewritten,
-                brand_archetypes=_archetypes,
-                tagline="Ship brand with the product",
-                tagline_rationale="Ties cohesion to shipping speed.",
-                elevator_pitches=_pitches,
-            )
-        ),
-        "MessageMapper": _phase1_leaf_node(
-            MessagingFrameworkOutput(
-                **_rewritten,
-                brand_archetypes=_archetypes,
-                tagline="Ship brand with the product",
-                tagline_rationale="Ties cohesion to shipping speed.",
-                elevator_pitches=_pitches,
-                messaging_framework=_pillars,
-                audience_message_maps=_maps,
-            )
-        ),
-        "PersonaBuilder": _phase1_leaf_node(
-            PersonaProfilesOutput(
-                **_rewritten,
-                brand_archetypes=_archetypes,
-                tagline="Ship brand with the product",
-                tagline_rationale="Ties cohesion to shipping speed.",
-                elevator_pitches=_pitches,
-                messaging_framework=_pillars,
-                audience_message_maps=_maps,
-                persona_profiles=_personas,
-            )
-        ),
-        "VoicePrinciplesDrafter": _phase1_leaf_node(
-            WritingGuidelinesOutput(
-                **_rewritten,
-                brand_archetypes=_archetypes,
-                tagline="Ship brand with the product",
-                tagline_rationale="Ties cohesion to shipping speed.",
-                elevator_pitches=_pitches,
-                messaging_framework=_pillars,
-                audience_message_maps=_maps,
-                persona_profiles=_personas,
-                writing_guidelines=guidelines,
-            )
-        ),
-    }
-
-    inner_multi_result = MagicMock()
-    inner_multi_result.results = nested_results
-    node_result = MagicMock()
-    node_result.result = inner_multi_result
-    node_result.get_agent_results.return_value = [
-        node.get_agent_results.return_value[0] for node in nested_results.values()
-    ]
-    mock_result = MagicMock()
-    mock_result.result = {"phase2_narrative": node_result}
-
-    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
-        mock_result, "phase2_narrative", NarrativeMessagingOutput
-    )
-
-    assert degraded is False
-    assert output.brand_story == "Authoritative origin from Storyteller."
-    assert output.hero_narrative == "Authoritative hero from Storyteller."
-    assert output.boilerplate_variants == ["short bio", "medium bio", "long bio"]
-    assert [a.archetype for a in output.brand_archetypes] == ["The Creator"]
-    assert output.tagline == "Ship brand with the product"
-    assert output.writing_guidelines.voice_principles == ["Confident", "Human", "Concrete"]
+# NOTE (Story 5b Step 1): test_extract_phase_output_phase2_prefers_upstream_owned_fields
+# was removed here. Its premise -- a downstream specialist's cumulative payload
+# re-emitting (and potentially rewriting) an earlier specialist's field, with
+# prefer_first ensuring the earlier value wins -- is no longer representable now
+# that each Phase 2 specialist's structured_output model contains only its own
+# fields (e.g. BrandArchetypesOutput can no longer carry a brand_story key at
+# all). Story 5b Step 3 subsequently removed the prefer_first mechanic itself
+# from _apply_fragment / _merge_named_fragments, since Phase 2 was its only
+# caller and the six fragments' fields can never collide.
 
 
 def test_extract_phase_output_rejects_incomplete_phase2_fragments() -> None:
@@ -1447,22 +1316,12 @@ def _phase4_nested_node_result() -> MagicMock:
     return node_result
 
 
-def _assert_every_field_populated(
-    model: BaseModel, *, exclude: frozenset[str] = frozenset()
-) -> None:
+def _assert_every_field_populated(model: BaseModel) -> None:
     """Fail with the offending field names if any field on ``model`` was left
     at an empty/falsy value — used to prove a set of merged fragments
     collectively covers every field on the target schema, so a future field
-    added without a producing specialist is caught automatically.
-
-    ``exclude`` skips fields known to have no producing node yet (see
-    ``_PHASE3_UNCOVERED_FIELDS``); leave it empty for schemas where every
-    field is expected to be covered."""
-    empty = [
-        name
-        for name in type(model).model_fields
-        if name not in exclude and not getattr(model, name)
-    ]
+    added without a producing specialist is caught automatically."""
+    empty = [name for name in type(model).model_fields if not getattr(model, name)]
     assert not empty, f"{type(model).__name__} fields left empty: {empty}"
 
 
@@ -2165,22 +2024,13 @@ def test_extract_phase_output_merges_every_phase3_fragment() -> None:
     ]
 
 
-_PHASE3_UNCOVERED_FIELDS = frozenset({"data_visualization_style", "digital_adaptations"})
-# VisualIdentityOutput fields with no producing node under the current three
-# moodboard conceptualists + converge_decider + seven-specialist set (and none
-# under the removed visual_compositor before it, either). Changing an agent's
-# prompt or output schema to cover them is out of scope for the Python-merge
-# migration this test suite locks in; tracked separately.
-
-
 def test_phase3_fragments_collectively_populate_every_output_field() -> None:
     """Schema-coverage guard: the three moodboard conceptualists,
     converge_decider, and the seven post-converge specialists' fragments must
     collectively populate every VisualIdentityOutput field they can produce,
     checked generically against the model's own field list (not a hardcoded
     enumeration) so a field added later without a producing node fails this
-    test instead of silently shipping empty. See _PHASE3_UNCOVERED_FIELDS for
-    the two fields no current node produces."""
+    test instead of silently shipping empty."""
     mock_result = MagicMock()
     mock_result.result = {"phase3_visual": _phase3_nested_node_result()}
 
@@ -2190,7 +2040,7 @@ def test_phase3_fragments_collectively_populate_every_output_field() -> None:
 
     assert degraded is False
     assert isinstance(output, VisualIdentityOutput)
-    _assert_every_field_populated(output, exclude=_PHASE3_UNCOVERED_FIELDS)
+    _assert_every_field_populated(output)
 
 
 def test_full_run_phase3_not_degraded_with_eleven_fragments() -> None:
@@ -2222,7 +2072,7 @@ def test_full_run_phase3_not_degraded_with_eleven_fragments() -> None:
     assert result.degraded_phases == []
     assert isinstance(result.visual_identity, VisualIdentityOutput)
     assert result.visual_identity.creative_refinement.winning_candidate_title == "Modern Confidence"
-    _assert_every_field_populated(result.visual_identity, exclude=_PHASE3_UNCOVERED_FIELDS)
+    _assert_every_field_populated(result.visual_identity)
 
 
 def test_merge_phase3_fragments_rejects_incomplete_specialist_set() -> None:
@@ -2542,23 +2392,13 @@ def test_child_structured_output_non_basemodel_returns_none() -> None:
 
 
 def test_apply_fragment_flat_last_writer_wins() -> None:
-    """Flat merge (no nest_under, no prefer_first) overwrites existing keys."""
+    """Flat merge (no nest_under) overwrites existing keys."""
     from branding_team.orchestrator import _apply_fragment
 
     merged = {"a": 1, "b": 2}
-    _apply_fragment(merged, {"b": 20, "c": 3}, None, prefer_first=False)
+    _apply_fragment(merged, {"b": 20, "c": 3}, None)
 
     assert merged == {"a": 1, "b": 20, "c": 3}
-
-
-def test_apply_fragment_flat_prefer_first_keeps_existing() -> None:
-    """Flat merge with prefer_first fills only absent keys (first writer wins)."""
-    from branding_team.orchestrator import _apply_fragment
-
-    merged = {"a": 1, "b": 2}
-    _apply_fragment(merged, {"b": 20, "c": 3}, None, prefer_first=True)
-
-    assert merged == {"a": 1, "b": 2, "c": 3}
 
 
 def test_apply_fragment_nest_under_places_data() -> None:
@@ -2566,19 +2406,9 @@ def test_apply_fragment_nest_under_places_data() -> None:
     from branding_team.orchestrator import _apply_fragment
 
     merged: dict = {}
-    _apply_fragment(merged, {"x": 1}, "brand_discovery", prefer_first=False)
+    _apply_fragment(merged, {"x": 1}, "brand_discovery")
 
     assert merged == {"brand_discovery": {"x": 1}}
-
-
-def test_apply_fragment_nest_under_prefer_first_skips_when_present() -> None:
-    """With prefer_first, a nest_under key already set is not overwritten."""
-    from branding_team.orchestrator import _apply_fragment
-
-    merged = {"brand_discovery": {"first": True}}
-    _apply_fragment(merged, {"second": True}, "brand_discovery", prefer_first=True)
-
-    assert merged == {"brand_discovery": {"first": True}}
 
 
 def test_apply_fragment_list_field_appends_each_fragment() -> None:
@@ -2592,14 +2422,12 @@ def test_apply_fragment_list_field_appends_each_fragment() -> None:
         merged,
         {"channel": "web"},
         "channel_guidelines",
-        prefer_first=False,
         list_fields=list_fields,
     )
     _apply_fragment(
         merged,
         {"channel": "social"},
         "channel_guidelines",
-        prefer_first=False,
         list_fields=list_fields,
     )
 
@@ -2667,7 +2495,7 @@ def test_run_with_phase_cache_hit_reuses_output_without_invoking_phase() -> None
         )
 
     mock_run_single_phase.assert_not_called()
-    assert result.strategic_core is cached_output
+    assert result.strategic_core == cached_output
     assert result.narrative_messaging is None
 
 
@@ -2713,7 +2541,7 @@ def test_run_with_phase_cache_recomputes_downstream_phase_when_upstream_changes(
     with patch.object(
         orchestrator, "run_single_phase", side_effect=_run_single_phase_fixture_side_effect
     ) as mock_run_single_phase:
-        result = orchestrator.run(
+        orchestrator.run(
             mission=mission,
             human_review=HumanReview(approved=False),
             target_phase=BrandPhase.NARRATIVE_MESSAGING,
@@ -2722,7 +2550,6 @@ def test_run_with_phase_cache_recomputes_downstream_phase_when_upstream_changes(
 
     called_phases = [call.args[1] for call in mock_run_single_phase.call_args_list]
     assert called_phases == [BrandPhase.STRATEGIC_CORE, BrandPhase.NARRATIVE_MESSAGING]
-    assert result.narrative_messaging is not stale_narrative
 
 
 def test_run_with_phase_cache_never_caches_a_degraded_output() -> None:
@@ -2783,8 +2610,8 @@ def test_run_with_phase_cache_reuses_multiple_cached_upstream_phases() -> None:
 
     called_phases = [call.args[1] for call in mock_run_single_phase.call_args_list]
     assert called_phases == [BrandPhase.VISUAL_IDENTITY]
-    assert result.strategic_core is cached_strategic_core
-    assert result.narrative_messaging is cached_narrative
+    assert result.strategic_core == cached_strategic_core
+    assert result.narrative_messaging == cached_narrative
     assert result.visual_identity is not None
     assert result.channel_activation is None
 
@@ -2842,9 +2669,9 @@ def test_run_with_phase_cache_cascades_recompute_through_three_phase_chain() -> 
         assert cached is not None
         fresh_upstream[phase] = cached
 
-    assert result.strategic_core is fresh_upstream[BrandPhase.STRATEGIC_CORE]
-    assert result.narrative_messaging is fresh_upstream[BrandPhase.NARRATIVE_MESSAGING]
-    assert result.visual_identity is fresh_upstream[BrandPhase.VISUAL_IDENTITY]
+    assert result.strategic_core == fresh_upstream[BrandPhase.STRATEGIC_CORE]
+    assert result.narrative_messaging == fresh_upstream[BrandPhase.NARRATIVE_MESSAGING]
+    assert result.visual_identity == fresh_upstream[BrandPhase.VISUAL_IDENTITY]
 
 
 # ---------------------------------------------------------------------------

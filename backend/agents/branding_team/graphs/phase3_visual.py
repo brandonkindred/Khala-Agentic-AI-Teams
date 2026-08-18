@@ -15,9 +15,11 @@ unified ``VisualIdentityOutput`` in Python.
 This is intentionally a Graph rather than a Swarm. Agents built with
 ``structured_output=`` force Strands' structured-output tool and then
 stop the agent loop (``stop_loop=True``), so they never call
-``handoff_to_agent``. The diverge step therefore uses the same
-fan-out/fan-in helper as Phase 1 -- also a direct multi-agent fan-in with
-no intermediate collector node.
+``handoff_to_agent``. The diverge step therefore wires a direct multi-agent
+fan-in (``shared.graph.wire_fan_out_fan_in``) with no intermediate collector
+node, then keeps building onto the same graph for the post-converge
+fan-out below -- unlike Phase 1, which is nothing but a fan-out/fan-in and
+so builds its whole graph via ``shared.graph.build_fan_out_fan_in`` directly.
 
 Pattern::
 
@@ -48,7 +50,7 @@ from branding_team.agents import (
     make_typography_builder,
     make_voice_tone_builder,
 )
-from branding_team.graphs.shared import build_fan_out_fan_in
+from shared.graph import wire_fan_out_fan_in
 
 _PHASE3_CONCEPTUALIST_VARIANTS: tuple[str, ...] = ("Editorial", "Minimalist", "Bold")
 
@@ -93,15 +95,10 @@ def build_phase3_graph() -> Graph:
     #    finishes).
     # ------------------------------------------------------------------
     converge_node = builder.add_node(make_converge_decider(), node_id="converge_decider")
-    build_fan_out_fan_in(
+    wire_fan_out_fan_in(
         builder,
         [
-            (
-                f"MoodBoardConceptualist_{variant}",
-                # Bind variant in default arg so the lambda closes over the
-                # loop value, not the final iteration.
-                (lambda v=variant: make_moodboard_conceptualist(v)),
-            )
+            (f"MoodBoardConceptualist_{variant}", make_moodboard_conceptualist(variant))
             for variant in _PHASE3_CONCEPTUALIST_VARIANTS
         ],
         converge_node,

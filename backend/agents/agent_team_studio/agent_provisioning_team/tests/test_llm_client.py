@@ -237,6 +237,30 @@ def test_llm_client_uses_shared_defaults_for_blank_ollama_entry(monkeypatch) -> 
     )
 
 
+def test_llm_client_tolerates_none_fields_on_provider_entry(monkeypatch) -> None:
+    from llm_service import config as llm_config
+    from llm_service import provider_store
+
+    entry = SimpleNamespace(id=1, provider="ollama", model=None, base_url=None, api_key=None)
+    monkeypatch.setattr(llm_config, "resolve_provider", lambda: "ollama")
+    monkeypatch.setattr(
+        llm_config,
+        "resolve_model_for_provider",
+        lambda agent_key, provider: "default-model",
+    )
+    monkeypatch.setattr(llm_config, "resolve_base_url", lambda: "https://ollama.default")
+    monkeypatch.setattr(provider_store, "load_ordered_entries", lambda: [entry])
+    monkeypatch.setattr(provider_store, "select_active_entry", lambda loaded: loaded[0])
+
+    config = LLMClient()._resolve_config()
+
+    assert (config.model, config.base_url, config.api_key) == (
+        "default-model",
+        "https://ollama.default",
+        "",
+    )
+
+
 class _StatusError(Exception):
     def __init__(self, status_code: int) -> None:
         super().__init__(f"HTTP {status_code}")

@@ -36,7 +36,7 @@ from .graphs.phase2_narrative import build_phase2_graph
 from .graphs.phase3_visual import build_phase3_graph
 from .graphs.phase4_channel import build_phase4_graph
 from .graphs.phase5_governance import build_phase5_graph
-from .graphs.shared import PHASE_ORDER, phase_index, serialize_mission
+from .graphs.shared import PHASE_ORDER, PHASE_OUTPUT_MODELS, phase_index, serialize_mission
 from .graphs.top_level import (
     DEFAULT_EXECUTION_TIMEOUT_SECONDS,
     DEFAULT_NODE_TIMEOUT_SECONDS,
@@ -84,11 +84,12 @@ _PHASE1_NODE_MERGE: dict[str, Optional[str]] = {
 
 
 # Phase 2 linear Graph node id -> nest-under key on NarrativeMessagingOutput,
-# or None to merge fields in flat. Each specialist's structured_output is a
-# cumulative carry-forward model (see models.py). Merge uses prefer_first so
-# upstream-owned keys are not overwritten by later re-emissions; require_all
-# still insists every specialist actually ran. VoicePrinciplesDrafter already
-# nests writing_guidelines in its own schema — no remap needed.
+# or None to merge fields in flat. Each specialist's structured_output is an
+# own-field-only model (Story 5b Step 1; see models.py) -- no two of the six
+# fragments can set the same flat key, so the merge is a plain flat union with
+# no collision-avoidance needed. require_all still insists every specialist
+# actually ran. VoicePrinciplesDrafter already nests writing_guidelines in its
+# own schema — no remap needed.
 _PHASE2_NODE_MERGE: dict[str, Optional[str]] = {
     "Storyteller": None,
     "ArchetypeAnalyst": None,
@@ -193,7 +194,6 @@ def _apply_fragment(
     data: dict[str, Any],
     nest_under: Optional[str],
     *,
-    prefer_first: bool,
     list_fields: frozenset[str] = frozenset(),
 ) -> None:
     """Fold one recognized fragment's dumped ``data`` into the ``merged`` accumulator.
@@ -207,25 +207,17 @@ def _apply_fragment(
         Mutates ``merged`` in place and returns ``None``.
         - When ``nest_under`` names a list field, ``data`` is appended as one
           element under it (several single-item fragments combine into one list,
-          e.g. Phase 4's ``channel_guidelines``); ``prefer_first`` does not
-          apply to list fields.
+          e.g. Phase 4's ``channel_guidelines``).
         - When ``nest_under`` names a non-list field, ``data`` is placed under
-          it — skipped when ``prefer_first`` and that key is already present
-          (the first writer wins).
-        - When ``nest_under`` is ``None``: with ``prefer_first`` each key is
-          filled only if absent (``setdefault``, first writer wins); otherwise
-          ``data`` overwrites (last writer wins).
+          it (last writer wins).
+        - When ``nest_under`` is ``None``, ``data`` overwrites ``merged``'s
+          matching keys (last writer wins).
         No other keys are touched.
     """
     if nest_under and nest_under in list_fields:
         merged.setdefault(nest_under, []).append(data)
     elif nest_under:
-        if prefer_first and nest_under in merged:
-            return
         merged[nest_under] = data
-    elif prefer_first:
-        for key, value in data.items():
-            merged.setdefault(key, value)
     else:
         merged.update(data)
 
@@ -236,7 +228,6 @@ def _merge_named_fragments(
     node_merge: dict[str, Optional[str]],
     *,
     require_all: bool = False,
-    prefer_first: bool = False,
 ) -> Optional[BaseModel]:
     """Merge every recognized child's ``structured_output`` into one phase output.
 
@@ -264,11 +255,6 @@ def _merge_named_fragments(
         this is how several single-item fragments (one per channel) combine
         into one list field. Non-list nest_under fields keep the original
         single-value-assignment behavior.
-
-        When ``prefer_first`` is True, the first child that sets a flat key
-        wins (later dumps do not overwrite). Phase 2 needs this because each
-        specialist's cumulative ``structured_output`` re-emits upstream fields
-        that a real LLM may rewrite.
     """
     nested_results = getattr(getattr(node_result, "result", None), "results", None)
     if not isinstance(nested_results, dict):
@@ -291,7 +277,6 @@ def _merge_named_fragments(
             merged,
             structured.model_dump(),
             nest_under,
-            prefer_first=prefer_first,
             list_fields=list_fields,
         )
 
@@ -342,9 +327,11 @@ def _merge_phase2_fragments(node_result: Any, model_class: type[BaseModel]) -> O
     — a partial run (e.g. entry agent only) must not validate as a complete
     ``NarrativeMessagingOutput`` via field defaults.
 
-    Cumulative carry-forward models re-emit upstream fields; merge keeps the
-    first value for each key so a later specialist cannot overwrite the
-    authoritative upstream fragment (e.g. Voice rewriting ``brand_story``).
+    Each specialist's ``structured_output`` is an own-field-only model (Story
+    5b Step 1): upstream narrative reaches it only as read-only context via
+    the single-predecessor edge chain's ``Inputs from previous nodes``, never
+    as a field it re-emits. So no two of the six fragments can ever set the
+    same flat key, and the flat union merge below is deterministic.
 
     Preconditions:
         ``node_result`` is the ``NodeResult`` for a single top-level graph node
@@ -356,9 +343,7 @@ def _merge_phase2_fragments(node_result: Any, model_class: type[BaseModel]) -> O
         the merged data fails validation — same None contract as
         ``_merge_phase1_fragments``.
     """
-    return _merge_named_fragments(
-        node_result, model_class, _PHASE2_NODE_MERGE, require_all=True, prefer_first=True
-    )
+    return _merge_named_fragments(node_result, model_class, _PHASE2_NODE_MERGE, require_all=True)
 
 
 def _merge_phase3_fragments(node_result: Any, model_class: type[BaseModel]) -> Optional[BaseModel]:
@@ -487,34 +472,34 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
     BrandPhase.STRATEGIC_CORE: _PhaseSpec(
         build_phase1_graph,
         "phase1_strategic_core",
-        StrategicCoreOutput,
+        PHASE_OUTPUT_MODELS[BrandPhase.STRATEGIC_CORE],
         merge_fn=_merge_phase1_fragments,
     ),
     BrandPhase.NARRATIVE_MESSAGING: _PhaseSpec(
         build_phase2_graph,
         "phase2_narrative",
-        NarrativeMessagingOutput,
+        PHASE_OUTPUT_MODELS[BrandPhase.NARRATIVE_MESSAGING],
         merge_fn=_merge_phase2_fragments,
         check_structured_output=False,
     ),
     BrandPhase.VISUAL_IDENTITY: _PhaseSpec(
         build_phase3_graph,
         "phase3_visual",
-        VisualIdentityOutput,
+        PHASE_OUTPUT_MODELS[BrandPhase.VISUAL_IDENTITY],
         merge_fn=_merge_phase3_fragments,
         check_structured_output=False,
     ),
     BrandPhase.CHANNEL_ACTIVATION: _PhaseSpec(
         build_phase4_graph,
         "phase4_channel",
-        ChannelActivationOutput,
+        PHASE_OUTPUT_MODELS[BrandPhase.CHANNEL_ACTIVATION],
         merge_fn=_merge_phase4_fragments,
         check_structured_output=False,
     ),
     BrandPhase.GOVERNANCE: _PhaseSpec(
         build_phase5_graph,
         "phase5_governance",
-        GovernanceOutput,
+        PHASE_OUTPUT_MODELS[BrandPhase.GOVERNANCE],
         merge_fn=_merge_phase5_fragments,
         check_structured_output=False,
     ),
@@ -968,8 +953,11 @@ class BrandingTeamOrchestrator:
         store: Optional["BrandingStore"] = None,
         client_id: Optional[str] = None,
         brand_id: Optional[str] = None,
+        phase_cache: Optional[PhaseOutputCache] = None,
     ) -> TeamOutput:
-        """Convenience method: run the pipeline up to (and including) a specific phase."""
+        """Convenience method: run the pipeline up to (and including) a specific
+        phase. Accepts an optional ``phase_cache`` to reuse cached phase
+        outputs (see ``run()``)."""
         return self.run(
             mission=mission,
             human_review=human_review,
@@ -978,6 +966,7 @@ class BrandingTeamOrchestrator:
             client_id=client_id,
             brand_id=brand_id,
             target_phase=phase,
+            phase_cache=phase_cache,
         )
 
     @staticmethod

@@ -1193,6 +1193,189 @@ def test_run_design_attempt_activity_stops_promptly_after_cancellation_mid_loop(
     assert calls["n"] == CANCEL_AFTER + 1
 
 
+def test_run_design_attempt_activity_publishes_mapped_progress_event(monkeypatch):
+    """With run_id/cycle_index present, an ``emit("designing", ...)`` checkpoint
+    best-effort publishes a `progress` SSE event whose phase is mapped onto the
+    frontend's phase-stepper vocabulary and whose data is whitelisted to the
+    fields ``StrategyLabProgressEvent`` actually models — unmodeled keys (e.g.
+    ``unmapped_field`` here) are dropped, not forwarded."""
+    from investment_team.api import job_event_bus
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    published: List[Any] = []
+    monkeypatch.setattr(
+        job_event_bus,
+        "publish",
+        lambda run_id, event, event_type=None: published.append((run_id, event, event_type)),
+    )
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    def _fake_attempt(self, **kwargs):
+        kwargs["emit"]("designing", {"sub_phase": "started", "unmapped_field": "should be dropped"})
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    act.run_design_attempt_activity(_run_design_attempt_params(run_id="run-1", cycle_index=3))
+
+    assert len(published) == 1
+    run_id, event, event_type = published[0]
+    assert run_id == "run-1"
+    assert event_type == "progress"
+    assert event == {
+        "type": "progress",
+        "cycle_index": 3,
+        "phase": "ideating",  # "designing" mapped onto the phase-stepper's "ideating" step
+        "sub_phase": "started",
+    }
+
+
+def test_run_design_attempt_activity_progress_checkpoint_maps_every_known_phase(monkeypatch):
+    """Every internal phase name in ``_PROGRESS_PHASE_MAP`` publishes under its
+    mapped frontend phase-stepper id."""
+    from investment_team.api import job_event_bus
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    published: List[Any] = []
+    monkeypatch.setattr(
+        job_event_bus,
+        "publish",
+        lambda run_id, event, event_type=None: published.append(event),
+    )
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    def _fake_attempt(self, **kwargs):
+        emit = kwargs["emit"]
+        for phase in act._PROGRESS_PHASE_MAP:
+            emit(phase, {})
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    act.run_design_attempt_activity(_run_design_attempt_params(run_id="run-1", cycle_index=0))
+
+    assert [event["phase"] for event in published] == [
+        act._PROGRESS_PHASE_MAP[phase] for phase in act._PROGRESS_PHASE_MAP
+    ]
+
+
+def test_run_design_attempt_activity_progress_checkpoint_drops_unmapped_phase(monkeypatch):
+    """A phase not in ``_PROGRESS_PHASE_MAP`` (e.g. the internal-only
+    ``telemetry``/``phase_transition`` diagnostics) is never published — no SSE
+    payload at all, not a fallback/default phase."""
+    from investment_team.api import job_event_bus
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    published: List[Any] = []
+    monkeypatch.setattr(
+        job_event_bus, "publish", lambda run_id, event, event_type=None: published.append(event)
+    )
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    def _fake_attempt(self, **kwargs):
+        emit = kwargs["emit"]
+        emit("telemetry", {"scope": "design_loop"})
+        emit("phase_transition", {"from_phase": "design", "to_phase": "design_review"})
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    act.run_design_attempt_activity(_run_design_attempt_params(run_id="run-1", cycle_index=0))
+
+    assert published == []
+
+
+def test_run_design_attempt_activity_progress_checkpoint_disabled_without_cycle_index(
+    monkeypatch,
+):
+    """``run_id`` present but ``cycle_index`` absent (a params dict from a
+    workflow-history replay predating that field) ⇒ no progress publish at
+    all, since ``StrategyLabProgressEvent.cycle_index`` is required on the
+    frontend and a malformed event is worse than none."""
+    from investment_team.api import job_event_bus
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    published: List[Any] = []
+    monkeypatch.setattr(
+        job_event_bus, "publish", lambda run_id, event, event_type=None: published.append(event)
+    )
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    def _fake_attempt(self, **kwargs):
+        kwargs["emit"]("designing", {"sub_phase": "started"})
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    act.run_design_attempt_activity(_run_design_attempt_params(run_id="run-1"))
+
+    assert published == []
+
+
+def test_run_design_attempt_activity_progress_checkpoint_swallows_publish_failure(monkeypatch):
+    """A ``job_event_bus.publish`` failure is logged and swallowed — a lost
+    live-progress update must never fail the design attempt."""
+    from investment_team.api import job_event_bus
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    def _boom(run_id, event, event_type=None):
+        raise RuntimeError("event bus exploded")
+
+    monkeypatch.setattr(job_event_bus, "publish", _boom)
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    def _fake_attempt(self, **kwargs):
+        kwargs["emit"]("designing", {"sub_phase": "started"})
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    out = act.run_design_attempt_activity(_run_design_attempt_params(run_id="run-1", cycle_index=0))
+    assert out["kind"] == "record"
+
+
+def test_run_design_attempt_activity_progress_checkpoint_still_raises_cancelled_on_publish_failure(
+    monkeypatch,
+):
+    """Cancellation is checked BEFORE any publish attempt, so a publish
+    failure can never mask a real cancellation."""
+    from temporalio.exceptions import CancelledError
+
+    from investment_team.api import job_event_bus
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    monkeypatch.setattr(act, "is_cancelled", lambda: True)
+
+    def _boom(run_id, event, event_type=None):
+        raise AssertionError("publish should never be reached once cancelled")
+
+    monkeypatch.setattr(job_event_bus, "publish", _boom)
+
+    def _fake_attempt(self, **kwargs):
+        kwargs["emit"]("designing", {"sub_phase": "started"})
+        raise AssertionError("should not run past the cancelled checkpoint")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    with pytest.raises(CancelledError):
+        act.run_design_attempt_activity(_run_design_attempt_params(run_id="run-1", cycle_index=0))
+
+
 def test_run_design_attempt_activity_returns_skipped_outcome_for_502(monkeypatch):
     """A 502 ("no market data") HTTPException is caught and surfaced as a
     structured ``kind='skipped'`` outcome — cycle-terminal, never re-raised —
@@ -3009,8 +3192,46 @@ def test_merge_wave_results_activity_maps_unexpected_error():
         )
 
 
+# ---------------------------------------------------------------------------
+# publish_run_event_activity — the workflow-code side-effect boundary for the
+# SSE run-event publishes StrategyLabBatchWorkflow.run makes directly.
+# ---------------------------------------------------------------------------
+
+
+def test_publish_run_event_activity_calls_job_event_bus_publish(monkeypatch):
+    from investment_team.api import job_event_bus
+
+    calls: List[Any] = []
+    monkeypatch.setattr(
+        job_event_bus,
+        "publish",
+        lambda run_id, event, event_type=None: calls.append((run_id, event, event_type)),
+    )
+
+    event = {"type": "cycle_complete", "cycle_index": 2, "completed_cycles": 3}
+    result = act.publish_run_event_activity({"run_id": "run-1", "event": event})
+
+    assert result is None
+    assert calls == [("run-1", event, "cycle_complete")]
+
+
+def test_publish_run_event_activity_swallows_publish_failure(monkeypatch):
+    """A lost live-progress/results-refresh update must never fail or retry
+    the underlying run — the activity always returns None, even on a
+    ``job_event_bus.publish`` failure."""
+    from investment_team.api import job_event_bus
+
+    def _boom(run_id, event, event_type=None):
+        raise RuntimeError("event bus exploded")
+
+    monkeypatch.setattr(job_event_bus, "publish", _boom)
+
+    result = act.publish_run_event_activity({"run_id": "run-1", "event": {"type": "complete"}})
+    assert result is None
+
+
 def test_activities_list_contains_every_activity():
-    assert len(act.ACTIVITIES) == 11
+    assert len(act.ACTIVITIES) == 12
     assert act.compute_regime_summary_activity in act.ACTIVITIES
     assert act.persist_run_state_activity in act.ACTIVITIES
     assert act.snapshot_prior_records_activity in act.ACTIVITIES
@@ -3023,3 +3244,4 @@ def test_activities_list_contains_every_activity():
     assert act.external_terminal_status_activity in act.ACTIVITIES
     assert act.finalize_cycle_record_activity in act.ACTIVITIES
     assert act.merge_wave_results_activity in act.ACTIVITIES
+    assert act.publish_run_event_activity in act.ACTIVITIES

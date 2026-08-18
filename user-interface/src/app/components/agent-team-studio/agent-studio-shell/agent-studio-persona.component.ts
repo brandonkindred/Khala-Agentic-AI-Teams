@@ -18,6 +18,7 @@ import { EMPTY, Subscription, catchError, interval, throwError, timeout } from '
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { pollWhile } from '../../../shared/poll-while';
+import { STAGE_INDEX } from '../../../models/agent-studio.model';
 import type {
   AgenticTeam,
   ProcessDefinition,
@@ -88,12 +89,6 @@ function parseTimestampMs(value: unknown): number | null {
   const ms = Date.parse(value);
   return Number.isFinite(ms) ? ms : null;
 }
-
-// Back-loop destinations as 0-based indices into STUDIO_STAGES
-// (build=0, test=1, compose=2, personas=3). Named so the back-loops don't carry
-// bare magic numbers; keep in sync with the STUDIO_STAGES order.
-const STAGE_TEST_AGENT = 1;
-const STAGE_COMPOSE_TEAM = 2;
 
 type StudioPersonaMode = 'manual' | 'persona';
 
@@ -901,7 +896,7 @@ export class AgentStudioPersonaComponent implements OnInit {
 
   /** Back-loop to Stage 3 (Compose Team) to revise the roster. */
   iterateRoster(): void {
-    this.state.navigateToStage(STAGE_COMPOSE_TEAM);
+    this.state.navigateToStage(STAGE_INDEX.compose);
   }
 
   /**
@@ -911,12 +906,12 @@ export class AgentStudioPersonaComponent implements OnInit {
    */
   fixAgent(): void {
     if (this.canFixAgent()) {
-      this.state.navigateToStage(STAGE_TEST_AGENT);
+      this.state.navigateToStage(STAGE_INDEX.test);
     }
   }
 
   /** Jump to Stage 3 (Compose Team) from an empty/safety-net state. */
   finishInCompose(): void {
-    this.state.navigateToStage(STAGE_COMPOSE_TEAM);
+    this.state.navigateToStage(STAGE_INDEX.compose);
   }
 }

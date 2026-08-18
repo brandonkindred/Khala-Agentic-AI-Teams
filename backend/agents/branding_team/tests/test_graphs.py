@@ -63,8 +63,9 @@ def test_build_phase2_swarm_alias_returns_graph() -> None:
 def test_build_phase2_graph_wires_linear_chain() -> None:
     """Phase 2 uses a single-predecessor chain (Strands multi-in edges are OR-ready).
 
-    Upstream narrative travels via cumulative ``structured_output`` models, not
-    fan-in edges.
+    Upstream narrative reaches each specialist as read-only context via the
+    edge-injected ``Inputs from previous nodes``, not fan-in edges or a
+    carry-forward ``structured_output`` model.
     """
     from branding_team.graphs.phase2_narrative import _PHASE2_NODE_ORDER
 
@@ -157,28 +158,40 @@ def test_build_phase4_graph_wires_pure_fan_out() -> None:
 
 
 def test_make_channel_guide_rejects_blank_channel_or_description() -> None:
-    """Documented channel/description preconditions are enforced before construction."""
+    """Documented channel/description preconditions are enforced before construction.
+
+    Preconditions are enforced with an explicit ``raise ValueError(...)`` rather
+    than ``assert`` so they stay in force even when Python runs with ``-O``.
+    """
     from branding_team.agents import _make_channel_guide
     from branding_team.models import ChannelGuidelineOutput
 
-    with pytest.raises(AssertionError, match="channel must be a non-empty string"):
+    with pytest.raises(ValueError, match="channel must be a non-empty string"):
         _make_channel_guide("", "some description", ChannelGuidelineOutput)
-    with pytest.raises(AssertionError, match="channel must be a non-empty string"):
+    with pytest.raises(ValueError, match="channel must be a non-empty string"):
         _make_channel_guide("   ", "some description", ChannelGuidelineOutput)
-    with pytest.raises(AssertionError, match="description must be a non-empty string"):
+    with pytest.raises(ValueError, match="description must be a non-empty string"):
         _make_channel_guide("website", "", ChannelGuidelineOutput)
-    with pytest.raises(AssertionError, match="description must be a non-empty string"):
+    with pytest.raises(ValueError, match="description must be a non-empty string"):
         _make_channel_guide("website", "   ", ChannelGuidelineOutput)
+    with pytest.raises(ValueError, match="channel must be a non-empty string"):
+        _make_channel_guide(123, "some description", ChannelGuidelineOutput)
+    with pytest.raises(ValueError, match="description must be a non-empty string"):
+        _make_channel_guide("website", 123, ChannelGuidelineOutput)
 
 
 def test_make_channel_guide_rejects_non_basemodel_structured_output() -> None:
-    """Documented structured_output precondition is enforced before construction."""
+    """Documented structured_output precondition is enforced before construction.
+
+    Enforced with an explicit ``raise ValueError(...)`` rather than ``assert``
+    so it stays in force even when Python runs with ``-O``.
+    """
     from branding_team.agents import _make_channel_guide
 
-    with pytest.raises(
-        AssertionError, match="structured_output must be a Pydantic BaseModel subclass"
-    ):
+    with pytest.raises(ValueError, match="structured_output must be a Pydantic BaseModel subclass"):
         _make_channel_guide("website", "a marketing site", dict)
+    with pytest.raises(ValueError, match="structured_output must be a Pydantic BaseModel subclass"):
+        _make_channel_guide("website", "a marketing site", object())
 
 
 def test_phase4_prompts_drop_redundant_json_reminder() -> None:
