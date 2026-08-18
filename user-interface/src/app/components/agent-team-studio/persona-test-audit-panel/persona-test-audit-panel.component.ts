@@ -1,4 +1,4 @@
-import { Component, inject, OnInit, OnDestroy } from '@angular/core';
+import { Component, inject, Input, OnInit, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { Subscription, timer, EMPTY } from 'rxjs';
@@ -37,6 +37,22 @@ export class PersonaTestAuditPanelComponent implements OnInit, OnDestroy {
   private readonly api = inject(PersonaTestingApiService);
   private readonly route = inject(ActivatedRoute);
   private statusSub: Subscription | null = null;
+
+  /**
+   * Router path for the header back control.
+   *
+   * Preconditions: a non-empty absolute-from-root path (leading `/`).
+   * Postconditions: the template's back `routerLink` equals this value.
+   */
+  @Input() backLink = '/persona-testing';
+
+  /**
+   * Visible label for the header back control.
+   *
+   * Preconditions: a non-empty string.
+   * Postconditions: the template renders this text next to the back icon.
+   */
+  @Input() backLabel = 'Back to Testing Personas';
 
   runId = '';
   run: PersonaTestRunDetail | null = null;

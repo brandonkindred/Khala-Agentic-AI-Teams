@@ -643,12 +643,15 @@ class ClaudeLLMClient(LLMClient):
         Preconditions: ``status`` is a telemetry status string; ``message`` is the
             final Anthropic message or ``None``.
         Postconditions: emits one ``record_llm_call`` row (token counts read from
-            ``message.usage``); any telemetry failure is swallowed so it never breaks
-            the LLM call. Never raises.
+            ``message.usage``, including cache-hit counts when the provider reports
+            prompt-cache activity); any telemetry failure is swallowed so it never
+            breaks the LLM call. Never raises.
         """
         usage = getattr(message, "usage", None)
         prompt_tokens = int(getattr(usage, "input_tokens", 0) or 0)
         completion_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+        cache_read_tokens = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+        cache_creation_tokens = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
         attr = current_attribution()
         try:
             record_llm_call(
@@ -659,6 +662,8 @@ class ClaudeLLMClient(LLMClient):
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=prompt_tokens + completion_tokens,
+                cache_read_tokens=cache_read_tokens,
+                cache_creation_tokens=cache_creation_tokens,
                 latency_ms=latency_ms,
                 status=status,
                 error_type=error_type,
