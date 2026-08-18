@@ -163,7 +163,16 @@ describe('AgentStudioPersonaComponent', () => {
     component = fixture.componentInstance;
   };
 
-  afterEach(() => TestBed.resetTestingModule());
+  // pollWhile's immediate poll fires via a (fake) timer(0) rather than
+  // synchronously, so fake timers are on for every test and `launch()` calls
+  // below are paired with `vi.advanceTimersByTime(0)` to flush it.
+  beforeEach(() => vi.useFakeTimers());
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    TestBed.resetTestingModule();
+  });
 
   it('shows the empty state and loads nothing when no team is composed', () => {
     build({ teamId: null });
@@ -208,6 +217,7 @@ describe('AgentStudioPersonaComponent', () => {
     build();
     fixture.detectChanges();
     component.launch();
+    vi.advanceTimersByTime(0);
     expect(facade.startPersonaRun).toHaveBeenCalledWith({
       persona_id: 'startup-founder',
       target_team_key: 'agentic_team:t1',
@@ -224,6 +234,7 @@ describe('AgentStudioPersonaComponent', () => {
     component.selectProcess('');
     state.setPersonaId(null);
     component.launch();
+    vi.advanceTimersByTime(0);
     expect(facade.startPersonaRun).not.toHaveBeenCalled();
   });
 
@@ -232,6 +243,7 @@ describe('AgentStudioPersonaComponent', () => {
     fixture.detectChanges();
     facade.startPersonaRun.mockReturnValue(throwError(() => new Error('boom')));
     component.launch();
+    vi.advanceTimersByTime(0);
     expect(component.error()).toContain('Could not start');
   });
 
@@ -240,6 +252,7 @@ describe('AgentStudioPersonaComponent', () => {
     fixture.detectChanges();
     facade.startPersonaRun.mockReturnValue(of(null));
     component.launch();
+    vi.advanceTimersByTime(0);
     expect(component.error()).toContain('Could not start');
     expect(component.launching()).toBe(false);
     // A null response must not start a run view.
@@ -342,12 +355,14 @@ describe('AgentStudioPersonaComponent', () => {
     facade.startPersonaRun.mockReturnValue(of({ job_id: 'run-1', status: 'running', message: '' }));
     facade.getPersonaRunStatus.mockReturnValueOnce(stale).mockReturnValue(new Subject());
     component.launch();
+    vi.advanceTimersByTime(0);
     expect(component.run()).toBeNull(); // run-1 status not yet emitted
 
     // Second launch supersedes run-1.
     facade.startPersonaRun.mockReturnValue(of({ job_id: 'run-2', status: 'running', message: '' }));
     facade.getPersonaRunStatus.mockReturnValueOnce(new Subject()).mockReturnValue(new Subject());
     component.launch();
+    vi.advanceTimersByTime(0);
 
     // The stale run-1 response now lands — it must be ignored, not clobber run-2
     // or stop the new poller.
@@ -363,6 +378,7 @@ describe('AgentStudioPersonaComponent', () => {
       of({ run_id: 'run-1', status: 'polling_build', decisions: [] }),
     );
     component.launch();
+    vi.advanceTimersByTime(0);
     expect(component.run()?.status).toBe('polling_build');
     expect(component.runTerminal()).toBe(false);
   });
@@ -495,6 +511,7 @@ describe('AgentStudioPersonaComponent', () => {
     fixture.detectChanges();
     component.error.set('Lost contact with the run; retrying…');
     component.launch(); // immediate getRunStatus success → handleStatus clears error
+    vi.advanceTimersByTime(0);
     expect(component.error()).toBeNull();
   });
 
@@ -509,6 +526,7 @@ describe('AgentStudioPersonaComponent', () => {
         .mockReturnValueOnce(throwError(() => new Error('blip')))
         .mockReturnValue(of({ run_id: 'run-1', status: 'completed', decisions: [] }));
       component.launch();
+      vi.advanceTimersByTime(0);
       expect(component.run()?.status).toBe('polling_build');
 
       // First interval tick errors — caught inside switchMap, stream stays alive.
@@ -537,6 +555,7 @@ describe('AgentStudioPersonaComponent', () => {
         of({ run_id: 'run-1', status: 'polling_build', decisions: [] }),
       );
       component.launch();
+      vi.advanceTimersByTime(0);
       expect(component.elapsedSec()).toBe(0);
 
       vi.advanceTimersByTime(3000);
@@ -567,6 +586,7 @@ describe('AgentStudioPersonaComponent', () => {
         of({ run_id: 'run-1', status: 'polling_build', decisions: [] }),
       );
       component.launch();
+      vi.advanceTimersByTime(0);
       // One immediate fetch on launch.
       expect(facade.getPersonaRunStatus).toHaveBeenCalledTimes(1);
       const frozenElapsed = component.elapsedSec();
@@ -591,6 +611,7 @@ describe('AgentStudioPersonaComponent', () => {
       of({ run_id: 'run-1', status: 'polling_build', decisions: [] }),
     );
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.runTerminal()).toBe(false);
     expect(fixture.nativeElement.textContent).toContain('persona is thinking…');
@@ -600,6 +621,7 @@ describe('AgentStudioPersonaComponent', () => {
       of({ run_id: 'run-1', status: 'completed', decisions: [] }),
     );
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.runTerminal()).toBe(true);
     expect(fixture.nativeElement.textContent).not.toContain('persona is thinking…');
@@ -626,6 +648,7 @@ describe('AgentStudioPersonaComponent', () => {
     fixture.detectChanges();
     // The default getRunStatus resolves to a completed run with empty decisions.
     component.launch();
+    vi.advanceTimersByTime(0);
     expect(component.runTerminal()).toBe(true);
     fixture.detectChanges();
     expect(fixture.nativeElement.textContent).toContain('No decisions recorded');
@@ -641,11 +664,13 @@ describe('AgentStudioPersonaComponent', () => {
     facade.startPersonaRun.mockReturnValue(of({ job_id: 'run-1', status: 'running', message: '' }));
     facade.getPersonaRunStatus.mockReturnValueOnce(stale).mockReturnValue(new Subject());
     component.launch();
+    vi.advanceTimersByTime(0);
 
     // Second launch supersedes run-1 (activeRunId becomes run-2).
     facade.startPersonaRun.mockReturnValue(of({ job_id: 'run-2', status: 'running', message: '' }));
     facade.getPersonaRunStatus.mockReturnValueOnce(new Subject()).mockReturnValue(new Subject());
     component.launch();
+    vi.advanceTimersByTime(0);
 
     // The stale run-1 immediate fetch now errors — it must NOT stamp run-2 with
     // the lost-contact banner.
@@ -679,6 +704,7 @@ describe('AgentStudioPersonaComponent', () => {
     state.setPersonaId('startup-founder');
     component.selectProcess('p1');
     component.launch();
+    vi.advanceTimersByTime(0);
     expect(facade.startPersonaRun).not.toHaveBeenCalled();
   });
 
@@ -700,6 +726,7 @@ describe('AgentStudioPersonaComponent', () => {
       }),
     );
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     const text = fixture.nativeElement.textContent;
     expect(text).toContain('What is the MVP scope?');
@@ -715,6 +742,7 @@ describe('AgentStudioPersonaComponent', () => {
       of({ run_id: 'run-1', status: 'running', decisions: [] }),
     );
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.runTerminal()).toBe(false);
     expect(fixture.nativeElement.textContent).toContain('Waiting for the first decision');
@@ -761,6 +789,7 @@ describe('AgentStudioPersonaComponent', () => {
       fixture.detectChanges();
       facade.startPersonaRun.mockReturnValue(new Subject()); // never emits
       component.launch();
+      vi.advanceTimersByTime(0);
       expect(component.launching()).toBe(true);
       vi.advanceTimersByTime(30_000);
       expect(component.launching()).toBe(false);
@@ -795,6 +824,7 @@ describe('AgentStudioPersonaComponent', () => {
     fixture.detectChanges();
     facade.getPersonaRunStatus.mockReturnValue(of(null));
     expect(() => component.launch()).not.toThrow();
+    vi.advanceTimersByTime(0);
     expect(component.run()).toBeNull();
   });
 
@@ -807,6 +837,7 @@ describe('AgentStudioPersonaComponent', () => {
     // 1 step finished; the runner has advanced to the 2nd (running) step s2.
     facade.getTeamPipelineRun.mockReturnValue(of(pipelineRun(1)));
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     // Pipeline read is piggybacked on the founder poll, keyed on se_job_id.
     expect(facade.getTeamPipelineRun).toHaveBeenCalledWith('t1', 'pipe-1');
@@ -833,6 +864,7 @@ describe('AgentStudioPersonaComponent', () => {
     facade.getPersonaRunStatus.mockReturnValue(of(statusWithJob()));
     facade.getTeamPipelineRun.mockReturnValue(of(pipelineRun(2)));
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.totalSteps()).toBe(0);
     expect(component.stepProgressKnown()).toBe(false);
@@ -851,6 +883,7 @@ describe('AgentStudioPersonaComponent', () => {
     facade.getPersonaRunStatus.mockReturnValue(of(statusWithJob()));
     facade.getTeamPipelineRun.mockReturnValue(of(null));
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.pipelineRun()).toBeNull();
     expect(component.completedStepCount()).toBe(0);
@@ -879,6 +912,7 @@ describe('AgentStudioPersonaComponent', () => {
       ),
     );
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.isWaiting()).toBe(true);
     // The waiting step is not counted as completed → still "step 3 of 4".
@@ -897,6 +931,7 @@ describe('AgentStudioPersonaComponent', () => {
     facade.getPersonaRunStatus.mockReturnValue(of(statusWithJob()));
     facade.getTeamPipelineRun.mockReturnValue(of(pipelineRun(2, { status: 'running' })));
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.isWaiting()).toBe(false);
     expect(fixture.nativeElement.textContent).not.toContain('answering a question');
@@ -921,6 +956,7 @@ describe('AgentStudioPersonaComponent', () => {
     // step name distinguishes the fixed (run-process) logic from the old launcher logic.
     facade.getTeamPipelineRun.mockReturnValue(of(pipelineRun(2, { process_id: 'p1' })));
     component.launch();
+    vi.advanceTimersByTime(0);
     expect(component.totalSteps()).toBe(4);
 
     // User switches the dropdown mid-run to the 2-step process pB.
@@ -939,6 +975,7 @@ describe('AgentStudioPersonaComponent', () => {
     // A looped/revisited run can complete more steps than the DAG declares.
     facade.getTeamPipelineRun.mockReturnValue(of(pipelineRun(5)));
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.completedStepCount()).toBe(5);
     expect(component.totalSteps()).toBe(4);
@@ -966,6 +1003,7 @@ describe('AgentStudioPersonaComponent', () => {
       of(pipelineRun(3, { step_results: results, current_step_id: 's4' })),
     );
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.completedStepCount()).toBe(3); // only 3 finished…
     expect(component.currentStepNumber()).toBe(4); // …on step 4 of 4
@@ -979,6 +1017,7 @@ describe('AgentStudioPersonaComponent', () => {
     facade.getPersonaRunStatus.mockReturnValue(of(statusWithJob({ status: 'completed' })));
     facade.getTeamPipelineRun.mockReturnValue(of(pipelineRun(4)));
     component.launch();
+    vi.advanceTimersByTime(0);
     expect(component.runTerminal()).toBe(true);
     expect(facade.getTeamPipelineRun).not.toHaveBeenCalled();
     expect(component.pipelineRun()).toBeNull();
@@ -991,6 +1030,7 @@ describe('AgentStudioPersonaComponent', () => {
     // A pipeline read for a different (superseded) run must not populate the signal.
     facade.getTeamPipelineRun.mockReturnValue(of(pipelineRun(3, { run_id: 'pipe-OTHER' })));
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.pipelineRun()).toBeNull();
     expect(component.stepProgressKnown()).toBe(false);
@@ -1002,6 +1042,7 @@ describe('AgentStudioPersonaComponent', () => {
     facade.getPersonaRunStatus.mockReturnValue(of(statusWithJob()));
     facade.getTeamPipelineRun.mockReturnValue(throwError(() => new Error('blip')));
     expect(() => component.launch()).not.toThrow();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.pipelineRun()).toBeNull();
     // A pipeline failure must not surface as a run/launch error.
@@ -1016,6 +1057,7 @@ describe('AgentStudioPersonaComponent', () => {
     // se_job_id absent (e.g. spec-gen phase before the build starts).
     facade.getPersonaRunStatus.mockReturnValue(of({ run_id: 'run-1', status: 'generating_spec', decisions: [] }));
     component.launch();
+    vi.advanceTimersByTime(0);
     expect(facade.getTeamPipelineRun).not.toHaveBeenCalled();
     expect(component.stepProgressKnown()).toBe(false);
   });
@@ -1026,12 +1068,14 @@ describe('AgentStudioPersonaComponent', () => {
     facade.getPersonaRunStatus.mockReturnValue(of(statusWithJob()));
     facade.getTeamPipelineRun.mockReturnValue(of(pipelineRun(3)));
     component.launch();
+    vi.advanceTimersByTime(0);
     expect(component.completedStepCount()).toBe(3);
 
     // A second launch clears the prior pipeline state before the first read lands.
     facade.startPersonaRun.mockReturnValue(of({ job_id: 'run-2', status: 'running', message: '' }));
     facade.getPersonaRunStatus.mockReturnValue(new Subject());
     component.launch();
+    vi.advanceTimersByTime(0);
     expect(component.pipelineRun()).toBeNull();
     expect(component.completedStepCount()).toBe(0);
   });
@@ -1044,6 +1088,7 @@ describe('AgentStudioPersonaComponent', () => {
     );
     facade.getTeamPipelineRun.mockReturnValue(of(pipelineRun(4, { status: 'completed' })));
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.runTerminal()).toBe(true);
     // stepProgressKnown is gated on !runTerminal, so no bar/thinking is shown.
@@ -1065,6 +1110,7 @@ describe('AgentStudioPersonaComponent', () => {
         .mockReturnValueOnce(of(pipelineRun(1))) // immediate fetch: 1 finished
         .mockReturnValue(of(pipelineRun(2))); // next tick: 2 finished
       component.launch();
+      vi.advanceTimersByTime(0);
       expect(component.completedStepCount()).toBe(1);
 
       // Advance one poll interval: the recurring switchMap → getRunStatus →
@@ -1085,6 +1131,7 @@ describe('AgentStudioPersonaComponent', () => {
     // Pipeline run exists (DAG known) but no step has finished yet.
     facade.getTeamPipelineRun.mockReturnValue(of(pipelineRun(0)));
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.completedStepCount()).toBe(0);
     expect(component.currentStepNumber()).toBe(1);
@@ -1102,6 +1149,7 @@ describe('AgentStudioPersonaComponent', () => {
     // 1 step finished, but current_step_id momentarily null.
     facade.getTeamPipelineRun.mockReturnValue(of(pipelineRun(1, { current_step_id: null })));
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.currentStepName()).toBe('');
     const text = fixture.nativeElement.textContent;
@@ -1119,6 +1167,7 @@ describe('AgentStudioPersonaComponent', () => {
     // separate DB writes). The number must follow the cursor (2), not jump to 3.
     facade.getTeamPipelineRun.mockReturnValue(of(pipelineRun(2, { current_step_id: 's2' })));
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.currentStepNumber()).toBe(2);
     expect(component.currentStepName()).toBe('Write'); // s2
@@ -1135,6 +1184,7 @@ describe('AgentStudioPersonaComponent', () => {
     // …but the underlying pipeline has already failed.
     facade.getTeamPipelineRun.mockReturnValue(of(pipelineRun(2, { status: 'failed' })));
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.runTerminal()).toBe(false); // founder not yet terminal
     expect(component.pipelineTerminal()).toBe(true);
@@ -1153,6 +1203,7 @@ describe('AgentStudioPersonaComponent', () => {
     fixture.detectChanges();
     facade.getPersonaRunStatus.mockReturnValue(of({ run_id: 'run-1', status: 'polling_build', decisions: [] }));
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.statusLabel('polling_build')).toBe('Running…');
     expect(component.statusLabel('answering_build_questions')).toBe('Answering a question…');
@@ -1171,6 +1222,7 @@ describe('AgentStudioPersonaComponent', () => {
     fixture.detectChanges();
     facade.getPersonaRunStatus.mockReturnValue(of({ run_id: 'run-1', status: 'polling_build', decisions: [] }));
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.runInProgress()).toBe(true);
     // Hold the cancel response pending so the in-flight "Stopping…" is observable.
@@ -1196,6 +1248,7 @@ describe('AgentStudioPersonaComponent', () => {
     fixture.detectChanges();
     facade.getPersonaRunStatus.mockReturnValue(of({ run_id: 'run-1', status: 'polling_build', decisions: [] }));
     component.launch();
+    vi.advanceTimersByTime(0);
     const cancel = new Subject<unknown>();
     facade.cancelPersonaRun.mockReturnValue(cancel);
     component.stopRun();
@@ -1214,6 +1267,7 @@ describe('AgentStudioPersonaComponent', () => {
     fixture.detectChanges();
     facade.getPersonaRunStatus.mockReturnValue(of({ run_id: 'run-1', status: 'polling_build', decisions: [] }));
     component.launch();
+    vi.advanceTimersByTime(0);
     facade.cancelPersonaRun.mockReturnValue(throwError(() => new Error('nope')));
     component.stopRun();
     expect(component.cancelling()).toBe(false);
@@ -1228,12 +1282,14 @@ describe('AgentStudioPersonaComponent', () => {
     const cancelA = new Subject<unknown>();
     facade.cancelPersonaRun.mockReturnValue(cancelA);
     component.launch(); // run A
+    vi.advanceTimersByTime(0);
     component.stopRun(); // cancel A in flight (held pending)
 
     // Supersede with run B; run() is now run-2.
     facade.startPersonaRun.mockReturnValue(of({ job_id: 'run-2', status: 'running', message: '' }));
     facade.getPersonaRunStatus.mockReturnValue(of({ run_id: 'run-2', status: 'polling_build', decisions: [] }));
     component.launch();
+    vi.advanceTimersByTime(0);
     expect(component.run()?.run_id).toBe('run-2');
 
     // The stale cancel for run A now fails (e.g. 409 on an already-gone job).
@@ -1250,6 +1306,7 @@ describe('AgentStudioPersonaComponent', () => {
     // …but the pipeline has already terminated (failed).
     facade.getTeamPipelineRun.mockReturnValue(of(pipelineRun(2, { status: 'failed' })));
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     // Progress/thinking hidden (pipeline dead)…
     expect(component.runLive()).toBe(false);
@@ -1268,6 +1325,7 @@ describe('AgentStudioPersonaComponent', () => {
     fixture.detectChanges();
     // Default getRunStatus resolves to a completed run.
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.runLive()).toBe(false);
     expect(fixture.nativeElement.querySelector('.persona__stop')).toBeNull();
@@ -1286,6 +1344,7 @@ describe('AgentStudioPersonaComponent', () => {
 
     facade.getPersonaRunStatus.mockReturnValue(of({ run_id: 'run-1', status: 'polling_build', decisions: [] }));
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     // While live, Run + process select are disabled so a new run can't silently
     // supersede the in-flight one.
@@ -1314,6 +1373,7 @@ describe('AgentStudioPersonaComponent', () => {
     // Running → announces "running".
     facade.getPersonaRunStatus.mockReturnValue(of({ run_id: 'run-1', status: 'polling_build', decisions: [] }));
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     const region = fixture.nativeElement.querySelector('section.persona__run');
     expect(region.getAttribute('aria-labelledby')).toBe('persona-run-title');
@@ -1323,6 +1383,7 @@ describe('AgentStudioPersonaComponent', () => {
     // Completed → announcement changes (aria-live speaks the transition).
     facade.getPersonaRunStatus.mockReturnValue(of({ run_id: 'run-1', status: 'completed', decisions: [] }));
     component.launch();
+    vi.advanceTimersByTime(0);
     expect(component.runAnnouncement()).toBe('Persona test completed.');
   });
 
@@ -1334,6 +1395,7 @@ describe('AgentStudioPersonaComponent', () => {
       of(pipelineRun(2, { status: 'waiting_for_input', current_step_id: 's3' })),
     );
     component.launch();
+    vi.advanceTimersByTime(0);
     fixture.detectChanges();
     expect(component.runAnnouncement()).toBe('The persona is answering a question.');
   });
