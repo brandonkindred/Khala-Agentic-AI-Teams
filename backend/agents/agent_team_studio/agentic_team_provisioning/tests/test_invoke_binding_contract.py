@@ -169,6 +169,41 @@ async def test_manifest_expertise_binds_from_team(fake_strands, monkeypatch: pyt
 
 
 @pytest.mark.asyncio
+async def test_body_expertise_overrides_manifest_team(fake_strands, monkeypatch: pytest.MonkeyPatch):
+    """An explicit body ``expertise`` wins over the manifest team.
+
+    Plain (green now): guards the override direction — see
+    ``test_body_role_overrides_manifest_default``."""
+    manifest = _manifest(team="demo")
+    _install_manifest(monkeypatch, manifest)
+
+    await agent_builder.invoke_generated_agent(_body(manifest.id, expertise=["custom"]))
+
+    assert "Expertise: custom" in fake_strands.last_system_prompt
+    assert "demo" not in fake_strands.last_system_prompt
+
+
+@pytest.mark.asyncio
+async def test_body_capabilities_override_manifest_default(
+    fake_strands, monkeypatch: pytest.MonkeyPatch
+):
+    """The manifest has no capabilities concept — ``persona_from_manifest``
+    always yields ``[]`` for it — so an omitted body ``capabilities`` renders no
+    ``Capabilities:`` line, while an explicit body value is honored for this
+    invoke, per the same presence-test precedence every other field follows."""
+    manifest = _manifest()
+    _install_manifest(monkeypatch, manifest)
+
+    # Omitted → manifest default is empty, no Capabilities line at all.
+    await agent_builder.invoke_generated_agent(_body(manifest.id))
+    assert "Capabilities:" not in fake_strands.last_system_prompt
+
+    # Explicit → request value is honored.
+    await agent_builder.invoke_generated_agent(_body(manifest.id, capabilities=["negotiation"]))
+    assert "Capabilities: negotiation" in fake_strands.last_system_prompt
+
+
+@pytest.mark.asyncio
 async def test_skills_strip_studio_plumbing_tag(fake_strands, monkeypatch: pytest.MonkeyPatch):
     """Plumbing markers ({generated, agentic_team_provisioning, studio}) must not
     surface in the Skills line; authored skill tags still bind."""
