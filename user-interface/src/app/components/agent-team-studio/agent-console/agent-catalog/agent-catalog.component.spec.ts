@@ -6,6 +6,14 @@ import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.s
 import type { AgentDetail, AgentSummary, TeamGroup } from '../../../../models/agent-catalog.model';
 import { AgentCatalogComponent } from './agent-catalog.component';
 
+interface CatalogApiMock {
+  listAgents: ReturnType<typeof vi.fn>;
+  listTeams: ReturnType<typeof vi.fn>;
+  getAgent: ReturnType<typeof vi.fn>;
+  getInputSchema: ReturnType<typeof vi.fn>;
+  getOutputSchema: ReturnType<typeof vi.fn>;
+}
+
 describe('AgentCatalogComponent', () => {
   const writer: AgentSummary = {
     id: 'blogging.writer',
@@ -59,21 +67,16 @@ describe('AgentCatalogComponent', () => {
     manifest: { ...writerDetail.manifest, id: 'soc2.auditor', tags: ['compliance', 'requires-live-integration'] },
   };
 
-  let api: {
-    listAgents: ReturnType<typeof vi.fn>;
-    listTeams: ReturnType<typeof vi.fn>;
-    getAgent: ReturnType<typeof vi.fn>;
-    getInputSchema: ReturnType<typeof vi.fn>;
-    getOutputSchema: ReturnType<typeof vi.fn>;
-  };
+  let api: CatalogApiMock;
 
-  const setup = async () => {
+  const setup = async (overrides: Partial<CatalogApiMock> = {}) => {
     api = {
       listAgents: vi.fn().mockReturnValue(of([writer, auditor])),
       listTeams: vi.fn().mockReturnValue(of([bloggingGroup, soc2Group])),
       getAgent: vi.fn().mockReturnValue(of(writerDetail)),
       getInputSchema: vi.fn(),
       getOutputSchema: vi.fn(),
+      ...overrides,
     };
     await TestBed.configureTestingModule({
       imports: [AgentCatalogComponent, NoopAnimationsModule],
@@ -99,22 +102,13 @@ describe('AgentCatalogComponent', () => {
 
   it('logs and swallows a listTeams failure without touching agents', async () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    api = {
+    const { component } = await setup({
       listAgents: vi.fn().mockReturnValue(of([writer])),
       listTeams: vi.fn().mockReturnValue(throwError(() => new Error('teams down'))),
-      getAgent: vi.fn(),
-      getInputSchema: vi.fn(),
-      getOutputSchema: vi.fn(),
-    };
-    await TestBed.configureTestingModule({
-      imports: [AgentCatalogComponent, NoopAnimationsModule],
-      providers: [{ provide: AgentCatalogApiService, useValue: api }],
-    }).compileComponents();
-    const fixture = TestBed.createComponent(AgentCatalogComponent);
-    fixture.detectChanges();
+    });
 
-    expect(fixture.componentInstance.agents()).toEqual([writer]);
-    expect(fixture.componentInstance.teams()).toEqual([]);
+    expect(component.agents()).toEqual([writer]);
+    expect(component.teams()).toEqual([]);
     expect(consoleSpy).toHaveBeenCalledWith('Failed to load teams', expect.any(Error));
   });
 
@@ -129,20 +123,10 @@ describe('AgentCatalogComponent', () => {
   it('cancels a stale in-flight request so only the latest filter result lands', async () => {
     const first$ = new Subject<AgentSummary[]>();
     const second$ = new Subject<AgentSummary[]>();
-    api = {
+    const { component } = await setup({
       listAgents: vi.fn().mockReturnValueOnce(first$).mockReturnValueOnce(second$),
       listTeams: vi.fn().mockReturnValue(of([])),
-      getAgent: vi.fn(),
-      getInputSchema: vi.fn(),
-      getOutputSchema: vi.fn(),
-    };
-    await TestBed.configureTestingModule({
-      imports: [AgentCatalogComponent, NoopAnimationsModule],
-      providers: [{ provide: AgentCatalogApiService, useValue: api }],
-    }).compileComponents();
-    const fixture = TestBed.createComponent(AgentCatalogComponent);
-    const component = fixture.componentInstance;
-    fixture.detectChanges(); // ngOnInit -> refresh() subscribes to first$
+    });
 
     component.onSearchChange('writer'); // refresh() unsubscribes first$, subscribes second$
 
@@ -192,58 +176,31 @@ describe('AgentCatalogComponent', () => {
   });
 
   it('sets a server-provided error message when refresh fails', async () => {
-    api = {
+    const { component } = await setup({
       listAgents: vi.fn().mockReturnValue(throwError(() => ({ error: { detail: 'registry unavailable' } }))),
       listTeams: vi.fn().mockReturnValue(of([])),
-      getAgent: vi.fn(),
-      getInputSchema: vi.fn(),
-      getOutputSchema: vi.fn(),
-    };
-    await TestBed.configureTestingModule({
-      imports: [AgentCatalogComponent, NoopAnimationsModule],
-      providers: [{ provide: AgentCatalogApiService, useValue: api }],
-    }).compileComponents();
-    const fixture = TestBed.createComponent(AgentCatalogComponent);
-    fixture.detectChanges();
+    });
 
-    expect(fixture.componentInstance.error()).toBe('registry unavailable');
-    expect(fixture.componentInstance.loading()).toBe(false);
+    expect(component.error()).toBe('registry unavailable');
+    expect(component.loading()).toBe(false);
   });
 
   it('falls back to err.message when there is no error.detail', async () => {
-    api = {
+    const { component } = await setup({
       listAgents: vi.fn().mockReturnValue(throwError(() => ({ message: 'network down' }))),
       listTeams: vi.fn().mockReturnValue(of([])),
-      getAgent: vi.fn(),
-      getInputSchema: vi.fn(),
-      getOutputSchema: vi.fn(),
-    };
-    await TestBed.configureTestingModule({
-      imports: [AgentCatalogComponent, NoopAnimationsModule],
-      providers: [{ provide: AgentCatalogApiService, useValue: api }],
-    }).compileComponents();
-    const fixture = TestBed.createComponent(AgentCatalogComponent);
-    fixture.detectChanges();
+    });
 
-    expect(fixture.componentInstance.error()).toBe('network down');
+    expect(component.error()).toBe('network down');
   });
 
   it('falls back to a generic message when the error has neither detail nor message', async () => {
-    api = {
+    const { component } = await setup({
       listAgents: vi.fn().mockReturnValue(throwError(() => ({}))),
       listTeams: vi.fn().mockReturnValue(of([])),
-      getAgent: vi.fn(),
-      getInputSchema: vi.fn(),
-      getOutputSchema: vi.fn(),
-    };
-    await TestBed.configureTestingModule({
-      imports: [AgentCatalogComponent, NoopAnimationsModule],
-      providers: [{ provide: AgentCatalogApiService, useValue: api }],
-    }).compileComponents();
-    const fixture = TestBed.createComponent(AgentCatalogComponent);
-    fixture.detectChanges();
+    });
 
-    expect(fixture.componentInstance.error()).toBe('Failed to load agents');
+    expect(component.error()).toBe('Failed to load agents');
   });
 
   it('openDetail opens the drawer and loads detail', async () => {

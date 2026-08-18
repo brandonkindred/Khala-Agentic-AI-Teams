@@ -86,17 +86,41 @@ describe('AgentRunnerComponent', () => {
     created_at: '2026-08-01T00:05:00Z',
   };
 
-  let catalogApi: { listAgents: ReturnType<typeof vi.fn>; getAgent: ReturnType<typeof vi.fn>; getInputSchema: ReturnType<typeof vi.fn> };
-  let runnerApi: Record<string, ReturnType<typeof vi.fn>>;
+  interface CatalogApiMock {
+    listAgents: ReturnType<typeof vi.fn>;
+    getAgent: ReturnType<typeof vi.fn>;
+    getInputSchema: ReturnType<typeof vi.fn>;
+  }
+
+  interface RunnerApiMock {
+    ensureWarm: ReturnType<typeof vi.fn>;
+    getSandbox: ReturnType<typeof vi.fn>;
+    teardown: ReturnType<typeof vi.fn>;
+    invoke: ReturnType<typeof vi.fn>;
+    listSamples: ReturnType<typeof vi.fn>;
+    getSample: ReturnType<typeof vi.fn>;
+    listSavedInputs: ReturnType<typeof vi.fn>;
+    createSavedInput: ReturnType<typeof vi.fn>;
+    deleteSavedInput: ReturnType<typeof vi.fn>;
+    listRuns: ReturnType<typeof vi.fn>;
+    getRun: ReturnType<typeof vi.fn>;
+    deleteRun: ReturnType<typeof vi.fn>;
+    diff: ReturnType<typeof vi.fn>;
+  }
+
+  let catalogApi: CatalogApiMock;
+  let runnerApi: RunnerApiMock;
   let dialogOpen: ReturnType<typeof vi.fn>;
   let fixture: ComponentFixture<AgentRunnerComponent>;
   let component: AgentRunnerComponent;
 
-  const setup = async () => {
+  const setup = async (catalogOverrides: Partial<CatalogApiMock> = {}) => {
+    TestBed.resetTestingModule();
     catalogApi = {
       listAgents: vi.fn().mockReturnValue(of([writerSummary])),
       getAgent: vi.fn().mockReturnValue(of(writerDetail)),
       getInputSchema: vi.fn().mockReturnValue(throwError(() => new Error('no schema'))),
+      ...catalogOverrides,
     };
     runnerApi = {
       ensureWarm: vi.fn().mockReturnValue(of(warmHandle)),
@@ -146,19 +170,10 @@ describe('AgentRunnerComponent', () => {
 
   it('logs and swallows a failure to load the agent list', async () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    catalogApi.listAgents.mockReturnValue(throwError(() => new Error('down')));
-    TestBed.resetTestingModule();
-    await TestBed.configureTestingModule({
-      imports: [AgentRunnerComponent, NoopAnimationsModule],
-      providers: [
-        { provide: AgentCatalogApiService, useValue: catalogApi },
-        { provide: AgentRunnerApiService, useValue: runnerApi },
-      ],
-    }).compileComponents();
-    TestBed.overrideProvider(MatDialog, { useValue: { open: dialogOpen } });
-    const f = TestBed.createComponent(AgentRunnerComponent);
-    f.detectChanges();
-    expect(f.componentInstance.agents()).toEqual([]);
+
+    await setup({ listAgents: vi.fn().mockReturnValue(throwError(() => new Error('down'))) });
+
+    expect(component.agents()).toEqual([]);
     expect(consoleSpy).toHaveBeenCalledWith('Runner: failed to load agents', expect.any(Error));
   });
 
