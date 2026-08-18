@@ -295,33 +295,19 @@ def test_maybe_register_injected_manifest_noop_when_file_missing(
 
 @pytest.fixture
 def fake_strands(monkeypatch: pytest.MonkeyPatch):
-    """Swap the real strands model for a recorder (no network call)."""
+    """Swap the real strands model for a recorder (no network call).
 
-    class _FakeResult:
-        def __init__(self, text: str) -> None:
-            self._text = text
+    Uses the shared double from ``shared.agent_invoke.tests.fake_strands`` (the
+    same one ``agentic_team_provisioning``'s own test suites use) rather than a
+    third local copy, patched by string target so this file's own import graph
+    never gains a static dependency on the domain app.
+    """
+    from shared.agent_invoke.tests.fake_strands import patch_strands_agent
 
-        def __str__(self) -> str:
-            return self._text
-
-    class _FakeStrandsAgent:
-        last_system_prompt: str | None = None
-        last_tools: object = None
-
-        def __init__(self, **kwargs) -> None:
-            type(self).last_system_prompt = kwargs.get("system_prompt")
-            type(self).last_tools = kwargs.get("tools")
-
-        def __call__(self, message: str) -> _FakeResult:
-            return _FakeResult("ok")
-
-    _FakeStrandsAgent.last_system_prompt = None
-    _FakeStrandsAgent.last_tools = None
-    monkeypatch.setattr(
+    return patch_strands_agent(
+        monkeypatch,
         "agent_team_studio.agentic_team_provisioning.runtime.agent_builder.StrandsAgent",
-        _FakeStrandsAgent,
     )
-    return _FakeStrandsAgent
 
 
 def _generated_style_manifest(agent_name: str, summary: str, skill_tags: list[str]):
@@ -376,6 +362,7 @@ def test_entrypoint_binds_saved_studio_persona_after_save(
     invokes the saved ``role`` / ``system_prompt`` even though the request body
     carries neither.
     """
+    from agent_platform.registry import get_registry
     from agent_platform.studio.models import AgentDefinition
     from agent_platform.studio.registration import build_studio_agent_manifest
 
@@ -387,18 +374,22 @@ def test_entrypoint_binds_saved_studio_persona_after_save(
             system_prompt="Always cite the clause number.",
         )
     )
-    app = _boot_with_injected_manifest(monkeypatch, tmp_path, manifest)
-    client = TestClient(app)
+    try:
+        app = _boot_with_injected_manifest(monkeypatch, tmp_path, manifest)
+        client = TestClient(app)
 
-    response = client.post(
-        f"/_agents/{manifest.id}/invoke",
-        json={"agent_name": manifest.name, "message": "Review this MSA."},
-    )
-    assert response.status_code == 200, response.text
+        response = client.post(
+            f"/_agents/{manifest.id}/invoke",
+            json={"agent_name": manifest.name, "message": "Review this MSA."},
+        )
+        assert response.status_code == 200, response.text
 
-    prompt = fake_strands.last_system_prompt
-    assert "Role: Audits vendor contracts" in prompt
-    assert "Always cite the clause number." in prompt
+        prompt = fake_strands.last_system_prompt
+        assert "Role: Audits vendor contracts" in prompt
+        assert "Always cite the clause number." in prompt
+    finally:
+        get_registry().unregister(manifest.id)
+        get_registry.cache_clear()
 
 
 def test_entrypoint_binds_saved_generated_persona_after_save(
@@ -411,17 +402,23 @@ def test_entrypoint_binds_saved_generated_persona_after_save(
     ``build_agent_manifest``'s output, proving the container-boot binding is
     entrypoint-level, not Studio-specific.
     """
+    from agent_platform.registry import get_registry
+
     manifest = _generated_style_manifest("Contract Auditor", "Audits vendor contracts", ["legal", "contracts"])
-    app = _boot_with_injected_manifest(monkeypatch, tmp_path, manifest)
-    client = TestClient(app)
+    try:
+        app = _boot_with_injected_manifest(monkeypatch, tmp_path, manifest)
+        client = TestClient(app)
 
-    response = client.post(
-        f"/_agents/{manifest.id}/invoke",
-        json={"agent_name": manifest.name, "message": "Review this MSA."},
-    )
-    assert response.status_code == 200, response.text
+        response = client.post(
+            f"/_agents/{manifest.id}/invoke",
+            json={"agent_name": manifest.name, "message": "Review this MSA."},
+        )
+        assert response.status_code == 200, response.text
 
-    prompt = fake_strands.last_system_prompt
-    assert "Role: Audits vendor contracts" in prompt
-    assert "Skills: legal, contracts" in prompt
-    assert "Expertise: agentic_team_provisioning" in prompt
+        prompt = fake_strands.last_system_prompt
+        assert "Role: Audits vendor contracts" in prompt
+        assert "Skills: legal, contracts" in prompt
+        assert "Expertise: agentic_team_provisioning" in prompt
+    finally:
+        get_registry().unregister(manifest.id)
+        get_registry.cache_clear()
