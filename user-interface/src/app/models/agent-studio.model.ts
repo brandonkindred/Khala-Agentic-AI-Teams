@@ -37,14 +37,14 @@ export const STUDIO_STAGES: readonly StudioStage[] = [
 ] as const;
 
 /**
- * 0-based index of each stage within `STUDIO_STAGES`, keyed by `StudioStageKey`.
- * Derived from `STUDIO_STAGES` so it can never drift from the array's order — the
- * single source of truth for `navigateToStage(index)` call sites across the shell
- * and its child stage components.
+ * Stage index lookup, keyed by stage key and derived from `STUDIO_STAGES`
+ * itself so a stage-component back-loop (`navigateToStage(n)`) can never
+ * drift from the canonical order — components should read `STAGE_INDEX.foo`
+ * rather than hand-maintaining a local `const FOO_STAGE = n` mirror.
  */
 export const STAGE_INDEX: Readonly<Record<StudioStageKey, number>> = Object.fromEntries(
   STUDIO_STAGES.map((stage, index) => [stage.key, index]),
-) as Readonly<Record<StudioStageKey, number>>;
+) as Record<StudioStageKey, number>;
 
 /**
  * Stage 1's own forward-only sub-stepper (spec §3, Stage 1: "Build Agent is

@@ -1,9 +1,11 @@
-import { ChangeDetectionStrategy, Component, computed, inject } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { A11yModule } from '@angular/cdk/a11y';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
+import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
 import { AgentRunnerComponent } from '../agent-console/agent-runner/agent-runner.component';
-import { STAGE_INDEX } from '../../../models/agent-studio.model';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
+import { STAGE_INDEX } from '../../../models/agent-studio.model';
 
 /**
  * Agent Studio — Stage 2 "Test Agent" (spec §3, Stage 2).
@@ -24,11 +26,20 @@ import { AgentStudioStateService } from '../../../services/agent-studio-state.se
  * selection), it renders an empty state rather than an unseeded runner — so the
  * heavy runner only mounts once there is a real agent to run — with a
  * contextual jump back to Build.
+ *
+ * **Browse agents (spec §2.1).** The forward-only stepper never jumps back to
+ * Stage 1, so picking a *different* agent once here is an explicit in-context
+ * action: a `[ Browse agents ]` slide-out (the same scrim + `<aside>` +
+ * `cdkTrapFocus` pattern as Stage 1's provisioning panel,
+ * `agent-studio-build-agent.component.ts`) hosts the catalog again. Selecting
+ * an agent there just re-points `registryAgentId` — since `AgentRunnerComponent`
+ * exposes `preselectedAgentId` as an `@Input()` setter, reassigning it already
+ * resets run history and re-warms the sandbox for the new agent.
  */
 @Component({
   selector: 'app-agent-studio-test-agent',
   standalone: true,
-  imports: [MatButtonModule, MatIconModule, AgentRunnerComponent],
+  imports: [A11yModule, MatButtonModule, MatIconModule, AgentCatalogComponent, AgentRunnerComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './agent-studio-test-agent.component.html',
   styleUrl: './agent-studio-test-agent.component.scss',
@@ -39,6 +50,9 @@ export class AgentStudioTestAgentComponent {
   /** The agent to test, carried from Stage 1 (null until one is selected). */
   readonly agentId = computed(() => this.state.registryAgentId());
 
+  /** Whether the "Browse agents" slide-out is open. */
+  readonly browseOpen = signal(false);
+
   /**
    * Return to Stage 1 (Build). Wired to the runner's "back to catalog"
    * affordance and the empty-state button: in the Studio the catalog *is*
@@ -46,5 +60,24 @@ export class AgentStudioTestAgentComponent {
    */
   onReturnToBuild(): void {
     this.state.navigateToStage(STAGE_INDEX.build);
+  }
+
+  openBrowse(): void {
+    this.browseOpen.set(true);
+  }
+
+  closeBrowse(): void {
+    this.browseOpen.set(false);
+  }
+
+  /**
+   * Re-point the handoff agent to `id` from the Browse-agents overlay (spec
+   * §2.1) — not a clone, just a focus change. `AgentRunnerComponent` reacts to
+   * the resulting `preselectedAgentId` change on its own (fresh run history,
+   * re-warmed sandbox), so no further reset is needed here.
+   */
+  onBrowseSelect(id: string): void {
+    this.state.setRegistryAgentId(id);
+    this.closeBrowse();
   }
 }
