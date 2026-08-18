@@ -884,6 +884,10 @@ class StrategyLabBatchWorkflow:
             - ``state`` is a JSON-serializable dict of run-state deltas.
             - ``generation`` is a non-negative int (this workflow's fencing token).
 
+        Postconditions:
+            - On successful return, ``state`` has been durably persisted for
+              ``run_id`` via ``persist_run_state_activity``.
+
         Raises when ``persist_run_state_activity`` rejects ``generation`` as stale
         (a non-retryable ``ApplicationError`` — a fenced write means this incarnation
         has been superseded by a restart and this workflow should stop, so letting the

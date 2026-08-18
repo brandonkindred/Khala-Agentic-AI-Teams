@@ -862,13 +862,12 @@ def _make_channel_guide(
         routed through the ``branding_channel_activation`` agent_key
         tier.
     """
-    assert isinstance(channel, str) and channel.strip(), "channel must be a non-empty string"
-    assert isinstance(description, str) and description.strip(), (
-        "description must be a non-empty string"
-    )
-    assert isinstance(structured_output, type) and issubclass(structured_output, BaseModel), (
-        "structured_output must be a Pydantic BaseModel subclass"
-    )
+    if not isinstance(channel, str) or not channel.strip():
+        raise ValueError("channel must be a non-empty string")
+    if not isinstance(description, str) or not description.strip():
+        raise ValueError("description must be a non-empty string")
+    if not (isinstance(structured_output, type) and issubclass(structured_output, BaseModel)):
+        raise ValueError("structured_output must be a Pydantic BaseModel subclass")
     return build_agent(
         name=f"{channel}_guide",
         description=f"Defines brand guidelines for the {channel} channel.",

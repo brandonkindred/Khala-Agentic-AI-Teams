@@ -226,7 +226,7 @@ export const SOURCE_DISPLAY: Record<
   software_engineering: { label: 'Software Engineering', icon: 'code', route: '/software-engineering' },
   blogging: { label: 'Blogging', icon: 'article', route: '/blogging/dashboard' },
   ai_systems: { label: 'AI Systems', icon: 'smart_toy', route: '/ai-systems' },
-  agent_provisioning: { label: 'Agent Provisioning', icon: 'settings', route: '/agent-provisioning' },
+  agent_provisioning: { label: 'Agent Provisioning', icon: 'settings', route: '/agent-studio/provisioning' },
   social_marketing: { label: 'Social Marketing', icon: 'campaign', route: '/social-marketing' },
   investment: { label: 'Investment', icon: 'trending_up', route: '/investment/strategy-lab' },
   user_agent_founder: { label: 'Testing Personas', icon: 'person_search', route: '/agent-studio' },
