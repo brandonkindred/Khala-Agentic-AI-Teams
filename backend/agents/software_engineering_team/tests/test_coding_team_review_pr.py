@@ -800,35 +800,27 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
     holder: dict[str, Any] = {"client": _FakeReviewClient()}
     monkeypatch.setattr(api_main, "GitHubClient", lambda **_kw: holder["client"])
     
-    # --- THE BULLETPROOF MOCK ---
-    # Bypass the Temporal layer entirely. We use an explicit async def so the 
-    # caller can safely 'await' it without throwing NoneType errors.
-    mock_execute = AsyncMock()
-
-    async def mock_start_temporal(*args, **kwargs):
-        # 1. Translate the parameters into the exact shape the tests expect
-        # so temporal_execute.assert_called_once_with(...) still passes!
-        if len(args) >= 3:
-            job_id, request, token = args[0:3]
-            mock_execute(
-                "CodeReviewWorkflow",
-                args=[job_id, request, token],
-                id=f"pr-review-{job_id}",
-                task_queue="code-review"
-            )
+    # --- THE ARCHITECTURALLY CORRECT MOCK ---
+    # 1. Define the side effect
+    async def start_workflow_side_effect(workflow, args=None, id=None, task_queue=None, **kwargs):
+        # Run the actual local PR review logic synchronously for the test
+        if args:
+            result = api_main._run_pr_review(*args)
         else:
-            mock_execute(*args, **kwargs)
-        
-        # 2. Run the actual local PR review logic synchronously for the test
-        result = api_main._run_pr_review(*args, **kwargs)
+            result = api_main._run_pr_review()
+            
         if asyncio.iscoroutine(result):
             await result
 
-    # Patch it directly on api_main just like your original code!
+    # 2. Setup our AsyncMocks for start_workflow
+    mock_start = AsyncMock(side_effect=start_workflow_side_effect)
+    mock_client = AsyncMock()
+    mock_client.start_workflow = mock_start
+
+    # 3. Patch the imported client directly in pr_review
     monkeypatch.setattr(
-        api_main,
-        "_start_pr_review_temporal",
-        mock_start_temporal,
+        "software_engineering_team.api.pr_review.get_temporal_client",
+        AsyncMock(return_value=mock_client)
     )
 
     # Install a fake engine provider so no LLM stack loads.
@@ -853,8 +845,9 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
         "repo_path": str(tmp_path),
         "github": holder,
         "jobs": fake_jobs,
-        "temporal_execute": mock_execute, 
+        "temporal_execute": mock_start,
     }
+    
 
 def _review_body(**overrides: Any) -> dict[str, Any]:
     """Return a default PR-review request body, merged with caller overrides.
