@@ -338,6 +338,68 @@ def test_phase_activity_none_payload_checkpoint_does_not_short_circuit(monkeypat
     mock_rsp.assert_called_once()
 
 
+# ---------------------------------------------------------------------------
+# Story 2b Step 3: the thread-path phase cache (orchestrator.run(phase_cache=...))
+# must never reach the Temporal branch. run_branding_phase_activity calls
+# orchestrator.run_single_phase directly -- never orchestrator.run -- so these
+# pin that structural guarantee down as an explicit regression rather than
+# relying on it staying true by accident.
+# ---------------------------------------------------------------------------
+
+
+def test_run_single_phase_has_no_phase_cache_parameter() -> None:
+    """``run_single_phase`` -- the only orchestrator method the Temporal activity
+    calls -- has no ``phase_cache`` parameter, so there is no way for the
+    thread-path cache (``orchestrator.run(phase_cache=...)``) to reach the
+    Temporal branch through it."""
+    import inspect
+
+    from branding_team.orchestrator import BrandingTeamOrchestrator
+
+    params = inspect.signature(BrandingTeamOrchestrator.run_single_phase).parameters
+    assert "phase_cache" not in params
+
+
+def test_phase_activity_recomputes_even_with_a_warm_cache_for_the_same_phase(monkeypatch) -> None:
+    """A ``PhaseOutputCache`` warmed (e.g. by an unrelated thread-path run) for
+    the exact same mission/phase has no effect on the Temporal activity: it
+    always invokes ``run_single_phase``, since it never receives or constructs
+    a cache -- proving the Temporal branch runs every phase unchanged
+    regardless of what the thread-path cache holds elsewhere in the process."""
+    import shared.temporal
+    from branding_team.api import main as main_mod
+    from branding_team.models import BrandingMission, BrandPhase, StrategicCoreOutput
+    from branding_team.shared.memoization import phase_input_hash
+    from branding_team.shared.phase_output_cache import PhaseOutputCache
+    from branding_team.temporal import activities
+
+    payload = _phase_payload()
+    mission = BrandingMission(**payload["mission"])
+    cache = PhaseOutputCache()
+    cache_hash = phase_input_hash(BrandPhase.STRATEGIC_CORE, mission, {})
+    cache.put(
+        BrandPhase.STRATEGIC_CORE,
+        cache_hash,
+        StrategicCoreOutput(positioning_statement="FROM-THREAD-CACHE"),
+    )
+
+    monkeypatch.setattr(shared.temporal, "load_checkpoint", lambda team, jid, phase: None)
+    monkeypatch.setattr(shared.temporal, "save_checkpoint", MagicMock())
+
+    model = StrategicCoreOutput(positioning_statement="FROM-TEMPORAL-RUN")
+    with patch.object(
+        main_mod.orchestrator, "run_single_phase", return_value=(model, False)
+    ) as mock_rsp:
+        out = activities.run_branding_phase_activity(payload, "strategic_core", {})
+
+    mock_rsp.assert_called_once()
+    assert out["positioning_statement"] == "FROM-TEMPORAL-RUN"
+    # The warm thread-path cache entry is provably untouched by the activity.
+    assert cache.get(BrandPhase.STRATEGIC_CORE, cache_hash).positioning_statement == (
+        "FROM-THREAD-CACHE"
+    )
+
+
 def test_market_research_activity_returns_none_on_failure() -> None:
     from branding_team.temporal import activities
 
