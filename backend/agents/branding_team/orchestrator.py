@@ -86,11 +86,10 @@ _PHASE1_NODE_MERGE: dict[str, Optional[str]] = {
 # Phase 2 linear Graph node id -> nest-under key on NarrativeMessagingOutput,
 # or None to merge fields in flat. Each specialist's structured_output is an
 # own-field-only model (Story 5b Step 1; see models.py) -- no two of the six
-# fragments can set the same flat key, so prefer_first is a defensive no-op
-# here rather than load-bearing collision-avoidance (its removal is Story 5b
-# Step 3). require_all still insists every specialist actually ran.
-# VoicePrinciplesDrafter already nests writing_guidelines in its own schema —
-# no remap needed.
+# fragments can set the same flat key, so the merge is a plain flat union with
+# no collision-avoidance needed. require_all still insists every specialist
+# actually ran. VoicePrinciplesDrafter already nests writing_guidelines in its
+# own schema — no remap needed.
 _PHASE2_NODE_MERGE: dict[str, Optional[str]] = {
     "Storyteller": None,
     "ArchetypeAnalyst": None,
@@ -195,7 +194,6 @@ def _apply_fragment(
     data: dict[str, Any],
     nest_under: Optional[str],
     *,
-    prefer_first: bool,
     list_fields: frozenset[str] = frozenset(),
 ) -> None:
     """Fold one recognized fragment's dumped ``data`` into the ``merged`` accumulator.
@@ -209,25 +207,17 @@ def _apply_fragment(
         Mutates ``merged`` in place and returns ``None``.
         - When ``nest_under`` names a list field, ``data`` is appended as one
           element under it (several single-item fragments combine into one list,
-          e.g. Phase 4's ``channel_guidelines``); ``prefer_first`` does not
-          apply to list fields.
+          e.g. Phase 4's ``channel_guidelines``).
         - When ``nest_under`` names a non-list field, ``data`` is placed under
-          it — skipped when ``prefer_first`` and that key is already present
-          (the first writer wins).
-        - When ``nest_under`` is ``None``: with ``prefer_first`` each key is
-          filled only if absent (``setdefault``, first writer wins); otherwise
-          ``data`` overwrites (last writer wins).
+          it (last writer wins).
+        - When ``nest_under`` is ``None``, ``data`` overwrites ``merged``'s
+          matching keys (last writer wins).
         No other keys are touched.
     """
     if nest_under and nest_under in list_fields:
         merged.setdefault(nest_under, []).append(data)
     elif nest_under:
-        if prefer_first and nest_under in merged:
-            return
         merged[nest_under] = data
-    elif prefer_first:
-        for key, value in data.items():
-            merged.setdefault(key, value)
     else:
         merged.update(data)
 
@@ -238,7 +228,6 @@ def _merge_named_fragments(
     node_merge: dict[str, Optional[str]],
     *,
     require_all: bool = False,
-    prefer_first: bool = False,
 ) -> Optional[BaseModel]:
     """Merge every recognized child's ``structured_output`` into one phase output.
 
@@ -266,12 +255,6 @@ def _merge_named_fragments(
         this is how several single-item fragments (one per channel) combine
         into one list field. Non-list nest_under fields keep the original
         single-value-assignment behavior.
-
-        When ``prefer_first`` is True, the first child that sets a flat key
-        wins (later dumps do not overwrite). Phase 2 passes this defensively:
-        since Story 5b Step 1 each specialist's ``structured_output`` is an
-        own-field-only model, so no two fragments can set the same flat key
-        and the guard is currently a no-op there (its removal is Step 3).
     """
     nested_results = getattr(getattr(node_result, "result", None), "results", None)
     if not isinstance(nested_results, dict):
@@ -294,7 +277,6 @@ def _merge_named_fragments(
             merged,
             structured.model_dump(),
             nest_under,
-            prefer_first=prefer_first,
             list_fields=list_fields,
         )
 
@@ -348,8 +330,8 @@ def _merge_phase2_fragments(node_result: Any, model_class: type[BaseModel]) -> O
     Each specialist's ``structured_output`` is an own-field-only model (Story
     5b Step 1): upstream narrative reaches it only as read-only context via
     the single-predecessor edge chain's ``Inputs from previous nodes``, never
-    as a field it re-emits. ``prefer_first`` is therefore a defensive no-op
-    here (no two fragments can set the same flat key); its removal is Step 3.
+    as a field it re-emits. So no two of the six fragments can ever set the
+    same flat key, and the flat union merge below is deterministic.
 
     Preconditions:
         ``node_result`` is the ``NodeResult`` for a single top-level graph node
@@ -361,9 +343,7 @@ def _merge_phase2_fragments(node_result: Any, model_class: type[BaseModel]) -> O
         the merged data fails validation — same None contract as
         ``_merge_phase1_fragments``.
     """
-    return _merge_named_fragments(
-        node_result, model_class, _PHASE2_NODE_MERGE, require_all=True, prefer_first=True
-    )
+    return _merge_named_fragments(node_result, model_class, _PHASE2_NODE_MERGE, require_all=True)
 
 
 def _merge_phase3_fragments(node_result: Any, model_class: type[BaseModel]) -> Optional[BaseModel]:

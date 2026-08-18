@@ -1252,7 +1252,12 @@ alongside `__side_effect_consolidation__` and
 in-process coordinator's submission-level short-circuit cache, so a verdict
 computed under one toggle state is never served to a run under the other. Set
 to `false`/`0`/`no` to disable (any other value, or unset, leaves it
-enabled).
+enabled). Like `__side_effect_consolidation__` and
+`__spec_compliance_single_pass__`, `__mutation_analysis__` is a caller-resolved
+value `run_coordinator` folds with the `CODE_REVIEW` profile restriction
+before threading it into the fingerprint helper — the helper itself never
+reads any of these three env vars, so a non-`CODE_REVIEW` submission is never
+fingerprinted as sensitive to a toggle that can never affect its output.
 
 ### CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION
 Default-on toggle for consolidating related `side-effects` findings from the
@@ -1300,12 +1305,21 @@ anchored in the same enclosing Python construct and are either `side-effects`
 `>= threshold`; or when they are the same-anchor near-duplicate (same file, same
 line or one unanchored, Jaccard `>= threshold`). Raising the threshold merges
 less (more separate findings, more filter calls); lowering it merges more. It is
-included in the submission-cache fingerprint, so changing it invalidates a
-stored verdict. Separate occurrences on different lines are never merged; that
-cross-line theming is left to the review narrative / systemic synthesis. This
-step subsumes the exact-match dedupe and the standalone side-effect
-consolidation on the in-process path; it is fail-safe (any error degrades to the
-uncombined findings). The durable Temporal path does not yet run it.
+included in the submission-cache fingerprint (`mapping._submission_fingerprint`'s
+`__combine_similarity_threshold__` payload entry), so changing it invalidates a
+stored verdict — unlike `CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION`,
+`CODE_REVIEW_SPEC_COMPLIANCE_PASS`, and `CODE_REVIEW_MUTATION_ANALYSIS`, this
+value is deliberately **not** folded with the `CODE_REVIEW` profile
+restriction before being threaded into the fingerprint: it governs the generic
+proximity/same-anchor merge rules `combine_findings` applies for every
+profile, not just `CODE_REVIEW`'s `side-effects` findings, so it is genuinely
+output-affecting regardless of `input_data.profile` and must invalidate a
+cached verdict for any profile when it changes. Separate occurrences on
+different lines are never merged; that cross-line theming is left to the
+review narrative / systemic synthesis. This step subsumes the exact-match
+dedupe and the standalone side-effect consolidation on the in-process path; it
+is fail-safe (any error degrades to the uncombined findings). The durable
+Temporal path does not yet run it.
 
 ### CODE_REVIEW_SPEC_COMPLIANCE_PASS
 Default-**off** toggle (`env_bool`, unlike the default-on tail passes above)
@@ -1385,6 +1399,36 @@ real on the next call. Backend failures (Redis unavailable, corrupt entry)
 fail open to a miss/recompute, same as every other `shared.cache` consumer.
 Default `256`, floor `0` (`0` disables the cache — every call re-invokes the
 model).
+
+---
+
+## Software Engineering DevOps Review
+
+### DEVOPS_IAC_CACHE_SIZE / DEVOPS_CICD_CACHE_SIZE / DEVOPS_DEPLOYMENT_STRATEGY_CACHE_SIZE / DEVOPS_DEVSECOPS_CACHE_SIZE / DEVOPS_TASK_CLARIFIER_CACHE_SIZE / DEVOPS_INFRA_DEBUG_CACHE_SIZE / DEVOPS_INFRA_PATCH_CACHE_SIZE / DEVOPS_DOC_RUNBOOK_CACHE_SIZE
+Max entries in each `devops_team` specialist agent's own shared LLM-response
+cache (`shared.cache`; the get/set/key/clear boilerplate lives in
+`software_engineering_team.shared.review_result_cache`, shared by all eight
+devops agents **and** `qa_agent` / `security_agent`). See
+[`software_engineering_team/README.md`](../backend/agents/software_engineering_team/README.md#caching-sharedcache--redis):
+one cache per agent — `InfrastructureAsCodeAgent`, `CICDPipelineAgent`,
+`DeploymentStrategyAgent`, `DevOpsTaskClarifierAgent`, `InfraDebugAgent`,
+`InfraPatchAgent`, and `DocumentationRunbookAgent` (all seven wired through
+the shared `DevOpsSingleShotAgent.run()`), plus `DevSecOpsReviewAgent`
+(wired at its own call site, since it calls `run_single_shot_review` rather
+than `complete_json_with_continuation`) — same
+whole-input key shape as `QA_REVIEW_CACHE_SIZE`: the key hashes the agent's
+entire structured input (including any embedded `DevOpsTaskSpec`) plus the
+resolved review model in one shot, so any field change naturally busts the
+key with no explicit invalidation logic. A cache hit skips the LLM call
+entirely; only a genuine (non-fallback) result is written back. A
+deterministic early return that never reaches the LLM (`DevOpsTaskClarifierAgent`'s
+gap check, `InfraPatchAgent`'s `not fixable` check) never touches the cache
+either way. Backend failures (Redis unavailable, corrupt entry) fail open to
+a miss/recompute, same as every other `shared.cache` consumer. `ChangeReviewAgent`
+has no cache of its own — it delegates entirely to `CodeReviewAgent`, which
+is already covered by `CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE` /
+`CODE_REVIEW_SUBMISSION_CACHE_SIZE`. Each var defaults to `128`, floor `0`
+(`0` disables that agent's cache — every call re-invokes the model).
 
 ---
 

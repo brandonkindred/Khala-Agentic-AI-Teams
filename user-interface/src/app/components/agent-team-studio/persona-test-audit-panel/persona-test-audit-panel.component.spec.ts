@@ -44,7 +44,7 @@ describe('PersonaTestAuditPanelComponent', () => {
   };
 
   afterEach(() => {
-    component?.ngOnDestroy();
+    fixture?.destroy();
     TestBed.resetTestingModule();
   });
 

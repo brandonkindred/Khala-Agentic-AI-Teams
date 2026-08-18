@@ -1158,9 +1158,9 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
 # prefer_first ensuring the earlier value wins -- is no longer representable now
 # that each Phase 2 specialist's structured_output model contains only its own
 # fields (e.g. BrandArchetypesOutput can no longer carry a brand_story key at
-# all). The prefer_first mechanic itself is unchanged and is still covered
-# directly at the _apply_fragment level by
-# test_apply_fragment_flat_prefer_first_keeps_existing.
+# all). Story 5b Step 3 subsequently removed the prefer_first mechanic itself
+# from _apply_fragment / _merge_named_fragments, since Phase 2 was its only
+# caller and the six fragments' fields can never collide.
 
 
 def test_extract_phase_output_rejects_incomplete_phase2_fragments() -> None:
@@ -2420,23 +2420,13 @@ def test_child_structured_output_non_basemodel_returns_none() -> None:
 
 
 def test_apply_fragment_flat_last_writer_wins() -> None:
-    """Flat merge (no nest_under, no prefer_first) overwrites existing keys."""
+    """Flat merge (no nest_under) overwrites existing keys."""
     from branding_team.orchestrator import _apply_fragment
 
     merged = {"a": 1, "b": 2}
-    _apply_fragment(merged, {"b": 20, "c": 3}, None, prefer_first=False)
+    _apply_fragment(merged, {"b": 20, "c": 3}, None)
 
     assert merged == {"a": 1, "b": 20, "c": 3}
-
-
-def test_apply_fragment_flat_prefer_first_keeps_existing() -> None:
-    """Flat merge with prefer_first fills only absent keys (first writer wins)."""
-    from branding_team.orchestrator import _apply_fragment
-
-    merged = {"a": 1, "b": 2}
-    _apply_fragment(merged, {"b": 20, "c": 3}, None, prefer_first=True)
-
-    assert merged == {"a": 1, "b": 2, "c": 3}
 
 
 def test_apply_fragment_nest_under_places_data() -> None:
@@ -2444,19 +2434,9 @@ def test_apply_fragment_nest_under_places_data() -> None:
     from branding_team.orchestrator import _apply_fragment
 
     merged: dict = {}
-    _apply_fragment(merged, {"x": 1}, "brand_discovery", prefer_first=False)
+    _apply_fragment(merged, {"x": 1}, "brand_discovery")
 
     assert merged == {"brand_discovery": {"x": 1}}
-
-
-def test_apply_fragment_nest_under_prefer_first_skips_when_present() -> None:
-    """With prefer_first, a nest_under key already set is not overwritten."""
-    from branding_team.orchestrator import _apply_fragment
-
-    merged = {"brand_discovery": {"first": True}}
-    _apply_fragment(merged, {"second": True}, "brand_discovery", prefer_first=True)
-
-    assert merged == {"brand_discovery": {"first": True}}
 
 
 def test_apply_fragment_list_field_appends_each_fragment() -> None:
@@ -2470,14 +2450,12 @@ def test_apply_fragment_list_field_appends_each_fragment() -> None:
         merged,
         {"channel": "web"},
         "channel_guidelines",
-        prefer_first=False,
         list_fields=list_fields,
     )
     _apply_fragment(
         merged,
         {"channel": "social"},
         "channel_guidelines",
-        prefer_first=False,
         list_fields=list_fields,
     )
 
