@@ -155,6 +155,27 @@
                   >
                     {{ agent.source === 'registry' ? '✦' : '⚙' }}
                   </span>
+                  @if (agent.source === 'registry') {
+                    <button
+                      mat-icon-button
+                      class="agent-test-btn"
+                      matTooltip="Test this agent in Stage 2"
+                      [attr.aria-label]="'Test ' + agent.agent_name"
+                      (click)="onTestAgent(agent, $event)"
+                    >
+                      <mat-icon>play_circle</mat-icon>
+                    </button>
+                  } @else {
+                    <button
+                      mat-icon-button
+                      class="agent-test-btn"
+                      disabled
+                      matTooltip="Generated agents can't be individually sandbox-tested — test the full team in Stage 4"
+                      [attr.aria-label]="'Test ' + agent.agent_name + ' (unavailable for generated agents)'"
+                    >
+                      <mat-icon>play_circle</mat-icon>
+                    </button>
+                  }
                   <button
                     mat-icon-button
                     class="agent-delete-btn"

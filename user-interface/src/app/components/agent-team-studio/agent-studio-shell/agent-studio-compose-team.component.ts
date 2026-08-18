@@ -11,20 +11,28 @@ import {
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { Subject, catchError, map, of, switchMap } from 'rxjs';
+import { A11yModule } from '@angular/cdk/a11y';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatSelectModule } from '@angular/material/select';
+import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { ProcessDesignerChatComponent } from '../../process-designer-chat/process-designer-chat.component';
 import type {
   AgenticTeam,
+  AgenticTeamAgent,
   AgenticTeamSummary,
   RosterValidationResult,
 } from '../../../models';
+
+// Back-loop destination as a 0-based index into STUDIO_STAGES
+// (build=0, test=1, compose=2, personas=3) — mirrors the constant in
+// `agent-studio-persona.component.ts`.
+const STAGE_TEST_AGENT = 1;
 
 /**
  * Agent Studio — Stage 3 "Compose Team" (spec §3, Stage 3).
@@ -47,12 +55,14 @@ import type {
   standalone: true,
   imports: [
     ReactiveFormsModule,
+    A11yModule,
     MatButtonModule,
     MatCardModule,
     MatFormFieldModule,
     MatIconModule,
     MatInputModule,
     MatSelectModule,
+    AgentCatalogComponent,
     ProcessDesignerChatComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -78,6 +88,9 @@ export class AgentStudioComposeTeamComponent implements OnInit {
   readonly showCreateForm = signal(false);
   readonly creating = signal(false);
   readonly createError = signal<string | null>(null);
+
+  /** Whether the "Browse agents" slide-out is open (spec §2.1). */
+  readonly browseOpen = signal(false);
 
   readonly selectedTeamId = computed(() => this.state.teamId());
   readonly selectedProcessId = computed(() => this.state.processId());
@@ -289,5 +302,37 @@ export class AgentStudioComposeTeamComponent implements OnInit {
           this.createError.set(err?.error?.detail ?? 'Failed to create team');
         },
       });
+  }
+
+  // ── Browse agents / Test ▸ (spec §2.1) ─────────────────────────────────────
+
+  openBrowse(): void {
+    this.browseOpen.set(true);
+  }
+
+  closeBrowse(): void {
+    this.browseOpen.set(false);
+  }
+
+  /**
+   * Re-point the handoff agent to `id` from the Browse-agents overlay. This
+   * only updates `registryAgentId` as a candidate for later actions (e.g.
+   * "+ Add" or a Stage-4 "fix an agent") — it must NOT auto-add `id` to the
+   * roster (`consumeHandoffAgent` only fires from a team *load*, not from
+   * this handoff-id change, so no extra guard is needed here).
+   */
+  onBrowseSelect(id: string): void {
+    this.state.setRegistryAgentId(id);
+    this.closeBrowse();
+  }
+
+  /**
+   * Per-roster-entry `Test ▸` back-loop (spec §2.1): open `agent` in Stage 2's
+   * sandbox. Registry-only — the template only renders this action enabled for
+   * `source: 'registry'` entries, which carry a real `manifest_id`.
+   */
+  onTestAgent(agent: AgenticTeamAgent): void {
+    this.state.setRegistryAgentId(agent.manifest_id);
+    this.state.navigateToStage(STAGE_TEST_AGENT);
   }
 }

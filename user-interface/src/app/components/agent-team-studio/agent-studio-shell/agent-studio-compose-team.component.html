@@ -30,6 +30,11 @@
       <mat-icon>{{ showCreateForm() ? 'close' : 'add' }}</mat-icon>
       {{ showCreateForm() ? 'Cancel' : 'New team' }}
     </button>
+
+    <button mat-stroked-button type="button" class="browse-btn" (click)="openBrowse()">
+      <mat-icon aria-hidden="true">search</mat-icon>
+      Browse agents ▾
+    </button>
   </div>
 
   @if (teamsError()) {
@@ -77,9 +82,36 @@
     <p class="error-text">{{ teamLoadError() }}</p>
   } @else {
     @if (team(); as t) {
-      <app-process-designer-chat [team]="t" (rosterChanged)="onRosterChanged($event)" />
+      <app-process-designer-chat
+        [team]="t"
+        (rosterChanged)="onRosterChanged($event)"
+        (testAgent)="onTestAgent($event)"
+      />
     } @else {
       <div class="loading-state">Loading team...</div>
     }
   }
 </div>
+
+@if (browseOpen()) {
+  <div class="browse-scrim" (click)="closeBrowse()" aria-hidden="true"></div>
+  <aside
+    class="browse-panel"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Browse agents"
+    cdkTrapFocus
+    [cdkTrapFocusAutoCapture]="true"
+    (keydown.escape)="closeBrowse()"
+  >
+    <header class="browse-head">
+      <h2>Browse agents</h2>
+      <button mat-icon-button type="button" aria-label="Close browse agents panel" (click)="closeBrowse()">
+        <mat-icon aria-hidden="true">close</mat-icon>
+      </button>
+    </header>
+    <div class="browse-body">
+      <app-agent-catalog (requestRun)="onBrowseSelect($event)" />
+    </div>
+  </aside>
+}

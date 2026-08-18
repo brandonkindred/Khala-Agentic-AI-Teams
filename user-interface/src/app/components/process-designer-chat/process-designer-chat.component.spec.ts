@@ -435,6 +435,49 @@ describe('ProcessDesignerChatComponent', () => {
     expect(component.rosterActionError()).toBe('cannot remove');
   });
 
+  // ── Test ▸ (spec §2.1: re-test a roster agent without advancing to Stage 4) ─
+
+  it('onTestAgent stops propagation and emits testAgent for the clicked agent', () => {
+    const emitSpy = vi.spyOn(component.testAgent, 'emit');
+    const event = new Event('click');
+    const stopSpy = vi.spyOn(event, 'stopPropagation');
+    const target = agent({ agent_name: 'Planner', source: 'registry', manifest_id: 'blogging.planner' });
+
+    component.onTestAgent(target, event);
+
+    expect(stopSpy).toHaveBeenCalled();
+    expect(emitSpy).toHaveBeenCalledWith(target);
+  });
+
+  it('renders an enabled Test ▸ action for a registry-sourced roster entry', () => {
+    component.rosterAgents.set([
+      agent({ agent_name: 'Planner', source: 'registry', manifest_id: 'blogging.planner' }),
+    ]);
+    fixture.detectChanges();
+
+    const btn = fixture.nativeElement.querySelector('.agent-test-btn');
+    expect(btn).toBeTruthy();
+    expect(btn.disabled).toBe(false);
+
+    const emitSpy = vi.spyOn(component.testAgent, 'emit');
+    btn.click();
+    expect(emitSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ agent_name: 'Planner', source: 'registry' }),
+    );
+  });
+
+  it('renders a disabled, tooltipped Test ▸ action for a generated roster entry', () => {
+    component.rosterAgents.set([
+      agent({ agent_name: 'Writer', source: 'generated' }),
+    ]);
+    fixture.detectChanges();
+
+    const btn = fixture.nativeElement.querySelector('.agent-test-btn');
+    expect(btn).toBeTruthy();
+    expect(btn.disabled).toBe(true);
+    expect(btn.getAttribute('aria-label')).toContain('unavailable for generated agents');
+  });
+
   // ── sendMessage: optimistic append must reconcile with backend atomicity ────
   //
   // The backend persists a turn's messages only after the LLM call and

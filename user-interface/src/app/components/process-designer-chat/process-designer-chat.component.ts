@@ -82,6 +82,15 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
    */
   @Output() readonly rosterChanged = new EventEmitter<RosterValidationResult | null>();
 
+  /**
+   * Emitted when a roster entry's `Test ▸` action is clicked (spec §2.1,
+   * registry-sourced entries only — see the template's `source === 'registry'`
+   * gate). This component stays decoupled from `AgentStudioStateService` (it
+   * is still mounted by the legacy `/agentic-teams` dashboard too), so the
+   * embedding Stage-3 host owns the actual "jump to Stage 2" back-loop.
+   */
+  @Output() readonly testAgent = new EventEmitter<AgenticTeamAgent>();
+
   @ViewChild('messagesContainer') messagesContainer!: ElementRef<HTMLDivElement>;
 
   private readonly api = inject(AgenticTeamApiService);
@@ -378,6 +387,17 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   /** "Suggest via chat": seed the chat input with a prompt asking for a new agent. */
   suggestAgentViaChat(): void {
     this.form.patchValue({ message: SUGGEST_AGENT_PROMPT });
+  }
+
+  /**
+   * Re-test a registry-sourced roster entry without advancing to Stage 4 first
+   * (spec §2.1: "Re-test an agent without going forward first"). The template
+   * only renders this action for `source === 'registry'` entries — generated
+   * agents have no registry manifest a sandbox can run.
+   */
+  onTestAgent(agent: AgenticTeamAgent, event: Event): void {
+    event.stopPropagation();
+    this.testAgent.emit(agent);
   }
 
   deleteAgent(agent: AgenticTeamAgent, event: Event): void {
