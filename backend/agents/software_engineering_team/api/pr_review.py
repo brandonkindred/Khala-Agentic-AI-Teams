@@ -476,7 +476,7 @@ def _pr_review_admission(owner: str, repo: str, pr_number: int):
         yield
 
 
-async def _start_pr_review_temporal(job_id: str, request, token: str) -> None:
+async def _start_pr_review_temporal(job_id: str, request: ReviewPrRequest, token: str) -> None:
     """
     Dispatches a PR review job to Temporal.
     """
@@ -484,9 +484,9 @@ async def _start_pr_review_temporal(job_id: str, request, token: str) -> None:
     
     # Configurable workflow routing per best practices
     workflow_name = os.environ.get("TEMPORAL_PR_REVIEW_WORKFLOW", "CodeReviewWorkflow")
-    task_queue = os.environ.get("TEMPORAL_CODE_REVIEW_QUEUE", "code-review")
+    task_queue = os.environ.get("TEMPORAL_CODE_REVIEW_QUEUE", "code_review-queue")
 
-    await client.execute_workflow(
+    await client.start_workflow(
         workflow_name, 
         args=[job_id, request, token],
         id=f"pr-review-{job_id}",
