@@ -844,7 +844,7 @@ def test_phase2_specialist_models_declare_only_own_fields() -> None:
     """Each Phase 2 specialist's structured_output model is own-field-only
     (Story 5b Step 1): no cumulative-inheritance leftovers, and no two
     specialists' field sets collide (the orchestrator's flat union-merge in
-    _merge_phase2_fragments relies on this to be collision-free). Checked
+    _merge_named_fragments relies on this to be collision-free). Checked
     against each model's own model_fields, not a hardcoded flat list, so a
     future field added to the wrong model is caught here."""
     own_fields = {

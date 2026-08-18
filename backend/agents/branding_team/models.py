@@ -763,7 +763,7 @@ class BrandArchetypesOutput(BaseModel):
     ArchetypeAnalyst's field. The chain that used to carry Storyteller's
     fields forward via subclassing is gone — Storyteller's output reaches
     ``NarrativeMessagingOutput`` exclusively through the orchestrator's flat
-    union-merge of all six Phase 2 node fragments (``_merge_phase2_fragments``
+    union-merge of all six Phase 2 node fragments (``_merge_named_fragments``
     in ``orchestrator.py``), not through subclassing.
     Uses ``BrandArchetypeOutput`` (not the soft ``BrandArchetype``) so each
     archetype's fields are individually required — a blank archetype must
