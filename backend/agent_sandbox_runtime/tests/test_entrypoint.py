@@ -333,10 +333,11 @@ def test_entrypoint_binds_saved_studio_persona_after_save(
     guard middleware and ``_maybe_register_injected_manifest``) invokes the saved
     ``role`` / ``system_prompt`` even though the request body carries neither.
     """
+    from fastapi.testclient import TestClient
+
     from agent_platform.registry import get_registry
     from agent_platform.studio.models import AgentDefinition
     from agent_platform.studio.registration import build_studio_agent_manifest
-    from fastapi.testclient import TestClient
 
     manifest = build_studio_agent_manifest(
         AgentDefinition(
@@ -373,9 +374,10 @@ def test_entrypoint_binds_saved_generated_persona_after_save(
     proving the container-boot binding is entrypoint-level, not Studio-specific —
     the same parity the shim-level suite already establishes for the shared shim.
     """
+    from fastapi.testclient import TestClient
+
     from agent_platform.registry import get_registry
     from agent_team_studio.agentic_team_provisioning.manifest_generation import build_agent_manifest
-    from fastapi.testclient import TestClient
 
     manifest = build_agent_manifest(
         "agentic_team_provisioning",
