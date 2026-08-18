@@ -2130,7 +2130,7 @@ def _run_pr_review_body(
                 provider=provider,
                 changed_context=(_files_for_scope(mode) if scope_llm_enabled else None),
                 task_description=(
-                    f"Review pull request #{getattr(pr, 'number', '')}: {getattr(pr, 'title', '') or ''}"
+                    f"Review pull request #{getattr(pr, 'number', '') or ''}: {getattr(pr, 'title', '') or ''}"
                     if scope_llm_enabled
                     else ""
                 ),
