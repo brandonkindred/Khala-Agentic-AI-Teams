@@ -115,7 +115,7 @@ describe('AgentStudioBuildAgentComponent', () => {
     expect(component.cloneError()).toBe('source agent missing');
     expect(component.draftDefinition()).toBeNull();
     expect(state.draftAgentId()).toBeNull();
-    expect(fixture.nativeElement.querySelector('.error-text').textContent).toContain('source agent missing');
+    expect(fixture.nativeElement.querySelector('.kh-banner__msg').textContent).toContain('source agent missing');
     expect(fixture.nativeElement.querySelector('.studio-build__continue-sub')).toBeNull();
 
     selectAgent('blogging.planner');
@@ -340,7 +340,7 @@ describe('AgentStudioBuildAgentComponent', () => {
       expect(state.registryAgentId()).toBeNull();
       expect(component.activeSubStageDef().key).toBe('configure');
       expect(component.draftDefinition()).toEqual(definition());
-      expect(fixture.nativeElement.querySelector('.error-text').textContent).toContain('name already taken');
+      expect(fixture.nativeElement.querySelector('.kh-banner__msg').textContent).toContain('name already taken');
 
       // Retry succeeds without re-cloning or losing the draft.
       fixture.nativeElement.querySelector('.studio-build__save-sub').click();

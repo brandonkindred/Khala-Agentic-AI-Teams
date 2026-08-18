@@ -206,11 +206,9 @@ def _think_payload_fields(think: "bool | str") -> dict:
     models with no registered levels, and pinning an effort level for an
     unknown model would be a guess.
 
-    Preconditions:
-        - ``think`` has been resolved (bool or level string, never None).
-    Postconditions:
-        - Returns a dict carrying ``think`` and, for level strings or
-          ``False``, the corresponding ``reasoning_effort``.
+    Preconditions: ``think`` has been resolved (bool or level string, never None).
+    Postconditions: returns a dict carrying ``think`` and, for level strings or
+        ``False``, the corresponding ``reasoning_effort``.
     """
     fields: dict = {"think": think}
     if isinstance(think, str):
@@ -272,12 +270,10 @@ def _semantic_retry_think(model: str, active_think: "bool | str | None") -> "boo
     tiers are wire-identical retries — a wasted multi-minute call. Jumping straight
     to thinking-off from a reduced tier is both cheaper and more effective.
 
-    Preconditions:
-        - ``active_think`` is a resolved wire value (bool, level string, or None).
-    Postconditions:
-        - Returns the next reduced setting, or ``None`` when nothing is left to
-          change. The sequence strictly reduces reasoning and always terminates.
-          Pure function: no env reads, never raises.
+    Preconditions: ``active_think`` is a resolved wire value (bool, level string, or None).
+    Postconditions: returns the next reduced setting, or ``None`` when nothing is left to
+        change. The sequence strictly reduces reasoning and always terminates.
+        Pure function: no env reads, never raises.
     """
     if active_think is None or active_think is False:
         return None
@@ -1216,13 +1212,11 @@ class OllamaLLMClient(LLMClient):
           decision, rather than a caller-side "looks truncated" heuristic that
           misfires on prose/fence prefixes and on braces inside string values.
 
-        Preconditions:
-            - ``text`` is a ``str`` (may be empty); it is the raw assistant
-              content, before any structured parsing.
-        Postconditions:
-            - Returns a parsed ``dict`` on success; raises ``LLMJsonParseError``
-              when nothing salvageable is found (a truncated payload is treated
-              as unsalvageable so the caller can continue).
+        Preconditions: ``text`` is a ``str`` (may be empty); it is the raw assistant
+            content, before any structured parsing.
+        Postconditions: returns a parsed ``dict`` on success; raises ``LLMJsonParseError``
+            when nothing salvageable is found (a truncated payload is treated
+            as unsalvageable so the caller can continue).
         """
         text = self._strip_json_noise(text)
         if "---DRAFT---" in text:
@@ -2138,11 +2132,9 @@ class OllamaLLMClient(LLMClient):
     def _observer_prompt_for_messages(self, messages: list[dict[str, str]]) -> str:
         """Serialize the continuation request body for transcript observers.
 
-        Preconditions:
-            ``messages`` is the ``messages`` list sent on this HTTP call
+        Preconditions: ``messages`` is the ``messages`` list sent on this HTTP call
             (system, original user, accumulated assistant, continuation user).
-        Postconditions:
-            Returns a JSON array string of those dicts so an observer can
+        Postconditions: returns a JSON array string of those dicts so an observer can
             reconstruct the prompt actually sent, not only the last user turn.
         """
         return json.dumps(messages, default=str)
@@ -2338,7 +2330,12 @@ class OllamaLLMClient(LLMClient):
             self._record_telemetry(status="error", error_type="semantic_exhaustion")
             raise
         except LLMTruncatedError as e:
-            self._record_telemetry(status="truncated", error_type="truncated")
+            self._record_telemetry(
+                status="truncated",
+                error_type="truncated",
+                prompt_text=prompt,
+                response_text=e.partial_content,
+            )
             record_complete_json_turn(
                 prompt, e.partial_content or "", started_monotonic=request_started
             )
@@ -2501,18 +2498,16 @@ class OllamaLLMClient(LLMClient):
     ) -> Any:
         """One corrective chat turn after a non-JSON/non-tool reply with tools present.
 
-        Preconditions:
-            - ``tools`` is a non-empty tool list (caller already gated on this);
-              ``json_object`` cannot be forced on the wire alongside tools.
-            - ``bad_content`` is the rejected assistant text from the prior turn.
-        Postconditions:
-            - Returns a parsed JSON ``dict``, or a ``{"__tool_calls__": [...]}``
-              envelope when the correction invokes a tool.
-            - Records this corrective HTTP turn (and the caller records the
-              rejected first reply) so transcript observers see both provider
-              calls, not only the recovered result.
-            - On a second non-JSON reply, re-raises ``first_error`` (or the
-              second parse error) after recording telemetry — never loops.
+        Preconditions: ``tools`` is a non-empty tool list (caller already gated on
+            this); ``json_object`` cannot be forced on the wire alongside tools;
+            ``bad_content`` is the rejected assistant text from the prior turn.
+        Postconditions: returns a parsed JSON ``dict``, or a
+            ``{"__tool_calls__": [...]}`` envelope when the correction invokes a
+            tool. Records this corrective HTTP turn (and the caller records the
+            rejected first reply) so transcript observers see both provider
+            calls, not only the recovered result. On a second non-JSON reply,
+            re-raises ``first_error`` (or the second parse error) after
+            recording telemetry — never loops.
         """
         preview = (bad_content or "")[:500]
         corrective_messages = list(messages) + [
