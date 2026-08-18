@@ -261,7 +261,7 @@ describe('LoadDraftMenuComponent', () => {
       ]);
     });
 
-    it('confirmDelete API failure sets error() and leaves the row', () => {
+    it('confirmDelete API failure leaves the row and does not emit draftDeleted (the global HTTP toast surfaces the error, not local error())', () => {
       openSpy.mockReturnValue({ afterClosed: () => of(true) } as unknown as ReturnType<MatDialog['open']>);
       const deleteDraft = vi.fn().mockReturnValue(throwError(() => ({ error: { detail: 'nope' } })));
       const { fixture } = configure(vi.fn().mockReturnValue(of([summary('d-1', 'A')])), deleteDraft);
@@ -269,8 +269,9 @@ describe('LoadDraftMenuComponent', () => {
       const spy = vi.fn();
       fixture.componentInstance.draftDeleted.subscribe(spy);
       fixture.componentInstance.confirmDelete(summary('d-1', 'A'));
-      expect(fixture.componentInstance.error()).toBe('nope');
+      expect(fixture.componentInstance.error()).toBeNull();
       expect(fixture.componentInstance.drafts()).toEqual([summary('d-1', 'A')]);
+      expect(fixture.componentInstance.isDeleting('d-1')).toBe(false);
       expect(spy).not.toHaveBeenCalled();
     });
 

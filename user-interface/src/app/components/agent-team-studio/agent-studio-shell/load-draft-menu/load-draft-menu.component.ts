@@ -173,13 +173,17 @@ export class LoadDraftMenuComponent {
               }
               this.draftDeleted.emit(draft.draft_id);
             },
-            error: (err) => {
+            error: () => {
               this.deletingIds.update((ids) => {
                 const next = new Set(ids);
                 next.delete(draft.draft_id);
                 return next;
               });
-              this.error.set(extractErrorDetail(err, 'Failed to delete draft.'));
+              // The Delete click already closed this menu (Material closes
+              // the whole chain on any mat-menu-item click), so `error()` —
+              // rendered only inside this component's own template — would
+              // never reach the user. The global HTTP interceptor toasts
+              // instead; do not also set local error state here.
             },
           });
       });
