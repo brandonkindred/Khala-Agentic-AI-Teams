@@ -74,6 +74,7 @@ from llm_service import (
 )
 from llm_service.strands_model import model_fingerprint as _model_fingerprint
 from shared.cache import get_shared_cache
+from shared.cache.pydantic_cache import cache_namespace_for, clear_cache_namespace
 from shared.concurrency import parallel_map
 from shared.env_config import env_bool
 from software_engineering_team.shared.context_sizing import (
@@ -117,9 +118,7 @@ _CHUNK_CACHE_NAMESPACE = "cr:chunk:v2"
 
 def _chunk_cache_namespace() -> str:
     """Shared-cache namespace for map-phase chunk outcomes (includes build id)."""
-    from shared.cache import with_cache_build_id  # noqa: PLC0415
-
-    return with_cache_build_id(_CHUNK_CACHE_NAMESPACE)
+    return cache_namespace_for(_CHUNK_CACHE_NAMESPACE)
 
 
 def _chunk_outcome_cache_size() -> int:
@@ -150,9 +149,12 @@ def clear_chunk_outcome_cache() -> None:
           returns. Callers that must force a cold review should ensure no review
           is in flight (or await in-flight completion) before relying on a miss.
           Intended for tests (the cache persists across ``run_coordinator``
-          calls by design) and for callers that must force a cold review.
+          calls by design) and for callers that must force a cold review. A
+          cache backend error is caught and logged rather than propagated —
+          fails open, so a broken backend never breaks a caller (e.g. a
+          test-teardown fixture) forcing a cold review.
     """
-    get_shared_cache(_chunk_cache_namespace()).clear()
+    clear_cache_namespace("ChunkOutcome", lambda: get_shared_cache(_chunk_cache_namespace()))
 
 
 def _chunk_outcome_to_bytes(outcome: "_ChunkOutcome") -> bytes:
