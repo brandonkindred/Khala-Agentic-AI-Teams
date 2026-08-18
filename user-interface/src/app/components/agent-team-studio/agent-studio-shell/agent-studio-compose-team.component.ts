@@ -22,6 +22,7 @@ import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { AgentStudioSlideOutComponent } from './agent-studio-slide-out/agent-studio-slide-out.component';
 import { ProcessDesignerChatComponent } from '../../process-designer-chat/process-designer-chat.component';
+import { ErrorMessageComponent } from '../../../shared/error-message/error-message.component';
 import { STAGE_INDEX } from '../../../models/agent-studio.model';
 import type {
   AgenticTeam,
@@ -60,6 +61,7 @@ import type {
     AgentCatalogComponent,
     AgentStudioSlideOutComponent,
     ProcessDesignerChatComponent,
+    ErrorMessageComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './agent-studio-compose-team.component.html',
