@@ -565,81 +565,27 @@ def test_code_review_min_prompt_length_constant() -> None:
 
 
 _BRANDING_PHASE2_MODEL_CASES = [
-    (
-        "BrandStoryOutput",
-        {"brand_story", "hero_narrative", "boilerplate_variants"},
-    ),
-    (
-        "BrandArchetypesOutput",
-        {"brand_story", "hero_narrative", "boilerplate_variants", "brand_archetypes"},
-    ),
-    (
-        "TaglineOutput",
-        {
-            "brand_story",
-            "hero_narrative",
-            "boilerplate_variants",
-            "brand_archetypes",
-            "tagline",
-            "tagline_rationale",
-            "elevator_pitches",
-        },
-    ),
-    (
-        "MessagingFrameworkOutput",
-        {
-            "brand_story",
-            "hero_narrative",
-            "boilerplate_variants",
-            "brand_archetypes",
-            "tagline",
-            "tagline_rationale",
-            "elevator_pitches",
-            "messaging_framework",
-            "audience_message_maps",
-        },
-    ),
-    (
-        "PersonaProfilesOutput",
-        {
-            "brand_story",
-            "hero_narrative",
-            "boilerplate_variants",
-            "brand_archetypes",
-            "tagline",
-            "tagline_rationale",
-            "elevator_pitches",
-            "messaging_framework",
-            "audience_message_maps",
-            "persona_profiles",
-        },
-    ),
-    (
-        "WritingGuidelinesOutput",
-        {
-            "brand_story",
-            "hero_narrative",
-            "boilerplate_variants",
-            "brand_archetypes",
-            "tagline",
-            "tagline_rationale",
-            "elevator_pitches",
-            "messaging_framework",
-            "audience_message_maps",
-            "persona_profiles",
-            "writing_guidelines",
-        },
-    ),
+    ("BrandStoryOutput", {"brand_story", "hero_narrative", "boilerplate_variants"}),
+    ("BrandArchetypesOutput", {"brand_archetypes"}),
+    ("TaglineOutput", {"tagline", "tagline_rationale", "elevator_pitches"}),
+    ("MessagingFrameworkOutput", {"messaging_framework", "audience_message_maps"}),
+    ("PersonaProfilesOutput", {"persona_profiles"}),
+    ("WritingGuidelinesOutput", {"writing_guidelines"}),
 ]
 
 
 @pytest.mark.parametrize("model_name,expected_keys", _BRANDING_PHASE2_MODEL_CASES)
-def test_branding_phase2_branches_return_cumulative_keys(
+def test_branding_phase2_branches_return_own_field_keys(
     model_name: str, expected_keys: set[str]
 ) -> None:
-    """Each Phase 2 branding specialist stub must carry forward exactly the
-    keys its predecessors introduced, plus its own — pinned by explicit
+    """Each Phase 2 branding specialist stub must return exactly its own
+    fields — no upstream carry-forward — pinned by explicit
     ``structured_output_model`` class name, not system-prompt substrings.
+
+    Story 5b Step 1: each Phase 2 specialist's ``structured_output`` model
+    now contains only that specialist's own fields (the cumulative
+    inheritance chain that used to make each successive class's stub a
+    superset of its predecessor's was removed).
     """
     import branding_team.models as branding_models
 
