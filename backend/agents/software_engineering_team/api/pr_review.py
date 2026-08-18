@@ -1515,8 +1515,12 @@ def _classify_review_scope(
     """LLM in/out-of-scope verdicts for ``issues``, or ``None`` when unavailable.
 
     Preconditions:
-        - ``issues`` is ``output.issues`` (already FP-filtered by the review
-          engine before ``_run_reviewer`` returns).
+        - ``issues`` is drawn from ``output.issues`` (already FP-filtered by
+          the review engine before ``_run_reviewer`` returns); the caller is
+          responsible for excluding any finding that must never be routed
+          away from ``pr_issues`` by an LLM verdict (e.g. a blocking
+          "could not be reviewed" coverage finding — see
+          :func:`_is_not_reviewed_coverage_finding`) before calling this.
         - ``provider`` is the same engine provider used to run the review, or
           ``None`` (a caller that does not wire classification, e.g. a legacy
           test calling :func:`_partition_review_issues` directly).
@@ -1561,6 +1565,7 @@ def _partition_review_issues(
     provider: Any = None,
     changed_context: Optional[Dict[str, str]] = None,
     task_description: str = "",
+    removed_by_path: Optional[Dict[str, List[int]]] = None,
 ) -> ReviewIssuePartition:
     """Split the reviewer's raw findings into PR-scoped issues and pre-existing-bug proposals.
 
@@ -1574,23 +1579,41 @@ def _partition_review_issues(
         - ``valid_by_path``/``changed_by_path`` are the maps
           :func:`_decide_review_mode` built for the same file set.
         - ``client`` is an open ``GitHubClient``.
-        - ``provider``/``changed_context``/``task_description`` are optional;
-          a caller that omits them gets exactly the tag-based split described
-          below, with no LLM classification attempted.
+        - ``provider``/``changed_context``/``task_description``/``removed_by_path``
+          are optional; a caller that omits them gets exactly the tag-based
+          split described below, with no LLM classification attempted.
     Postconditions:
-        - Each issue's in/out-of-scope verdict is resolved in priority order:
-          (1) a decisive verdict from :func:`_classify_review_scope` (the LLM
-          classifier, gated behind :data:`_SCOPE_LLM_PASS_ENV`) when one was
-          returned for that issue; (2) otherwise today's heuristic — ``not
-          getattr(issue, "pre_existing", False)``; (3) regardless of (1)/(2),
-          :func:`is_within_diff` against ``changed_by_path`` unconditionally
-          forces in-scope when it proves the issue lies on a line this PR
-          actually ADDED — a finding on an added line cannot legitimately be
-          out-of-scope, whichever source decided otherwise. An issue resolved
-          in-scope goes to ``pr_issues``; otherwise ``preexisting_issues``.
-          With the LLM pass off, unavailable, or degraded to "unknown" for an
-          issue, this collapses to the tag-only heuristic: an issue without
-          the ``pre_existing`` tag (or from a caller that never asks for it)
+        - A :func:`_is_not_reviewed_coverage_finding` issue (a blocking
+          "could not be reviewed" coverage/safety finding) is never sent to
+          the classifier at all — mirroring :func:`_tag_review_issues_for_scope`'s
+          identical exclusion from ``apply_scope_verification`` — so it
+          always falls through to the tag-only heuristic below, which (since
+          these findings are always constructed with ``pre_existing=False``)
+          reliably keeps it in ``pr_issues``; an ungrounded LLM verdict can
+          never route it to a proposal and defeat the fail-closed
+          ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` gate.
+        - For every other issue, the in/out-of-scope verdict is resolved in
+          priority order: (1) a decisive verdict from
+          :func:`_classify_review_scope` (the LLM classifier, gated behind
+          :data:`_SCOPE_LLM_PASS_ENV`) when one was returned for that issue —
+          except a decisive out-of-scope verdict is itself discarded (treated
+          as step (2) instead) when ``removed_by_path`` shows the issue's
+          cited file has any deleted lines, since the classifier never sees
+          deleted content and so cannot reliably rule such a finding
+          out-of-scope (mirrors ``scope_filter.apply_scope_verdicts``'s
+          identical distrust of an unconfident/ungrounded verdict on a file
+          with deletions — this pass's verdicts are never grounded, so the
+          distrust applies unconditionally rather than only when unconfident);
+          (2) otherwise today's heuristic — ``not getattr(issue, "pre_existing",
+          False)``; (3) regardless of (1)/(2), :func:`is_within_diff` against
+          ``changed_by_path`` unconditionally forces in-scope when it proves
+          the issue lies on a line this PR actually ADDED — a finding on an
+          added line cannot legitimately be out-of-scope, whichever source
+          decided otherwise. An issue resolved in-scope goes to
+          ``pr_issues``; otherwise ``preexisting_issues``. With the LLM pass
+          off, unavailable, or degraded to "unknown" for an issue, this
+          collapses to the tag-only heuristic: an issue without the
+          ``pre_existing`` tag (or from a caller that never asks for it)
           defaults to a PR finding — this deliberately includes a finding
           naming a file outside the diff (e.g. "module X is imported but was
           never added"): such a finding is exactly the kind
@@ -1650,12 +1673,35 @@ def _partition_review_issues(
     # in-scope when it proves the finding lies on a line this PR actually
     # ADDED — such a finding cannot legitimately be "pre-existing, unchanged
     # code", whether it was the classifier or the tag heuristic that said so.
-    verdicts = _classify_review_scope(provider, output.issues, changed_context, task_description)
+    #
+    # A blocking "could not be reviewed" coverage/safety finding is never
+    # handed to the classifier at all (mirroring _tag_review_issues_for_scope's
+    # identical exclusion around apply_scope_verification): these findings are
+    # always constructed with pre_existing=False, so keeping them out of
+    # classify_issue_scope's input guarantees they always fall through to the
+    # tag heuristic below and land in pr_issues, exactly as before this pass
+    # existed. Letting a lightweight, ungrounded verdict decide them instead
+    # could silently route one to a proposal and defeat the fail-closed
+    # CODE_REVIEW_BLOCK_ON_UNREVIEWED gate (choose_event below only reacts to
+    # partition.pr_issues).
+    classifiable = [i for i in output.issues if not _is_not_reviewed_coverage_finding(i)]
+    raw_verdicts = _classify_review_scope(provider, classifiable, changed_context, task_description)
+    verdicts_by_id = (
+        {id(i): v for i, v in zip(classifiable, raw_verdicts)} if raw_verdicts is not None else {}
+    )
+    removed_by_path = removed_by_path or {}
     pr_issues: List[Any] = []
     preexisting_issues: List[Any] = []
-    for idx, i in enumerate(output.issues):
-        verdict = verdicts[idx] if verdicts is not None else None
+    for i in output.issues:
+        verdict = verdicts_by_id.get(id(i))
         in_scope = verdict.in_scope if verdict is not None else None
+        if in_scope is False and removed_by_path.get((getattr(i, "file_path", "") or "").strip()):
+            # The classifier never sees deleted lines (its Protocol has no
+            # removed_by_path input), so it cannot reliably rule a finding
+            # out-of-scope when this file's diff includes deletions — distrust
+            # a decisive negative verdict here, mirroring scope_filter's own
+            # distrust of an unconfident/ungrounded verdict on such a file.
+            in_scope = None
         if in_scope is None:
             in_scope = not getattr(i, "pre_existing", False)
         if not in_scope and is_within_diff(i, changed_by_path):
@@ -2047,9 +2093,16 @@ def _run_pr_review_body(
             _tag_review_issues_for_scope(output, mode, pr, files)
 
             # Skip gathering changed-file content / building the task description
-            # when the LLM scope pass would not run anyway (flag off): both are
-            # otherwise-unused work in that case.
+            # / removed-line map when the LLM scope pass would not run anyway
+            # (flag off): all three are otherwise-unused work in that case.
             scope_llm_enabled = env_flag_enabled(_SCOPE_LLM_PASS_ENV)
+            removed_by_path = None
+            if scope_llm_enabled:
+                removed_by_path = {
+                    f.filename: sorted(parse_removed_lines(getattr(f, "patch", None) or ""))
+                    for f in files
+                }
+                removed_by_path = {path: lines for path, lines in removed_by_path.items() if lines}
             partition = _partition_review_issues(
                 output,
                 client,
@@ -2065,6 +2118,7 @@ def _run_pr_review_body(
                     if scope_llm_enabled
                     else ""
                 ),
+                removed_by_path=removed_by_path,
             )
             posting = _post_review_comments(
                 client, owner, repo, pr_number, pr, reviewer_login, output, partition

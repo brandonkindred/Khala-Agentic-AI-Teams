@@ -3431,7 +3431,9 @@ class TestFixedRunPrReview:
         # Not just "is a dict" -- the PR's changed file (a.py, per the default
         # _FakeReviewClient patch) must actually be present as grounding content.
         assert "a.py" in calls[0]["changed_context"]
-        assert calls[0]["changed_context"]["a.py"]
+        # Beyond truthiness: the actual added-line grounding text is present
+        # (the rendered, annotated version of the "+added" hunk line above).
+        assert "added" in calls[0]["changed_context"]["a.py"]
 
     def test_scope_llm_pass_out_of_scope_verdict_routes_to_proposal(self, review_app) -> None:
         """A decisive out-of-scope LLM verdict routes an otherwise-postable finding
@@ -5671,8 +5673,9 @@ class _ScopeLlmFakeGitHubClient:
 class _FakeScopeProvider:
     """Records each ``classify_issue_scope`` call and returns a scripted verdict list.
 
-    ``verdicts`` may also be an exception instance/type to script a classifier
-    failure, or a list of the wrong length to script a malformed reply.
+    ``verdicts`` may also be an Exception instance/subclass to script a
+    classifier failure, or a list of the wrong length to script a malformed
+    reply.
     """
 
     def __init__(self, verdicts: Any) -> None:
@@ -5687,9 +5690,9 @@ class _FakeScopeProvider:
                 "task_description": task_description,
             }
         )
-        if isinstance(self._verdicts, BaseException):
+        if isinstance(self._verdicts, Exception):
             raise self._verdicts
-        if isinstance(self._verdicts, type) and issubclass(self._verdicts, BaseException):
+        if isinstance(self._verdicts, type) and issubclass(self._verdicts, Exception):
             raise self._verdicts("scripted failure")
         return self._verdicts
 
@@ -5848,6 +5851,107 @@ class TestPartitionReviewIssuesScopeLlmPass:
             {"a.py": []},
             {"a.py": []},
             provider=provider,
+        )
+        assert result.pr_issues == []
+        assert result.preexisting_issues == [issue]
+
+    def test_not_reviewed_coverage_finding_never_reaches_classifier(self) -> None:
+        """A blocking "could not be reviewed" coverage finding must never be
+        handed to the classifier -- not even to end up correctly in-scope by
+        luck -- because a decisive out-of-scope verdict for it would defeat
+        the fail-closed CODE_REVIEW_BLOCK_ON_UNREVIEWED gate (see
+        _is_not_reviewed_coverage_finding's docstring)."""
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.code_review_agent.mapping import (
+            NOT_REVIEWED_FINDING_MARKER,
+        )
+        from software_engineering_team.code_review_agent.scope_classifier import (
+            ScopeClassification,
+        )
+
+        coverage_issue = _FakeReviewIssue(
+            "high",
+            line=99,
+            file_path="a.py",
+            description=f"This code {NOT_REVIEWED_FINDING_MARKER} automatically (TimeoutError)",
+        )
+        output = _FakeOutput(issues=[coverage_issue])
+        # Scripted to say "out of scope" for anything it's asked to classify --
+        # proves the coverage finding surviving isn't a lucky verdict outcome.
+        provider = _FakeScopeProvider([ScopeClassification(in_scope=False, reason="misjudged")])
+
+        result = pr_review._partition_review_issues(
+            output,
+            _ScopeLlmFakeGitHubClient(),
+            "o",
+            "r",
+            7,
+            {"a.py": []},
+            {"a.py": []},
+            provider=provider,
+        )
+        assert result.pr_issues == [coverage_issue]
+        assert result.preexisting_issues == []
+        # The classifier was never even asked about it (classifiable list was
+        # empty, so _classify_review_scope short-circuits before any call).
+        assert provider.calls == []
+
+    def test_decisive_out_of_scope_verdict_distrusted_for_file_with_deletions(self) -> None:
+        """The classifier never sees deleted lines (no removed_by_path input in
+        its Protocol), so it cannot reliably rule a finding out-of-scope when
+        the cited file's diff includes deletions -- mirrors scope_filter's own
+        distrust of an unconfident/ungrounded verdict on such a file."""
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.code_review_agent.scope_classifier import (
+            ScopeClassification,
+        )
+
+        issue = _FakeReviewIssue("medium", line=1, file_path="a.py", pre_existing=False)
+        output = _FakeOutput(issues=[issue])
+        provider = _FakeScopeProvider(
+            [ScopeClassification(in_scope=False, reason="looks pre-existing")]
+        )
+
+        result = pr_review._partition_review_issues(
+            output,
+            _ScopeLlmFakeGitHubClient(),
+            "o",
+            "r",
+            7,
+            {"a.py": []},
+            {"a.py": []},  # not within diff either -- verdict is what would decide
+            provider=provider,
+            removed_by_path={"a.py": [10, 11]},  # a.py's diff includes deletions
+        )
+        # Verdict distrusted -> falls back to the tag heuristic (pre_existing=False -> in-scope).
+        assert result.pr_issues == [issue]
+        assert result.preexisting_issues == []
+
+    def test_decisive_out_of_scope_verdict_trusted_without_deletions(self) -> None:
+        """The deletion guard must not overreach: a decisive out-of-scope verdict
+        for a file with NO deletions in this diff is still trusted -- otherwise
+        the fix for the deletion case would silently neuter the whole feature."""
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.code_review_agent.scope_classifier import (
+            ScopeClassification,
+        )
+
+        issue = _FakeReviewIssue("medium", line=1, file_path="a.py", pre_existing=False)
+        output = _FakeOutput(issues=[issue])
+        provider = _FakeScopeProvider(
+            [ScopeClassification(in_scope=False, reason="unrelated code")]
+        )
+
+        result = pr_review._partition_review_issues(
+            output,
+            _ScopeLlmFakeGitHubClient(),
+            "o",
+            "r",
+            7,
+            {"a.py": []},
+            {"a.py": []},
+            provider=provider,
+            removed_by_path={},  # no deletions anywhere
         )
         assert result.pr_issues == []
         assert result.preexisting_issues == [issue]
