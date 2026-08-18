@@ -10,15 +10,20 @@ this agent used previously.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 from typing import Optional
 
 from llm_service import LLMClient, get_strands_model
 from llm_service.strands_model import model_fingerprint, resolve_strands_model
 from shared.cache import get_shared_cache
-from shared.env_config import env_int
+from software_engineering_team.shared.review_result_cache import (
+    build_review_cache_key,
+    cache_capacity_for,
+    cache_namespace_for,
+    clear_review_cache_namespace,
+    get_cached_review_result,
+    set_cached_review_result,
+)
 from software_engineering_team.shared.security_service import derive_approved
 from software_engineering_team.shared.single_shot_review import run_single_shot_review
 
@@ -27,25 +32,26 @@ from .prompts import SECURITY_PROMPT
 
 logger = logging.getLogger(__name__)
 
+_CACHE_LABEL = "Security"
+
 # Shared review-result cache: keyed on the whole SecurityInput content plus
 # the resolved review model, so a byte-identical resubmission (e.g. across
 # the review->fix->re-review retry loop, or an unchanged sibling task) skips
 # the LLM call entirely. Mirrors qa_agent's review cache exactly (same
 # whole-input key *shape*, same "cache every genuine outcome regardless of
 # approved" *policy*, since this is a single atomic call with no reduce
-# phase to short-circuit) — see qa_agent/agent.py's module-level comment for
-# the fuller rationale shared by both. Backed by shared.cache (Redis, falls
-# open to an in-process store). Base stem; ``_review_cache_namespace()``
-# appends build id.
+# phase to short-circuit) — the shared policy itself lives in
+# ``software_engineering_team.shared.review_result_cache``, imported above;
+# this module supplies only its own namespace stem, env var, capacity
+# default, and output model. Backed by shared.cache (Redis, falls open to an
+# in-process store). Base stem; ``_review_cache_namespace()`` appends build id.
 DEFAULT_REVIEW_CACHE_SIZE = 256  # SECURITY_REVIEW_CACHE_SIZE, floor 0
 _REVIEW_CACHE_NAMESPACE = "security:review:v1"
 
 
 def _review_cache_namespace() -> str:
     """Shared-cache namespace for security review results (includes build id)."""
-    from shared.cache import with_cache_build_id  # noqa: PLC0415
-
-    return with_cache_build_id(_REVIEW_CACHE_NAMESPACE)
+    return cache_namespace_for(_REVIEW_CACHE_NAMESPACE)
 
 
 def _review_cache_size() -> int:
@@ -58,7 +64,7 @@ def _review_cache_size() -> int:
           explicit or clamped-to 0 disables the cache — every ``run()`` call
           re-invokes the model, matching pre-cache behavior.
     """
-    return env_int("SECURITY_REVIEW_CACHE_SIZE", DEFAULT_REVIEW_CACHE_SIZE, 0)
+    return cache_capacity_for("SECURITY_REVIEW_CACHE_SIZE", DEFAULT_REVIEW_CACHE_SIZE)
 
 
 def clear_review_cache() -> None:
@@ -75,10 +81,7 @@ def clear_review_cache() -> None:
           forcing a cold review. Intended for tests and for callers that
           must force a cold review.
     """
-    try:
-        get_shared_cache(_review_cache_namespace()).clear()
-    except Exception:
-        logger.warning("Security: review cache clear failed", exc_info=True)
+    clear_review_cache_namespace(_CACHE_LABEL, lambda: get_shared_cache(_review_cache_namespace()))
 
 
 def _security_model_fingerprint(llm: Optional[LLMClient]) -> str:
@@ -136,10 +139,7 @@ def _review_cache_key(input_data: SecurityInput, model_fp: str) -> str:
           resolved model changes, and is stable (``sort_keys``) across calls
           in a process, so a byte-identical resubmission is recognized.
     """
-    payload = input_data.model_dump(mode="json")
-    payload["__model__"] = model_fp
-    body = json.dumps(payload, sort_keys=True)
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+    return build_review_cache_key(input_data, model_fp)
 
 
 class CybersecurityExpertAgent:
@@ -186,36 +186,13 @@ class CybersecurityExpertAgent:
         if capacity > 0:
             cache_key = _review_cache_key(input_data, _security_model_fingerprint(self.llm))
             cache = get_shared_cache(_review_cache_namespace())
-            # shared.cache is fail-open, but keep an explicit local guard so a
-            # misbehaving backend / unexpected raise never aborts the review
-            # (mirrors qa_agent's review cache).
-            try:
-                raw = cache.get(cache_key)
-            except Exception:
-                logger.warning("Security: review cache get failed; treating as miss", exc_info=True)
-                raw = None
-            if raw is not None:
-                try:
-                    cached_result = SecurityOutput.model_validate_json(raw)
-                except Exception:
-                    logger.warning(
-                        "Security: corrupt review cache entry for %s; treating as miss",
-                        cache_key,
-                        exc_info=True,
-                    )
-                    try:
-                        cache.delete(cache_key)
-                    except Exception:
-                        logger.warning(
-                            "Security: review cache delete failed after corrupt entry",
-                            exc_info=True,
-                        )
-                else:
-                    logger.info(
-                        "Security: review cache hit; skipping LLM call (approved=%s)",
-                        cached_result.approved,
-                    )
-                    return cached_result
+            cached_result = get_cached_review_result(_CACHE_LABEL, cache, cache_key, SecurityOutput)
+            if cached_result is not None:
+                logger.info(
+                    "Security: review cache hit; skipping LLM call (approved=%s)",
+                    cached_result.approved,
+                )
+                return cached_result
 
         user_prompt = self._build_user_prompt(input_data)
 
@@ -258,22 +235,8 @@ class CybersecurityExpertAgent:
         )
 
         if cache_key is not None:
-            payload = result.model_dump_json().encode("utf-8")
-            try:
-                get_shared_cache(_review_cache_namespace()).set(
-                    cache_key, payload, max_entries=capacity
-                )
-            except Exception:
-                logger.warning(
-                    "Security: review cache set failed; continuing without cache write",
-                    exc_info=True,
-                )
-            else:
-                logger.info(
-                    "Security: cached review result under key=%s (bytes=%d)",
-                    cache_key,
-                    len(payload),
-                )
+            cache = get_shared_cache(_review_cache_namespace())
+            set_cached_review_result(_CACHE_LABEL, cache, cache_key, result, capacity=capacity)
 
         return result
 
