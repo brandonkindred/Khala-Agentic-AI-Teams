@@ -69,14 +69,17 @@ per-agent sandbox — has its own bootstrap step
 (`_maybe_register_injected_manifest`) that registers a provision-time-injected
 manifest (a Studio save or a generated agent, absent from the image's on-disk
 registry) before the single-agent guard middleware and the shim ever see a
-request. `agent_sandbox_runtime/tests/test_entrypoint.py` closes that second
-layer: it injects a manifest built via the real Stage-1 save builders, boots
-the real `_build_app()`, and posts an invoke through it.
+request. Two cases in this same suite close that second layer: they inject a
+manifest built via the real Stage-1 save builders, boot the real `_build_app()`,
+and post an invoke through it — reusing the `fake_strands`/`registry` fixtures
+above rather than duplicating them.
 
-```bash
-cd backend
-.venv/bin/pytest agent_sandbox_runtime/tests/test_entrypoint.py -v -rxX
-```
+These cases live here rather than in `agent_sandbox_runtime/tests/` because
+`agent_sandbox_runtime` is platform infrastructure that stays team-agnostic (it
+only imports `agent_platform` / `shared.*`, never a domain app); a test that
+builds a manifest via `agentic_team_provisioning`'s own builders belongs in this
+domain app's test tree, which imports `agent_sandbox_runtime.entrypoint`
+downward — the same direction production code already depends.
 
 | Test | Result | What it proves |
 |---|---|---|
