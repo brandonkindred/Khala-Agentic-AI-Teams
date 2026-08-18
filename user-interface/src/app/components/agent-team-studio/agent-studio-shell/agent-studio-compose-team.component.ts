@@ -11,7 +11,6 @@ import {
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { Subject, catchError, map, of, switchMap } from 'rxjs';
-import { A11yModule } from '@angular/cdk/a11y';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
@@ -21,6 +20,7 @@ import { MatSelectModule } from '@angular/material/select';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
+import { AgentStudioSlideOutComponent } from './agent-studio-slide-out/agent-studio-slide-out.component';
 import { ProcessDesignerChatComponent } from '../../process-designer-chat/process-designer-chat.component';
 import { STAGE_INDEX } from '../../../models/agent-studio.model';
 import type {
@@ -51,7 +51,6 @@ import type {
   standalone: true,
   imports: [
     ReactiveFormsModule,
-    A11yModule,
     MatButtonModule,
     MatCardModule,
     MatFormFieldModule,
@@ -59,6 +58,7 @@ import type {
     MatInputModule,
     MatSelectModule,
     AgentCatalogComponent,
+    AgentStudioSlideOutComponent,
     ProcessDesignerChatComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -85,7 +85,7 @@ export class AgentStudioComposeTeamComponent implements OnInit {
   readonly creating = signal(false);
   readonly createError = signal<string | null>(null);
 
-  /** Whether the "Browse agents" slide-out is open (spec §2.1). */
+  /** Whether the "Browse agents" overlay is open (spec §2.1). */
   readonly browseOpen = signal(false);
 
   readonly selectedTeamId = computed(() => this.state.teamId());
