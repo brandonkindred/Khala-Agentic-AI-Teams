@@ -27,6 +27,28 @@ class DevOpsTaskClarifierAgent:
         )
 
     def run(self, input_data: DevOpsTaskClarifierInput) -> DevOpsTaskClarifierOutput:
+        """Validate a DevOps task spec for completeness and safety before execution.
+
+        Preconditions:
+            ``input_data.task_spec`` is a populated ``DevOpsTaskSpec`` (fields may
+            be blank/empty to signal missing data — that's what the checks below
+            test for).
+        Postconditions:
+            - If any deterministic check finds a blocking gap (missing goal
+              summary, deployment target, environments, acceptance criteria,
+              rollback requirements for staging/production, secret source, or a
+              production approval gate), returns immediately with
+              ``approved_for_execution=False``, the fixed ``checklist``, the
+              collected ``gaps``, and ``clarification_requests`` mirroring each
+              blocking gap's message. The LLM is not called on this path.
+            - Otherwise, calls the LLM via ``self._model`` — resolved once in
+              ``__init__`` and reused here rather than re-resolved per call — and
+              returns its ``approved_for_execution``/``checklist``/``gaps``/
+              ``clarification_requests`` from ``complete_json_with_continuation``,
+              falling back to the deterministic ``checklist`` and
+              ``approved_for_execution=True`` when the LLM response omits those
+              fields.
+        """
         spec = input_data.task_spec
         gaps: List[ClarificationGap] = []
 
