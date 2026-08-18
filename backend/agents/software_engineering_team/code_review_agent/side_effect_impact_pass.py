@@ -444,7 +444,13 @@ def _coerce_finding(item: object) -> Optional[CodeReviewIssue]:
           of a blocking PR comment (see ``CodeReviewIssue.pre_existing``).
         - ``omission`` is likewise coerced via ``chunking._coerce_bool`` from
           the model's optional per-finding tag, defaulting to ``False`` when
-          absent (see ``CodeReviewIssue.omission``).
+          absent (see ``CodeReviewIssue.omission``). When the raw finding
+          tags both ``omission`` and ``pre_existing`` true (a
+          self-contradictory reply -- ``CodeReviewIssue`` rejects that
+          combination via ``_omission_implies_in_scope``), ``omission``
+          wins: the constructed issue carries ``pre_existing=False``, so
+          this boundary degrades a malformed reply to the more specific
+          signal instead of raising.
     """
     if not isinstance(item, dict):
         return None
@@ -460,6 +466,8 @@ def _coerce_finding(item: object) -> Optional[CodeReviewIssue]:
     severity = str(item.get("severity", "") or "").strip().lower()
     if severity not in _ALLOWED_SEVERITIES:
         severity = "medium"
+    omission_flag = _coerce_bool(item.get("omission"))
+    pre_existing_flag = False if omission_flag else _coerce_bool(item.get("pre_existing"))
     return CodeReviewIssue(
         severity=severity,
         category=category,
@@ -467,8 +475,8 @@ def _coerce_finding(item: object) -> Optional[CodeReviewIssue]:
         line=coerce_line(item.get("line")),
         description=description,
         suggestion=suggestion,
-        pre_existing=_coerce_bool(item.get("pre_existing")),
-        omission=_coerce_bool(item.get("omission")),
+        pre_existing=pre_existing_flag,
+        omission=omission_flag,
     )
 
 

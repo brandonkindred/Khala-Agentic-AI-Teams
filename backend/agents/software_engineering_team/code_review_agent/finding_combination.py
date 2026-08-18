@@ -190,8 +190,9 @@ def combine_findings(
           ``CodeReviewIssue`` (see ``side_effect_consolidation._merge_group``,
           called with the group's shared category): ``severity`` is the group
           max, ``line``/``start_line`` span the majority file's cited lines,
-          descriptions/suggestions are exact-deduped, and ``pre_existing`` is
-          the AND across the group. The merged issue is placed at the position
+          descriptions/suggestions are exact-deduped, ``pre_existing`` is
+          the AND across the group, and ``omission`` is the OR across the
+          group. The merged issue is placed at the position
           of the group's earliest-occurring member; the group's other members
           are dropped.
         - A finding that groups with no other passes through unchanged, in its

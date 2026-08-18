@@ -2866,6 +2866,33 @@ def test_omission_tag_is_carried_through_and_defaults_false() -> None:
     assert [i.omission for i in issues] == [True, True, False, False]
 
 
+def test_omission_and_pre_existing_both_true_is_rejected_on_construction() -> None:
+    """``CodeReviewIssue`` rejects the self-contradictory combination
+    directly, not just via LLM-schema validation: an omission is by
+    definition in-scope for this change (see ``omission``'s Field
+    description), so any caller constructing both True is a bug."""
+    with pytest.raises(ValidationError):
+        CodeReviewIssue(description="d", omission=True, pre_existing=True)
+
+
+def test_issues_from_chunk_output_reconciles_contradictory_raw_tags() -> None:
+    """A raw LLM dict tagging both ``omission`` and ``pre_existing`` true
+    (a self-contradictory reply that ``CodeReviewIssue`` would otherwise
+    reject via ``_omission_implies_in_scope``) is reconciled at this
+    boundary rather than raised: ``omission`` wins, so the constructed
+    issue is in-scope. This keeps ``_issues_from_chunk_output``'s documented
+    "never raises on malformed output" contract intact."""
+    seg = FileSegment(path="a.py", content="x = 1", total_lines=1)
+    chunk = ReviewChunk(segments=[seg])
+    issues = _issues_from_chunk_output(
+        chunk,
+        [{"description": "contradictory tags", "line": 1, "omission": True, "pre_existing": True}],
+    )
+    assert len(issues) == 1
+    assert issues[0].omission is True
+    assert issues[0].pre_existing is False
+
+
 _NO_OP_SUGGESTIONS = [
     "No changes needed.",
     "no changes needed",

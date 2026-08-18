@@ -510,7 +510,13 @@ def _issues_from_chunk_output(chunk: ReviewChunk, raw_issues: List[dict]) -> Lis
           ``_coerce_bool``); it defaults to False when the field is absent, so a
           reviewer/gate that never emits it is unaffected.
         - ``omission`` is likewise coerced via ``_coerce_bool`` from the LLM's
-          optional per-issue tag, defaulting to False when absent.
+          optional per-issue tag, defaulting to False when absent. When the
+          raw reply tags both ``omission`` and ``pre_existing`` true (a
+          self-contradictory reply -- ``CodeReviewIssue`` rejects that
+          combination via ``_omission_implies_in_scope``), ``omission`` wins:
+          the constructed issue carries ``pre_existing=False``, so this
+          boundary degrades a malformed reply to the more specific signal
+          instead of raising.
         - An item whose ``suggestion`` is, in its entirety, a no-op phrasing
           (e.g. "No changes needed.") is dropped (see ``is_no_op_suggestion``):
           the reviewer's own suggested fix says there is nothing to do, so it
@@ -540,6 +546,12 @@ def _issues_from_chunk_output(chunk: ReviewChunk, raw_issues: List[dict]) -> Lis
         if category not in _VALID_CATEGORIES:
             category = "general"
         title = _clean_str(item.get("title"), "") or derive_issue_title(description)
+        # An omission is by definition in-scope (CodeReviewIssue enforces this via
+        # _omission_implies_in_scope) -- omission wins over a contradictory raw
+        # pre_existing tag so a malformed LLM reply degrades to the more specific
+        # signal instead of raising out of this defensively-coded boundary.
+        omission_flag = _coerce_bool(item.get("omission"))
+        pre_existing_flag = False if omission_flag else _coerce_bool(item.get("pre_existing"))
         issues.append(
             CodeReviewIssue(
                 severity=severity,
@@ -550,8 +562,8 @@ def _issues_from_chunk_output(chunk: ReviewChunk, raw_issues: List[dict]) -> Lis
                 title=title,
                 description=description,
                 suggestion=suggestion,
-                pre_existing=_coerce_bool(item.get("pre_existing")),
-                omission=_coerce_bool(item.get("omission")),
+                pre_existing=pre_existing_flag,
+                omission=omission_flag,
             )
         )
     return issues

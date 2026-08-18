@@ -479,6 +479,42 @@ def test_coerce_finding_carries_through_omission_tag() -> None:
     ]
 
 
+def test_coerce_finding_reconciles_contradictory_raw_tags() -> None:
+    """A raw finding tagging both omission and pre_existing true (a
+    self-contradictory reply that CodeReviewIssue would otherwise reject via
+    _omission_implies_in_scope) is reconciled here rather than raised:
+    omission wins, so the constructed issue is in-scope. Keeps
+    _coerce_finding's documented "never raises on malformed input"
+    contract intact."""
+    finding = _coerce_finding(
+        {
+            "category": "architecture",
+            "description": "contradictory tags",
+            "omission": True,
+            "pre_existing": True,
+        }
+    )
+    assert finding is not None
+    assert finding.omission is True
+    assert finding.pre_existing is False
+
+
+def test_architecture_finding_llm_rejects_omission_and_pre_existing_both_true() -> None:
+    """ArchitectureConsistencyFindingLLM's own schema-level validator
+    rejects the self-contradictory combination too, independent of
+    _coerce_finding's runtime reconciliation (see the class's
+    _omission_implies_in_scope docstring for why: not currently exercised
+    by the hand-rolled parsing path, but kept self-enforcing for any future
+    caller that validates against it directly)."""
+    from code_review_agent.models import ArchitectureConsistencyFindingLLM
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        ArchitectureConsistencyFindingLLM.model_validate(
+            {"category": "architecture", "description": "d", "omission": True, "pre_existing": True}
+        )
+
+
 def test_coerce_finding_coerces_line_and_unknown_severity() -> None:
     finding = _coerce_finding(
         {

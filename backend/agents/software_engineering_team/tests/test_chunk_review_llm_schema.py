@@ -176,15 +176,28 @@ def test_numeric_omission_is_rejected_by_strict_bool() -> None:
 
 
 def test_omission_flag_round_trips_true() -> None:
-    """A model-set ``omission: true`` survives schema validation unchanged,
-    independent of ``pre_existing`` (an omission always pairs with
-    ``pre_existing: false``, but the schema itself does not enforce that --
-    it only carries whatever the model actually reports)."""
+    """A model-set ``omission: true`` survives schema validation unchanged
+    when paired with ``pre_existing: false`` (the only valid combination --
+    see ``test_omission_and_pre_existing_both_true_is_rejected``)."""
     issue = ChunkReviewIssueLLM.model_validate(
         {"description": "d", "omission": True, "pre_existing": False}
     )
     assert issue.omission is True
     assert issue.pre_existing is False
+
+
+def test_omission_and_pre_existing_both_true_is_rejected() -> None:
+    """``omission=True`` and ``pre_existing=True`` together is
+    self-contradictory: an omission is by definition in-scope for this
+    change (see ``CodeReviewIssue.omission``'s canonical wording).
+    ``_omission_implies_in_scope`` rejects the combination, driving
+    ``complete_validated``'s corrective retry the same way
+    ``_require_approval_consistent_with_issues`` does for a contradictory
+    ``approved``/``issues`` pair."""
+    with pytest.raises(ValidationError):
+        ChunkReviewIssueLLM.model_validate(
+            {"description": "d", "omission": True, "pre_existing": True}
+        )
 
 
 def test_empty_top_level_response_is_rejected() -> None:
