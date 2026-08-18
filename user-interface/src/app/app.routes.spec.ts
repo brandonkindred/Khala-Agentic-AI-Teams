@@ -75,7 +75,7 @@ describe('App routes', () => {
     expect(await loadedComponent('agent-studio/metrics')).toBe(MetricsTabComponent);
   });
 
-  it('guards agent-studio with unsavedChangesGuard so leaving with unsaved handoff edits prompts', () => {
+  it('registers unsavedChangesGuard on the agent-studio route\'s canDeactivate', () => {
     const shell = routes[0];
     const children = (shell?.children ?? []) as Route[];
     const route = children.find((r) => r.path === 'agent-studio');
