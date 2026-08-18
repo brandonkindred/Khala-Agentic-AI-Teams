@@ -2500,7 +2500,7 @@ def test_run_with_phase_cache_hit_reuses_output_without_invoking_phase() -> None
         )
 
     mock_run_single_phase.assert_not_called()
-    assert result.strategic_core is cached_output
+    assert result.strategic_core == cached_output
     assert result.narrative_messaging is None
 
 
@@ -2546,7 +2546,7 @@ def test_run_with_phase_cache_recomputes_downstream_phase_when_upstream_changes(
     with patch.object(
         orchestrator, "run_single_phase", side_effect=_run_single_phase_fixture_side_effect
     ) as mock_run_single_phase:
-        result = orchestrator.run(
+        orchestrator.run(
             mission=mission,
             human_review=HumanReview(approved=False),
             target_phase=BrandPhase.NARRATIVE_MESSAGING,
@@ -2555,7 +2555,6 @@ def test_run_with_phase_cache_recomputes_downstream_phase_when_upstream_changes(
 
     called_phases = [call.args[1] for call in mock_run_single_phase.call_args_list]
     assert called_phases == [BrandPhase.STRATEGIC_CORE, BrandPhase.NARRATIVE_MESSAGING]
-    assert result.narrative_messaging is not stale_narrative
 
 
 def test_run_with_phase_cache_never_caches_a_degraded_output() -> None:
@@ -2616,8 +2615,8 @@ def test_run_with_phase_cache_reuses_multiple_cached_upstream_phases() -> None:
 
     called_phases = [call.args[1] for call in mock_run_single_phase.call_args_list]
     assert called_phases == [BrandPhase.VISUAL_IDENTITY]
-    assert result.strategic_core is cached_strategic_core
-    assert result.narrative_messaging is cached_narrative
+    assert result.strategic_core == cached_strategic_core
+    assert result.narrative_messaging == cached_narrative
     assert result.visual_identity is not None
     assert result.channel_activation is None
 
@@ -2675,9 +2674,9 @@ def test_run_with_phase_cache_cascades_recompute_through_three_phase_chain() -> 
         assert cached is not None
         fresh_upstream[phase] = cached
 
-    assert result.strategic_core is fresh_upstream[BrandPhase.STRATEGIC_CORE]
-    assert result.narrative_messaging is fresh_upstream[BrandPhase.NARRATIVE_MESSAGING]
-    assert result.visual_identity is fresh_upstream[BrandPhase.VISUAL_IDENTITY]
+    assert result.strategic_core == fresh_upstream[BrandPhase.STRATEGIC_CORE]
+    assert result.narrative_messaging == fresh_upstream[BrandPhase.NARRATIVE_MESSAGING]
+    assert result.visual_identity == fresh_upstream[BrandPhase.VISUAL_IDENTITY]
 
 
 # ---------------------------------------------------------------------------

@@ -36,7 +36,7 @@ from .graphs.phase2_narrative import build_phase2_graph
 from .graphs.phase3_visual import build_phase3_graph
 from .graphs.phase4_channel import build_phase4_graph
 from .graphs.phase5_governance import build_phase5_graph
-from .graphs.shared import PHASE_ORDER, phase_index, serialize_mission
+from .graphs.shared import PHASE_ORDER, PHASE_OUTPUT_MODELS, phase_index, serialize_mission
 from .graphs.top_level import (
     DEFAULT_EXECUTION_TIMEOUT_SECONDS,
     DEFAULT_NODE_TIMEOUT_SECONDS,
@@ -487,34 +487,34 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
     BrandPhase.STRATEGIC_CORE: _PhaseSpec(
         build_phase1_graph,
         "phase1_strategic_core",
-        StrategicCoreOutput,
+        PHASE_OUTPUT_MODELS[BrandPhase.STRATEGIC_CORE],
         merge_fn=_merge_phase1_fragments,
     ),
     BrandPhase.NARRATIVE_MESSAGING: _PhaseSpec(
         build_phase2_graph,
         "phase2_narrative",
-        NarrativeMessagingOutput,
+        PHASE_OUTPUT_MODELS[BrandPhase.NARRATIVE_MESSAGING],
         merge_fn=_merge_phase2_fragments,
         check_structured_output=False,
     ),
     BrandPhase.VISUAL_IDENTITY: _PhaseSpec(
         build_phase3_graph,
         "phase3_visual",
-        VisualIdentityOutput,
+        PHASE_OUTPUT_MODELS[BrandPhase.VISUAL_IDENTITY],
         merge_fn=_merge_phase3_fragments,
         check_structured_output=False,
     ),
     BrandPhase.CHANNEL_ACTIVATION: _PhaseSpec(
         build_phase4_graph,
         "phase4_channel",
-        ChannelActivationOutput,
+        PHASE_OUTPUT_MODELS[BrandPhase.CHANNEL_ACTIVATION],
         merge_fn=_merge_phase4_fragments,
         check_structured_output=False,
     ),
     BrandPhase.GOVERNANCE: _PhaseSpec(
         build_phase5_graph,
         "phase5_governance",
-        GovernanceOutput,
+        PHASE_OUTPUT_MODELS[BrandPhase.GOVERNANCE],
         merge_fn=_merge_phase5_fragments,
         check_structured_output=False,
     ),
