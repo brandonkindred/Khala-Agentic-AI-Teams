@@ -13,7 +13,10 @@ keeps production ``shared.agent_invoke`` importable from both sides.
 
 from __future__ import annotations
 
+import types
 from typing import Any
+
+import pytest
 
 
 class FakeAgentResult:
@@ -41,7 +44,7 @@ class FakeStrandsAgent:
         return FakeAgentResult("ok")
 
 
-def patch_strands_agent(monkeypatch: Any, target: Any) -> type[FakeStrandsAgent]:
+def patch_strands_agent(monkeypatch: pytest.MonkeyPatch, target: str | types.ModuleType) -> type[FakeStrandsAgent]:
     """Monkeypatch ``target``'s ``StrandsAgent`` attribute with the recording fake.
 
     Preconditions:
