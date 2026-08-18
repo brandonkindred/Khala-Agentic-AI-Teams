@@ -276,19 +276,23 @@ def test_criteria_block_ends_without_trailing_newline() -> None:
 class _SystemPromptProbe(DummyLLMClient):
     """Captures chunk-review reasoning-pass ``system_prompt`` values.
 
-    Profile role anchors and review criteria live on call 1 (``complete``);
-    call 2 (``complete_json``) carries only the untrusted-analysis guard.
+    ``run_agent_via_reasoning`` runs the reasoning pass through a real
+    Strands ``Agent``, whose ``chat()`` unconditionally delegates to
+    ``complete_json`` (for both text and json ``response_format``), so both
+    passes land on ``complete_json`` here. The reasoning-pass call carries
+    the profile's role anchors and review criteria as its ``system_prompt``;
+    the formatting-pass call carries only the untrusted-analysis guard and
+    is identified by the ``--- ANALYSIS`` marker
+    ``wrap_with_analysis_delimiters`` injects into its prompt.
     """
 
     def __init__(self):
         super().__init__()
         self.reasoning_system_prompts: list[str] = []
 
-    def complete(self, prompt, *, system_prompt=None, **kwargs):
-        self.reasoning_system_prompts.append(system_prompt or "")
-        return "Structured prose review summary."
-
     def complete_json(self, prompt, *, system_prompt=None, **kwargs):
+        if "--- ANALYSIS" not in prompt:
+            self.reasoning_system_prompts.append(system_prompt or "")
         return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
 

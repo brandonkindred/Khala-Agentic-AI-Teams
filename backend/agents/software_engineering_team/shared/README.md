@@ -96,29 +96,41 @@ llm = get_client("backend")
 `llm.py` re-exports `get_strands_model` from `llm_service`, which also exposes
 `CacheBreakpoint` — a marker a prompt builder wraps around a stable, repeated
 prefix (a spec excerpt, a persona/standards block, ...) to declare it safe to
-send as a provider-side cached prefix. To adopt it, place the marker directly
-in the `system_prompt_content` list passed to a Strands `Agent` built from
-`get_strands_model`:
+send as a provider-side cached prefix.
+
+A Strands `Agent`'s public constructor carries it directly:
+`Agent(system_prompt=...)` accepts a plain string or a list of dict-shaped
+blocks, and `CacheBreakpoint` duck-types as a single-key `{"text": ...}`
+mapping (`__contains__`/`__getitem__`) specifically so a bare instance in that
+list satisfies Strands' own `"text" in block` check (`split_system_prompt`,
+called both at `Agent` construction and again by the event loop on every
+turn) and survives intact — no private-attribute workaround needed. See
+`code_review_agent.via_reasoning._build_reasoning_agent_system_prompt` for a
+small, tested helper that builds this combined list, and
+`run_agent_via_reasoning`'s `system_prompt_content` parameter for how a caller
+uses it:
 
 ```python
 from llm_service import CacheBreakpoint
-from strands import Agent
 
-from software_engineering_team.shared.llm import get_strands_model
+from code_review_agent.via_reasoning import run_agent_via_reasoning
 
-model = get_strands_model("backend")
-agent = Agent(
+run_agent_via_reasoning(
     model=model,
-    system_prompt_content=[CacheBreakpoint(stable_spec_excerpt), "\n\n" + rest_of_persona],
+    reasoning_prompt=per_chunk_content,
+    reasoning_system_prompt=persona_text,
+    system_prompt_content=[CacheBreakpoint(stable_spec_excerpt)],
+    ...
 )
 ```
 
 On a caching-capable backing client (Claude, today) the marked segment reaches
 the wire as a real cache-control breakpoint; on every other client it is a
-documented no-op — flattened to plain text, no error, no output change. No SE
-agent adopts this yet (adopting it at a call site is a separate, later
-change); see `llm_service/README.md`'s "Prompt caching (cache-control
-breakpoints)" section for the full contract and telemetry fields.
+documented no-op — flattened to plain text, no error, no output change. The
+code-review map-phase call (`chunk_reviewer.py`) adopted this for its shared
+spec/architecture/existing-code prefix; see `llm_service/README.md`'s "Prompt
+caching (cache-control breakpoints)" section for the full contract and
+telemetry fields.
 
 ## Models (moved to `shared.dev_models`)
 

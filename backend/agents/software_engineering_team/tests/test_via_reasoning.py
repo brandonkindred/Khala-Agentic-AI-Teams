@@ -408,6 +408,151 @@ def test_run_agent_via_reasoning_formats_via_underlying_client(
     assert "REVIEW PROSE" in format_calls[0]["prompt"]
 
 
+def test_build_reasoning_agent_system_prompt_returns_plain_string_when_no_content() -> None:
+    """``system_prompt_content`` falsy: returns the persona string unchanged --
+    byte-identical to every caller before this parameter existed."""
+    from software_engineering_team.code_review_agent.via_reasoning import (
+        _build_reasoning_agent_system_prompt,
+    )
+
+    assert _build_reasoning_agent_system_prompt("Prose reviewer", None) == "Prose reviewer"
+    assert _build_reasoning_agent_system_prompt("Prose reviewer", []) == "Prose reviewer"
+
+
+def test_build_reasoning_agent_system_prompt_combines_persona_and_content() -> None:
+    """Non-empty content: the persona becomes a leading text block, followed
+    by the extra segments in order."""
+    from llm_service import CacheBreakpoint
+    from software_engineering_team.code_review_agent.via_reasoning import (
+        _build_reasoning_agent_system_prompt,
+    )
+
+    breakpoint_ = CacheBreakpoint("shared text")
+    result = _build_reasoning_agent_system_prompt("Prose reviewer", [breakpoint_])
+    assert result == [{"text": "Prose reviewer"}, breakpoint_]
+
+
+def test_build_reasoning_agent_system_prompt_normalizes_bare_string_segments() -> None:
+    """A bare ``str`` segment is normalized to a ``{"text": ...}`` block before
+    reaching Strands -- passing it through unchanged would crash Strands'
+    ``split_system_prompt`` whenever the string happens to contain the
+    substring "text" (``"text" in block`` then does ``block["text"]``, which
+    raises ``TypeError`` for a plain string)."""
+    from software_engineering_team.code_review_agent.via_reasoning import (
+        _build_reasoning_agent_system_prompt,
+    )
+
+    result = _build_reasoning_agent_system_prompt("Prose reviewer", ["raw text segment"])
+    assert result == [{"text": "Prose reviewer"}, {"text": "raw text segment"}]
+
+
+def test_run_agent_via_reasoning_forwards_system_prompt_content_to_reasoning_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``system_prompt_content`` reaches the reasoning ``Agent`` through its
+    public ``system_prompt=`` constructor argument -- a combined list with
+    the persona as a leading text block and the ``CacheBreakpoint`` after it."""
+    from llm_service import CacheBreakpoint, LLMClientModel
+    from llm_service.clients.dummy import DummyLLMClient
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+
+    agent_calls: list[dict[str, Any]] = []
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            agent_calls.append(kwargs)
+
+        def __call__(self, prompt: str) -> str:
+            return "REVIEW PROSE"
+
+    class _RecordingClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            return {"approved": True, "summary": "via client"}
+
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+    model = LLMClientModel(_RecordingClient(), agent_key="code_review")
+    breakpoint_content = [CacheBreakpoint("shared text")]
+
+    run_agent_via_reasoning(
+        model=model,
+        reasoning_prompt="Review this",
+        reasoning_system_prompt="Prose reviewer",
+        formatting_instructions='Return {"approved": bool, "summary": str}',
+        parse=lambda raw: _Out.model_validate_json(raw),
+        system_prompt_content=breakpoint_content,
+    )
+
+    assert agent_calls[0]["system_prompt"] == [{"text": "Prose reviewer"}, breakpoint_content[0]]
+
+
+def test_run_agent_via_reasoning_omits_system_prompt_content_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``system_prompt_content`` is not passed (every caller as of this
+    parameter's introduction), the reasoning ``Agent`` still receives a plain
+    ``str`` ``system_prompt`` -- regression pin for the existing callers'
+    behavior."""
+    from llm_service import LLMClientModel
+    from llm_service.clients.dummy import DummyLLMClient
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+
+    agent_calls: list[dict[str, Any]] = []
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            agent_calls.append(kwargs)
+
+        def __call__(self, prompt: str) -> str:
+            return "REVIEW PROSE"
+
+    class _RecordingClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            return {"approved": True, "summary": "via client"}
+
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+    model = LLMClientModel(_RecordingClient(), agent_key="code_review")
+
+    run_agent_via_reasoning(
+        model=model,
+        reasoning_prompt="Review this",
+        reasoning_system_prompt="Prose reviewer",
+        formatting_instructions='Return {"approved": bool, "summary": str}',
+        parse=lambda raw: _Out.model_validate_json(raw),
+    )
+
+    assert agent_calls[0]["system_prompt"] == "Prose reviewer"
+
+
+def test_run_agent_via_reasoning_system_prompt_content_survives_real_strands_agent() -> None:
+    """End-to-end guard against the exact regression this design fixes: a
+    real ``strands.Agent`` (not a fake/monkeypatched one) constructed with a
+    ``CacheBreakpoint``-bearing ``system_prompt`` list must not raise --
+    Strands' own ``split_system_prompt`` is called both at ``Agent``
+    construction and again by the event loop on every turn, and a bare
+    dataclass instance in that list raises ``TypeError`` unless it duck-types
+    as a ``{"text": ...}`` block (see ``llm_service.CacheBreakpoint``)."""
+    from llm_service import CacheBreakpoint, LLMClientModel
+    from llm_service.clients.dummy import DummyLLMClient
+
+    class _RecordingClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            return {"approved": True, "summary": "via real agent"}
+
+    model = LLMClientModel(_RecordingClient(), agent_key="code_review")
+    breakpoint_ = CacheBreakpoint("shared spec/architecture/existing-code text")
+
+    result = run_agent_via_reasoning(
+        model=model,
+        reasoning_prompt="Review this",
+        reasoning_system_prompt="Prose reviewer",
+        formatting_instructions='Return {"approved": bool, "summary": str}',
+        parse=lambda raw: _Out.model_validate_json(raw),
+        system_prompt_content=[breakpoint_],
+    )
+
+    assert result.summary == "via real agent"
+
+
 def test_run_agent_via_reasoning_forwards_model_max_tokens_to_format_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
