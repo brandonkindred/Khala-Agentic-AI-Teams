@@ -57,11 +57,44 @@ already do via ``_patch_fenced_response``).
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Type
+
+from pydantic import BaseModel
 
 from llm_service import LLMClient, get_strands_model
-from llm_service.strands_model import resolve_strands_model
+from llm_service.strands_model import model_fingerprint, resolve_strands_model
+from shared.cache import get_shared_cache
 from software_engineering_team.shared.llm import complete_json_with_continuation
+from software_engineering_team.shared.review_result_cache import (
+    build_review_cache_key,
+    cache_capacity_for,
+    cache_namespace_for,
+    clear_review_cache_namespace,
+    get_cached_review_result,
+    set_cached_review_result,
+)
+
+
+def _as_bool(value: Any) -> bool:
+    """Coerce an LLM-provided flag to a strict boolean.
+
+    JSON booleans already parse to ``bool``; this guards the common schema drift
+    where a model emits the STRING ``"false"``/``"true"``. ``bool("false")`` is
+    True, so a naive cast would report the flag as set when the model said the
+    opposite. Only a real ``True`` or an explicit true-like string
+    (``true``/``1``/``yes``, case-insensitive) counts.
+
+    Preconditions:
+        - ``value`` is arbitrary parsed-JSON content (bool, str, number, None, ...).
+    Postconditions:
+        - Returns a bool; anything not unambiguously true (including
+          ``"false"``/``"0"``/``"no"``/None/other strings/numbers) returns False.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return False
 
 
 class DevOpsSingleShotAgent:
@@ -73,12 +106,20 @@ class DevOpsSingleShotAgent:
         - ``run`` is stateless across calls aside from that resolved model.
         - Subclasses set a non-empty ``PROMPT`` and override
           ``build_context`` / ``build_output``; ``pre_call`` may short-circuit.
+        - A subclass that sets ``CACHE_NAMESPACE``/``CACHE_ENV_VAR``/
+          ``OUTPUT_MODEL`` gets a cache-checked/populated ``run`` for free; an
+          unset ``CACHE_NAMESPACE`` (the default) disables caching for that
+          subclass, matching the ``capacity <= 0`` passthrough convention.
     """
 
     PROMPT: str = ""
     PROMPT_SEPARATOR: str = "\n\n---\n\n"
     temperature: Optional[float] = 0.1
     think: Optional[bool] = True
+    CACHE_NAMESPACE: str = ""
+    CACHE_ENV_VAR: str = ""
+    CACHE_DEFAULT_SIZE: int = 128
+    OUTPUT_MODEL: Optional[Type[BaseModel]] = None
 
     def __init__(self, llm_client: LLMClient) -> None:
         """Resolve the devops-routed Strands model.
@@ -131,10 +172,20 @@ class DevOpsSingleShotAgent:
             ``build_output`` are overridden on the concrete subclass.
         Postconditions:
             If ``pre_call`` returns non-``None``, that value is returned and
-            the LLM is not called. Otherwise returns
+            the LLM is not called (no cache lookup either — nothing was
+            hashed yet). Otherwise, when ``CACHE_NAMESPACE`` and
+            ``CACHE_ENV_VAR`` are both set (non-empty) AND the resolved
+            capacity is ``> 0`` — all three conditions gate caching; a
+            subclass with ``CACHE_NAMESPACE`` set but ``CACHE_ENV_VAR`` left
+            empty (the default) never caches, regardless of
+            ``CACHE_DEFAULT_SIZE`` — a cache hit (byte-identical
+            ``input_data`` and resolved model) returns the prior
+            ``OUTPUT_MODEL`` instance without invoking the LLM. On a cache
+            miss, a disabled cache, or any cache-backend error, returns
             ``build_output(input_data, data)`` where ``data`` comes from
             ``complete_json_with_continuation`` with prompt
-            ``PROMPT + PROMPT_SEPARATOR + context``. ``temperature`` /
+            ``PROMPT + PROMPT_SEPARATOR + context``, and (when caching is
+            enabled) writes the result back to the cache. ``temperature`` /
             ``think`` class attrs are passed as kwargs only when not ``None``.
             LLM/parse errors propagate unchanged.
         """
@@ -143,6 +194,23 @@ class DevOpsSingleShotAgent:
             return early
 
         assert self.PROMPT, f"{type(self).__name__}.PROMPT must be a non-empty string"
+
+        cache_key: Optional[str] = None
+        capacity = 0
+        if self.CACHE_NAMESPACE and self.CACHE_ENV_VAR:
+            capacity = cache_capacity_for(self.CACHE_ENV_VAR, self.CACHE_DEFAULT_SIZE)
+            if capacity > 0:
+                assert self.OUTPUT_MODEL is not None, (
+                    f"{type(self).__name__}.OUTPUT_MODEL must be set when CACHE_NAMESPACE and "
+                    "CACHE_ENV_VAR are set and capacity > 0"
+                )
+                cache_key = build_review_cache_key(input_data, model_fingerprint(self._model))
+                cache = get_shared_cache(cache_namespace_for(self.CACHE_NAMESPACE))
+                cached = get_cached_review_result(
+                    type(self).__name__, cache, cache_key, self.OUTPUT_MODEL
+                )
+                if cached is not None:
+                    return cached
 
         context = self.build_context(input_data)
         prompt = self.PROMPT + self.PROMPT_SEPARATOR + context
@@ -154,4 +222,30 @@ class DevOpsSingleShotAgent:
             kwargs["think"] = self.think
 
         data = complete_json_with_continuation(self._model, prompt, **kwargs)
-        return self.build_output(input_data, data)
+        result = self.build_output(input_data, data)
+
+        if cache_key is not None:
+            cache = get_shared_cache(cache_namespace_for(self.CACHE_NAMESPACE))
+            set_cached_review_result(
+                type(self).__name__, cache, cache_key, result, capacity=capacity
+            )
+
+        return result
+
+    @classmethod
+    def clear_cache(cls) -> None:
+        """Drop every cached result for this subclass. Intended for test teardown.
+
+        Preconditions:
+            - None.
+        Postconditions:
+            - A no-op when ``cls.CACHE_NAMESPACE`` is unset (caching disabled
+              for this subclass). Otherwise this process's view of the
+              namespace is empty when the call returns (best-effort across
+              Redis), fail-open on any backend error.
+        """
+        if not cls.CACHE_NAMESPACE:
+            return
+        clear_review_cache_namespace(
+            cls.__name__, lambda: get_shared_cache(cache_namespace_for(cls.CACHE_NAMESPACE))
+        )

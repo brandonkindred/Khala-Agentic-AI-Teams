@@ -1,10 +1,12 @@
 import { Component, EventEmitter, Input, Output } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { By } from '@angular/platform-browser';
 import { Subject, of, tap, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.component';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
+import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
 import { ProcessDesignerChatComponent } from '../../process-designer-chat/process-designer-chat.component';
 import type {
   AgenticTeam,
@@ -15,11 +17,21 @@ import type {
 } from '../../../models';
 
 /** Stub the heavy embedded chat/roster panel; tests exercise `onRosterChanged`
- *  directly rather than through the stub's (unused) output emissions. */
+ *  and `onTestAgent` directly rather than through the stub's (unused) output
+ *  emissions — except `testAgent`, which is exercised via the stub so the
+ *  Stage-3 host's binding is covered end-to-end. */
 @Component({ selector: 'app-process-designer-chat', standalone: true, template: '' })
 class StubProcessDesignerChatComponent {
   @Input() team!: AgenticTeam;
   @Output() readonly rosterChanged = new EventEmitter<RosterValidationResult | null>();
+  @Output() readonly testAgent = new EventEmitter<AgenticTeamAgent>();
+}
+
+/** Stand-in for the catalog: same selector + the one output the Browse-agents
+ *  slide-out wires, so no catalog HTTP fetch runs in these unit tests. */
+@Component({ selector: 'app-agent-catalog', standalone: true, template: '' })
+class StubAgentCatalogComponent {
+  @Output() readonly requestRun = new EventEmitter<string>();
 }
 
 const teamSummary = (id: string, name = id): AgenticTeamSummary => ({
@@ -85,8 +97,8 @@ describe('AgentStudioComposeTeamComponent', () => {
       ],
     })
       .overrideComponent(AgentStudioComposeTeamComponent, {
-        remove: { imports: [ProcessDesignerChatComponent] },
-        add: { imports: [StubProcessDesignerChatComponent] },
+        remove: { imports: [ProcessDesignerChatComponent, AgentCatalogComponent] },
+        add: { imports: [StubProcessDesignerChatComponent, StubAgentCatalogComponent] },
       });
 
     fixture = TestBed.createComponent(AgentStudioComposeTeamComponent);
@@ -411,5 +423,95 @@ describe('AgentStudioComposeTeamComponent', () => {
     component.form.patchValue({ name: 'Dup' });
     component.onCreateTeam();
     expect(component.createError()).toBe('name taken');
+  });
+
+  // ── Browse agents / Test ▸ (spec §2.1) ─────────────────────────────────────
+
+  describe('Browse agents slide-out', () => {
+    it('keeps the slide-out closed until requested, even with no team selected', () => {
+      fixture.detectChanges();
+      expect(component.browseOpen()).toBe(false);
+      expect(fixture.nativeElement.querySelector('app-agent-catalog')).toBeNull();
+    });
+
+    it('opens and closes the slide-out via its buttons', () => {
+      fixture.detectChanges();
+      fixture.nativeElement.querySelector('.browse-btn').click();
+      fixture.detectChanges();
+      expect(component.browseOpen()).toBe(true);
+      expect(fixture.nativeElement.querySelector('app-agent-catalog')).toBeTruthy();
+
+      fixture.nativeElement.querySelector('.browse-head button').click();
+      fixture.detectChanges();
+      expect(component.browseOpen()).toBe(false);
+      expect(fixture.nativeElement.querySelector('app-agent-catalog')).toBeNull();
+    });
+
+    it('closes the slide-out when the scrim is clicked', () => {
+      fixture.detectChanges();
+      component.openBrowse();
+      fixture.detectChanges();
+      fixture.nativeElement.querySelector('.browse-scrim').click();
+      fixture.detectChanges();
+      expect(component.browseOpen()).toBe(false);
+    });
+
+    it('closes the slide-out on Escape', () => {
+      fixture.detectChanges();
+      component.openBrowse();
+      fixture.detectChanges();
+      const panel = fixture.nativeElement.querySelector('.browse-panel');
+      panel.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      fixture.detectChanges();
+      expect(component.browseOpen()).toBe(false);
+    });
+
+    it('marks the panel as a focus-trapping modal', () => {
+      fixture.detectChanges();
+      component.openBrowse();
+      fixture.detectChanges();
+      const panel = fixture.nativeElement.querySelector('.browse-panel');
+      expect(panel.getAttribute('aria-modal')).toBe('true');
+      expect(panel.getAttribute('role')).toBe('dialog');
+      expect(panel.hasAttribute('cdkTrapFocus')).toBe(true);
+    });
+
+    it('selecting an agent re-points the handoff id without adding it to the roster', () => {
+      state.setTeamId('t-1');
+      fixture.detectChanges();
+      component.openBrowse();
+      fixture.detectChanges();
+      const catalog = fixture.debugElement.query(By.directive(StubAgentCatalogComponent));
+      (catalog.componentInstance as StubAgentCatalogComponent).requestRun.emit('soc2.auditor');
+      fixture.detectChanges();
+
+      expect(state.registryAgentId()).toBe('soc2.auditor');
+      expect(component.browseOpen()).toBe(false);
+      // Only the initial team-load auto-add fires; Browse selection alone must
+      // not trigger a second addAgentToTeam call.
+      expect(facade.addAgentToTeam).not.toHaveBeenCalledWith('t-1', 'soc2.auditor', expect.anything());
+    });
+  });
+
+  describe('Test ▸ back-loop', () => {
+    it('onTestAgent sets the handoff agent and jumps to Stage 2', () => {
+      fixture.detectChanges();
+      component.onTestAgent(agent({ manifest_id: 'blogging.planner' }));
+      expect(state.registryAgentId()).toBe('blogging.planner');
+      expect(state.activeStage()).toBe(1);
+    });
+
+    it("the embedded chat's testAgent output is wired to onTestAgent", () => {
+      state.setTeamId('t-1');
+      fixture.detectChanges();
+      const chat = fixture.debugElement.query(By.directive(StubProcessDesignerChatComponent));
+      (chat.componentInstance as StubProcessDesignerChatComponent).testAgent.emit(
+        agent({ manifest_id: 'soc2.auditor' }),
+      );
+      fixture.detectChanges();
+
+      expect(state.registryAgentId()).toBe('soc2.auditor');
+      expect(state.activeStage()).toBe(1);
+    });
   });
 });
