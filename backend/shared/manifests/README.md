@@ -81,7 +81,16 @@ Roster Manifest SoT:
 
 ## Out of scope
 
-Runtime persona binding — a saved agent's `role` / `system_prompt` are
-advertised on the manifest, but the shared generated-agent runtime still
-reconstructs persona from the invoke request body at invoke time. Binding
-that advertised persona at runtime is a separate follow-up.
+Runtime persona binding is **shipped**, not a follow-up: a saved agent's
+`role` / `system_prompt` are the *default* persona for that agent's invoke —
+the shared generated-agent runtime (`invoke_generated_agent`) binds an
+omitted request field from the manifest, but an explicitly-present request
+field (raw-body presence, not truthiness) overrides it for that invoke only,
+never written back; a request-supplied `system_prompt` fully replaces the
+base prompt rather than composing with it. See
+[`agent_platform/studio/README.md`](../../agents/agent_platform/studio/README.md#identity-agentdefinition-view-model-vs-agentmanifest-sot),
+[`agent_platform/registry/README.md`](../../agents/agent_platform/registry/README.md),
+[`agentic_team_provisioning/README.md`](../../agents/agent_team_studio/agentic_team_provisioning/README.md#roster-identity-thin-refs-manifest-sot),
+and
+[`system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md`](../../../system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md)
+for the locked precedence contract this package's builders feed into.
