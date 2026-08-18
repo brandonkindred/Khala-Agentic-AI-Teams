@@ -746,6 +746,16 @@ def _merged_tool_names(tools: list) -> set:
     }
 
 
+def _merged_tool_by_name(tools: list, name: str):
+    """Look up one tool by its registered name (see ``_merged_tool_names``)."""
+    return next(
+        t
+        for t in tools
+        if (getattr(t, "tool_name", None) or getattr(t, "__name__", None) or getattr(t, "name", ""))
+        == name
+    )
+
+
 def test_build_merged_pass_tools_includes_scoped_tools_when_side_off() -> None:
     """With the side-effect half off, the merged builder still exposes the full
     shared scoped-tool set (read_lines/read_function/find_references) plus its
@@ -788,6 +798,48 @@ def test_build_merged_pass_tools_includes_scoped_tools_when_side_on() -> None:
         "search_repository",
         "list_changed_files",
     }
+
+
+def test_list_changed_files_shares_run_level_total_call_budget_with_base_tools() -> None:
+    """list_changed_files is added outside ``_build_tools``/``build_side_effect_tools``,
+    but must still share their one call tracker -- exhausting the shared
+    total-call budget via a base tool must also short-circuit
+    list_changed_files, proving the run-level cap covers the merged pass's
+    whole tool set, not just the tools built underneath it."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+    from code_review_agent.false_positive_filter import _MAX_TOTAL_TOOL_CALLS, CodebaseIndex
+
+    index = CodebaseIndex.from_input(_input(files={"a.py": "a", "b.py": "b"}))
+    tools = pass_mod._build_merged_pass_tools(index, side_on=False)
+    list_files = _merged_tool_by_name(tools, "list_files")
+    list_changed_files = _merged_tool_by_name(tools, "list_changed_files")
+    for _ in range(_MAX_TOTAL_TOOL_CALLS):
+        list_files()
+    result = list_changed_files()
+    assert "tool call budget" in result
+    assert "exhausted" in result
+    assert "a.py" not in result
+
+
+def test_list_changed_files_and_search_repository_share_one_budget_when_side_on() -> None:
+    """When the side-effect half is on, list_changed_files, search_repository,
+    and the seven shared tools all come from three different builder layers
+    (``_build_tools`` -> ``build_side_effect_tools`` -> ``_build_merged_pass_tools``)
+    but must still share exactly one run-level budget end to end."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+    from code_review_agent.false_positive_filter import _MAX_TOTAL_TOOL_CALLS, CodebaseIndex
+
+    index = CodebaseIndex.from_input(_input(files={"a.py": "a"}))
+    tools = pass_mod._build_merged_pass_tools(index, side_on=True)
+    list_files = _merged_tool_by_name(tools, "list_files")
+    list_changed_files = _merged_tool_by_name(tools, "list_changed_files")
+    search_repository = _merged_tool_by_name(tools, "search_repository")
+    for _ in range(_MAX_TOTAL_TOOL_CALLS):
+        list_files()
+    changed_result = list_changed_files()
+    assert "tool call budget" in changed_result and "exhausted" in changed_result
+    repo_result = search_repository("anything")
+    assert "tool call budget" in repo_result and "exhausted" in repo_result
 
 
 def test_format_changed_files_page_paginates_and_hints_next_offset() -> None:

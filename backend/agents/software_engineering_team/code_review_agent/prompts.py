@@ -445,3 +445,35 @@ SPEC_COMPLIANCE_PASS_FORMATTING_INSTRUCTIONS = (
 SPEC_COMPLIANCE_PASS_PROMPT = (
     SPEC_COMPLIANCE_PASS_REASONING_SYSTEM_PROMPT + SPEC_COMPLIANCE_PASS_FORMATTING_INSTRUCTIONS
 )
+
+
+# ---------------------------------------------------------------------------
+# Scope classification pass (scope_classifier.py) — the lightweight batched
+# in/out-of-scope LLM classifier. Distinct from the SCOPE_VERIFY_* prompts
+# above (the heavier tool-grounded scope_filter verifier): this pass makes one
+# direct complete_json call per file batch, so it needs a plain system prompt
+# and a strict-JSON formatting instruction rather than a reasoning-agent body.
+# ---------------------------------------------------------------------------
+
+SCOPE_CLASSIFY_SYSTEM_PROMPT = (
+    "You are a meticulous code-review triage assistant. For each finding you are "
+    "given, decide whether it is IN SCOPE or OUT OF SCOPE for the pull request "
+    "under review.\n\n"
+    "- IN SCOPE: the finding is a defect the change under review introduced or is "
+    "directly responsible for — a bug in code this PR added or modified, or a "
+    "required change the PR should have made but omitted.\n"
+    "- OUT OF SCOPE: the finding is a pre-existing defect in unrelated, unchanged "
+    "code that merely happens to be near the change — it was already there before "
+    "this PR and the PR is not responsible for it.\n\n"
+    "Judge only from the evidence provided. When you genuinely cannot tell, say so "
+    "rather than guessing."
+)
+
+SCOPE_CLASSIFY_FORMATTING_INSTRUCTIONS = (
+    "Reply with a single JSON object and nothing else, in exactly this shape:\n"
+    '{"verdicts": [{"index": <int>, "in_scope": <true|false|"unknown">, '
+    '"reason": "<one short sentence>"}]}\n'
+    "Include exactly one entry per finding, using the finding's index. Set "
+    'in_scope to true for IN SCOPE, false for OUT OF SCOPE, and "unknown" when '
+    "you genuinely cannot decide. Do not omit entries."
+)
