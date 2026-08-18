@@ -110,4 +110,33 @@ describe('App routes', () => {
       expect(typeof cmp).toBe('function'); // a component class
     }
   });
+
+  it('nests persona-run under agent-studio and keeps the old audit route', async () => {
+    const shell = routes[0];
+    const children = (shell?.children ?? []) as Route[];
+    const studio = children.find((r) => r.path === 'agent-studio');
+    expect(studio).toBeDefined();
+    expect(studio!.children?.length).toBe(2);
+    expect(studio!.children?.map((c) => c.path)).toEqual(
+      expect.arrayContaining(['', 'persona-run/:runId']),
+    );
+    const auditChild = studio!.children?.find((c) => c.path === 'persona-run/:runId');
+    expect(auditChild?.data).toEqual({ hideStudioFooter: true });
+    expect(typeof auditChild?.loadComponent).toBe('function');
+    const { AgentStudioPersonaAuditComponent } = await import(
+      './components/agent-team-studio/agent-studio-shell/agent-studio-persona-audit.component'
+    );
+    expect(await auditChild!.loadComponent!()).toBe(AgentStudioPersonaAuditComponent);
+
+    const emptyChild = studio!.children?.find((c) => c.path === '');
+    expect(typeof emptyChild?.loadComponent).toBe('function');
+    const { AgentStudioStageHostComponent } = await import(
+      './components/agent-team-studio/agent-studio-shell/agent-studio-stage-host.component'
+    );
+    expect(await emptyChild!.loadComponent!()).toBe(AgentStudioStageHostComponent);
+
+    const oldAudit = children.find((r) => r.path === 'persona-testing/audit/:runId');
+    expect(oldAudit).toBeDefined();
+    expect(typeof oldAudit?.loadComponent).toBe('function');
+  });
 });
