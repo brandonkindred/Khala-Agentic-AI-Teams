@@ -1107,16 +1107,14 @@ def _branding_phase5_text_routed_stub(system_lowered: str) -> Optional[Dict[str,
     return None
 
 
-def _branding_phase2_narrative_base() -> Dict[str, Any]:
-    """Return the base brand-narrative fields shared by all Phase 2 stubs.
+def _branding_phase2_story_stub() -> Dict[str, Any]:
+    """Return BrandStoryOutput's own-field stub payload.
 
     Preconditions:
         None.
     Postconditions:
         Returns a fresh dict with ``brand_story``, ``hero_narrative``, and
-        ``boilerplate_variants`` — the fields every Phase 2 branding stub
-        carries forward, regardless of how much further downstream fields
-        each specific agent also requires.
+        ``boilerplate_variants`` — Storyteller's own fields.
     """
     return {
         "brand_story": (
@@ -1135,17 +1133,16 @@ def _branding_phase2_narrative_base() -> Dict[str, Any]:
     }
 
 
-def _branding_phase2_narrative_with_archetype() -> Dict[str, Any]:
-    """Return the Phase 2 base narrative plus ``brand_archetypes``.
+def _branding_phase2_archetypes_stub() -> Dict[str, Any]:
+    """Return BrandArchetypesOutput's own-field stub payload.
 
     Preconditions:
         None.
     Postconditions:
-        Returns a fresh dict extending ``_branding_phase2_narrative_base()``
-        with a single-entry ``brand_archetypes`` list.
+        Returns a fresh dict with a single-entry ``brand_archetypes`` list —
+        ArchetypeAnalyst's own field.
     """
     return {
-        **_branding_phase2_narrative_base(),
         "brand_archetypes": [
             {
                 "archetype": "The Creator",
@@ -1156,18 +1153,16 @@ def _branding_phase2_narrative_with_archetype() -> Dict[str, Any]:
     }
 
 
-def _branding_phase2_narrative_with_tagline() -> Dict[str, Any]:
-    """Return the Phase 2 narrative-with-archetype payload plus tagline fields.
+def _branding_phase2_tagline_stub() -> Dict[str, Any]:
+    """Return TaglineOutput's own-field stub payload.
 
     Preconditions:
         None.
     Postconditions:
-        Returns a fresh dict extending
-        ``_branding_phase2_narrative_with_archetype()`` with ``tagline``,
-        ``tagline_rationale``, and ``elevator_pitches``.
+        Returns a fresh dict with ``tagline``, ``tagline_rationale``, and
+        ``elevator_pitches`` — TaglineWriter's own fields.
     """
     return {
-        **_branding_phase2_narrative_with_archetype(),
         "tagline": "Ship brand with the product",
         "tagline_rationale": "Ties cohesion to shipping speed (dummy).",
         "elevator_pitches": [
@@ -1190,18 +1185,16 @@ def _branding_phase2_narrative_with_tagline() -> Dict[str, Any]:
     }
 
 
-def _branding_phase2_narrative_with_messaging() -> Dict[str, Any]:
-    """Return the Phase 2 narrative-with-tagline payload plus messaging fields.
+def _branding_phase2_messaging_stub() -> Dict[str, Any]:
+    """Return MessagingFrameworkOutput's own-field stub payload.
 
     Preconditions:
         None.
     Postconditions:
-        Returns a fresh dict extending
-        ``_branding_phase2_narrative_with_tagline()`` with
-        ``messaging_framework`` and ``audience_message_maps``.
+        Returns a fresh dict with ``messaging_framework`` and
+        ``audience_message_maps`` — MessageMapper's own fields.
     """
     return {
-        **_branding_phase2_narrative_with_tagline(),
         "messaging_framework": [
             {
                 "pillar": "Cohesion",
@@ -1230,18 +1223,16 @@ def _branding_phase2_narrative_with_messaging() -> Dict[str, Any]:
     }
 
 
-def _branding_phase2_narrative_with_personas() -> Dict[str, Any]:
-    """Return the Phase 2 narrative-with-messaging payload plus persona profiles.
+def _branding_phase2_personas_stub() -> Dict[str, Any]:
+    """Return PersonaProfilesOutput's own-field stub payload.
 
     Preconditions:
         None.
     Postconditions:
-        Returns a fresh dict extending
-        ``_branding_phase2_narrative_with_messaging()`` with
-        ``persona_profiles``.
+        Returns a fresh dict with ``persona_profiles`` — PersonaBuilder's own
+        field.
     """
     return {
-        **_branding_phase2_narrative_with_messaging(),
         "persona_profiles": [
             {
                 "name": "Alex Rivera",
@@ -1267,18 +1258,16 @@ def _branding_phase2_narrative_with_personas() -> Dict[str, Any]:
     }
 
 
-def _branding_phase2_narrative_with_writing_guidelines() -> Dict[str, Any]:
-    """Return the Phase 2 narrative-with-personas payload plus writing guidelines.
+def _branding_phase2_writing_guidelines_stub() -> Dict[str, Any]:
+    """Return WritingGuidelinesOutput's own-field stub payload.
 
     Preconditions:
         None.
     Postconditions:
-        Returns a fresh dict extending
-        ``_branding_phase2_narrative_with_personas()`` with a nested
-        ``writing_guidelines`` object.
+        Returns a fresh dict with a nested ``writing_guidelines`` object —
+        VoicePrinciplesDrafter's own field.
     """
     return {
-        **_branding_phase2_narrative_with_personas(),
         "writing_guidelines": {
             "voice_principles": [
                 "Use a confident, human voice (dummy).",
@@ -1364,17 +1353,17 @@ def _branding_phase2_structured_output_stub(model_name: str) -> Optional[Dict[st
         continue non–Phase-2 routing paths.
     """
     if model_name == "BrandStoryOutput":
-        return _branding_phase2_narrative_base()
+        return _branding_phase2_story_stub()
     if model_name == "BrandArchetypesOutput":
-        return _branding_phase2_narrative_with_archetype()
+        return _branding_phase2_archetypes_stub()
     if model_name == "TaglineOutput":
-        return _branding_phase2_narrative_with_tagline()
+        return _branding_phase2_tagline_stub()
     if model_name == "MessagingFrameworkOutput":
-        return _branding_phase2_narrative_with_messaging()
+        return _branding_phase2_messaging_stub()
     if model_name == "PersonaProfilesOutput":
-        return _branding_phase2_narrative_with_personas()
+        return _branding_phase2_personas_stub()
     if model_name == "WritingGuidelinesOutput":
-        return _branding_phase2_narrative_with_writing_guidelines()
+        return _branding_phase2_writing_guidelines_stub()
     return None
 
 
