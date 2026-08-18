@@ -629,6 +629,19 @@ class TestTaskClarifier:
         assert not out.approved_for_execution
         assert any("approval" in r.lower() for r in out.clarification_requests)
 
+    def test_blocks_prod_when_approval_only_appears_as_embedded_substring(self) -> None:
+        """Scope items like "disapproval"/"preapproval" must not satisfy the approval
+        gate via substring match -- "approval" has to appear as its own word."""
+        spec = _base_task_spec(
+            scope={
+                "included": ["build image", "disapproval workflow", "preapproval script"],
+                "excluded": [],
+            }
+        )
+        out = self._agent().run(DevOpsTaskClarifierInput(task_spec=spec))
+        assert not out.approved_for_execution
+        assert any("approval" in r.lower() for r in out.clarification_requests)
+
     def test_blocks_missing_goal(self) -> None:
         """A spec with an empty goal summary is rejected with an outcome request."""
         spec = _base_task_spec(goal={"summary": ""})
