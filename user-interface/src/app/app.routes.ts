@@ -137,6 +137,7 @@ export const routes: Routes = [
           import('./components/agent-team-studio/agent-studio-shell/agent-studio-shell.component').then(
             (m) => m.AgentStudioShellComponent,
           ),
+        canDeactivate: [unsavedChangesGuard],
         title: 'Agent Studio',
         data: { breadcrumb: 'Agent Studio' },
       },

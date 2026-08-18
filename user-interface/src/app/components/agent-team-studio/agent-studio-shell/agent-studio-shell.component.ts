@@ -6,6 +6,7 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { Observable } from 'rxjs';
 import type { AgentStudioDraft } from '../../../models/agent-studio.model';
 import { STUDIO_STAGES } from '../../../models/agent-studio.model';
+import { HasUnsavedChanges } from '../../../core/unsaved-changes.guard';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService, handoffEquals } from '../../../services/agent-studio-state.service';
 import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
@@ -71,7 +72,7 @@ function asNullableString(value: unknown): string | null {
   templateUrl: './agent-studio-shell.component.html',
   styleUrl: './agent-studio-shell.component.scss',
 })
-export class AgentStudioShellComponent {
+export class AgentStudioShellComponent implements HasUnsavedChanges {
   readonly state = inject(AgentStudioStateService);
   private readonly dialog = inject(MatDialog);
   private readonly facade = inject(AgentStudioFacade);
@@ -158,6 +159,20 @@ export class AgentStudioShellComponent {
    */
   onContinue(): void {
     this.state.advance();
+  }
+
+  /**
+   * Drives `unsavedChangesGuard` (route `canDeactivate`) so navigating away
+   * from `/agent-studio` with unsaved handoff edits prompts Discard/Keep
+   * editing, the same protection `/integrations`, `/user-profile`, and
+   * `/llm-config` already have.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `state.isDirty()` — the same predicate that
+   *   already gates the in-page load-conflict prompt.
+   */
+  hasUnsavedChanges(): boolean {
+    return this.state.isDirty();
   }
 
   /**

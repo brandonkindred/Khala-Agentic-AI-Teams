@@ -17,6 +17,7 @@ import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.com
 import { AgentStudioPersonaComponent } from './agent-studio-persona.component';
 import { AgentStudioShellComponent } from './agent-studio-shell.component';
 import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
+import { DraftConflictDialogComponent } from './draft-conflict-dialog/draft-conflict-dialog.component';
 import { LoadDraftMenuComponent } from './load-draft-menu/load-draft-menu.component';
 import { SaveDraftDialogComponent } from './save-draft-dialog/save-draft-dialog.component';
 
@@ -329,11 +330,14 @@ describe('AgentStudioShellComponent', () => {
       expect(component.state.currentDraftId()).toBe('d-1');
     });
 
-    it('the Load-draft menu draftDeleted output calls onDraftDeleted', () => {
+    it('the Load-draft menu draftDeleted output unbinds the draft but keeps the current journey', () => {
+      component.state.setRegistryAgentId('local-1');
       component.state.setCurrentDraft('d-1', 'My draft');
       const menu = fixture.debugElement.query(By.directive(LoadDraftMenuComponent));
       menu.triggerEventHandler('draftDeleted', 'd-1');
       expect(component.state.currentDraftId()).toBeNull();
+      expect(component.state.currentDraftName()).toBeNull();
+      expect(component.state.registryAgentId()).toBe('local-1');
     });
 
     it('markClean after hydrate so a just-loaded draft is not dirty', () => {
@@ -395,6 +399,10 @@ describe('AgentStudioShellComponent', () => {
       component.state.setRegistryAgentId('local-1');
       openSpy.mockReturnValue({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
       component.loadDraft('d-1');
+      // The spy is on MatDialog.prototype, so any dialog opened during this
+      // test would get the same mocked return value — confirm it's actually
+      // the conflict dialog, not some other dialog opened by mistake.
+      expect(openSpy.mock.calls[0][0]).toBe(DraftConflictDialogComponent);
       const config = openSpy.mock.calls[0][1] as { disableClose?: boolean };
       expect(config.disableClose).not.toBe(true);
       expect(facade.loadDraft).not.toHaveBeenCalled();
@@ -796,6 +804,8 @@ describe('AgentStudioShellComponent', () => {
       component.state.setCurrentDraft('d-1', 'My draft');
       component.onDraftDeleted('other');
       expect(component.state.currentDraftId()).toBe('d-1');
+      expect(component.state.currentDraftName()).toBe('My draft');
+      expect(component.state.registryAgentId()).toBe('reg-1');
       expect(component.state.isDirty()).toBe(false);
     });
   });
@@ -949,5 +959,15 @@ describe('AgentStudioShellComponent', () => {
     fixture.detectChanges();
     expect(component.activeStageDef().key).toBe('test');
     expect(component.buildForwardDisabledReason()).toBeNull();
+  });
+
+  describe('hasUnsavedChanges', () => {
+    it('mirrors state.isDirty() so the route canDeactivate guard can prompt before leaving', () => {
+      expect(component.hasUnsavedChanges()).toBe(false);
+      component.state.setRegistryAgentId('reg-1');
+      expect(component.hasUnsavedChanges()).toBe(true);
+      component.state.markClean();
+      expect(component.hasUnsavedChanges()).toBe(false);
+    });
   });
 });
