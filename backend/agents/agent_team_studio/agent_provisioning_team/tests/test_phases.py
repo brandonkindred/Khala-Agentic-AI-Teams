@@ -1974,9 +1974,14 @@ def test_documentation_uses_llm_summary_when_configured(tmp_path: Path) -> None:
     class _StubClient:
         def complete(self, prompt, **kwargs):
             captured["called"] = True
+            captured["kwargs"] = kwargs
             return "FAKE_LLM_SUMMARY"
 
-    with patch.object(doc_mod, "get_client", lambda agent_key=None: _StubClient()):
+    def make_client(agent_key=None):
+        captured["agent_key"] = agent_key
+        return _StubClient()
+
+    with patch.object(doc_mod, "get_client", make_client):
         result = doc_mod.run_documentation(
             agent_id="a1",
             manifest=ToolManifest(),
@@ -1987,6 +1992,8 @@ def test_documentation_uses_llm_summary_when_configured(tmp_path: Path) -> None:
     assert result.success is True
     assert "FAKE_LLM_SUMMARY" in result.onboarding.summary
     assert captured["called"] is True
+    assert captured["agent_key"] == "agent_provisioning_team.documentation"
+    assert captured["kwargs"].get("max_tokens") == 300
 
 
 def test_documentation_llm_summary_falls_back_on_exception(tmp_path: Path) -> None:
@@ -2052,11 +2059,22 @@ def test_documentation_uses_llm_getting_started_when_configured(tmp_path: Path) 
         ]
     )
 
+    # run_documentation also calls _generate_summary against the same stubbed
+    # client, so calls/agent_keys are collected per-call rather than
+    # overwritten — the getting-started call is picked out by its objective.
+    calls = []
+    agent_keys = []
+
     class _StubClient:
         def complete(self, prompt, **kwargs):
+            calls.append(kwargs)
             return "FAKE_TOOL_DOC"
 
-    with patch.object(doc_mod, "get_client", lambda agent_key=None: _StubClient()):
+    def make_client(agent_key=None):
+        agent_keys.append(agent_key)
+        return _StubClient()
+
+    with patch.object(doc_mod, "get_client", make_client):
         result = doc_mod.run_documentation(
             agent_id="a1",
             manifest=manifest,
@@ -2076,6 +2094,11 @@ def test_documentation_uses_llm_getting_started_when_configured(tmp_path: Path) 
 
     # LLM-generated docs appear in the tool's getting_started field
     assert any("FAKE_TOOL_DOC" in t.getting_started for t in result.onboarding.tools)
+    assert all(key == "agent_provisioning_team.documentation" for key in agent_keys)
+    getting_started_call = next(
+        c for c in calls if c.get("objective") == "generate tool getting-started guide"
+    )
+    assert getting_started_call.get("max_tokens") == 400
 
 
 def test_documentation_llm_getting_started_falls_back_on_exception(tmp_path: Path) -> None:

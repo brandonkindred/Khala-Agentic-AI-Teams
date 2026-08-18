@@ -4,6 +4,7 @@ Documentation phase: Generate onboarding packet for the agent.
 This is phase 5 of the provisioning workflow.
 """
 
+import logging
 from typing import Callable, Dict, List, Optional
 
 from llm_service import DummyLLMClient, LLMNotConfiguredError, get_client
@@ -22,6 +23,8 @@ from ..prompts import (
 )
 from ..shared.prompt_sanitize import sanitize_prompt_var
 from ..shared.tool_manifest import ToolManifest
+
+logger = logging.getLogger(__name__)
 
 _SUMMARY_SYSTEM = (
     "You are the onboarding writer for the Khala Agent Provisioning Team. "
@@ -154,8 +157,8 @@ def _generate_summary(
             temperature=0.2,
             max_tokens=300,
         ).strip()
-    except Exception:  # noqa: BLE001 — fall through to deterministic template
-        pass
+    except Exception as exc:  # noqa: BLE001 — fall through to deterministic template
+        logger.warning("LLM summary failed, using template fallback: %s", exc)
 
     return (
         f"Your agent environment is ready with {tool_count} tool(s) configured. "
@@ -206,8 +209,8 @@ def _generate_getting_started(
             temperature=0.2,
             max_tokens=400,
         ).strip()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001 — fall through to deterministic template
+        logger.warning("LLM getting-started guide failed, using template fallback: %s", exc)
 
     lines = [f"To use {tool_name}:"]
 
