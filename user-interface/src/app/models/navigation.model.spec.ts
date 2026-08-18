@@ -55,3 +55,15 @@ describe('NAV_GROUPS Agent Console retirement', () => {
     });
   });
 });
+
+describe('NAV_GROUPS Agentic Teams / Testing Personas retirement', () => {
+  it('no longer lists Agentic Teams as a peer product', () => {
+    expect(ALL_NAV_ITEMS.some((i) => i.id === 'agentic-teams')).toBe(false);
+    expect(ALL_NAV_ITEMS.some((i) => i.route === '/agentic-teams')).toBe(false);
+  });
+
+  it('no longer lists Testing Personas as a peer product', () => {
+    expect(ALL_NAV_ITEMS.some((i) => i.id === 'persona-testing')).toBe(false);
+    expect(ALL_NAV_ITEMS.some((i) => i.route === '/persona-testing')).toBe(false);
+  });
+});

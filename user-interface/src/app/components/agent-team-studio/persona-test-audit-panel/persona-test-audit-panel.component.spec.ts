@@ -131,12 +131,12 @@ describe('PersonaTestAuditPanelComponent', () => {
     expect(component.getTaskStatus('t1')).toBe('');
   });
 
-  it('defaults the back link to /persona-testing', () => {
+  it('defaults the back link to /agent-studio', () => {
     buildFixture();
     fixture.detectChanges();
     const link = fixture.nativeElement.querySelector('a.back-link') as HTMLAnchorElement;
-    expect(link.getAttribute('href')).toBe('/persona-testing');
-    expect(link.textContent).toContain('Back to Testing Personas');
+    expect(link.getAttribute('href')).toBe('/agent-studio');
+    expect(link.textContent).toContain('Back to Agent Studio');
   });
 
   it('renders a custom backLink and backLabel when provided', () => {
