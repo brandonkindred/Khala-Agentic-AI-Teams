@@ -26,6 +26,7 @@ def _reset_phase_output_cache():
     process. Without a reset, one test's cached phase output could be served
     to another test constructing an unrelated ``PhaseOutputCache()``.
     """
+    clear_phase_output_cache()
     yield
     clear_phase_output_cache()
 
