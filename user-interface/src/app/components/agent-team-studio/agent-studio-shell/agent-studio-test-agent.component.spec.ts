@@ -20,7 +20,7 @@ class StubAgentRunnerComponent {
 }
 
 /** Stand-in for the catalog: same selector + the one output the Browse-agents
- *  slide-out wires, so no catalog HTTP fetch runs in these unit tests. */
+ *  overlay wires, so no catalog HTTP fetch runs in these unit tests. */
 @Component({ selector: 'app-agent-catalog', standalone: true, template: '' })
 class StubAgentCatalogComponent {
   @Output() readonly requestRun = new EventEmitter<string>();
@@ -90,41 +90,41 @@ describe('AgentStudioTestAgentComponent', () => {
     expect(state.activeStage()).toBe(0);
   });
 
-  describe('Browse agents slide-out', () => {
+  describe('Browse agents overlay', () => {
     beforeEach(() => {
       state.setRegistryAgentId('blogging.planner');
       fixture.detectChanges();
     });
 
-    it('keeps the slide-out closed until requested', () => {
+    it('keeps the overlay closed until requested', () => {
       expect(component.browseOpen()).toBe(false);
       expect(fixture.nativeElement.querySelector('app-agent-catalog')).toBeNull();
     });
 
-    it('opens and closes the slide-out via its buttons', () => {
+    it('opens and closes the overlay via its buttons', () => {
       fixture.nativeElement.querySelector('.studio-test__browse-btn').click();
       fixture.detectChanges();
       expect(component.browseOpen()).toBe(true);
       expect(fixture.nativeElement.querySelector('app-agent-catalog')).toBeTruthy();
 
-      fixture.nativeElement.querySelector('.studio-test__browse-head button').click();
+      fixture.nativeElement.querySelector('.studio-slide-out__head button').click();
       fixture.detectChanges();
       expect(component.browseOpen()).toBe(false);
       expect(fixture.nativeElement.querySelector('app-agent-catalog')).toBeNull();
     });
 
-    it('closes the slide-out when the scrim is clicked', () => {
+    it('closes the overlay when the scrim is clicked', () => {
       component.openBrowse();
       fixture.detectChanges();
-      fixture.nativeElement.querySelector('.studio-test__scrim').click();
+      fixture.nativeElement.querySelector('.studio-slide-out__scrim').click();
       fixture.detectChanges();
       expect(component.browseOpen()).toBe(false);
     });
 
-    it('closes the slide-out on Escape', () => {
+    it('closes the overlay on Escape', () => {
       component.openBrowse();
       fixture.detectChanges();
-      const panel = fixture.nativeElement.querySelector('.studio-test__browse-panel');
+      const panel = fixture.nativeElement.querySelector('.studio-slide-out__panel');
       panel.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       fixture.detectChanges();
       expect(component.browseOpen()).toBe(false);
@@ -133,13 +133,13 @@ describe('AgentStudioTestAgentComponent', () => {
     it('marks the panel as a focus-trapping modal', () => {
       component.openBrowse();
       fixture.detectChanges();
-      const panel = fixture.nativeElement.querySelector('.studio-test__browse-panel');
+      const panel = fixture.nativeElement.querySelector('.studio-slide-out__panel');
       expect(panel.getAttribute('aria-modal')).toBe('true');
       expect(panel.getAttribute('role')).toBe('dialog');
       expect(panel.hasAttribute('cdkTrapFocus')).toBe(true);
     });
 
-    it('selecting an agent re-points the handoff id and closes the slide-out', () => {
+    it('selecting an agent re-points the handoff id and closes the overlay', () => {
       component.openBrowse();
       fixture.detectChanges();
       const catalog = fixture.debugElement.query(By.directive(StubAgentCatalogComponent));
