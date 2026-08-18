@@ -663,6 +663,12 @@ class BrandingTeamOrchestrator:
               invoked; a miss runs the phase via ``run_single_phase`` and, if
               the result is not degraded, stores it in ``phase_cache`` for a
               future call.
+            - ``phase_cache`` is thread-path-only by construction, not by
+              convention: the Temporal activity (``temporal/activities.py``)
+              calls ``run_single_phase`` directly and never this method, and
+              ``run_single_phase`` itself takes no ``phase_cache`` parameter
+              -- so a warm cache elsewhere in the process cannot alter the
+              Temporal workflow branch, which keeps invoking every phase.
         """
         # ---- Resolve brand from store if applicable ----
         mission, resolved_client_id = self._resolve_mission(mission, store, client_id, brand_id)
