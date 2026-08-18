@@ -216,6 +216,10 @@ def record_llm_call(
     bucket derived from ``status``. Returns the created record for
     testing/inspection.
 
+    ``cache_read_tokens`` and ``cache_creation_tokens`` default to ``0`` and are
+    populated by providers that expose prompt-cache accounting (currently
+    Anthropic, via ``ClaudeLLMClient``); other callers may omit them.
+
     Negative ``prompt_tokens``/``completion_tokens`` are clamped to ``0`` for the
     cost estimate (telemetry recording must never raise into the LLM call path,
     and ``estimate_cost_usd`` rejects negatives); the raw counts are still stored
