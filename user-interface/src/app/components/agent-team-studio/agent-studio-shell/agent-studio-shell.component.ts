@@ -1,20 +1,17 @@
 import { ChangeDetectionStrategy, Component, Injector, computed, inject, signal } from '@angular/core';
+import { toSignal } from '@angular/core/rxjs-interop';
 import { MatButtonModule } from '@angular/material/button';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { Observable } from 'rxjs';
+import { ActivatedRoute, NavigationEnd, Router, RouterOutlet } from '@angular/router';
+import { Observable, filter, map } from 'rxjs';
 import type { AgentStudioDraft } from '../../../models/agent-studio.model';
 import { STUDIO_STAGES } from '../../../models/agent-studio.model';
 import { HasUnsavedChanges } from '../../../core/unsaved-changes.guard';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService, handoffEquals } from '../../../services/agent-studio-state.service';
 import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
-import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
-import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.component';
-import { AgentStudioPersonaComponent } from './agent-studio-persona.component';
-import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-placeholder.component';
-import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
 import {
   DraftConflictDialogComponent,
   type DraftConflictResult,
@@ -45,28 +42,18 @@ function asNullableString(value: unknown): string | null {
 
 /**
  * Agent Studio shell — the single `/agent-studio` surface (spec §2.1). Renders
- * the forward-only 4-stage stepper and the active stage. All four stages are
- * implemented: Build Agent, Test Agent, Compose Team, and Test Team w/
- * Personas. Owns one `AgentStudioStateService` per session (provided here,
- * not at root, so each visit starts clean). `AgentStudioFacade` is provided
- * alongside it so the facade's injector can resolve this session's state
- * service (it is not a root singleton either).
+ * the forward-only 4-stage stepper and header; the active stage itself is
+ * rendered by the routed `AgentStudioStageHostComponent` child (default child
+ * route) via `RouterOutlet` — the persona-run audit is a sibling child route.
+ * Owns one `AgentStudioStateService` per session (provided here, not at root,
+ * so each visit starts clean). `AgentStudioFacade` is provided alongside it
+ * so the facade's injector can resolve this session's state service (it is
+ * not a root singleton either).
  */
 @Component({
   selector: 'app-agent-studio-shell',
   standalone: true,
-  imports: [
-    MatButtonModule,
-    MatDialogModule,
-    MatIconModule,
-    MatTooltipModule,
-    AgentStudioBuildAgentComponent,
-    AgentStudioComposeTeamComponent,
-    AgentStudioPersonaComponent,
-    AgentStudioStagePlaceholderComponent,
-    AgentStudioTestAgentComponent,
-    LoadDraftMenuComponent,
-  ],
+  imports: [MatButtonModule, MatDialogModule, MatIconModule, MatTooltipModule, LoadDraftMenuComponent, RouterOutlet],
   changeDetection: ChangeDetectionStrategy.OnPush,
   providers: [AgentStudioStateService, AgentStudioFacade],
   templateUrl: './agent-studio-shell.component.html',
@@ -78,6 +65,46 @@ export class AgentStudioShellComponent implements HasUnsavedChanges {
   private readonly facade = inject(AgentStudioFacade);
   private readonly injector = inject(Injector);
   private readonly agenticTeamApi = inject(AgenticTeamApiService);
+  private readonly router = inject(Router);
+  private readonly route = inject(ActivatedRoute);
+
+  /**
+   * True when the active child route sets `data.hideStudioFooter`.
+   *
+   * Preconditions: this component is the routed `/agent-studio` parent.
+   * Postconditions: `true` iff the deepest activated child snapshot has
+   *   `hideStudioFooter === true`; `false` when there is no child (unit tests
+   *   that construct the shell without navigating).
+   */
+  readonly hideFooter = toSignal(
+    this.router.events.pipe(
+      filter((e): e is NavigationEnd => e instanceof NavigationEnd),
+      map(() => this.childHidesFooter()),
+    ),
+    // Router.events does not replay the NavigationEnd that created this
+    // component, so seed from the already-activated child snapshot. A hardcoded
+    // `false` would flash the footer on a direct load of the audit child.
+    { initialValue: this.childHidesFooter() },
+  );
+
+  /**
+   * Read `data.hideStudioFooter` from the deepest activated child.
+   *
+   * Preconditions: none — safe when there is no child (shell constructed
+   *   without navigating).
+   * Postconditions: `true` iff that child's snapshot has
+   *   `hideStudioFooter === true`. Walks `firstChild` because the audit
+   *   route is nested under this shell; `snapshot` may be missing while
+   *   the outlet is still activating.
+   */
+  private childHidesFooter(): boolean {
+    let child = this.route.firstChild;
+    while (child?.firstChild) {
+      child = child.firstChild;
+    }
+    // `firstChild` can exist before `snapshot` is attached during outlet activation.
+    return child?.snapshot?.data['hideStudioFooter'] === true;
+  }
 
   /** True while a Load-draft selection is being fetched and hydrated. */
   readonly loadingDraft = signal(false);
@@ -376,12 +403,14 @@ export class AgentStudioShellComponent implements HasUnsavedChanges {
    *   and the stepper moves to the furthest reachable stage.
    *   `loadingDraft()` stays `true` for the entire chain, including the
    *   nested process-status check. On failure, `loadingDraft()` returns to
-   *   `false` and `state` is unchanged. A call superseded by a later
-   *   `loadDraft` (its token no longer matches `loadDraftToken`) discards
-   *   its response instead of applying it. If the handoff IDs change while
-   *   the GET is in flight, or a clean session becomes dirty (e.g. bound-draft
-   *   delete invalidated the snapshot), hydration is aborted so that work
-   *   is not overwritten.
+   *   `false` and `state` is unchanged (surfaced via the global HTTP error
+   *   toast, not a bespoke inline banner — the triggering menu has already
+   *   closed by the time this runs). A call superseded by a later `loadDraft`
+   *   (its token no longer matches `loadDraftToken`) discards its response
+   *   instead of applying it. If the handoff IDs change while the GET is in
+   *   flight, or a clean session becomes dirty (e.g. bound-draft delete
+   *   invalidated the snapshot), hydration is aborted so that work is not
+   *   overwritten.
    */
   private fetchAndHydrate(draftId: string): void {
     this.loadingDraft.set(true);
@@ -410,7 +439,9 @@ export class AgentStudioShellComponent implements HasUnsavedChanges {
    * Preconditions: caller has already run the token and dirty-state guards
    *   (see `fetchAndHydrate`).
    * Postconditions: `currentDraftId`/`currentDraftName` are bound to
-   *   `draft`; the five handoff ids are set from `draft.payload`; the
+   *   `draft`; the five handoff ids are set from `draft.payload`; the current
+   *   persona live-run id is cleared (`state.setPersonaLiveRunId(null)`)
+   *   because a persisted draft never contains an in-progress live run; the
    *   session is marked clean; the stepper advances to the furthest
    *   reachable stage via `resolveFurthestStage`.
    */
@@ -422,6 +453,7 @@ export class AgentStudioShellComponent implements HasUnsavedChanges {
     this.state.setProcessId(asNullableString(payload['processId']));
     this.state.setPersonaId(asNullableString(payload['personaId']));
     this.state.setDraftAgentId(asNullableString(payload['draftAgentId']));
+    this.state.setPersonaLiveRunId(null);
     this.state.markClean();
     this.resolveFurthestStage(token);
   }
@@ -443,7 +475,9 @@ export class AgentStudioShellComponent implements HasUnsavedChanges {
    * not an oversight.
    *
    * `token` guards the async `getProcess` branch against a superseded call's
-   * late response — see `loadDraft`'s contract.
+   * late response — see `loadDraft`'s contract. Each branch finishes via
+   * `finishSuccessfulDraftLoad`, which also returns the router to this
+   * shell's default child if the persona-run audit was showing.
    */
   private resolveFurthestStage(token: number): void {
     const teamId = this.state.teamId();
@@ -454,7 +488,7 @@ export class AgentStudioShellComponent implements HasUnsavedChanges {
           if (token !== this.loadDraftToken) return;
           this.state.setComposeProcessStatus(process.status);
           this.state.navigateToStage(process.status === 'complete' ? STAGE_PERSONAS : STAGE_COMPOSE);
-          this.loadingDraft.set(false);
+          this.finishSuccessfulDraftLoad();
         },
         error: () => {
           if (token !== this.loadDraftToken) return;
@@ -465,7 +499,7 @@ export class AgentStudioShellComponent implements HasUnsavedChanges {
           // risk it wrongly satisfying the Stage-3→4 gate.
           this.state.setComposeProcessStatus(null);
           this.state.navigateToStage(STAGE_COMPOSE);
-          this.loadingDraft.set(false);
+          this.finishSuccessfulDraftLoad();
         },
       });
       return;
@@ -478,6 +512,34 @@ export class AgentStudioShellComponent implements HasUnsavedChanges {
       this.state.resetBuildSubStage();
       this.state.navigateToStage(STAGE_BUILD);
     }
+    this.finishSuccessfulDraftLoad();
+  }
+
+  /**
+   * Close out a draft load that already wrote `state` and the stepper.
+   *
+   * Preconditions: the caller's `loadDraftToken` still matches (superseded
+   *   loads must not reach here).
+   * Postconditions: if a non-default child is active, the router is asked to
+   *   show this shell's default child; `loadingDraft()` is `false`.
+   */
+  private finishSuccessfulDraftLoad(): void {
+    this.showStageHostAfterDraftLoad();
     this.loadingDraft.set(false);
+  }
+
+  /**
+   * Leave a nested Studio child so the stage host can show the restored stage.
+   *
+   * Preconditions: none — safe when there is no child (unit tests that
+   *   construct the shell without navigating).
+   * Postconditions: if the active child path is non-empty (today:
+   *   `persona-run/:runId`), navigates to this shell's default child. The
+   *   empty default child and a missing child are left unchanged.
+   */
+  private showStageHostAfterDraftLoad(): void {
+    const childPath = this.route.firstChild?.snapshot?.routeConfig?.path;
+    if (!childPath) return;
+    void this.router.navigate(['.'], { relativeTo: this.route });
   }
 }

@@ -59,6 +59,10 @@ export function handoffEquals(a: AgentStudioHandoffState, b: AgentStudioHandoffS
  *   - `activeBuildSubStage()` ∈ [0, BUILD_SUB_STAGE_COUNT − 1].
  *   - `maxReachedBuildSubStage()` ∈ [`activeBuildSubStage()`,
  *     BUILD_SUB_STAGE_COUNT − 1] and never decreases except via `reset()`.
+ *   - `personaLiveRunId()` is session-ephemeral (not part of `handoff()` /
+ *     drafts) and is cleared by `reset()`, a team change, and draft hydrate.
+ *     `personaLiveRunStartedAtMs()` is cleared with it, as is
+ *     `personaLiveRunEndedAtMs()`.
  */
 @Injectable()
 export class AgentStudioStateService {
@@ -73,6 +77,24 @@ export class AgentStudioStateService {
   readonly rosterFullyStaffed = signal(false);
   /** Stage-3 gate: status of the process selected as the Stage-4 handoff target. */
   readonly composeProcessStatus = signal<ProcessStatus | null>(null);
+  /**
+   * Stage-4 persona-test run currently owned by this session. Held here — not
+   * on `AgentStudioPersonaComponent` — so the live-run panel (and Stop) can
+   * resume after that component is destroyed by the nested audit child or a
+   * Stage 3/2 back-loop.
+   */
+  readonly personaLiveRunId = signal<string | null>(null);
+  /**
+   * Epoch-ms when this session started watching `personaLiveRunId`. Used to
+   * restore elapsed time after Stage 4 is destroyed (audit child / back-loop).
+   */
+  readonly personaLiveRunStartedAtMs = signal<number | null>(null);
+  /**
+   * Epoch-ms when the watched run reached a terminal status this session, or
+   * the run payload's `updated_at` when that is parseable. Caps elapsed time
+   * after Stage 4 remounts.
+   */
+  readonly personaLiveRunEndedAtMs = signal<number | null>(null);
 
   // ── Server draft binding (spec §3.5) ───────────────────────────────────────
   /**
@@ -282,7 +304,20 @@ export class AgentStudioStateService {
   setRegistryAgentId(id: string | null): void {
     this.registryAgentId.set(id);
   }
+
+  /**
+   * Bind this session to a composed team.
+   *
+   * Preconditions: none.
+   * Postconditions: `teamId() === id`. If `id` differs from the previous
+   *   value, persona live-run signals are cleared (`personaLiveRunId()`,
+   *   `personaLiveRunStartedAtMs()`, `personaLiveRunEndedAtMs()` are `null`)
+   *   so Stage 4 cannot resume a run that belonged to another team.
+   */
   setTeamId(id: string | null): void {
+    if (id !== this.teamId()) {
+      this.setPersonaLiveRunId(null);
+    }
     this.teamId.set(id);
   }
   setProcessId(id: string | null): void {
@@ -299,6 +334,41 @@ export class AgentStudioStateService {
   }
   setComposeProcessStatus(status: ProcessStatus | null): void {
     this.composeProcessStatus.set(status);
+  }
+
+  /**
+   * Persist or clear the Stage-4 persona run this session is watching.
+   *
+   * Preconditions: none.
+   * Postconditions: `personaLiveRunId() === id`. When `id` is `null`,
+   *   `personaLiveRunStartedAtMs()` and `personaLiveRunEndedAtMs()` are also `null`.
+   */
+  setPersonaLiveRunId(id: string | null): void {
+    this.personaLiveRunId.set(id);
+    if (id === null) {
+      this.personaLiveRunStartedAtMs.set(null);
+      this.personaLiveRunEndedAtMs.set(null);
+    }
+  }
+
+  /**
+   * Record when this session started watching the current persona live-run.
+   *
+   * Preconditions: none.
+   * Postconditions: `personaLiveRunStartedAtMs() === ms`.
+   */
+  setPersonaLiveRunStartedAtMs(ms: number | null): void {
+    this.personaLiveRunStartedAtMs.set(ms);
+  }
+
+  /**
+   * Record when the watched persona run reached a terminal status.
+   *
+   * Preconditions: none.
+   * Postconditions: `personaLiveRunEndedAtMs() === ms`.
+   */
+  setPersonaLiveRunEndedAtMs(ms: number | null): void {
+    this.personaLiveRunEndedAtMs.set(ms);
   }
 
   /**
@@ -374,7 +444,9 @@ export class AgentStudioStateService {
   /**
    * Reset the session — clear handoff state and return to Stage 1.
    * Postconditions: every id is null; `activeStage() === 0`; `maxReachedStage() === 0`;
-   *   `activeBuildSubStage() === 0`; `maxReachedBuildSubStage() === 0`; `isDirty()` is `false`.
+   *   `activeBuildSubStage() === 0`; `maxReachedBuildSubStage() === 0`; `isDirty()` is `false`;
+   *   `personaLiveRunId() === null`; `personaLiveRunStartedAtMs() === null`;
+   *   `personaLiveRunEndedAtMs() === null`.
    */
   reset(): void {
     this.registryAgentId.set(null);
@@ -384,6 +456,9 @@ export class AgentStudioStateService {
     this.draftAgentId.set(null);
     this.rosterFullyStaffed.set(false);
     this.composeProcessStatus.set(null);
+    this.personaLiveRunId.set(null);
+    this.personaLiveRunStartedAtMs.set(null);
+    this.personaLiveRunEndedAtMs.set(null);
     this.currentDraftId.set(null);
     this.currentDraftName.set(null);
     this.lastSavedHandoff.set(null);
