@@ -151,6 +151,10 @@ class _PerFileScriptedClient(DummyLLMClient):
     (``{"summary": marker}``); ``chat()`` JSON-serializes that into the raw
     prose, which the formatting prompt then wraps verbatim, so the same
     marker is directly re-matchable there with no shared mutable state.
+
+    ``call_count`` counts REASONING-pass calls only (the opposite of
+    ``_ScriptedClient.call_count`` above, which counts formatting-pass
+    calls) -- callers comparing the two must not assume a shared meaning.
     """
 
     def __init__(self, responses_by_marker: dict[str, dict[str, Any]]) -> None:
@@ -218,6 +222,10 @@ class _FailBadKeepGood(DummyLLMClient):
     marker back; ``chat()`` JSON-serializes it into the raw prose, which the
     formatting prompt wraps verbatim, so the marker is directly
     re-matchable in the formatting-pass prompt with no shared mutable state.
+
+    ``call_count`` counts REASONING-pass calls only (the opposite of
+    ``_ScriptedClient.call_count`` above, which counts formatting-pass
+    calls) -- callers comparing the two must not assume a shared meaning.
     """
 
     _GOOD_FILE_MARKER = "GOOD_FILE_REVIEWED_MARKER"

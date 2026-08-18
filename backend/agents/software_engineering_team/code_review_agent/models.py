@@ -492,10 +492,11 @@ class ChunkReviewIssueLLM(BaseModel):
     ``severity``/``category`` are typed as the exact enumerated sets the
     review prompt asks for (mirrors ``chunking._VALID_SEVERITIES``/
     ``_VALID_CATEGORIES``) instead of a free string with silent fallback
-    coercion: an out-of-set value now fails schema validation and drives
-    ``complete_validated``'s one correction retry, rather than being
-    silently rewritten to "high"/"general" as today's hand-rolled parsing
-    does in ``chunking._issues_from_chunk_output``.
+    coercion: an out-of-set value now fails schema validation and raises
+    ``LLMSchemaValidationError``, which the coordinator's chunk-level
+    recovery in ``mapping.py`` handles, rather than being silently
+    rewritten to "high"/"general" as today's hand-rolled parsing does in
+    ``chunking._issues_from_chunk_output``.
 
     ``pre_existing`` is ``StrictBool``, not plain ``bool``: Pydantic's
     default lax coercion would accept a numeric ``1``/``0`` (or "yes"/"no",
@@ -505,8 +506,8 @@ class ChunkReviewIssueLLM(BaseModel):
     truthy string counts there, and a bare number is always false, to stop
     a stray numeric value from being misread as an affirmative flag.
     ``StrictBool`` keeps that policy intact by rejecting non-bool input
-    outright (driving ``complete_validated``'s corrective retry) instead of
-    silently coercing it before it ever reaches that downstream check.
+    outright (raising ``LLMSchemaValidationError``) instead of silently
+    coercing it before it ever reaches that downstream check.
     """
 
     severity: CodeReviewIssueSeverity = Field(
@@ -588,9 +589,10 @@ class ChunkReviewLLMResponse(BaseModel):
     baseless rejection to an approval, or a contradictory approval to a
     rejection) rather than letting a malformed LLM reply be a schema
     failure. Enforcing the same rule here means that reply instead fails
-    validation and drives ``complete_validated``'s corrective retry — giving
-    the model a chance to correct itself — rather than always being
-    silently absorbed by the coordinator's safety net.
+    validation and raises ``LLMSchemaValidationError`` — the coordinator's
+    chunk-level recovery (``mapping.py``) is the retry layer for a
+    rejected reply, rather than the reply being silently absorbed by the
+    coordinator's safety net.
     """
 
     approved: bool = Field(

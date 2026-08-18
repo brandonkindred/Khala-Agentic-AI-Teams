@@ -432,6 +432,20 @@ def test_build_reasoning_agent_system_prompt_combines_persona_and_content() -> N
     assert result == [{"text": "Prose reviewer"}, breakpoint_]
 
 
+def test_build_reasoning_agent_system_prompt_normalizes_bare_string_segments() -> None:
+    """A bare ``str`` segment is normalized to a ``{"text": ...}`` block before
+    reaching Strands -- passing it through unchanged would crash Strands'
+    ``split_system_prompt`` whenever the string happens to contain the
+    substring "text" (``"text" in block`` then does ``block["text"]``, which
+    raises ``TypeError`` for a plain string)."""
+    from software_engineering_team.code_review_agent.via_reasoning import (
+        _build_reasoning_agent_system_prompt,
+    )
+
+    result = _build_reasoning_agent_system_prompt("Prose reviewer", ["raw text segment"])
+    assert result == [{"text": "Prose reviewer"}, {"text": "raw text segment"}]
+
+
 def test_run_agent_via_reasoning_forwards_system_prompt_content_to_reasoning_agent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

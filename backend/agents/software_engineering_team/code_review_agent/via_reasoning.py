@@ -427,7 +427,14 @@ def _build_reasoning_agent_system_prompt(
     ``llm_service.CacheBreakpoint.__contains__``/``__getitem__``), so placing
     one directly in this list — via the public ``Agent(system_prompt=...)``
     constructor, no private-attribute reach-around needed — is exactly how a
-    cache-breakpoint-marked segment reaches ``Model.stream()``.
+    cache-breakpoint-marked segment reaches ``Model.stream()``. A bare
+    ``str`` segment is unsafe there: Strands' ``"text" in block`` treats a
+    string ``block`` as a substring check rather than a key lookup, so a
+    string that happens to contain the substring ``"text"`` then hits
+    ``block["text"]`` — a ``TypeError``, since strings aren't subscriptable
+    by string keys. This function normalizes any bare string segment to a
+    ``{"text": ...}`` block before it ever reaches Strands, so callers never
+    have to reason about that footgun.
 
     Preconditions:
         ``reasoning_system_prompt`` is non-empty (already enforced by
@@ -441,15 +448,21 @@ def _build_reasoning_agent_system_prompt(
         unchanged (a plain ``str``) — every caller that never passes
         ``system_prompt_content`` gets byte-identical behavior to before this
         parameter existed. Otherwise returns
-        ``[{"text": reasoning_system_prompt}] + system_prompt_content`` — the
+        ``[{"text": reasoning_system_prompt}, *normalized_content]`` — the
         persona wrapped as a native text block, followed by the extra
-        segments in order, so a ``CacheBreakpoint`` among them survives
+        segments in order (each bare ``str`` segment normalized to
+        ``{"text": segment}``; ``CacheBreakpoint``/dict segments passed
+        through as-is), so a ``CacheBreakpoint`` among them survives
         Strands' internal processing with the persona kept as its own
         leading block (not concatenated into the cached segment's text).
     """
     if not system_prompt_content:
         return reasoning_system_prompt
-    return [{"text": reasoning_system_prompt}, *system_prompt_content]
+    normalized_content = [
+        {"text": segment} if isinstance(segment, str) else segment
+        for segment in system_prompt_content
+    ]
+    return [{"text": reasoning_system_prompt}, *normalized_content]
 
 
 def run_agent_via_reasoning(

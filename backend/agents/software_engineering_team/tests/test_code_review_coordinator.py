@@ -1256,6 +1256,43 @@ class _FailNTimes(DummyLLMClient):
         return super().complete_json(prompt, **kwargs)
 
 
+def _delegate_chat_via_complete_json(
+    delegate: Any, messages: list, *, tools: list | None = None, **kwargs: Any
+) -> Any:
+    """Shared ``chat()``-to-``complete_json`` bridge for a wrapped-``DummyLLMClient``
+    delegate (see ``_HalfTimingDummyDelegate``/``_MultiFileFirstCallFailsDelegate``,
+    which both define an explicit ``chat`` override for the same reason and
+    otherwise differ only in their ``complete_json`` per-half/per-path hooks).
+
+    Preconditions:
+        ``delegate`` exposes ``complete_json`` (its own override) and ``_inner``
+        (a real ``DummyLLMClient``, used for the tooled-call passthrough).
+
+    Postconditions:
+        A tooled call (chunk review never passes tools) degrades unchanged to
+        ``delegate._inner.chat(...)``. Otherwise extracts the system/user
+        prompt from ``messages`` and routes to ``delegate.complete_json(...)``,
+        JSON-serializing the result when ``response_format="text"`` was
+        requested (matching the real ``DummyLLMClient.chat()`` contract).
+    """
+    if tools:
+        return delegate._inner.chat(messages, tools=tools, **kwargs)
+    system_prompt = None
+    user_prompt = ""
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        if m.get("role") == "system":
+            system_prompt = m.get("content")
+        elif m.get("role") == "user":
+            user_prompt = m.get("content") or ""
+    response_format = kwargs.pop("response_format", "json")
+    data = delegate.complete_json(user_prompt, system_prompt=system_prompt, tools=None, **kwargs)
+    if response_format == "text":
+        return json.dumps(data) if isinstance(data, dict) else str(data)
+    return data
+
+
 class _HalfTimingDummyDelegate:
     """Inner delegate for a non-``DummyLLMClient`` stand-in (see
     ``_NonDummyLLMClient`` further below in this file): forces the combined
@@ -1289,24 +1326,11 @@ class _HalfTimingDummyDelegate:
         bypasses this delegate's per-half timing/failure hooks entirely.
         Chunk review never passes tools (``tools=[]``), so the real
         ``chat()``'s tool-call branches are never exercised here and are not
-        reproduced; a tooled call still degrades to the inner client.
+        reproduced; a tooled call still degrades to the inner client. See
+        ``_delegate_chat_via_complete_json`` for the shared parsing/routing
+        logic this shares with ``_MultiFileFirstCallFailsDelegate.chat``.
         """
-        if tools:
-            return self._inner.chat(messages, tools=tools, **kwargs)
-        system_prompt = None
-        user_prompt = ""
-        for m in messages:
-            if not isinstance(m, dict):
-                continue
-            if m.get("role") == "system":
-                system_prompt = m.get("content")
-            elif m.get("role") == "user":
-                user_prompt = m.get("content") or ""
-        response_format = kwargs.pop("response_format", "json")
-        data = self.complete_json(user_prompt, system_prompt=system_prompt, tools=None, **kwargs)
-        if response_format == "text":
-            return json.dumps(data) if isinstance(data, dict) else str(data)
-        return data
+        return _delegate_chat_via_complete_json(self, messages, tools=tools, **kwargs)
 
     def _half_review_response(self, key: str) -> dict[str, Any]:
         return {
@@ -1383,23 +1407,10 @@ class _MultiFileFirstCallFailsDelegate:
         override is required: ``__getattr__`` forwarding would otherwise hand
         back the inner ``DummyLLMClient``'s bound ``chat``, whose internal
         ``self.complete_json(...)`` call bypasses this delegate's per-path
-        bisect/concurrency hooks for the reasoning pass."""
-        if tools:
-            return self._inner.chat(messages, tools=tools, **kwargs)
-        system_prompt = None
-        user_prompt = ""
-        for m in messages:
-            if not isinstance(m, dict):
-                continue
-            if m.get("role") == "system":
-                system_prompt = m.get("content")
-            elif m.get("role") == "user":
-                user_prompt = m.get("content") or ""
-        response_format = kwargs.pop("response_format", "json")
-        data = self.complete_json(user_prompt, system_prompt=system_prompt, tools=None, **kwargs)
-        if response_format == "text":
-            return json.dumps(data) if isinstance(data, dict) else str(data)
-        return data
+        bisect/concurrency hooks for the reasoning pass. See
+        ``_delegate_chat_via_complete_json`` for the shared parsing/routing
+        logic this shares with ``_HalfTimingDummyDelegate.chat``."""
+        return _delegate_chat_via_complete_json(self, messages, tools=tools, **kwargs)
 
     def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         # The reasoning pass now lands here too (via the Strands Agent's

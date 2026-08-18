@@ -654,7 +654,9 @@ class _NoNotesClient(DummyLLMClient):
                     "summary": "beta summary",
                     "spec_compliance_notes": "",
                 }
-            return "Structured prose synthesis."
+            raise AssertionError(
+                f"unexpected format-pass prompt in _NoNotesClient: {prompt[:200]!r}"
+            )
         if CODE_TO_REVIEW_HEADER in prompt:
             if "### a.py ###" in prompt:
                 return "Structured prose chunk review for a.py."
@@ -708,7 +710,9 @@ class _SynthOkClient(DummyLLMClient):
                     "summary": "beta",
                     "spec_compliance_notes": "",
                 }
-            return "Structured prose synthesis."
+            raise AssertionError(
+                f"unexpected format-pass prompt in _SynthOkClient: {prompt[:200]!r}"
+            )
         if CODE_TO_REVIEW_HEADER in prompt:
             if "### a.py ###" in prompt:
                 return "Structured prose chunk review for a.py."
