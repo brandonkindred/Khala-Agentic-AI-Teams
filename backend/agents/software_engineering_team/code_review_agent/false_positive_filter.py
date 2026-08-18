@@ -1336,51 +1336,39 @@ _MAX_DUPLICATE_TOOL_CALLS = 2
 _MAX_TOTAL_TOOL_CALLS = 40
 
 
-def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
-    """Build strands tools bound to ``index`` for one verification agent.
+def _make_call_tracker() -> Callable[..., Tuple[bool, Optional[str]]]:
+    """Build a fresh, independent per-run duplicate-call/total-budget tracker.
+
+    Every tool in one verification run must share exactly one tracker for the
+    run-level budget to actually be a run-level cap: ``_build_tools`` creates
+    one internally by default, but a caller that adds further tools alongside
+    it (e.g. ``side_effect_impact_pass.build_side_effect_tools``'s
+    ``search_repository``, or ``merged_architecture_side_effect_pass``'s
+    ``list_changed_files``) must call this once, pass the result to
+    ``_build_tools(index, track_call=...)``, and wrap its own extra tool(s)
+    with the same callable -- otherwise those extra tools escape the budget
+    entirely and the run-level cap only bounds the seven tools built here.
 
     Postconditions:
-        - Returns seven tools (``read_file``, ``read_lines``, ``read_function``,
-          ``list_files``, ``search_codebase``, ``find_function_at_line``,
-          ``find_references``) that delegate to ``index`` and never raise, so
-          a bad model-supplied argument becomes a self-correcting tool
-          message rather than an error that aborts the agent loop. Every tool
-          but ``read_file`` returns a plain string. ``read_file`` returns a
-          Strands ``ToolResult``-shaped dict (``{"status": ...,
-          "content": [...]}``) instead: unlike the others, its result is
-          inspected after the run by ``_agent_read_the_cited_file`` to decide
-          whether a false-positive verdict is grounded, so it needs an
-          accurate ``status`` -- a plain string return is always wrapped by
-          Strands as ``status="success"`` regardless of content, which cannot
-          be told apart from a genuine read failure reported as an
-          "Error: ..." string (see ``_agent_read_the_cited_file`` for why
-          that distinction matters).
-        - Every call is tracked by exact ``(tool name, arguments)``. Once a
-          signature repeats more than ``_MAX_DUPLICATE_TOOL_CALLS`` times, its
-          (still-real) result gets a note appended telling the model it
-          already has this information. Once the run's total tool calls
-          exceed ``_MAX_TOTAL_TOOL_CALLS``, every further call short-circuits
-          -- skipping its real lookup -- and returns a stop directive telling
-          the model to finalize its verdict now.
+        Returns a ``_track_call(tool_name, *args)`` callable closed over its
+        own independent counters (never shared with any other tracker
+        returned by this function). Calling it records one tool invocation:
+        returns ``(True, directive)`` once total calls through this tracker
+        exceed ``_MAX_TOTAL_TOOL_CALLS`` -- callers must return ``directive``
+        as-is instead of doing any real work. Otherwise returns ``(False,
+        note)``: ``note`` is a string to append to the tool's normal result
+        once this ``(tool_name, args)`` signature has been called more than
+        ``_MAX_DUPLICATE_TOOL_CALLS`` times through this tracker, else
+        ``None``. The signature is keyed on ``repr(args)`` rather than
+        ``args`` itself so an unhashable model-supplied argument (e.g. a list
+        where a string was expected) still tracks correctly instead of
+        raising -- tools built against this tracker must never raise on bad
+        input.
     """
     call_counts: Dict[str, int] = {}
     total_calls = 0
 
     def _track_call(tool_name: str, *args: Any) -> Tuple[bool, Optional[str]]:
-        """Record one tool call.
-
-        Postconditions:
-            Returns ``(True, directive)`` once total calls this run exceed
-            ``_MAX_TOTAL_TOOL_CALLS`` -- callers must return ``directive``
-            as-is instead of doing any real work. Otherwise returns
-            ``(False, note)``: ``note`` is a string to append to the tool's
-            normal result once this ``(tool_name, args)`` signature has been
-            called more than ``_MAX_DUPLICATE_TOOL_CALLS`` times, else
-            ``None``. The signature is keyed on ``repr(args)`` rather than
-            ``args`` itself so an unhashable model-supplied argument (e.g. a
-            list where a string was expected) still tracks correctly instead
-            of raising -- tools built here must never raise on bad input.
-        """
         nonlocal total_calls
         total_calls += 1
         if total_calls > _MAX_TOTAL_TOOL_CALLS:
@@ -1399,6 +1387,51 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
                 "new information. Use what you already found and answer now.]"
             )
         return False, None
+
+    return _track_call
+
+
+def _build_tools(
+    index: CodebaseIndex,
+    *,
+    track_call: Callable[..., Tuple[bool, Optional[str]]] | None = None,
+) -> List[Callable[..., Any]]:
+    """Build strands tools bound to ``index`` for one verification agent.
+
+    Preconditions:
+        - When given, ``track_call`` is a callable previously returned by
+          ``_make_call_tracker`` (typically because the caller is also
+          building further tools of its own that must share the same
+          run-level budget -- see ``_make_call_tracker``'s docstring).
+
+    Postconditions:
+        - Returns seven tools (``read_file``, ``read_lines``, ``read_function``,
+          ``list_files``, ``search_codebase``, ``find_function_at_line``,
+          ``find_references``) that delegate to ``index`` and never raise, so
+          a bad model-supplied argument becomes a self-correcting tool
+          message rather than an error that aborts the agent loop. Every tool
+          but ``read_file`` returns a plain string. ``read_file`` returns a
+          Strands ``ToolResult``-shaped dict (``{"status": ...,
+          "content": [...]}``) instead: unlike the others, its result is
+          inspected after the run by ``_agent_read_the_cited_file`` to decide
+          whether a false-positive verdict is grounded, so it needs an
+          accurate ``status`` -- a plain string return is always wrapped by
+          Strands as ``status="success"`` regardless of content, which cannot
+          be told apart from a genuine read failure reported as an
+          "Error: ..." string (see ``_agent_read_the_cited_file`` for why
+          that distinction matters).
+        - Every call is tracked, via ``track_call`` when given, else a fresh
+          tracker created internally (so an existing caller that wants only
+          these seven tools needs no changes). Every call is tracked by
+          exact ``(tool name, arguments)``. Once a signature repeats more
+          than ``_MAX_DUPLICATE_TOOL_CALLS`` times, its (still-real) result
+          gets a note appended telling the model it already has this
+          information. Once the tracker's total tool calls exceed
+          ``_MAX_TOTAL_TOOL_CALLS``, every further call short-circuits --
+          skipping its real lookup -- and returns a stop directive telling
+          the model to finalize its verdict now.
+    """
+    _track_call = track_call if track_call is not None else _make_call_tracker()
 
     @tool
     def read_file(path: str) -> Dict[str, Any]:

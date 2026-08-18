@@ -1123,6 +1123,43 @@ def test_reasoning_only_logs_info_not_warning(
     assert not any(lvl == "WARNING" and "reasoning only" in msg for lvl, msg in records)
 
 
+def test_reasoning_only_with_no_tool_calls_still_logs_reasoning_only(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Positive counterpart to
+    ``test_reasoning_then_tool_calls_does_not_log_reasoning_only``: a turn
+    with reasoning, no text content, and no ``tool_calls`` at all is a
+    genuine reasoning-only turn that DOES need the empty-response retry
+    ladder -- the "reasoning only (no content) ... will retry" line must
+    still fire for it. This locks in the other side of the
+    ``tool_call_buffers`` gate added to that log line: it is suppressed
+    exactly when the turn also carries ``tool_calls``, not for every
+    empty-text-content turn regardless of ``tool_calls``."""
+    import logging
+
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "0")
+    sse = [
+        'data: {"choices":[{"delta":{"reasoning":"thinking, no tool call this time"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    cms = [
+        _stream_cm(200, sse_lines=sse),
+        _stream_cm(200, sse_lines=list(sse)),
+    ]
+    with (
+        patch("httpx.Client") as mock_client_cls,
+        caplog.at_level(logging.INFO, logger="llm_service.clients.ollama"),
+    ):
+        mock_client_cls.return_value = _multi_attempt_client(cms)
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        with pytest.raises(LLMSemanticExhaustionError):
+            client.complete_json("q", objective="test", temperature=0)
+    records = [(r.levelname, r.getMessage()) for r in caplog.records]
+    assert any(lvl == "INFO" and "reasoning only" in msg for lvl, msg in records)
+
+
 def test_reasoning_then_tool_calls_does_not_log_reasoning_only(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
