@@ -99,6 +99,16 @@ def clear_compaction_cache() -> None:
 def _model_fingerprint(llm: "LLMClient") -> str:
     """Best-effort stable identifier for the model a compaction will run on.
 
+    Delegates to ``llm_service.strands_model.model_fingerprint`` — the
+    canonical attribute-probing tail — imported lazily (not at module level)
+    to avoid a circular import: this module is imported eagerly by
+    ``llm_service/__init__.py``, before ``strands_model``'s own top-level
+    ``from llm_service import get_strands_model`` could resolve.
+    ``model_fingerprint`` is a strict superset of this function's old
+    inline probe (it additionally falls back to a dict-shaped ``.config``),
+    so this is behavior-preserving for every ``LLMClient`` that has no such
+    attribute — true of every concrete client in this package.
+
     Postconditions:
         - Returns a string that changes when the *currently preferred* model
           changes, so switching the configured provider/model (e.g. Ollama →
@@ -113,14 +123,11 @@ def _model_fingerprint(llm: "LLMClient") -> str:
           provider produces a valid, budget-bounded compaction of the same input,
           so reusing one within a configured provider list is acceptable.
     """
-    for attr in ("model_id", "model_name", "model"):
-        try:
-            value = getattr(llm, attr, None)
-        except Exception:
-            value = None
-        if isinstance(value, str) and value:
-            return value
-    return type(llm).__name__
+    from llm_service.strands_model import (
+        model_fingerprint as _model_fingerprint_tail,  # noqa: PLC0415
+    )
+
+    return _model_fingerprint_tail(llm)
 
 
 def _compaction_cache_key(
