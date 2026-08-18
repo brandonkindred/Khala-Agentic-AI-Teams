@@ -173,8 +173,12 @@ def test_classify_issue_scope_delegates_to_scope_classifier(monkeypatch) -> None
         captured["input_data"] = input_data
         return sentinel
 
+    def _fake_get_client(client_name, *a, **k):
+        captured["client_name"] = client_name
+        return "the-client"
+
     monkeypatch.setattr(sc, "classify_scope", _fake_classify_scope)
-    monkeypatch.setattr(llm_service, "get_client", lambda *a, **k: "the-client")
+    monkeypatch.setattr(llm_service, "get_client", _fake_get_client)
 
     findings = ["f1", "f2"]
     out = SECodeEngineProvider().classify_issue_scope(
@@ -183,6 +187,7 @@ def test_classify_issue_scope_delegates_to_scope_classifier(monkeypatch) -> None
 
     assert out is sentinel
     assert captured["issues"] is findings
+    assert captured["client_name"] == "code_review_verify"
     assert captured["llm"] == "the-client"
     assert captured["input_data"].files == {"a.py": "x = 1\n"}
     assert captured["input_data"].task_description == "review this PR"
