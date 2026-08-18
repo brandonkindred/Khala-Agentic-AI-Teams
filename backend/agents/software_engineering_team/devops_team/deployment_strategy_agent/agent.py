@@ -36,7 +36,9 @@ class DeploymentStrategyAgent(DevOpsSingleShotAgent):
     """Produce deployment strategy artifacts via a single structured LLM call.
 
     Invariants: instance state is limited to ``llm`` and ``_model`` from the
-    base; ``run`` is stateless across calls.
+    base. ``run`` is deterministic for identical inputs and the resolved
+    model: repeated identical calls may return a cached result and skip the
+    LLM. Cache reads/writes are fail-open and gated by ``CACHE_ENV_VAR``.
     """
 
     PROMPT = DEPLOYMENT_STRATEGY_PROMPT

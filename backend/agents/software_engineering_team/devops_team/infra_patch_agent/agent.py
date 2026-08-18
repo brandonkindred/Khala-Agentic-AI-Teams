@@ -14,7 +14,10 @@ class InfraPatchAgent(DevOpsSingleShotAgent):
     """Produces minimal IaC artifact patches for fixable debug errors.
 
     Invariants: instance state is limited to ``llm`` and ``_model`` from the
-    base; ``run`` is stateless across calls.
+    base. ``run`` is deterministic for identical inputs and the resolved
+    model: repeated identical calls may return a cached result and skip the
+    LLM (unless the ``not fixable`` short-circuit fires first). Cache
+    reads/writes are fail-open and gated by ``CACHE_ENV_VAR``.
     """
 
     PROMPT = INFRA_PATCH_PROMPT

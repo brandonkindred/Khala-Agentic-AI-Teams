@@ -26,7 +26,10 @@ class DevOpsTaskClarifierAgent(DevOpsSingleShotAgent):
     """Ensures task input is complete and safe before execution.
 
     Invariants: instance state is limited to ``llm`` and ``_model`` from the
-    base; ``run`` is stateless across calls.
+    base. ``run`` is deterministic for identical inputs and the resolved
+    model: repeated identical calls may return a cached result and skip the
+    LLM (unless a deterministic gap short-circuits first). Cache reads/writes
+    are fail-open and gated by ``CACHE_ENV_VAR``.
     """
 
     PROMPT = DEVOPS_TASK_CLARIFIER_PROMPT

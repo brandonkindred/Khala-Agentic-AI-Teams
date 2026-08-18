@@ -39,7 +39,10 @@ class DevSecOpsReviewAgent:
     """Infra security reviewer for DevOps artifacts (IAM/secrets/network).
 
     Invariants: instance state is limited to the injectable ``llm`` client
-    and the resolved Strands ``_model``; ``run`` is stateless across calls.
+    and the resolved Strands ``_model``. ``run`` is deterministic for
+    identical inputs and the resolved model: repeated identical calls may
+    return a cached result and skip the LLM. Cache reads/writes are
+    fail-open and gated by ``DEVOPS_DEVSECOPS_CACHE_SIZE``.
     """
 
     # Shared review-result cache: keyed on the whole DevSecOpsReviewInput

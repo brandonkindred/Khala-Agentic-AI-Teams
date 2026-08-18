@@ -13,9 +13,13 @@ wired at its own call site around ``run_single_shot_review``) — get the full
 hit/miss/fallback suite, while the remaining agents get a lighter hit+miss
 check since they exercise the same shared helper.
 
-Each agent module resolves and holds its own ``get_shared_cache`` (from
-``shared.cache``) at its call site rather than through the shared helper
-module, so that is the seam backend-error tests monkeypatch — matching
+Backend-error tests monkeypatch different seams depending on how each agent
+calls the LLM. Design-phase agents (``InfrastructureAsCodeAgent``,
+``CICDPipelineAgent``, etc.) are wired through ``DevOpsSingleShotAgent.run()``
+in ``_agent_template.py``, which resolves ``get_shared_cache`` itself, so
+their seam is ``_agent_template.get_shared_cache``. ``DevSecOpsReviewAgent``
+resolves and holds its own ``get_shared_cache`` at its own call site instead,
+so its seam is ``devsecops_agent_mod.get_shared_cache`` — matching
 ``test_qa_agent_cache.py``'s convention of patching ``agent_mod.get_shared_cache``.
 
 The caches themselves are cleared around every test by the autouse
