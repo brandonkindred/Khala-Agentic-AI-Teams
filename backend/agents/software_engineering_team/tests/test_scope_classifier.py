@@ -235,7 +235,7 @@ def test_one_batch_fails_others_survive() -> None:
     issues = [_issue(file_path="good.py"), _issue(file_path="bad.py")]
     out = classify_scope(issues, llm=stub)
     assert out[0] == ScopeClassification(in_scope=True, reason="ok")
-    assert out[1] is UNKNOWN
+    assert out[1] == UNKNOWN
 
 
 def test_missing_index_stays_unknown() -> None:
@@ -248,7 +248,7 @@ def test_missing_index_stays_unknown() -> None:
     issues = [_issue(file_path="a.py", description="0"), _issue(file_path="a.py", description="1")]
     out = classify_scope(issues, llm=stub)
     assert out[0].in_scope is True
-    assert out[1] is UNKNOWN
+    assert out[1] == UNKNOWN
 
 
 # --------------------------------------------------------------------------- #

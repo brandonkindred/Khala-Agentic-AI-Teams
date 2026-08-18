@@ -61,6 +61,7 @@ from software_engineering_team.shared.context_sizing import parse_env_int
 from ._llm_client_utils import is_unscripted_dummy
 from ._prompt_utils import _cap_context_field, _render_finding_block, _truncate_with_marker
 from .models import CodeReviewInput, CodeReviewIssue
+from .prompts import SCOPE_CLASSIFY_FORMATTING_INSTRUCTIONS, SCOPE_CLASSIFY_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -77,29 +78,6 @@ _FILE_EXCERPT_TRUNCATION_MARKER = "\n… (truncated) …"
 # Tokens a model may use for ``in_scope`` beyond a real JSON bool.
 _IN_SCOPE_TOKENS = frozenset({"in_scope", "in-scope", "inscope", "yes", "true", "y"})
 _OUT_OF_SCOPE_TOKENS = frozenset({"out_of_scope", "out-of-scope", "outofscope", "no", "false", "n"})
-
-SCOPE_CLASSIFY_SYSTEM_PROMPT = (
-    "You are a meticulous code-review triage assistant. For each finding you are "
-    "given, decide whether it is IN SCOPE or OUT OF SCOPE for the pull request "
-    "under review.\n\n"
-    "- IN SCOPE: the finding is a defect the change under review introduced or is "
-    "directly responsible for — a bug in code this PR added or modified, or a "
-    "required change the PR should have made but omitted.\n"
-    "- OUT OF SCOPE: the finding is a pre-existing defect in unrelated, unchanged "
-    "code that merely happens to be near the change — it was already there before "
-    "this PR and the PR is not responsible for it.\n\n"
-    "Judge only from the evidence provided. When you genuinely cannot tell, say so "
-    "rather than guessing."
-)
-
-SCOPE_CLASSIFY_FORMATTING_INSTRUCTIONS = (
-    "Reply with a single JSON object and nothing else, in exactly this shape:\n"
-    '{"verdicts": [{"index": <int>, "in_scope": <true|false|"unknown">, '
-    '"reason": "<one short sentence>"}]}\n'
-    "Include one entry per finding, using the finding's index. Set in_scope to "
-    "true for IN SCOPE and false for OUT OF SCOPE. If you truly cannot decide a "
-    'finding, omit it (or set its in_scope to "unknown").'
-)
 
 
 @dataclass(frozen=True)
