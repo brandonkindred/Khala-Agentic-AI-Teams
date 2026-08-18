@@ -784,11 +784,11 @@ _MIGRATED_SCHEMA_DERIVED_PROMPT_SPEC_NAMES: tuple[str, ...] = (
     "_BRAND_RULES_CODIFIER_PROMPT",
 )
 
-# Phase-2 cumulative-carry-forward chain: each bound model inherits every
-# upstream field via subclassing, so schema-derivation would emit lines for
-# fields the prompt intentionally omits (carried forward in prose instead).
-# Removing that inheritance is story 5b's job, not this one's — see the
-# ``AgentPromptSpec``/``models.py`` module docstrings.
+# Phase-2 specialist chain: migrating these five to schema-derived prompts
+# (dropping hand-written ``fields=`` in favor of ``AgentPromptSpec.structured_output``)
+# is story 5a's job, not this one's — story 5b flattened the bound models
+# (models.py) into own-field-only schemas, but generating each prompt's field
+# list from that schema is a separate migration, still pending.
 _STILL_FIELDS_BASED_PROMPT_SPEC_NAMES: tuple[str, ...] = (
     "_ARCHETYPE_ANALYST_PROMPT",
     "_TAGLINE_WRITER_PROMPT",
@@ -809,9 +809,9 @@ def test_migrated_specs_are_schema_derived_not_hand_written() -> None:
     Postconditions:
         Every migrated spec has an empty ``fields`` tuple and a non-None
         ``structured_output``; every deliberately-unmigrated spec (the
-        Phase-2 cumulative-carry-forward chain, out of scope per story 5b)
-        keeps the opposite: a non-empty ``fields`` tuple and no
-        ``structured_output``. Guards against a migrated spec silently
+        Phase-2 specialist chain, schema-derived prompt migration out of
+        scope per story 5a) keeps the opposite: a non-empty ``fields`` tuple
+        and no ``structured_output``. Guards against a migrated spec silently
         regressing back onto hand-written ``PromptFieldSpec`` entries, or
         the reverse.
     """
