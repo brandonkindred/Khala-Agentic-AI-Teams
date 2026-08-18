@@ -11,7 +11,11 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Union
 
 import pytest
-from code_review_agent.chunk_reviewer import CODE_TO_REVIEW_HEADER, ChunkReviewAgent
+from code_review_agent.chunk_reviewer import (
+    CODE_TO_REVIEW_HEADER,
+    ChunkReviewAgent,
+    _build_shared_review_prefix,
+)
 from code_review_agent.models import ChunkReviewInput, ChunkReviewOutput
 from code_review_agent.profiles import build_review_reasoning_system_prompt
 
@@ -673,3 +677,102 @@ def test_spec_compliance_single_pass_default_false_keeps_legacy_rendering() -> N
     prompt = client.prompts[0]
     assert "Must validate input" in prompt
     assert "SPEC_MARKER_TEXT" in prompt
+
+
+def test_build_shared_review_prefix_orders_spec_arch_existing() -> None:
+    """With all three blocks present, they render in spec → architecture →
+    existing-codebase order, each under its established header/delimiters."""
+    parts = _build_shared_review_prefix("SPEC_TEXT", "ARCH_TEXT", "EXISTING_TEXT", False)
+    prompt = "\n".join(parts)
+    assert "**Project specification (excerpt):**" in prompt
+    assert "**Architecture:**" in prompt
+    assert "**Existing codebase (excerpt):**" in prompt
+    assert prompt.count("---") == 4  # two "---" delimiter pairs: spec, existing
+    assert prompt.index("SPEC_TEXT") < prompt.index("ARCH_TEXT") < prompt.index("EXISTING_TEXT")
+
+
+def test_build_shared_review_prefix_omits_spec_when_single_pass_true() -> None:
+    """``spec_compliance_single_pass=True`` suppresses the spec-excerpt block
+    even when ``spec_excerpt`` is set, but architecture/existing still render."""
+    parts = _build_shared_review_prefix("SPEC_TEXT", "ARCH_TEXT", "EXISTING_TEXT", True)
+    prompt = "\n".join(parts)
+    assert "**Project specification" not in prompt
+    assert "SPEC_TEXT" not in prompt
+    assert "ARCH_TEXT" in prompt
+    assert "EXISTING_TEXT" in prompt
+
+
+def test_build_shared_review_prefix_returns_empty_list_when_all_absent() -> None:
+    """With no spec/architecture/existing content, the prefix is empty."""
+    assert _build_shared_review_prefix("", "", "", False) == []
+
+
+def test_build_shared_review_prefix_omits_absent_blocks_individually() -> None:
+    """Only the blocks with content render; absent blocks contribute nothing,
+    even when the other two are present."""
+    parts = _build_shared_review_prefix("", "ARCH_ONLY_TEXT", "", False)
+    prompt = "\n".join(parts)
+    assert "**Architecture:**" in prompt
+    assert "ARCH_ONLY_TEXT" in prompt
+    assert "**Project specification" not in prompt
+    assert "**Existing codebase" not in prompt
+
+
+def test_shared_prefix_is_contiguous_and_precedes_all_per_chunk_content() -> None:
+    """The composed chunk prompt keeps the spec/architecture/existing-code
+    prefix as one contiguous span, with every per-chunk-varying block
+    (segment note, file label, sibling surface, code chunk) positioned
+    strictly after it -- the "single seam" a future cache breakpoint needs."""
+    client = _RecorderClient()
+    agent = ChunkReviewAgent(llm=client)
+    agent.run(
+        _chunk_input(
+            spec_excerpt="SPEC_MARKER_XYZ",
+            architecture_overview="ARCH_MARKER_XYZ",
+            existing_codebase_excerpt="EXISTING_MARKER_XYZ",
+            segment_note="SEGMENT_MARKER_XYZ",
+            sibling_surface="SIBLING_MARKER_XYZ",
+            file_path_or_label="chunk/FILELABEL_MARKER_XYZ.py",
+            code_chunk="CODE_MARKER_XYZ",
+        )
+    )
+    prompt = client.prompts[0]
+    spec_i = prompt.index("SPEC_MARKER_XYZ")
+    arch_i = prompt.index("ARCH_MARKER_XYZ")
+    existing_i = prompt.index("EXISTING_MARKER_XYZ")
+    existing_end = existing_i + len("EXISTING_MARKER_XYZ")
+    segment_i = prompt.index("SEGMENT_MARKER_XYZ")
+    file_label_i = prompt.index("FILELABEL_MARKER_XYZ")
+    sibling_i = prompt.index("SIBLING_MARKER_XYZ")
+    code_i = prompt.index("CODE_MARKER_XYZ")
+
+    # Ordering: the prefix (spec -> arch -> existing) precedes every
+    # per-chunk-varying block.
+    assert spec_i < arch_i < existing_i < segment_i < file_label_i < sibling_i < code_i
+
+    # Contiguity: no per-chunk marker falls inside the prefix's own span.
+    prefix_span = prompt[spec_i:existing_end]
+    for marker in (
+        "SEGMENT_MARKER_XYZ",
+        "FILELABEL_MARKER_XYZ",
+        "SIBLING_MARKER_XYZ",
+        "CODE_MARKER_XYZ",
+    ):
+        assert marker not in prefix_span
+
+
+def test_shared_prefix_precedes_per_chunk_content_when_spec_and_existing_absent() -> None:
+    """Even when only one of the three shared blocks is present (the common
+    ``spec_compliance_single_pass=True`` shape, where spec/existing are both
+    absent), it still precedes per-chunk content -- guards against a
+    contiguity check that would pass vacuously with a single-block prefix."""
+    client = _RecorderClient()
+    agent = ChunkReviewAgent(llm=client)
+    agent.run(
+        _chunk_input(
+            architecture_overview="ARCH_MARKER_XYZ",
+            code_chunk="CODE_MARKER_XYZ",
+        )
+    )
+    prompt = client.prompts[0]
+    assert prompt.index("ARCH_MARKER_XYZ") < prompt.index("CODE_MARKER_XYZ")
