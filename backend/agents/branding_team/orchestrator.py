@@ -459,29 +459,27 @@ class _PhaseSpec(NamedTuple):
             fan-out), the merge function to try first. All five current phases
             supply one; ``None`` remains valid for a hypothetical future phase
             whose terminal node's own output is already the complete phase
-            output — none of today's five needs it. Invariant: a merge
-            function must return ``None`` to signal "could not merge" — never
-            a default-constructed ``model_cls()`` — since
+            output — none of today's five needs it. Its absence is also what
+            the single-agent fallback (``_extract_from_single_agent``) checks
+            to decide whether the last agent's own ``structured_output`` may
+            stand in as the phase output: a spec with a ``merge_fn`` means
+            multiple named children exist and no single "last" agent's
+            fragment is ever the complete phase output — subset-validating it
+            against the phase's full output model would silently report a
+            non-degraded output with every other field defaulted empty — so
+            when ``merge_fn`` returns ``None`` the phase must degrade instead
+            of accepting a stray fragment; a spec with no ``merge_fn`` has no
+            other legitimate extraction path, so the fallback may accept it.
+            Invariant: a merge function must return ``None`` to signal "could
+            not merge" — never a default-constructed ``model_cls()`` — since
             ``_extract_phase_output`` trusts any non-``None`` return as a
             successful, non-degraded extraction.
-        check_structured_output: Whether the single-agent fallback may accept
-            the last agent's own ``structured_output`` as the phase output.
-            ``False`` for Phase 2, Phase 3, Phase 4, and Phase 5, whose
-            last-seen agent (Phase 2's VoicePrinciplesDrafter; Phase 3's,
-            Phase 4's, and Phase 5's parallel specialists have no single
-            "last" node) only ever emits its own fragment — subset-validating
-            that against the phase's full output model would silently report
-            a non-degraded output with every other field defaulted empty.
-            None of these four phases have a compositor, so ``merge_fn`` is
-            the only legitimate extraction path; when it returns ``None`` the
-            phase must degrade instead of accepting a stray fragment.
     """
 
     builder_fn: Callable[[], Any]
     node_id: str
     model_cls: type[BaseModel]
     merge_fn: Optional[Callable[[Any, type[BaseModel]], Optional[BaseModel]]] = None
-    check_structured_output: bool = True
 
 
 # Per-phase spec, keyed by BrandPhase in PHASE_ORDER order. This is the single
@@ -500,28 +498,24 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
         "phase2_narrative",
         PHASE_OUTPUT_MODELS[BrandPhase.NARRATIVE_MESSAGING],
         merge_fn=_merge_phase2_fragments,
-        check_structured_output=False,
     ),
     BrandPhase.VISUAL_IDENTITY: _PhaseSpec(
         build_phase3_graph,
         "phase3_visual",
         PHASE_OUTPUT_MODELS[BrandPhase.VISUAL_IDENTITY],
         merge_fn=_merge_phase3_fragments,
-        check_structured_output=False,
     ),
     BrandPhase.CHANNEL_ACTIVATION: _PhaseSpec(
         build_phase4_graph,
         "phase4_channel",
         PHASE_OUTPUT_MODELS[BrandPhase.CHANNEL_ACTIVATION],
         merge_fn=_merge_phase4_fragments,
-        check_structured_output=False,
     ),
     BrandPhase.GOVERNANCE: _PhaseSpec(
         build_phase5_graph,
         "phase5_governance",
         PHASE_OUTPUT_MODELS[BrandPhase.GOVERNANCE],
         merge_fn=_merge_phase5_fragments,
-        check_structured_output=False,
     ),
 }
 
@@ -1116,22 +1110,23 @@ class BrandingTeamOrchestrator:
 
         The graph node results contain ``AgentResult`` or ``MultiAgentResult``
         objects. ``node_id`` is looked up in ``_SPEC_BY_NODE_ID`` to find that
-        phase's extraction strategy: when the spec has a ``merge_fn`` (Phase 1's
-        fan-out, Phase 2's sequential graph — both wrap several named agents as
-        a single top-level node), it's tried first, merging every recognized
+        phase's extraction strategy: every phase's spec declares a
+        ``merge_fn`` (each wraps several named sub-agents as a single
+        top-level node), so it's tried first, merging every recognized
         child's ``structured_output`` into one ``model_class`` instance; if
-        that succeeds, its result is returned directly. Every other phase
-        (whose spec has no ``merge_fn``, or an unrecognized node id with no
-        spec at all) skips straight to the per-node fallback below: when the
-        node's agent was built with ``structured_output=``, Strands forces a
-        tool call to produce the payload and populates
-        ``AgentResult.structured_output`` instead of the message's text blocks
-        — so that's checked next, unless the spec sets
-        ``check_structured_output=False`` (Phase 2 and Phase 4: a lone
-        specialist's own fragment must never be accepted as a complete phase
-        output, since subset validation against the phase's full output model
-        would succeed via defaults). Agents without usable structured output
-        fall back to parsing the last text block.
+        that succeeds, its result is returned directly. When ``merge_fn``
+        returns ``None`` (a partial or malformed nested result), or
+        ``node_id`` is unrecognized (no spec at all), extraction falls
+        through to the per-node fallback below: when the node's agent was
+        built with ``structured_output=``, Strands forces a tool call to
+        produce the payload and populates ``AgentResult.structured_output``
+        instead of the message's text blocks — so that's checked next,
+        unless the spec declares a ``merge_fn`` (true for every phase today):
+        a lone specialist's own fragment must never be accepted as a
+        complete phase output when multiple named children exist, since
+        subset validation against the phase's full output model would
+        succeed via defaults. Agents without usable structured output fall
+        back to parsing the last text block.
 
         Preconditions:
             - ``result`` is the Strands graph invocation result (or a test
@@ -1311,7 +1306,8 @@ def _extract_from_single_agent(
     Postconditions:
         Returns a validated ``model_class`` instance from the last agent's
         ``structured_output`` (only when ``spec`` is ``None`` or
-        ``spec.check_structured_output`` is True) or from parsing its last text
+        ``spec.merge_fn`` is ``None`` — i.e. there is no other legitimate
+        extraction path for this phase) or from parsing its last text
         block; returns ``None`` when there are no agent results or neither
         source yields a usable value — in which case the caller degrades to a
         default-constructed model.
@@ -1320,7 +1316,7 @@ def _extract_from_single_agent(
     if not agent_results:
         return None
     last = agent_results[-1]
-    if spec is None or spec.check_structured_output:
+    if spec is None or spec.merge_fn is None:
         structured = getattr(last, "structured_output", None)
         if isinstance(structured, BaseModel):
             parsed = _merge_structured_output(structured, model_class)
