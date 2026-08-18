@@ -17,6 +17,36 @@ const DEFINE_SUB_STAGE_INDEX = BUILD_SUB_STAGES.findIndex((s) => s.key === 'defi
 /** Index of the Configure sub-stage — the only sub-stage `backToDefine()` may be called from. */
 const CONFIGURE_SUB_STAGE_INDEX = BUILD_SUB_STAGES.findIndex((s) => s.key === 'configure');
 
+function handoffHasAnyId(h: AgentStudioHandoffState): boolean {
+  return (
+    h.registryAgentId != null ||
+    h.teamId != null ||
+    h.processId != null ||
+    h.personaId != null ||
+    h.draftAgentId != null
+  );
+}
+
+/** `undefined` and `null` both mean "no id" (matching `handoffHasAnyId`'s
+ *  `!= null`) — a field can end up `undefined` at runtime from an
+ *  untyped/external source even though the type only declares `string | null`. */
+function normalizeId(value: string | null | undefined): string | null {
+  return value ?? null;
+}
+
+/** Whether two handoff snapshots carry the same five ids. Shared with the
+ *  Studio shell's load-conflict guard so handoff-field changes can't drift
+ *  between two copies of the same comparison. */
+export function handoffEquals(a: AgentStudioHandoffState, b: AgentStudioHandoffState): boolean {
+  return (
+    normalizeId(a.registryAgentId) === normalizeId(b.registryAgentId) &&
+    normalizeId(a.teamId) === normalizeId(b.teamId) &&
+    normalizeId(a.processId) === normalizeId(b.processId) &&
+    normalizeId(a.personaId) === normalizeId(b.personaId) &&
+    normalizeId(a.draftAgentId) === normalizeId(b.draftAgentId)
+  );
+}
+
 /**
  * Holds the Agent Studio handoff state and stepper position for one Studio
  * session. Provided at the Studio shell (not `root`) so navigating afresh to
@@ -69,13 +99,34 @@ export class AgentStudioStateService {
   // ── Server draft binding (spec §3.5) ───────────────────────────────────────
   /**
    * Server draft id this session is bound to; `null` until the first
-   * successful save. Re-saving with this set issues a PUT (update-in-place)
-   * instead of a POST (create) — see `AgentStudioApiService`.
+   * successful save or load. Re-saving with this set issues a PUT
+   * (update-in-place) instead of a POST (create) — see `AgentStudioApiService`.
    */
   readonly currentDraftId = signal<string | null>(null);
   /** Server draft name from the last successful save — pre-fills the
    *  Save-draft popover on re-save so it doesn't silently rename on confirm. */
   readonly currentDraftName = signal<string | null>(null);
+
+  /**
+   * Last handoff snapshot that was successfully saved or loaded. `null` until
+   * the first `markClean()`. Used only by `isDirty`.
+   */
+  private readonly lastSavedHandoff = signal<AgentStudioHandoffState | null>(null);
+
+  /**
+   * Whether the current handoff differs from the last saved/loaded snapshot.
+   *
+   * Preconditions: none.
+   * Postconditions: `false` on a blank session (`lastSavedHandoff` null and
+   *   every id null); `true` if any id is non-null and there is no snapshot
+   *   yet, or if any of the five ids differs from the snapshot.
+   */
+  readonly isDirty = computed(() => {
+    const current = this.handoff();
+    const saved = this.lastSavedHandoff();
+    if (saved === null) return handoffHasAnyId(current);
+    return !handoffEquals(current, saved);
+  });
 
   /**
    * `${teamId}::${manifestId}` keys the Stage-2 handoff agent has already been
@@ -335,6 +386,38 @@ export class AgentStudioStateService {
   }
 
   /**
+   * Record `snapshot` as the last successfully persisted handoff.
+   *
+   * Preconditions: none — `snapshot` is a full five-id handoff.
+   * Postconditions: `lastSavedHandoff` equals `snapshot`; `isDirty()` is true
+   *   iff the current handoff differs from `snapshot`.
+   */
+  markSaved(snapshot: AgentStudioHandoffState): void {
+    this.lastSavedHandoff.set({ ...snapshot });
+  }
+
+  /**
+   * Record the current handoff as the last saved/loaded snapshot.
+   *
+   * Preconditions: none.
+   * Postconditions: `isDirty()` is `false` until a later handoff-id write.
+   */
+  markClean(): void {
+    this.markSaved(this.handoff());
+  }
+
+  /**
+   * Drop the last saved/loaded snapshot so the current handoff is unsaved.
+   *
+   * Preconditions: none.
+   * Postconditions: `lastSavedHandoff` is null; `isDirty()` is true iff any
+   *   handoff id is set. Handoff ids themselves are unchanged.
+   */
+  invalidateSavedSnapshot(): void {
+    this.lastSavedHandoff.set(null);
+  }
+
+  /**
    * Whether the Stage-2 handoff agent has already been auto-added for `key`
    * (`${teamId}::${manifestId}`) this session.
    *
@@ -361,7 +444,7 @@ export class AgentStudioStateService {
   /**
    * Reset the session — clear handoff state and return to Stage 1.
    * Postconditions: every id is null; `activeStage() === 0`; `maxReachedStage() === 0`;
-   *   `activeBuildSubStage() === 0`; `maxReachedBuildSubStage() === 0`;
+   *   `activeBuildSubStage() === 0`; `maxReachedBuildSubStage() === 0`; `isDirty()` is `false`;
    *   `personaLiveRunId() === null`; `personaLiveRunStartedAtMs() === null`;
    *   `personaLiveRunEndedAtMs() === null`.
    */
@@ -378,6 +461,7 @@ export class AgentStudioStateService {
     this.personaLiveRunEndedAtMs.set(null);
     this.currentDraftId.set(null);
     this.currentDraftName.set(null);
+    this.lastSavedHandoff.set(null);
     this.handoffConsumed.clear();
     this._activeStage.set(0);
     this._maxReachedStage.set(0);

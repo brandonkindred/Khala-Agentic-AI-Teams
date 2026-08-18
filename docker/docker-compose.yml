@@ -59,14 +59,13 @@ x-team-env-base: &team-env-base
   SE_WORKSPACE_DIR: /data/agents/software_engineering_team/workspaces
 
 # Per-phase branding LLM overrides. Blank means fall through to LLM_MODEL.
-# Names match branding_team.graphs.shared.phase_agent_key / COMPOSITOR_AGENT_KEY.
+# Names match branding_team.graphs.shared.phase_agent_key.
 x-branding-llm-tiers: &branding-llm-tiers
   LLM_MODEL_branding_strategic_core: ${LLM_MODEL_branding_strategic_core:-}
   LLM_MODEL_branding_narrative_messaging: ${LLM_MODEL_branding_narrative_messaging:-}
   LLM_MODEL_branding_visual_identity: ${LLM_MODEL_branding_visual_identity:-}
   LLM_MODEL_branding_channel_activation: ${LLM_MODEL_branding_channel_activation:-}
   LLM_MODEL_branding_governance: ${LLM_MODEL_branding_governance:-}
-  LLM_MODEL_branding_compositor: ${LLM_MODEL_branding_compositor:-}
 
 # Shared.cache Redis wiring for SE only (code-review + SE compaction). Kept off
 # *team-env-base so other team containers do not receive Redis credentials and
