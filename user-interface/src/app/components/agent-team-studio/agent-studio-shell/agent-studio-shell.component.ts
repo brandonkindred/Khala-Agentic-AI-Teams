@@ -5,13 +5,23 @@ import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { ActivatedRoute, NavigationEnd, Router, RouterOutlet } from '@angular/router';
-import { filter, map } from 'rxjs';
+import { Observable, filter, map } from 'rxjs';
 import type { AgentStudioDraft } from '../../../models/agent-studio.model';
 import { STUDIO_STAGES } from '../../../models/agent-studio.model';
+import { HasUnsavedChanges } from '../../../core/unsaved-changes.guard';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
-import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
+import { AgentStudioStateService, handoffEquals } from '../../../services/agent-studio-state.service';
 import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
+import {
+  DraftConflictDialogComponent,
+  type DraftConflictResult,
+} from './draft-conflict-dialog/draft-conflict-dialog.component';
 import { LoadDraftMenuComponent } from './load-draft-menu/load-draft-menu.component';
+import {
+  RenameDraftDialogComponent,
+  type RenameDraftDialogData,
+  type RenameDraftDialogResult,
+} from './rename-draft-dialog/rename-draft-dialog.component';
 import {
   SaveDraftDialogComponent,
   type SaveDraftDialogData,
@@ -32,30 +42,24 @@ function asNullableString(value: unknown): string | null {
 
 /**
  * Agent Studio shell — the single `/agent-studio` surface (spec §2.1). Renders
- * the forward-only 4-stage stepper and the active stage. All four stages are
- * implemented: Build Agent, Test Agent, Compose Team, and Test Team w/
- * Personas. Owns one `AgentStudioStateService` per session (provided here,
- * not at root, so each visit starts clean). `AgentStudioFacade` is provided
- * alongside it so the facade's injector can resolve this session's state
- * service (it is not a root singleton either).
+ * the forward-only 4-stage stepper and header; the active stage itself is
+ * rendered by the routed `AgentStudioStageHostComponent` child (default child
+ * route) via `RouterOutlet` — the persona-run audit is a sibling child route.
+ * Owns one `AgentStudioStateService` per session (provided here, not at root,
+ * so each visit starts clean). `AgentStudioFacade` is provided alongside it
+ * so the facade's injector can resolve this session's state service (it is
+ * not a root singleton either).
  */
 @Component({
   selector: 'app-agent-studio-shell',
   standalone: true,
-  imports: [
-    MatButtonModule,
-    MatDialogModule,
-    MatIconModule,
-    MatTooltipModule,
-    LoadDraftMenuComponent,
-    RouterOutlet,
-  ],
+  imports: [MatButtonModule, MatDialogModule, MatIconModule, MatTooltipModule, LoadDraftMenuComponent, RouterOutlet],
   changeDetection: ChangeDetectionStrategy.OnPush,
   providers: [AgentStudioStateService, AgentStudioFacade],
   templateUrl: './agent-studio-shell.component.html',
   styleUrl: './agent-studio-shell.component.scss',
 })
-export class AgentStudioShellComponent {
+export class AgentStudioShellComponent implements HasUnsavedChanges {
   readonly state = inject(AgentStudioStateService);
   private readonly dialog = inject(MatDialog);
   private readonly facade = inject(AgentStudioFacade);
@@ -185,20 +189,39 @@ export class AgentStudioShellComponent {
   }
 
   /**
-   * Open the Save-draft popover (spec §3.5). Assembles the payload from the
-   * currently-available handoff state and lets the dialog decide create vs
-   * update based on whether this session is already bound to a server draft.
+   * Drives `unsavedChangesGuard` (route `canDeactivate`) so navigating away
+   * from `/agent-studio` with unsaved handoff edits prompts Discard/Keep
+   * editing, the same protection `/integrations`, `/user-profile`, and
+   * `/llm-config` already have.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `state.isDirty()` — the same predicate that
+   *   already gates the in-page load-conflict prompt.
+   */
+  hasUnsavedChanges(): boolean {
+    return this.state.isDirty();
+  }
+
+  /**
+   * Open the Save-draft popover (spec §3.5).
    *
    * Preconditions: none — always safe to call.
-   * Postconditions: on a successful save, `state.currentDraftId()`/
-   *   `currentDraftName()` reflect the saved draft. On cancel or failure,
-   *   state is unchanged.
+   * Postconditions: on a successful save, `state.currentDraftId()` /
+   *   `currentDraftName()` reflect the saved draft and `markSaved` records
+   *   the payload submitted at open (not response-time handoff) iff the
+   *   session is still bound to the dialog's `draftId`; a load that rebound
+   *   the session while the dialog was open leaves binding and snapshot
+   *   unchanged. `isDirty()` is then false iff the current handoff still
+   *   matches that payload. On cancel or failure, state is unchanged. The
+   *   returned observable is the dialog's `afterClosed()`.
    */
-  openSaveDraftDialog(): void {
+  openSaveDraftDialog(): Observable<SaveDraftDialogResult | undefined> {
+    const submitted = { ...this.state.handoff() };
+    const capturedDraftId = this.state.currentDraftId();
     const data: SaveDraftDialogData = {
-      draftId: this.state.currentDraftId(),
+      draftId: capturedDraftId,
       initialName: this.state.currentDraftName(),
-      payload: { ...this.state.handoff() },
+      payload: submitted,
     };
     const ref = this.dialog.open<SaveDraftDialogComponent, SaveDraftDialogData, SaveDraftDialogResult>(
       SaveDraftDialogComponent,
@@ -216,41 +239,191 @@ export class AgentStudioShellComponent {
       // throws NullInjectorError.
       { data, width: '420px', disableClose: true, closeOnNavigation: false, injector: this.injector },
     );
+    const closed$ = ref.afterClosed();
+    closed$.subscribe((result) => {
+      if (!result) return;
+      if (this.state.currentDraftId() !== capturedDraftId) return;
+      this.state.setCurrentDraft(result.draft_id, result.name);
+      this.state.markSaved(submitted);
+    });
+    return closed$;
+  }
+
+  /**
+   * Open the rename dialog for the bound draft.
+   *
+   * Preconditions: none — no-op when unbound or when the bound name is null.
+   * Postconditions: on success, `currentDraftName()` matches the PATCH
+   *   response iff the session is still bound to `draftId`; a load that
+   *   rebound the session while the dialog was open leaves state unchanged.
+   *   `isDirty()` is unchanged. On cancel/failure, state unchanged.
+   */
+  openRenameDraftDialog(): void {
+    const draftId = this.state.currentDraftId();
+    const initialName = this.state.currentDraftName();
+    if (!draftId || initialName == null) return;
+    const data: RenameDraftDialogData = { draftId, initialName };
+    // `injector` is the shell's session injector so the overlay can resolve
+    // `AgentStudioFacade` (provided here, not `root`) — see `openSaveDraftDialog`.
+    // Without it, MatDialog instantiates the dialog from the root injector
+    // and the façade inject throws NullInjectorError.
+    const ref = this.dialog.open<RenameDraftDialogComponent, RenameDraftDialogData, RenameDraftDialogResult>(
+      RenameDraftDialogComponent,
+      { data, width: '420px', disableClose: true, closeOnNavigation: false, injector: this.injector },
+    );
     ref.afterClosed().subscribe((result) => {
       if (!result) return;
+      if (this.state.currentDraftId() !== draftId) return;
       this.state.setCurrentDraft(result.draft_id, result.name);
     });
   }
 
   /**
-   * Load a saved draft and hydrate the session from it (spec §3.5). No
-   * unsaved-local-edit conflict check is performed here — that guard is
-   * sibling issue #5914's responsibility; this loads directly.
+   * Handle a successful delete from the Load menu.
    *
-   * Preconditions: `draftId` names a draft the current user owns (rows in
-   *   `LoadDraftMenuComponent` only ever come from that user's own list).
-   * Postconditions: on success, `state` is hydrated from the draft's payload
-   *   and the stepper is moved to the furthest reachable stage. The current
-   *   persona live-run ID is cleared (`state.setPersonaLiveRunId(null)`)
-   *   because a persisted draft never contains an in-progress live run; this
-   *   prevents Stage 4 from displaying a stale run from the previous session.
-   *   If a nested child (the persona-run audit) is showing, the router returns to this
-   *   shell's default child so the restored stage is visible. `loadingDraft()`
-   *   stays `true` for the entire chain, including the nested process-status
-   *   check, so a second selection can't race it. On failure, `loadingDraft()`
-   *   returns to `false`, `state` is unchanged, and the current child stays
-   *   mounted (surfaced via the global HTTP error toast, not a bespoke inline
-   *   banner — the triggering menu has already closed by the time this runs).
-   *   A call superseded by a later `loadDraft` (its token no longer matches
-   *   `loadDraftToken`) discards its response instead of applying it.
+   * Preconditions: `draftId` is a non-empty id.
+   * Postconditions: if it was the bound draft, `currentDraftId()` /
+   *   `currentDraftName()` are null, the saved snapshot is dropped so
+   *   `isDirty()` is true while any handoff id remains, and handoff ids are
+   *   unchanged. Otherwise state is unchanged.
+   */
+  onDraftDeleted(draftId: string): void {
+    if (this.state.currentDraftId() === draftId) {
+      this.state.setCurrentDraft(null, null);
+      this.state.invalidateSavedSnapshot();
+    }
+  }
+
+  /**
+   * Load a saved draft and hydrate the session from it (spec §3.5 / §2.4).
+   *
+   * Preconditions: `draftId` names a draft the current user owns.
+   * Postconditions: if `loadingDraft()` is already true, returns without
+   *   starting any HTTP and state is unchanged. Otherwise, when `!isDirty()`,
+   *   hydrates immediately. When dirty, opens the conflict dialog and
+   *   `loadingDraft()` stays false until hydration HTTP starts. Cancel /
+   *   Escape / backdrop: no HTTP, state unchanged. Discard: hydrate the
+   *   chosen draft. Save first: persist current handoff then hydrate; a
+   *   failed persist does not hydrate.
    */
   loadDraft(draftId: string): void {
     if (this.loadingDraft()) return;
+    if (this.state.isDirty()) {
+      this.resolveLoadConflict(draftId);
+      return;
+    }
+    this.fetchAndHydrate(draftId);
+  }
+
+  /**
+   * Open the unsaved-edit conflict dialog and route the user's choice.
+   *
+   * Preconditions: `state.isDirty()` is true; `draftId` is the draft the user
+   *   asked to load.
+   * Postconditions: `'discard'` starts `fetchAndHydrate`; `'save'` runs
+   *   `saveFirstThenHydrate`; `undefined` (cancel) leaves state and HTTP
+   *   unchanged. Does not set `loadingDraft()` — that begins only when
+   *   hydration HTTP starts.
+   */
+  private resolveLoadConflict(draftId: string): void {
+    const ref = this.dialog.open<DraftConflictDialogComponent, void, DraftConflictResult>(
+      DraftConflictDialogComponent,
+      { width: '420px', disableClose: false },
+    );
+    ref.afterClosed().subscribe((choice) => {
+      if (choice === 'discard') {
+        this.fetchAndHydrate(draftId);
+        return;
+      }
+      if (choice === 'save') {
+        this.saveFirstThenHydrate(draftId);
+      }
+    });
+  }
+
+  /**
+   * Persist the current handoff, then hydrate the chosen draft.
+   *
+   * Preconditions: caller has already chosen `'save'` from the conflict
+   *   dialog; `draftId` is the draft to load after a successful persist.
+   * Postconditions: when bound (`currentDraftId` + `currentDraftName`), PUTs
+   *   via `saveDraft` with `loadingDraft()` true for the whole PUT+hydrate.
+   *   On success, records the submitted snapshot as saved and hydrates only
+   *   if the session is still bound to `boundId` and the handoff still
+   *   matches that snapshot. Concurrent edits, or a delete that unbound the
+   *   draft while the PUT was in flight, stay dirty and are not overwritten.
+   *   On PUT error, does not hydrate and
+   *   `loadingDraft()` returns to false. When unbound, opens the Save-draft
+   *   dialog; hydrates only if the session is still bound to the saved
+   *   draft and the handoff still matches the submitted payload;
+   *   empty/cancel/rebind aborts with no hydrate.
+   */
+  private saveFirstThenHydrate(draftId: string): void {
+    const boundId = this.state.currentDraftId();
+    const boundName = this.state.currentDraftName();
+    if (boundId && boundName) {
+      this.loadingDraft.set(true);
+      const submitted = { ...this.state.handoff() };
+      this.facade.saveDraft({ name: boundName, payload: submitted }, boundId).subscribe({
+        next: (summary) => {
+          if (this.state.currentDraftId() !== boundId) {
+            this.loadingDraft.set(false);
+            return;
+          }
+          this.state.setCurrentDraft(summary.draft_id, summary.name);
+          this.state.markSaved(submitted);
+          if (this.state.isDirty()) {
+            this.loadingDraft.set(false);
+            return;
+          }
+          this.fetchAndHydrate(draftId);
+        },
+        error: () => {
+          this.loadingDraft.set(false);
+          // Global HTTP interceptor toasts. Do not hydrate.
+        },
+      });
+      return;
+    }
+    this.openSaveDraftDialog().subscribe((result) => {
+      if (!result) return;
+      if (this.state.currentDraftId() !== result.draft_id) return;
+      if (this.state.isDirty()) return;
+      this.fetchAndHydrate(draftId);
+    });
+  }
+
+  /**
+   * Fetch a draft and hydrate the session from it.
+   *
+   * Preconditions: `draftId` names a draft the current user owns; caller has
+   *   already cleared any dirty-gate (clean session, discard, or successful
+   *   save-first).
+   * Postconditions: on success, `state` is hydrated from the draft's payload
+   *   and the stepper moves to the furthest reachable stage.
+   *   `loadingDraft()` stays `true` for the entire chain, including the
+   *   nested process-status check. On failure, `loadingDraft()` returns to
+   *   `false` and `state` is unchanged (surfaced via the global HTTP error
+   *   toast, not a bespoke inline banner — the triggering menu has already
+   *   closed by the time this runs). A call superseded by a later `loadDraft`
+   *   (its token no longer matches `loadDraftToken`) discards its response
+   *   instead of applying it. If the handoff IDs change while the GET is in
+   *   flight, or a clean session becomes dirty (e.g. bound-draft delete
+   *   invalidated the snapshot), hydration is aborted so that work is not
+   *   overwritten.
+   */
+  private fetchAndHydrate(draftId: string): void {
     this.loadingDraft.set(true);
     const token = ++this.loadDraftToken;
+    const captured = { ...this.state.handoff() };
+    const wasDirty = this.state.isDirty();
     this.facade.loadDraft(draftId).subscribe({
       next: (draft) => {
         if (token !== this.loadDraftToken) return;
+        if (!handoffEquals(this.state.handoff(), captured) || (!wasDirty && this.state.isDirty())) {
+          this.loadingDraft.set(false);
+          return;
+        }
         this.hydrateFromDraft(draft, token);
       },
       error: () => {
@@ -260,6 +433,18 @@ export class AgentStudioShellComponent {
     });
   }
 
+  /**
+   * Replace the current session state with the contents of a loaded draft.
+   *
+   * Preconditions: caller has already run the token and dirty-state guards
+   *   (see `fetchAndHydrate`).
+   * Postconditions: `currentDraftId`/`currentDraftName` are bound to
+   *   `draft`; the five handoff ids are set from `draft.payload`; the current
+   *   persona live-run id is cleared (`state.setPersonaLiveRunId(null)`)
+   *   because a persisted draft never contains an in-progress live run; the
+   *   session is marked clean; the stepper advances to the furthest
+   *   reachable stage via `resolveFurthestStage`.
+   */
   private hydrateFromDraft(draft: AgentStudioDraft, token: number): void {
     this.state.setCurrentDraft(draft.draft_id, draft.name);
     const payload = draft.payload;
@@ -269,6 +454,7 @@ export class AgentStudioShellComponent {
     this.state.setPersonaId(asNullableString(payload['personaId']));
     this.state.setDraftAgentId(asNullableString(payload['draftAgentId']));
     this.state.setPersonaLiveRunId(null);
+    this.state.markClean();
     this.resolveFurthestStage(token);
   }
 
@@ -289,7 +475,9 @@ export class AgentStudioShellComponent {
    * not an oversight.
    *
    * `token` guards the async `getProcess` branch against a superseded call's
-   * late response — see `loadDraft`'s contract.
+   * late response — see `loadDraft`'s contract. Each branch finishes via
+   * `finishSuccessfulDraftLoad`, which also returns the router to this
+   * shell's default child if the persona-run audit was showing.
    */
   private resolveFurthestStage(token: number): void {
     const teamId = this.state.teamId();

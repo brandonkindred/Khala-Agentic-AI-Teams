@@ -27,6 +27,22 @@
     gap: var(--kh-space-2);
   }
 
+  &__current-draft {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--kh-space-1);
+    min-width: 0;
+  }
+
+  &__current-draft-name {
+    max-width: var(--studio-draft-name-max-width, 16rem);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+    color: var(--kh-text-primary);
+  }
+
   &__draft-btn {
     @include draft-btn.look;
   }

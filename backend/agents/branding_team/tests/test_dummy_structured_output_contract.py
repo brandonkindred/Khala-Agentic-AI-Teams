@@ -61,7 +61,6 @@ from branding_team.models import (
     IconographyOutput,
     LogoSuiteOutput,
     MessagingFrameworkOutput,
-    MoodBoardCandidatesOutput,
     MoodBoardConcept,
     OwnershipOutput,
     PersonaProfilesOutput,
@@ -111,7 +110,6 @@ _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
         WritingGuidelinesOutput,
     ),
     # Phase 3 — Visual Identity
-    ("creative_director", branding_agents.make_creative_director, MoodBoardCandidatesOutput),
     *(
         (
             f"moodboard_conceptualist_{variant.lower()}",
@@ -258,7 +256,6 @@ _FACTORIES_WITH_STRUCTURED_OUTPUT: frozenset[str] = frozenset(
         "make_message_mapper",
         "make_persona_builder",
         "make_voice_principles_drafter",
-        "make_creative_director",
         "make_moodboard_conceptualist",
         "make_converge_decider",
         "make_logo_specifier",
