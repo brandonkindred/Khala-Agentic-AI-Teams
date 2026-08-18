@@ -91,6 +91,35 @@ from software_engineering_team.shared.llm import get_client
 llm = get_client("backend")
 ```
 
+### Prompt caching
+
+`llm.py` re-exports `get_strands_model` from `llm_service`, which also exposes
+`CacheBreakpoint` — a marker a prompt builder wraps around a stable, repeated
+prefix (a spec excerpt, a persona/standards block, ...) to declare it safe to
+send as a provider-side cached prefix. To adopt it, place the marker directly
+in the `system_prompt_content` list passed to a Strands `Agent` built from
+`get_strands_model`:
+
+```python
+from llm_service import CacheBreakpoint
+from strands import Agent
+
+from software_engineering_team.shared.llm import get_strands_model
+
+model = get_strands_model("backend")
+agent = Agent(
+    model=model,
+    system_prompt_content=[CacheBreakpoint(stable_spec_excerpt), "\n\n" + rest_of_persona],
+)
+```
+
+On a caching-capable backing client (Claude, today) the marked segment reaches
+the wire as a real cache-control breakpoint; on every other client it is a
+documented no-op — flattened to plain text, no error, no output change. No SE
+agent adopts this yet (adopting it at a call site is a separate, later
+change); see `llm_service/README.md`'s "Prompt caching (cache-control
+breakpoints)" section for the full contract and telemetry fields.
+
 ## Models (moved to `shared.dev_models`)
 
 Core Pydantic models used across agents now live in the neutral top-level

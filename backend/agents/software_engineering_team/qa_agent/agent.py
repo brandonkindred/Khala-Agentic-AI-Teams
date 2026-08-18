@@ -21,8 +21,6 @@ output contract).
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 from typing import Dict, Optional
 
@@ -31,8 +29,15 @@ from strands import Agent
 from llm_service import get_strands_model
 from llm_service.strands_model import model_fingerprint, resolve_strands_model
 from shared.cache import get_shared_cache
-from shared.env_config import env_int
 from software_engineering_team.shared.persona_agent_base import run_structured_persona
+from software_engineering_team.shared.review_result_cache import (
+    build_review_cache_key,
+    cache_capacity_for,
+    cache_namespace_for,
+    clear_review_cache_namespace,
+    get_cached_review_result,
+    set_cached_review_result,
+)
 from software_engineering_team.shared.security_service import derive_approved
 
 from .models import QAInput, QAOutput
@@ -45,6 +50,8 @@ from .prompts import (
 
 logger = logging.getLogger(__name__)
 
+_CACHE_LABEL = "QA"
+
 # Shared review-result cache: keyed on the whole QAInput content plus the
 # resolved review model, so a byte-identical resubmission (e.g. across the
 # review->fix->re-review retry loop, or an unchanged sibling task) skips the
@@ -52,18 +59,20 @@ logger = logging.getLogger(__name__)
 # coordinator's submission-level cache, but code_review_agent.mapping's
 # chunk-level *policy*: every genuine outcome is cached regardless of
 # ``approved`` (see ``run()``'s ``is_fallback`` guard below), since this is a
-# single atomic call with no reduce phase to short-circuit. Backed by
-# shared.cache (Redis, falls open to an in-process store). Base stem;
-# ``_review_cache_namespace()`` appends build id.
+# single atomic call with no reduce phase to short-circuit. The shared
+# policy itself lives in
+# ``software_engineering_team.shared.review_result_cache``, imported above
+# (also used by security_agent's analogous cache); this module supplies only
+# its own namespace stem, env var, capacity default, and output model.
+# Backed by shared.cache (Redis, falls open to an in-process store). Base
+# stem; ``_review_cache_namespace()`` appends build id.
 DEFAULT_REVIEW_CACHE_SIZE = 256  # QA_REVIEW_CACHE_SIZE, floor 0
 _REVIEW_CACHE_NAMESPACE = "qa:review:v1"
 
 
 def _review_cache_namespace() -> str:
     """Shared-cache namespace for QA review results (includes build id)."""
-    from shared.cache import with_cache_build_id  # noqa: PLC0415
-
-    return with_cache_build_id(_REVIEW_CACHE_NAMESPACE)
+    return cache_namespace_for(_REVIEW_CACHE_NAMESPACE)
 
 
 def _review_cache_size() -> int:
@@ -76,7 +85,7 @@ def _review_cache_size() -> int:
           explicit or clamped-to 0 disables the cache — every ``run()`` call
           re-invokes the model, matching pre-cache behavior.
     """
-    return env_int("QA_REVIEW_CACHE_SIZE", DEFAULT_REVIEW_CACHE_SIZE, 0)
+    return cache_capacity_for("QA_REVIEW_CACHE_SIZE", DEFAULT_REVIEW_CACHE_SIZE)
 
 
 def clear_review_cache() -> None:
@@ -93,10 +102,7 @@ def clear_review_cache() -> None:
           forcing a cold review. Intended for tests and for callers that
           must force a cold review.
     """
-    try:
-        get_shared_cache(_review_cache_namespace()).clear()
-    except Exception:
-        logger.warning("QA: review cache clear failed", exc_info=True)
+    clear_review_cache_namespace(_CACHE_LABEL, lambda: get_shared_cache(_review_cache_namespace()))
 
 
 def _review_cache_key(input_data: QAInput, model_fp: str) -> str:
@@ -124,10 +130,7 @@ def _review_cache_key(input_data: QAInput, model_fp: str) -> str:
           resolved model changes, and is stable (``sort_keys``) across calls
           in a process, so a byte-identical resubmission is recognized.
     """
-    payload = input_data.model_dump(mode="json")
-    payload["__model__"] = model_fp
-    body = json.dumps(payload, sort_keys=True)
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+    return build_review_cache_key(input_data, model_fp)
 
 
 class QAExpertAgent:
@@ -197,35 +200,13 @@ class QAExpertAgent:
         if capacity > 0:
             cache_key = _review_cache_key(input_data, model_fingerprint(self._model))
             cache = get_shared_cache(_review_cache_namespace())
-            # shared.cache is fail-open, but keep an explicit local guard so a
-            # misbehaving backend / unexpected raise never aborts the review
-            # (mirrors code_review_agent.coordinator's submission cache).
-            try:
-                raw = cache.get(cache_key)
-            except Exception:
-                logger.warning("QA: review cache get failed; treating as miss", exc_info=True)
-                raw = None
-            if raw is not None:
-                try:
-                    cached_result = QAOutput.model_validate_json(raw)
-                except Exception:
-                    logger.warning(
-                        "QA: corrupt review cache entry for %s; treating as miss",
-                        cache_key,
-                        exc_info=True,
-                    )
-                    try:
-                        cache.delete(cache_key)
-                    except Exception:
-                        logger.warning(
-                            "QA: review cache delete failed after corrupt entry", exc_info=True
-                        )
-                else:
-                    logger.info(
-                        "QA: review cache hit; skipping LLM call (approved=%s)",
-                        cached_result.approved,
-                    )
-                    return cached_result
+            cached_result = get_cached_review_result(_CACHE_LABEL, cache, cache_key, QAOutput)
+            if cached_result is not None:
+                logger.info(
+                    "QA: review cache hit; skipping LLM call (approved=%s)",
+                    cached_result.approved,
+                )
+                return cached_result
 
         user_prompt = self._build_user_prompt(input_data)
 
@@ -297,19 +278,8 @@ class QAExpertAgent:
         )
 
         if cache_key is not None and not is_fallback:
-            payload = result.model_dump_json().encode("utf-8")
-            try:
-                get_shared_cache(_review_cache_namespace()).set(
-                    cache_key, payload, max_entries=capacity
-                )
-            except Exception:
-                logger.warning(
-                    "QA: review cache set failed; continuing without cache write", exc_info=True
-                )
-            else:
-                logger.info(
-                    "QA: cached review result under key=%s (bytes=%d)", cache_key, len(payload)
-                )
+            cache = get_shared_cache(_review_cache_namespace())
+            set_cached_review_result(_CACHE_LABEL, cache, cache_key, result, capacity=capacity)
 
         return result
 

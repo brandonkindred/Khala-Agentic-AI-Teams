@@ -17,27 +17,11 @@ from llm_service.interface import (
     LLMTemporaryError,
     LLMTruncatedError,
 )
+from llm_service.tests._fakes import _FakeStreamCtx, _text_message
 
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
-
-
-class _FakeStreamCtx:
-    def __init__(self, message=None, exc=None):
-        self._message = message
-        self._exc = exc
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_a):
-        return False
-
-    def get_final_message(self):
-        if self._exc is not None:
-            raise self._exc
-        return self._message
 
 
 class _FakeMessages:
@@ -54,27 +38,6 @@ class _FakeMessages:
 class _FakeClient:
     def __init__(self, ctx, capture):
         self.messages = _FakeMessages(ctx, capture)
-
-
-def _text_message(
-    text,
-    *,
-    stop_reason="end_turn",
-    input_tokens=11,
-    output_tokens=7,
-    cache_read_input_tokens=None,
-    cache_creation_input_tokens=None,
-):
-    usage_kwargs = {"input_tokens": input_tokens, "output_tokens": output_tokens}
-    if cache_read_input_tokens is not None:
-        usage_kwargs["cache_read_input_tokens"] = cache_read_input_tokens
-    if cache_creation_input_tokens is not None:
-        usage_kwargs["cache_creation_input_tokens"] = cache_creation_input_tokens
-    return SimpleNamespace(
-        content=[SimpleNamespace(type="text", text=text)],
-        stop_reason=stop_reason,
-        usage=SimpleNamespace(**usage_kwargs),
-    )
 
 
 def _tool_message(name, tool_input, *, tool_id="toolu_1"):
@@ -764,6 +727,60 @@ def test_telemetry_recorded_with_cache_tokens():
     rec = calls[-1]
     assert rec["cache_read_tokens"] == 500
     assert rec["cache_creation_tokens"] == 200
+
+
+def test_repeated_call_with_identical_cache_breakpoint_prefix_hits_cache_without_changing_output():
+    """Two chat() calls with the identical CacheBreakpoint-marked system
+    prefix + identical user turn: the wire payload sent is byte-identical
+    both times (a genuine repeat, not two arbitrary calls); the returned
+    completion text is identical regardless of whether the call was
+    cache-served (AC: "no output change for identical inputs"); and the
+    second call's telemetry record carries a non-zero cache_read_tokens
+    (AC: "non-zero cache_read on a repeated identical prefix")."""
+    from llm_service import telemetry
+    from llm_service.cache_breakpoint import CacheBreakpoint
+
+    telemetry.clear_call_log()
+    messages = [
+        {
+            "role": "system",
+            "content": [CacheBreakpoint("stable spec excerpt"), "\n\ntrailer"],
+        },
+        {"role": "user", "content": "hi"},
+    ]
+
+    # First call: simulated cache write (miss -> populates the cache).
+    client, capture = _make_client(
+        _text_message("hi there", cache_read_input_tokens=0, cache_creation_input_tokens=200)
+    )
+    first_out = client.chat(messages, objective="t", response_format="text")
+    # Snapshot before the next call clears/rewrites `capture`.
+    first_system = capture["system"]
+
+    # Second call, same client/messages: simulated cache hit.
+    client._client = _FakeClient(
+        _FakeStreamCtx(
+            message=_text_message(
+                "hi there", cache_read_input_tokens=500, cache_creation_input_tokens=0
+            )
+        ),
+        capture,
+    )
+    second_out = client.chat(messages, objective="t", response_format="text")
+    second_system = capture["system"]
+
+    # No output change for identical inputs, cache-served or not.
+    assert first_out == second_out == "hi there"
+    # Proves it's a genuine repeat: identical wire payload both times.
+    assert first_system == second_system
+
+    calls = telemetry.get_recent_calls()
+    rec1, rec2 = calls[-2], calls[-1]
+    assert rec1["cache_creation_tokens"] == 200
+    assert rec1["cache_read_tokens"] == 0
+    # Non-zero cache_read on the repeated identical prefix.
+    assert rec2["cache_read_tokens"] == 500
+    assert rec2["cache_creation_tokens"] == 0
 
 
 def test_complete_requires_objective():
