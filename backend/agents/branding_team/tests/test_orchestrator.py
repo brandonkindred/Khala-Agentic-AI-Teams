@@ -1046,14 +1046,6 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
     ]
     voice_leaf = _phase1_leaf_node(
         WritingGuidelinesOutput(
-            **_story,
-            brand_archetypes=_archetypes,
-            tagline="Ship brand with the product",
-            tagline_rationale="Ties cohesion to shipping speed.",
-            elevator_pitches=_pitches,
-            messaging_framework=_pillars,
-            audience_message_maps=_maps,
-            persona_profiles=_personas,
             writing_guidelines=WritingGuidelinesBody(
                 voice_principles=["Confident", "Human", "Concrete"],
                 style_dos=["Lead with outcome", "Use active voice", "Name the audience"],
@@ -1064,13 +1056,9 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
     )
     nested_results = {
         "Storyteller": _phase1_leaf_node(BrandStoryOutput(**_story)),
-        "ArchetypeAnalyst": _phase1_leaf_node(
-            BrandArchetypesOutput(**_story, brand_archetypes=_archetypes)
-        ),
+        "ArchetypeAnalyst": _phase1_leaf_node(BrandArchetypesOutput(brand_archetypes=_archetypes)),
         "TaglineWriter": _phase1_leaf_node(
             TaglineOutput(
-                **_story,
-                brand_archetypes=_archetypes,
                 tagline="Ship brand with the product",
                 tagline_rationale="Ties cohesion to shipping speed.",
                 elevator_pitches=_pitches,
@@ -1078,27 +1066,11 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
         ),
         "MessageMapper": _phase1_leaf_node(
             MessagingFrameworkOutput(
-                **_story,
-                brand_archetypes=_archetypes,
-                tagline="Ship brand with the product",
-                tagline_rationale="Ties cohesion to shipping speed.",
-                elevator_pitches=_pitches,
                 messaging_framework=_pillars,
                 audience_message_maps=_maps,
             )
         ),
-        "PersonaBuilder": _phase1_leaf_node(
-            PersonaProfilesOutput(
-                **_story,
-                brand_archetypes=_archetypes,
-                tagline="Ship brand with the product",
-                tagline_rationale="Ties cohesion to shipping speed.",
-                elevator_pitches=_pitches,
-                messaging_framework=_pillars,
-                audience_message_maps=_maps,
-                persona_profiles=_personas,
-            )
-        ),
+        "PersonaBuilder": _phase1_leaf_node(PersonaProfilesOutput(persona_profiles=_personas)),
         "VoicePrinciplesDrafter": voice_leaf,
     }
 
@@ -1140,154 +1112,15 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
     ]
 
 
-def test_extract_phase_output_phase2_prefers_upstream_owned_fields() -> None:
-    """Later carry-forward dumps must not overwrite earlier specialists' fields.
-
-    A real LLM may rewrite inherited ``brand_story`` when Voice emits its
-    cumulative payload; merge keeps Storyteller's authoritative value.
-    """
-    _story = dict(
-        brand_story="Authoritative origin from Storyteller.",
-        hero_narrative="Authoritative hero from Storyteller.",
-        boilerplate_variants=["short bio", "medium bio", "long bio"],
-    )
-    _rewritten = dict(
-        brand_story="Rewritten by VoicePrinciplesDrafter.",
-        hero_narrative="Rewritten hero.",
-        boilerplate_variants=["v-short", "v-medium", "v-long"],
-    )
-    _archetypes = [
-        BrandArchetypeOutput(
-            archetype="The Creator",
-            rationale="Inventive.",
-            personality_traits=["Imaginative", "Original"],
-        )
-    ]
-    _pitches = [
-        ElevatorPitchOutput(tier="5-second", pitch="a"),
-        ElevatorPitchOutput(tier="30-second", pitch="b"),
-        ElevatorPitchOutput(tier="2-minute", pitch="c"),
-    ]
-    _pillars = [
-        MessagingPillarOutput(
-            pillar="Cohesion", key_message="One voice everywhere.", proof_points=["Style guide"]
-        ),
-        MessagingPillarOutput(
-            pillar="Speed", key_message="Ship weekly.", proof_points=["Release cadence"]
-        ),
-        MessagingPillarOutput(
-            pillar="Clarity", key_message="Say it simply.", proof_points=["Plain-language copy"]
-        ),
-    ]
-    _maps = [
-        AudienceMessageMapOutput(
-            audience_segment="Enterprise product leaders",
-            primary_message="Ship on-brand, faster.",
-            supporting_messages=["Consistent across every touchpoint"],
-            tone_adjustments="Confident, outcome-focused",
-        )
-    ]
-    _personas = [
-        PersonaProfileOutput(
-            name="Alex Rivera",
-            role="VP of Product",
-            demographics="35-44, urban, enterprise SaaS",
-            psychographics="Outcome-driven, skeptical of hype",
-            goals=["Ship cohesive experiences"],
-            frustrations=["Inconsistent brand touchpoints"],
-            media_habits=["Industry newsletters"],
-            jobs_to_be_done=["Align teams on brand voice"],
-        ),
-        PersonaProfileOutput(
-            name="Jordan Lee",
-            role="Head of Marketing",
-            demographics="28-34, remote, mid-market",
-            psychographics="Data-driven, values clarity",
-            goals=["Grow brand recall"],
-            frustrations=["Fragmented messaging"],
-            media_habits=["Design newsletters"],
-            jobs_to_be_done=["Brief agencies quickly"],
-        ),
-    ]
-    guidelines = WritingGuidelinesBody(
-        voice_principles=["Confident", "Human", "Concrete"],
-        style_dos=["Lead with outcome", "Use active voice", "Name the audience"],
-        style_donts=["Empty superlatives", "Bury the offer", "Mix slang with claims"],
-        editorial_quality_bar=["States who it's for", "Cites proof", "Matches tone"],
-    )
-    nested_results = {
-        "Storyteller": _phase1_leaf_node(BrandStoryOutput(**_story)),
-        "ArchetypeAnalyst": _phase1_leaf_node(
-            BrandArchetypesOutput(**_rewritten, brand_archetypes=_archetypes)
-        ),
-        "TaglineWriter": _phase1_leaf_node(
-            TaglineOutput(
-                **_rewritten,
-                brand_archetypes=_archetypes,
-                tagline="Ship brand with the product",
-                tagline_rationale="Ties cohesion to shipping speed.",
-                elevator_pitches=_pitches,
-            )
-        ),
-        "MessageMapper": _phase1_leaf_node(
-            MessagingFrameworkOutput(
-                **_rewritten,
-                brand_archetypes=_archetypes,
-                tagline="Ship brand with the product",
-                tagline_rationale="Ties cohesion to shipping speed.",
-                elevator_pitches=_pitches,
-                messaging_framework=_pillars,
-                audience_message_maps=_maps,
-            )
-        ),
-        "PersonaBuilder": _phase1_leaf_node(
-            PersonaProfilesOutput(
-                **_rewritten,
-                brand_archetypes=_archetypes,
-                tagline="Ship brand with the product",
-                tagline_rationale="Ties cohesion to shipping speed.",
-                elevator_pitches=_pitches,
-                messaging_framework=_pillars,
-                audience_message_maps=_maps,
-                persona_profiles=_personas,
-            )
-        ),
-        "VoicePrinciplesDrafter": _phase1_leaf_node(
-            WritingGuidelinesOutput(
-                **_rewritten,
-                brand_archetypes=_archetypes,
-                tagline="Ship brand with the product",
-                tagline_rationale="Ties cohesion to shipping speed.",
-                elevator_pitches=_pitches,
-                messaging_framework=_pillars,
-                audience_message_maps=_maps,
-                persona_profiles=_personas,
-                writing_guidelines=guidelines,
-            )
-        ),
-    }
-
-    inner_multi_result = MagicMock()
-    inner_multi_result.results = nested_results
-    node_result = MagicMock()
-    node_result.result = inner_multi_result
-    node_result.get_agent_results.return_value = [
-        node.get_agent_results.return_value[0] for node in nested_results.values()
-    ]
-    mock_result = MagicMock()
-    mock_result.result = {"phase2_narrative": node_result}
-
-    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
-        mock_result, "phase2_narrative", NarrativeMessagingOutput
-    )
-
-    assert degraded is False
-    assert output.brand_story == "Authoritative origin from Storyteller."
-    assert output.hero_narrative == "Authoritative hero from Storyteller."
-    assert output.boilerplate_variants == ["short bio", "medium bio", "long bio"]
-    assert [a.archetype for a in output.brand_archetypes] == ["The Creator"]
-    assert output.tagline == "Ship brand with the product"
-    assert output.writing_guidelines.voice_principles == ["Confident", "Human", "Concrete"]
+# NOTE (Story 5b Step 1): test_extract_phase_output_phase2_prefers_upstream_owned_fields
+# was removed here. Its premise -- a downstream specialist's cumulative payload
+# re-emitting (and potentially rewriting) an earlier specialist's field, with
+# prefer_first ensuring the earlier value wins -- is no longer representable now
+# that each Phase 2 specialist's structured_output model contains only its own
+# fields (e.g. BrandArchetypesOutput can no longer carry a brand_story key at
+# all). The prefer_first mechanic itself is unchanged and is still covered
+# directly at the _apply_fragment level by
+# test_apply_fragment_flat_prefer_first_keeps_existing.
 
 
 def test_extract_phase_output_rejects_incomplete_phase2_fragments() -> None:
