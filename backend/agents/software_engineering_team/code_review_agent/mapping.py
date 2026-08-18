@@ -281,7 +281,8 @@ def _is_infra_failure(exc: BaseException) -> bool:
 # degraded to a not-reviewed finding. Any other exception is treated as an
 # unexpected defect and fails closed. ``json.JSONDecodeError`` is retained
 # defensively: no current call path raises it directly anymore (the chunk
-# reviewer now routes through ``llm_service.complete_validated``, which raises
+# reviewer now routes through ``run_agent_via_reasoning`` and
+# ``chunk_reviewer._parse_chunk_review_response``, which raise
 # ``LLMJsonParseError`` or ``LLMSchemaValidationError`` instead), but any future
 # bare ``json.loads`` reachable from this call chain would still classify
 # correctly here. ``LLMTruncatedError``

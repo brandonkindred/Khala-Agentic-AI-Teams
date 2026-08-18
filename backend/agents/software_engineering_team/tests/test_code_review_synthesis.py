@@ -15,11 +15,11 @@ back to concatenation when it returns ``None``.
 from __future__ import annotations
 
 import json
-import threading
 from typing import Any, Dict
 
 import pytest
 from code_review_agent import coordinator as coordinator_mod
+from code_review_agent.chunk_reviewer import CODE_TO_REVIEW_HEADER
 from code_review_agent.coordinator import run_coordinator
 from code_review_agent.models import CodeReviewInput, CodeReviewIssue
 from code_review_agent.synthesis import (
@@ -243,17 +243,6 @@ class _RecordingClient(DummyLLMClient):
 
 def _is_format_pass_prompt(prompt: str) -> bool:
     return "Convert the following analysis" in prompt or "--- ANALYSIS" in prompt
-
-
-def _last_reasoning_prompt() -> str:
-    return getattr(_REASONING_PROMPT_LOCAL, "value", "")
-
-
-def _set_last_reasoning_prompt(prompt: str) -> None:
-    _REASONING_PROMPT_LOCAL.value = prompt
-
-
-_REASONING_PROMPT_LOCAL = threading.local()
 
 
 def test_synthesize_forwards_per_pass_spec_notes_into_prompt() -> None:
@@ -626,11 +615,21 @@ def _two_chunk_files() -> Dict[str, str]:
 
 
 class _NoNotesClient(DummyLLMClient):
-    """Per-chunk summaries; synthesis format pass yields an empty summary → None."""
+    """Per-chunk summaries; synthesis format pass yields an empty summary → None.
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        _set_last_reasoning_prompt(prompt)
-        return "Structured prose chunk review."
+    Chunk review's reasoning pass and synthesis's reasoning pass both land on
+    ``complete_json`` now (``DummyLLMClient.chat()`` always delegates there,
+    for both ``response_format="text"``/reasoning and
+    ``response_format="json"``/formatting calls). Chunk review's reasoning
+    prompt carries ``CODE_TO_REVIEW_HEADER`` plus a "### <path> ###" chunk
+    header; the reasoning-pass reply echoes that path into its prose so the
+    paired formatting-pass call -- whose prompt wraps this same prose inside
+    the "--- ANALYSIS" delimiters -- can identify which chunk it is
+    formatting by content alone. This avoids depending on call order or
+    thread-local state: the reasoning call's actual model invocation runs via
+    ``asyncio.to_thread`` inside the Strands ``Agent``, which is not
+    guaranteed to be the same OS thread that later makes the formatting call.
+    """
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Any:
         if _is_format_pass_prompt(prompt):
@@ -641,30 +640,41 @@ class _NoNotesClient(DummyLLMClient):
                 and '"approved"' not in lower
             ):
                 return {"summary": "", "spec_compliance_notes": "ignored"}
-            last = _last_reasoning_prompt()
-            if "### a.py ###" in last:
+            if "a.py" in prompt:
                 return {
                     "approved": True,
                     "issues": [],
                     "summary": "alpha summary",
                     "spec_compliance_notes": "",
                 }
-            if "### b.py ###" in last:
+            if "b.py" in prompt:
                 return {
                     "approved": True,
                     "issues": [],
                     "summary": "beta summary",
                     "spec_compliance_notes": "",
                 }
+            raise AssertionError(
+                f"unexpected format-pass prompt in _NoNotesClient: {prompt[:200]!r}"
+            )
+        if CODE_TO_REVIEW_HEADER in prompt:
+            if "### a.py ###" in prompt:
+                return "Structured prose chunk review for a.py."
+            if "### b.py ###" in prompt:
+                return "Structured prose chunk review for b.py."
+            return "Structured prose chunk review."
         return "Structured prose synthesis."
 
 
 class _SynthOkClient(DummyLLMClient):
-    """One chunk flags a critical issue; synthesis format pass returns clean prose."""
+    """One chunk flags a critical issue; synthesis format pass returns clean prose.
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        _set_last_reasoning_prompt(prompt)
-        return "Structured prose chunk review."
+    See ``_NoNotesClient`` for why both reasoning passes now land on
+    ``complete_json`` and are routed by content (the reasoning pass echoes
+    the chunk's path into its prose; the formatting pass reads it back out of
+    the analysis-wrapped prompt) rather than by overriding ``complete`` or
+    keying off thread-local state.
+    """
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Any:
         if _is_format_pass_prompt(prompt):
@@ -678,8 +688,7 @@ class _SynthOkClient(DummyLLMClient):
                     "summary": "SYNTHESIZED SUMMARY",
                     "spec_compliance_notes": "SYNTHESIZED NOTES",
                 }
-            last = _last_reasoning_prompt()
-            if "### a.py ###" in last:
+            if "a.py" in prompt:
                 return {
                     "approved": False,
                     "issues": [
@@ -694,13 +703,22 @@ class _SynthOkClient(DummyLLMClient):
                     "summary": "alpha",
                     "spec_compliance_notes": "",
                 }
-            if "### b.py ###" in last:
+            if "b.py" in prompt:
                 return {
                     "approved": True,
                     "issues": [],
                     "summary": "beta",
                     "spec_compliance_notes": "",
                 }
+            raise AssertionError(
+                f"unexpected format-pass prompt in _SynthOkClient: {prompt[:200]!r}"
+            )
+        if CODE_TO_REVIEW_HEADER in prompt:
+            if "### a.py ###" in prompt:
+                return "Structured prose chunk review for a.py."
+            if "### b.py ###" in prompt:
+                return "Structured prose chunk review for b.py."
+            return "Structured prose chunk review."
         return "Structured prose synthesis."
 
 

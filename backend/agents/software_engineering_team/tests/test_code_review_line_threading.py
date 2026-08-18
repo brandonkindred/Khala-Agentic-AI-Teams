@@ -8,7 +8,6 @@ powers inline PR review comments downstream.
 
 from __future__ import annotations
 
-import threading
 from typing import Any, Dict, List, Optional
 
 from code_review_agent import CodeReviewAgent
@@ -187,28 +186,41 @@ def test_split_segments_cite_absolute_prefixed_lines() -> None:
     content = "\n".join(f"line {i:05d}".ljust(40, "x") for i in range(1, 1_001))  # ~41K chars
 
     class _CiteFirstPrefixed(DummyLLMClient):
-        """Cites the first original-line prefix found in the chunk prompt."""
+        """Cites the first original-line prefix found in the chunk prompt.
 
-        def __init__(self) -> None:
-            super().__init__()
-            self._tls = threading.local()
+        ``run_agent_via_reasoning`` runs the reasoning pass through a real
+        Strands ``Agent`` on a worker thread, whose ``chat()`` unconditionally
+        delegates to ``complete_json`` for both ``response_format="text"``
+        (reasoning) and ``"json"`` (formatting) -- so both passes land here
+        instead of on ``complete``, and each may run on a different thread
+        (ruling out a thread-local to correlate them). The two are
+        distinguished by the ``--- ANALYSIS`` marker
+        ``wrap_with_analysis_delimiters`` injects into the formatting-pass
+        prompt only. Correlation instead rides in the reasoning pass's own
+        prose reply: returning a bare ``cited_line=<N>`` string (rather than a
+        dict) short-circuits ``chat()``'s ``json.dumps`` for text mode, so
+        that literal string becomes the reasoning ``Agent``'s output, which
+        ``wrap_with_analysis_delimiters`` then embeds verbatim in the
+        formatting-pass prompt for this same chunk -- reachable there with a
+        plain regex, no shared mutable state required.
+        """
 
-        def complete(self, prompt: str, **kwargs: Any) -> str:
-            if CODE_TO_REVIEW_HEADER in prompt:
-                # This prompt is FileSegment.prompt_content (partial-segment
-                # rendering), which never carries a change-surface ``+``/``>``
-                # marker; the optional ``[+>]`` here only mirrors the
-                # production gutter parsers' tolerance and is not exercised.
-                m = _re.search(r"^[+>]?[ ]*(\d+)[:|] line", prompt, _re.M)
-                assert m is not None, "split segments must render prefixed lines"
-                self._tls.cited = int(m.group(1))
-            return super().complete(prompt, **kwargs)
-
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            cited = getattr(self._tls, "cited", None)
-            if cited is None:
+        def complete_json(self, prompt: str, **kwargs: Any) -> Any:
+            if "--- ANALYSIS" not in prompt:
+                if CODE_TO_REVIEW_HEADER in prompt:
+                    # This prompt is FileSegment.prompt_content (partial-segment
+                    # rendering), which never carries a change-surface ``+``/``>``
+                    # marker; the optional ``[+>]`` here only mirrors the
+                    # production gutter parsers' tolerance and is not exercised.
+                    m = _re.search(r"^[+>]?[ ]*(\d+)[:|] line", prompt, _re.M)
+                    assert m is not None, "split segments must render prefixed lines"
+                    return f"cited_line={m.group(1)}"
                 return super().complete_json(prompt, **kwargs)
-            self._tls.cited = None
+
+            m = _re.search(r"cited_line=(\d+)", prompt)
+            if m is None:
+                return super().complete_json(prompt, **kwargs)
+            cited = int(m.group(1))
             return {
                 "approved": False,
                 "issues": [
