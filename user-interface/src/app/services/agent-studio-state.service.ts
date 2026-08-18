@@ -63,6 +63,9 @@ export function handoffEquals(a: AgentStudioHandoffState, b: AgentStudioHandoffS
  *     drafts) and is cleared by `reset()`, a team change, and draft hydrate.
  *     `personaLiveRunStartedAtMs()` is cleared with it, as is
  *     `personaLiveRunEndedAtMs()`.
+ *   - `isDirty()` is `false` after `reset()` and after `markClean()`.
+ *   - `isDirty()` is `true` after `invalidateSavedSnapshot()` while any
+ *     handoff id is set.
  */
 @Injectable()
 export class AgentStudioStateService {
