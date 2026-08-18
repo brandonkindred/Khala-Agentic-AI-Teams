@@ -7,6 +7,7 @@ import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-cata
 import { AgentProvisioningPanelComponent } from '../agent-provisioning-panel/agent-provisioning-panel.component';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
+import { InlineBannerComponent } from '../../../shared/inline-banner/inline-banner.component';
 import { AgentStudioSlideOutComponent } from './agent-studio-slide-out/agent-studio-slide-out.component';
 import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-placeholder.component';
 
@@ -53,6 +54,7 @@ import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-place
     MatIconModule,
     AgentCatalogComponent,
     AgentProvisioningPanelComponent,
+    InlineBannerComponent,
     AgentStudioSlideOutComponent,
     AgentStudioStagePlaceholderComponent,
   ],

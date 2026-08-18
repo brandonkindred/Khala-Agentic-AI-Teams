@@ -43,7 +43,7 @@
       </div>
 
       @if (cloneError(); as message) {
-        <p class="error-text">{{ message }}</p>
+        <app-inline-banner variant="error" [message]="message" />
       }
 
       <app-agent-catalog (requestRun)="onSelectAgent($event)" />
@@ -87,7 +87,7 @@
         [handoff]="state.handoff()"
       />
       @if (saveError(); as message) {
-        <p class="error-text">{{ message }}</p>
+        <app-inline-banner variant="error" [message]="message" />
       }
       <div class="studio-build__substage-actions">
         <button
