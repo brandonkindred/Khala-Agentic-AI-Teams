@@ -19,6 +19,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from shared.dev_models.models import Task, TaskStatus, TaskType
+from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
+from software_engineering_team.backend_code_v2_team.orchestrator import BackendDevelopmentAgent
 from software_engineering_team.shared.phases.execution import ReviewDependencies
 from software_engineering_team.shared.stack_profile import StackProfile
 from software_engineering_team.shared.v2_models import Phase
@@ -31,7 +33,7 @@ from ._v2_config_fixtures import make_stack_profile as _make_stack_profile
 def _make_config(
     *,
     stack_profile: StackProfile | None = None,
-    tool_agent_kinds: frozenset = frozenset({"security", "testing_qa"}),
+    tool_agent_kinds: frozenset[str] = frozenset({"security", "testing_qa"}),
     extra_review_clause: str = "",
 ) -> V2TeamConfig:
     """Build a minimal V2TeamConfig for tests, defaulting to a synthetic StackProfile."""
@@ -314,14 +316,20 @@ class TestBackendConfigParity:
     """Proves ``ConfigDrivenV2DevelopmentAgent`` can faithfully hold
     ``backend_code_v2_team``'s real config values (mirroring
     ``test_v2_team_config.py::TestBackendParity``) without this base being
-    wired into that team's own ``orchestrator.py`` yet."""
+    wired into that team's own ``orchestrator.py`` yet.
+
+    Reads the real profile via ``BackendDevelopmentAgent.PROFILE`` (a public
+    class attribute of the team's public ``orchestrator`` module) rather than
+    backend_code_v2_team's private ``phases._profile`` submodule directly --
+    the identical live object either way (``orchestrator.py`` sets
+    ``PROFILE = PROFILE`` from that same import), so parity stays real
+    (no hardcoded copy to drift out of sync) without this shared test suite
+    reaching into another team's private internals.
+    """
 
     def _build(self) -> ConfigDrivenV2DevelopmentAgent:
-        from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-        from software_engineering_team.backend_code_v2_team.phases._profile import PROFILE
-
         config = V2TeamConfig(
-            stack_profile=PROFILE,
+            stack_profile=BackendDevelopmentAgent.PROFILE,
             tool_agent_kinds=frozenset(k.value for k in ToolAgentKind),
             extra_review_clause="",
         )
@@ -331,8 +339,6 @@ class TestBackendConfigParity:
         assert self._build().default_language == "python"
 
     def test_tool_agent_kinds_match_backend_enum(self):
-        from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-
         agent = self._build()
         assert agent.tool_agent_kinds == frozenset(k.value for k in ToolAgentKind)
 
@@ -340,6 +346,6 @@ class TestBackendConfigParity:
         assert self._build().build_task_requirements("Build it.") == "Build it."
 
     def test_conventions_for_java_matches_backend_profile(self):
-        from software_engineering_team.backend_code_v2_team.phases._profile import PROFILE
-
-        assert self._build().conventions_for("java") == PROFILE.conventions_for("java")
+        assert self._build().conventions_for(
+            "java"
+        ) == BackendDevelopmentAgent.PROFILE.conventions_for("java")
