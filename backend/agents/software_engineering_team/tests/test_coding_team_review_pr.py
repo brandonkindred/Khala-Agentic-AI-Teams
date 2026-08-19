@@ -920,10 +920,11 @@ class TestReviewEndpoint:
         )
 
     def test_review_summary_counts_findings_by_severity(self, review_app) -> None:
-        # Findings across several recognized severities, plus a pre-existing bug:
+        # Findings across several recognized severities, plus an off-diff bug:
         # severity matching is case-insensitive ("HIGH" folds into "high"), the
-        # pre-existing bug (excluded from the PR review) does not inflate the counts,
-        # and only non-zero levels are emitted. With every PR finding at a recognized
+        # off-diff bug on unchanged.py (not added/modified, and omission=False)
+        # is routed to a proposal and does not inflate the counts, and only
+        # non-zero levels are emitted. With every PR finding at a recognized
         # severity the invariant holds: the counts sum to total_issues.
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
@@ -943,7 +944,7 @@ class TestReviewEndpoint:
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
-        # Four PR findings counted (the pre-existing bug is excluded); zero levels
+        # Four PR findings counted (the off-diff bug is excluded); zero levels
         # (medium, low) are absent from the compact map.
         assert job["review_summary"]["total_issues"] == 4
         assert job["review_summary"]["severity_counts"] == {"critical": 1, "high": 2, "info": 1}
@@ -953,7 +954,7 @@ class TestReviewEndpoint:
             sum(job["review_summary"]["severity_counts"].values())
             == job["review_summary"]["total_issues"]
         )
-        # The pre-existing bug is excluded from the counts because it's routed to a
+        # The off-diff bug is excluded from the counts because it's routed to a
         # proposal, not silently dropped: it must show up there and never as any kind
         # of PR comment.
         proposals = job["review_summary"]["pending_issue_proposals"]
@@ -1073,7 +1074,7 @@ class TestReviewEndpoint:
         assert job["review_summary"]["file_comments"] == 2
         assert job["review_summary"]["comment_findings"] == 0
 
-    def test_off_diff_finding_without_tag_becomes_standalone_comment(self, review_app) -> None:
+    def test_off_diff_omission_becomes_standalone_comment(self, review_app) -> None:
         # A finding whose file is not in the PR diff, tagged omission=True (a
         # required add/modify this change left out): it stays an in-scope PR
         # finding under the change-map-driven gate. Since it cannot be anchored
@@ -1737,9 +1738,9 @@ class TestReviewEndpoint:
         # A single line rejected by GitHub (bad_lines) must not collapse the whole
         # review: the good lines stay inline and only the bad one is demoted to a
         # file-level comment. (Diff valid lines for a.py are {1, 2, 3}; line 3 is
-        # in-diff but still rejected by the fake client.) Line 3 is unchanged
-        # context, not an added line, so omission=True is what keeps it in-scope
-        # under the change-map-driven gate.
+        # unchanged context within the diff hunk but still rejected by the fake
+        # client.) Line 3 is not an added line, so omission=True is what keeps it
+        # in-scope under the change-map-driven gate.
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
                 _FakeReviewIssue("high", line=2, description="good line"),
@@ -1803,7 +1804,9 @@ class TestReviewEndpoint:
         assert job["review_summary"]["file_comments"] == 2
         assert job["review_summary"]["comment_findings"] == 0
 
-    def test_off_diff_finding_without_tag_becomes_standalone_not_inline(self, review_app) -> None:
+    def test_off_diff_finding_with_omission_tag_becomes_standalone_not_inline(
+        self, review_app
+    ) -> None:
         # A finding whose file is not in the diff, tagged omission=True: it
         # cannot be anchored to any diff location -- it must never be posted
         # line-anchored or file-level, but it must still be posted, as its own
@@ -2469,8 +2472,8 @@ class TestBugConditionExploration:
     """
 
     def test_leftover_finding_becomes_standalone_comment_not_misanchored(self, review_app) -> None:
-        """A finding whose file_path is NOT in the PR diff, and which the reviewer did
-        NOT tag pre_existing, is an in-scope PR finding (round 2): since it cannot be
+        """A finding whose file_path is NOT in the PR diff is an in-scope PR finding
+        (round 3) ONLY when the reviewer tags it omission=True: since it cannot be
         anchored to any diff location, it must be posted as its own standalone
         conversation comment naming its own file. It must NEVER be re-anchored as a
         file-level review comment against an unrelated changed file (the interim
@@ -2525,10 +2528,10 @@ class TestBugConditionExploration:
 
     def test_empty_file_path_finding_becomes_standalone_not_misanchored(self, review_app) -> None:
         """A finding with an empty or None file_path cannot resolve into the diff at
-        all, but (round 2) is still an in-scope PR finding absent an explicit
-        pre_existing tag: it must become its own standalone comment, never anchored
-        to the first changed file in the diff as a file-level comment, and never
-        silently dropped to a proposal.
+        all, but (round 3) is still an in-scope PR finding when tagged omission=True
+        (the change-map gate's structural signal): it must become its own standalone
+        comment, never anchored to the first changed file in the diff as a file-level
+        comment, and never silently dropped to a proposal.
 
         On code with EITHER now-fixed bug this test FAILS:
           - review_comments carries a subject_type="file" entry for the finding, OR
@@ -2571,10 +2574,11 @@ class TestBugConditionExploration:
         assert job["review_summary"]["pending_issue_proposals"] == []
 
     def test_multiple_leftovers_each_get_their_own_standalone_comment(self, review_app) -> None:
-        """Multiple findings whose files are not in the PR diff, without a
-        pre_existing tag, must each become their OWN standalone comment -- never
-        mis-anchored to the same first changed file, never merged into one comment,
-        and never silently dropped to a proposal.
+        """Multiple findings whose files are not in the PR diff, each tagged
+        omission=True to keep it in-scope under the change-map gate, must each
+        become their OWN standalone comment -- never mis-anchored to the same
+        first changed file, never merged into one comment, and never silently
+        dropped to a proposal.
 
         On code with EITHER now-fixed bug this test FAILS:
           - review_comments carries subject_type="file" entries for the findings, OR

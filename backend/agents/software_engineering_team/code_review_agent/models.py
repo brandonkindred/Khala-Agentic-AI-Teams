@@ -435,13 +435,15 @@ class CodeReviewIssue(BaseModel):
         default=False,
         description="True when this issue is a bug in code the change under review did NOT add or "
         "modify — a pre-existing defect in unrelated, unchanged code — rather than a defect the "
-        "change introduced. Documented in every profile's output schema, but only the PR-review "
-        "flow (api/pr_review.py) actually acts on it: a finding tagged true is routed to a "
-        "GitHub-issue proposal for a human to review instead of being posted as a PR comment, "
-        "unless the finding's own file/line proves it sits on a line this PR actually added (that "
-        "override, plus a finding naming a file outside this PR's diff entirely, are handled "
-        "deterministically — see api/pr_review.py::_partition_review_issues for why a missing "
-        "file/module is deliberately NOT treated as pre-existing). Default False.",
+        "change introduced. Documented in every profile's output schema, and produced by the "
+        "upstream scope-tagging pass (`_tag_review_issues_for_scope` / "
+        "`scope_filter.apply_scope_verification`) as a signal for downstream consumers, but the "
+        "PR-review posting gate (api/pr_review.py::_partition_review_issues) no longer consults "
+        "it directly: eligibility there is determined by `is_within_diff(changed_by_path)` and "
+        "`omission` alone, so a finding tagged true still posts as a PR comment when its own "
+        "file/line proves it sits on a line this PR actually added, while one on unchanged "
+        "context or a file outside this PR's diff becomes a GitHub-issue proposal regardless of "
+        "this tag. Default False.",
     )
     omission: bool = Field(
         default=False,
