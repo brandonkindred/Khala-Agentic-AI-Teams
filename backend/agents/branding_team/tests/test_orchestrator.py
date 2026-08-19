@@ -840,46 +840,6 @@ def test_trailing_unrelated_json_object_does_not_win_over_real_payload() -> None
     assert result.narrative_messaging.tagline == real_payload.tagline
 
 
-def test_extract_phase_output_uses_structured_output_when_present() -> None:
-    """Agents built with ``structured_output=`` populate ``AgentResult.structured_output``
-    rather than the message's text blocks; extraction must check that field before
-    falling back to text or it silently discards the agent's real output.
-
-    Uses an unrecognized node id (absent from ``_SPEC_BY_NODE_ID``) so the spec
-    lookup misses and extraction runs with ``spec=None`` -- every real phase now
-    declares a ``merge_fn``, so a recognized node id would try that first
-    instead of exercising this fallback. Calls the private
-    ``_extract_phase_output`` helper directly: the public ``run``/``run_phase``
-    APIs always go through a full graph invoke, which cannot isolate the
-    structured-output-vs-text branch without rebuilding the entire Strands
-    result shape around this one field.
-    """
-    agent_result = MagicMock()
-    agent_result.message = {"content": []}
-    agent_result.structured_output = PositioningOutput(
-        positioning_statement=(
-            "For enterprise product leaders who need cohesive digital experiences, "
-            "Northstar Labs is the hands-on partner that delivers clarity."
-        ),
-        brand_promise="Every customer touchpoint will feel cohesive, useful, and unmistakably aligned.",
-    )
-
-    node_result = MagicMock()
-    node_result.get_agent_results.return_value = [agent_result]
-
-    mock_result = MagicMock()
-    mock_result.result = {"unrecognized_node": node_result}
-
-    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
-        mock_result, "unrecognized_node", StrategicCoreOutput
-    )
-
-    assert degraded is False
-    assert isinstance(output, StrategicCoreOutput)
-    assert output.positioning_statement == agent_result.structured_output.positioning_statement
-    assert output.brand_promise == agent_result.structured_output.brand_promise
-
-
 def test_phase_spec_every_entry_declares_merge_fn() -> None:
     """All five phases now merge their fan-out fragments in Python (Phases 1-2
     always did; Phases 3-5 dropped their LLM compositors in stories 1a/1b/1c).
@@ -2370,21 +2330,8 @@ def test_locate_node_result_node_without_result_attr_returns_none() -> None:
     assert _locate_node_result(mock_result, "phase1_strategic_core") is None
 
 
-def test_extract_from_single_agent_prefers_structured_output() -> None:
-    """The last agent's typed ``structured_output`` is validated and returned."""
-    from branding_team.orchestrator import _extract_from_single_agent
-
-    core = _full_strategic_core()
-    node = _leaf_node_result(core)
-
-    parsed = _extract_from_single_agent(node, StrategicCoreOutput, None)
-
-    assert isinstance(parsed, StrategicCoreOutput)
-    assert parsed.positioning_statement == core.positioning_statement
-
-
 def test_extract_from_single_agent_falls_back_to_text() -> None:
-    """With no usable structured output, the last text block is parsed."""
+    """With no merge_fn match, the last agent's last text block is parsed."""
     from branding_team.orchestrator import _extract_from_single_agent
 
     core = _full_strategic_core()
@@ -2394,49 +2341,10 @@ def test_extract_from_single_agent_falls_back_to_text() -> None:
     node = MagicMock()
     node.get_agent_results.return_value = [agent_result]
 
-    parsed = _extract_from_single_agent(node, StrategicCoreOutput, None)
+    parsed = _extract_from_single_agent(node, StrategicCoreOutput)
 
     assert isinstance(parsed, StrategicCoreOutput)
     assert parsed.brand_promise == core.brand_promise
-
-
-def test_extract_from_single_agent_skips_structured_when_spec_disallows() -> None:
-    """When ``spec.merge_fn`` is set the structured field is ignored and
-    extraction falls through to text (here empty → None) -- a spec with a
-    merge_fn has multiple named children, so a lone agent's fragment must
-    never be accepted as the complete phase output."""
-    from branding_team.orchestrator import _extract_from_single_agent, _PhaseSpec
-
-    spec = _PhaseSpec(
-        builder_fn=lambda: None,
-        node_id="phase2_narrative",
-        model_cls=StrategicCoreOutput,
-        merge_fn=lambda *_: None,
-    )
-    node = _leaf_node_result(_full_strategic_core())  # message content is empty
-
-    assert _extract_from_single_agent(node, StrategicCoreOutput, spec) is None
-
-
-def test_extract_from_single_agent_checks_structured_when_spec_has_no_merge_fn() -> None:
-    """A present spec with no merge_fn (the documented "single-node phase with
-    no compositor" case) still allows the last agent's own structured_output
-    to be accepted -- ``spec is None`` is not the only path to this fallback;
-    ``spec.merge_fn is None`` is the real condition it stands in for."""
-    from branding_team.orchestrator import _extract_from_single_agent, _PhaseSpec
-
-    core = _full_strategic_core()
-    node = _leaf_node_result(core)
-    spec = _PhaseSpec(
-        builder_fn=lambda: None,
-        node_id="phase1_strategic_core",
-        model_cls=StrategicCoreOutput,
-    )  # merge_fn defaults to None
-
-    parsed = _extract_from_single_agent(node, StrategicCoreOutput, spec)
-
-    assert isinstance(parsed, StrategicCoreOutput)
-    assert parsed.positioning_statement == core.positioning_statement
 
 
 def test_extract_from_single_agent_no_agent_results_returns_none() -> None:
@@ -2446,7 +2354,7 @@ def test_extract_from_single_agent_no_agent_results_returns_none() -> None:
     node = MagicMock()
     node.get_agent_results.return_value = []
 
-    assert _extract_from_single_agent(node, StrategicCoreOutput, None) is None
+    assert _extract_from_single_agent(node, StrategicCoreOutput) is None
 
 
 def test_child_structured_output_valid_child() -> None:
