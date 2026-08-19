@@ -16,6 +16,7 @@ __all__ = [
     "_text_message",
     "_drain",
     "_SequentialFakeMessages",
+    "_build_claude_client",
     "_make_claude_client",
 ]
 
@@ -84,21 +85,48 @@ class _SequentialFakeMessages:
         return _FakeStreamCtx(message=self._messages.pop(0))
 
 
-def _make_claude_client(messages: List[Any]):
-    """Build a real ``ClaudeLLMClient`` wired to a scripted fake Anthropic SDK.
+def _build_claude_client(
+    messages_obj: Any, *, model: str = "claude-opus-4-8", api_key: str = "sk-test"
+):
+    """Build a real ``ClaudeLLMClient`` wired to a fake Anthropic SDK.
+
+    The single place every fake-Claude-client test double in this package
+    constructs its client: ``ClaudeLLMClient`` has no public constructor arg
+    for the underlying Anthropic SDK client, so callers inject one through
+    the private ``_client`` seam instead.
+
+    Preconditions:
+        ``messages_obj`` exposes a ``stream(**kwargs)`` method returning a
+        context manager whose ``get_final_message()`` yields the canned
+        Anthropic SDK response (e.g. ``_SequentialFakeMessages`` here, or
+        ``test_claude_client.py``'s ``_FakeMessages``) — i.e. the shape of
+        the real SDK client's ``.messages`` attribute.
 
     Postconditions:
-        Returns ``(client, fake_messages)``. ``client`` is a genuine
-        ``ClaudeLLMClient`` whose private Anthropic SDK handle has been
-        swapped for ``fake_messages`` (same private-seam injection as
-        ``test_claude_client.py``'s own client-construction helper —
-        ``ClaudeLLMClient`` has no public constructor arg for the underlying
-        SDK client), so every real code path (``chat``, ``complete_json``,
-        wire rendering, telemetry) runs unmodified against scripted replies.
+        Returns a genuine ``ClaudeLLMClient`` whose private Anthropic SDK
+        handle is an object exposing ``messages=messages_obj``, so every
+        real code path (``chat``, ``complete_json``, wire rendering,
+        telemetry) runs unmodified against ``messages_obj``'s scripted
+        replies.
     """
     from llm_service.clients.claude import ClaudeLLMClient
 
+    client = ClaudeLLMClient(model=model, api_key=api_key)
+    client._client = SimpleNamespace(messages=messages_obj)
+    return client
+
+
+def _make_claude_client(messages: List[Any]):
+    """Build a real ``ClaudeLLMClient`` wired to a scripted, sequential fake
+    Anthropic SDK -- one queued response per call, in order.
+
+    Postconditions:
+        Returns ``(client, fake_messages)`` via :func:`_build_claude_client`
+        (``client``) and ``_SequentialFakeMessages(messages)``
+        (``fake_messages``), so every real code path runs unmodified against
+        scripted replies and ``fake_messages.captured_calls`` records every
+        call's outgoing kwargs, in order.
+    """
     fake_messages = _SequentialFakeMessages(messages)
-    client = ClaudeLLMClient(model="claude-opus-4-8", api_key="sk-test")
-    client._client = SimpleNamespace(messages=fake_messages)
+    client = _build_claude_client(fake_messages)
     return client, fake_messages
