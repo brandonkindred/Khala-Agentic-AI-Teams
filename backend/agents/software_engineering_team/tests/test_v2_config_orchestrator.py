@@ -20,6 +20,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from shared.dev_models.models import Task, TaskStatus, TaskType
+
+# Transitional import, pending Step 3 (a separate, dependent issue): this
+# shared test suite reaches into backend_code_v2_team's public orchestrator
+# module only for TestBackendConfigParity's real-value fidelity check below.
+# Once Step 3 re-expresses backend_code_v2_team.orchestrator as a thin
+# instance of ConfigDrivenV2DevelopmentAgent, this parity class either moves
+# into that team's own test tree or is deleted as redundant with its tests.
 from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
 from software_engineering_team.backend_code_v2_team.orchestrator import BackendDevelopmentAgent
 from software_engineering_team.shared.phases.execution import ReviewDependencies
@@ -333,6 +340,14 @@ class TestBackendConfigParity:
     ``PROFILE = PROFILE`` from that same import), so parity stays real
     (no hardcoded copy to drift out of sync) without this shared test suite
     reaching into another team's private internals.
+
+    Deliberately narrow in scope: it checks fidelity to backend's *real*
+    values (which have no extra review clause and conventions only for
+    ``"java"``/``"_default"``), not general merge/delegation behavior --
+    that is already covered against synthetic configs by
+    ``TestBuildTaskRequirements`` and ``TestConfigDrivenAxes`` above.
+    Transitional pending Step 3 (see the import comment above); expected to
+    move or be deleted once that lands.
     """
 
     def _build(self) -> ConfigDrivenV2DevelopmentAgent:
@@ -357,3 +372,14 @@ class TestBackendConfigParity:
         assert self._build().conventions_for(
             "java"
         ) == BackendDevelopmentAgent.PROFILE.conventions_for("java")
+
+    def test_conventions_for_unlisted_language_falls_back_to_backend_default(self):
+        """Backend's real profile only defines ``java``/``_default`` -- a
+        language it doesn't list (e.g. ``python``) must still resolve through
+        the real profile's ``_default`` entry, not an empty/synthetic one."""
+        assert self._build().conventions_for(
+            "python"
+        ) == BackendDevelopmentAgent.PROFILE.conventions_for("python")
+        assert self._build().conventions_for(
+            "python"
+        ) == BackendDevelopmentAgent.PROFILE.conventions_for("_default")

@@ -80,26 +80,3 @@ def toml_has_section(text: str, header: str) -> bool:
             return False
         node = node[part]
     return True
-
-
-def merge_extra_requirements(base: str, extra: str) -> str:
-    """Merge an optional extra requirements clause into a base requirements string.
-
-    Single source of truth for the blank-line-separator-or-verbatim merge rule
-    shared by ``shared.v2_review.run_coordinator_llm_review``'s
-    ``extra_task_requirements`` handling and
-    ``shared.v2_orchestrator.ConfigDrivenV2DevelopmentAgent.build_task_requirements``,
-    so the two can no longer diverge on how a clause (e.g. frontend's
-    accessibility-verification note) gets appended.
-
-    Preconditions: ``base`` and ``extra`` are strings (either may be empty).
-    Postconditions: returns ``base`` unchanged when ``extra`` is ``""``;
-      otherwise returns ``extra`` appended after a blank-line separator when
-      ``base`` is non-empty, or ``extra`` verbatim when ``base`` is empty.
-      Pure; no side effects.
-    """
-    if not extra:
-        return base
-    if base:
-        return f"{base}\n\n{extra}"
-    return extra

@@ -80,7 +80,7 @@ from software_engineering_team.shared.review_progress import (
     call_code_review_agent,
 )
 from software_engineering_team.shared.security_service import is_blocking
-from software_engineering_team.shared.text_utils import merge_extra_requirements
+from software_engineering_team.shared.task_utils import merge_extra_requirements
 from software_engineering_team.shared.v2_models import Phase, ReviewIssue, ReviewResult
 
 logger = logging.getLogger(__name__)

@@ -38,8 +38,8 @@ from llm_service import LLMClient
 from shared.repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
 from software_engineering_team.shared.stack_profile import StackProfile
+from software_engineering_team.shared.task_utils import merge_extra_requirements
 from software_engineering_team.shared.team_lead_base import make_job_updater
-from software_engineering_team.shared.text_utils import merge_extra_requirements
 from software_engineering_team.shared.tool_agent_runners import build_tool_runners
 from software_engineering_team.shared.v2_models import MicrotaskReviewFailedError, Phase
 from software_engineering_team.shared.v2_team_config import V2TeamConfig
