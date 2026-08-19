@@ -13,7 +13,7 @@ never raises on malformed model output (it sanitizes instead).
 from __future__ import annotations
 
 import re
-from typing import List, Optional, Tuple
+from typing import List, Mapping, Optional, Tuple
 
 from software_engineering_team.shared.context_sizing import parse_env_int
 
@@ -474,6 +474,31 @@ def _coerce_bool(value: object) -> bool:
     return False
 
 
+def _coerce_scope_tags(item: Mapping[str, object]) -> Tuple[bool, bool]:
+    """Coerce and reconcile a raw finding dict's pre_existing/omission tags.
+
+    Single source of truth for the "omission wins" reconciliation shared by
+    every LLM-output coercion boundary that constructs a ``CodeReviewIssue``
+    from an untrusted raw dict (chunk-review, architecture-consistency,
+    side-effect-impact) -- mirrors ``_coerce_bool``'s existing role as a
+    shared coercion helper those same call sites already import, rather than
+    forking this reconciliation policy per call site.
+
+    Postconditions:
+        - Returns ``(pre_existing, omission)``, each coerced via
+          ``_coerce_bool`` (tolerating string encodings, defaulting False
+          when absent).
+        - When the raw dict tags both fields true (a self-contradictory
+          reply -- ``CodeReviewIssue`` rejects that combination via
+          ``_omission_implies_in_scope``), ``omission`` wins: the returned
+          ``pre_existing`` is forced ``False``, so a ``CodeReviewIssue``
+          built from this pair never trips that validator. Never raises.
+    """
+    omission = _coerce_bool(item.get("omission"))
+    pre_existing = False if omission else _coerce_bool(item.get("pre_existing"))
+    return pre_existing, omission
+
+
 def _validate_line(line: Optional[int], seg: Optional[FileSegment]) -> Optional[int]:
     """Validate a cited original-file line number against its segment.
 
@@ -506,17 +531,15 @@ def _issues_from_chunk_output(chunk: ReviewChunk, raw_issues: List[dict]) -> Lis
           set, strings coerced), so conversion never raises on malformed output.
         - ``line``/``start_line`` are original-file absolute and within the
           cited segment's range, or dropped (see ``_validate_line``).
-        - ``pre_existing`` reflects the LLM's optional per-issue tag (coerced via
-          ``_coerce_bool``); it defaults to False when the field is absent, so a
-          reviewer/gate that never emits it is unaffected.
-        - ``omission`` is likewise coerced via ``_coerce_bool`` from the LLM's
-          optional per-issue tag, defaulting to False when absent. When the
-          raw reply tags both ``omission`` and ``pre_existing`` true (a
-          self-contradictory reply -- ``CodeReviewIssue`` rejects that
-          combination via ``_omission_implies_in_scope``), ``omission`` wins:
-          the constructed issue carries ``pre_existing=False``, so this
-          boundary degrades a malformed reply to the more specific signal
-          instead of raising.
+        - ``pre_existing``/``omission`` are coerced and reconciled together via
+          ``_coerce_scope_tags`` (the single source of truth this coercion
+          boundary shares with ``architecture_consistency_pass._coerce_finding``
+          and ``side_effect_impact_pass._coerce_finding``): when the raw reply
+          tags both true (a self-contradictory reply -- ``CodeReviewIssue``
+          rejects that combination via ``_omission_implies_in_scope``),
+          ``omission`` wins and the constructed issue carries
+          ``pre_existing=False``, so this boundary degrades a malformed reply
+          to the more specific signal instead of raising.
         - An item whose ``suggestion`` is, in its entirety, a no-op phrasing
           (e.g. "No changes needed.") is dropped (see ``is_no_op_suggestion``):
           the reviewer's own suggested fix says there is nothing to do, so it
@@ -546,12 +569,7 @@ def _issues_from_chunk_output(chunk: ReviewChunk, raw_issues: List[dict]) -> Lis
         if category not in _VALID_CATEGORIES:
             category = "general"
         title = _clean_str(item.get("title"), "") or derive_issue_title(description)
-        # An omission is by definition in-scope (CodeReviewIssue enforces this via
-        # _omission_implies_in_scope) -- omission wins over a contradictory raw
-        # pre_existing tag so a malformed LLM reply degrades to the more specific
-        # signal instead of raising out of this defensively-coded boundary.
-        omission_flag = _coerce_bool(item.get("omission"))
-        pre_existing_flag = False if omission_flag else _coerce_bool(item.get("pre_existing"))
+        pre_existing_flag, omission_flag = _coerce_scope_tags(item)
         issues.append(
             CodeReviewIssue(
                 severity=severity,

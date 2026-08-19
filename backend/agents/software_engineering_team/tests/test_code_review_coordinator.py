@@ -3084,6 +3084,23 @@ def test_coerce_bool_recognizes_truthy_tokens_only() -> None:
     assert _coerce_bool(1) is False
 
 
+def test_coerce_scope_tags_reconciles_omission_and_pre_existing() -> None:
+    """_coerce_scope_tags is the single shared reconciliation helper for the
+    pre_existing/omission pair, used by chunking._issues_from_chunk_output,
+    architecture_consistency_pass._coerce_finding, and
+    side_effect_impact_pass._coerce_finding: each coerces via _coerce_bool,
+    and omission wins when both raw tags are true."""
+    from code_review_agent.chunking import _coerce_scope_tags
+
+    assert _coerce_scope_tags({}) == (False, False)
+    assert _coerce_scope_tags({"pre_existing": True}) == (True, False)
+    assert _coerce_scope_tags({"omission": True}) == (False, True)
+    # omission wins over a contradictory pre_existing tag.
+    assert _coerce_scope_tags({"pre_existing": True, "omission": True}) == (False, True)
+    # String encodings tolerated the same way _coerce_bool tolerates them.
+    assert _coerce_scope_tags({"pre_existing": "true", "omission": "yes"}) == (False, True)
+
+
 def test_validate_line_absolute_numbering_has_no_overlap_ambiguity() -> None:
     """Partial segments are rendered with original line-number prefixes, so a
     citation is absolute by construction: a segment whose absolute range

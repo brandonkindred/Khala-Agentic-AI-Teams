@@ -732,8 +732,10 @@ class ArchitectureConsistencyFindingLLM(BaseModel):
 
     Mirrors the fields ``architecture_consistency_pass._coerce_finding``
     actually populates on ``CodeReviewIssue`` — severity, category,
-    file_path, line, description, suggestion, and ``pre_existing`` — typed
-    as an enumerated schema in the same style as :class:`ChunkReviewIssueLLM`.
+    file_path, line, description, suggestion, ``pre_existing``, and
+    ``omission`` — typed as an enumerated schema in the same style as
+    :class:`ChunkReviewIssueLLM`. ``omission`` is also ``StrictBool`` and
+    enforced by this class's own ``_omission_implies_in_scope`` validator.
     Intentionally omits ``start_line``: that pass's own ``_coerce_finding``
     never populates it (its prompt's output format has no multi-line-anchor
     field). This is the intended shape for the merged prompt's Part 1 output
@@ -815,13 +817,16 @@ class SideEffectImpactFindingLLM(BaseModel):
 
     Mirrors the fields ``side_effect_impact_pass._coerce_finding`` actually
     populates on ``CodeReviewIssue`` — severity, category, file_path, line,
-    description, suggestion, and ``pre_existing``. ``pre_existing`` is
-    ``StrictBool`` here (matching :class:`ChunkReviewIssueLLM`'s rationale),
-    which is stricter than the current pass's ``chunking._coerce_bool``:
-    a bare numeric ``1``/``0`` or a string token is rejected at validation
-    time and drives ``complete_validated``'s corrective retry, rather than
-    being silently coerced to ``False`` (or a truthy string to ``True``) as
-    ``_coerce_bool`` does today. Intentionally omits ``start_line``: that
+    description, suggestion, ``pre_existing``, and ``omission``.
+    ``pre_existing`` is ``StrictBool`` here (matching
+    :class:`ChunkReviewIssueLLM`'s rationale), which is stricter than the
+    current pass's ``chunking._coerce_bool``: a bare numeric ``1``/``0`` or a
+    string token is rejected at validation time and drives
+    ``complete_validated``'s corrective retry, rather than being silently
+    coerced to ``False`` (or a truthy string to ``True``) as ``_coerce_bool``
+    does today. ``omission`` is likewise ``StrictBool`` and enforced by this
+    class's own ``_omission_implies_in_scope`` validator. Intentionally omits
+    ``start_line``: that
     pass's own ``_coerce_finding`` never populates it either (its prompt's
     output format has no multi-line-anchor field). This is the intended shape for the
     merged prompt's Part 2 output contract. The in-process merged pass currently

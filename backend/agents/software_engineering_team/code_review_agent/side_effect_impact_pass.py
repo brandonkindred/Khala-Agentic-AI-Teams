@@ -72,7 +72,7 @@ from llm_service import LLMClient
 from shared.env import env_flag_enabled
 from software_engineering_team.shared.llm import extract_json_from_response
 
-from .chunking import _coerce_bool
+from .chunking import _coerce_scope_tags
 from .false_positive_filter import CodebaseIndex, _build_tools, _code_fence_for, _make_call_tracker
 from .models import CodeReviewInput, CodeReviewIssue, coerce_line, is_no_op_suggestion
 from .profiles import ReviewProfile
@@ -435,22 +435,21 @@ def _coerce_finding(item: object) -> Optional[CodeReviewIssue]:
           -- see ``is_no_op_suggestion``. An unrecognized ``severity``
           defaults to ``"medium"`` rather than being dropped. Never raises on
           malformed input.
-        - ``pre_existing`` reflects the model's optional per-finding tag
-          (coerced via ``chunking._coerce_bool``, tolerating string
-          encodings), defaulting to ``False`` when absent -- mirrors
-          ``chunking._issues_from_chunk_output``'s identical convention, used
-          by the PR-review whole-file path to route a finding about code this
-          submission did NOT add or modify to a human-review proposal instead
-          of a blocking PR comment (see ``CodeReviewIssue.pre_existing``).
-        - ``omission`` is likewise coerced via ``chunking._coerce_bool`` from
-          the model's optional per-finding tag, defaulting to ``False`` when
-          absent (see ``CodeReviewIssue.omission``). When the raw finding
-          tags both ``omission`` and ``pre_existing`` true (a
-          self-contradictory reply -- ``CodeReviewIssue`` rejects that
-          combination via ``_omission_implies_in_scope``), ``omission``
-          wins: the constructed issue carries ``pre_existing=False``, so
-          this boundary degrades a malformed reply to the more specific
-          signal instead of raising.
+        - ``pre_existing``/``omission`` reflect the model's optional
+          per-finding tags, coerced and reconciled together via
+          ``chunking._coerce_scope_tags`` (the single source of truth this
+          coercion boundary shares with ``chunking._issues_from_chunk_output``
+          and ``architecture_consistency_pass._coerce_finding``) -- each
+          defaults to ``False`` when absent, used by the PR-review
+          whole-file path to route a finding about code this submission did
+          NOT add or modify to a human-review proposal instead of a
+          blocking PR comment (see ``CodeReviewIssue.pre_existing``). When
+          the raw finding tags both true (a self-contradictory reply --
+          ``CodeReviewIssue`` rejects that combination via
+          ``_omission_implies_in_scope``), ``omission`` wins: the
+          constructed issue carries ``pre_existing=False``, so this
+          boundary degrades a malformed reply to the more specific signal
+          instead of raising.
     """
     if not isinstance(item, dict):
         return None
@@ -466,8 +465,7 @@ def _coerce_finding(item: object) -> Optional[CodeReviewIssue]:
     severity = str(item.get("severity", "") or "").strip().lower()
     if severity not in _ALLOWED_SEVERITIES:
         severity = "medium"
-    omission_flag = _coerce_bool(item.get("omission"))
-    pre_existing_flag = False if omission_flag else _coerce_bool(item.get("pre_existing"))
+    pre_existing_flag, omission_flag = _coerce_scope_tags(item)
     return CodeReviewIssue(
         severity=severity,
         category=category,
