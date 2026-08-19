@@ -453,10 +453,10 @@ class CodeReviewIssue(BaseModel):
         "documented. Populated by chunk-review and auxiliary-pass coercion from the model's own "
         "tag (see `chunking._issues_from_chunk_output`, "
         "`architecture_consistency_pass._coerce_finding`, "
-        "`side_effect_impact_pass._coerce_finding`); not yet consumed by any routing/posting "
-        "logic — a future change to api/pr_review.py::_partition_review_issues is expected to "
-        "gate on this flag so an omission stays in-scope even when its file is outside the "
-        "diff. Default False.",
+        "`side_effect_impact_pass._coerce_finding`); consumed by "
+        "`api/pr_review.py::_partition_review_issues`, which treats an omission as always "
+        "in-scope regardless of diff membership, even when its file is outside the diff. "
+        "Default False.",
     )
 
     @model_validator(mode="after")
