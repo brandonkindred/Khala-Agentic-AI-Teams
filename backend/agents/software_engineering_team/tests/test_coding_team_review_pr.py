@@ -1100,7 +1100,9 @@ class TestReviewEndpoint:
         for review in gh.reviews:
             for c in review.get("comments", []):
                 assert "orphan" not in c.get("body", "")
-        # Posted as its own standalone comment naming its own file.
+        # Posted as its own standalone comment naming its own file. gh.comments
+        # entries are (pr_number, body) -- 7 is _review_body()'s default
+        # pr_number, not derived from the finding's line/file.
         assert len(gh.comments) == 1
         assert gh.comments[0][0] == 7
         assert "orphan" in gh.comments[0][1]
@@ -3093,12 +3095,17 @@ class TestPreservationProperties:
           2. Submit the in-diff finding TOGETHER with out-of-diff findings → capture
              the same in-diff finding's review comment shape.
           3. Assert the two shapes are identical (path, line/subject_type, side).
+          4. Assert each out-of-diff finding lands in its own standalone comment
+             and never leaks into the in-diff finding's review/file-level comments.
 
         This is the core Req 3.1/3.2 preservation invariant: adding out-of-diff
         findings to the list must not perturb the routing of in-diff ones. Every
         finding here is tagged omission=True so each stays in-scope under the
         change-map-driven gate regardless of which line/file it names -- the
-        property under test is routing SHAPE, not scope eligibility itself.
+        property under test is primarily routing SHAPE, not scope eligibility,
+        though step 4 does also assert the out-of-diff findings' own routing
+        outcome (standalone, never leaked) since that's what step 3's isolation
+        depends on.
         Validates: Requirements 3.1, 3.2
         """
         in_sev, in_line, in_path, in_desc = in_diff_spec
@@ -3184,7 +3191,14 @@ class TestPreservationProperties:
         # Each out-of-diff finding (tagged omission=True here) must appear
         # in at least one standalone conversation comment that names its file
         # when one is set, and never leak into the review/file-level comments
-        # checked above.
+        # checked above. Both checks use substring containment against the
+        # rendered comment body (not exact equality, since format_comment_body
+        # wraps the description in markdown); this is safe because, within
+        # each _PBT_D_CASES entry, the in-diff and out-of-diff descriptions
+        # are distinct and none is a substring of another (only the
+        # descriptions belonging to the SAME test run are ever compared, so
+        # collisions across different table entries don't matter) -- keep
+        # that property when extending this table.
         for issue in out_issues:
             path = issue.file_path or ""
             assert any(
