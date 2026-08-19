@@ -1132,13 +1132,16 @@ that do not stub the verifier keep their existing posting behavior. Set to
 
 ### CODE_REVIEW_SCOPE_LLM_PASS
 Removed: no code reads this flag any more. `api/pr_review.py::_partition_review_issues`'s
-posting gate is purely change-map-driven (`is_within_diff` against the PR's
-added/modified lines, plus the `omission` signal) — no LLM verdict, and no
-`pre_existing` tag from `CODE_REVIEW_SCOPE_FILTER` or elsewhere, is consulted
-when deciding whether a finding is posted. The batched classifier this flag
-used to gate (`code_review_agent/scope_classifier.py`'s `classify_scope`,
-via the `classify_issue_scope` provider method) still exists but currently
-has no caller.
+posting gate is purely change-map-driven: a finding posts when `is_within_diff`
+proves it sits on a line the PR actually added/modified, or it carries the
+`omission` signal, regardless of any LLM verdict or the `pre_existing` tag
+`CODE_REVIEW_SCOPE_FILTER` sets. Neither the tag nor a verdict can decide the
+outcome either way — a `pre_existing=true` finding on an added/modified line
+still posts (`is_within_diff` alone decides that), and an untagged finding on
+unchanged context or an untouched file still routes to a proposal. The batched
+classifier this flag used to gate (`code_review_agent/scope_classifier.py`'s
+`classify_scope`, via the `classify_issue_scope` provider method) still exists
+but currently has no caller.
 
 ### CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS
 Default-on toggle for the architecture-consistency / cross-codebase-redundancy
