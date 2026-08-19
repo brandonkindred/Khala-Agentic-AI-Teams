@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 import llm_service.clients.claude as _claude_mod
+from llm_client_fakes import _build_claude_client, _FakeStreamCtx, _text_message
 from llm_service.clients.claude import ClaudeLLMClient, _to_anthropic_tools
 from llm_service.interface import (
     LLMPermanentError,
@@ -17,7 +18,6 @@ from llm_service.interface import (
     LLMTemporaryError,
     LLMTruncatedError,
 )
-from llm_service.tests._fakes import _build_claude_client, _FakeStreamCtx, _text_message
 
 # ---------------------------------------------------------------------------
 # Fakes

@@ -20,11 +20,12 @@ from typing import Any, Dict, List
 
 import pytest
 
+from llm_client_fakes import _make_claude_client, _text_message
 from llm_service import telemetry
 from llm_service.cache_breakpoint import CacheBreakpoint
 from llm_service.interface import reset_complete_json_observer_state
 from llm_service.strands_adapter import LLMClientModel
-from llm_service.tests._fakes import _drain, _make_claude_client, _text_message
+from llm_service.tests._fakes import _drain
 
 
 @pytest.fixture(autouse=True)

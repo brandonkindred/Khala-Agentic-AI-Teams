@@ -30,14 +30,21 @@ import pytest
 from code_review_agent.chunk_reviewer import ChunkReviewAgent
 from code_review_agent.models import ChunkReviewInput
 
+from llm_client_fakes import _make_claude_client, _text_message
 from llm_service import telemetry
 from llm_service.interface import reset_complete_json_observer_state
 from llm_service.strands_adapter import LLMClientModel
-from llm_service.tests._fakes import _make_claude_client, _text_message
 
 
 @pytest.fixture(autouse=True)
 def _reset_state() -> None:
+    """Isolate each test's telemetry and JSON-observer state.
+
+    Precondition: none.
+    Postcondition: the telemetry call log is empty before the test runs, and
+    the ``complete_json`` observer's per-turn state is empty both before and
+    after, so no test leaks call records into the next.
+    """
     telemetry.clear_call_log()
     reset_complete_json_observer_state()
     yield
@@ -63,12 +70,25 @@ def _shared_context() -> Dict[str, Any]:
 
 
 def _chunk_input(code_chunk: str, file_path: str) -> ChunkReviewInput:
+    """Build one chunk's ``ChunkReviewInput``, sharing the run-wide context.
+
+    ``code_chunk``/``file_path`` vary per chunk; every other field comes from
+    :func:`_shared_context`, so two calls with different chunk args still
+    carry the identical shared prefix a real coordinator run would produce.
+    """
     return ChunkReviewInput(
         code_chunk=code_chunk, file_path_or_label=file_path, **_shared_context()
     )
 
 
 def _format_reply(summary: str) -> str:
+    """Return the formatting-pass JSON reply a canned ``_text_message`` carries.
+
+    Always ``approved=True`` with no issues, so it trivially satisfies
+    ``ChunkReviewLLMResponse``'s approval/issues consistency validator --
+    these tests assert on cache telemetry and output equality, not on
+    findings content.
+    """
     return json.dumps(
         {"approved": True, "issues": [], "summary": summary, "spec_compliance_notes": ""}
     )
