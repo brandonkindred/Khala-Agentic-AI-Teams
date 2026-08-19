@@ -1,14 +1,22 @@
 """Scope verification for code-review findings before PR comments are posted.
 
 The chunk reviewer and auxiliary passes often flag defects in unchanged
-context. Posting those as PR comments expands ticket scope. This pass tags
-findings the verifier cannot confidently call in-scope as ``pre_existing=True``
-so ``_partition_review_issues`` routes them to issue proposals instead of
-comments.
+context. This pass tags findings the verifier cannot confidently call
+in-scope as ``pre_existing=True``.
 
-Posting is fail-closed: unsure / missing / low-confidence verdicts are not
-posted. An *ungrounded* out-of-scope verdict is ignored so it cannot strip a
-real in-scope finding.
+Posting eligibility itself is decided independently, by
+``api.pr_review._partition_review_issues``'s change-map-driven gate
+(``is_within_diff`` against the PR's added/modified lines, plus the
+``omission`` signal) -- that gate no longer consults this pass's
+``pre_existing`` tag at all, so a finding tagged here can still post when it
+sits on a line the PR actually added, and one left untagged can still route
+to a proposal when it doesn't. The tag remains available as an upstream
+signal for other consumers.
+
+Tagging is fail-closed: an unsure / missing / low-confidence verdict tags
+``pre_existing=True`` rather than risk an unconfident finding masquerading
+as in-scope. An *ungrounded* out-of-scope verdict is ignored so it cannot
+strip a real in-scope finding.
 """
 
 from __future__ import annotations
