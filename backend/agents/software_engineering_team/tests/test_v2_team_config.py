@@ -16,29 +16,9 @@ import dataclasses
 
 import pytest
 
-from software_engineering_team.shared.stack_profile import StackProfile
 from software_engineering_team.shared.v2_team_config import V2TeamConfig
 
-
-def _make_stack_profile(
-    default_language: str = "python", conventions_by_language: dict | None = None
-) -> StackProfile:
-    """Minimal synthetic ``StackProfile`` for tests that don't need a real team's."""
-    return StackProfile(
-        name="test",
-        default_language=default_language,
-        planning_language_label="Language",
-        planning_progress_label="language",
-        conventions_by_language=conventions_by_language or {"_default": "PY"},
-        has_language_conventions=True,
-        build_verify_label="test_code_v2",
-        detect_language=lambda _p, _t: default_language,
-        repo_extensions=frozenset({".py"}),
-        repo_exclude_dirs=frozenset({".git"}),
-        repo_max_chars=1000,
-        detect_tooling=lambda _p: (True, True),
-    )
-
+from ._v2_config_fixtures import make_stack_profile as _make_stack_profile
 
 _CONFIG_KWARGS = dict(
     stack_profile=_make_stack_profile(),
@@ -50,6 +30,7 @@ _CONFIG_KWARGS = dict(
 def test_construction_round_trips_all_fields():
     """Every constructor argument is readable back off the instance unchanged."""
     config = V2TeamConfig(**_CONFIG_KWARGS)
+    assert config.stack_profile is _CONFIG_KWARGS["stack_profile"]
     assert config.stack_profile.default_language == "python"
     assert config.stack_profile.conventions_by_language == {"_default": "PY"}
     assert config.tool_agent_kinds == frozenset({"security", "testing_qa"})
