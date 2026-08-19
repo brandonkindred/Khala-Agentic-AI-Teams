@@ -3101,11 +3101,15 @@ class TestPreservationProperties:
         This is the core Req 3.1/3.2 preservation invariant: adding out-of-diff
         findings to the list must not perturb the routing of in-diff ones. Every
         finding here is tagged omission=True so each stays in-scope under the
-        change-map-driven gate regardless of which line/file it names -- the
-        property under test is primarily routing SHAPE, not scope eligibility,
-        though step 4 does also assert the out-of-diff findings' own routing
-        outcome (standalone, never leaked) since that's what step 3's isolation
-        depends on.
+        change-map-driven gate. Every _PBT_D_CASES out-of-diff spec names a file
+        entirely absent from valid_by_path (never "a.py", the only file in the
+        diff) -- never an off-diff LINE on an in-diff file, which routes to a
+        file-level comment instead (see PBT B) -- so step 4's standalone
+        assertion holds regardless of which line each out-of-diff spec names.
+        The property under test is primarily routing SHAPE, not scope
+        eligibility, though step 4 does also assert the out-of-diff findings'
+        own routing outcome (standalone, never leaked) since that's what step
+        3's isolation depends on.
         Validates: Requirements 3.1, 3.2
         """
         in_sev, in_line, in_path, in_desc = in_diff_spec
@@ -3250,10 +3254,12 @@ class TestFixedRunPrReview:
         mis-anchored to an unrelated changed file, and it is never silently
         dropped -- it is posted as its own standalone conversation comment.
 
-        A finding whose file_path is NOT in the PR diff (valid_by_path only
-        contains "a.py") cannot be anchored to any diff location, so it must
-        surface as a standalone comment naming its own file, not as a proposal
-        and not mis-anchored onto "a.py".
+        An omission=True finding whose file_path is NOT in the PR diff
+        (valid_by_path only contains "a.py") cannot be anchored to any diff
+        location, so it must surface as a standalone comment naming its own
+        file, not as a proposal and not mis-anchored onto "a.py". Without
+        omission=True, such a finding would instead be routed to
+        pending_issue_proposals as a pre-existing issue.
 
         Validates: Requirements 2.1, 2.2, 2.5
         """
