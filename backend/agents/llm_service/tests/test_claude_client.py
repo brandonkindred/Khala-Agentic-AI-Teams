@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 import llm_service.clients.claude as _claude_mod
+from llm_client_fakes import _build_claude_client, _FakeStreamCtx, _text_message
 from llm_service.clients.claude import ClaudeLLMClient, _to_anthropic_tools
 from llm_service.interface import (
     LLMPermanentError,
@@ -17,7 +18,6 @@ from llm_service.interface import (
     LLMTemporaryError,
     LLMTruncatedError,
 )
-from llm_service.tests._fakes import _FakeStreamCtx, _text_message
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -35,11 +35,6 @@ class _FakeMessages:
         return self._ctx
 
 
-class _FakeClient:
-    def __init__(self, ctx, capture):
-        self.messages = _FakeMessages(ctx, capture)
-
-
 def _tool_message(name, tool_input, *, tool_id="toolu_1"):
     return SimpleNamespace(
         content=[SimpleNamespace(type="tool_use", id=tool_id, name=name, input=tool_input)],
@@ -51,8 +46,9 @@ def _tool_message(name, tool_input, *, tool_id="toolu_1"):
 def _make_client(message=None, exc=None, *, model="claude-opus-4-8"):
     """Return (client, capture) with the Anthropic SDK call faked."""
     capture: dict = {}
-    client = ClaudeLLMClient(model=model, api_key="sk-test")
-    client._client = _FakeClient(_FakeStreamCtx(message=message, exc=exc), capture)
+    client = _build_claude_client(
+        _FakeMessages(_FakeStreamCtx(message=message, exc=exc), capture), model=model
+    )
     return client, capture
 
 
@@ -758,13 +754,15 @@ def test_repeated_call_with_identical_cache_breakpoint_prefix_hits_cache_without
     first_system = capture["system"]
 
     # Second call, same client/messages: simulated cache hit.
-    client._client = _FakeClient(
-        _FakeStreamCtx(
-            message=_text_message(
-                "hi there", cache_read_input_tokens=500, cache_creation_input_tokens=0
-            )
-        ),
-        capture,
+    client._client = SimpleNamespace(
+        messages=_FakeMessages(
+            _FakeStreamCtx(
+                message=_text_message(
+                    "hi there", cache_read_input_tokens=500, cache_creation_input_tokens=0
+                )
+            ),
+            capture,
+        )
     )
     second_out = client.chat(messages, objective="t", response_format="text")
     second_system = capture["system"]
@@ -1037,9 +1035,8 @@ def test_invoke_acquires_global_concurrency_gate(monkeypatch):
             return super().get_final_message()
 
     capture: dict = {}
-    client = ClaudeLLMClient(model="claude-opus-4-8", api_key="sk-test")
-    client._client = _FakeClient(
-        _RecordingStreamCtx(message=_text_message('{"ok": true}')), capture
+    client = _build_claude_client(
+        _FakeMessages(_RecordingStreamCtx(message=_text_message('{"ok": true}')), capture)
     )
 
     out = client.complete_json("q", objective="t")
