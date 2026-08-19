@@ -901,10 +901,13 @@ class BaseV2DevelopmentAgent:
         )
 
         # ── Deliver ─────────────────────────────────────────────────
-        # ``PROFILE`` is a concrete-subclass class attribute (Backend/FrontendDevelopmentAgent);
-        # absent on a bare ``BaseV2DevelopmentAgent`` (e.g. unit tests), where the labels are
-        # unused anyway since such callers also don't pass build_verifier/linting_tool_agent.
-        stack_profile = getattr(self, "PROFILE", None)
+        # ``_stack_profile()`` resolves the concrete class-level ``PROFILE``
+        # (Backend/FrontendDevelopmentAgent) or, for
+        # ``ConfigDrivenV2DevelopmentAgent``, ``self.config.stack_profile``;
+        # ``None`` only on a bare ``BaseV2DevelopmentAgent`` (e.g. unit
+        # tests), where the labels below default to "" and go unused since
+        # such callers also don't pass build_verifier/linting_tool_agent.
+        stack_profile = self._stack_profile()
         self._run_deliver_and_finalize(
             task_id=task_id,
             repo_path=repo_path,
@@ -960,6 +963,20 @@ class BaseV2DevelopmentAgent:
         keeps working unbound, resolving the calling subclass's ``PROFILE``.
         """
         return cls.PROFILE.detect_tooling(repo_path)
+
+    def _stack_profile(self) -> Optional[StackProfile]:
+        """Return this instance's ``StackProfile``, if it has one.
+
+        Preconditions: none.
+        Postconditions: returns the concrete subclass's class-level
+          ``PROFILE`` (e.g. ``BackendDevelopmentAgent``/
+          ``FrontendDevelopmentAgent``), or ``None`` on a bare
+          ``BaseV2DevelopmentAgent`` (e.g. unit tests) that sets no
+          ``PROFILE``. Subclasses whose stack profile isn't a class
+          attribute (e.g. :class:`ConfigDrivenV2DevelopmentAgent`, which
+          resolves it from ``self.config`` instead) override this.
+        """
+        return getattr(self, "PROFILE", None)
 
     def _read_existing_code(self, repo_path: Path) -> str:
         """Return the repo briefing, consulting the incremental cache when one is threaded in.
@@ -1121,6 +1138,23 @@ class ConfigDrivenV2DevelopmentAgent(BaseV2DevelopmentAgent):
         """
         return merge_extra_requirements(base_requirements, self.extra_review_clause)
 
+    def _stack_profile(self) -> StackProfile:
+        """Return this instance's ``StackProfile``, read from ``self.config``.
+
+        Overrides the parent's ``getattr(self, "PROFILE", None)`` lookup:
+        this class deliberately has no class-level ``PROFILE`` attribute, so
+        that lookup would always return ``None`` here (silently emptying the
+        deliver phase's ``build_verify_label``/``lint_agent_type``). This
+        override is what ``_run_development_workflow``'s deliver-phase call
+        to ``self._stack_profile()`` resolves to for this subclass.
+
+        Preconditions: none beyond construction.
+        Postconditions: returns ``self.config.stack_profile``; never
+          ``None`` (config is always required at construction, unlike the
+          base class's class-attribute fallback).
+        """
+        return self.config.stack_profile
+
     def _read_repo_code(self, repo_path: Path, max_chars: Optional[int] = None) -> str:
         """Read the repo briefing using ``self.config.stack_profile``.
 
@@ -1135,7 +1169,7 @@ class ConfigDrivenV2DevelopmentAgent(BaseV2DevelopmentAgent):
         Postconditions: same as the parent classmethod, but sourced from
           ``self.config.stack_profile`` instead of ``cls.PROFILE``.
         """
-        profile = self.config.stack_profile
+        profile = self._stack_profile()
         return read_repo_code_budgeted(
             repo_path,
             extensions=profile.repo_extensions,
@@ -1156,4 +1190,4 @@ class ConfigDrivenV2DevelopmentAgent(BaseV2DevelopmentAgent):
         Postconditions: same as the parent classmethod, but sourced from
           ``self.config.stack_profile`` instead of ``cls.PROFILE``.
         """
-        return self.config.stack_profile.detect_tooling(repo_path)
+        return self._stack_profile().detect_tooling(repo_path)

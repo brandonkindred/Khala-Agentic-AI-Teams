@@ -197,6 +197,16 @@ class TestConfigDrivenRepoReading:
         agent = ConfigDrivenV2DevelopmentAgent(MagicMock(), config)
         assert agent._detect_tooling(tmp_path) == (False, True)
 
+    def test_stack_profile_hook_returns_config_stack_profile(self):
+        """``_stack_profile()`` overrides the base's ``getattr(self, "PROFILE",
+        None)`` lookup, which would otherwise return None here (this class
+        has no class-level PROFILE) and silently empty the deliver phase's
+        build_verify_label/lint_agent_type."""
+        stack_profile = _make_stack_profile()
+        config = _make_config(stack_profile=stack_profile)
+        agent = ConfigDrivenV2DevelopmentAgent(MagicMock(), config)
+        assert agent._stack_profile() is stack_profile
+
 
 class _FakeWorkflowResult:
     def __init__(self, *, task_id: str) -> None:
@@ -253,6 +263,12 @@ class TestFullPipelineRun:
         doc_result = SimpleNamespace(files={}, summary="documented")
         deliver_result = SimpleNamespace(merged=True, branch_ready=True, summary="delivered")
 
+        captured_deliver_kwargs = {}
+
+        def _run_deliver(**kwargs):
+            captured_deliver_kwargs.update(kwargs)
+            return deliver_result
+
         result = agent._run_development_workflow(
             repo_path=tmp_path,
             task=task,
@@ -274,13 +290,24 @@ class TestFullPipelineRun:
             run_execution_with_review_gates=lambda **_kwargs: exec_result,
             documentation_status_text="Documenting...",
             run_documentation_phase=lambda **_kwargs: doc_result,
-            run_deliver=lambda **_kwargs: deliver_result,
+            run_deliver=_run_deliver,
         )
 
         assert result.success is True
         assert result.current_phase == Phase.DELIVER
         assert result.final_files == {"app.py": "print('ok')\n"}
         assert result.deliver_result is deliver_result
+
+        # The deliver phase must resolve its labels from the config's
+        # StackProfile via _stack_profile() -- not silently default to "" as
+        # it did before that hook existed (getattr(self, "PROFILE", None)
+        # always returned None for this subclass).
+        assert (
+            captured_deliver_kwargs["build_verify_label"] == config.stack_profile.build_verify_label
+        )
+        assert captured_deliver_kwargs["build_verify_label"] != ""
+        assert captured_deliver_kwargs["lint_agent_type"] == config.stack_profile.name
+        assert captured_deliver_kwargs["lint_agent_type"] != ""
 
 
 class TestBackendConfigParity:
