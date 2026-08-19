@@ -402,18 +402,11 @@ class _PhaseSpec(NamedTuple):
             Phase 2's sequential graph, Phase 3's, Phase 4's, and Phase 5's
             fan-out), the merge function to try first. All five current phases
             supply one; ``None`` remains valid for a hypothetical future phase
-            whose terminal node's own output is already the complete phase
-            output — none of today's five needs it. Its absence is also what
-            the single-agent fallback (``_extract_from_single_agent``) checks
-            to decide whether the last agent's own ``structured_output`` may
-            stand in as the phase output: a spec with a ``merge_fn`` means
-            multiple named children exist and no single "last" agent's
-            fragment is ever the complete phase output — subset-validating it
-            against the phase's full output model would silently report a
-            non-degraded output with every other field defaulted empty — so
-            when ``merge_fn`` returns ``None`` the phase must degrade instead
-            of accepting a stray fragment; a spec with no ``merge_fn`` has no
-            other legitimate extraction path, so the fallback may accept it.
+            whose node has no fan-out to merge. When ``merge_fn`` is absent or
+            returns ``None``, ``_extract_phase_output`` falls through to
+            ``_extract_from_single_agent``'s last-resort text parse of the
+            node's last agent reply — there is no ``structured_output``
+            shortcut for any phase today.
             Invariant: a merge function must return ``None`` to signal "could
             not merge" — never a default-constructed ``model_cls()`` — since
             ``_extract_phase_output`` trusts any non-``None`` return as a
@@ -1063,16 +1056,9 @@ class BrandingTeamOrchestrator:
         that succeeds, its result is returned directly. When ``merge_fn``
         returns ``None`` (a partial or malformed nested result), or
         ``node_id`` is unrecognized (no spec at all), extraction falls
-        through to the per-node fallback below: when the node's agent was
-        built with ``structured_output=``, Strands forces a tool call to
-        produce the payload and populates ``AgentResult.structured_output``
-        instead of the message's text blocks — so that's checked next,
-        unless the spec declares a ``merge_fn`` (true for every phase today):
-        a lone specialist's own fragment must never be accepted as a
-        complete phase output when multiple named children exist, since
-        subset validation against the phase's full output model would
-        succeed via defaults. Agents without usable structured output fall
-        back to parsing the last text block.
+        through to a single last-resort fallback: parsing the last agent's
+        last text block. Anything that doesn't yield a value through either
+        path degrades to a default-constructed ``model_class()``.
 
         Preconditions:
             - ``result`` is the Strands graph invocation result (or a test
@@ -1081,9 +1067,9 @@ class BrandingTeamOrchestrator:
               for that node.
         Postconditions:
             - Returns ``(output, degraded)``. ``output`` is a parsed
-              ``model_class`` instance on success (from the phase's merge_fn,
-              structured output, or text parsing), or a default-constructed
-              ``model_class()`` when none of those yield a value or the node
+              ``model_class`` instance on success (from the phase's merge_fn
+              or the last-resort text parse), or a default-constructed
+              ``model_class()`` when neither yields a value or the node
               result is missing/malformed. ``degraded`` reflects which code
               path produced ``output``, not a property of the value itself:
               it is ``True`` only when extraction fell through every
@@ -1107,7 +1093,7 @@ class BrandingTeamOrchestrator:
                     merged = spec.merge_fn(node_result, model_class)
                     if merged is not None:
                         return merged, False
-                parsed = _extract_from_single_agent(node_result, model_class, spec)
+                parsed = _extract_from_single_agent(node_result, model_class)
                 if parsed is not None:
                     return parsed, False
         except Exception:
@@ -1147,32 +1133,6 @@ def _collect_message_text(message: dict) -> str:
         elif getattr(block, "text", None):
             parts.append(block.text)
     return "".join(parts)
-
-
-def _merge_structured_output(
-    structured: BaseModel, model_class: type[BaseModel]
-) -> Optional[BaseModel]:
-    """Validate an agent's typed ``structured_output`` against a phase's output model.
-
-    ``structured`` is often a specialist fragment of ``model_class`` — e.g. the
-    positioning synthesizer only emits ``positioning_statement``/``brand_promise``
-    out of the full ``StrategicCoreOutput`` schema — which validates fine since
-    every field on the phase output models has a default. Dump-then-validate is
-    required for those subset payloads; it is not leftover twin-model conversion.
-
-    Preconditions:
-        ``structured`` is a ``pydantic.BaseModel`` instance; ``model_class`` is
-        the phase output model type to validate against.
-    Postconditions:
-        Returns a validated ``model_class`` instance when fields match (including
-        subset payloads that fill missing fields from defaults); returns
-        ``None`` on a genuine schema mismatch — same failure contract as
-        ``_parse_model_from_text``.
-    """
-    try:
-        return model_class.model_validate(structured.model_dump())
-    except ValidationError:
-        return None
 
 
 def _parse_model_from_text(text: str, model_class: type[BaseModel]) -> Optional[BaseModel]:
@@ -1250,38 +1210,30 @@ def _locate_node_result(result: Any, node_id: str) -> Optional[Any]:
 
 
 def _extract_from_single_agent(
-    node_result: Any, model_class: type[BaseModel], spec: Optional["_PhaseSpec"]
+    node_result: Any, model_class: type[BaseModel]
 ) -> Optional[BaseModel]:
-    """Recover a phase output from a node's last agent result, or ``None``.
+    """Last-resort text parse of a node's last agent result, or ``None``.
 
-    The per-node fallback for phases whose merge_fn didn't apply: prefer the
-    last agent's typed ``structured_output`` (Strands populates it when the
-    agent was built with ``structured_output=``), then fall back to parsing the
-    last text block.
+    The single fallback for a phase whose merge_fn returned ``None`` (a
+    partial or malformed nested result) or whose node id is unrecognized:
+    parse the last agent's last text block. There is no structured_output
+    shortcut here — every current phase declares a merge_fn (see
+    ``_PhaseSpec.merge_fn``), so a lone agent's own structured_output is
+    never a legitimate stand-in for a phase's full output.
 
     Preconditions:
-        ``node_result`` is a ``NodeResult`` exposing ``get_agent_results()``;
-        ``spec`` is the phase's ``_PhaseSpec`` or ``None`` for an unrecognized
-        node id.
+        ``node_result`` is a ``NodeResult`` exposing ``get_agent_results()``.
     Postconditions:
-        Returns a validated ``model_class`` instance from the last agent's
-        ``structured_output`` (only when ``spec`` is ``None`` or
-        ``spec.merge_fn`` is ``None`` — i.e. there is no other legitimate
-        extraction path for this phase) or from parsing its last text
-        block; returns ``None`` when there are no agent results or neither
-        source yields a usable value — in which case the caller degrades to a
+        Returns a validated ``model_class`` instance parsed from the last
+        agent's last text block; returns ``None`` when there are no agent
+        results, the last agent has no usable ``message``, or the text
+        doesn't parse — in which case the caller degrades to a
         default-constructed model.
     """
     agent_results = node_result.get_agent_results()
     if not agent_results:
         return None
     last = agent_results[-1]
-    if spec is None or spec.merge_fn is None:
-        structured = getattr(last, "structured_output", None)
-        if isinstance(structured, BaseModel):
-            parsed = _merge_structured_output(structured, model_class)
-            if parsed is not None:
-                return parsed
     if hasattr(last, "message") and last.message:
         text = _collect_message_text(last.message)
         parsed = _parse_model_from_text(text, model_class)
