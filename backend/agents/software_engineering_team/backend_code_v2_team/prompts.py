@@ -31,9 +31,7 @@ PYTHON_CONVENTIONS = """
 **Python conventions:**
 - Use type hints on all function signatures.
 - Follow PEP 8 naming (snake_case functions/variables, PascalCase classes).
-- FastAPI project layout: app/main.py, app/routers/, app/models/, app/schemas/, app/services/, app/database.py, tests/.
-- requirements.txt with pinned versions; always include httpx>=0.24,<0.28 for TestClient.
-- SQLAlchemy: use String(36) for UUID columns (SQLite compat), not sqlalchemy.UUID.
+- requirements.txt with pinned versions;
 - Pydantic v2 BaseModel for all request/response schemas.
 """
 
@@ -44,6 +42,7 @@ JAVA_CONVENTIONS = """
 - Use records or DTOs for request/response; Jackson for serialization.
 - JUnit 5 + Mockito for testing.
 - PascalCase classes, camelCase methods/fields.
+- 
 """
 
 # ---------------------------------------------------------------------------
