@@ -3514,6 +3514,9 @@ class TestFixedRunPrReview:
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         gh = review_app["github"]["client"]
+        assert gh.review_comments == [], (
+            f"omission on off-diff file posted as inline review comment: {gh.review_comments}"
+        )
         assert any("should have added missing.py" in c[1] for c in gh.comments)
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["review_summary"]["pending_issue_proposals"] == []
