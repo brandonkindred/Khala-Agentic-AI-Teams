@@ -1440,7 +1440,7 @@ def test_brand_health_kpi_output_is_usable_as_a_brand_health_kpi() -> None:
 
 
 def test_channel_activation_accepts_strict_architecture_fragment_dump() -> None:
-    """``_merge_structured_output`` validates a specialist dump against the
+    """A dump-then-validate merge of a specialist fragment against the
     soft phase model; a ``BrandArchitectureOutput`` dump must still merge
     into ``ChannelActivationOutput`` after the nested twin collapse."""
     merged = ChannelActivationOutput.model_validate(
@@ -1452,7 +1452,7 @@ def test_channel_activation_accepts_strict_architecture_fragment_dump() -> None:
 
 
 def test_governance_accepts_strict_workflow_fragment_dump() -> None:
-    """``_merge_structured_output`` validates a specialist dump against the
+    """A dump-then-validate merge of a specialist fragment against the
     soft phase model; an ``ApprovalWorkflowsOutput`` dump must still merge
     into ``GovernanceOutput`` after the nested twin collapse."""
     workflow = ApprovalWorkflowOutput(
