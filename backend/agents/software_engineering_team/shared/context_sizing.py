@@ -178,9 +178,17 @@ def _scale_with_context(llm: LLMClient, base_at_16k: int, max_chars: int = 700_0
 def compute_code_review_spec_excerpt_chars(llm: LLMClient) -> int:
     """Max chars for spec excerpt in code review.
 
-    Scales with model context but absolutely capped: this excerpt repeats in
-    every map call of the review coordinator, so an uncapped 1M-context scale
-    (~488K chars) would dominate each chunk prompt.
+    Scales with model context but absolutely capped: this excerpt is
+    identical across every map-phase chunk call of one review run and is
+    attached as a ``CacheBreakpoint``-marked prompt segment (see
+    ``chunk_reviewer._build_shared_review_prefix``), so a Claude-backed run
+    (``ClaudeLLMClient.supports_prompt_caching()`` True) re-bills its full
+    token cost only on the first chunk and reads it from the provider cache
+    on every chunk after. The cap still matters regardless: it bounds the
+    first chunk's prompt size on every client, and every chunk's prompt on a
+    client that does not support prompt caching (Ollama, ``DummyLLMClient``)
+    or once a run's cache entries age out — an uncapped 1M-context scale
+    (~488K chars) would still dominate those prompts.
     """
     cap = parse_env_int("CODE_REVIEW_SPEC_EXCERPT_CHARS", CODE_REVIEW_SPEC_EXCERPT_ABS_CHARS, 1_000)
     return _scale_with_context(llm, 8_000, max_chars=cap)

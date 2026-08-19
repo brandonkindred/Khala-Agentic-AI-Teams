@@ -364,6 +364,30 @@ def test_pre_existing_true_only_when_all_members_are() -> None:
     assert result2[0].pre_existing is True
 
 
+def test_omission_true_when_any_member_is() -> None:
+    """A consolidated group is marked omission if ANY member in the group is
+    (OR across the group -- the inverse quantifier from pre_existing's AND,
+    see ``_merge_group``'s docstring): a single omission member is enough to
+    keep the merged finding flagged, unlike pre_existing which needs
+    unanimous agreement."""
+    content = "def foo():\n    x = 1\n    return x\n"
+    index = _index({"app/foo.py": content})
+    issues = [
+        _issue(line=2, omission=True, description="a"),
+        _issue(line=3, omission=False, description="b"),
+    ]
+    result = consolidate_side_effect_issues(issues, index)
+    assert result[0].omission is True
+    assert result[0].pre_existing is False
+
+    issues_none_omission = [
+        _issue(line=2, omission=False, description="a"),
+        _issue(line=3, omission=False, description="b"),
+    ]
+    result2 = consolidate_side_effect_issues(issues_none_omission, index)
+    assert result2[0].omission is False
+
+
 def test_merge_preserves_earliest_start_of_multi_line_members() -> None:
     """Merged ``start_line`` uses each member's effective start so multi-line ranges keep the earliest bound."""
     content = "\n".join(

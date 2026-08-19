@@ -2924,6 +2924,53 @@ def test_pre_existing_tag_is_carried_through_and_defaults_false() -> None:
     assert [i.pre_existing for i in issues] == [True, True, False, False]
 
 
+def test_omission_tag_is_carried_through_and_defaults_false() -> None:
+    """The optional ``omission`` tag (the positive signal for "this change
+    should have added or modified file X but didn't", distinct from
+    ``pre_existing``) survives conversion, tolerates string encodings, and
+    defaults False when absent -- mirrors
+    ``test_pre_existing_tag_is_carried_through_and_defaults_false``."""
+    seg = FileSegment(path="a.py", content="x = 1\ny = 2\nz = 3", total_lines=3)
+    chunk = ReviewChunk(segments=[seg])
+    issues = _issues_from_chunk_output(
+        chunk,
+        [
+            {"description": "tagged bool", "line": 1, "omission": True},
+            {"description": "tagged str", "line": 2, "omission": "true"},
+            {"description": "tagged false str", "line": 3, "omission": "false"},
+            {"description": "untagged", "line": 1},
+        ],
+    )
+    assert [i.omission for i in issues] == [True, True, False, False]
+
+
+def test_omission_and_pre_existing_both_true_is_rejected_on_construction() -> None:
+    """``CodeReviewIssue`` rejects the self-contradictory combination
+    directly, not just via LLM-schema validation: an omission is by
+    definition in-scope for this change (see ``omission``'s Field
+    description), so any caller constructing both True is a bug."""
+    with pytest.raises(ValidationError):
+        CodeReviewIssue(description="d", omission=True, pre_existing=True)
+
+
+def test_issues_from_chunk_output_reconciles_contradictory_raw_tags() -> None:
+    """A raw LLM dict tagging both ``omission`` and ``pre_existing`` true
+    (a self-contradictory reply that ``CodeReviewIssue`` would otherwise
+    reject via ``_omission_implies_in_scope``) is reconciled at this
+    boundary rather than raised: ``omission`` wins, so the constructed
+    issue is in-scope. This keeps ``_issues_from_chunk_output``'s documented
+    "never raises on malformed output" contract intact."""
+    seg = FileSegment(path="a.py", content="x = 1", total_lines=1)
+    chunk = ReviewChunk(segments=[seg])
+    issues = _issues_from_chunk_output(
+        chunk,
+        [{"description": "contradictory tags", "line": 1, "omission": True, "pre_existing": True}],
+    )
+    assert len(issues) == 1
+    assert issues[0].omission is True
+    assert issues[0].pre_existing is False
+
+
 _NO_OP_SUGGESTIONS = [
     "No changes needed.",
     "no changes needed",
@@ -3035,6 +3082,23 @@ def test_coerce_bool_recognizes_truthy_tokens_only() -> None:
     # bool or a recognized truthy string counts (mirrors tech_lead_agent's
     # stricter convention for the same LLM-flag-drift problem).
     assert _coerce_bool(1) is False
+
+
+def test_coerce_scope_tags_reconciles_omission_and_pre_existing() -> None:
+    """_coerce_scope_tags is the single shared reconciliation helper for the
+    pre_existing/omission pair, used by chunking._issues_from_chunk_output,
+    architecture_consistency_pass._coerce_finding, and
+    side_effect_impact_pass._coerce_finding: each coerces via _coerce_bool,
+    and omission wins when both raw tags are true."""
+    from code_review_agent.chunking import _coerce_scope_tags
+
+    assert _coerce_scope_tags({}) == (False, False)
+    assert _coerce_scope_tags({"pre_existing": True}) == (True, False)
+    assert _coerce_scope_tags({"omission": True}) == (False, True)
+    # omission wins over a contradictory pre_existing tag.
+    assert _coerce_scope_tags({"pre_existing": True, "omission": True}) == (False, True)
+    # String encodings tolerated the same way _coerce_bool tolerates them.
+    assert _coerce_scope_tags({"pre_existing": "true", "omission": "yes"}) == (False, True)
 
 
 def test_validate_line_absolute_numbering_has_no_overlap_ambiguity() -> None:

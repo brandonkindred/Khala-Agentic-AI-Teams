@@ -128,7 +128,14 @@ _SHARED_OUTPUT_SECTION = (
     "when the defect is in code this change itself added or modified. Default false: when you "
     "cannot tell whether the code predates this change, treat it as part of the change rather than "
     "guessing pre-existing. This does NOT apply to findings that the change should have added or "
-    "modified a file but did not -- those are in-scope defects and must use pre_existing: false.\n"
+    "modified a file but did not -- those are in-scope defects; use pre_existing: false and set "
+    'omission: true instead (see "omission" below).\n'
+    '  - "omission": boolean. true when this finding is a required add/modify the change should '
+    "have made but did not (e.g. the task/spec calls for a new or updated file/module that this "
+    "change omits) -- as opposed to a bug in code outside the scope of this change. An omission "
+    "always pairs with pre_existing: false (it stays in scope for this change, it just was not "
+    "delivered) -- never set both pre_existing and omission true for the same finding. Default "
+    "false.\n"
     '- "summary": string. A brief, high-level overview for the developer. Do NOT restate what the '
     "PR does or is meant to accomplish. When any issue was found, do NOT praise the implementation "
     "(do not call it sound, well-structured, or well-implemented) and do NOT claim it aligns with "
@@ -177,7 +184,8 @@ _SHARED_REVIEW_POLICY = (
     '  - "pre_existing": boolean. true when the defect is in unchanged, pre-existing code outside '
     "this change; false when the defect is in code this change added or modified. Default false "
     "when uncertain. This does NOT apply to findings that the change should have added or modified "
-    "a file but did not -- those are in-scope defects and must use pre_existing: false.\n"
+    "a file but did not -- those are in-scope defects; use pre_existing: false and set omission: "
+    "true instead.\n"
     "- The coding agent that receives these issues will use them as instructions, so each issue "
     "must be detailed enough to be acted upon WITHOUT additional context.\n\n"
     "**NEVER PUBLISH YOUR CHAIN OF THOUGHT:**\n"

@@ -214,6 +214,53 @@ def test_architecture_finding_pre_existing_tag_survives_the_merged_pass() -> Non
     assert side == []
 
 
+def test_omission_tag_survives_the_merged_pass_for_both_halves() -> None:
+    """The omission tag (the positive signal for "this change should have
+    added or modified file X but didn't", distinct from pre_existing)
+    survives the merged pass's per-half parsing/validation for both the
+    architecture and side-effect halves -- proving _issues_from_half's reuse
+    of arch_pass.parse_findings/side_pass.parse_findings actually carries
+    the field through, not just each standalone pass in isolation
+    (mirrors test_architecture_finding_pre_existing_tag_survives_the_merged_pass)."""
+
+    class _FindingsClient(SubmissionPassTwoCallClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
+                return {
+                    "architecture_findings": [
+                        {
+                            "severity": "medium",
+                            "category": "architecture",
+                            "file_path": "app/main.py",
+                            "description": "the change should have added a migration module",
+                            "suggestion": "add app/migrations/xyz.py",
+                            "pre_existing": False,
+                            "omission": True,
+                        }
+                    ],
+                    "side_effect_findings": [
+                        {
+                            "severity": "high",
+                            "category": "documentation",
+                            "file_path": "app/main.py",
+                            "description": "the task required updating README.md but it wasn't",
+                            "suggestion": "update README.md to document bar()'s new behavior",
+                            "pre_existing": False,
+                            "omission": True,
+                        }
+                    ],
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    arch, side = find_architecture_and_side_effect_issues(_FindingsClient(), _input())
+    assert len(arch) == 1
+    assert arch[0].omission is True
+    assert arch[0].pre_existing is False
+    assert len(side) == 1
+    assert side[0].omission is True
+    assert side[0].pre_existing is False
+
+
 def test_fails_safe_on_llm_error() -> None:
     class _Raiser(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:

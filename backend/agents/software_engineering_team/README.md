@@ -508,6 +508,21 @@ Sub-team orchestrators (`backend_code_v2_team/`, `frontend_code_v2_team/`, `devo
 
 See [docs/ENV_VARS.md](../../../docs/ENV_VARS.md) for the complete reference, including `KHALA_CACHE_BUILD_ID` / `KHALA_BUILD_ID` (build-id namespace suffixing), single-flight lock/waiter timing (`REDIS_LOCK_TTL_S`, `REDIS_WAITER_POLL_S`, `REDIS_WAITER_TIMEOUT_S`, `REDIS_RESULT_TTL_S`), and connection/socket tuning.
 
+## LLM prompt caching (map-phase, code review)
+
+Distinct from the `shared.cache` outcome cache above: this is Anthropic wire-level prompt caching (`cache_control: {"type": "ephemeral"}`), which reduces token billing for a stable prompt prefix on repeated calls — it never skips an LLM call outright the way the outcome cache does.
+
+The code-review map phase (`code_review_agent/chunk_reviewer.py`) marks its shared spec/architecture/existing-codebase prefix — the three prompt blocks that are byte-identical across every chunk of one coordinator run — as a single `llm_service.CacheBreakpoint`-wrapped system-content segment on each chunk's *reasoning* call (`chunk_reviewer._build_shared_review_prefix`, attached via `run_agent_via_reasoning`'s `system_prompt_content`). `architecture_overview` and `existing_codebase_excerpt` are always included when present; the spec excerpt is included only when the run is not using `CODE_REVIEW_SPEC_COMPLIANCE_PASS`'s single-pass spec-compliance mode (see `ChunkReviewInput.spec_compliance_single_pass`). Per-chunk content (the code under review, guardrails, sibling surface) always stays in the user turn, never in the cached segment. The formatting pass (`complete_json`, thinking off) is **not** cache-marked.
+
+Requirements and no-op behavior:
+
+- Only takes effect on a client whose `supports_prompt_caching()` is `True` — today, `ClaudeLLMClient`. `OllamaLLMClient` and `DummyLLMClient` (used by most code-review unit tests) never populate cache telemetry: the marked segment is silently flattened to plain text, a documented no-op (identical output, no error, no behavior change).
+- The coordinator constructs exactly one `ChunkReviewAgent(llm)` per run, reused across every chunk (`coordinator.run_coordinator`), so a caching-capable client sees the identical prefix on every map call after the first.
+
+Verifying a real run hit the cache: `llm_service.telemetry.get_recent_calls(...)` records `cache_read_tokens` (non-zero on a cache-served call, from Anthropic's `usage.cache_read_input_tokens`) and `cache_creation_tokens` (non-zero on the call that first wrote the breakpoint) per LLM call. See `software_engineering_team/tests/test_chunk_reviewer_cache_e2e.py` for an executable proof: two chunks sharing one `ClaudeLLMClient`, the second chunk's reasoning call reading a non-zero `cache_read_tokens`, and review findings unchanged whether or not a call was cache-served.
+
+See `llm_service/README.md`'s "Prompt caching (cache-control breakpoints)" section for the full mechanism (the `CacheBreakpoint` marker, Strands plumbing, telemetry fields, the repeated-call-is-safe guarantee) and `shared/README.md`'s "Prompt caching" section for this team's `Agent`-construction pattern.
+
 ## DevOps Engineering Team (`devops_team/`)
 
 The `devops_team/` package is the contract-first, multi-agent DevOps engineering team modeled after the code-v2 teams (`frontend_code_v2_team/`), and is the sole DevOps path (superseding an earlier monolithic DevOps agent). It implements the **MVP fleet** (9 core agents + 5 tool agents) with hard gates, environment-aware safety, and structured completion packages.
