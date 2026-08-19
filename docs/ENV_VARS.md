@@ -1130,6 +1130,24 @@ never enter this pass. The unscripted dummy LLM harness is a no-op so tests
 that do not stub the verifier keep their existing posting behavior. Set to
 `false`/`0`/`no` to disable (any other value, or unset, leaves it enabled).
 
+### CODE_REVIEW_SCOPE_LLM_PASS
+Default-on toggle for the LLM scope-classification pass consumed by
+`api/pr_review.py::_partition_review_issues` when it splits the review
+engine's (already false-positive-filtered) findings into PR-scoped comments
+vs. pre-existing-bug proposals. Each finding is classified in/out-of-scope
+(with a reason) via the `classify_issue_scope` provider method, which
+delegates to the batched, parallel classifier in
+`code_review_agent/scope_classifier.py` (see
+`CODE_REVIEW_SCOPE_MAX_FINDINGS_PER_GROUP` above). A decisive verdict from
+this pass takes priority over the `CODE_REVIEW_SCOPE_FILTER` pass's
+`pre_existing` tag; a finding the classifier could not decide (an "unknown"
+verdict, a disabled pass, no engine provider attached, or any classification
+failure) falls back to that tag instead, so the review is never blocked by a
+classifier outage. Whichever source decides a finding is out-of-scope, a
+finding on a line this pull request actually added is always forced back
+in-scope (the `is_within_diff` override) regardless of the verdict. Set to
+`false`/`0`/`no` to disable (any other value, or unset, leaves it enabled).
+
 ### CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS
 Default-on toggle for the architecture-consistency / cross-codebase-redundancy
 pass. This toggle enables the architecture half of the in-process coordinator's
