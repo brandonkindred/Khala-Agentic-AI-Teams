@@ -283,6 +283,21 @@ def test_merge_takes_max_severity_and_ands_pre_existing() -> None:
     assert result[0].pre_existing is False
 
 
+def test_merge_ors_omission() -> None:
+    """Merged omission is True if ANY member is (OR across the group -- the
+    inverse quantifier from pre_existing's AND, see
+    side_effect_consolidation._merge_group's docstring)."""
+    index = _index({"app/foo.py": _TWO_FUNCS})
+    issues = [
+        _issue(line=2, category="side-effects", description="one", omission=True),
+        _issue(line=4, category="side-effects", description="two", omission=False),
+    ]
+    result = combine_findings(issues, index)
+    assert len(result) == 1
+    assert result[0].omission is True
+    assert result[0].pre_existing is False
+
+
 def test_ungrouped_finding_keeps_position() -> None:
     """A standalone finding keeps its relative position among a merged group."""
     index = _index({"app/foo.py": _TWO_FUNCS})

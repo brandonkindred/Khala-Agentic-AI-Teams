@@ -77,6 +77,23 @@ def test_shared_output_section_treats_line_gutter_as_metadata_not_indent() -> No
     assert "gutter is metadata" in _SHARED_OUTPUT_SECTION
 
 
+def test_shared_output_section_documents_the_omission_field() -> None:
+    """The shared JSON output contract carries an explicit "omission" field,
+    distinct from "pre_existing", and the pre_existing carve-out for a
+    required-but-missing add/modify now routes to it instead of being a bare
+    exception with nothing to set."""
+    assert '"omission": boolean' in _SHARED_OUTPUT_SECTION
+    assert "set omission: true instead" in _SHARED_OUTPUT_SECTION
+    assert "never set both pre_existing and omission true" in _SHARED_OUTPUT_SECTION
+
+
+def test_shared_review_policy_pre_existing_carve_out_points_at_omission() -> None:
+    """The CRITICAL RULES FOR REJECTION pre_existing bullet's carve-out for a
+    required-but-missing add/modify also routes to the omission field
+    (mirrors the _SHARED_OUTPUT_SECTION carve-out)."""
+    assert "use pre_existing: false and set omission: true instead" in _SHARED_REVIEW_POLICY
+
+
 def test_requirement_citation_guardrail_in_spec_flavored_sections_only() -> None:
     """Guardrail sits under the Ticket/Spec Fit item, not Style."""
     code_review = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
