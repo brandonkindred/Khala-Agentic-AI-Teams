@@ -772,8 +772,9 @@ class BaseV2DevelopmentAgent:
           former per-team ``run_workflow`` bodies. On success, threads through
           bookkeeping, documentation, and deliver exactly as
           ``_run_deliver_and_finalize`` documents, and returns ``result``.
-          Never raises on its own; propagates only what the injected
-          callables raise outside their documented failure paths.
+          Propagates exceptions from ``self._stack_profile()`` and from the
+          injected callables when they raise outside their documented
+          failure paths; otherwise does not raise on its own.
         """
         self._repo_context_cache = repo_context_cache
         task_id = task.id

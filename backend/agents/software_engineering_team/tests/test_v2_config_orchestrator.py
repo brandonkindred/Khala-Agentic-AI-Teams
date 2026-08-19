@@ -178,19 +178,26 @@ class TestConfigDrivenRepoReading:
         assert "z.marker" not in out
 
     def test_read_repo_code_respects_max_chars_budget_from_config(self, tmp_path: Path):
-        (tmp_path / "a.marker").write_text("x" * 50)
-        (tmp_path / "b.marker").write_text("y" * 50)
+        """Budget truncates at a whole-file boundary (read_repo_code_budgeted's
+        contract, matching test_be_development_agent_read_repo_code_max_chars):
+        the first file's full chunk is included, the second excluded entirely --
+        not a budget that happens to exclude everything or truncate mid-file."""
+        (tmp_path / "a.marker").write_text("x" * 30)
+        (tmp_path / "b.marker").write_text("y" * 30)
 
         config = _make_config(
             stack_profile=_make_stack_profile(
                 repo_extensions=frozenset({".marker"}),
-                repo_max_chars=10,
+                repo_max_chars=60,
             )
         )
         agent = ConfigDrivenV2DevelopmentAgent(MagicMock(), config)
         out = agent._read_repo_code(tmp_path)
-        assert "x" * 50 not in out
-        assert "y" * 50 not in out
+        assert len(out) <= 60
+        assert "a.marker" in out
+        assert "x" * 30 in out
+        assert "b.marker" not in out
+        assert "y" * 30 not in out
 
     def test_detect_tooling_uses_config_stack_profile(self, tmp_path: Path):
         config = _make_config(
