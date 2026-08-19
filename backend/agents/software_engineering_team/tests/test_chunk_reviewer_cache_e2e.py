@@ -45,8 +45,14 @@ def _reset_state() -> None:
 
 
 def _shared_context() -> Dict[str, Any]:
-    """The three shared-prefix fields: byte-identical across every chunk of
-    one coordinator run, per ``_build_shared_review_prefix``."""
+    """Shared context fields used for every chunk of one coordinator run.
+
+    ``spec_excerpt``, ``architecture_overview``, and
+    ``existing_codebase_excerpt`` form the byte-identical shared prefix that
+    ``_build_shared_review_prefix`` marks as a ``CacheBreakpoint``.
+    ``task_description`` and ``spec_compliance_single_pass`` are also shared
+    across chunks but are not part of the cache-marked prefix.
+    """
     return {
         "task_description": "Add pagination to the users endpoint",
         "spec_excerpt": "Spec excerpt shared across every chunk of this run.",
