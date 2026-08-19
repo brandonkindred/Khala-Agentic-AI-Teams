@@ -14,6 +14,7 @@ proves the base can faithfully hold ``backend_code_v2_team``'s real
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -218,6 +219,8 @@ class TestConfigDrivenRepoReading:
 
 
 class _FakeWorkflowResult:
+    """Minimal stand-in for the workflow result object ``_run_development_workflow`` builds via ``result_cls``."""
+
     def __init__(self, *, task_id: str) -> None:
         self.task_id = task_id
         self.current_phase = None
@@ -234,7 +237,7 @@ class _FakeWorkflowResult:
 
 
 class _FakeReviewConfig:
-    pass
+    """Placeholder review config satisfying ``_run_development_workflow``'s ``review_config_cls`` parameter."""
 
 
 class TestFullPipelineRun:
@@ -247,8 +250,6 @@ class TestFullPipelineRun:
     """
 
     def test_run_development_workflow_succeeds_with_config_driven_agent(self, tmp_path: Path):
-        from types import SimpleNamespace
-
         config = _make_config(
             stack_profile=_make_stack_profile(detect_tooling=lambda _p: (True, True))
         )
