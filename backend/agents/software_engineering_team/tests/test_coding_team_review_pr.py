@@ -2523,7 +2523,8 @@ class TestBugConditionExploration:
 
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["review_summary"]["comment_findings"] == 1
-        # Never routed to a proposal -- only an explicit pre_existing=True tag does that.
+        # Never routed to a proposal -- an off-diff finding without omission=True
+        # would now route to preexisting_issues instead of being posted.
         assert job["review_summary"]["pending_issue_proposals"] == []
 
     def test_empty_file_path_finding_becomes_standalone_not_misanchored(self, review_app) -> None:
@@ -2772,11 +2773,12 @@ class TestPreservationProperties:
           - line==<finding line>
         This is the Req 3.1 invariant: correctly-routed findings are unchanged.
         Only line 2 was actually added by this PR's patch (lines 1/3 are
-        unchanged context), so omission=True is what keeps every case in-scope
-        under the change-map-driven gate -- the property under test here is the
+        unchanged context), so omission=True is used here to keep the
+        unchanged-context cases in-scope and let the test focus on the
         line-vs-file comment SHAPE selection, not scope eligibility itself
         (that is covered separately by TestFixedRunPrReview /
-        TestPartitionReviewIssuesUnit).
+        TestPartitionReviewIssuesUnit). Line 2 would pass the gate on its
+        own as an added line.
         Validates: Requirements 3.1
         """
         _resp, gh, _job = self._post_review(

@@ -21,21 +21,18 @@ verdict (``in_scope=None``) so a caller can fall back to the free heuristic.
 aligned 1:1 with its input.
 
 Relationship to :mod:`scope_filter`:
-    This module's verdicts are the primary signal :mod:`api.pr_review`'s
-    ``_partition_review_issues`` uses to split a review's findings into
-    PR-scoped comments vs. pre-existing-issue proposals (gated behind the
-    ``CODE_REVIEW_SCOPE_LLM_PASS`` flag, default on): a decisive verdict from
-    :func:`classify_scope` wins outright. The existing, heavier
-    :func:`scope_filter.apply_scope_verification` pass (a tool-grounded
-    reasoning agent using the added/modified/deleted line maps, tagging
-    findings ``pre_existing``) still runs first in the same pipeline and
-    supplies the fail-safe fallback this module's design leans on: its
-    ``pre_existing`` tag is what ``_partition_review_issues`` consults whenever
-    this module returns ``"unknown"`` for a finding, the LLM call fails or is
-    disabled, or (for a decisive out-of-scope verdict) the cited file has
-    deletions this pass never sees. On top of both, ``is_within_diff`` is a
-    deterministic override: a finding on a line the PR actually added is
-    always treated as in-scope regardless of either pass's verdict.
+    Historically, this module's verdicts were the primary signal
+    :mod:`api.pr_review`'s ``_partition_review_issues`` used (behind the
+    now-removed ``CODE_REVIEW_SCOPE_LLM_PASS`` flag) to split a review's
+    findings into PR-scoped comments vs. pre-existing-issue proposals, with
+    :mod:`scope_filter`'s ``pre_existing`` tag as the fallback and
+    ``is_within_diff`` as a deterministic override. That posting gate is now
+    purely change-map-driven (``is_within_diff`` against the PR's
+    added/modified lines, plus the ``omission`` signal): it does not call
+    :func:`classify_scope` or consult either pass's verdict at all. This
+    module (and the ``classify_issue_scope`` provider method that wraps it)
+    is currently unwired from the live PR-review pipeline; it is kept in
+    case a future consumer needs it.
 
 Model resolution mirrors the sibling verification passes
 (:func:`false_positive_filter.filter_false_positives`,
