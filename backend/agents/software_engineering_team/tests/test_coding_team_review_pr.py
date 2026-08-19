@@ -3427,7 +3427,6 @@ class TestFixedRunPrReview:
         """_run_pr_review_body wires the engine provider's classify_issue_scope
         with output.issues, the PR's changed-file content, and a PR-identifying
         task description -- the exact args _partition_review_issues needs."""
-        review_app["github"]["client"] = _FakeReviewClient()
         issue = _FakeReviewIssue("high", line=2, file_path="a.py")
         review_app["github"]["agent_output"] = _FakeOutput(issues=[issue])
 
@@ -3453,7 +3452,6 @@ class TestFixedRunPrReview:
             ScopeClassification,
         )
 
-        review_app["github"]["client"] = _FakeReviewClient()
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
                 # line 999 is off-diff on a.py (only line 2 is added by this PR's
@@ -3480,6 +3478,76 @@ class TestFixedRunPrReview:
             job["review_summary"]["pending_issue_proposals"][0]["description"]
             == "flagged out of scope by LLM"
         )
+
+    def test_scope_llm_pass_unknown_verdict_falls_back_to_pre_existing_tag(
+        self, review_app
+    ) -> None:
+        """At the full /review-pr level, an 'unknown' verdict from
+        classify_issue_scope itself (NOT a scope_filter-forced tag) falls back
+        to the reviewer's own pre_existing tag. scope_filter is deliberately
+        left unpatched here -- unlike test_scope_verifier_unsure_does_not_post_comment,
+        which proves the legacy scope_filter fallback -- so the only thing that
+        can explain the outcome is classify_issue_scope's default UNKNOWN reply."""
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                # line 999 is off-diff on a.py, so is_within_diff cannot rescue
+                # it -- the pre_existing=True tag is what decides it once the
+                # classifier degrades to unknown.
+                _FakeReviewIssue(
+                    "high",
+                    line=999,
+                    file_path="a.py",
+                    description="tagged pre-existing",
+                    pre_existing=True,
+                )
+            ]
+        )
+        # holder["scope_verdicts"] intentionally left unset -- _FakeProvider
+        # .classify_issue_scope returns [UNKNOWN] * len(findings) by default.
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+
+        calls = review_app["github"]["scope_classify_calls"]
+        assert len(calls) == 1  # classify_issue_scope was actually invoked
+        gh = review_app["github"]["client"]
+        assert gh.comments == []
+        assert gh.review_comments == []
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        proposals = job["review_summary"]["pending_issue_proposals"]
+        assert len(proposals) == 1
+        assert proposals[0]["description"] == "tagged pre-existing"
+
+    def test_scope_llm_pass_is_within_diff_overrides_out_of_scope_verdict(self, review_app) -> None:
+        """At the full /review-pr level, is_within_diff overrides a decisive
+        out-of-scope LLM verdict for a finding that sits on a line this PR
+        actually added."""
+        from software_engineering_team.code_review_agent.scope_classifier import (
+            ScopeClassification,
+        )
+
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                # line 2 is added by this PR's patch -- is_within_diff must
+                # force this back in-scope despite the decisive out-of-scope
+                # verdict below.
+                _FakeReviewIssue("high", line=2, file_path="a.py", description="on-diff finding")
+            ]
+        )
+        review_app["github"]["scope_verdicts"] = [
+            ScopeClassification(in_scope=False, reason="misjudged pre-existing")
+        ]
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        # Posted as a PR comment, NOT routed to a proposal.
+        assert job["review_summary"]["pending_issue_proposals"] == []
+        assert len(gh.reviews) == 1
+        line_comments = [c for c in gh.reviews[0].get("comments", []) if c.get("side") == "RIGHT"]
+        assert len(line_comments) == 1
+        assert "on-diff finding" in line_comments[0]["body"]
 
     def test_scope_verifier_leaves_not_reviewed_coverage_findings_untagged(
         self, review_app, monkeypatch
