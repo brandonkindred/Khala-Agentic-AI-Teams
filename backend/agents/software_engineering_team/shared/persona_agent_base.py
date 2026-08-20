@@ -29,6 +29,10 @@ from __future__ import annotations
 
 from typing import Any, Callable, List, TypeVar
 
+from software_engineering_team.shared.system_prompt_assembly import (
+    build_system_prompt_with_content,
+)
+
 OutputT = TypeVar("OutputT")
 
 
@@ -37,27 +41,11 @@ def _build_system_prompt_with_content(
 ) -> "str | List[Any]":
     """Combine persona text with extra system-content segments (e.g. CacheBreakpoint).
 
-    Mirrors ``code_review_agent.via_reasoning._build_reasoning_agent_system_prompt``:
-    when ``system_prompt_content`` is provided, returns a list suitable for
-    Strands ``Agent(system_prompt=...)`` — the persona wrapped as a native
-    ``{"text": ...}`` block, followed by each segment (bare strings normalized
-    to ``{"text": str}``; ``CacheBreakpoint`` and dict blocks passed through
-    as-is). When absent, returns the plain string unchanged so callers that
-    never pass ``system_prompt_content`` get byte-identical behavior.
-
-    Preconditions:
-        ``system_prompt`` is non-empty. ``system_prompt_content`` is ``None``,
-        ``[]``, or a non-empty list of system-content segments.
-    Postconditions:
-        Returns ``system_prompt`` unchanged when ``system_prompt_content`` is
-        falsy; otherwise returns a list ``[{"text": system_prompt}, *normalized]``.
+    Delegates to :func:`shared.system_prompt_assembly.build_system_prompt_with_content`
+    — preserved as a module-level name for backward compatibility with
+    existing test imports.
     """
-    if not system_prompt_content:
-        return system_prompt
-    normalized = [
-        {"text": seg} if isinstance(seg, str) else seg for seg in system_prompt_content
-    ]
-    return [{"text": system_prompt}, *normalized]
+    return build_system_prompt_with_content(system_prompt, system_prompt_content)
 
 
 def run_structured_persona(
@@ -81,8 +69,10 @@ def run_structured_persona(
         valid instance of ``output_model``. ``system_prompt_content``, when
         given, is a list of system-content segments (``CacheBreakpoint``
         instances, dict blocks, or strings) attached to the ``Agent``'s
-        system prompt — the file-context prefix that is stable across gates
-        and retries.
+        system prompt — restricted to **trusted** metadata (spec excerpts,
+        architecture overviews) that is safe to elevate to system level.
+        Untrusted content (code under review, repository-controlled text)
+        must remain in ``user_prompt``.
     Postconditions:
         On a successful call whose ``structured_output`` is an instance of
         ``output_model``, returns ``on_success(result)`` (or ``result``
@@ -95,8 +85,8 @@ def run_structured_persona(
         not be reinterpreted as a clean approval. Never raises.
     """
     composed_prompt = _build_system_prompt_with_content(system_prompt, system_prompt_content)
-    agent = agent_factory(model=model, system_prompt=composed_prompt)
     try:
+        agent = agent_factory(model=model, system_prompt=composed_prompt)
         agent_result = agent(user_prompt, structured_output_model=output_model)
         result = agent_result.structured_output
         if not isinstance(result, output_model):

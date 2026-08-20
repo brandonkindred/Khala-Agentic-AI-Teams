@@ -22,11 +22,11 @@ output contract).
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from strands import Agent
 
-from llm_service import CacheBreakpoint, get_strands_model
+from llm_service import get_strands_model
 from llm_service.strands_model import model_fingerprint, resolve_strands_model
 from shared.cache import get_shared_cache
 from shared.cache.pydantic_cache import (
@@ -315,16 +315,6 @@ class QAExpertAgent:
         # breaks the forced-tool-choice mechanism used by
         # ``structured_output_model`` on the second call. Construction is
         # cheap — it just wraps the cached model + system_prompt.
-        #
-        # The file-context prefix (language + code) is marked as a
-        # CacheBreakpoint in system content so the provider caches it across
-        # Code Review / QA / Security gates and retry cycles — the same
-        # bytes are not re-billed on each gate call (Story 2c, Step 2).
-        file_context_content: List[CacheBreakpoint] = []
-        if mode != "acceptance_evidence":
-            prefix_text = "\n".join(_build_qa_file_context_prefix(input_data))
-            if prefix_text:
-                file_context_content = [CacheBreakpoint(prefix_text)]
 
         result = run_structured_persona(
             model=self._model,
@@ -334,7 +324,6 @@ class QAExpertAgent:
             fallback_factory=_fallback,
             agent_factory=Agent,
             on_success=_finalize,
-            system_prompt_content=file_context_content or None,
         )
 
         logger.info(
@@ -408,8 +397,8 @@ class QAExpertAgent:
                 f"**Tool results:**\n{tool_results_text}"
             )
 
-        # In non-acceptance_evidence modes, only the role instructions remain
-        # in the user prompt — the file-context prefix (language + code) is
-        # now emitted as a CacheBreakpoint in system content (see run()).
-        parts = _build_qa_role_instructions(input_data)
+        # File-context prefix (language + code under review) stays in the user
+        # message — it is untrusted repository content and must not be
+        # elevated to system-level instructions.
+        parts = _build_qa_file_context_prefix(input_data) + _build_qa_role_instructions(input_data)
         return "\n".join(parts)

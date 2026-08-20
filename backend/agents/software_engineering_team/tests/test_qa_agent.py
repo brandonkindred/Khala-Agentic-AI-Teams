@@ -184,17 +184,17 @@ def test_multiple_run_calls_on_same_instance_succeed() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_user_prompt_contains_only_role_instructions() -> None:
-    """After Story 2c Step 2, the file-context prefix (language + code) is
-    emitted as a CacheBreakpoint in system content — the user prompt now
-    contains only the role instructions (schema hint, task description)."""
+def test_user_prompt_contains_file_context_and_role_instructions() -> None:
+    """The user prompt carries both the file-context prefix (language + code
+    under review) and the role instructions. Untrusted code must stay in the
+    user message, not be elevated to system-level instructions."""
     prompt = QAExpertAgent._build_user_prompt(_input())
     # Role instructions are present
     assert "Review the code for bugs" in prompt
     assert "**Task:**" in prompt
-    # File-context prefix is NOT in the user prompt (it's in system content)
-    assert "def add(a, b)" not in prompt
-    assert "**Language:**" not in prompt
+    # File-context prefix IS in the user prompt (untrusted code stays here)
+    assert "def add(a, b)" in prompt
+    assert "**Language:**" in prompt
 
 
 def test_user_prompt_includes_architecture_run_instructions_and_build_errors() -> None:
@@ -209,8 +209,8 @@ def test_user_prompt_includes_architecture_run_instructions_and_build_errors() -
     assert "**Architecture:**" in prompt
     assert "**Run instructions:**" in prompt
     assert "**Build/compiler errors:**" in prompt
-    # File-context prefix is NOT in the user prompt
-    assert "def add(a, b)" not in prompt
+    # File-context prefix IS in the user prompt
+    assert "def add(a, b)" in prompt
 
 
 def test_qa_expert_agent_falls_back_on_validation_error() -> None:

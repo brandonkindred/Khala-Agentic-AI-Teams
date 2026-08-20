@@ -1,9 +1,13 @@
-"""Tests for Story 2c Step 2: CacheBreakpoint marking on review-gate requests.
+"""Tests for cache-breakpoint marking on review-gate system prompts.
 
-Asserts that each review gate (Code Review, QA, Security) emits the shared
-file-context prefix as a ``CacheBreakpoint``-marked system-content segment,
-and that the same breakpoint applies across retry cycles (the identical
-``CacheBreakpoint`` text is produced for the same input on repeated calls).
+Asserts that:
+- ``run_structured_persona`` correctly composes system_prompt_content into the
+  Agent's system_prompt (for trusted metadata like spec/architecture).
+- Untrusted file context (code under review) stays in the user message for
+  QA and Security gates — never elevated to system-level instructions.
+- Code Review's ``_build_shared_review_prefix`` produces stable breakpoint text
+  from trusted spec/architecture metadata.
+- The same breakpoint text is produced on repeated calls (stability).
 """
 
 from __future__ import annotations
@@ -77,7 +81,7 @@ def test_build_system_prompt_with_content_normalizes_bare_strings() -> None:
 def test_run_structured_persona_passes_cache_breakpoint_to_agent() -> None:
     """When system_prompt_content contains a CacheBreakpoint, the agent
     receives a list-form system_prompt with the breakpoint intact."""
-    bp = CacheBreakpoint("file context prefix")
+    bp = CacheBreakpoint("spec excerpt")
 
     run_structured_persona(
         model=object(),
@@ -94,7 +98,7 @@ def test_run_structured_persona_passes_cache_breakpoint_to_agent() -> None:
     assert isinstance(agent.system_prompt, list)
     assert agent.system_prompt[0] == {"text": "security persona"}
     assert isinstance(agent.system_prompt[1], CacheBreakpoint)
-    assert agent.system_prompt[1].text == "file context prefix"
+    assert agent.system_prompt[1].text == "spec excerpt"
 
 
 def test_run_structured_persona_no_content_passes_plain_str() -> None:
@@ -113,22 +117,40 @@ def test_run_structured_persona_no_content_passes_plain_str() -> None:
     assert agent.system_prompt == "persona"
 
 
+def test_run_structured_persona_fallback_on_agent_construction_error() -> None:
+    """When agent_factory raises, fallback_factory is invoked (agent
+    construction is inside the try/except)."""
+
+    def _failing_factory(*, model: Any, system_prompt: Any) -> Any:
+        raise RuntimeError("construction failed")
+
+    sentinel = _DummyOutput()
+    result = run_structured_persona(
+        model=object(),
+        system_prompt="persona",
+        user_prompt="review",
+        output_model=_DummyOutput,
+        fallback_factory=lambda exc: sentinel,
+        agent_factory=_failing_factory,
+    )
+    assert result is sentinel
+
+
 # ---------------------------------------------------------------------------
-# QA gate: CacheBreakpoint present on the request
+# QA gate: file context stays in user prompt (not system)
 # ---------------------------------------------------------------------------
 
 
-def test_qa_gate_emits_cache_breakpoint_for_file_context() -> None:
-    """QAExpertAgent.run() wraps the file-context prefix in a CacheBreakpoint
-    and passes it as system_prompt_content to run_structured_persona."""
+def test_qa_gate_keeps_file_context_in_user_prompt() -> None:
+    """QAExpertAgent.run() keeps the file-context prefix (code under review)
+    in the user prompt, not system_prompt_content — untrusted code must not
+    be elevated to system-level."""
     from qa_agent import QAExpertAgent, QAInput
 
     captured_kwargs: List[dict] = []
 
     def _spy(**kwargs: Any) -> Any:
         captured_kwargs.append(kwargs)
-        # Return a valid QAOutput-shaped object via the real function with a
-        # no-op agent that returns the right type.
         from qa_agent.models import QAOutput
 
         return QAOutput(
@@ -153,23 +175,22 @@ def test_qa_gate_emits_cache_breakpoint_for_file_context() -> None:
         "qa_agent.agent.run_structured_persona", side_effect=_spy
     ):
         agent = QAExpertAgent(None)
-        # Bypass model resolution for the test
         agent._model = object()
         agent.run(input_data)
 
     assert len(captured_kwargs) == 1
+    # system_prompt_content must NOT contain the code under review
     spc = captured_kwargs[0].get("system_prompt_content")
-    assert spc is not None
-    assert len(spc) == 1
-    assert isinstance(spc[0], CacheBreakpoint)
-    # The breakpoint text contains the file context (language + code)
-    assert "**Language:** python" in spc[0].text
-    assert "def hello(): pass" in spc[0].text
+    assert spc is None
+    # The code under review must appear in the user_prompt
+    user_prompt = captured_kwargs[0]["user_prompt"]
+    assert "def hello(): pass" in user_prompt
+    assert "**Language:** python" in user_prompt
 
 
-def test_qa_gate_no_cache_breakpoint_for_acceptance_evidence_mode() -> None:
-    """In acceptance_evidence mode there is no code under review, so no
-    CacheBreakpoint is emitted."""
+def test_qa_gate_no_file_context_for_acceptance_evidence_mode() -> None:
+    """In acceptance_evidence mode there is no code under review, so neither
+    user_prompt nor system_prompt_content carries file context."""
     from qa_agent import QAExpertAgent, QAInput
 
     captured_kwargs: List[dict] = []
@@ -209,24 +230,21 @@ def test_qa_gate_no_cache_breakpoint_for_acceptance_evidence_mode() -> None:
 
     assert len(captured_kwargs) == 1
     spc = captured_kwargs[0].get("system_prompt_content")
-    # No CacheBreakpoint for acceptance_evidence mode
     assert spc is None
 
 
 # ---------------------------------------------------------------------------
-# Security gate: CacheBreakpoint present on the request
+# Security gate: file context stays in user prompt
 # ---------------------------------------------------------------------------
 
 
-def test_security_gate_emits_cache_breakpoint_for_file_context() -> None:
-    """CybersecurityExpertAgent.run() wraps the file-context prefix in a
-    cache-control-marked system prompt block when the client supports prompt
-    caching, and passes it to run_single_shot_review."""
-    from security_agent.agent import (
-        _build_cache_aware_system_prompt,
-        _build_security_file_context_prefix,
-    )
+def test_security_gate_keeps_file_context_in_user_prompt() -> None:
+    """CybersecurityExpertAgent._build_user_prompt includes the file-context
+    prefix (code under review) in the user message, not the system prompt.
+    The system prompt is the plain SECURITY_PROMPT persona string."""
+    from security_agent.agent import CybersecurityExpertAgent, _build_security_file_context_prefix
     from security_agent.models import SecurityInput
+    from security_agent.prompts import SECURITY_PROMPT
 
     input_data = SecurityInput(
         code="import os\nos.system('ls')",
@@ -234,43 +252,27 @@ def test_security_gate_emits_cache_breakpoint_for_file_context() -> None:
         task_description="review command runner",
     )
 
-    # Verify the cache-aware system prompt is a list with cache_control when
-    # the client supports prompt caching.
-    prefix_text = "\n".join(_build_security_file_context_prefix(input_data))
+    user_prompt = CybersecurityExpertAgent._build_user_prompt(input_data)
 
-    # Simulate a caching-capable client
-    class _CachingClient:
-        def supports_prompt_caching(self) -> bool:
-            return True
+    # Code under review must be in the user prompt
+    assert "import os" in user_prompt
+    assert "os.system('ls')" in user_prompt
+    assert "**Language:** python" in user_prompt
 
-    system_prompt = _build_cache_aware_system_prompt(prefix_text, _CachingClient())
-    assert isinstance(system_prompt, list)
-    assert len(system_prompt) == 2
-    # First block is the persona (no cache_control)
-    assert system_prompt[0]["type"] == "text"
-    assert "cache_control" not in system_prompt[0]
-    # Second block is the file-context prefix (with cache_control)
-    assert system_prompt[1]["type"] == "text"
-    assert system_prompt[1]["cache_control"] == {"type": "ephemeral"}
-    assert "**Language:** python" in system_prompt[1]["text"]
-    assert "os.system('ls')" in system_prompt[1]["text"]
-
-    # Verify non-caching client gets a plain string
-    system_prompt_str = _build_cache_aware_system_prompt(prefix_text, None)
-    assert isinstance(system_prompt_str, str)
-    assert "**Language:** python" in system_prompt_str
-    assert "os.system('ls')" in system_prompt_str
+    # The file-context prefix helper returns the expected parts
+    prefix_parts = _build_security_file_context_prefix(input_data)
+    assert any("os.system('ls')" in part for part in prefix_parts)
 
 
 # ---------------------------------------------------------------------------
-# Code Review gate: CacheBreakpoint already present (Story 2a/2b, verify)
+# Code Review gate: _build_shared_review_prefix for trusted metadata
 # ---------------------------------------------------------------------------
 
 
 def test_build_shared_review_prefix_produces_non_empty_breakpoint_text() -> None:
-    """_build_shared_review_prefix returns non-empty text parts that can be
-    wrapped in a CacheBreakpoint when spec/architecture/existing-code are
-    present."""
+    """_build_shared_review_prefix returns non-empty text parts from trusted
+    metadata (spec/architecture/existing-code) that can be wrapped in a
+    CacheBreakpoint for system_prompt_content."""
     from code_review_agent.chunk_reviewer import _build_shared_review_prefix
 
     parts = _build_shared_review_prefix(
@@ -288,8 +290,7 @@ def test_build_shared_review_prefix_produces_non_empty_breakpoint_text() -> None
 
 def test_build_shared_review_prefix_returns_empty_list_when_all_blocks_empty() -> None:
     """When spec/architecture/existing-code are all empty,
-    _build_shared_review_prefix returns an empty list, so no CacheBreakpoint
-    text is produced."""
+    _build_shared_review_prefix returns an empty list."""
     from code_review_agent.chunk_reviewer import _build_shared_review_prefix
 
     parts = _build_shared_review_prefix(

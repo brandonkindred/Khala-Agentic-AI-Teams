@@ -4,16 +4,15 @@ Calls the LLM via ``shared.single_shot_review.run_single_shot_review`` in
 schema-validated mode, which resolves the client, validates the reply
 against ``SecurityLLMResponse``, and drives one bounded corrective retry
 (re-prompting with the schema/validation error) before falling back. The
-file-context prefix (language + code under review) is emitted as a
-``CacheBreakpoint``-marked segment in the system prompt so the provider
-caches it across Code Review / QA / Security gates and retry cycles
-(Story 2c, Step 2).
+file-context prefix (language + code under review) is kept in the user
+message — it is untrusted repository content and must not be elevated to
+system-level instructions.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Optional
 
 from llm_service import LLMClient, get_strands_model
 from llm_service.strands_model import model_fingerprint, resolve_strands_model
@@ -195,49 +194,6 @@ def _build_security_role_instructions(input_data: SecurityInput) -> list[str]:
     return parts
 
 
-def _build_cache_aware_system_prompt(
-    file_context_prefix: str, client: Optional[LLMClient] = None
-) -> Any:
-    """Compose a system prompt with a CacheBreakpoint-marked file-context prefix.
-
-    When the resolved client supports prompt caching (e.g. Claude), returns a
-    list-form system prompt suitable for Anthropic's API: the persona as a plain
-    text block, followed by the file-context prefix as a cache-control-marked
-    text block. The Claude client's ``_json_system`` already handles this
-    list-of-dicts shape.
-
-    When the client does not support prompt caching (e.g. DummyLLMClient in
-    tests), returns a plain string with persona + file context concatenated —
-    preserving full backward compatibility.
-
-    When ``file_context_prefix`` is empty, returns the plain string persona
-    regardless of client capability.
-
-    Preconditions:
-        - ``file_context_prefix`` is a string (may be empty).
-        - ``client`` is ``None`` or an ``LLMClient``.
-    Postconditions:
-        - When non-empty and client supports caching: returns a list of
-          Anthropic text-block dicts with ``cache_control`` on the file-context
-          block.
-        - Otherwise: returns a plain string.
-    """
-    if not file_context_prefix:
-        return SECURITY_PROMPT
-
-    # Check if the backing client supports the list-form system prompt with
-    # cache_control. If not (DummyLLMClient, OllamaClient, etc.), fall back
-    # to the concatenated string form.
-    supports_caching = getattr(client, "supports_prompt_caching", lambda: False)()
-    if supports_caching:
-        return [
-            {"type": "text", "text": SECURITY_PROMPT},
-            {"type": "text", "text": file_context_prefix, "cache_control": {"type": "ephemeral"}},
-        ]
-    # Non-caching client: concatenate persona + file context as plain string.
-    return f"{SECURITY_PROMPT}\n\n{file_context_prefix}"
-
-
 class CybersecurityExpertAgent:
     """
     Cybersecurity expert that reviews code for security flaws. Reports
@@ -292,22 +248,12 @@ class CybersecurityExpertAgent:
 
         user_prompt = self._build_user_prompt(input_data)
 
-        # The file-context prefix (language + code) is marked as a
-        # CacheBreakpoint in the system prompt so the provider caches it across
-        # Code Review / QA / Security gates and retry cycles (Story 2c, Step 2).
-        # The composed system prompt is a list-of-dicts when the prefix is
-        # present, which ClaudeLLMClient.complete_json handles natively via
-        # _json_system. Clients that don't support prompt caching (e.g.
-        # DummyLLMClient in tests) receive the plain string form instead.
-        file_context_prefix = "\n".join(_build_security_file_context_prefix(input_data))
-        system_prompt = _build_cache_aware_system_prompt(file_context_prefix, self.llm)
-
         try:
             response = run_single_shot_review(
                 self.llm,
                 agent_key="security",
                 prompt=user_prompt,
-                system_prompt=system_prompt,
+                system_prompt=SECURITY_PROMPT,
                 schema=SecurityLLMResponse,
                 objective="security review",
                 temperature=0.0,
@@ -350,17 +296,20 @@ class CybersecurityExpertAgent:
     def _build_user_prompt(input_data: SecurityInput) -> str:
         """Assemble the user-facing prompt.
 
-        The persona (``SECURITY_PROMPT``) and the ``CacheBreakpoint``-marked
-        file-context prefix are passed as the system prompt (see ``run()``).
-        The user prompt carries only the per-gate role instructions — the
-        schema hint, task description, context, and architecture. The words
-        "security" and "vulnerabilities" MUST appear somewhere in the prompt
-        because ``DummyLLMClient.complete_json`` pattern-matches on them
+        The persona (``SECURITY_PROMPT``) is passed as
+        ``run_single_shot_review``'s ``system_prompt``. The user prompt
+        carries the code under review (see ``_build_security_file_context_prefix``)
+        followed by the per-gate role instructions — the schema hint, task
+        description, context, and architecture. The code under review is
+        untrusted repository content and must stay in the user message, not
+        be elevated to system-level instructions. The words "security" and
+        "vulnerabilities" MUST appear somewhere in the prompt because
+        ``DummyLLMClient.complete_json`` pattern-matches on them
         (order-independent substring check) to return a deterministic stub
         in tests — see llm_service/README.md "Migration rule: keep pattern
         anchors in the user prompt".
         """
-        # Only role instructions in the user prompt — the file-context prefix
-        # (language + code) is emitted as a CacheBreakpoint in system content.
-        parts = _build_security_role_instructions(input_data)
+        parts = _build_security_file_context_prefix(input_data) + _build_security_role_instructions(
+            input_data
+        )
         return "\n".join(parts)
