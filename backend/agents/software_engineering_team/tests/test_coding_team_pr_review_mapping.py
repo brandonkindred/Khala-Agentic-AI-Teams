@@ -451,6 +451,28 @@ def test_is_within_diff_false_for_non_numeric_line_does_not_raise() -> None:
     assert is_within_diff(finding, valid) is False
 
 
+def test_is_within_diff_context_vs_changed_distinction() -> None:
+    # The posting gate calls is_within_diff with changed_by_path (narrower, only
+    # added/modified lines), NOT valid_by_path (which also includes context lines).
+    # A context line (line 1) is in valid_by_path but NOT in changed_by_path:
+    #   - is_within_diff(finding, valid_by_path)   → True (commentable location)
+    #   - is_within_diff(finding, changed_by_path) → False (not a changed line)
+    # This test documents the distinction that drives the diff-grounded contract.
+    valid_by_path = {"app/main.py": {1, 2, 3}}   # context + added lines
+    changed_by_path = {"app/main.py": {2}}         # only the added line
+
+    context_finding = _Issue(file_path="app/main.py", line=1)
+    added_finding = _Issue(file_path="app/main.py", line=2)
+
+    # Against valid_by_path (used for ROUTING to comment shape):
+    assert is_within_diff(context_finding, valid_by_path) is True
+    assert is_within_diff(added_finding, valid_by_path) is True
+
+    # Against changed_by_path (used for SCOPE eligibility in the posting gate):
+    assert is_within_diff(context_finding, changed_by_path) is False
+    assert is_within_diff(added_finding, changed_by_path) is True
+
+
 # ---------------------------------------------------------------------------
 # split_review_comments
 # ---------------------------------------------------------------------------
