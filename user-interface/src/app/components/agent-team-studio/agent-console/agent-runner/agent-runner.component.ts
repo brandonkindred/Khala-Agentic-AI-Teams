@@ -26,7 +26,6 @@ import { MatSelectModule } from '@angular/material/select';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { Subscription, interval } from 'rxjs';
-import { map } from 'rxjs/operators';
 import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
 import { AgentRunnerApiService } from '../../../../services/agent-runner-api.service';
 import type {
@@ -44,12 +43,9 @@ import type {
 } from '../../../../models/agent-history.model';
 import { AgentRunHistoryComponent } from '../agent-run-history/agent-run-history.component';
 import { AgentSchemaFormComponent } from '../agent-schema-form/agent-schema-form.component';
+import { ConfirmDestructiveService } from '../../../../shared/confirm-destructive.service';
 import { InlineBannerComponent } from '../../../../shared/inline-banner/inline-banner.component';
 import { extractErrorDetail } from '../../../../shared/extract-error-detail';
-import {
-  ConfirmDialogComponent,
-  type ConfirmDialogData,
-} from '../../../../shared/confirm-dialog/confirm-dialog.component';
 import { NotificationService } from '../../../../core/notification.service';
 import {
   AgentDiffDialogComponent,
@@ -95,12 +91,14 @@ import {
   ],
   templateUrl: './agent-runner.component.html',
   styleUrl: './agent-runner.component.scss',
+  providers: [ConfirmDestructiveService],
 })
 export class AgentRunnerComponent implements OnInit, OnDestroy {
   private readonly catalog = inject(AgentCatalogApiService);
   private readonly runner = inject(AgentRunnerApiService);
   private readonly dialog = inject(MatDialog);
   private readonly notify = inject(NotificationService);
+  private readonly confirmService = inject(ConfirmDestructiveService);
 
   /** Preselect an agent (wired from the Catalog drawer). */
   @Input() set preselectedAgentId(value: string | null) {
@@ -341,18 +339,25 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     ref.afterClosed().subscribe((result) => {
       if (!result) return;
       this.runner
-        .createSavedInput(agent, {
-          name: result.name,
-          input_data: body,
-          description: result.description,
-        })
+        .createSavedInput(
+          agent,
+          {
+            name: result.name,
+            input_data: body,
+            description: result.description,
+          },
+        )
         .subscribe({
           next: (saved) => {
+            this.lastError.set(null);
             this.savedInputs.update((rows) => [saved, ...rows]);
             this.selectedPickerValue.set(`saved:${saved.id}`);
           },
-          // Error toast is handled by the global errorHandlerInterceptor.
-          error: () => undefined,
+          error: (err) => {
+            this.lastError.set(
+              extractErrorDetail(err, 'Failed to save input'),
+            );
+          },
         });
     });
   }
@@ -372,26 +377,30 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     event.stopPropagation();
     const match = this.savedInputs().find((s) => s.id === savedId);
     if (!match) return;
-    this.dialog
-      .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(ConfirmDialogComponent, {
-        data: {
-          title: 'Delete saved input',
-          message: `Delete saved input "${match.name}"?`,
-          confirmLabel: 'Delete',
-          variant: 'danger',
-        },
+    this.confirmService
+      .confirm({
+        title: 'Delete Saved Input',
+        message: `Delete saved input "${match.name}"?`,
+        confirmLabel: 'Delete',
+        variant: 'danger',
       })
-      .afterClosed()
-      .pipe(map((result) => result === true))
       .subscribe((confirmed) => {
         if (!confirmed) return;
         this.runner.deleteSavedInput(savedId).subscribe({
           next: () => {
-            this.savedInputs.update((rows) => rows.filter((s) => s.id !== savedId));
+            this.lastError.set(null);
+            this.savedInputs.update((rows) =>
+              rows.filter((s) => s.id !== savedId),
+            );
             if (this.selectedPickerValue() === `saved:${savedId}`) {
               this.selectedPickerValue.set(null);
             }
             this.notify.saved('Saved input deleted.');
+          },
+          error: (err) => {
+            this.lastError.set(
+              extractErrorDetail(err, 'Failed to delete saved input'),
+            );
           },
         });
       });
@@ -452,25 +461,29 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
     const label = this.selectedAgent()?.manifest.name ?? agentId;
-    this.dialog
-      .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(ConfirmDialogComponent, {
-        data: {
-          title: 'Tear down sandbox',
-          message: `Tear down the ${label} sandbox? The sandbox will need to be re-warmed before the next run.`,
-          confirmLabel: 'Tear down',
-          variant: 'danger',
-        },
+    this.confirmService
+      .confirm({
+        title: 'Tear Down Sandbox',
+        message: `Tear down the ${label} sandbox?`,
+        confirmLabel: 'Tear Down',
+        variant: 'danger',
       })
-      .afterClosed()
-      .pipe(map((result) => result === true))
       .subscribe((confirmed) => {
         if (!confirmed) return;
         this.runner.teardown(agentId).subscribe({
           next: () => {
-            this.sandbox.set({ ...(this.sandbox() as SandboxHandle), status: 'cold', url: null });
+            this.lastError.set(null);
+            const current = this.sandbox();
+            if (current) {
+              this.sandbox.set({ ...current, status: 'cold', url: null });
+            }
             this.notify.saved('Sandbox torn down.');
           },
-          error: (err) => console.error('teardown failed', err),
+          error: (err) => {
+            this.lastError.set(
+              extractErrorDetail(err, 'Failed to tear down sandbox'),
+            );
+          },
         });
       });
   }
