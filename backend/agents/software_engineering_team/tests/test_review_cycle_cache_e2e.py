@@ -46,28 +46,12 @@ from security_agent.models import SecurityInput
 
 from llm_client_fakes import _make_claude_client, _text_message
 from llm_service import telemetry
-from llm_service.interface import reset_complete_json_observer_state
 from llm_service.strands_adapter import LLMClientModel
 from software_engineering_team.shared.single_shot_review import run_single_shot_review
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def _reset_state() -> None:
-    """Isolate each test's telemetry and JSON-observer state.
-
-    Precondition: none.
-    Postcondition: the telemetry call log is empty before the test runs, and
-    the ``complete_json`` observer's per-turn state is empty both before and
-    after, so no test leaks call records into the next.
-    """
-    telemetry.clear_call_log()
-    reset_complete_json_observer_state()
-    yield
-    reset_complete_json_observer_state()
 
 
 @pytest.fixture(autouse=True)
@@ -207,7 +191,7 @@ def test_qa_and_security_show_nonzero_cache_read_after_code_review() -> None:
             ),
             _text_message(
                 _cr_format_reply(),
-                cache_read_input_tokens=1024,
+                cache_read_input_tokens=0,
                 cache_creation_input_tokens=0,
             ),
         ]
@@ -280,8 +264,9 @@ def test_qa_and_security_show_nonzero_cache_read_after_code_review() -> None:
     assert cr_reasoning["cache_read_tokens"] == 0
     assert cr_reasoning["cache_creation_tokens"] == 1024
 
-    # Code Review formatting: reads prefix cache
-    assert cr_formatting["cache_read_tokens"] == 1024
+    # Code Review formatting: uses a different system prompt (no breakpoint),
+    # so it does not read from the reasoning pass's cache.
+    assert cr_formatting["cache_read_tokens"] == 0
 
     # AC1: QA call reads non-zero cache_read tokens
     assert qa_call["cache_read_tokens"] > 0, (
@@ -328,10 +313,10 @@ def test_code_review_retry_shows_nonzero_cache_read() -> None:
                 cache_read_input_tokens=0,
                 cache_creation_input_tokens=1024,
             ),
-            # Cycle 1 - Code Review formatting
+            # Cycle 1 - Code Review formatting (different system prompt, no breakpoint)
             _text_message(
                 _cr_format_reply(),
-                cache_read_input_tokens=512,
+                cache_read_input_tokens=0,
                 cache_creation_input_tokens=0,
             ),
             # Cycle 2 - Code Review reasoning: reads cache from cycle 1
@@ -340,10 +325,10 @@ def test_code_review_retry_shows_nonzero_cache_read() -> None:
                 cache_read_input_tokens=1024,
                 cache_creation_input_tokens=0,
             ),
-            # Cycle 2 - Code Review formatting
+            # Cycle 2 - Code Review formatting (different system prompt, no breakpoint)
             _text_message(
                 _cr_format_reply(),
-                cache_read_input_tokens=1024,
+                cache_read_input_tokens=0,
                 cache_creation_input_tokens=0,
             ),
         ]
@@ -670,7 +655,7 @@ def test_full_cycle_telemetry_records_all_gate_calls_with_cache_tokens() -> None
             ),
             _text_message(
                 _cr_format_reply(),
-                cache_read_input_tokens=2048,
+                cache_read_input_tokens=0,
                 cache_creation_input_tokens=0,
             ),
         ]
@@ -712,8 +697,9 @@ def test_full_cycle_telemetry_records_all_gate_calls_with_cache_tokens() -> None
         assert call["cache_read_tokens"] >= 0
         assert call["cache_creation_tokens"] >= 0
 
-    # Total cache tokens: one creation (CR reasoning) + three reads
+    # Total cache tokens: one creation (CR reasoning); QA and Security read.
+    # The formatting pass does not share the reasoning breakpoint, so no hit there.
     total_creation = sum(c["cache_creation_tokens"] for c in calls)
     total_read = sum(c["cache_read_tokens"] for c in calls)
-    assert total_creation == 2048  # only the first call creates
-    assert total_read == 2048 * 3  # three subsequent calls read
+    assert total_creation == 2048  # only the reasoning call creates
+    assert total_read == 2048 * 2  # QA + Security read

@@ -142,10 +142,12 @@ within-batch savings depend on timing and provider cache propagation latency. Th
 primary realized savings are on **retry cycles** (always sequential) and any
 sequential re-invocations within the same TTL window.
 
-Example (retry cycle, sequential): a 2000-token spec/architecture prefix billed
-once on the first cycle, then served at the cached-input discount (90% cheaper on
-Anthropic) on retry cycles: 2000 full + 2000 × 0.1 per retry = 2200 effective
-tokens for two cycles instead of 4000.
+Example (retry cycle, sequential): a 2000-token spec/architecture prefix with
+Anthropic's ephemeral breakpoint pricing (1.25× input rate for the cache write,
+0.1× for reads):
+- Cycle 1 (write): 2000 × 1.25 = 2500 token-equivalents
+- Cycle 2 (read): 2000 × 0.1 = 200 token-equivalents
+- Total for two cycles: 2700 token-equivalents instead of 4000 (2× full price)
 
 **QA/Security** (no explicit opt-in — potential future savings):
 If a supported cache mechanism is added for QA/Security user-message content, the
