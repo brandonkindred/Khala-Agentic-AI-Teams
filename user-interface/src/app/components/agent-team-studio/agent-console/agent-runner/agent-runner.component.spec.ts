@@ -2,6 +2,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { HttpErrorResponse, HttpResponse } from '@angular/common/http';
 import { MatDialog } from '@angular/material/dialog';
+import { MatSnackBar } from '@angular/material/snack-bar';
 import { of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
@@ -117,6 +118,7 @@ describe('AgentRunnerComponent', () => {
   let catalogApi: CatalogApiMock;
   let runnerApi: RunnerApiMock;
   let dialogOpen: ReturnType<typeof vi.fn>;
+  let snackBarOpen: ReturnType<typeof vi.fn>;
   let fixture: ComponentFixture<AgentRunnerComponent>;
   let component: AgentRunnerComponent;
 
@@ -144,6 +146,7 @@ describe('AgentRunnerComponent', () => {
       diff: vi.fn(),
     };
     dialogOpen = vi.fn();
+    snackBarOpen = vi.fn();
 
     TestBed.configureTestingModule({
       imports: [AgentRunnerComponent, NoopAnimationsModule],
@@ -153,6 +156,7 @@ describe('AgentRunnerComponent', () => {
       ],
     });
     TestBed.overrideProvider(MatDialog, { useValue: { open: dialogOpen } });
+    TestBed.overrideProvider(MatSnackBar, { useValue: { open: snackBarOpen } });
     await TestBed.compileComponents();
 
     fixture = TestBed.createComponent(AgentRunnerComponent);
@@ -373,14 +377,16 @@ describe('AgentRunnerComponent', () => {
       expect(component.selectedPickerValue()).toBe(`saved:${savedInput.id}`);
     });
 
-    it('alerts the user when creating the saved input fails', () => {
-      const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+    it('shows a snackbar when creating the saved input fails', () => {
       dialogOpen.mockReturnValue({ afterClosed: () => of({ name: 'New save', description: null }) });
       runnerApi.createSavedInput.mockReturnValue(throwError(() => ({ error: { detail: 'name taken' } })));
 
       component.openSaveInputDialog();
 
-      expect(alertSpy).toHaveBeenCalledWith('name taken');
+      expect(snackBarOpen).toHaveBeenCalledWith('name taken', 'Close', expect.objectContaining({
+        duration: 6000,
+        panelClass: 'kh-snack-error',
+      }));
     });
   });
 
@@ -388,14 +394,13 @@ describe('AgentRunnerComponent', () => {
     beforeEach(() => selectWriter());
 
     it('does nothing for an id with no match', () => {
-      const confirmSpy = vi.spyOn(window, 'confirm');
       component.deleteSavedInput('missing', new Event('click'));
-      expect(confirmSpy).not.toHaveBeenCalled();
+      expect(dialogOpen).not.toHaveBeenCalled();
     });
 
-    it('does nothing when the user cancels the confirm', () => {
+    it('does nothing when the user cancels the confirm dialog', () => {
       component.savedInputs.set([savedInput]);
-      vi.spyOn(window, 'confirm').mockReturnValue(false);
+      dialogOpen.mockReturnValue({ afterClosed: () => of(false) });
 
       component.deleteSavedInput(savedInput.id, new Event('click'));
 
@@ -406,7 +411,7 @@ describe('AgentRunnerComponent', () => {
     it('removes the row and clears the picker when it was selected', () => {
       component.savedInputs.set([savedInput]);
       component.selectedPickerValue.set(`saved:${savedInput.id}`);
-      vi.spyOn(window, 'confirm').mockReturnValue(true);
+      dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
       runnerApi.deleteSavedInput.mockReturnValue(of({ id: savedInput.id, status: 'deleted' }));
       const event = new Event('click');
       const stopSpy = vi.spyOn(event, 'stopPropagation');
@@ -482,16 +487,16 @@ describe('AgentRunnerComponent', () => {
       expect(component.sandboxPolling()).toBe(false);
     });
 
-    it('tearDownSandbox does nothing when the user cancels the confirm', () => {
+    it('tearDownSandbox does nothing when the user cancels the confirm dialog', () => {
       selectWriter();
-      vi.spyOn(window, 'confirm').mockReturnValue(false);
+      dialogOpen.mockReturnValue({ afterClosed: () => of(false) });
       component.tearDownSandbox();
       expect(runnerApi.teardown).not.toHaveBeenCalled();
     });
 
     it('tearDownSandbox marks the sandbox cold on confirm', () => {
       selectWriter();
-      vi.spyOn(window, 'confirm').mockReturnValue(true);
+      dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
       component.tearDownSandbox();
       expect(component.sandbox()).toEqual({ ...coldHandle, status: 'cold', url: null });
     });
@@ -499,7 +504,7 @@ describe('AgentRunnerComponent', () => {
     it('tearDownSandbox logs on failure', () => {
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
       selectWriter();
-      vi.spyOn(window, 'confirm').mockReturnValue(true);
+      dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
       runnerApi.teardown.mockReturnValue(throwError(() => new Error('teardown failed')));
 
       component.tearDownSandbox();

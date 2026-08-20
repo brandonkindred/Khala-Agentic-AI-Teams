@@ -17,6 +17,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
+import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
@@ -43,6 +44,10 @@ import type {
 } from '../../../../models/agent-history.model';
 import { AgentRunHistoryComponent } from '../agent-run-history/agent-run-history.component';
 import { AgentSchemaFormComponent } from '../agent-schema-form/agent-schema-form.component';
+import {
+  ConfirmDialogComponent,
+  type ConfirmDialogData,
+} from '../../../../shared/confirm-dialog/confirm-dialog.component';
 import { InlineBannerComponent } from '../../../../shared/inline-banner/inline-banner.component';
 import {
   AgentDiffDialogComponent,
@@ -75,6 +80,7 @@ import {
     MatCardModule,
     MatChipsModule,
     MatDialogModule,
+    MatSnackBarModule,
     MatFormFieldModule,
     MatIconModule,
     MatInputModule,
@@ -93,6 +99,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   private readonly catalog = inject(AgentCatalogApiService);
   private readonly runner = inject(AgentRunnerApiService);
   private readonly dialog = inject(MatDialog);
+  private readonly snackBar = inject(MatSnackBar);
 
   /** Preselect an agent (wired from the Catalog drawer). */
   @Input() set preselectedAgentId(value: string | null) {
@@ -333,8 +340,15 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
             this.selectedPickerValue.set(`saved:${saved.id}`);
           },
           error: (err) => {
-            // Mat dialog is already closed; surface via snackbar-equivalent.
-            alert(err?.error?.detail ?? err?.message ?? 'Failed to save input');
+            const msg =
+              err?.error?.detail ?? err?.message ?? 'Failed to save input';
+            this.snackBar.open(msg, 'Close', {
+              duration: 6000,
+              horizontalPosition: 'end',
+              verticalPosition: 'top',
+              politeness: 'assertive',
+              panelClass: 'kh-snack-error',
+            });
           },
         });
     });
@@ -344,15 +358,32 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     event.stopPropagation();
     const match = this.savedInputs().find((s) => s.id === savedId);
     if (!match) return;
-    if (!confirm(`Delete saved input "${match.name}"?`)) return;
-    this.runner.deleteSavedInput(savedId).subscribe({
-      next: () => {
-        this.savedInputs.update((rows) => rows.filter((s) => s.id !== savedId));
-        if (this.selectedPickerValue() === `saved:${savedId}`) {
-          this.selectedPickerValue.set(null);
-        }
-      },
-    });
+    this.dialog
+      .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(
+        ConfirmDialogComponent,
+        {
+          data: {
+            title: 'Delete Saved Input',
+            message: `Delete saved input "${match.name}"?`,
+            confirmLabel: 'Delete',
+            variant: 'danger',
+          },
+        },
+      )
+      .afterClosed()
+      .subscribe((confirmed) => {
+        if (!confirmed) return;
+        this.runner.deleteSavedInput(savedId).subscribe({
+          next: () => {
+            this.savedInputs.update((rows) =>
+              rows.filter((s) => s.id !== savedId),
+            );
+            if (this.selectedPickerValue() === `saved:${savedId}`) {
+              this.selectedPickerValue.set(null);
+            }
+          },
+        });
+      });
   }
 
   // ---------------------------------------------------------------
@@ -392,13 +423,28 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
     const label = this.selectedAgent()?.manifest.name ?? agentId;
-    if (!confirm(`Tear down the ${label} sandbox?`)) return;
-    this.runner.teardown(agentId).subscribe({
-      next: () => {
-        this.sandbox.set({ ...(this.sandbox() as SandboxHandle), status: 'cold', url: null });
-      },
-      error: (err) => console.error('teardown failed', err),
-    });
+    this.dialog
+      .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(
+        ConfirmDialogComponent,
+        {
+          data: {
+            title: 'Tear Down Sandbox',
+            message: `Tear down the ${label} sandbox?`,
+            confirmLabel: 'Tear Down',
+            variant: 'danger',
+          },
+        },
+      )
+      .afterClosed()
+      .subscribe((confirmed) => {
+        if (!confirmed) return;
+        this.runner.teardown(agentId).subscribe({
+          next: () => {
+            this.sandbox.set({ ...(this.sandbox() as SandboxHandle), status: 'cold', url: null });
+          },
+          error: (err) => console.error('teardown failed', err),
+        });
+      });
   }
 
   // ---------------------------------------------------------------
