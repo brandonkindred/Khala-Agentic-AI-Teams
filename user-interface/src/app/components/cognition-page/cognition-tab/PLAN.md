@@ -155,7 +155,7 @@ Try again shortly."
 2. [x] `cognition.model.ts` + `cognition-labels.ts` (+ spec).
 3. [x] `cognition-api.service.ts` (+ spec).
 4. [x] `cognition-tab.component.*` — picker → Proposals → Memory → Rules (+ spec).
-5. [x] Wire 7th tab into `agent-console.component.{ts,html}`.
+5. [x] ~~Wire 7th tab into `agent-console.component.{ts,html}`.~~ (Console shell deleted; Cognition is now a standalone route at `/cognition`.)
 6. [x] Lint + production build green; 100% line coverage on the new files
    (37 specs: labels 9, service 12, component 16).
 7. [ ] Manual smoke: approve/reject round-trip against a running unified API.

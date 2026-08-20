@@ -356,7 +356,7 @@ Reuse the pattern from `BrandingDashboardComponent` (client/brand create forms v
 
 **Frontend**
 1. `cd user-interface && npm ci && npm test` — Vitest suites green, 80% coverage floor.
-2. `npm start` and navigate to `/agent-studio`. Advance through the Studio stages (Catalog → Build → Compose → Test) to reach Stage 4 (Testing Personas). Sidebar reads **Agent Studio**. The stage stepper shows "Test" as the active stage.
+2. `npm start` and navigate to `/agent-studio`. Advance through the Studio stages (Build Agent → Test Agent → Compose Team → Test Team w/ Personas) to reach Stage 4. Sidebar reads **Agent Studio**. The stage stepper shows "Test Team w/ Personas" as the active stage.
 3. Click **+ Create Persona** → dialog opens → fill required fields → submit → persona appears in the list with an **Edit / Delete** action.
 4. On the builtin card click **Duplicate** → dialog opens pre-filled with builtin's prompts + name `"Startup Founder (copy)"` → submit → new user persona created.
 5. Click **Start Test** → dialog opens → both dropdowns populated (personas from `/personas`, one team from `/testable-teams`) → Submit disabled until both selected → select → submit → app routes to the audit panel and the run appears in the **Running tests** list with the selected persona name + `Software Engineering`.
