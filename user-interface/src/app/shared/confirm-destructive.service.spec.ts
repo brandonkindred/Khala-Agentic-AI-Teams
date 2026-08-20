@@ -43,7 +43,7 @@ describe('ConfirmDestructiveService', () => {
     dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
     service
       .confirm({ title: 'A', message: 'First', variant: 'danger' })
-      .subscribe(() => {});
+      .subscribe(() => { /* consumed */ });
 
     // The first dialog already completed (synchronous of(true)), so the
     // guard was released via finalize. Verify a second call works normally.
