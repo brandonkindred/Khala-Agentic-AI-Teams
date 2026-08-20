@@ -36,9 +36,10 @@ def api_design_architect(
     Returns:
         API contracts/stubs, gateway topology, auth flow, versioning strategy.
     """
+    model = _get_sonnet_model()
     agent = Agent(
-        model=_get_sonnet_model(),
-        system_prompt=cached_system_prompt(API_DESIGN_PROMPT),
+        model=model,
+        system_prompt=cached_system_prompt(API_DESIGN_PROMPT, model),
         tools=[file_read_tool, web_search_tool, document_writer_tool],
         callback_handler=None,
     )

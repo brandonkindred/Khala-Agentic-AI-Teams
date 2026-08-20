@@ -31,9 +31,10 @@ def application_architect(
     Returns:
         Component/service diagram, API contract stubs, data flow, tech stack recommendation.
     """
+    model = _get_sonnet_model()
     agent = Agent(
-        model=_get_sonnet_model(),
-        system_prompt=cached_system_prompt(APPLICATION_PROMPT),
+        model=model,
+        system_prompt=cached_system_prompt(APPLICATION_PROMPT, model),
         tools=[file_read_tool, web_search_tool, document_writer_tool],
         callback_handler=None,
     )

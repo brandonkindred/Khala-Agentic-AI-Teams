@@ -36,9 +36,10 @@ def architecture_scrutineer(
     Returns:
         Scrutiny report with findings (CRITICAL/HIGH/MEDIUM/LOW), remediations, and re-run recommendations.
     """
+    model = _get_opus_model()
     agent = Agent(
-        model=_get_opus_model(),
-        system_prompt=cached_system_prompt(SCRUTINEER_PROMPT),
+        model=model,
+        system_prompt=cached_system_prompt(SCRUTINEER_PROMPT, model),
         tools=[file_read_tool, web_search_tool, document_writer_tool],
         callback_handler=None,
     )

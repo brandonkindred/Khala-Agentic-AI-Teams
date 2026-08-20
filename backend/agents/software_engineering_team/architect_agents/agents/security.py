@@ -43,9 +43,10 @@ def security_architect(
         Phase 1: Security constraints, threat model, compliance checklist, auth recommendation.
         Phase 5: Security review, APPROVE/VETO decision, unresolved issues.
     """
+    model = _get_sonnet_model()
     agent = Agent(
-        model=_get_sonnet_model(),
-        system_prompt=cached_system_prompt(SECURITY_PROMPT),
+        model=model,
+        system_prompt=cached_system_prompt(SECURITY_PROMPT, model),
         tools=[file_read_tool, web_search_tool, document_writer_tool],
         callback_handler=None,
     )

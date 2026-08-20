@@ -42,9 +42,10 @@ def cloud_infrastructure_architect(
     Returns:
         Infrastructure component list, network topology, and cost breakdown.
     """
+    model = _get_sonnet_model()
     agent = Agent(
-        model=_get_sonnet_model(),
-        system_prompt=cached_system_prompt(CLOUD_INFRA_PROMPT),
+        model=model,
+        system_prompt=cached_system_prompt(CLOUD_INFRA_PROMPT, model),
         tools=[file_read_tool, aws_pricing_tool, web_search_tool, document_writer_tool],
         callback_handler=None,
     )

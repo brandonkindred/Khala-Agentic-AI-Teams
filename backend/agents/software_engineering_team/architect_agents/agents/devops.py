@@ -44,9 +44,10 @@ def devops_architect(
     Returns:
         CI/CD architecture, IaC strategy, deployment plan, environment topology.
     """
+    model = _get_sonnet_model()
     agent = Agent(
-        model=_get_sonnet_model(),
-        system_prompt=cached_system_prompt(DEVOPS_PROMPT),
+        model=model,
+        system_prompt=cached_system_prompt(DEVOPS_PROMPT, model),
         tools=[file_read_tool, aws_pricing_tool, web_search_tool, document_writer_tool],
         callback_handler=None,
     )

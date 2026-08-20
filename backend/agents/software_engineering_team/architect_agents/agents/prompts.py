@@ -823,19 +823,24 @@ Use `document_writer_tool` to write the scrutiny report. Use `web_search_tool` t
 # Cache-breakpoint helper for Bedrock-native system prompts
 # ---------------------------------------------------------------------------
 
-#: Bedrock ``cachePoint`` block placed after a system-prompt text segment to
-#: mark the preceding prefix as a provider-side cached breakpoint.  Placed in
-#: the ``system`` list of a Bedrock ConverseStream request, this tells the
-#: provider that the text block(s) before this marker are stable across calls
-#: and eligible for prefix caching.
-_CACHE_POINT_BLOCK: "dict[str, dict[str, str]]" = {"cachePoint": {"type": "default"}}
+#: Models whose Bedrock model-id contains one of these substrings support the
+#: ``cachePoint`` system-content block.  All default architect model IDs are
+#: Anthropic Claude variants; env-var overrides to a non-Anthropic model
+#: gracefully degrade to a plain string prompt (no caching, no error).
+_CACHE_SUPPORTED_FRAGMENTS = ("anthropic", "claude")
 
 
-def cached_system_prompt(prompt: str) -> "list[dict]":
+def cached_system_prompt(prompt: str, model_id: str = "") -> "str | list[dict]":
     """Wrap a static system-prompt string as a cached-prefix list for Strands Agent.
 
-    Returns a two-element list suitable for ``Agent(system_prompt=...)``:
+    When the *model_id* contains ``"anthropic"`` or ``"claude"`` (the default
+    for all architect models), returns a two-element list suitable for
+    ``Agent(system_prompt=...)``:
     ``[{"text": prompt}, {"cachePoint": {"type": "default"}}]``.
+
+    For any other model (e.g. a Llama or Mistral override via env var) the
+    function falls back to returning the plain prompt string so the agent
+    still works — just without the caching optimization.
 
     On the Bedrock Converse API the ``cachePoint`` block instructs the provider
     to treat the preceding text segment as a stable prefix eligible for
@@ -843,4 +848,7 @@ def cached_system_prompt(prompt: str) -> "list[dict]":
     iterations) and across the security architect's dual invocation, the
     identical system prompt is re-sent — this marker avoids re-processing it.
     """
-    return [{"text": prompt}, _CACHE_POINT_BLOCK]
+    model_lower = model_id.lower()
+    if model_lower and not any(frag in model_lower for frag in _CACHE_SUPPORTED_FRAGMENTS):
+        return prompt
+    return [{"text": prompt}, {"cachePoint": {"type": "default"}}]
