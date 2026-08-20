@@ -356,7 +356,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
           error: (err) => {
             // Global toast suppressed; surface inline via the error banner.
             this.lastError.set(
-              extractErrorDetail(err, 'Failed to save input'),
+              extractErrorDetail(err, 'Failed to save input', { joinValidationArray: true }),
             );
           },
         });
@@ -402,7 +402,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
           },
           error: (err) => {
             this.lastError.set(
-              extractErrorDetail(err, 'Failed to delete saved input'),
+              extractErrorDetail(err, 'Failed to delete saved input', { joinValidationArray: true }),
             );
           },
         });
