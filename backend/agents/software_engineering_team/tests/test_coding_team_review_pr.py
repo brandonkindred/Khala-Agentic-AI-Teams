@@ -5577,16 +5577,16 @@ class _SilentGitHubClient:
     _partition_review_issues without exercising the real GitHub API.
     """
 
-    def list_review_comments(self, o, r, n):
+    def list_review_comments(self, owner, repo, pr_number):
         return []
 
-    def list_issue_comments(self, o, r, n):
+    def list_issue_comments(self, owner, repo, pr_number):
         return []
 
-    def get_resolved_review_thread_comment_ids(self, o, r, n):
+    def get_resolved_review_thread_comment_ids(self, owner, repo, pr_number):
         return set()
 
-    def list_open_issues(self, o, r):
+    def list_open_issues(self, owner, repo):
         return iter(())
 
 
@@ -5596,7 +5596,7 @@ class _UnreachableGitHubClient(_SilentGitHubClient):
     Used to verify that comment-fetching is skipped when no PR issues exist.
     """
 
-    def list_review_comments(self, o, r, n):
+    def list_review_comments(self, owner, repo, pr_number):
         raise AssertionError("should not be called when pr_issues is empty")
 
 
@@ -5658,10 +5658,10 @@ class TestPartitionReviewIssuesUnit:
         )
 
         class _ResolvedCommentClient(_SilentGitHubClient):
-            def list_review_comments(self, o, r, n):
+            def list_review_comments(self, owner, repo, pr_number):
                 return [existing]
 
-            def get_resolved_review_thread_comment_ids(self, o, r, n):
+            def get_resolved_review_thread_comment_ids(self, owner, repo, pr_number):
                 return {1}  # resolved
 
         result = pr_review._partition_review_issues(
