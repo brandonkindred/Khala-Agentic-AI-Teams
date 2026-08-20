@@ -1,5 +1,6 @@
 import {
   Component,
+  DestroyRef,
   EventEmitter,
   Input,
   OnDestroy,
@@ -10,6 +11,7 @@ import {
   inject,
   signal,
 } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { HttpErrorResponse } from '@angular/common/http';
@@ -28,6 +30,7 @@ import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { Subscription, interval } from 'rxjs';
 import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
 import { AgentRunnerApiService } from '../../../../services/agent-runner-api.service';
+import { AgentRunnerDestructiveActionsService } from '../../../../services/agent-runner-destructive-actions.service';
 import type {
   AgentDetail,
   AgentSummary,
@@ -86,6 +89,7 @@ import {
     AgentSchemaFormComponent,
     InlineBannerComponent,
   ],
+  providers: [AgentRunnerDestructiveActionsService],
   templateUrl: './agent-runner.component.html',
   styleUrl: './agent-runner.component.scss',
 })
@@ -93,6 +97,12 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   private readonly catalog = inject(AgentCatalogApiService);
   private readonly runner = inject(AgentRunnerApiService);
   private readonly dialog = inject(MatDialog);
+  private readonly destructiveActions = inject(AgentRunnerDestructiveActionsService);
+  private readonly destroyRef = inject(DestroyRef);
+
+  /** Expose service loading signals for the template. */
+  readonly deletingSavedInputId = this.destructiveActions.deletingSavedInputId;
+  readonly tearingDown = this.destructiveActions.tearingDown;
 
   /** Preselect an agent (wired from the Catalog drawer). */
   @Input() set preselectedAgentId(value: string | null) {
@@ -161,6 +171,26 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
       next: (agents) => this.agents.set(agents),
       error: (err) => console.error('Runner: failed to load agents', err),
     });
+
+    // Wire destructive-actions service observables.
+    this.destructiveActions.savedInputDeleted$
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((savedId) => {
+        this.savedInputs.update((rows) => rows.filter((s) => s.id !== savedId));
+        if (this.selectedPickerValue() === `saved:${savedId}`) {
+          this.selectedPickerValue.set(null);
+        }
+      });
+
+    this.destructiveActions.sandboxTornDown$
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(() => {
+        this.sandbox.set({ ...(this.sandbox() as SandboxHandle), status: 'cold', url: null });
+      });
+
+    this.destructiveActions.errors$
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((msg) => this.lastError.set(msg));
   }
 
   ngOnDestroy(): void {
@@ -344,15 +374,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     event.stopPropagation();
     const match = this.savedInputs().find((s) => s.id === savedId);
     if (!match) return;
-    if (!confirm(`Delete saved input "${match.name}"?`)) return;
-    this.runner.deleteSavedInput(savedId).subscribe({
-      next: () => {
-        this.savedInputs.update((rows) => rows.filter((s) => s.id !== savedId));
-        if (this.selectedPickerValue() === `saved:${savedId}`) {
-          this.selectedPickerValue.set(null);
-        }
-      },
-    });
+    this.destructiveActions.deleteSavedInput(savedId, match.name);
   }
 
   // ---------------------------------------------------------------
@@ -392,13 +414,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
     const label = this.selectedAgent()?.manifest.name ?? agentId;
-    if (!confirm(`Tear down the ${label} sandbox?`)) return;
-    this.runner.teardown(agentId).subscribe({
-      next: () => {
-        this.sandbox.set({ ...(this.sandbox() as SandboxHandle), status: 'cold', url: null });
-      },
-      error: (err) => console.error('teardown failed', err),
-    });
+    this.destructiveActions.tearDownSandbox(agentId, label);
   }
 
   // ---------------------------------------------------------------
