@@ -2,6 +2,7 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpParams, HttpResponse } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
+import { skipErrorNotify } from '../core/error-handler.interceptor';
 import type {
   InvokeEnvelope,
   SandboxHandle,
@@ -27,6 +28,9 @@ export class AgentRunnerApiService {
   private readonly http = inject(HttpClient);
   private readonly baseUrl = environment.agentRegistryApiUrl;
   private readonly sandboxesUrl = `${this.baseUrl}/sandboxes`;
+
+  /** Request options that suppress the global error toast (caller renders inline error). */
+  private readonly SKIP_NOTIFY = { context: skipErrorNotify() };
 
   // ------------------------------------------------------------
   // Sandbox lifecycle
@@ -74,7 +78,7 @@ export class AgentRunnerApiService {
     return this.http.post<InvokeEnvelope | Record<string, unknown>>(
       `${this.baseUrl}/${encodeURIComponent(agentId)}/invoke`,
       body,
-      { observe: 'response', params },
+      { observe: 'response', params, context: this.SKIP_NOTIFY.context },
     );
   }
 
@@ -109,6 +113,7 @@ export class AgentRunnerApiService {
     return this.http.post<SavedInput>(
       `${this.baseUrl}/${encodeURIComponent(agentId)}/saved-inputs`,
       body,
+      this.SKIP_NOTIFY,
     );
   }
 
@@ -122,6 +127,7 @@ export class AgentRunnerApiService {
   deleteSavedInput(savedId: string): Observable<{ id: string; status: string }> {
     return this.http.delete<{ id: string; status: string }>(
       `${this.baseUrl}/saved-inputs/${encodeURIComponent(savedId)}`,
+      this.SKIP_NOTIFY,
     );
   }
 

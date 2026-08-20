@@ -352,6 +352,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
             this.selectedPickerValue.set(`saved:${saved.id}`);
           },
           error: (err) => {
+            // Global toast suppressed; surface inline via the error banner.
             this.lastError.set(
               extractErrorDetail(err, 'Failed to save input'),
             );
