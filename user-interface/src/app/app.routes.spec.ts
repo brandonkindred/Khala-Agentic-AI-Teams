@@ -155,7 +155,9 @@ describe('App routes', () => {
     expect(studio).toBeDefined();
     // Persona audit is nested under Studio — not a standalone route
     expect(studio!.children?.some((c) => c.path === 'persona-run/:runId')).toBe(true);
-    // Studio sub-routes (provisioning, metrics) are siblings at top level
+    // Studio sub-routes (provisioning, metrics) are siblings at top level.
+    // NOTE: docs/design/agent-studio-ux-spec.md §2.3 plans to fold provisioning
+    // into the Studio shell; when that lands (#5948), update this assertion.
     expect(children.some((r) => r.path === 'agent-studio/provisioning')).toBe(true);
     expect(children.some((r) => r.path === 'agent-studio/metrics')).toBe(true);
   });
