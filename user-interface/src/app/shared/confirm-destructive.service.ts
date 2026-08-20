@@ -1,6 +1,6 @@
 import { Injectable, inject } from '@angular/core';
 import { MatDialog } from '@angular/material/dialog';
-import { Observable, of } from 'rxjs';
+import { Observable, of, throwError } from 'rxjs';
 import { finalize, map } from 'rxjs/operators';
 
 import {
@@ -31,22 +31,27 @@ export class ConfirmDestructiveService {
    * Returns an observable that emits exactly once: `true` when the user
    * confirms, `false` on cancel, backdrop/ESC dismissal, or when a
    * confirmation is already pending. The re-entrancy guard is released
-   * when the dialog closes.
+   * when the dialog closes or if `MatDialog.open()` throws synchronously.
    */
   confirm(data: ConfirmDialogData): Observable<boolean> {
     if (this.confirming) return of(false);
     this.confirming = true;
-    return this.dialog
-      .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(
-        ConfirmDialogComponent,
-        { data },
-      )
-      .afterClosed()
-      .pipe(
-        map((result) => result === true),
-        finalize(() => {
-          this.confirming = false;
-        }),
-      );
+    try {
+      return this.dialog
+        .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(
+          ConfirmDialogComponent,
+          { data },
+        )
+        .afterClosed()
+        .pipe(
+          map((result) => result === true),
+          finalize(() => {
+            this.confirming = false;
+          }),
+        );
+    } catch (err) {
+      this.confirming = false;
+      return throwError(() => err);
+    }
   }
 }

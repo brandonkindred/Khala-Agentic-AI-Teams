@@ -94,5 +94,37 @@ describe('ConfirmDestructiveService', () => {
     afterClosed$.next(true);
     afterClosed$.complete();
     expect(firstResult).toBe(true);
+
+    // Third call after guard is released — should open the dialog again.
+    dialogOpen.mockClear();
+    dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
+    let thirdResult: boolean | undefined;
+    service
+      .confirm({ title: 'C', message: 'Third', variant: 'danger' })
+      .subscribe((v) => (thirdResult = v));
+    expect(dialogOpen).toHaveBeenCalledTimes(1);
+    expect(thirdResult).toBe(true);
+  });
+
+  it('releases the guard and emits an error if dialog.open() throws synchronously', () => {
+    const openError = new Error('Missing component');
+    dialogOpen.mockImplementation(() => { throw openError; });
+
+    let emittedError: unknown;
+    service
+      .confirm({ title: 'X', message: 'Boom', variant: 'danger' })
+      .subscribe({ error: (e) => (emittedError = e) });
+
+    expect(emittedError).toBe(openError);
+
+    // Guard was released — a subsequent call should open the dialog normally.
+    dialogOpen.mockReset();
+    dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
+    let result: boolean | undefined;
+    service
+      .confirm({ title: 'Y', message: 'Retry', variant: 'danger' })
+      .subscribe((v) => (result = v));
+    expect(dialogOpen).toHaveBeenCalledTimes(1);
+    expect(result).toBe(true);
   });
 });
