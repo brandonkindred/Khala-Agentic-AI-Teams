@@ -74,10 +74,10 @@ All feature routes are lazily loaded; the initial bundle ships only the app shel
 
 The following legacy routes and their container shells have been removed:
 
-- `/agent-console` – replaced by Agent Studio
-- `/agentic-teams` – replaced by Agent Studio Stage 3 (Compose)
-- `/persona-testing` – replaced by Agent Studio Stage 4 (Persona)
-- `/agent-provisioning` – integrated into Agent Studio
+- `/agent-console` – shell deleted; child components reused within Agent Studio
+- `/agentic-teams` – shell deleted; replaced by Agent Studio Stage 3 (Compose)
+- `/persona-testing` – shell deleted; replaced by Agent Studio Stage 4 (Persona)
+- `/agent-provisioning` – route removed; the `AgentProvisioningDashboardComponent` was moved (not deleted) to `/agent-studio/provisioning`
 
 ## Core Modules
 
