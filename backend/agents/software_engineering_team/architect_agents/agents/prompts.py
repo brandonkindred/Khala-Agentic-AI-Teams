@@ -1,5 +1,19 @@
 """Prompts for the architect_agents specialist agents and orchestrator."""
 
+import importlib.util as _ilu
+from pathlib import Path as _Path
+
+# Import bedrock_model_supports_prompt_caching directly from the canonical
+# llm_service/capabilities.py without triggering llm_service/__init__.py
+# (which pulls in heavy deps like pydantic that aren't available in the
+# standalone architect-agents virtualenv).
+_capabilities_path = _Path(__file__).resolve().parent.parent.parent.parent / "llm_service" / "capabilities.py"
+_spec = _ilu.spec_from_file_location("llm_service.capabilities", _capabilities_path)
+_capabilities = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_capabilities)
+bedrock_model_supports_prompt_caching = _capabilities.bedrock_model_supports_prompt_caching
+
+
 ORCHESTRATOR_PROMPT = """# Enterprise Architect Orchestrator
 
 You are an expert Lead Enterprise Architect Orchestrator. Your job is to interpret incoming specs and planning documents, identify which architecture domains are relevant, delegate to specialist agents, synthesize all outputs into a unified architecture package, and ensure the architecture is scrutinized for conflicts, gaps, and risks before delivery.
@@ -823,18 +837,6 @@ Use `document_writer_tool` to write the scrutiny report. Use `web_search_tool` t
 # Cache-breakpoint helper for Bedrock-native system prompts
 # ---------------------------------------------------------------------------
 
-import importlib.util as _ilu
-from pathlib import Path as _Path
-
-# Import bedrock_model_supports_prompt_caching directly from the canonical
-# llm_service/capabilities.py without triggering llm_service/__init__.py
-# (which pulls in heavy deps like pydantic that aren't available in the
-# standalone architect-agents virtualenv).
-_capabilities_path = _Path(__file__).resolve().parent.parent.parent.parent / "llm_service" / "capabilities.py"
-_spec = _ilu.spec_from_file_location("llm_service.capabilities", _capabilities_path)
-_capabilities = _ilu.module_from_spec(_spec)
-_spec.loader.exec_module(_capabilities)
-bedrock_model_supports_prompt_caching = _capabilities.bedrock_model_supports_prompt_caching
 
 #: Bedrock ``cachePoint`` block placed after a system-prompt text segment to
 #: mark the preceding prefix as a provider-side cached breakpoint.  Returned
