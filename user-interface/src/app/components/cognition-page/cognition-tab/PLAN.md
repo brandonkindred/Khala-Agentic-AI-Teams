@@ -1,6 +1,11 @@
 # Cognition HITL Review Panel — Implementation Plan
 
-Implementation plan for the Agent Console **Cognition** tab. This plan is the
+> **Note:** This plan was written when Cognition was a tab inside the Agent Console.
+> The Agent Console shell has since been deleted; Cognition now lives at its own
+> route (`/cognition`) as a standalone page. References to `agent-console.component`
+> below are historical only.
+
+Implementation plan for the ~~Agent Console **Cognition** tab~~ standalone Cognition page. This plan is the
 build companion to [`DESIGN.md`](./DESIGN.md) and incorporates every design
 requirement from it (section references below point at `DESIGN.md §N`).
 

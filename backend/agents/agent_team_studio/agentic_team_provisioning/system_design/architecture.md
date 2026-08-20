@@ -157,7 +157,7 @@ In this service, the orchestrator is **not** a dedicated LLM agent — it is the
 
 ```mermaid
 graph LR
-    Actor(["Actor"]) --> UI["UI<br/>(Angular /agentic-teams)"]
+    Actor(["Actor"]) --> UI["UI<br/>(Angular /agent-studio)"]
     UI --> Unified["Unified API<br/>(FastAPI, 0.0.0.0:8080)"]
     Unified --> Mount["/api/agentic-team-provisioning<br/>(TeamConfig in unified_api/config.py:194-197)"]
     Mount --> Orch["Orchestrator Agent<br/>(this team)"]
