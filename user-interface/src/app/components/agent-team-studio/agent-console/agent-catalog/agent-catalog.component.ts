@@ -12,7 +12,7 @@ import { MatSelectModule } from '@angular/material/select';
 import { MatSidenavModule } from '@angular/material/sidenav';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
+import { AgentConsoleApiService } from '../../../../services/agent-console-api.service';
 import { extractErrorDetail } from '../../../../shared/extract-error-detail';
 import type {
   AgentDetail,
@@ -45,7 +45,7 @@ import type {
   styleUrl: './agent-catalog.component.scss',
 })
 export class AgentCatalogComponent implements OnInit, OnDestroy {
-  private readonly api = inject(AgentCatalogApiService);
+  private readonly api = inject(AgentConsoleApiService);
 
   /** Emitted when the user clicks "Run agent" in the detail drawer. Consumed by the host
    *  (Agent Studio's Build Agent stage) to hand off the selected agent id. */

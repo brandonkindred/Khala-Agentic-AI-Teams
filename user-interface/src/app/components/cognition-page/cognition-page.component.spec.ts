@@ -3,7 +3,7 @@ import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
 import { CognitionPageComponent } from './cognition-page.component';
-import { AgentCatalogApiService } from '../../services/agent-catalog-api.service';
+import { AgentConsoleApiService } from '../../services/agent-console-api.service';
 import { CognitionApiService } from '../../services/cognition-api.service';
 
 /**
@@ -31,7 +31,7 @@ describe('CognitionPageComponent', () => {
     await TestBed.configureTestingModule({
       imports: [CognitionPageComponent, NoopAnimationsModule],
       providers: [
-        { provide: AgentCatalogApiService, useValue: catalogSpy() },
+        { provide: AgentConsoleApiService, useValue: catalogSpy() },
         { provide: CognitionApiService, useValue: cognitionApiSpy() },
       ],
     }).compileComponents();
