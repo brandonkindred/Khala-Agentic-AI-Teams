@@ -288,11 +288,19 @@ def test_qa_and_security_show_nonzero_cache_read_after_code_review() -> None:
         f"Expected non-zero cache_read on QA call following Code Review, "
         f"got {qa_call['cache_read_tokens']}"
     )
+    assert qa_call["cache_creation_tokens"] == 0, (
+        f"Expected zero cache_creation on QA cache-hit call, "
+        f"got {qa_call['cache_creation_tokens']}"
+    )
 
     # AC1: Security call reads non-zero cache_read tokens
     assert security_call["cache_read_tokens"] > 0, (
         f"Expected non-zero cache_read on Security call following Code Review, "
         f"got {security_call['cache_read_tokens']}"
+    )
+    assert security_call["cache_creation_tokens"] == 0, (
+        f"Expected zero cache_creation on Security cache-hit call, "
+        f"got {security_call['cache_creation_tokens']}"
     )
 
 
@@ -383,6 +391,10 @@ def test_code_review_retry_shows_nonzero_cache_read() -> None:
     assert cycle2_cr_reason["cache_read_tokens"] > 0, (
         f"Expected non-zero cache_read on retry cycle's CR call, "
         f"got {cycle2_cr_reason['cache_read_tokens']}"
+    )
+    assert cycle2_cr_reason["cache_creation_tokens"] == 0, (
+        f"Expected zero cache_creation on CR cache-hit retry, "
+        f"got {cycle2_cr_reason['cache_creation_tokens']}"
     )
 
 
@@ -529,6 +541,7 @@ def test_code_review_output_unchanged_regardless_of_cache_state() -> None:
     calls = telemetry.get_recent_calls()
     assert calls[0]["cache_read_tokens"] == 0  # miss
     assert calls[2]["cache_read_tokens"] == 1024  # hit
+    assert calls[2]["cache_creation_tokens"] == 0  # hit: no new cache creation
 
 
 def test_qa_output_unchanged_regardless_of_cache_state() -> None:
@@ -567,6 +580,7 @@ def test_qa_output_unchanged_regardless_of_cache_state() -> None:
     calls = telemetry.get_recent_calls()
     assert calls[0]["cache_read_tokens"] == 0  # miss
     assert calls[1]["cache_read_tokens"] == 512  # hit
+    assert calls[1]["cache_creation_tokens"] == 0  # hit: no new cache creation
 
 
 def test_security_output_unchanged_regardless_of_cache_state() -> None:
@@ -602,6 +616,7 @@ def test_security_output_unchanged_regardless_of_cache_state() -> None:
     calls = telemetry.get_recent_calls()
     assert calls[0]["cache_read_tokens"] == 0  # miss
     assert calls[1]["cache_read_tokens"] == 512  # hit
+    assert calls[1]["cache_creation_tokens"] == 0  # hit: no new cache creation
 
 
 # ---------------------------------------------------------------------------
