@@ -109,6 +109,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   @Input() set preselectedAgentId(value: string | null) {
     if (value && value !== this.selectedAgentId()) {
       this.selectedAgentId.set(value);
+      this.destructiveError.set(null);
       this.loadAgentDetail(value);
     }
   }

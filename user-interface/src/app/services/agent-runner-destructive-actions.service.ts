@@ -47,7 +47,15 @@ export class AgentRunnerDestructiveActionsService {
   readonly sandboxTornDown$: Observable<void> = this._sandboxTornDown.asObservable();
 
   /**
-   * Deletes a saved input after user confirmation.
+   * Deletes a saved input after the user confirms a danger dialog.
+   *
+   * Preconditions: `savedId` and `savedName` are non-empty strings.
+   * Side effects: opens `ConfirmDialogComponent`, calls
+   *   `AgentRunnerApiService.deleteSavedInput`, shows a success toast,
+   *   and emits `savedId` through `savedInputDeleted$`.
+   * Postconditions: on completion (success or failure) `deletingSavedInputId`
+   *   is reset to `null`. On failure, an error message is emitted through
+   *   `errors$`.
    */
   deleteSavedInput(savedId: string, savedName: string): void {
     this.helper.execute(
@@ -69,7 +77,16 @@ export class AgentRunnerDestructiveActionsService {
   }
 
   /**
-   * Tears down a sandbox after user confirmation.
+   * Tears down a sandbox after the user confirms a danger dialog.
+   *
+   * Preconditions: `agentId` is a non-empty agent identifier;
+   *   `agentLabel` is the human-readable name shown in the dialog.
+   * Side effects: opens `ConfirmDialogComponent`, calls
+   *   `AgentRunnerApiService.teardown`, shows a success toast,
+   *   and emits through `sandboxTornDown$`.
+   * Postconditions: on completion (success or failure) `tearingDown`
+   *   is reset to `false`. On failure, an error message is emitted
+   *   through `errors$`.
    */
   tearDownSandbox(agentId: string, agentLabel: string): void {
     this.helper.execute(

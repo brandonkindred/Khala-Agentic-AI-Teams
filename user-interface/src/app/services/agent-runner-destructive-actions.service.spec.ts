@@ -1,6 +1,6 @@
 import { TestBed } from '@angular/core/testing';
 import { MatDialog } from '@angular/material/dialog';
-import { of, throwError } from 'rxjs';
+import { Observable, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { AgentRunnerDestructiveActionsService } from './agent-runner-destructive-actions.service';
 import { AgentRunnerApiService } from './agent-runner-api.service';
@@ -49,6 +49,7 @@ describe('AgentRunnerDestructiveActionsService', () => {
         {
           data: expect.objectContaining({
             title: 'Delete saved input',
+            message: expect.stringContaining('My Input'),
             confirmLabel: 'Delete',
             variant: 'danger',
           }),
@@ -64,9 +65,15 @@ describe('AgentRunnerDestructiveActionsService', () => {
 
     it('sets deletingSavedInputId during the API call and clears it on success', () => {
       mockDialogResult(true);
-      runnerApi.deleteSavedInput.mockReturnValue(of({ id: 'id-1', status: 'deleted' }));
+      runnerApi.deleteSavedInput.mockReturnValue(
+        new Observable((subscriber) => {
+          // Verify the loading signal is set while the call is in flight.
+          expect(service.deletingSavedInputId()).toBe('id-1');
+          subscriber.next({ id: 'id-1', status: 'deleted' });
+          subscriber.complete();
+        }),
+      );
 
-      // Signal starts null.
       expect(service.deletingSavedInputId()).toBeNull();
 
       service.deleteSavedInput('id-1', 'My Input');
@@ -124,6 +131,7 @@ describe('AgentRunnerDestructiveActionsService', () => {
         {
           data: expect.objectContaining({
             title: 'Tear down sandbox',
+            message: expect.stringContaining('Writer'),
             confirmLabel: 'Tear down',
             variant: 'danger',
           }),
@@ -139,7 +147,14 @@ describe('AgentRunnerDestructiveActionsService', () => {
 
     it('sets tearingDown during the API call and clears it on success', () => {
       mockDialogResult(true);
-      runnerApi.teardown.mockReturnValue(of({ agent_id: 'agent-1', status: 'stopped' }));
+      runnerApi.teardown.mockReturnValue(
+        new Observable((subscriber) => {
+          // Verify the loading signal is set while the call is in flight.
+          expect(service.tearingDown()).toBe(true);
+          subscriber.next({ agent_id: 'agent-1', status: 'stopped' });
+          subscriber.complete();
+        }),
+      );
 
       expect(service.tearingDown()).toBe(false);
 

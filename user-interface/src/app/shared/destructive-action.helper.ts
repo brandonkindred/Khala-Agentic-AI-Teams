@@ -36,6 +36,10 @@ export interface DestructiveActionOptions<T = unknown> {
  * Usage: instantiate once per service (in the constructor or as a field), then
  * call `execute()` for each destructive action. The helper owns no signals or
  * subjects — callers supply callbacks so they remain in control of state shape.
+ *
+ * Note: before each confirmed action the helper resets caller error state by
+ * invoking `onError(null)`, ensuring stale errors are cleared before a new
+ * request is attempted.
  */
 export class DestructiveActionHelper {
   /** True while a confirm dialog is open — blocks re-entrant opens. */
@@ -52,13 +56,17 @@ export class DestructiveActionHelper {
    * Opens the confirm dialog and, on confirmation, executes the API call.
    *
    * Re-entrancy guard prevents stacked dialogs from rapid double-activation.
+   * On confirmation, clears any previous error by calling `onError(null)`,
+   * then invokes `onStart`, runs `apiCall` (wrapped in `defer` to catch
+   * synchronous throws), and calls `onFinally` on completion via `finalize`.
    * On success calls `opts.onSuccess` and shows a toast via NotificationService.
-   * On failure calls the `onError` callback provided at construction.
+   * On failure calls the `onError` callback provided at construction with
+   * the extracted error message.
    *
    * @param opts Configuration for this specific destructive action.
    * @param successToast Message for the success notification toast.
    * @param onStart Optional callback fired just before the API call (e.g. set loading signal).
-   * @param onFinally Optional callback fired after both success and error (e.g. clear loading signal).
+   * @param onFinally Optional callback fired after success, error, or unsubscribe (e.g. clear loading signal).
    */
   execute<T>(
     opts: DestructiveActionOptions<T>,
