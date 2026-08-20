@@ -75,7 +75,7 @@ export class AgentRunnerApiService {
     return this.http.post<InvokeEnvelope | Record<string, unknown>>(
       `${this.baseUrl}/${encodeURIComponent(agentId)}/invoke`,
       body,
-      { observe: 'response', params, context: SKIP_NOTIFY_OPTIONS.context },
+      { observe: 'response', params, ...SKIP_NOTIFY_OPTIONS },
     );
   }
 
