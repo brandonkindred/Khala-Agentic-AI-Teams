@@ -14,7 +14,7 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { HasUnsavedChanges } from '../../core/unsaved-changes.guard';
 import { NotificationService } from '../../core/notification.service';
-import { extractErrorDetail } from '../../core/error-handler.interceptor';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import type {
   GitHubConfigResponse,
@@ -266,7 +266,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
         this.googleBrowserError =
-          extractErrorDetail(err, 'Failed to load Google browser-login status.');
+          extractErrorDetail(err, 'Failed to load Google browser-login status.', { joinValidationArray: true });
         this.googleBrowserLoading = false;
       },
     });
@@ -289,7 +289,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
         this.googleBrowserError =
-          extractErrorDetail(err, 'Failed to save Google credentials.');
+          extractErrorDetail(err, 'Failed to save Google credentials.', { joinValidationArray: true });
         this.savingGoogleBrowserCredentials = false;
       },
     });
@@ -309,7 +309,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
         this.googleBrowserError =
-          extractErrorDetail(err, 'Failed to clear Google credentials.');
+          extractErrorDetail(err, 'Failed to clear Google credentials.', { joinValidationArray: true });
         this.clearingGoogleBrowserCredentials = false;
       },
     });
@@ -363,7 +363,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         this.mediumLoading = false;
       },
       error: (err) => {
-        this.mediumError = extractErrorDetail(err, 'Failed to load Medium config');
+        this.mediumError = extractErrorDetail(err, 'Failed to load Medium config', { joinValidationArray: true });
         this.mediumLoading = false;
       },
     });
@@ -391,7 +391,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         this.mediumSaving = false;
       },
       error: (err) => {
-        this.mediumError = extractErrorDetail(err, 'Failed to save Medium settings.');
+        this.mediumError = extractErrorDetail(err, 'Failed to save Medium settings.', { joinValidationArray: true });
         this.mediumSaving = false;
       },
     });
@@ -408,7 +408,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
         this.mediumError =
-          extractErrorDetail(err, 'Automated Medium browser login failed.');
+          extractErrorDetail(err, 'Automated Medium browser login failed.', { joinValidationArray: true });
         this.mediumBrowserLoginRunning = false;
       },
     });
@@ -422,7 +422,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         this.loadingSlack = false;
       },
       error: (err) => {
-        this.error = extractErrorDetail(err, 'Failed to load Slack config');
+        this.error = extractErrorDetail(err, 'Failed to load Slack config', { joinValidationArray: true });
         this.loadingSlack = false;
       },
     });
@@ -467,7 +467,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
           window.location.href = res.url;
         },
         error: (err) => {
-          this.error = extractErrorDetail(err, 'Failed to start Slack OAuth.');
+          this.error = extractErrorDetail(err, 'Failed to start Slack OAuth.', { joinValidationArray: true });
           this.connecting = false;
         },
       });
@@ -494,7 +494,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
           doConnect();
         },
         error: (err) => {
-          this.error = extractErrorDetail(err, 'Failed to save credentials.');
+          this.error = extractErrorDetail(err, 'Failed to save credentials.', { joinValidationArray: true });
           this.connecting = false;
         },
       });
@@ -513,7 +513,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         this.disconnecting = false;
       },
       error: (err) => {
-        this.error = extractErrorDetail(err, 'Failed to disconnect Slack.');
+        this.error = extractErrorDetail(err, 'Failed to disconnect Slack.', { joinValidationArray: true });
         this.disconnecting = false;
       },
     });
@@ -550,7 +550,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         this.saving = false;
       },
       error: (err) => {
-        this.error = extractErrorDetail(err, 'Failed to save settings.');
+        this.error = extractErrorDetail(err, 'Failed to save settings.', { joinValidationArray: true });
         this.saving = false;
       },
     });
@@ -627,7 +627,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         this.saving = false;
       },
       error: (err) => {
-        this.error = extractErrorDetail(err, 'Failed to save Slack config.');
+        this.error = extractErrorDetail(err, 'Failed to save Slack config.', { joinValidationArray: true });
         this.saving = false;
       },
     });
@@ -670,7 +670,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         this.githubLoading = false;
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
-        this.githubError = extractErrorDetail(err, 'Failed to load GitHub config.');
+        this.githubError = extractErrorDetail(err, 'Failed to load GitHub config.', { joinValidationArray: true });
         this.githubLoading = false;
         // Current store state is unknown after a failed reload — clear the stale
         // unreachable flag so a banner from a prior load doesn't linger.
@@ -704,7 +704,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         this.githubSaving = false;
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
-        this.githubError = extractErrorDetail(err, 'Failed to save GitHub config.');
+        this.githubError = extractErrorDetail(err, 'Failed to save GitHub config.', { joinValidationArray: true });
         this.githubSaving = false;
       },
     });
@@ -725,7 +725,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         this.githubDisconnecting = false;
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
-        this.githubError = extractErrorDetail(err, 'Failed to disconnect GitHub.');
+        this.githubError = extractErrorDetail(err, 'Failed to disconnect GitHub.', { joinValidationArray: true });
         this.githubDisconnecting = false;
       },
     });
@@ -793,7 +793,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
       error: (err) => {
         this.tradingViewTestResult = {
           ok: false,
-          detail: extractErrorDetail(err, 'Connection test failed.'),
+          detail: extractErrorDetail(err, 'Connection test failed.', { joinValidationArray: true }),
         };
         this.tradingViewTesting = false;
       },
@@ -809,7 +809,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         this.tradingViewLoading = false;
       },
       error: (err) => {
-        this.tradingViewError = extractErrorDetail(err, 'Failed to load TradingView config.');
+        this.tradingViewError = extractErrorDetail(err, 'Failed to load TradingView config.', { joinValidationArray: true });
         this.tradingViewLoading = false;
       },
     });
@@ -841,7 +841,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         this.tradingViewSaving = false;
       },
       error: (err) => {
-        this.tradingViewError = extractErrorDetail(err, 'Failed to save TradingView config.');
+        this.tradingViewError = extractErrorDetail(err, 'Failed to save TradingView config.', { joinValidationArray: true });
         this.tradingViewSaving = false;
       },
     });
@@ -857,7 +857,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         this.tradingViewDisconnecting = false;
       },
       error: (err) => {
-        this.tradingViewError = extractErrorDetail(err, 'Failed to disconnect TradingView.');
+        this.tradingViewError = extractErrorDetail(err, 'Failed to disconnect TradingView.', { joinValidationArray: true });
         this.tradingViewDisconnecting = false;
       },
     });

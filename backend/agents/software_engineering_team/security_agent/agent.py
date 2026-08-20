@@ -3,9 +3,10 @@
 Calls the LLM via ``shared.single_shot_review.run_single_shot_review`` in
 schema-validated mode, which resolves the client, validates the reply
 against ``SecurityLLMResponse``, and drives one bounded corrective retry
-(re-prompting with the schema/validation error) before falling back — in
-place of the single-shot, no-retry Strands ``structured_output_model`` path
-this agent used previously.
+(re-prompting with the schema/validation error) before falling back. The
+file-context prefix (language + code under review) is kept in the user
+message — it is untrusted repository content and must not be elevated to
+system-level instructions.
 """
 
 from __future__ import annotations
@@ -87,12 +88,8 @@ def clear_review_cache() -> None:
 def _security_model_fingerprint(llm: Optional[LLMClient]) -> str:
     """Best-effort stable identifier for the model a security review will run on.
 
-    Unlike ``qa_agent``, this agent never resolves/holds a Strands model —
-    it calls the LLM via ``run_single_shot_review`` on the raw ``self.llm``.
-    Mirrors ``code_review_agent.mapping._review_model_fingerprint``: resolve
-    a Strands model purely for identity purposes via the generic
-    ``resolve_strands_model`` (not the code-review-specific resolver), then
-    delegate the attribute probing to
+    Resolves a Strands model for identity purposes via ``resolve_strands_model``,
+    then delegates the attribute probing to
     ``llm_service.strands_model.model_fingerprint``.
 
     Preconditions:
@@ -301,13 +298,15 @@ class CybersecurityExpertAgent:
         The persona (``SECURITY_PROMPT``) is passed as
         ``run_single_shot_review``'s ``system_prompt``. The user prompt
         carries the code under review (see ``_build_security_file_context_prefix``)
-        as a stable prefix, followed by the schema hint and remaining
-        instructions (see ``_build_security_role_instructions``). The words
-        "security" and "vulnerabilities" MUST appear somewhere in the prompt
-        because ``DummyLLMClient.complete_json``
-        pattern-matches on them (order-independent substring check) to return
-        a deterministic stub in tests — see llm_service/README.md "Migration
-        rule: keep pattern anchors in the user prompt".
+        followed by the per-gate role instructions — the schema hint, task
+        description, context, and architecture. The code under review is
+        untrusted repository content and must stay in the user message, not
+        be elevated to system-level instructions. The words "security" and
+        "vulnerabilities" MUST appear somewhere in the prompt because
+        ``DummyLLMClient.complete_json`` pattern-matches on them
+        (order-independent substring check) to return a deterministic stub
+        in tests — see llm_service/README.md "Migration rule: keep pattern
+        anchors in the user prompt".
         """
         parts = _build_security_file_context_prefix(input_data) + _build_security_role_instructions(
             input_data

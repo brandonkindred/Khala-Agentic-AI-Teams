@@ -375,14 +375,12 @@ describe('AgentRunnerComponent', () => {
       expect(component.selectedPickerValue()).toBe(`saved:${savedInput.id}`);
     });
 
-    it('alerts the user when creating the saved input fails', () => {
-      const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+    it('does not throw when creating the saved input fails (interceptor toasts)', () => {
       dialogOpen.mockReturnValue({ afterClosed: () => of({ name: 'New save', description: null }) });
       runnerApi.createSavedInput.mockReturnValue(throwError(() => ({ error: { detail: 'name taken' } })));
 
-      component.openSaveInputDialog();
-
-      expect(alertSpy).toHaveBeenCalledWith('name taken');
+      // Error is handled gracefully; global interceptor surfaces the toast.
+      expect(() => component.openSaveInputDialog()).not.toThrow();
     });
   });
 

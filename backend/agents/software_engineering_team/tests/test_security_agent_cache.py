@@ -234,7 +234,9 @@ def test_corrupt_cache_entry_treated_as_miss() -> None:
     agent = CybersecurityExpertAgent(client)
     input_data = _input()
 
-    key = agent_mod._review_cache_key(input_data, agent_mod._security_model_fingerprint(agent.llm))
+    key = agent_mod._review_cache_key(
+        input_data, agent_mod._security_model_fingerprint(agent.llm)
+    )
     cache = get_shared_cache(agent_mod._review_cache_namespace())
     cache.set(key, b"not valid json", max_entries=agent_mod._review_cache_size())
 

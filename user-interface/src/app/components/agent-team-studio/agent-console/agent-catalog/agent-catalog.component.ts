@@ -13,6 +13,7 @@ import { MatSidenavModule } from '@angular/material/sidenav';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
+import { extractErrorDetail } from '../../../../shared/extract-error-detail';
 import type {
   AgentDetail,
   AgentSummary,
@@ -105,7 +106,7 @@ export class AgentCatalogComponent implements OnInit, OnDestroy {
           this.loading.set(false);
         },
         error: (err) => {
-          this.error.set(err?.error?.detail ?? err?.message ?? 'Failed to load agents');
+          this.error.set(extractErrorDetail(err, 'Failed to load agents'));
           this.loading.set(false);
         },
       });
