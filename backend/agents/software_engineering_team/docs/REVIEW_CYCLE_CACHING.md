@@ -103,7 +103,7 @@ Code Review (reasoning + formatting)  →  QA  →  Security
 
 End-to-end tests in `tests/test_review_cycle_cache_e2e.py` verify:
 
-1. **Wire-level Code Review cache opt-in** (`test_qa_and_security_show_nonzero_cache_read_after_code_review`,
+1. **Wire-level Code Review cache opt-in** (`test_code_review_emits_cache_control_and_records_cache_tokens`,
    `test_code_review_retry_shows_nonzero_cache_read`):
    - Code Review's system content carries `cache_control: {"type": "ephemeral"}`
      blocks on the wire.
