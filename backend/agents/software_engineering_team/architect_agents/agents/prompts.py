@@ -823,10 +823,18 @@ Use `document_writer_tool` to write the scrutiny report. Use `web_search_tool` t
 # Cache-breakpoint helper for Bedrock-native system prompts
 # ---------------------------------------------------------------------------
 
-try:
-    from llm_service.capabilities import bedrock_model_supports_prompt_caching
-except ModuleNotFoundError:  # standalone architect-agents entry (main.py)
-    from llm_service_compat import bedrock_model_supports_prompt_caching  # type: ignore[no-redef]
+import importlib.util as _ilu
+from pathlib import Path as _Path
+
+# Import bedrock_model_supports_prompt_caching directly from the canonical
+# llm_service/capabilities.py without triggering llm_service/__init__.py
+# (which pulls in heavy deps like pydantic that aren't available in the
+# standalone architect-agents virtualenv).
+_capabilities_path = _Path(__file__).resolve().parent.parent.parent.parent / "llm_service" / "capabilities.py"
+_spec = _ilu.spec_from_file_location("llm_service.capabilities", _capabilities_path)
+_capabilities = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_capabilities)
+bedrock_model_supports_prompt_caching = _capabilities.bedrock_model_supports_prompt_caching
 
 #: Bedrock ``cachePoint`` block placed after a system-prompt text segment to
 #: mark the preceding prefix as a provider-side cached breakpoint.  Returned
@@ -866,5 +874,5 @@ def cached_system_prompt(prompt: str, model_id: str = "") -> "str | list[dict]":
     — the single source of truth for raw-Bedrock integration paths.
     """
     if bedrock_model_supports_prompt_caching(model_id):
-        return [{"text": prompt}, {**_CACHE_POINT_BLOCK}]
+        return [{"text": prompt}, {"cachePoint": {"type": "default"}}]
     return prompt
