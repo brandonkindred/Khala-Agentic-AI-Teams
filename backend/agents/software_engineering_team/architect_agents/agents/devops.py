@@ -10,7 +10,7 @@ _root = Path(__file__).resolve().parent.parent
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
-from agents.prompts import DEVOPS_PROMPT  # noqa: E402
+from agents.prompts import DEVOPS_PROMPT, cached_system_prompt  # noqa: E402
 from strands import Agent, tool  # noqa: E402
 from tools import (  # noqa: E402
     aws_pricing_tool,
@@ -44,9 +44,10 @@ def devops_architect(
     Returns:
         CI/CD architecture, IaC strategy, deployment plan, environment topology.
     """
+    model = _get_sonnet_model()
     agent = Agent(
-        model=_get_sonnet_model(),
-        system_prompt=DEVOPS_PROMPT,
+        model=model,
+        system_prompt=cached_system_prompt(DEVOPS_PROMPT, model),
         tools=[file_read_tool, aws_pricing_tool, web_search_tool, document_writer_tool],
         callback_handler=None,
     )

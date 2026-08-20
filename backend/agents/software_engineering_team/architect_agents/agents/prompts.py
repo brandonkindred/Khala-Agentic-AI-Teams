@@ -1,5 +1,7 @@
 """Prompts for the architect_agents specialist agents and orchestrator."""
 
+from shared.llm_capabilities import bedrock_model_supports_prompt_caching
+
 ORCHESTRATOR_PROMPT = """# Enterprise Architect Orchestrator
 
 You are an expert Lead Enterprise Architect Orchestrator. Your job is to interpret incoming specs and planning documents, identify which architecture domains are relevant, delegate to specialist agents, synthesize all outputs into a unified architecture package, and ensure the architecture is scrutinized for conflicts, gaps, and risks before delivery.
@@ -818,3 +820,68 @@ When evaluating findings, apply this priority order:
 
 Use `document_writer_tool` to write the scrutiny report. Use `web_search_tool` to verify best practices when evaluating specialist recommendations. Use `file_read_tool` to read any referenced documents.
 """
+
+# ---------------------------------------------------------------------------
+# Cache-breakpoint helper for Bedrock-native system prompts
+# ---------------------------------------------------------------------------
+# Design note (dual-abstraction): The SE team has two prompt-caching
+# primitives that serve different integration layers:
+#
+# 1. ``llm_service.CacheBreakpoint`` — for agents using ``LLMClientModel``
+#    (the strands adapter).  The adapter translates CacheBreakpoint into
+#    Anthropic's ``cache_control: {"type": "ephemeral"}`` wire format.
+#    Used by: code_review_agent, QA/Security gates, any agent using
+#    ``run_structured_persona`` / ``run_agent_via_reasoning``.
+#
+# 2. ``cached_system_prompt()`` (here) — for agents using raw Bedrock model
+#    strings with ``strands.Agent(model="...")``.  Returns a Strands
+#    system-prompt list with a native Bedrock ``cachePoint`` block.
+#    Used by: architect specialist agents, orchestrator.
+#
+# These two abstractions coexist because the architect agents intentionally
+# bypass ``llm_service`` (see ARCHITECT_AGENTS_FRAMEWORK_DECISION.md) and
+# construct models from bare Bedrock IDs.  The Bedrock Converse API expects
+# ``cachePoint`` blocks (not Anthropic ``cache_control``), so a different
+# wire format is needed.  Both ultimately solve the same problem — marking a
+# stable prefix for provider-side caching — at different layers.
+# ---------------------------------------------------------------------------
+
+
+#: Bedrock ``cachePoint`` block appended after a system-prompt text segment
+#: to mark the preceding prefix as a provider-side cached breakpoint.
+_CACHE_POINT_BLOCK: "dict[str, dict[str, str]]" = {"cachePoint": {"type": "default"}}
+
+
+def cached_system_prompt(prompt: str, model_id: str = "") -> "str | list[dict]":
+    """Wrap a static system-prompt string as a cached-prefix list for Strands Agent.
+
+    When the *model_id* identifies a model known to support Bedrock prompt
+    caching (Claude 3.5 Sonnet v2, Claude 3.7+, Claude 4+, Haiku 4.5+,
+    Opus 4.5+, Nova), returns a two-element list suitable for
+    ``Agent(system_prompt=...)``:
+    ``[{"text": prompt}, {"cachePoint": {"type": "default"}}]``.
+
+    If *model_id* is empty or omitted, the function assumes caching is
+    supported (safe default — all architect-agent default models are
+    caching-capable Anthropic Claude variants).  Callers whose model may
+    not support caching should pass the resolved model identifier to opt
+    out gracefully.
+
+    For any other model — including older Claude 3 originals (3-sonnet,
+    3-haiku, 3-opus), Claude 3.5 Sonnet v1, and non-Anthropic overrides
+    (Llama, Mistral) — the function falls back to returning the plain
+    prompt string so the agent still works without the caching optimization.
+
+    On the Bedrock Converse API the ``cachePoint`` block instructs the provider
+    to treat the preceding text segment as a stable prefix eligible for
+    cross-call caching.  Within the architect scrutiny loop (up to 2
+    iterations) and across the security architect's dual invocation, the
+    identical system prompt is re-sent — this marker avoids re-processing it.
+
+    Model-support detection is delegated to
+    :func:`llm_service.capabilities.bedrock_model_supports_prompt_caching`
+    — the single source of truth for raw-Bedrock integration paths.
+    """
+    if bedrock_model_supports_prompt_caching(model_id):
+        return [{"text": prompt}, {"cachePoint": dict(_CACHE_POINT_BLOCK["cachePoint"])}]
+    return prompt
