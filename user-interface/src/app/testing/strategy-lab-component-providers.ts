@@ -3,6 +3,7 @@ import { StrategyLabRunService } from '../services/strategy-lab-run.service';
 import { StrategyLabActivityLogService } from '../services/strategy-lab-activity-log.service';
 import { StrategyLabPaperTradingService } from '../services/strategy-lab-paper-trading.service';
 import { StrategyLabDestructiveActionsService } from '../services/strategy-lab-destructive-actions.service';
+import { ConfirmDestructiveService } from '../shared/confirm-destructive.service';
 import type { RunServiceStub } from './strategy-lab-run-service.stub';
 
 /**
@@ -31,6 +32,7 @@ export function strategyLabProvidersOverride(runService: RunServiceStub, extraPr
         StrategyLabActivityLogService,
         StrategyLabPaperTradingService,
         StrategyLabDestructiveActionsService,
+        ConfirmDestructiveService,
         ...extraProviders,
       ],
     },
