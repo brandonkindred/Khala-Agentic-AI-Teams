@@ -26,6 +26,7 @@ import { MatSelectModule } from '@angular/material/select';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { Subscription, interval } from 'rxjs';
+import { finalize } from 'rxjs/operators';
 import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
 import { AgentRunnerApiService } from '../../../../services/agent-runner-api.service';
 import type {
@@ -160,6 +161,9 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   });
 
   private sandboxPollSub: Subscription | null = null;
+
+  /** Prevents stacked destructive-action dialogs from rapid double-activation. */
+  private confirmingDestructive = false;
 
   ngOnInit(): void {
     this.catalog.listAgents().subscribe({
@@ -350,6 +354,8 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     event.stopPropagation();
     const match = this.savedInputs().find((s) => s.id === savedId);
     if (!match) return;
+    if (this.confirmingDestructive) return;
+    this.confirmingDestructive = true;
     this.dialog
       .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(
         ConfirmDialogComponent,
@@ -363,6 +369,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
         },
       )
       .afterClosed()
+      .pipe(finalize(() => { this.confirmingDestructive = false; }))
       .subscribe((confirmed) => {
         if (!confirmed) return;
         this.runner.deleteSavedInput(savedId).subscribe({
@@ -419,6 +426,8 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   tearDownSandbox(): void {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
+    if (this.confirmingDestructive) return;
+    this.confirmingDestructive = true;
     const label = this.selectedAgent()?.manifest.name ?? agentId;
     this.dialog
       .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(
@@ -433,6 +442,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
         },
       )
       .afterClosed()
+      .pipe(finalize(() => { this.confirmingDestructive = false; }))
       .subscribe((confirmed) => {
         if (!confirmed) return;
         this.runner.teardown(agentId).subscribe({
