@@ -92,24 +92,7 @@ describe('AgentRunnerComponent', () => {
     created_at: '2026-08-01T00:05:00Z',
   };
 
-  interface ApiMock {
-    listAgents: ReturnType<typeof vi.fn>;
-    getAgent: ReturnType<typeof vi.fn>;
-    getInputSchema: ReturnType<typeof vi.fn>;
-    ensureWarm: ReturnType<typeof vi.fn>;
-    getSandbox: ReturnType<typeof vi.fn>;
-    teardown: ReturnType<typeof vi.fn>;
-    invoke: ReturnType<typeof vi.fn>;
-    listSamples: ReturnType<typeof vi.fn>;
-    getSample: ReturnType<typeof vi.fn>;
-    listSavedInputs: ReturnType<typeof vi.fn>;
-    createSavedInput: ReturnType<typeof vi.fn>;
-    deleteSavedInput: ReturnType<typeof vi.fn>;
-    listRuns: ReturnType<typeof vi.fn>;
-    getRun: ReturnType<typeof vi.fn>;
-    deleteRun: ReturnType<typeof vi.fn>;
-    diff: ReturnType<typeof vi.fn>;
-  }
+  type ApiMock = { [K in keyof AgentConsoleApiService]: ReturnType<typeof vi.fn> };
 
   let api: ApiMock;
   let dialogOpen: ReturnType<typeof vi.fn>;
@@ -117,7 +100,7 @@ describe('AgentRunnerComponent', () => {
   let fixture: ComponentFixture<AgentRunnerComponent>;
   let component: AgentRunnerComponent;
 
-  const setup = async (catalogOverrides: Partial<ApiMock> = {}) => {
+  const setup = async (apiOverrides: Partial<ApiMock> = {}) => {
     TestBed.resetTestingModule();
     api = {
       listAgents: vi.fn().mockReturnValue(of([writerSummary])),
@@ -136,7 +119,7 @@ describe('AgentRunnerComponent', () => {
       getRun: vi.fn(),
       deleteRun: vi.fn(),
       diff: vi.fn(),
-      ...catalogOverrides,
+      ...apiOverrides,
     };
     dialogOpen = vi.fn();
     confirmServiceConfirm = vi.fn();
@@ -384,7 +367,7 @@ describe('AgentRunnerComponent', () => {
       // Simulate a prior error state.
       component.lastError.set('prior failure');
       dialogOpen.mockReturnValue({ afterClosed: () => of({ name: 'New save', description: null }) });
-      runnerApi.createSavedInput.mockReturnValue(of(savedInput));
+      api.createSavedInput.mockReturnValue(of(savedInput));
 
       component.openSaveInputDialog();
 
@@ -446,7 +429,7 @@ describe('AgentRunnerComponent', () => {
       component.savedInputs.set([savedInput]);
       component.lastError.set('prior failure');
       confirmServiceConfirm.mockReturnValue(of(true));
-      runnerApi.deleteSavedInput.mockReturnValue(of({ id: savedInput.id, status: 'deleted' }));
+      api.deleteSavedInput.mockReturnValue(of({ id: savedInput.id, status: 'deleted' }));
 
       component.deleteSavedInput(savedInput.id, new Event('click'));
 

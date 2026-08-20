@@ -163,7 +163,10 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.api.listAgents().subscribe({
       next: (agents) => this.agents.set(agents),
-      error: (err) => console.error('Runner: failed to load agents', err),
+      error: (err) => {
+        console.error('Runner: failed to load agents', err);
+        this.lastError.set('Could not load agents.');
+      },
     });
   }
 
@@ -423,6 +426,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     this.sandboxPollSub = interval(5000).subscribe(() => {
       this.api.getSandbox(agentId).subscribe({
         next: (handle) => this.sandbox.set(handle),
+        error: () => this.sandbox.set(null),
       });
     });
   }

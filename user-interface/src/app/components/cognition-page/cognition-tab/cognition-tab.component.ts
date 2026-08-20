@@ -96,7 +96,7 @@ const RULE_PAGE_LIMIT = 500;
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class CognitionTabComponent implements OnInit {
-  private readonly catalog = inject(AgentConsoleApiService);
+  private readonly agentConsoleApi = inject(AgentConsoleApiService);
   private readonly api = inject(CognitionApiService);
   private readonly dialog = inject(MatDialog);
   private readonly destroyRef = inject(DestroyRef);
@@ -210,7 +210,7 @@ export class CognitionTabComponent implements OnInit {
   loadAgents(): void {
     this.loadingAgents.set(true);
     this.agentsError.set(null);
-    this.catalog
+    this.agentConsoleApi
       .listAgents()
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
