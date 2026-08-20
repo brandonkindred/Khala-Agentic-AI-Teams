@@ -29,8 +29,6 @@ from __future__ import annotations
 
 from typing import Any, Callable, List, TypeVar
 
-from llm_service.cache_breakpoint import CacheBreakpoint
-
 OutputT = TypeVar("OutputT")
 
 
