@@ -11,6 +11,7 @@ from security_agent import CybersecurityExpertAgent
 from security_agent.models import SecurityInput, SecurityOutput
 
 from llm_service.clients.dummy import DummyLLMClient
+from shared.dev_models.models import SystemArchitecture
 
 
 def _input(**overrides: object) -> SecurityInput:
@@ -35,8 +36,6 @@ def test_security_agent_default_run_returns_security_output() -> None:
 
 def test_security_agent_with_context_and_architecture() -> None:
     """Optional context and architecture fields should not crash the pipeline."""
-    from shared.dev_models.models import SystemArchitecture
-
     arch = SystemArchitecture(
         overview="Tiny microservice",
         architecture_document="# Arch\n\nSingle FastAPI service.",
@@ -223,8 +222,6 @@ def test_file_context_prefix_precedes_role_instructions() -> None:
     """The shared microtask file context (language + code) is a stable prefix
     ahead of the role-specific instructions (schema hint, task, context,
     architecture) -- pure reorder/isolation, no cache marking yet."""
-    from shared.dev_models.models import SystemArchitecture
-
     prompt = CybersecurityExpertAgent._build_user_prompt(
         _input(
             context="Runs behind reverse proxy",
