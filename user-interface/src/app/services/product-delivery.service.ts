@@ -26,7 +26,7 @@ import type {
  * Talks to the unified API at `${environment.productDeliveryApiUrl}`.
  * Errors are not handled here; subscribers should surface
  * `err?.error?.detail` at the component layer (existing project
- * convention — see `AgentRunnerApiService`).
+ * convention — see `AgentConsoleApiService`).
  */
 @Injectable({ providedIn: 'root' })
 export class ProductDeliveryService {
