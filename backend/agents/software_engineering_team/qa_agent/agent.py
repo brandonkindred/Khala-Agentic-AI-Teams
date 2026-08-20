@@ -134,6 +134,59 @@ def _review_cache_key(input_data: QAInput, model_fp: str) -> str:
     return build_model_cache_key(input_data, model_fp)
 
 
+def _build_qa_file_context_prefix(input_data: QAInput) -> list[str]:
+    """Render the microtask file context (language + code) as a stable prefix.
+
+    Positioned ahead of ``_build_qa_role_instructions``'s output in the
+    assembled user prompt (reorder/isolation only; no cache marking here).
+    Only called from the non-``acceptance_evidence`` branch of
+    ``_build_user_prompt``, whose caller has already excluded the
+    evidence-mapping mode (that mode carries no code under review).
+
+    Preconditions:
+        - ``input_data`` is a valid ``QAInput`` with ``code`` set.
+
+    Postconditions:
+        - Returns non-empty prompt lines: the language line, then the code
+          fence around ``input_data.code``. Never raises or transforms the code.
+    """
+    return [
+        f"**Language:** {input_data.language}",
+        "**Code to review:**",
+        "```",
+        input_data.code,
+        "```",
+    ]
+
+
+def _build_qa_role_instructions(input_data: QAInput) -> list[str]:
+    """Render the QA-specific review instructions that follow the file-context prefix.
+
+    Preconditions:
+        - ``input_data`` is a valid ``QAInput``.
+
+    Postconditions:
+        - Returns non-empty prompt lines: the schema-hint sentence, then the
+          task description, architecture, run instructions, and build errors
+          when each is present — in that fixed order. Never raises.
+    """
+    parts = [
+        "",
+        "Review the code for bugs and produce structured JSON with "
+        "fields: bugs_found, test_plan, unit_tests, integration_tests, "
+        "readme_content, summary, live_test_notes, suggested_commit_message.",
+    ]
+    if input_data.task_description:
+        parts.append(f"**Task:** {input_data.task_description}")
+    if input_data.architecture:
+        parts.append(f"**Architecture:** {input_data.architecture.overview}")
+    if input_data.run_instructions:
+        parts.append(f"**Run instructions:** {input_data.run_instructions}")
+    if input_data.build_errors:
+        parts.append(f"**Build/compiler errors:**\n```\n{input_data.build_errors}\n```")
+    return parts
+
+
 class QAExpertAgent:
     """
     QA expert that reviews code for bugs, runs live testing, and ensures
@@ -309,9 +362,11 @@ class QAExpertAgent:
 
         The persona (``QA_PROMPT`` and its mode-specific addendum) lives on
         the Strands ``Agent``'s system prompt, so the user prompt only
-        carries the code under review and its context. An explicit schema
-        hint (``bugs_found``, ``test_plan``, ...) makes the expected output
-        shape unambiguous for the LLM.
+        carries the code under review and its context. In the default/
+        fix_build/write_tests modes, the code under review (see
+        ``_build_qa_file_context_prefix``) is a stable prefix, followed by an
+        explicit schema hint (``bugs_found``, ``test_plan``, ...) and the
+        remaining instructions (see ``_build_qa_role_instructions``).
 
         Preconditions: ``input_data`` is a valid :class:`QAInput`.
         Postconditions: returns a non-empty str. In ``acceptance_evidence`` mode
@@ -341,28 +396,5 @@ class QAExpertAgent:
                 f"**Tool results:**\n{tool_results_text}"
             )
 
-        parts = [
-            "Review the following code for bugs and produce structured JSON with "
-            "fields: bugs_found, test_plan, unit_tests, integration_tests, "
-            "readme_content, summary, live_test_notes, suggested_commit_message.",
-            "",
-            f"**Language:** {input_data.language}",
-        ]
-        if input_data.task_description:
-            parts.append(f"**Task:** {input_data.task_description}")
-        parts.extend(
-            [
-                "**Code to review:**",
-                "```",
-                input_data.code,
-                "```",
-            ]
-        )
-        if input_data.architecture:
-            parts.append(f"**Architecture:** {input_data.architecture.overview}")
-        if input_data.run_instructions:
-            parts.append(f"**Run instructions:** {input_data.run_instructions}")
-        if input_data.build_errors:
-            parts.append(f"**Build/compiler errors:**\n```\n{input_data.build_errors}\n```")
-
+        parts = _build_qa_file_context_prefix(input_data) + _build_qa_role_instructions(input_data)
         return "\n".join(parts)

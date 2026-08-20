@@ -12,6 +12,7 @@ from qa_agent import QAExpertAgent, QAInput
 from qa_agent.models import BugReport, QAOutput
 
 from llm_service.clients.dummy import DummyLLMClient
+from shared.dev_models.models import SystemArchitecture
 
 # ---------------------------------------------------------------------------
 # BugReport.location collapse validator
@@ -176,6 +177,36 @@ def test_multiple_run_calls_on_same_instance_succeed() -> None:
         result = agent.run(_input(request_mode=mode))
         assert isinstance(result, QAOutput), f"run {i} (mode={mode}) did not return QAOutput"
         assert result.approved is True, f"run {i} (mode={mode}) failed: {result.summary}"
+
+
+# ---------------------------------------------------------------------------
+# _build_user_prompt: shared file context as a stable prefix
+# ---------------------------------------------------------------------------
+
+
+def test_file_context_prefix_precedes_role_instructions() -> None:
+    """The shared microtask file context (language + code) is a stable prefix
+    ahead of the role-specific instructions (schema hint, task description) --
+    pure reorder/isolation, no cache marking yet."""
+    prompt = QAExpertAgent._build_user_prompt(_input())
+    code_pos = prompt.index("def add(a, b)")
+    assert code_pos < prompt.index("Review the code for bugs")
+    assert code_pos < prompt.index("**Task:**")
+
+
+def test_file_context_prefix_precedes_architecture_run_instructions_and_build_errors() -> None:
+    """The file-context prefix precedes every optional role-instruction section."""
+    prompt = QAExpertAgent._build_user_prompt(
+        _input(
+            architecture=SystemArchitecture(overview="layered"),
+            run_instructions="uvicorn main:app",
+            build_errors="SyntaxError: bad",
+        )
+    )
+    code_pos = prompt.index("def add(a, b)")
+    assert code_pos < prompt.index("**Architecture:**")
+    assert code_pos < prompt.index("**Run instructions:**")
+    assert code_pos < prompt.index("**Build/compiler errors:**")
 
 
 def test_qa_expert_agent_falls_back_on_validation_error() -> None:

@@ -25,6 +25,8 @@ from typing import Any, Dict, Optional, Union
 
 import pytest
 from code_review_agent.chunk_reviewer import (
+    CHUNK_REVIEW_NOTE,
+    REVIEW_GUARDRAILS_NOTE,
     ChunkReviewAgent,
     _build_shared_review_prefix,
 )
@@ -305,13 +307,27 @@ def test_review_guardrails_note_is_in_every_prompt(monkeypatch) -> None:
     assert "**Review guardrails" in prompt
     # Full sentences, not bare substrings, so a stray unrelated occurrence of
     # "COMPLETE" or "does not exist" elsewhere in the prompt can't false-pass.
-    assert "Surface-first: the code shown below is COMPLETE" in prompt
+    assert "Surface-first: the code shown for this chunk is COMPLETE" in prompt
     assert "Do NOT claim that a file, module, or symbol referenced here 'does not exist'" in prompt
     assert "SOLELY because it is off-chunk" in prompt
     assert (
         "Defer that cross-caller check to the dedicated side-effect / blast-radius pass" in prompt
     )
     assert "from .models import" in prompt  # relative imports are conventional
+
+
+def test_shared_file_context_prefix_precedes_role_instructions(monkeypatch) -> None:
+    """The shared microtask file context (the "Files in this chunk" label and
+    the code under review) is a stable prefix ahead of the per-chunk
+    role-specific instructions (the chunk note, review guardrails, and task
+    description) -- pure reorder/isolation, no cache marking yet."""
+    calls = _capture_run_agent_via_reasoning(monkeypatch)
+    ChunkReviewAgent(llm=DummyLLMClient()).run(_chunk_input())
+    prompt = calls[0]["reasoning_prompt"]
+    code_pos = prompt.index("Code to review")
+    assert code_pos < prompt.index(CHUNK_REVIEW_NOTE.strip())
+    assert code_pos < prompt.index(REVIEW_GUARDRAILS_NOTE.strip())
+    assert code_pos < prompt.index("Task description")
 
 
 def test_user_decisions_rendered_as_settled_in_prompt(monkeypatch) -> None:
