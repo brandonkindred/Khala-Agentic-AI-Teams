@@ -47,7 +47,6 @@ import { AgentSchemaFormComponent } from '../agent-schema-form/agent-schema-form
 import { ConfirmDestructiveService } from '../../../../shared/confirm-destructive.service';
 import { InlineBannerComponent } from '../../../../shared/inline-banner/inline-banner.component';
 import { extractErrorDetail } from '../../../../shared/extract-error-detail';
-import { skipErrorNotify } from '../../../../core/error-handler.interceptor';
 import {
   AgentDiffDialogComponent,
   type AgentDiffDialogData,
@@ -337,7 +336,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
             input_data: body,
             description: result.description,
           },
-          skipErrorNotify(),
+          { silent: true },
         )
         .subscribe({
           next: (saved) => {

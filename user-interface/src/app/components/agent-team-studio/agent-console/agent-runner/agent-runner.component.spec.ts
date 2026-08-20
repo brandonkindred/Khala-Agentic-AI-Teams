@@ -378,7 +378,7 @@ describe('AgentRunnerComponent', () => {
         name: 'New save',
         input_data: {},
         description: null,
-      }, expect.any(Object));
+      }, { silent: true });
       expect(component.savedInputs()).toEqual([savedInput]);
       expect(component.selectedPickerValue()).toBe(`saved:${savedInput.id}`);
     });
