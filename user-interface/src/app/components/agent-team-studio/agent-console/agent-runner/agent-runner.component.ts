@@ -46,6 +46,7 @@ import { AgentSchemaFormComponent } from '../agent-schema-form/agent-schema-form
 import { ConfirmDestructiveService } from '../../../../shared/confirm-destructive.service';
 import { InlineBannerComponent } from '../../../../shared/inline-banner/inline-banner.component';
 import { extractErrorDetail } from '../../../../shared/extract-error-detail';
+import { NotificationService } from '../../../../core/notification.service';
 import {
   AgentDiffDialogComponent,
   type AgentDiffDialogData,
@@ -96,6 +97,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   private readonly catalog = inject(AgentCatalogApiService);
   private readonly runner = inject(AgentRunnerApiService);
   private readonly dialog = inject(MatDialog);
+  private readonly notify = inject(NotificationService);
   private readonly confirmService = inject(ConfirmDestructiveService);
 
   /** Preselect an agent (wired from the Catalog drawer). */
@@ -393,6 +395,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
             if (this.selectedPickerValue() === `saved:${savedId}`) {
               this.selectedPickerValue.set(null);
             }
+            this.notify.saved('Saved input deleted.');
           },
           error: (err) => {
             this.lastError.set(
@@ -474,6 +477,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
             if (current) {
               this.sandbox.set({ ...current, status: 'cold', url: null });
             }
+            this.notify.saved('Sandbox torn down.');
           },
           error: (err) => {
             this.lastError.set(

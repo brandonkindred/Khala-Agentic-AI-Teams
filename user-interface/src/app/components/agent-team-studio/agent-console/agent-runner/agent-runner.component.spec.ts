@@ -410,7 +410,7 @@ describe('AgentRunnerComponent', () => {
       expect(component.savedInputs()).toEqual([savedInput]);
     });
 
-    it('removes the row and clears the picker when it was selected', () => {
+    it('removes the row and clears the picker when confirmed', () => {
       component.savedInputs.set([savedInput]);
       component.selectedPickerValue.set(`saved:${savedInput.id}`);
       confirmServiceConfirm.mockReturnValue(of(true));
