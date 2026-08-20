@@ -369,7 +369,7 @@ def test_issue_defaults_match_current_hand_rolled_fallbacks() -> None:
     assert issue.start_line is None
     assert issue.description == ""
     assert issue.suggestion == ""
-    assert issue.pre_existing is False
+    assert issue.pre_existing is True
     assert issue.omission is False
 
 

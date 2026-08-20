@@ -486,8 +486,10 @@ def _coerce_scope_tags(item: Mapping[str, object]) -> Tuple[bool, bool]:
 
     Postconditions:
         - Returns ``(pre_existing, omission)``, each coerced via
-          ``_coerce_bool`` (tolerating string encodings, defaulting False
-          when absent).
+          ``_coerce_bool`` (tolerating string encodings). ``pre_existing``
+          defaults True when absent (matching the prompt instruction that
+          uncertain findings should be tagged out-of-scope); ``omission``
+          defaults False when absent.
         - When the raw dict tags both fields true (a self-contradictory
           reply -- ``CodeReviewIssue`` rejects that combination via
           ``_omission_implies_in_scope``), ``omission`` wins: the returned
@@ -495,7 +497,14 @@ def _coerce_scope_tags(item: Mapping[str, object]) -> Tuple[bool, bool]:
           built from this pair never trips that validator. Never raises.
     """
     omission = _coerce_bool(item.get("omission"))
-    pre_existing = False if omission else _coerce_bool(item.get("pre_existing"))
+    if omission:
+        pre_existing = False
+    elif "pre_existing" in item:
+        pre_existing = _coerce_bool(item["pre_existing"])
+    else:
+        # Field absent — default to True (uncertain ⇒ out-of-scope), matching
+        # the prompt instruction across all review passes.
+        pre_existing = True
     return pre_existing, omission
 
 

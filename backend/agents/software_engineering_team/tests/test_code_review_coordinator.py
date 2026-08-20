@@ -2906,10 +2906,11 @@ def test_documentation_category_survives_chunk_output_validation() -> None:
     assert issues[0].category == "documentation"
 
 
-def test_pre_existing_tag_is_carried_through_and_defaults_false() -> None:
+def test_pre_existing_tag_is_carried_through_and_defaults_true() -> None:
     """The optional ``pre_existing`` tag (used by the PR-review path to route a
     finding to an issue proposal instead of a PR comment) survives conversion,
-    tolerates string encodings, and defaults False when absent."""
+    tolerates string encodings, and defaults True when absent (uncertain
+    findings are treated as out-of-scope rather than guessed into scope)."""
     seg = FileSegment(path="a.py", content="x = 1\ny = 2\nz = 3", total_lines=3)
     chunk = ReviewChunk(segments=[seg])
     issues = _issues_from_chunk_output(
@@ -2921,7 +2922,7 @@ def test_pre_existing_tag_is_carried_through_and_defaults_false() -> None:
             {"description": "untagged", "line": 1},
         ],
     )
-    assert [i.pre_existing for i in issues] == [True, True, False, False]
+    assert [i.pre_existing for i in issues] == [True, True, False, True]
 
 
 def test_omission_tag_is_carried_through_and_defaults_false() -> None:
@@ -2929,7 +2930,7 @@ def test_omission_tag_is_carried_through_and_defaults_false() -> None:
     should have added or modified file X but didn't", distinct from
     ``pre_existing``) survives conversion, tolerates string encodings, and
     defaults False when absent -- mirrors
-    ``test_pre_existing_tag_is_carried_through_and_defaults_false``."""
+    ``test_pre_existing_tag_is_carried_through_and_defaults_true``."""
     seg = FileSegment(path="a.py", content="x = 1\ny = 2\nz = 3", total_lines=3)
     chunk = ReviewChunk(segments=[seg])
     issues = _issues_from_chunk_output(
@@ -3089,16 +3090,21 @@ def test_coerce_scope_tags_reconciles_omission_and_pre_existing() -> None:
     pre_existing/omission pair, used by chunking._issues_from_chunk_output,
     architecture_consistency_pass._coerce_finding, and
     side_effect_impact_pass._coerce_finding: each coerces via _coerce_bool,
-    and omission wins when both raw tags are true."""
+    omission wins when both raw tags are true, and pre_existing defaults True
+    when absent (uncertain findings treated as out-of-scope)."""
     from code_review_agent.chunking import _coerce_scope_tags
 
-    assert _coerce_scope_tags({}) == (False, False)
+    # Absent pre_existing defaults True (uncertain ⇒ out-of-scope).
+    assert _coerce_scope_tags({}) == (True, False)
     assert _coerce_scope_tags({"pre_existing": True}) == (True, False)
+    assert _coerce_scope_tags({"pre_existing": False}) == (False, False)
     assert _coerce_scope_tags({"omission": True}) == (False, True)
     # omission wins over a contradictory pre_existing tag.
     assert _coerce_scope_tags({"pre_existing": True, "omission": True}) == (False, True)
     # String encodings tolerated the same way _coerce_bool tolerates them.
     assert _coerce_scope_tags({"pre_existing": "true", "omission": "yes"}) == (False, True)
+    # Explicitly false pre_existing is honored.
+    assert _coerce_scope_tags({"pre_existing": "false"}) == (False, False)
 
 
 def test_validate_line_absolute_numbering_has_no_overlap_ambiguity() -> None:
