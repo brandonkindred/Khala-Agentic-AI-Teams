@@ -125,9 +125,10 @@ _SHARED_OUTPUT_SECTION = (
     '  - "pre_existing": boolean. true when this issue describes a defect in code this change did '
     "NOT add or modify -- a pre-existing defect in code outside the scope of this change (e.g. an "
     "unrelated bug you notice in surrounding, unchanged code you were shown for context). false "
-    "when the defect is in code this change itself added or modified. Default false: when you "
-    "cannot tell whether the code predates this change, treat it as part of the change rather than "
-    "guessing pre-existing. This does NOT apply to findings that the change should have added or "
+    "when the defect is in code this change itself added or modified. Default false. This tag is "
+    "informational for attribution; the downstream posting gate is change-map-driven "
+    "(is_within_diff + omission), so pre_existing alone does not control whether a finding is "
+    "posted. This does NOT apply to findings that the change should have added or "
     "modified a file but did not -- those are in-scope defects; use pre_existing: false and set "
     'omission: true instead (see "omission" below).\n'
     '  - "omission": boolean. true when this finding is a required add/modify the change should '
@@ -182,8 +183,10 @@ _SHARED_REVIEW_POLICY = (
     "`this.userService.getUsers(this.page, this.pageSize).subscribe(...)` and bind MatPaginator "
     'events to update these values."\n'
     '  - "pre_existing": boolean. true when the defect is in unchanged, pre-existing code outside '
-    "this change; false when the defect is in code this change added or modified. Default false "
-    "when uncertain. This does NOT apply to findings that the change should have added or modified "
+    "this change; false when the defect is in code this change added or modified. Default false. "
+    "This tag is informational for attribution; the downstream posting gate is change-map-driven "
+    "(is_within_diff + omission), so pre_existing alone does not control whether a finding is "
+    "posted. This does NOT apply to findings that the change should have added or modified "
     "a file but did not -- those are in-scope defects; use pre_existing: false and set omission: "
     "true instead.\n"
     "- The coding agent that receives these issues will use them as instructions, so each issue "

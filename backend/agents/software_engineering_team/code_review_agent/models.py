@@ -603,7 +603,9 @@ class ChunkReviewIssueLLM(BaseModel):
         default=False,
         description="True when this issue is a bug in code the change under review did NOT add or "
         "modify — a pre-existing defect in unrelated, unchanged code — rather than a defect the "
-        "change introduced. Default False.",
+        "change introduced. This tag is informational for attribution; it does not drive posting "
+        "scope — the downstream gate is change-map-driven (is_within_diff + omission). "
+        "Default False.",
     )
     omission: StrictBool = Field(
         default=False,
@@ -780,7 +782,9 @@ class ArchitectureConsistencyFindingLLM(BaseModel):
         "in unrelated, unchanged code that merely lives in a file this submission also touched — "
         "rather than a defect the change introduced (mirrors CodeReviewIssue.pre_existing's "
         "canonical wording). Per the merged prompt's Part 1 tagging guidance, that means the "
-        "specific construct the finding is about looks untouched by this submission's actual work.",
+        "specific construct the finding is about looks untouched by this submission's actual work. "
+        "This tag is informational for attribution; it does not drive posting scope — the "
+        "downstream gate is change-map-driven (is_within_diff + omission).",
     )
     omission: StrictBool = Field(
         default=False,
@@ -869,7 +873,9 @@ class SideEffectImpactFindingLLM(BaseModel):
         "or modify — a pre-existing defect in unrelated, unchanged code — rather than a defect "
         "the change introduced (mirrors CodeReviewIssue.pre_existing's canonical wording). Per "
         "the merged prompt's Part 2 tagging guidance, that means the function(s) the finding is "
-        "about look untouched by this submission's actual work.",
+        "about look untouched by this submission's actual work. This tag is informational for "
+        "attribution; it does not drive posting scope — the downstream gate is change-map-driven "
+        "(is_within_diff + omission).",
     )
     omission: StrictBool = Field(
         default=False,
