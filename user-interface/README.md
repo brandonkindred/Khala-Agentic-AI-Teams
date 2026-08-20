@@ -106,7 +106,7 @@ See [docs/API_MAPPING.md](docs/API_MAPPING.md) for the full UI-to-API mapping.
 
 - **Software Engineering:** Main dashboard plus nested **Planning** (`/software-engineering/planning`) and **Coding Team** (`/software-engineering/coding-team`) — the latter is the SE sub-team surface; API prefix remains `/api/coding-team`.
 - **Investment:** **Advisor & IPS** (`/investment/advisor`), **Strategy Lab** (`/investment/strategy-lab`, profile not required for lab flows), and overview (`/investment`).
-- **Agentic Teams:** Process designer with a live **Team Roster** column (agents, roles, skills, staffing validation) alongside chat and the process diagram (`/agentic-teams`).
+- **Agent Studio:** 4-stage workflow (Build → Test → Compose → Persona) at `/agent-studio`; replaces the former `/agent-console`, `/agentic-teams`, and `/persona-testing` routes. Provisioning at `/agent-studio/provisioning`, metrics at `/agent-studio/metrics`.
 
 `src/environments/environment.ts` includes `codingTeamApiUrl` (and the usual unified-style `*ApiUrl` fields) when calling team-specific health endpoints.
 

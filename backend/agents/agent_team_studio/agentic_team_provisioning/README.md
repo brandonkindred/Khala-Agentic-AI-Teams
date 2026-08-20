@@ -92,7 +92,7 @@ When enabled (`AGENTIC_TEAM_AGENT_PROVISIONING_ENABLED`), saving a process can s
 
 ## UI
 
-The Angular app (**Agentic Teams**) shows chat, **Team Roster** (live refresh after messages), process diagram, and staffing gaps. Routes under `/agentic-teams`.
+The Angular app (**Agent Studio**) shows chat, **Team Roster** (live refresh after messages), process diagram, and staffing gaps. Routes under `/agent-studio` (formerly `/agentic-teams`).
 
 ## Khala platform
 
