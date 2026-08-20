@@ -1,8 +1,7 @@
 import { Injectable, NgZone, inject } from '@angular/core';
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpContext } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
-import { SKIP_NOTIFY_OPTIONS } from '../core/error-handler.interceptor';
 import type {
   CreateProfileRequest,
   CreateProfileResponse,
@@ -255,17 +254,22 @@ export class InvestmentApiService {
     );
   }
 
-  deleteStrategyLabRecord(labRecordId: string): Observable<DeleteStrategyLabRecordResponse> {
+  deleteStrategyLabRecord(
+    labRecordId: string,
+    options?: { context?: HttpContext },
+  ): Observable<DeleteStrategyLabRecordResponse> {
     return this.http.delete<DeleteStrategyLabRecordResponse>(
       `${this.baseUrl}/strategy-lab/records/${encodeURIComponent(labRecordId)}`,
-      SKIP_NOTIFY_OPTIONS,
+      options,
     );
   }
 
-  clearStrategyLabStorage(): Observable<ClearStrategyLabStorageResponse> {
+  clearStrategyLabStorage(
+    options?: { context?: HttpContext },
+  ): Observable<ClearStrategyLabStorageResponse> {
     return this.http.delete<ClearStrategyLabStorageResponse>(
       `${this.baseUrl}/strategy-lab/storage`,
-      SKIP_NOTIFY_OPTIONS,
+      options,
     );
   }
 

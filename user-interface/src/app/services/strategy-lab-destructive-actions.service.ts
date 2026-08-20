@@ -4,6 +4,7 @@ import { Observable, Subject } from 'rxjs';
 import { InvestmentApiService } from './investment-api.service';
 import { StrategyLabRunService } from './strategy-lab-run.service';
 import { NotificationService } from '../core/notification.service';
+import { SKIP_NOTIFY_OPTIONS } from '../core/error-handler.interceptor';
 import { ConfirmDestructiveService } from '../shared/confirm-destructive.service';
 import { DestructiveActionHelper } from '../shared/destructive-action.helper';
 import type { StrategyLabRecord } from '../models';
@@ -66,7 +67,7 @@ export class StrategyLabDestructiveActionsService {
           confirmLabel: 'Delete',
           variant: 'danger',
         },
-        apiCall: () => this.api.deleteStrategyLabRecord(id),
+        apiCall: () => this.api.deleteStrategyLabRecord(id, SKIP_NOTIFY_OPTIONS),
         onSuccess: () => this._resultsRefreshRequested.next(),
         errorFallback: 'Failed to delete strategy.',
       },
@@ -90,7 +91,7 @@ export class StrategyLabDestructiveActionsService {
           confirmLabel: 'Delete all',
           variant: 'danger',
         },
-        apiCall: () => this.api.clearStrategyLabStorage(),
+        apiCall: () => this.api.clearStrategyLabStorage(SKIP_NOTIFY_OPTIONS),
         onSuccess: () => {
           this.runService.clearPaperTradingSessions();
           this._resultsRefreshRequested.next();
