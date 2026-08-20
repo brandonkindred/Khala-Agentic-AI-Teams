@@ -57,6 +57,9 @@ from strands.models.model import Model
 from tests.chunk_review_prompt_routing import (
     is_chunk_map_reasoning_prompt as _is_chunk_map_reasoning_prompt,
 )
+from tests.chunk_review_prompt_routing import (
+    is_formatting_pass_prompt as _is_formatting_pass_prompt,
+)
 
 from llm_service import (
     LLMClient,
@@ -68,11 +71,6 @@ from llm_service import (
 )
 from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
-
-# The prefix wrap_with_analysis_delimiters (via_reasoning.py) puts on every
-# formatting-pass prompt, used throughout this file's test doubles to route a
-# complete_json call to either the reasoning-pass or formatting-pass branch.
-_ANALYSIS_DELIMITER = "--- ANALYSIS"
 
 # Grace period for a buggy late progress notification to (wrongly) land before the
 # test asserts none arrived after a map failure. Small by design; the preceding
@@ -244,10 +242,10 @@ class _ScriptedClient(DummyLLMClient):
     in parallel. Both the reasoning pass (reached via the Strands Agent's
     ``chat()`` delegation) and the formatting pass (a direct ``complete_json``
     call from ``run_agent_via_reasoning``) land on ``complete_json`` now, so
-    only the formatting-pass call (identified by the "--- ANALYSIS" wrapper
-    ``wrap_with_analysis_delimiters`` always injects) advances the scripted
-    response cursor -- the reasoning-pass call instead gets the inherited
-    dummy default, whose prose is discarded once wrapped for formatting.
+    only the formatting-pass call (identified by
+    ``_is_formatting_pass_prompt``) advances the scripted response cursor
+    -- the reasoning-pass call instead gets the inherited dummy default,
+    whose prose is discarded once wrapped for formatting.
     """
 
     def __init__(self, responses: list[dict[str, Any]]) -> None:
@@ -266,7 +264,7 @@ class _ScriptedClient(DummyLLMClient):
         think: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        if _ANALYSIS_DELIMITER not in prompt:
+        if not _is_formatting_pass_prompt(prompt):
             return super().complete_json(
                 prompt,
                 temperature=temperature,
@@ -1227,7 +1225,7 @@ class _SelectiveRaiser(DummyLLMClient):
     def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         with self._lock:
             self.prompts.append(prompt)
-            if self.marker in prompt and _ANALYSIS_DELIMITER not in prompt:
+            if self.marker in prompt and not _is_formatting_pass_prompt(prompt):
                 raise self.exc
         return super().complete_json(prompt, **kwargs)
 
@@ -1355,12 +1353,12 @@ class _HalfTimingDummyDelegate:
     def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         # Both the reasoning pass (reached via the Strands Agent's ``chat()``
         # delegation) and the formatting pass (a direct ``complete_json`` call
-        # from ``run_agent_via_reasoning``) land here now. The formatting
-        # pass's prompt wraps the reasoning pass's prose in "--- ANALYSIS"
-        # delimiters, which the raw reasoning prompt (and the per-half marker
-        # text within it) never contains -- so the pass is identified by
-        # content, not by call order (concurrent halves interleave calls).
-        if _ANALYSIS_DELIMITER in prompt:
+        # from ``run_agent_via_reasoning``) land here now. The formatting pass
+        # is identified by ``_is_formatting_pass_prompt`` (it carries the
+        # "--- ANALYSIS" wrapper), while any reasoning prompt never carries
+        # that marker -- so the pass is identified by content, not by call
+        # order (concurrent halves interleave calls).
+        if _is_formatting_pass_prompt(prompt):
             with self._lock:
                 key = self._pending_half
                 self._pending_half = None
@@ -1456,9 +1454,8 @@ class _TimedDummyHalfClient(DummyLLMClient):
 
     def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         # Both passes land on ``complete_json`` now; the formatting pass is
-        # identified by its "--- ANALYSIS" wrapper (see
-        # ``_HalfTimingDummyDelegate`` for the same technique).
-        if _ANALYSIS_DELIMITER in prompt:
+        # identified by ``_is_formatting_pass_prompt``.
+        if _is_formatting_pass_prompt(prompt):
             self._pending_half = None
             return super().complete_json(prompt, **kwargs)
         is_chunk_review = _is_chunk_map_reasoning_prompt(prompt)
@@ -3191,7 +3188,7 @@ def test_rejecting_chunk_with_only_a_summary_degrades_instead_of_blocking() -> N
         _B_MARKER = "B_CHUNK_REJECT_SUMMARY_ONLY"
 
         def complete_json(self, prompt: str, **kwargs: Any) -> Any:
-            if _ANALYSIS_DELIMITER not in prompt:
+            if not _is_formatting_pass_prompt(prompt):
                 if (
                     _is_chunk_map_reasoning_prompt(prompt)
                     and "### b.py ###" in prompt
@@ -3252,7 +3249,7 @@ def test_silent_rejection_never_borrows_an_approving_chunks_summary() -> None:
         _B_MARKER = "B_CHUNK_SILENT_REJECT"
 
         def complete_json(self, prompt: str, **kwargs: Any) -> Any:
-            if _ANALYSIS_DELIMITER not in prompt:
+            if not _is_formatting_pass_prompt(prompt):
                 if (
                     _is_chunk_map_reasoning_prompt(prompt)
                     and "### b.py ###" in prompt
@@ -3313,7 +3310,7 @@ def test_no_stale_progress_reports_after_map_failure() -> None:
             self.slow_finished = threading.Event()
 
         def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-            if _ANALYSIS_DELIMITER in prompt or not _is_chunk_map_reasoning_prompt(prompt):
+            if _is_formatting_pass_prompt(prompt) or not _is_chunk_map_reasoning_prompt(prompt):
                 return super().complete_json(prompt, **kwargs)
             if "FAILME" in prompt:
                 assert slow_started.wait(timeout=10), "slow chunk must start first"
