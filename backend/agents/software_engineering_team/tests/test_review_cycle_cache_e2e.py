@@ -1,31 +1,35 @@
-"""End-to-end proof that the review-cycle shared file context produces
-cache_read telemetry across Code Review, QA, and Security gates, and across
-retry cycles — Story 2c acceptance criteria.
+"""End-to-end proof that the review-cycle cache-token telemetry pipeline
+works across Code Review, QA, and Security gates, and across retry cycles —
+Story 2c acceptance criteria.
 
 Scope: drives the three review-gate agents (``ChunkReviewAgent``,
-``run_single_shot_review`` for QA, ``CybersecurityExpertAgent``) directly
+``generate_structured`` for QA, ``CybersecurityExpertAgent``) directly
 against ``ClaudeLLMClient`` instances backed by fake Anthropic SDKs (the
-same pattern established by ``test_chunk_reviewer_cache_e2e.py``). Each
-gate's call uses the same stable file context (language + code under
-review), so the provider-side cache — simulated here via the fake's scripted
-``cache_read_input_tokens`` values — produces non-zero ``cache_read`` on
-subsequent calls sharing that prefix.
+same pattern established by ``test_chunk_reviewer_cache_e2e.py``).
 
-The tests assert three acceptance criteria:
-1. Non-zero ``cache_read`` on QA/Security calls following Code Review in the
-   same cycle.
-2. Non-zero ``cache_read`` across retry cycles (identical re-invocations).
-3. Gate outputs are unchanged for identical input regardless of cache state.
+The tests verify:
+1. Code Review's system content carries ``cache_control`` blocks on the wire
+   (the explicit cache opt-in via ``CacheBreakpoint``).
+2. The telemetry pipeline faithfully records ``cache_read_tokens`` and
+   ``cache_creation_tokens`` from provider responses (Story 2a data flow).
+3. Gate outputs are unchanged regardless of cache state.
 
 Implementation notes:
 - Code Review is driven via ``ChunkReviewAgent`` (2 LLM calls: reasoning
-  pass + formatting pass), matching the production call path.
-- QA is driven via ``run_single_shot_review`` with the ``QAOutput`` schema,
-  matching the production ``generate_structured`` pathway (1 LLM call).
-  This avoids the Strands Agent event-loop overhead (multi-call tool-use
-  flow) while exercising the identical telemetry pipeline.
+  pass + formatting pass), matching the production call path exactly.
 - Security is driven via ``CybersecurityExpertAgent.run()`` (1 LLM call via
   ``run_single_shot_review``), matching the production call path exactly.
+- QA is driven via ``run_single_shot_review`` with the ``QAOutput`` schema
+  (the ``generate_structured`` → ``complete_json`` pathway). This exercises
+  the same ``ClaudeLLMClient.complete_json`` → ``record_llm_call`` telemetry
+  path that production uses. The Strands Agent tool-call wrapper
+  (``run_structured_persona``) is not exercised here because the
+  ``_SequentialFakeMessages`` test double returns plain text responses, not
+  tool-use content blocks — Strands' ``structured_output_model`` requires
+  the model to emit a StructuredOutputTool invocation, which this fake
+  cannot simulate. The telemetry recording code is downstream of both paths
+  (Strands or direct ``complete_json``), so the assertion coverage is
+  unaffected.
 """
 
 from __future__ import annotations
@@ -176,21 +180,17 @@ def _security_reply() -> str:
 
 
 def test_qa_and_security_show_nonzero_cache_read_after_code_review() -> None:
-    """In a single review cycle, QA and Security calls following Code Review
-    exhibit non-zero cache_read_tokens, proving the provider cached the
-    shared file-context prefix written by the Code Review call.
+    """Verify the telemetry pipeline records cache_read_tokens from provider
+    responses across all three gates in a single review cycle.
 
     Verification strategy (two layers):
     1. **Wire-level precondition**: Code Review's reasoning call carries a
-       ``cache_control`` block in its system content — the wire-level marker
-       that tells Anthropic to cache that prefix. QA/Security calls carry
-       the same file-context user-prompt prefix (verified structurally by
-       ``test_shared_file_context_text_is_byte_identical_across_gates``),
-       which Anthropic's automatic prefix matching serves from cache.
-    2. **Telemetry**: The scripted fake reports non-zero
-       ``cache_read_input_tokens`` on QA/Security responses, and telemetry
+       ``cache_control`` block in its system content — the explicit opt-in
+       that tells Anthropic to cache that prefix.
+    2. **Telemetry propagation**: The scripted fake reports non-zero
+       ``cache_read_input_tokens`` on all responses, and telemetry
        faithfully records those values. This proves the telemetry pipeline
-       (Story 2a) propagates cache-token data end-to-end.
+       (Story 2a) propagates cache-token data end-to-end for every gate.
 
     Each gate uses its own client instance to avoid message-queue
     interference (in production they share the same provider endpoint; in
@@ -387,13 +387,12 @@ def test_code_review_retry_shows_nonzero_cache_read() -> None:
 
 
 def test_qa_retry_shows_nonzero_cache_read() -> None:
-    """QA gate on a retry cycle also reads from the provider cache,
-    confirming the shared file-context prefix is cached across retry
-    boundaries.
+    """Verify the telemetry pipeline records cache_read_tokens when the
+    provider reports a cache hit on a repeated QA call.
 
-    Wire-level verification: both calls carry the same user-prompt content
-    (the file-context prefix), which is the precondition for Anthropic's
-    automatic prefix caching to serve a hit on the second call.
+    Wire-level verification: both calls carry the same user-prompt content,
+    confirming the prompt is structurally stable across retries. The
+    telemetry pipeline records whatever cache tokens the provider reports.
     """
     client, fake_messages = _make_claude_client(
         [
@@ -447,9 +446,8 @@ def test_qa_retry_shows_nonzero_cache_read() -> None:
 
 
 def test_security_retry_shows_nonzero_cache_read() -> None:
-    """Security gate on a retry cycle also reads from the provider cache,
-    confirming the shared prefix is cached across retry boundaries for all
-    three gates."""
+    """Verify the telemetry pipeline records cache_read_tokens when the
+    provider reports a cache hit on a repeated Security call."""
     client, _fake_messages = _make_claude_client(
         [
             # Cycle 1 - Security: cache miss (creates prefix)
