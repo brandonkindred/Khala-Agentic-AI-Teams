@@ -1,6 +1,7 @@
 import { Routes } from '@angular/router';
 import { AppShellComponent } from './components/app-shell/app-shell.component';
 import { llmConfiguredGuard } from './core/llm-configured.guard';
+import { personaAuditRedirectGuard } from './core/persona-audit-redirect.guard';
 import { unsavedChangesGuard } from './core/unsaved-changes.guard';
 
 // All feature routes are lazily loaded so the initial bundle ships only the app
@@ -309,6 +310,14 @@ export const routes: Routes = [
           ),
         title: 'Job Matching',
         data: { breadcrumb: 'Job Matching' },
+      },
+      // Legacy persona-testing deep-link redirects (issue #6508).
+      // Preserves bookmarked audit URLs by forwarding to the relocated Studio nested route.
+      { path: 'persona-testing', redirectTo: '/agent-studio', pathMatch: 'full' },
+      {
+        path: 'persona-testing/audit/:runId',
+        canActivate: [personaAuditRedirectGuard],
+        children: [],
       },
     ],
   },
