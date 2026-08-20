@@ -545,10 +545,14 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
           ) {
             this.lastResponse.set(detail as InvokeEnvelope);
           } else {
-            this.lastError.set(extractErrorDetail(err, 'Invocation failed.'));
+            this.lastError.set(
+              extractErrorDetail(err, 'Invocation failed.', { joinValidationArray: true }),
+            );
           }
         } else {
-          this.lastError.set(extractErrorDetail(err, 'Invocation failed.'));
+          this.lastError.set(
+            extractErrorDetail(err, 'Invocation failed.', { joinValidationArray: true }),
+          );
         }
         this.historyPanel?.refresh();
       },

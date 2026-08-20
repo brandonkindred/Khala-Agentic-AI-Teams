@@ -22,6 +22,13 @@ export interface DestructiveActionOptions<T = unknown> {
   onSuccess: (result: T) => void;
   /** Fallback error string when extractErrorDetail cannot find one. */
   errorFallback: string;
+  /**
+   * Per-call error callback. When provided, overrides the constructor-level
+   * `onError` for this specific execution. Use this to attach context (e.g.
+   * an originating agent id) to each error emission without relying on
+   * shared mutable state.
+   */
+  onError?: (message: string | null) => void;
 }
 
 /**
@@ -37,15 +44,15 @@ export interface DestructiveActionOptions<T = unknown> {
  * subjects — callers supply callbacks so they remain in control of state shape.
  *
  * Note: before each confirmed action the helper resets caller error state by
- * invoking `onError(null)`, ensuring stale errors are cleared before a new
- * request is attempted.
+ * invoking the error callback with `null`, ensuring stale errors are cleared
+ * before a new request is attempted.
  */
 export class DestructiveActionHelper {
   constructor(
     private readonly confirmService: ConfirmDestructiveService,
     private readonly notify: NotificationService,
     private readonly destroyRef: DestroyRef,
-    private readonly onError: (message: string | null) => void,
+    private readonly defaultOnError: (message: string | null) => void,
   ) {}
 
   /**
@@ -57,7 +64,7 @@ export class DestructiveActionHelper {
    * then invokes `onStart`, runs `apiCall` (wrapped in `defer` to catch
    * synchronous throws), and calls `onFinally` on completion via `finalize`.
    * On success calls `opts.onSuccess` and shows a toast via NotificationService.
-   * On failure calls the `onError` callback provided at construction with
+   * On failure calls `opts.onError` (or the constructor-level default) with
    * the extracted error message.
    *
    * @param opts Configuration for this specific destructive action.
@@ -71,12 +78,13 @@ export class DestructiveActionHelper {
     onStart?: () => void,
     onFinally?: () => void,
   ): void {
+    const errorCb = opts.onError ?? this.defaultOnError;
     this.confirmService
       .confirm(opts.dialogData)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((confirmed) => {
         if (!confirmed) return;
-        this.onError(null);
+        errorCb(null);
         onStart?.();
         defer(() => opts.apiCall())
           .pipe(
@@ -89,7 +97,7 @@ export class DestructiveActionHelper {
               this.notify.saved(successToast);
             },
             error: (err) => {
-              this.onError(extractErrorDetail(err, opts.errorFallback));
+              errorCb(extractErrorDetail(err, opts.errorFallback));
             },
           });
       });

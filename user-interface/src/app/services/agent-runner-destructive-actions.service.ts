@@ -27,7 +27,8 @@ export interface AgentTaggedError {
  * dialog data, the API call, and post-success side effects.
  *
  * All emissions carry the originating `agentId` so the host component can
- * discard stale events from a prior agent's in-flight action.
+ * discard stale events from a prior agent's in-flight action. The agent id
+ * is captured in per-call closures — no shared mutable state is used.
  *
  * Not `providedIn: 'root'` — intended to be provided at the consuming
  * component so its lifecycle is scoped to that component.
@@ -45,11 +46,9 @@ export class AgentRunnerDestructiveActionsService {
     inject(ConfirmDestructiveService),
     inject(NotificationService),
     this.destroyRef,
-    (msg) => this._emitError(msg),
+    // Default onError is never used — each call provides its own via opts.onError.
+    () => undefined,
   );
-
-  /** Agent id of the currently executing action (set by public methods). */
-  private _currentAgentId: string | null = null;
 
   /** Saved-input id currently being deleted (disables actions on that row). */
   readonly deletingSavedInputId = signal<string | null>(null);
@@ -64,12 +63,6 @@ export class AgentRunnerDestructiveActionsService {
   private readonly _sandboxTornDown = new Subject<AgentTaggedEvent>();
   readonly sandboxTornDown$: Observable<AgentTaggedEvent> = this._sandboxTornDown.asObservable();
 
-  private _emitError(msg: string | null): void {
-    if (this._currentAgentId) {
-      this._errors.next({ agentId: this._currentAgentId, message: msg });
-    }
-  }
-
   /**
    * Deletes a saved input after the user confirms a danger dialog.
    *
@@ -81,7 +74,6 @@ export class AgentRunnerDestructiveActionsService {
    *   is reset to `null`. On failure, an error is emitted through `errors$`.
    */
   deleteSavedInput(agentId: string, savedId: string, savedName: string): void {
-    this._currentAgentId = agentId;
     this.helper.execute(
       {
         dialogData: {
@@ -93,6 +85,7 @@ export class AgentRunnerDestructiveActionsService {
         apiCall: () => this.api.deleteSavedInput(savedId),
         onSuccess: () => this._savedInputDeleted.next({ agentId, payload: savedId }),
         errorFallback: 'Failed to delete saved input.',
+        onError: (msg) => this._errors.next({ agentId, message: msg }),
       },
       'Saved input deleted.',
       () => this.deletingSavedInputId.set(savedId),
@@ -112,7 +105,6 @@ export class AgentRunnerDestructiveActionsService {
    *   is reset to `false`. On failure, an error is emitted through `errors$`.
    */
   tearDownSandbox(agentId: string, agentLabel: string): void {
-    this._currentAgentId = agentId;
     this.helper.execute(
       {
         dialogData: {
@@ -124,6 +116,7 @@ export class AgentRunnerDestructiveActionsService {
         apiCall: () => this.api.teardown(agentId),
         onSuccess: () => this._sandboxTornDown.next({ agentId, payload: undefined }),
         errorFallback: 'Failed to tear down sandbox.',
+        onError: (msg) => this._errors.next({ agentId, message: msg }),
       },
       'Sandbox torn down.',
       () => this.tearingDown.set(true),
