@@ -73,7 +73,7 @@ flowchart TB
     Project --> Buttons
 ```
 
-Clicking **Start Test** → `POST /api/user-agent-founder/start` with `{persona_id, target_team_key, project_name}` → navigate to `/agent-studio/persona-run/:runId` (audit panel nested under Studio).
+Clicking **Start Test** → `POST /api/user-agent-founder/start` with `{persona_id, target_team_key, project_name, process_id}` → navigate to `/agent-studio/persona-run/:runId` (audit panel nested under Studio). Note: `process_id` is required when `target_team_key` starts with `agentic_team:` (handed off from Stage 3) and ignored for the default SE target.
 
 ### Create / Edit Persona dialog
 
