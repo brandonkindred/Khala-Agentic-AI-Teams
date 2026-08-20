@@ -477,7 +477,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
             this.sandbox.set(
               current
                 ? { ...current, status: 'cold', url: null }
-                : ({ status: 'cold', url: null } as SandboxHandle),
+                : null,
             );
             this.notify.saved('Sandbox torn down.');
           },
