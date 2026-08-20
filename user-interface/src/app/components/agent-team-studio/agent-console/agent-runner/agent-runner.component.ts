@@ -26,6 +26,7 @@ import { MatSelectModule } from '@angular/material/select';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { Subscription, interval } from 'rxjs';
+import { map } from 'rxjs/operators';
 import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
 import { AgentRunnerApiService } from '../../../../services/agent-runner-api.service';
 import type {
@@ -45,6 +46,11 @@ import { AgentRunHistoryComponent } from '../agent-run-history/agent-run-history
 import { AgentSchemaFormComponent } from '../agent-schema-form/agent-schema-form.component';
 import { InlineBannerComponent } from '../../../../shared/inline-banner/inline-banner.component';
 import { extractErrorDetail } from '../../../../shared/extract-error-detail';
+import {
+  ConfirmDialogComponent,
+  type ConfirmDialogData,
+} from '../../../../shared/confirm-dialog/confirm-dialog.component';
+import { NotificationService } from '../../../../core/notification.service';
 import {
   AgentDiffDialogComponent,
   type AgentDiffDialogData,
@@ -94,6 +100,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   private readonly catalog = inject(AgentCatalogApiService);
   private readonly runner = inject(AgentRunnerApiService);
   private readonly dialog = inject(MatDialog);
+  private readonly notify = inject(NotificationService);
 
   /** Preselect an agent (wired from the Catalog drawer). */
   @Input() set preselectedAgentId(value: string | null) {
@@ -365,15 +372,29 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     event.stopPropagation();
     const match = this.savedInputs().find((s) => s.id === savedId);
     if (!match) return;
-    if (!confirm(`Delete saved input "${match.name}"?`)) return;
-    this.runner.deleteSavedInput(savedId).subscribe({
-      next: () => {
-        this.savedInputs.update((rows) => rows.filter((s) => s.id !== savedId));
-        if (this.selectedPickerValue() === `saved:${savedId}`) {
-          this.selectedPickerValue.set(null);
-        }
-      },
-    });
+    this.dialog
+      .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(ConfirmDialogComponent, {
+        data: {
+          title: 'Delete saved input',
+          message: `Delete saved input "${match.name}"?`,
+          confirmLabel: 'Delete',
+          variant: 'danger',
+        },
+      })
+      .afterClosed()
+      .pipe(map((result) => result === true))
+      .subscribe((confirmed) => {
+        if (!confirmed) return;
+        this.runner.deleteSavedInput(savedId).subscribe({
+          next: () => {
+            this.savedInputs.update((rows) => rows.filter((s) => s.id !== savedId));
+            if (this.selectedPickerValue() === `saved:${savedId}`) {
+              this.selectedPickerValue.set(null);
+            }
+            this.notify.saved('Saved input deleted.');
+          },
+        });
+      });
   }
 
   // ---------------------------------------------------------------
@@ -431,13 +452,27 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
     const label = this.selectedAgent()?.manifest.name ?? agentId;
-    if (!confirm(`Tear down the ${label} sandbox?`)) return;
-    this.runner.teardown(agentId).subscribe({
-      next: () => {
-        this.sandbox.set({ ...(this.sandbox() as SandboxHandle), status: 'cold', url: null });
-      },
-      error: (err) => console.error('teardown failed', err),
-    });
+    this.dialog
+      .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(ConfirmDialogComponent, {
+        data: {
+          title: 'Tear down sandbox',
+          message: `Tear down the ${label} sandbox? The sandbox will need to be re-warmed before the next run.`,
+          confirmLabel: 'Tear down',
+          variant: 'danger',
+        },
+      })
+      .afterClosed()
+      .pipe(map((result) => result === true))
+      .subscribe((confirmed) => {
+        if (!confirmed) return;
+        this.runner.teardown(agentId).subscribe({
+          next: () => {
+            this.sandbox.set({ ...(this.sandbox() as SandboxHandle), status: 'cold', url: null });
+            this.notify.saved('Sandbox torn down.');
+          },
+          error: (err) => console.error('teardown failed', err),
+        });
+      });
   }
 
   // ---------------------------------------------------------------
