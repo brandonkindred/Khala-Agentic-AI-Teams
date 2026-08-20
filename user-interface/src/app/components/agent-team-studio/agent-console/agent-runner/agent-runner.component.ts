@@ -111,6 +111,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     if (value && value !== this.selectedAgentId()) {
       this.selectedAgentId.set(value);
       this.destructiveError.set(null);
+      this.destructiveActionGeneration++;
       this.loadAgentDetail(value);
     }
   }
@@ -171,6 +172,10 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   });
 
   private sandboxPollSub: Subscription | null = null;
+  /** Increments on agent change to discard stale error emissions from prior agents. */
+  private destructiveActionGeneration = 0;
+  /** Generation captured when the last error-clear (null) was received. */
+  private _errorGeneration = 0;
 
   ngOnInit(): void {
     this.catalog.listAgents().subscribe({
@@ -198,7 +203,19 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
 
     this.destructiveActions.errors$
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((msg) => this.destructiveError.set(msg));
+      .subscribe((msg) => {
+        // The helper emits null to clear previous errors at the start of each
+        // confirmed action. Capture the generation at that point so late
+        // error emissions from a prior agent's in-flight action (which
+        // resolves after an agent switch increments the generation) are
+        // silently discarded.
+        if (msg === null) {
+          this._errorGeneration = this.destructiveActionGeneration;
+          this.destructiveError.set(null);
+        } else if (this._errorGeneration === this.destructiveActionGeneration) {
+          this.destructiveError.set(msg);
+        }
+      });
   }
 
   ngOnDestroy(): void {
@@ -223,6 +240,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     this.lastError.set(null);
     this.activeRunId.set(null);
     this.destructiveError.set(null);
+    this.destructiveActionGeneration++;
     this.sandbox.set(null);
     this.sandboxPollSub?.unsubscribe();
     this.sandboxPollSub = null;
