@@ -27,7 +27,11 @@ devops template standardization this module supports.
 
 from __future__ import annotations
 
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, List, TypeVar
+
+from software_engineering_team.shared.system_prompt_assembly import (
+    build_system_prompt_with_content,
+)
 
 OutputT = TypeVar("OutputT")
 
@@ -41,6 +45,7 @@ def run_structured_persona(
     fallback_factory: Callable[[Exception], OutputT],
     agent_factory: Callable[..., Any],
     on_success: Callable[[OutputT], OutputT] | None = None,
+    system_prompt_content: List[Any] | None = None,
 ) -> OutputT:
     """Run a one-shot structured-output Strands ``Agent`` call with a safe fallback.
 
@@ -49,7 +54,13 @@ def run_structured_persona(
         callable Strands ``Agent``; ``fallback_factory(exc)`` returns a valid,
         already-final instance of ``output_model`` (e.g. ``approved=False``)
         and may itself log a warning; ``on_success``, if given, returns a
-        valid instance of ``output_model``.
+        valid instance of ``output_model``. ``system_prompt_content``, when
+        given, is a list of system-content segments (``CacheBreakpoint``
+        instances, dict blocks, or strings) attached to the ``Agent``'s
+        system prompt — restricted to **trusted** metadata (spec excerpts,
+        architecture overviews) that is safe to elevate to system level.
+        Untrusted content (code under review, repository-controlled text)
+        must remain in ``user_prompt``.
     Postconditions:
         On a successful call whose ``structured_output`` is an instance of
         ``output_model``, returns ``on_success(result)`` (or ``result``
@@ -61,8 +72,9 @@ def run_structured_persona(
         severities"), and an empty findings list from the safe fallback must
         not be reinterpreted as a clean approval. Never raises.
     """
-    agent = agent_factory(model=model, system_prompt=system_prompt)
     try:
+        composed_prompt = build_system_prompt_with_content(system_prompt, system_prompt_content)
+        agent = agent_factory(model=model, system_prompt=composed_prompt)
         agent_result = agent(user_prompt, structured_output_model=output_model)
         result = agent_result.structured_output
         if not isinstance(result, output_model):

@@ -104,23 +104,24 @@ def test_falls_back_when_agent_call_raises() -> None:
     assert "fallback: boom" in result.issues[0]
 
 
-def test_agent_factory_exception_is_not_caught() -> None:
-    """Matches every pre-refactor call site: ``Agent(...)`` is constructed
-    outside the try/except, so a construction failure propagates rather than
-    routing through the fallback."""
+def test_agent_factory_exception_routes_through_fallback() -> None:
+    """Agent construction is inside the try/except, so a construction failure
+    routes through fallback_factory rather than propagating — matching the
+    documented postcondition of 'Never raises'."""
 
     def _raising_factory(*, model: Any, system_prompt: str) -> Any:
         raise ValueError("cannot build agent")
 
-    with pytest.raises(ValueError, match="cannot build agent"):
-        run_structured_persona(
-            model=object(),
-            system_prompt="persona",
-            user_prompt="do the thing",
-            output_model=_Output,
-            fallback_factory=_fallback,
-            agent_factory=_raising_factory,
-        )
+    result = run_structured_persona(
+        model=object(),
+        system_prompt="persona",
+        user_prompt="do the thing",
+        output_model=_Output,
+        fallback_factory=_fallback,
+        agent_factory=_raising_factory,
+    )
+    # fallback_factory returns approved=False
+    assert result.approved is False
 
 
 def test_on_success_applied_to_genuine_result() -> None:
