@@ -305,6 +305,17 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   // Save + delete saved inputs
   // ---------------------------------------------------------------
 
+  /**
+   * Opens the save-input dialog and, on confirmation, persists the current
+   * editor input as a named saved input via the runner API.
+   *
+   * Preconditions: an agent is selected (`selectedAgentId()` is non-null).
+   * Behavior: attempts to parse `inputText()` as JSON; on parse failure sets
+   * `inputError` to the error message and returns without opening the dialog.
+   * Side effects: opens a Material dialog; on success prepends the new entry
+   * to `savedInputs` and sets `selectedPickerValue` to the new saved ID;
+   * alerts the user on API failure.
+   */
   openSaveInputDialog(): void {
     const agent = this.selectedAgentId();
     if (!agent) return;
@@ -341,6 +352,17 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     });
   }
 
+  /**
+   * Prompts the user to confirm deletion of a saved input and, on
+   * confirmation, calls the runner API to remove it permanently.
+   *
+   * Preconditions: `savedId` is a non-empty string.
+   * Behavior: if `savedId` does not match any row in `savedInputs()`, the
+   * method returns without side effects.
+   * Side effects: stops event propagation; opens a confirmation dialog;
+   * removes the row from `savedInputs` on success; resets
+   * `selectedPickerValue` if the deleted entry was active.
+   */
   deleteSavedInput(savedId: string, event: Event): void {
     event.stopPropagation();
     const match = this.savedInputs().find((s) => s.id === savedId);
@@ -373,6 +395,15 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     });
   }
 
+  /**
+   * Warms the sandbox for the currently selected agent by calling the
+   * runner's ensure-warm endpoint.
+   *
+   * Preconditions: a valid agent is selected (`selectedAgentId()` is non-null).
+   * Side effects: sets `sandboxPolling` to true while the request is in
+   * flight; updates the `sandbox` signal on success; logs errors and resets
+   * polling state on failure.
+   */
   warmSandbox(): void {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
@@ -389,6 +420,15 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     });
   }
 
+  /**
+   * Tears down the sandbox environment for the currently selected agent
+   * after confirming with the user via a modal dialog.
+   *
+   * Preconditions: a valid agent is selected (`selectedAgentId()` is non-null).
+   * Side effects: opens a confirmation dialog; on confirmation calls the
+   * runner teardown API and sets the local sandbox status to `'cold'` with
+   * a null URL; logs errors to the console on API failure.
+   */
   tearDownSandbox(): void {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
