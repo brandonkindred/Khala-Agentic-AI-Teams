@@ -36,18 +36,6 @@ from software_engineering_team.shared.system_prompt_assembly import (
 OutputT = TypeVar("OutputT")
 
 
-def _build_system_prompt_with_content(
-    system_prompt: str, system_prompt_content: "List[Any] | None"
-) -> "str | List[Any]":
-    """Combine persona text with extra system-content segments (e.g. CacheBreakpoint).
-
-    Delegates to :func:`shared.system_prompt_assembly.build_system_prompt_with_content`
-    — preserved as a module-level name for backward compatibility with
-    existing test imports.
-    """
-    return build_system_prompt_with_content(system_prompt, system_prompt_content)
-
-
 def run_structured_persona(
     *,
     model: Any,
@@ -84,7 +72,7 @@ def run_structured_persona(
         severities"), and an empty findings list from the safe fallback must
         not be reinterpreted as a clean approval. Never raises.
     """
-    composed_prompt = _build_system_prompt_with_content(system_prompt, system_prompt_content)
+    composed_prompt = build_system_prompt_with_content(system_prompt, system_prompt_content)
     try:
         agent = agent_factory(model=model, system_prompt=composed_prompt)
         agent_result = agent(user_prompt, structured_output_model=output_model)

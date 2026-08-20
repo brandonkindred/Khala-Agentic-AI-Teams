@@ -18,9 +18,9 @@ from unittest.mock import patch
 import pytest
 
 from llm_service.cache_breakpoint import CacheBreakpoint
-from software_engineering_team.shared.persona_agent_base import (
-    _build_system_prompt_with_content,
-    run_structured_persona,
+from software_engineering_team.shared.persona_agent_base import run_structured_persona
+from software_engineering_team.shared.system_prompt_assembly import (
+    build_system_prompt_with_content,
 )
 
 # ---------------------------------------------------------------------------
@@ -54,25 +54,25 @@ class _DummyOutput:
 
 
 def test_build_system_prompt_with_content_returns_str_when_no_content() -> None:
-    result = _build_system_prompt_with_content("persona text", None)
+    result = build_system_prompt_with_content("persona text", None)
     assert result == "persona text"
 
 
 def test_build_system_prompt_with_content_returns_str_when_empty_list() -> None:
-    result = _build_system_prompt_with_content("persona text", [])
+    result = build_system_prompt_with_content("persona text", [])
     assert result == "persona text"
 
 
 def test_build_system_prompt_with_content_returns_list_with_cache_breakpoint() -> None:
     bp = CacheBreakpoint("cached prefix")
-    result = _build_system_prompt_with_content("persona", [bp])
+    result = build_system_prompt_with_content("persona", [bp])
     assert isinstance(result, list)
     assert result[0] == {"text": "persona"}
     assert result[1] is bp
 
 
 def test_build_system_prompt_with_content_normalizes_bare_strings() -> None:
-    result = _build_system_prompt_with_content("persona", ["extra context"])
+    result = build_system_prompt_with_content("persona", ["extra context"])
     assert isinstance(result, list)
     assert result[0] == {"text": "persona"}
     assert result[1] == {"text": "extra context"}
