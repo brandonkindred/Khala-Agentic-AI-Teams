@@ -315,6 +315,7 @@ class QAExpertAgent:
         # breaks the forced-tool-choice mechanism used by
         # ``structured_output_model`` on the second call. Construction is
         # cheap — it just wraps the cached model + system_prompt.
+
         result = run_structured_persona(
             model=self._model,
             system_prompt=self._system_prompts[mode],
@@ -404,5 +405,8 @@ class QAExpertAgent:
                 f"**Tool results:**\n{tool_results_text}"
             )
 
+        # File-context prefix (language + code under review) stays in the user
+        # message — it is untrusted repository content and must not be
+        # elevated to system-level instructions.
         parts = _build_qa_file_context_prefix(input_data) + _build_qa_role_instructions(input_data)
         return "\n".join(parts)
