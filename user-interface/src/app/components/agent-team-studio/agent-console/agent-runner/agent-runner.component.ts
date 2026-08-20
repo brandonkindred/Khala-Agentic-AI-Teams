@@ -315,9 +315,11 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
    * Preconditions: an agent is selected (`selectedAgentId()` is non-null).
    * Behavior: attempts to parse `inputText()` as JSON; on parse failure sets
    * `inputError` to the error message and returns without opening the dialog.
-   * Side effects: opens a Material dialog; on success prepends the new entry
-   * to `savedInputs` and sets `selectedPickerValue` to the new saved ID;
-   * alerts the user on API failure.
+   * Side effects: opens a Material dialog; on success clears `lastError` and
+   * prepends the new entry to `savedInputs` and sets `selectedPickerValue`
+   * to the new saved ID; on API failure sets `lastError` to a user-facing
+   * message (the global toast is suppressed; the template renders the
+   * inline error banner instead).
    */
   openSaveInputDialog(): void {
     const agent = this.selectedAgentId();
@@ -370,7 +372,10 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
    * method returns without side effects.
    * Side effects: stops event propagation; opens a confirmation dialog;
    * removes the row from `savedInputs` on success; resets
-   * `selectedPickerValue` if the deleted entry was active.
+   * `selectedPickerValue` if the deleted entry was active. On success,
+   * clears `lastError`. On failure, sets `lastError` to a user-facing
+   * message (the global toast is suppressed; the template renders the
+   * inline error banner instead).
    */
   deleteSavedInput(savedId: string, event: Event): void {
     event.stopPropagation();
