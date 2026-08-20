@@ -375,12 +375,13 @@ describe('AgentRunnerComponent', () => {
       expect(component.selectedPickerValue()).toBe(`saved:${savedInput.id}`);
     });
 
-    it('does not throw when creating the saved input fails (interceptor toasts)', () => {
+    it('sets lastError when creating the saved input fails', () => {
       dialogOpen.mockReturnValue({ afterClosed: () => of({ name: 'New save', description: null }) });
       runnerApi.createSavedInput.mockReturnValue(throwError(() => ({ error: { detail: 'name taken' } })));
 
-      // Error is handled gracefully; global interceptor surfaces the toast.
-      expect(() => component.openSaveInputDialog()).not.toThrow();
+      component.openSaveInputDialog();
+
+      expect(component.lastError()).toBe('name taken');
     });
   });
 

@@ -210,7 +210,7 @@
       </section>
     }
 
-    @if (lastError() && !lastResponse()) {
+    @if (lastError()) {
       <app-inline-banner variant="error" [message]="lastError() ?? ''" />
     }
 

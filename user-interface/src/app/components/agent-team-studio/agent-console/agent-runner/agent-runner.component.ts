@@ -399,7 +399,11 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
             this.selectedPickerValue.set(`saved:${saved.id}`);
           },
           // Error toast is handled by the global errorHandlerInterceptor.
-          error: () => undefined,
+          error: (err) => {
+            this.lastError.set(
+              extractErrorDetail(err, 'Failed to save input', { joinValidationArray: true }),
+            );
+          },
         });
     });
   }
