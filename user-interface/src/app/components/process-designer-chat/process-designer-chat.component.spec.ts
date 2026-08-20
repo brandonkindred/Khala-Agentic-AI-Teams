@@ -622,9 +622,8 @@ describe('ProcessDesignerChatComponent', () => {
 
     component.createNewProcess();
 
-    // Regression for #5172: the old chain treated a truthy non-string `detail`
-    // (e.g. FastAPI's 422 validation-error array) as the message itself instead
-    // of falling through to a readable fallback string.
+    // Without joinValidationArray, array details are skipped so the global
+    // interceptor can toast them; the component sees the fallback string.
     expect(component.error()).toBe('Failed to link process to conversation');
   });
 
