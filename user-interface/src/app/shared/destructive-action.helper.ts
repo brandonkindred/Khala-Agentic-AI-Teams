@@ -1,7 +1,7 @@
 import { DestroyRef } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatDialog } from '@angular/material/dialog';
-import { Observable, of } from 'rxjs';
+import { Observable, defer, of } from 'rxjs';
 import { finalize, map } from 'rxjs/operators';
 
 import { NotificationService } from '../core/notification.service';
@@ -72,17 +72,17 @@ export class DestructiveActionHelper {
         if (!confirmed) return;
         this.onError(null);
         onStart?.();
-        opts
-          .apiCall()
-          .pipe(takeUntilDestroyed(this.destroyRef))
+        defer(() => opts.apiCall())
+          .pipe(
+            takeUntilDestroyed(this.destroyRef),
+            finalize(() => onFinally?.()),
+          )
           .subscribe({
             next: (result) => {
-              onFinally?.();
               opts.onSuccess(result);
               this.notify.saved(successToast);
             },
             error: (err) => {
-              onFinally?.();
               this.onError(extractErrorDetail(err, opts.errorFallback));
             },
           });

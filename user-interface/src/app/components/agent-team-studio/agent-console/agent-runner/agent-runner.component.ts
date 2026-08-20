@@ -219,6 +219,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     this.lastResponse.set(null);
     this.lastError.set(null);
     this.activeRunId.set(null);
+    this.destructiveError.set(null);
     this.sandbox.set(null);
     this.sandboxPollSub?.unsubscribe();
     this.sandboxPollSub = null;

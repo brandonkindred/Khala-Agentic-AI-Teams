@@ -22,6 +22,10 @@ export class AgentRunnerDestructiveActionsService {
   private readonly api = inject(AgentRunnerApiService);
   private readonly destroyRef = inject(DestroyRef);
 
+  /** Error-banner messages for this service's concerns; `null` clears. */
+  private readonly _errors = new Subject<string | null>();
+  readonly errors$: Observable<string | null> = this._errors.asObservable();
+
   private readonly helper = new DestructiveActionHelper(
     inject(MatDialog),
     inject(NotificationService),
@@ -33,10 +37,6 @@ export class AgentRunnerDestructiveActionsService {
   readonly deletingSavedInputId = signal<string | null>(null);
   /** True while a sandbox teardown is in flight. */
   readonly tearingDown = signal(false);
-
-  /** Error-banner messages for this service's concerns; `null` clears. */
-  private readonly _errors = new Subject<string | null>();
-  readonly errors$: Observable<string | null> = this._errors.asObservable();
 
   /** Emits the deleted saved-input id after a successful deletion. */
   private readonly _savedInputDeleted = new Subject<string>();

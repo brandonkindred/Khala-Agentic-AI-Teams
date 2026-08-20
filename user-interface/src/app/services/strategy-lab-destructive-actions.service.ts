@@ -31,6 +31,10 @@ export class StrategyLabDestructiveActionsService {
   private readonly runService = inject(StrategyLabRunService);
   private readonly destroyRef = inject(DestroyRef);
 
+  /** Error-banner messages for this service's own concerns; `null` clears. */
+  private readonly _errors = new Subject<string | null>();
+  readonly errors$: Observable<string | null> = this._errors.asObservable();
+
   private readonly helper = new DestructiveActionHelper(
     inject(MatDialog),
     inject(NotificationService),
@@ -41,10 +45,6 @@ export class StrategyLabDestructiveActionsService {
   readonly clearingAll = signal(false);
   /** Lab record id currently being deleted (disables actions on that card). */
   readonly deletingLabRecordId = signal<string | null>(null);
-
-  /** Error-banner messages for this service's own concerns; `null` clears. */
-  private readonly _errors = new Subject<string | null>();
-  readonly errors$: Observable<string | null> = this._errors.asObservable();
 
   /** Emits after a successful delete/clear-all, so the component reloads results. */
   private readonly _resultsRefreshRequested = new Subject<void>();
