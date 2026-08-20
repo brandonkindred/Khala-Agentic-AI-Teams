@@ -13,7 +13,7 @@ import { MatSidenavModule } from '@angular/material/sidenav';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
-import { extractErrorDetail } from '../../../../shared/extract-error-detail';
+import { extractErrorDetail } from '../../../../core/error-handler.interceptor';
 import type {
   AgentDetail,
   AgentSummary,
