@@ -4,7 +4,8 @@ import { ActivatedRouteSnapshot, CanActivateFn, Router } from '@angular/router';
 /**
  * Redirect guard for the retired `/persona-testing/audit/:runId` deep links.
  *
- * Preconditions: route must have a `:runId` param.
+ * Preconditions: none — the route may provide a `:runId` param; a missing
+ *   value is treated as an empty string.
  * Postconditions: returns a `UrlTree` pointing to `/agent-studio/persona-run/:runId`,
  *   preserving the run ID so bookmarked audit links continue to work.
  *

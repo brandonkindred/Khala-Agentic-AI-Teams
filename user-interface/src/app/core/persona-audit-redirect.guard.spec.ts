@@ -1,13 +1,10 @@
 import { TestBed } from '@angular/core/testing';
-import { ActivatedRouteSnapshot, Router, UrlTree, convertToParamMap } from '@angular/router';
+import { ActivatedRouteSnapshot, UrlTree, convertToParamMap } from '@angular/router';
 import { personaAuditRedirectGuard } from './persona-audit-redirect.guard';
 
 describe('personaAuditRedirectGuard', () => {
-  let router: Router;
-
   beforeEach(() => {
     TestBed.configureTestingModule({});
-    router = TestBed.inject(Router);
   });
 
   function buildRouteSnapshot(runId: string): ActivatedRouteSnapshot {
