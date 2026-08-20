@@ -31,6 +31,7 @@ import { Subscription, interval } from 'rxjs';
 import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
 import { AgentRunnerApiService } from '../../../../services/agent-runner-api.service';
 import { AgentRunnerDestructiveActionsService } from '../../../../services/agent-runner-destructive-actions.service';
+import { ConfirmDestructiveService } from '../../../../shared/confirm-destructive.service';
 import type {
   AgentDetail,
   AgentSummary,
@@ -90,7 +91,7 @@ import {
     AgentSchemaFormComponent,
     InlineBannerComponent,
   ],
-  providers: [AgentRunnerDestructiveActionsService],
+  providers: [ConfirmDestructiveService, AgentRunnerDestructiveActionsService],
   templateUrl: './agent-runner.component.html',
   styleUrl: './agent-runner.component.scss',
 })

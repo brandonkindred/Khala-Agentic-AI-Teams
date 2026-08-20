@@ -98,6 +98,13 @@ export class AgentRunnerApiService {
     );
   }
 
+  /**
+   * Create a new saved input for the given agent.
+   *
+   * @param agentId - The agent identifier (will be URL-encoded).
+   * @param body - The saved input payload.
+   * @returns The created saved input.
+   */
   createSavedInput(agentId: string, body: SavedInputCreate): Observable<SavedInput> {
     return this.http.post<SavedInput>(
       `${this.baseUrl}/${encodeURIComponent(agentId)}/saved-inputs`,

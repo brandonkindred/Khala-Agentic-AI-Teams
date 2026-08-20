@@ -1,14 +1,14 @@
 import { TestBed } from '@angular/core/testing';
-import { MatDialog } from '@angular/material/dialog';
 import { Observable, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { AgentRunnerDestructiveActionsService } from './agent-runner-destructive-actions.service';
 import { AgentRunnerApiService } from './agent-runner-api.service';
 import { NotificationService } from '../core/notification.service';
+import { ConfirmDestructiveService } from '../shared/confirm-destructive.service';
 
 describe('AgentRunnerDestructiveActionsService', () => {
   let service: AgentRunnerDestructiveActionsService;
-  let dialogOpen: ReturnType<typeof vi.fn>;
+  let confirmFn: ReturnType<typeof vi.fn>;
   let runnerApi: {
     deleteSavedInput: ReturnType<typeof vi.fn>;
     teardown: ReturnType<typeof vi.fn>;
@@ -16,7 +16,7 @@ describe('AgentRunnerDestructiveActionsService', () => {
   let notify: { saved: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
-    dialogOpen = vi.fn();
+    confirmFn = vi.fn();
     runnerApi = {
       deleteSavedInput: vi.fn(),
       teardown: vi.fn(),
@@ -26,7 +26,7 @@ describe('AgentRunnerDestructiveActionsService', () => {
     TestBed.configureTestingModule({
       providers: [
         AgentRunnerDestructiveActionsService,
-        { provide: MatDialog, useValue: { open: dialogOpen } },
+        { provide: ConfirmDestructiveService, useValue: { confirm: confirmFn } },
         { provide: AgentRunnerApiService, useValue: runnerApi },
         { provide: NotificationService, useValue: notify },
       ],
@@ -35,8 +35,8 @@ describe('AgentRunnerDestructiveActionsService', () => {
     service = TestBed.inject(AgentRunnerDestructiveActionsService);
   });
 
-  function mockDialogResult(result: boolean | undefined) {
-    dialogOpen.mockReturnValue({ afterClosed: () => of(result) });
+  function mockDialogResult(result: boolean) {
+    confirmFn.mockReturnValue(of(result));
   }
 
   describe('deleteSavedInput', () => {
@@ -44,16 +44,13 @@ describe('AgentRunnerDestructiveActionsService', () => {
       mockDialogResult(false);
       service.deleteSavedInput('id-1', 'My Input');
 
-      expect(dialogOpen).toHaveBeenCalledWith(
-        expect.anything(),
-        {
-          data: expect.objectContaining({
-            title: 'Delete saved input',
-            message: expect.stringContaining('My Input'),
-            confirmLabel: 'Delete',
-            variant: 'danger',
-          }),
-        },
+      expect(confirmFn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Delete saved input',
+          message: expect.stringContaining('My Input'),
+          confirmLabel: 'Delete',
+          variant: 'danger',
+        }),
       );
     });
 
@@ -126,16 +123,13 @@ describe('AgentRunnerDestructiveActionsService', () => {
       mockDialogResult(false);
       service.tearDownSandbox('agent-1', 'Writer');
 
-      expect(dialogOpen).toHaveBeenCalledWith(
-        expect.anything(),
-        {
-          data: expect.objectContaining({
-            title: 'Tear down sandbox',
-            message: expect.stringContaining('Writer'),
-            confirmLabel: 'Tear down',
-            variant: 'danger',
-          }),
-        },
+      expect(confirmFn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Tear down sandbox',
+          message: expect.stringContaining('Writer'),
+          confirmLabel: 'Tear down',
+          variant: 'danger',
+        }),
       );
     });
 

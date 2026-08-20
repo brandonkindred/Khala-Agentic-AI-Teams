@@ -1,9 +1,9 @@
 import { DestroyRef, Injectable, inject, signal } from '@angular/core';
-import { MatDialog } from '@angular/material/dialog';
 import { Observable, Subject } from 'rxjs';
 
 import { AgentRunnerApiService } from './agent-runner-api.service';
 import { NotificationService } from '../core/notification.service';
+import { ConfirmDestructiveService } from '../shared/confirm-destructive.service';
 import { DestructiveActionHelper } from '../shared/destructive-action.helper';
 
 /**
@@ -27,7 +27,7 @@ export class AgentRunnerDestructiveActionsService {
   readonly errors$: Observable<string | null> = this._errors.asObservable();
 
   private readonly helper = new DestructiveActionHelper(
-    inject(MatDialog),
+    inject(ConfirmDestructiveService),
     inject(NotificationService),
     this.destroyRef,
     (msg) => this._errors.next(msg),

@@ -1,10 +1,10 @@
 import { DestroyRef, Injectable, inject, signal } from '@angular/core';
-import { MatDialog } from '@angular/material/dialog';
 import { Observable, Subject } from 'rxjs';
 
 import { InvestmentApiService } from './investment-api.service';
 import { StrategyLabRunService } from './strategy-lab-run.service';
 import { NotificationService } from '../core/notification.service';
+import { ConfirmDestructiveService } from '../shared/confirm-destructive.service';
 import { DestructiveActionHelper } from '../shared/destructive-action.helper';
 import type { StrategyLabRecord } from '../models';
 
@@ -36,7 +36,7 @@ export class StrategyLabDestructiveActionsService {
   readonly errors$: Observable<string | null> = this._errors.asObservable();
 
   private readonly helper = new DestructiveActionHelper(
-    inject(MatDialog),
+    inject(ConfirmDestructiveService),
     inject(NotificationService),
     this.destroyRef,
     (msg) => this._errors.next(msg),

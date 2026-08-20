@@ -1,12 +1,12 @@
 import { DestroyRef, EnvironmentInjector, createEnvironmentInjector } from '@angular/core';
-import { MatDialog } from '@angular/material/dialog';
 import { of, Subject, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { DestructiveActionHelper, DestructiveActionOptions } from './destructive-action.helper';
+import { ConfirmDestructiveService } from './confirm-destructive.service';
 import { NotificationService } from '../core/notification.service';
 
 describe('DestructiveActionHelper', () => {
-  let dialog: { open: ReturnType<typeof vi.fn> };
+  let confirmService: { confirm: ReturnType<typeof vi.fn> };
   let notify: { saved: ReturnType<typeof vi.fn> };
   let destroyRef: DestroyRef;
   let onError: ReturnType<typeof vi.fn>;
@@ -14,7 +14,7 @@ describe('DestructiveActionHelper', () => {
   let injector: EnvironmentInjector;
 
   beforeEach(() => {
-    dialog = { open: vi.fn() };
+    confirmService = { confirm: vi.fn() };
     notify = { saved: vi.fn() };
     // Create a real EnvironmentInjector to get a working DestroyRef.
     injector = createEnvironmentInjector([], undefined as unknown as EnvironmentInjector);
@@ -22,7 +22,7 @@ describe('DestructiveActionHelper', () => {
     onError = vi.fn();
 
     helper = new DestructiveActionHelper(
-      dialog as unknown as MatDialog,
+      confirmService as unknown as ConfirmDestructiveService,
       notify as unknown as NotificationService,
       destroyRef,
       onError,
@@ -40,13 +40,13 @@ describe('DestructiveActionHelper', () => {
     variant: 'danger' as const,
   };
 
-  function mockDialogResult(result: boolean | undefined) {
-    dialog.open.mockReturnValue({ afterClosed: () => of(result) });
+  function mockConfirmResult(result: boolean) {
+    confirmService.confirm.mockReturnValue(of(result));
   }
 
   describe('execute — confirmation', () => {
     it('opens the confirm dialog with supplied data', () => {
-      mockDialogResult(false);
+      mockConfirmResult(false);
       const opts: DestructiveActionOptions = {
         dialogData,
         apiCall: () => of(null),
@@ -56,29 +56,11 @@ describe('DestructiveActionHelper', () => {
 
       helper.execute(opts, 'Done.');
 
-      expect(dialog.open).toHaveBeenCalledWith(
-        expect.anything(),
-        { data: dialogData },
-      );
+      expect(confirmService.confirm).toHaveBeenCalledWith(dialogData);
     });
 
     it('does not call apiCall when the user cancels', () => {
-      mockDialogResult(false);
-      const apiCall = vi.fn().mockReturnValue(of(null));
-      const opts: DestructiveActionOptions = {
-        dialogData,
-        apiCall,
-        onSuccess: vi.fn(),
-        errorFallback: 'fail',
-      };
-
-      helper.execute(opts, 'Done.');
-
-      expect(apiCall).not.toHaveBeenCalled();
-    });
-
-    it('does not call apiCall when the dialog is dismissed (undefined)', () => {
-      mockDialogResult(undefined);
+      mockConfirmResult(false);
       const apiCall = vi.fn().mockReturnValue(of(null));
       const opts: DestructiveActionOptions = {
         dialogData,
@@ -94,9 +76,10 @@ describe('DestructiveActionHelper', () => {
   });
 
   describe('execute — re-entrancy guard', () => {
-    it('blocks a second dialog while the first is still open', () => {
-      const dialogClose$ = new Subject<boolean | undefined>();
-      dialog.open.mockReturnValue({ afterClosed: () => dialogClose$.asObservable() });
+    it('delegates re-entrancy to ConfirmDestructiveService (two calls both reach confirm)', () => {
+      // ConfirmDestructiveService owns the re-entrancy guard. The helper
+      // simply delegates — both calls reach confirmService.confirm().
+      mockConfirmResult(false);
 
       const opts: DestructiveActionOptions = {
         dialogData,
@@ -108,41 +91,13 @@ describe('DestructiveActionHelper', () => {
       helper.execute(opts, 'Done.');
       helper.execute(opts, 'Done.');
 
-      // Only one dialog opened despite two calls.
-      expect(dialog.open).toHaveBeenCalledTimes(1);
-    });
-
-    it('releases the guard after the dialog closes', () => {
-      const dialogClose$ = new Subject<boolean | undefined>();
-      dialog.open.mockReturnValue({ afterClosed: () => dialogClose$.asObservable() });
-
-      const opts: DestructiveActionOptions = {
-        dialogData,
-        apiCall: () => of(null),
-        onSuccess: vi.fn(),
-        errorFallback: 'fail',
-      };
-
-      helper.execute(opts, 'Done.');
-
-      // Close dialog with cancel — emits false then completes.
-      dialogClose$.next(false);
-      dialogClose$.complete();
-
-      // Guard released — new dialog can open.
-      const dialogClose2$ = new Subject<boolean | undefined>();
-      dialog.open.mockReturnValue({ afterClosed: () => dialogClose2$.asObservable() });
-      helper.execute(opts, 'Done.');
-      expect(dialog.open).toHaveBeenCalledTimes(2);
-
-      dialogClose2$.next(false);
-      dialogClose2$.complete();
+      expect(confirmService.confirm).toHaveBeenCalledTimes(2);
     });
   });
 
   describe('execute — success path', () => {
     it('calls onStart, apiCall, onSuccess, toast, and onFinally in order', () => {
-      mockDialogResult(true);
+      mockConfirmResult(true);
       const order: string[] = [];
       const opts: DestructiveActionOptions<string> = {
         dialogData,
@@ -163,7 +118,7 @@ describe('DestructiveActionHelper', () => {
 
   describe('execute — error path', () => {
     it('calls onError with extracted detail and onFinally, no toast', () => {
-      mockDialogResult(true);
+      mockConfirmResult(true);
       const opts: DestructiveActionOptions = {
         dialogData,
         apiCall: () => throwError(() => ({ error: { detail: 'conflict' } })),
@@ -181,7 +136,7 @@ describe('DestructiveActionHelper', () => {
     });
 
     it('uses the fallback message when error has no detail', () => {
-      mockDialogResult(true);
+      mockConfirmResult(true);
       const opts: DestructiveActionOptions = {
         dialogData,
         apiCall: () => throwError(() => ({})),
@@ -195,7 +150,7 @@ describe('DestructiveActionHelper', () => {
     });
 
     it('catches a synchronous throw from apiCall factory', () => {
-      mockDialogResult(true);
+      mockConfirmResult(true);
       const opts: DestructiveActionOptions = {
         dialogData,
         apiCall: () => { throw new Error('sync boom'); },
@@ -214,7 +169,7 @@ describe('DestructiveActionHelper', () => {
 
   describe('execute — lifecycle cleanup', () => {
     it('calls onFinally via finalize when the component is destroyed mid-flight', () => {
-      mockDialogResult(true);
+      mockConfirmResult(true);
       // Use a Subject that never completes to simulate an in-flight request.
       const inflight$ = new Subject<unknown>();
       const opts: DestructiveActionOptions = {

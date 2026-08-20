@@ -1,15 +1,12 @@
 import { DestroyRef } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { MatDialog } from '@angular/material/dialog';
-import { Observable, defer, of } from 'rxjs';
-import { finalize, map } from 'rxjs/operators';
+import { Observable, defer } from 'rxjs';
+import { finalize } from 'rxjs/operators';
 
 import { NotificationService } from '../core/notification.service';
 import { extractErrorDetail } from './extract-error-detail';
-import {
-  ConfirmDialogComponent,
-  type ConfirmDialogData,
-} from './confirm-dialog/confirm-dialog.component';
+import { ConfirmDestructiveService } from './confirm-destructive.service';
+import type { ConfirmDialogData } from './confirm-dialog/confirm-dialog.component';
 
 /**
  * Options for a single destructive-action invocation.
@@ -33,6 +30,8 @@ export interface DestructiveActionOptions<T = unknown> {
  * Encapsulates the confirm-dialog → re-entrancy guard → API call → error/toast
  * flow shared across all component-scoped destructive-action services.
  *
+ * Delegates dialog opening and re-entrancy guard to `ConfirmDestructiveService`.
+ *
  * Usage: instantiate once per service (in the constructor or as a field), then
  * call `execute()` for each destructive action. The helper owns no signals or
  * subjects — callers supply callbacks so they remain in control of state shape.
@@ -42,11 +41,8 @@ export interface DestructiveActionOptions<T = unknown> {
  * request is attempted.
  */
 export class DestructiveActionHelper {
-  /** True while a confirm dialog is open — blocks re-entrant opens. */
-  private confirming = false;
-
   constructor(
-    private readonly dialog: MatDialog,
+    private readonly confirmService: ConfirmDestructiveService,
     private readonly notify: NotificationService,
     private readonly destroyRef: DestroyRef,
     private readonly onError: (message: string | null) => void,
@@ -55,7 +51,8 @@ export class DestructiveActionHelper {
   /**
    * Opens the confirm dialog and, on confirmation, executes the API call.
    *
-   * Re-entrancy guard prevents stacked dialogs from rapid double-activation.
+   * Re-entrancy guard (owned by `ConfirmDestructiveService`) prevents
+   * stacked dialogs from rapid double-activation.
    * On confirmation, clears any previous error by calling `onError(null)`,
    * then invokes `onStart`, runs `apiCall` (wrapped in `defer` to catch
    * synchronous throws), and calls `onFinally` on completion via `finalize`.
@@ -74,7 +71,8 @@ export class DestructiveActionHelper {
     onStart?: () => void,
     onFinally?: () => void,
   ): void {
-    this.confirmDestructive(opts.dialogData)
+    this.confirmService
+      .confirm(opts.dialogData)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((confirmed) => {
         if (!confirmed) return;
@@ -95,19 +93,5 @@ export class DestructiveActionHelper {
             },
           });
       });
-  }
-
-  private confirmDestructive(data: ConfirmDialogData): Observable<boolean> {
-    if (this.confirming) return of(false);
-    this.confirming = true;
-    return this.dialog
-      .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(ConfirmDialogComponent, { data })
-      .afterClosed()
-      .pipe(
-        map((result) => result === true),
-        finalize(() => {
-          this.confirming = false;
-        }),
-      );
   }
 }
