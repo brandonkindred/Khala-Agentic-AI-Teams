@@ -69,7 +69,8 @@ describe('NAV_GROUPS Studio-only journey entry', () => {
   });
 
   it('only exposes Studio-based routes as navigable /agent-studio paths', () => {
-    const studioRoutes = agenticGroup.items.filter((i) => i.route.startsWith('/agent-studio'));
+    // Check globally so routes added under any group are caught
+    const studioRoutes = ALL_NAV_ITEMS.filter((i) => i.route.startsWith('/agent-studio'));
     expect(studioRoutes.map((r) => r.id).sort()).toEqual([
       'agent-studio',
       'agent-studio-metrics',
