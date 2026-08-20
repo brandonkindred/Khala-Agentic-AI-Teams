@@ -1,4 +1,5 @@
 import { DestroyRef, EnvironmentInjector, createEnvironmentInjector } from '@angular/core';
+import { TestBed } from '@angular/core/testing';
 import { of, Subject, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { DestructiveActionHelper, DestructiveActionOptions } from './destructive-action.helper';
@@ -16,8 +17,9 @@ describe('DestructiveActionHelper', () => {
   beforeEach(() => {
     confirmService = { confirm: vi.fn() };
     notify = { saved: vi.fn() };
-    // Create a real EnvironmentInjector to get a working DestroyRef.
-    injector = createEnvironmentInjector([], undefined as unknown as EnvironmentInjector);
+    // Use TestBed's root injector as the parent for a proper injector hierarchy.
+    const parentInjector = TestBed.inject(EnvironmentInjector);
+    injector = createEnvironmentInjector([], parentInjector);
     destroyRef = injector.get(DestroyRef);
     onError = vi.fn();
 

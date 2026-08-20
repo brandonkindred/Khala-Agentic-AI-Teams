@@ -174,8 +174,8 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   private sandboxPollSub: Subscription | null = null;
   /** Increments on agent change to discard stale error emissions from prior agents. */
   private destructiveActionGeneration = 0;
-  /** Generation captured when the last error-clear (null) was received. */
-  private _errorGeneration = 0;
+  /** Generation captured when the component last delegated a destructive action. */
+  private _actionStartGeneration = 0;
 
   ngOnInit(): void {
     this.catalog.listAgents().subscribe({
@@ -204,15 +204,13 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     this.destructiveActions.errors$
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((msg) => {
-        // The helper emits null to clear previous errors at the start of each
-        // confirmed action. Capture the generation at that point so late
-        // error emissions from a prior agent's in-flight action (which
-        // resolves after an agent switch increments the generation) are
-        // silently discarded.
+        // Only apply errors that originated from an action started during the
+        // current agent's lifetime. The generation is captured when we delegate
+        // to the service (via deleteSavedInput/tearDownSandbox below) and
+        // incremented on agent change; a null clear is always accepted.
         if (msg === null) {
-          this._errorGeneration = this.destructiveActionGeneration;
           this.destructiveError.set(null);
-        } else if (this._errorGeneration === this.destructiveActionGeneration) {
+        } else if (this._actionStartGeneration === this.destructiveActionGeneration) {
           this.destructiveError.set(msg);
         }
       });
@@ -421,6 +419,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     event.stopPropagation();
     const match = this.savedInputs().find((s) => s.id === savedId);
     if (!match) return;
+    this._actionStartGeneration = this.destructiveActionGeneration;
     this.destructiveActions.deleteSavedInput(savedId, match.name);
   }
 
@@ -479,6 +478,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
     const label = this.selectedAgent()?.manifest.name ?? agentId;
+    this._actionStartGeneration = this.destructiveActionGeneration;
     this.destructiveActions.tearDownSandbox(agentId, label);
   }
 
