@@ -350,6 +350,28 @@ class TestDiffFirstFocusUnit:
         assert "uncertain" in result.lower()
         assert "never defaults toward posting" in result
 
+    def test_note_does_not_treat_every_shown_line_as_in_scope(self) -> None:
+        """The focus note must NOT instruct the reviewer to treat every shown
+        line as in scope (the old leaky contract). Instead, it must instruct
+        a diff-first approach: surrounding/unchanged code is context, only
+        added/modified lines are the primary target."""
+        result = pr_review._diff_first_focus("")
+        lower = result.lower()
+        # Must NOT say every shown line is in scope.
+        assert "every shown line" not in lower
+        assert "all lines are in scope" not in lower
+        assert "all shown lines" not in lower
+        # MUST say surrounding/unchanged code is context, not a target.
+        assert "context" in lower
+        assert "surrounding" in lower or "unchanged" in lower
+
+    def test_note_requires_positive_evidence_for_in_scope_tagging(self) -> None:
+        """The tagging instruction must require positive evidence (change-surface
+        marker) before a finding is tagged as in-scope (pre_existing: false)."""
+        result = pr_review._diff_first_focus("")
+        assert "positive evidence" in result
+        assert "pre_existing: false" in result
+
 
 # ---------------------------------------------------------------------------
 # _review_author

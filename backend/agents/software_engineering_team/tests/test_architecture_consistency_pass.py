@@ -451,7 +451,8 @@ def test_coerce_finding_carries_through_pre_existing_tag() -> None:
     path to route an architecture/refactor finding about a field, function, or
     class this submission did NOT add or modify to a human-review proposal
     instead of a blocking PR comment) survives conversion, tolerates string
-    encodings, and defaults False when absent -- mirrors
+    encodings, and defaults True when absent (uncertain findings are treated
+    as out-of-scope) -- mirrors
     side_effect_impact_pass._coerce_finding's identical convention."""
     tagged_true = _coerce_finding(
         {"category": "architecture", "description": "d1", "pre_existing": True}
@@ -467,7 +468,7 @@ def test_coerce_finding_carries_through_pre_existing_tag() -> None:
         True,
         True,
         False,
-        False,
+        True,
     ]
 
 

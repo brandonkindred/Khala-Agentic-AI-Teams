@@ -432,7 +432,7 @@ class CodeReviewIssue(BaseModel):
         description="Concrete suggestion for how to fix the issue",
     )
     pre_existing: bool = Field(
-        default=False,
+        default=True,
         description="True when this issue is a bug in code the change under review did NOT add or "
         "modify — a pre-existing defect in unrelated, unchanged code — rather than a defect the "
         "change introduced. Documented in every profile's output schema, and produced by the "
@@ -443,7 +443,8 @@ class CodeReviewIssue(BaseModel):
         "`omission` alone, so a finding tagged true still posts as a PR comment when its own "
         "file/line proves it sits on a line this PR actually added, while one on unchanged "
         "context or a file outside this PR's diff becomes a GitHub-issue proposal regardless of "
-        "this tag. Default False.",
+        "this tag. Default True (uncertain findings are treated as out-of-scope rather than "
+        "guessed into scope).",
     )
     omission: bool = Field(
         default=False,
@@ -600,12 +601,13 @@ class ChunkReviewIssueLLM(BaseModel):
         description="Concrete suggestion for how to fix the issue",
     )
     pre_existing: StrictBool = Field(
-        default=False,
+        default=True,
         description="True when this issue is a bug in code the change under review did NOT add or "
         "modify — a pre-existing defect in unrelated, unchanged code — rather than a defect the "
         "change introduced. This tag is informational for attribution; it does not drive posting "
         "scope — the downstream gate is change-map-driven (is_within_diff + omission). "
-        "Default False.",
+        "Default True (uncertain findings are treated as out-of-scope rather than guessed "
+        "into scope).",
     )
     omission: StrictBool = Field(
         default=False,
@@ -776,7 +778,7 @@ class ArchitectureConsistencyFindingLLM(BaseModel):
         "align with the stated boundary)",
     )
     pre_existing: StrictBool = Field(
-        default=False,
+        default=True,
         description="True when this issue is about a field, function, class, or other construct "
         "the change under review did NOT add or modify — a pre-existing contradiction/duplication "
         "in unrelated, unchanged code that merely lives in a file this submission also touched — "
@@ -784,7 +786,8 @@ class ArchitectureConsistencyFindingLLM(BaseModel):
         "canonical wording). Per the merged prompt's Part 1 tagging guidance, that means the "
         "specific construct the finding is about looks untouched by this submission's actual work. "
         "This tag is informational for attribution; it does not drive posting scope — the "
-        "downstream gate is change-map-driven (is_within_diff + omission).",
+        "downstream gate is change-map-driven (is_within_diff + omission). Default True "
+        "(uncertain findings are treated as out-of-scope rather than guessed into scope).",
     )
     omission: StrictBool = Field(
         default=False,
@@ -868,14 +871,15 @@ class SideEffectImpactFindingLLM(BaseModel):
         "implementation)",
     )
     pre_existing: StrictBool = Field(
-        default=False,
+        default=True,
         description="True when this issue is a bug in code the change under review did NOT add "
         "or modify — a pre-existing defect in unrelated, unchanged code — rather than a defect "
         "the change introduced (mirrors CodeReviewIssue.pre_existing's canonical wording). Per "
         "the merged prompt's Part 2 tagging guidance, that means the function(s) the finding is "
         "about look untouched by this submission's actual work. This tag is informational for "
         "attribution; it does not drive posting scope — the downstream gate is change-map-driven "
-        "(is_within_diff + omission).",
+        "(is_within_diff + omission). Default True (uncertain findings are treated as "
+        "out-of-scope rather than guessed into scope).",
     )
     omission: StrictBool = Field(
         default=False,
