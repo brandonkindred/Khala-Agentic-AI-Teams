@@ -818,3 +818,29 @@ When evaluating findings, apply this priority order:
 
 Use `document_writer_tool` to write the scrutiny report. Use `web_search_tool` to verify best practices when evaluating specialist recommendations. Use `file_read_tool` to read any referenced documents.
 """
+
+# ---------------------------------------------------------------------------
+# Cache-breakpoint helper for Bedrock-native system prompts
+# ---------------------------------------------------------------------------
+
+#: Bedrock ``cachePoint`` block placed after a system-prompt text segment to
+#: mark the preceding prefix as a provider-side cached breakpoint.  Placed in
+#: the ``system`` list of a Bedrock ConverseStream request, this tells the
+#: provider that the text block(s) before this marker are stable across calls
+#: and eligible for prefix caching.
+_CACHE_POINT_BLOCK: "dict[str, dict[str, str]]" = {"cachePoint": {"type": "default"}}
+
+
+def cached_system_prompt(prompt: str) -> "list[dict]":
+    """Wrap a static system-prompt string as a cached-prefix list for Strands Agent.
+
+    Returns a two-element list suitable for ``Agent(system_prompt=...)``:
+    ``[{"text": prompt}, {"cachePoint": {"type": "default"}}]``.
+
+    On the Bedrock Converse API the ``cachePoint`` block instructs the provider
+    to treat the preceding text segment as a stable prefix eligible for
+    cross-call caching.  Within the architect scrutiny loop (up to 2
+    iterations) and across the security architect's dual invocation, the
+    identical system prompt is re-sent — this marker avoids re-processing it.
+    """
+    return [{"text": prompt}, _CACHE_POINT_BLOCK]
