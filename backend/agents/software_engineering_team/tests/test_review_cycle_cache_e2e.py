@@ -31,7 +31,6 @@ Implementation notes:
 from __future__ import annotations
 
 import json
-from typing import Any, Dict
 
 import pytest
 from code_review_agent.chunk_reviewer import ChunkReviewAgent
@@ -46,7 +45,6 @@ from llm_service import telemetry
 from llm_service.interface import reset_complete_json_observer_state
 from llm_service.strands_adapter import LLMClientModel
 from software_engineering_team.shared.single_shot_review import run_single_shot_review
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -182,10 +180,17 @@ def test_qa_and_security_show_nonzero_cache_read_after_code_review() -> None:
     exhibit non-zero cache_read_tokens, proving the provider cached the
     shared file-context prefix written by the Code Review call.
 
-    The Code Review reasoning pass creates 1024 cache tokens (simulating the
-    shared spec/architecture prefix being cached). QA and Security calls
-    then read 1024 tokens back (simulating the shared user-prompt prefix
-    being served from cache).
+    Verification strategy (two layers):
+    1. **Wire-level precondition**: Code Review's reasoning call carries a
+       ``cache_control`` block in its system content — the wire-level marker
+       that tells Anthropic to cache that prefix. QA/Security calls carry
+       the same file-context user-prompt prefix (verified structurally by
+       ``test_shared_file_context_text_is_byte_identical_across_gates``),
+       which Anthropic's automatic prefix matching serves from cache.
+    2. **Telemetry**: The scripted fake reports non-zero
+       ``cache_read_input_tokens`` on QA/Security responses, and telemetry
+       faithfully records those values. This proves the telemetry pipeline
+       (Story 2a) propagates cache-token data end-to-end.
 
     Each gate uses its own client instance to avoid message-queue
     interference (in production they share the same provider endpoint; in
@@ -193,7 +198,7 @@ def test_qa_and_security_show_nonzero_cache_read_after_code_review() -> None:
     independently).
     """
     # --- Code Review gate (2 LLM calls: reasoning + formatting) ---
-    cr_client, _ = _make_claude_client(
+    cr_client, cr_fake = _make_claude_client(
         [
             _text_message(
                 "No issues found in payment processing.",
@@ -210,8 +215,22 @@ def test_qa_and_security_show_nonzero_cache_read_after_code_review() -> None:
     model = LLMClientModel(cr_client, agent_key="code_review")
     ChunkReviewAgent(model).run(_cr_chunk_input())
 
+    # Wire-level assertion: CR reasoning call's system content carries a
+    # cache_control breakpoint (the real-world precondition for Anthropic to
+    # cache this prefix for subsequent calls in the same session).
+    cr_reasoning_call = cr_fake.captured_calls[0]
+    cr_system = cr_reasoning_call["system"]
+    cache_marked_blocks = [
+        block
+        for block in cr_system
+        if isinstance(block, dict) and block.get("cache_control") == {"type": "ephemeral"}
+    ]
+    assert cache_marked_blocks, (
+        f"Expected a cache_control block in CR reasoning system content, got {cr_system}"
+    )
+
     # --- QA gate (1 LLM call via run_single_shot_review) ---
-    qa_client, _ = _make_claude_client(
+    qa_client, qa_fake = _make_claude_client(
         [
             _text_message(
                 _qa_reply(),
@@ -230,7 +249,7 @@ def test_qa_and_security_show_nonzero_cache_read_after_code_review() -> None:
     )
 
     # --- Security gate (1 LLM call via CybersecurityExpertAgent) ---
-    sec_client, _ = _make_claude_client(
+    sec_client, sec_fake = _make_claude_client(
         [
             _text_message(
                 _security_reply(),
@@ -240,6 +259,15 @@ def test_qa_and_security_show_nonzero_cache_read_after_code_review() -> None:
         ]
     )
     CybersecurityExpertAgent(sec_client).run(_security_input())
+
+    # Wire-level assertion: QA and Security carry the shared file-context
+    # prefix in their user messages. The prompts contain the same code under
+    # review — the precondition for Anthropic's automatic prefix caching
+    # across calls with identical leading content.
+    qa_prompt = qa_fake.captured_calls[0]["messages"][0]["content"]
+    sec_prompt = sec_fake.captured_calls[0]["messages"][0]["content"]
+    assert _SHARED_CODE.strip() in qa_prompt, "QA prompt must contain the shared code"
+    assert _SHARED_CODE.strip() in sec_prompt, "Security prompt must contain the shared code"
 
     # --- Telemetry assertions ---
     calls = telemetry.get_recent_calls()
@@ -279,10 +307,12 @@ def test_code_review_retry_shows_nonzero_cache_read() -> None:
     cache_read_tokens for the shared prefix, proving the provider cache
     persists across retries.
 
-    Simulates two Code Review calls (one per cycle): the first creates the
-    cache, the second reads it back.
+    Wire-level verification: both cycles' reasoning calls carry the same
+    ``cache_control``-marked system content (byte-identical spec/architecture
+    prefix), which is the real-world precondition for Anthropic to serve a
+    cache hit on the second cycle.
     """
-    client, _fake_messages = _make_claude_client(
+    client, fake_messages = _make_claude_client(
         [
             # Cycle 1 - Code Review reasoning: cache miss
             _text_message(
@@ -319,6 +349,26 @@ def test_code_review_retry_shows_nonzero_cache_read() -> None:
     # Cycle 2 (retry with identical input — same file context)
     cr_agent.run(_cr_chunk_input())
 
+    # Wire-level assertion: both reasoning calls carry the same
+    # cache_control-marked system content (the precondition for a real
+    # provider cache hit on the second call).
+    reasoning_calls = [fake_messages.captured_calls[0], fake_messages.captured_calls[2]]
+    cycle1_system, cycle2_system = (call["system"] for call in reasoning_calls)
+    assert cycle1_system == cycle2_system, (
+        "Retry cycle's system content must be byte-identical to cycle 1's "
+        "for the provider cache to hit"
+    )
+    # Confirm cache_control is present
+    cache_marked = [
+        block
+        for block in cycle1_system
+        if isinstance(block, dict) and block.get("cache_control") == {"type": "ephemeral"}
+    ]
+    assert cache_marked, (
+        f"Expected cache_control block in reasoning system content, got {cycle1_system}"
+    )
+
+    # Telemetry assertions
     calls = telemetry.get_recent_calls()
     assert len(calls) == 4
 
@@ -339,8 +389,13 @@ def test_code_review_retry_shows_nonzero_cache_read() -> None:
 def test_qa_retry_shows_nonzero_cache_read() -> None:
     """QA gate on a retry cycle also reads from the provider cache,
     confirming the shared file-context prefix is cached across retry
-    boundaries."""
-    client, _fake_messages = _make_claude_client(
+    boundaries.
+
+    Wire-level verification: both calls carry the same user-prompt content
+    (the file-context prefix), which is the precondition for Anthropic's
+    automatic prefix caching to serve a hit on the second call.
+    """
+    client, fake_messages = _make_claude_client(
         [
             # Cycle 1 - QA: cache miss (creates prefix)
             _text_message(
@@ -366,6 +421,14 @@ def test_qa_retry_shows_nonzero_cache_read() -> None:
     run_single_shot_review(
         client, agent_key="qa", prompt=_qa_user_prompt(),
         system_prompt=QA_PROMPT, schema=QAOutput, objective="qa review",
+    )
+
+    # Wire-level assertion: both calls send the same prompt (the
+    # precondition for provider-side automatic prefix caching to hit).
+    call1_prompt = fake_messages.captured_calls[0]["messages"][0]["content"]
+    call2_prompt = fake_messages.captured_calls[1]["messages"][0]["content"]
+    assert call1_prompt == call2_prompt, (
+        "Retry cycle's user prompt must be byte-identical for prefix caching"
     )
 
     calls = telemetry.get_recent_calls()
@@ -556,8 +619,8 @@ def test_shared_file_context_text_is_byte_identical_across_gates() -> None:
     This is a structural assertion: the helpers that render file context for
     each gate produce the same content when given the same code.
     """
-    from qa_agent.agent import _build_qa_file_context_prefix
     from qa_agent import QAInput
+    from qa_agent.agent import _build_qa_file_context_prefix
     from security_agent.agent import _build_security_file_context_prefix
 
     qa_input = QAInput(

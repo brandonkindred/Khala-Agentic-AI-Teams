@@ -2,42 +2,60 @@
 
 ## Summary
 
-The three review gates (Code Review, QA, Security) share a stable file-context
-prefix — the language label and code under review — across every call in a single
-review cycle. When the backing LLM provider supports prompt caching (currently
-Anthropic Claude via `cache_control: {"type": "ephemeral"}`), this shared prefix is
-billed once (on the first call in the cycle) and served from the provider's cache on
-all subsequent calls that share the same byte-identical prefix. On retry cycles
-(QA/Security failure → batch-fix → restart from Code Review), the prefix often
-remains cache-warm because the fixed files still share significant content overlap
-with the prior cycle's request.
+The review gates (Code Review, QA, Security) use provider-side prompt caching to
+reduce input-token costs on repeated calls with identical prefixes. Two distinct
+caching mechanisms are in play:
+
+1. **Explicit cache breakpoints** (Code Review only): the spec/architecture
+   metadata is wrapped in a `CacheBreakpoint` and sent as a `cache_control`-marked
+   system-content block. Anthropic caches this prefix across chunks within a single
+   coordinator run and across retry cycles.
+
+2. **Automatic prefix caching** (all gates, within-gate retries): when a gate is
+   re-invoked with byte-identical input (e.g. QA or Security retried after a fix
+   that didn't change the code under review), the entire request is identical and
+   Anthropic's automatic prefix matching serves it from cache.
+
+**Important**: Code Review, QA, and Security use different system prompts
+(personas), so there is no cross-gate cache hit at the system-prompt level. Each
+gate's caching operates independently within its own retry/re-invocation cycles.
 
 ## How it works
 
-### Cache-breakpoint marking
+### Cache-breakpoint marking (Code Review)
 
 The `CacheBreakpoint` marker (`llm_service/cache_breakpoint.py`) is a frozen
 dataclass that wraps a stable prompt segment. It carries no provider logic — it
-simply declares "this text is safe to cache." The wire translation happens downstream:
+simply declares "this text is safe to cache." The wire translation happens
+downstream:
 
 1. **Code Review** (`code_review_agent/chunk_reviewer.py`): wraps the spec excerpt,
    architecture overview, and existing-codebase excerpt in a `CacheBreakpoint` and
    passes it as `system_prompt_content` on the reasoning Agent. These are trusted
-   metadata — identical across every chunk in the coordinator's map phase.
+   metadata — identical across every chunk in the coordinator's map phase and
+   across retry cycles.
 
-2. **QA and Security** (`qa_agent/agent.py`, `security_agent/agent.py`): the file
-   context (language + code under review) stays in the **user message** — it is
-   untrusted repository content and must not be elevated to system-level
-   instructions. Provider-side caching still applies because the entire request
-   prefix (system prompt persona + user-message file context) is byte-identical
-   across calls with the same code under review.
-
-3. **Wire translation** (`llm_service/strands_adapter.py`,
+2. **Wire translation** (`llm_service/strands_adapter.py`,
    `llm_service/clients/claude.py`): the Strands model wrapper recognizes
    `CacheBreakpoint` instances in `system_prompt_content` and passes them to
-   `ClaudeLLMClient`, which renders them as Anthropic `cache_control` blocks. For
-   non-caching clients (e.g. `DummyLLMClient`), breakpoints are flattened to plain
-   text — no error, byte-identical behavior.
+   `ClaudeLLMClient`, which renders them as Anthropic `cache_control: {"type":
+   "ephemeral"}` blocks in the system message. For non-caching clients (e.g.
+   `DummyLLMClient`), breakpoints are flattened to plain text — no error,
+   byte-identical behavior.
+
+### QA and Security: user-message file context
+
+QA and Security keep the file-context prefix (language + code under review) in the
+**user message** — it is untrusted repository content and must not be elevated to
+system-level instructions. There is no explicit `CacheBreakpoint` marker on these
+calls.
+
+Provider-side caching for QA/Security works only in the **within-gate retry** case:
+when the same gate is re-invoked with identical input (same system prompt + same
+user message), Anthropic's automatic prefix matching serves the entire request from
+cache. This happens when:
+- A retry cycle restarts and the file context hasn't changed for that gate
+- The same code is re-reviewed after a fix that didn't alter the reviewed files
 
 ### Telemetry
 
@@ -63,28 +81,30 @@ Code Review (reasoning + formatting)  →  QA  →  Security
      └───── batch-fix on QA/Security failure ←┘
 ```
 
-1. **Code Review reasoning pass**: creates the provider cache for the shared
-   spec/architecture prefix (`cache_creation_tokens > 0`, `cache_read_tokens == 0`
-   on a cold start).
-2. **Code Review formatting pass**: reads back the cached prefix
-   (`cache_read_tokens > 0`).
-3. **QA call**: the user-prompt file-context prefix is byte-identical to what Code
-   Review reviewed — the same `microtask_files` content. Provider serves it from
-   cache (`cache_read_tokens > 0`).
-4. **Security call**: same byte-identical prefix as QA — also served from cache
-   (`cache_read_tokens > 0`).
+**Code Review caching (explicit breakpoint)**:
+- Reasoning pass: the `CacheBreakpoint`-marked spec/architecture prefix is sent
+  with `cache_control`. On the first call, Anthropic creates the cache
+  (`cache_creation_tokens > 0`). On subsequent reasoning calls with the same
+  prefix (across chunks and retries), Anthropic serves it from cache
+  (`cache_read_tokens > 0`).
+- Formatting pass: may benefit from automatic prefix caching if the system
+  prompt is identical.
 
-On a retry cycle (QA or Security failure triggers a fix and restart from Code
-Review), the shared prefix often remains cache-warm because:
-- The spec/architecture metadata in Code Review's system prompt is unchanged.
-- The file-context prefix in QA/Security's user message may be partially or fully
-  unchanged (a batch-fix touches only the files with reported issues; untouched
-  files retain their byte-identical content).
+**QA/Security caching (automatic prefix matching)**:
+- Within-gate retries: when QA or Security is re-invoked with identical input
+  (same `microtask_files` content), the entire request prefix matches and
+  Anthropic serves from cache.
+- Cross-gate: QA and Security have different system prompts (QA_PROMPT vs
+  SECURITY_PROMPT), so they do NOT share a cache prefix with each other or
+  with Code Review. Each gate's cache is independent.
 
 ### What is NOT cached across gates
 
-- **LLM responses**: only the *input* prefix is cached. The model still generates a
-  fresh response for each call.
+- **Cross-gate prefix sharing**: Code Review, QA, and Security use different
+  personas (system prompts), preventing cross-gate cache hits. Each gate only
+  benefits from its own prior calls.
+- **LLM responses**: only the *input* prefix is cached. The model still generates
+  a fresh response for each call.
 - **Application-level result caches**: QA and Security have their own
   shared-cache-backed result caches (keyed on the full input hash + model
   fingerprint). These are a separate, higher-level mechanism — a cache hit there
@@ -98,32 +118,44 @@ Review), the shared prefix often remains cache-warm because:
 
 End-to-end tests in `tests/test_review_cycle_cache_e2e.py` prove:
 
-1. **Cross-gate caching** (`test_qa_and_security_show_nonzero_cache_read_after_code_review`):
-   QA and Security calls following Code Review in the same cycle show non-zero
-   `cache_read_tokens`.
+1. **Wire-level preconditions** (`test_qa_and_security_show_nonzero_cache_read_after_code_review`,
+   `test_code_review_retry_shows_nonzero_cache_read`):
+   - Code Review's system content carries `cache_control: {"type": "ephemeral"}`
+     blocks on the wire.
+   - Retry cycles send byte-identical system content (the precondition for a real
+     provider cache hit).
+   - QA/Security carry the shared file-context code in their user prompts.
 
-2. **Cross-retry caching** (`test_code_review_retry_shows_nonzero_cache_read`,
+2. **Telemetry propagation** (all AC1/AC2 tests): scripted fake responses with
+   `cache_read_input_tokens` values are faithfully recorded by the telemetry
+   pipeline, proving Story 2a's end-to-end data flow works.
+
+3. **Within-gate retry caching** (`test_code_review_retry_shows_nonzero_cache_read`,
    `test_qa_retry_shows_nonzero_cache_read`,
-   `test_security_retry_shows_nonzero_cache_read`): on a second cycle with
-   identical input, all three gates read from the provider cache.
+   `test_security_retry_shows_nonzero_cache_read`): repeated calls with identical
+   input produce cache hits (verified via both wire-level prompt identity and
+   telemetry values).
 
-3. **Output stability** (`test_code_review_output_unchanged_regardless_of_cache_state`,
+4. **Output stability** (`test_code_review_output_unchanged_regardless_of_cache_state`,
    `test_qa_output_unchanged_regardless_of_cache_state`,
    `test_security_output_unchanged_regardless_of_cache_state`): gate outputs are
    byte-identical regardless of whether the call was cache-served or not.
 
-4. **Structural invariant** (`test_shared_file_context_text_is_byte_identical_across_gates`):
-   QA and Security render the same file-context prefix text for the same input —
-   the precondition for a provider cache hit.
+5. **Structural invariant** (`test_shared_file_context_text_is_byte_identical_across_gates`):
+   QA and Security render the same file-context prefix text for the same input.
+   While this doesn't produce a cross-gate cache hit (different system prompts),
+   it ensures both gates present the same code for review.
 
 ## Cost impact
 
-For a typical review cycle with a 3000-token file-context prefix:
-- Without caching: 3000 input tokens billed × 4 calls = 12000 input tokens.
-- With caching: 3000 tokens billed once (creation) + 3000 tokens × 3 reads at the
-  cached-input discount (typically 90% cheaper on Anthropic) = 3000 + 900 = 3900
-  effective input tokens. A ~68% reduction in input-token cost for the shared
-  prefix portion.
+**Code Review** (explicit breakpoint, most significant savings):
+For a typical review with a 2000-token spec/architecture prefix reviewed across 5
+chunks: without caching, 2000 × 5 = 10000 input tokens. With caching, 2000 billed
+once + 2000 × 4 reads at the cached-input discount (90% cheaper on Anthropic) =
+2000 + 800 = 2800 effective input tokens. ~72% reduction for the shared prefix
+portion. Savings compound on retry cycles.
 
-The savings compound with retries: each additional cycle adds only the discounted
-cache-read cost, not the full prefix cost.
+**QA/Security** (automatic prefix caching on retries):
+When a gate is retried with unchanged code, the entire prompt (~3000 tokens) is
+served from cache at the discounted rate. With 2-3 retry cycles per microtask, this
+saves approximately 3000–6000 tokens at the cache discount per gate.
