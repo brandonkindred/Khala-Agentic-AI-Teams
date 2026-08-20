@@ -4,6 +4,7 @@ import {
   HttpTestingController,
 } from '@angular/common/http/testing';
 import { AgentRunnerApiService } from './agent-runner-api.service';
+import { SKIP_ERROR_NOTIFY } from '../core/error-handler.interceptor';
 import { environment } from '../../environments/environment';
 
 describe('AgentRunnerApiService', () => {
@@ -55,6 +56,7 @@ describe('AgentRunnerApiService', () => {
     const req = httpMock.expectOne((r) => r.url === `${baseUrl}/agent.foo/invoke`);
     expect(req.request.method).toBe('POST');
     expect(req.request.params.keys().length).toBe(0);
+    expect(req.request.context.get(SKIP_ERROR_NOTIFY)).toBe(true);
     req.flush({});
   });
 
@@ -90,6 +92,7 @@ describe('AgentRunnerApiService', () => {
     service.createSavedInput('agent.foo', { name: 'x', payload: {} }).subscribe();
     const req = httpMock.expectOne(`${baseUrl}/agent.foo/saved-inputs`);
     expect(req.request.method).toBe('POST');
+    expect(req.request.context.get(SKIP_ERROR_NOTIFY)).toBe(true);
     req.flush({});
   });
 
@@ -104,6 +107,7 @@ describe('AgentRunnerApiService', () => {
     service.deleteSavedInput('id1').subscribe();
     const req = httpMock.expectOne(`${baseUrl}/saved-inputs/id1`);
     expect(req.request.method).toBe('DELETE');
+    expect(req.request.context.get(SKIP_ERROR_NOTIFY)).toBe(true);
     req.flush({ id: 'id1', status: 'deleted' });
   });
 
