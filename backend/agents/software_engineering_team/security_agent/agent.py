@@ -142,6 +142,61 @@ def _review_cache_key(input_data: SecurityInput, model_fp: str) -> str:
     return build_model_cache_key(input_data, model_fp)
 
 
+def _build_security_file_context_prefix(input_data: SecurityInput) -> list[str]:
+    """Render the microtask file context (language + code) as a stable prefix.
+
+    Positioned ahead of ``_build_security_role_instructions``'s output in the
+    assembled user prompt (reorder/isolation only; no cache marking here).
+
+    Preconditions:
+        - ``input_data`` is a valid ``SecurityInput`` with ``code`` set.
+
+    Postconditions:
+        - Returns non-empty prompt lines: the language line, then the code
+          fence around ``input_data.code``. Never raises or transforms the code.
+    """
+    return [
+        f"**Language:** {input_data.language}",
+        "**Code to review:**",
+        "```",
+        input_data.code,
+        "```",
+    ]
+
+
+def _build_security_role_instructions(input_data: SecurityInput) -> list[str]:
+    """Render the security-specific review instructions that follow the file-context prefix.
+
+    The words "security" and "vulnerabilities" MUST appear here because
+    ``DummyLLMClient.complete_json`` pattern-matches on them (substring check
+    over the whole prompt, order-independent) to return a deterministic stub
+    in tests — see llm_service/README.md "Migration rule: keep pattern
+    anchors in the user prompt".
+
+    Preconditions:
+        - ``input_data`` is a valid ``SecurityInput``.
+
+    Postconditions:
+        - Returns non-empty prompt lines: the schema-hint sentence, then the
+          task description, context, and architecture when each is present —
+          in that fixed order. Never raises.
+    """
+    parts = [
+        "",
+        "Review the code for security vulnerabilities. Produce "
+        "structured JSON with fields: vulnerabilities, summary, "
+        "remediations. Each vulnerability must include severity, "
+        "category, description, location, and recommendation.",
+    ]
+    if input_data.task_description:
+        parts.append(f"**Task:** {input_data.task_description}")
+    if input_data.context:
+        parts.append(f"**Context:** {input_data.context}")
+    if input_data.architecture:
+        parts.append(f"**Architecture:** {input_data.architecture.overview}")
+    return parts
+
+
 class CybersecurityExpertAgent:
     """
     Cybersecurity expert that reviews code for security flaws. Reports
@@ -246,33 +301,16 @@ class CybersecurityExpertAgent:
 
         The persona (``SECURITY_PROMPT``) is passed as
         ``run_single_shot_review``'s ``system_prompt``. The user prompt
-        carries the code under review plus an explicit schema hint. The
-        words "security" and "vulnerabilities" MUST appear here because
-        ``DummyLLMClient.complete_json`` pattern-matches on them to return a
-        deterministic stub in tests — see llm_service/README.md "Migration
+        carries the code under review (see ``_build_security_file_context_prefix``)
+        as a stable prefix, followed by the schema hint and remaining
+        instructions (see ``_build_security_role_instructions``). The words
+        "security" and "vulnerabilities" MUST appear somewhere in the prompt
+        because ``DummyLLMClient.complete_json``
+        pattern-matches on them (order-independent substring check) to return
+        a deterministic stub in tests — see llm_service/README.md "Migration
         rule: keep pattern anchors in the user prompt".
         """
-        parts = [
-            "Review the following code for security vulnerabilities. Produce "
-            "structured JSON with fields: vulnerabilities, summary, "
-            "remediations. Each vulnerability must include severity, "
-            "category, description, location, and recommendation.",
-            "",
-            f"**Language:** {input_data.language}",
-        ]
-        if input_data.task_description:
-            parts.append(f"**Task:** {input_data.task_description}")
-        parts.extend(
-            [
-                "**Code to review:**",
-                "```",
-                input_data.code,
-                "```",
-            ]
+        parts = _build_security_file_context_prefix(input_data) + _build_security_role_instructions(
+            input_data
         )
-        if input_data.context:
-            parts.append(f"**Context:** {input_data.context}")
-        if input_data.architecture:
-            parts.append(f"**Architecture:** {input_data.architecture.overview}")
-
         return "\n".join(parts)

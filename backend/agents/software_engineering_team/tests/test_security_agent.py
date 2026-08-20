@@ -212,3 +212,31 @@ def test_security_agent_blocks_on_capitalized_severity() -> None:
     agent = CybersecurityExpertAgent(_CapitalizedClient())
     result = agent.run(_input())
     assert result.approved is False
+
+
+# ---------------------------------------------------------------------------
+# _build_user_prompt: shared file context as a stable prefix
+# ---------------------------------------------------------------------------
+
+
+def test_file_context_prefix_precedes_role_instructions() -> None:
+    """The shared microtask file context (language + code) is a stable prefix
+    ahead of the role-specific instructions (schema hint, task, context,
+    architecture) -- pure reorder/isolation, no cache marking yet."""
+    from shared.dev_models.models import SystemArchitecture
+
+    prompt = CybersecurityExpertAgent._build_user_prompt(
+        _input(
+            context="Runs behind reverse proxy",
+            architecture=SystemArchitecture(overview="layered"),
+        )
+    )
+    code_pos = prompt.index("os.system(cmd)")
+    assert code_pos < prompt.index("Review the code for security vulnerabilities")
+    assert code_pos < prompt.index("**Task:**")
+    assert code_pos < prompt.index("**Context:**")
+    assert code_pos < prompt.index("**Architecture:**")
+    # DummyLLMClient's pattern-anchor regression guard: both words must still
+    # appear somewhere in the prompt (order-independent substring match).
+    assert "security" in prompt.lower()
+    assert "vulnerabilities" in prompt.lower()

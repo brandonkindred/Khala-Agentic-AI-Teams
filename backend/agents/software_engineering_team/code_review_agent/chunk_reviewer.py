@@ -70,7 +70,7 @@ logger = logging.getLogger(__name__)
 # must be guessed from its file path. Mirrors code_boundaries._PYTHON_EXTS.
 _PYTHON_FILE_EXTS = (".py", ".pyi")
 
-CHUNK_REVIEW_NOTE = "\n**Note:** This is one chunk of the full codebase. Review only the code below. Report issues with file_path set to the path provided for this chunk.\n"
+CHUNK_REVIEW_NOTE = "\n**Note:** This is one chunk of the full codebase. Review only the code shown for this chunk. Report issues with file_path set to the path provided for this chunk.\n"
 
 # Guardrails that keep the reviewer from filing the false positives this engine
 # was seeing. Injected into the per-chunk user prompt (NOT the system prompt) so
@@ -80,7 +80,7 @@ CHUNK_REVIEW_NOTE = "\n**Note:** This is one chunk of the full codebase. Review 
 # cross-caller impact check this bounded chunk has no tools to perform.
 REVIEW_GUARDRAILS_NOTE = (
     "\n**Review guardrails (avoid these false positives):**\n"
-    "- Surface-first: the code shown below is COMPLETE for what is displayed. Each function, "
+    "- Surface-first: the code shown for this chunk is COMPLETE for what is displayed. Each function, "
     "method, class, and test is presented in full. Never report a function, test, or block as "
     "'truncated', 'cut off', or 'missing its body' based on where the shown code ends — the end "
     "of the shown code is not evidence of an incomplete implementation.\n"
@@ -169,6 +169,107 @@ def _build_shared_review_prefix(
     if existing_codebase_excerpt:
         parts.extend(
             ["", "**Existing codebase (excerpt):**", "---", existing_codebase_excerpt, "---"]
+        )
+    return parts
+
+
+def _build_chunk_file_context_prefix(input_data: ChunkReviewInput) -> list[str]:
+    """Render the microtask file context this chunk carries, as a stable prefix.
+
+    Groups the content that identifies and shows the code under review — the
+    segment note (if any), the "Files in this chunk" label, the sibling-file
+    surface (if any), and finally the code block itself — into one contiguous
+    run of prompt lines, positioned ahead of the per-chunk role instructions
+    built by ``_build_chunk_role_instructions``. This is a pure isolation/
+    reorder of content ``_run_chunk_review`` already built inline; no content
+    is added, removed, or reworded here beyond what its callers already sent
+    (aside from the "below"/"for this chunk" wording fixes in
+    ``CHUNK_REVIEW_NOTE``/``REVIEW_GUARDRAILS_NOTE`` that this reorder required).
+
+    Preconditions:
+        - ``input_data`` is a valid ``ChunkReviewInput`` (``code_chunk`` set).
+
+    Postconditions:
+        - Returns non-empty prompt lines ending with the code fence around
+          ``input_data.code_chunk``, preceded by the segment note (only when
+          ``input_data.segment_note`` is truthy), the file-path label, and
+          the sibling-surface block (only when ``input_data.sibling_surface``
+          is truthy) — in that fixed order.
+        - Never raises; never truncates or otherwise transforms the inputs.
+    """
+    parts: list[str] = []
+    if input_data.segment_note:
+        parts.extend(["**Segment notes:**", input_data.segment_note, ""])
+    parts.append(f"**Files in this chunk:** {input_data.file_path_or_label}")
+    sibling_surface = input_data.sibling_surface or ""
+    if sibling_surface:
+        parts.extend(
+            [
+                "",
+                "**Other files changed in this submission (top-level symbols they define/export):**",
+                "Flag any reference in the code below to a symbol that a sibling file was "
+                "expected to provide but no longer does (e.g. a renamed or removed function, "
+                "class, or export). Do not flag symbols that are still present.",
+                "---",
+                sibling_surface,
+                "---",
+            ]
+        )
+    parts.extend(
+        [
+            "",
+            CODE_TO_REVIEW_HEADER,
+            "```",
+            input_data.code_chunk,
+            "```",
+        ]
+    )
+    return parts
+
+
+def _build_chunk_role_instructions(input_data: ChunkReviewInput, language: str) -> list[str]:
+    """Render the per-chunk role-specific review instructions.
+
+    Groups the reviewer guardrails, task framing, and settled decisions that
+    are NOT part of the shared file-context prefix — these are placed after
+    ``_build_chunk_file_context_prefix``'s output in the assembled prompt
+    (reorder/isolation only; no cache marking here).
+
+    Preconditions:
+        - ``input_data`` is a valid ``ChunkReviewInput``.
+        - ``language`` is the resolved (non-empty) language label for this chunk.
+
+    Postconditions:
+        - Returns non-empty prompt lines: ``CHUNK_REVIEW_NOTE``,
+          ``REVIEW_GUARDRAILS_NOTE``, the language line, and the task
+          description, followed by task requirements, acceptance criteria,
+          and user decisions when each is present — in that fixed order.
+        - Never raises; never truncates or otherwise transforms the inputs.
+    """
+    parts = [
+        CHUNK_REVIEW_NOTE,
+        REVIEW_GUARDRAILS_NOTE,
+        f"**Language:** {language}",
+        f"**Task description:** {input_data.task_description}",
+    ]
+    if input_data.task_requirements:
+        parts.extend(["", "**Task requirements:**", input_data.task_requirements])
+    if input_data.acceptance_criteria and not input_data.spec_compliance_single_pass:
+        parts.extend(
+            [
+                "",
+                "**Acceptance criteria (code MUST meet all of these):**",
+                *[f"- {c}" for c in input_data.acceptance_criteria],
+            ]
+        )
+    if input_data.user_decisions:
+        parts.extend(
+            [
+                "",
+                "**User decisions already made (settled — do NOT flag these as open/unanswered "
+                "questions or suggest reconsidering them):**",
+                *[f"- {d}" for d in input_data.user_decisions],
+            ]
         )
     return parts
 
@@ -354,7 +455,6 @@ def _run_chunk_review(
             smaller review.
         LLMPermanentError: other unrecoverable LLM failures propagate unchanged.
     """
-    code_chunk = input_data.code_chunk
     spec_excerpt = input_data.spec_excerpt
     architecture_overview = input_data.architecture_overview
     existing_codebase_excerpt = input_data.existing_codebase_excerpt or ""
@@ -364,31 +464,6 @@ def _run_chunk_review(
         # Fallback for legacy callers that did not declare a language: derive
         # it from the chunk's file extension rather than guessing from content.
         language = _guess_language_from_label(input_data.file_path_or_label) or "typescript"
-
-    context_parts = [CHUNK_REVIEW_NOTE, REVIEW_GUARDRAILS_NOTE]
-    context_parts += [
-        f"**Language:** {language}",
-        f"**Task description:** {input_data.task_description}",
-    ]
-    if input_data.task_requirements:
-        context_parts.extend(["", "**Task requirements:**", input_data.task_requirements])
-    if input_data.acceptance_criteria and not input_data.spec_compliance_single_pass:
-        context_parts.extend(
-            [
-                "",
-                "**Acceptance criteria (code MUST meet all of these):**",
-                *[f"- {c}" for c in input_data.acceptance_criteria],
-            ]
-        )
-    if input_data.user_decisions:
-        context_parts.extend(
-            [
-                "",
-                "**User decisions already made (settled — do NOT flag these as open/unanswered "
-                "questions or suggest reconsidering them):**",
-                *[f"- {d}" for d in input_data.user_decisions],
-            ]
-        )
 
     # Shared review prefix: identical across every chunk in this run. Attached
     # to the reasoning Agent's system content as a CacheBreakpoint-marked
@@ -402,32 +477,10 @@ def _run_chunk_review(
     )
     system_prompt_content = [CacheBreakpoint("\n".join(shared_parts))] if shared_parts else None
 
-    if input_data.segment_note:
-        context_parts.extend(["**Segment notes:**", input_data.segment_note, ""])
-    context_parts.append(f"**Files in this chunk:** {input_data.file_path_or_label}")
-    sibling_surface = input_data.sibling_surface or ""
-    if sibling_surface:
-        context_parts.extend(
-            [
-                "",
-                "**Other files changed in this submission (top-level symbols they define/export):**",
-                "Flag any reference in the code below to a symbol that a sibling file was "
-                "expected to provide but no longer does (e.g. a renamed or removed function, "
-                "class, or export). Do not flag symbols that are still present.",
-                "---",
-                sibling_surface,
-                "---",
-            ]
-        )
-    context_parts.extend(
-        [
-            "",
-            CODE_TO_REVIEW_HEADER,
-            "```",
-            code_chunk,
-            "```",
-        ]
-    )
+    # Microtask file context (this chunk's code) as a stable prefix, ahead of
+    # the per-chunk role-specific instructions.
+    context_parts = _build_chunk_file_context_prefix(input_data)
+    context_parts += _build_chunk_role_instructions(input_data, language)
 
     prompt = "\n".join(context_parts)
     reasoning_system_prompt = build_review_reasoning_system_prompt(input_data.profile)
