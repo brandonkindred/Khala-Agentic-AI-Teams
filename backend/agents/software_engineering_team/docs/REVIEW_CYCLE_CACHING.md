@@ -66,10 +66,17 @@ Anthropic SDK's response `usage` object (`cache_read_input_tokens`,
 In `_run_review_cycles` (`shared/phases/review_cycle.py`), per outer cycle:
 
 ```
-Code Review (reasoning + formatting)  →  QA  →  Security
-     ↑                                       |
-     └───── batch-fix on QA/Security failure ←┘
+Code Review (reasoning + formatting)  →  QA ──┐
+     ↑                                        ├── join
+     │                                Security ┘
+     └───── batch-fix on QA/Security failure ←─────┘
 ```
+
+In production, both backend and frontend `GATE_CONFIG`s set
+`parallelize_qa_security=True`, so QA and Security run concurrently via
+`parallel_map` against the same post-Code-Review snapshot. The sequential
+fallback (`_qa_security_run_sequentially`) applies only when the backing LLM
+client requires sequencing (e.g. `DummyLLMClient` in tests).
 
 **Code Review caching (explicit breakpoint)**:
 - Reasoning pass: the `CacheBreakpoint`-marked spec/architecture prefix is sent
