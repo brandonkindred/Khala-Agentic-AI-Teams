@@ -29,6 +29,14 @@ export const SKIP_ERROR_NOTIFY = new HttpContextToken<boolean>(() => false);
 export function skipErrorNotify(): HttpContext {
   return new HttpContext().set(SKIP_ERROR_NOTIFY, true);
 }
+
+/**
+ * Pre-built request options that suppress the global error toast. Services
+ * that render their own inline error can pass this as the options argument to
+ * `HttpClient` methods (e.g. `this.http.post(url, body, SKIP_NOTIFY_OPTIONS)`).
+ */
+export const SKIP_NOTIFY_OPTIONS: { context: HttpContext } = { context: skipErrorNotify() };
+
 /**
  * HTTP interceptor that catches API errors and displays user-friendly messages via MatSnackBar.
  * Re-throws the error so callers can still handle it. Requests carrying

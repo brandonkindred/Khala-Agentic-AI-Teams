@@ -387,6 +387,17 @@ describe('AgentRunnerComponent', () => {
 
       expect(component.lastError()).toBe('name taken');
     });
+
+    it('clears lastError on a successful save after a prior failure', () => {
+      // Simulate a prior error state.
+      component.lastError.set('prior failure');
+      dialogOpen.mockReturnValue({ afterClosed: () => of({ name: 'New save', description: null }) });
+      runnerApi.createSavedInput.mockReturnValue(of(savedInput));
+
+      component.openSaveInputDialog();
+
+      expect(component.lastError()).toBeNull();
+    });
   });
 
   describe('saved inputs — delete', () => {
@@ -437,6 +448,17 @@ describe('AgentRunnerComponent', () => {
       expect(component.lastError()).toBe('still referenced');
       // The row is NOT removed because the API call failed.
       expect(component.savedInputs()).toEqual([savedInput]);
+    });
+
+    it('clears lastError on a successful delete after a prior failure', () => {
+      component.savedInputs.set([savedInput]);
+      component.lastError.set('prior failure');
+      confirmServiceConfirm.mockReturnValue(of(true));
+      runnerApi.deleteSavedInput.mockReturnValue(of({ id: savedInput.id, status: 'deleted' }));
+
+      component.deleteSavedInput(savedInput.id, new Event('click'));
+
+      expect(component.lastError()).toBeNull();
     });
   });
 
