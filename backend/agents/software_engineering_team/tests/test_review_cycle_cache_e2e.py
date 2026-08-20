@@ -88,13 +88,14 @@ _SHARED_TASK = "Implement payment processing endpoint"
 def _cr_chunk_input() -> ChunkReviewInput:
     """Build Code Review input sharing the same file context.
 
-    The spec/architecture/codebase excerpts are sized above Anthropic's
-    minimum cacheable prefix length (~1024 tokens) so the test fixture is
-    realistically cache-eligible when the CacheBreakpoint is translated to a
-    wire-level cache_control block.
+    The spec/architecture/codebase excerpts are sized to be representative of
+    production content. This test verifies the ``cache_control`` breakpoint is
+    emitted on the wire and that telemetry records the provider-reported cache
+    tokens; it does not assert that the provider actually caches the prefix
+    (that depends on the provider's minimum-prefix-length threshold, which
+    varies and is not controllable from the client).
     """
-    # Each excerpt is ~400 tokens (1600 chars), totalling ~1200 tokens for
-    # the combined CacheBreakpoint prefix — above the provider threshold.
+    # Representative-length excerpts for the CacheBreakpoint prefix.
     spec_excerpt = (
         "## Payment Service Specification\n"
         "The payment service handles all monetary transactions for the platform. "
@@ -433,7 +434,7 @@ def test_qa_telemetry_propagates_cache_tokens_on_retries() -> None:
     """
     client, fake_messages = _make_claude_client(
         [
-            # Call 1: provider reports no cache activity
+            # Call 1: provider reports cache creation (incidental)
             _text_message(
                 _qa_reply(),
                 cache_read_input_tokens=0,
@@ -486,7 +487,7 @@ def test_security_telemetry_propagates_cache_tokens_on_retries() -> None:
     """
     client, _fake_messages = _make_claude_client(
         [
-            # Call 1: provider reports no cache activity
+            # Call 1: provider reports cache creation (incidental)
             _text_message(
                 _security_reply(),
                 cache_read_input_tokens=0,

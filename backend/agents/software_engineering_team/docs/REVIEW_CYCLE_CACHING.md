@@ -131,18 +131,20 @@ The savings apply when a subsequent call reuses a prefix that an earlier call
 already cached. In practice this means:
 - **Retry cycles**: when the outer review loop re-invokes Code Review after a
   QA/Security failure, the spec/architecture prefix is already cached from the
-  previous cycle.
+  previous cycle — **provided the intervening batch-fix completes within
+  Anthropic's 5-minute ephemeral-cache TTL**. Slow fixes that exceed the TTL
+  invalidate the cache entry, and the next cycle pays the full creation cost again.
 - **Sequential chunk pairs**: if a chunk finishes and its cache entry is still warm
-  when the next chunk starts (within Anthropic's 5-minute TTL).
+  when the next chunk starts (within the same 5-minute TTL).
 
 Note: the production coordinator fans out chunks concurrently via `parallel_map`
 (default concurrency up to 8 in `code_review_agent/mapping.py`). In a concurrent
 batch, all requests may start before the first cache entry is available, so
 within-batch savings depend on timing and provider cache propagation latency. The
-primary realized savings are on **retry cycles** (always sequential) and any
-sequential re-invocations within the same TTL window.
+primary realized savings are on **retry cycles whose intervening fix completes
+within the 5-minute TTL** and any sequential re-invocations within that window.
 
-Example (retry cycle, sequential): a 2000-token spec/architecture prefix with
+Example (retry cycle, fix within TTL): a 2000-token spec/architecture prefix with
 Anthropic's ephemeral breakpoint pricing (1.25× input rate for the cache write,
 0.1× for reads):
 - Cycle 1 (write): 2000 × 1.25 = 2500 token-equivalents
