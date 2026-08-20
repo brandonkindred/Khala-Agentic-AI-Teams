@@ -317,9 +317,11 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
    * Preconditions: an agent is selected (`selectedAgentId()` is non-null).
    * Behavior: attempts to parse `inputText()` as JSON; on parse failure sets
    * `inputError` to the error message and returns without opening the dialog.
-   * Side effects: opens a Material dialog; on success prepends the new entry
-   * to `savedInputs` and sets `selectedPickerValue` to the new saved ID;
-   * alerts the user on API failure.
+   * Side effects: opens a Material dialog; on success clears `lastError` and
+   * prepends the new entry to `savedInputs` and sets `selectedPickerValue`
+   * to the new saved ID; on API failure sets `lastError` to a user-facing
+   * message (the global toast is suppressed; the template renders the
+   * inline error banner instead).
    */
   openSaveInputDialog(): void {
     const agent = this.selectedAgentId();
@@ -354,8 +356,9 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
             this.selectedPickerValue.set(`saved:${saved.id}`);
           },
           error: (err) => {
+            // Global toast suppressed; surface inline via the error banner.
             this.lastError.set(
-              extractErrorDetail(err, 'Failed to save input'),
+              extractErrorDetail(err, 'Failed to save input', { joinValidationArray: true }),
             );
           },
         });
@@ -371,7 +374,10 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
    * method returns without side effects.
    * Side effects: stops event propagation; opens a confirmation dialog;
    * removes the row from `savedInputs` on success; resets
-   * `selectedPickerValue` if the deleted entry was active.
+   * `selectedPickerValue` if the deleted entry was active. On success,
+   * clears `lastError`. On failure, sets `lastError` to a user-facing
+   * message (the global toast is suppressed; the template renders the
+   * inline error banner instead).
    */
   deleteSavedInput(savedId: string, event: Event): void {
     event.stopPropagation();
@@ -399,7 +405,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
           },
           error: (err) => {
             this.lastError.set(
-              extractErrorDetail(err, 'Failed to delete saved input'),
+              extractErrorDetail(err, 'Failed to delete saved input', { joinValidationArray: true }),
             );
           },
         });
@@ -474,9 +480,11 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
           next: () => {
             this.lastError.set(null);
             const current = this.sandbox();
-            if (current) {
-              this.sandbox.set({ ...current, status: 'cold', url: null });
-            }
+            this.sandbox.set(
+              current
+                ? { ...current, status: 'cold', url: null }
+                : null,
+            );
             this.notify.saved('Sandbox torn down.');
           },
           error: (err) => {
@@ -532,7 +540,14 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
         } else if (err.status === 422 && err.error?.detail) {
           // The shim wraps user-space exceptions in a 422 with the envelope
           // as `detail`, so we can surface the output + logs inline.
-          this.lastResponse.set(err.error.detail as InvokeEnvelope);
+          // Guard: only treat it as an envelope if it has the expected shape;
+          // cognition rule-block 422s have a different detail structure.
+          const detail = err.error.detail;
+          if (typeof detail === 'object' && 'trace_id' in detail) {
+            this.lastResponse.set(detail as InvokeEnvelope);
+          } else {
+            this.lastError.set(extractErrorDetail(err, 'Invocation failed.', { joinValidationArray: true }));
+          }
         } else {
           this.lastError.set(extractErrorDetail(err, 'Invocation failed.'));
         }

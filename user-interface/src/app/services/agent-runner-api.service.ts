@@ -2,6 +2,7 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpParams, HttpResponse } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
+import { SKIP_NOTIFY_OPTIONS } from '../core/error-handler.interceptor';
 import type {
   InvokeEnvelope,
   SandboxHandle,
@@ -74,7 +75,7 @@ export class AgentRunnerApiService {
     return this.http.post<InvokeEnvelope | Record<string, unknown>>(
       `${this.baseUrl}/${encodeURIComponent(agentId)}/invoke`,
       body,
-      { observe: 'response', params },
+      { observe: 'response', params, ...SKIP_NOTIFY_OPTIONS },
     );
   }
 
@@ -109,6 +110,7 @@ export class AgentRunnerApiService {
     return this.http.post<SavedInput>(
       `${this.baseUrl}/${encodeURIComponent(agentId)}/saved-inputs`,
       body,
+      SKIP_NOTIFY_OPTIONS,
     );
   }
 
@@ -122,6 +124,7 @@ export class AgentRunnerApiService {
   deleteSavedInput(savedId: string): Observable<{ id: string; status: string }> {
     return this.http.delete<{ id: string; status: string }>(
       `${this.baseUrl}/saved-inputs/${encodeURIComponent(savedId)}`,
+      SKIP_NOTIFY_OPTIONS,
     );
   }
 

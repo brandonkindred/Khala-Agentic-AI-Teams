@@ -1,4 +1,4 @@
-import { ALL_NAV_ITEMS } from './navigation.model';
+import { ALL_NAV_ITEMS, NAV_GROUPS } from './navigation.model';
 
 describe('NAV_GROUPS Cognition entry', () => {
   it('registers Cognition as a top-level agentic-ai item at /cognition', () => {
@@ -53,6 +53,15 @@ describe('NAV_GROUPS Agent Console retirement', () => {
       group: 'agentic-ai',
       nested: true,
     });
+  });
+});
+
+describe('NAV_GROUPS Agent Studio is the sole product entry (#6525)', () => {
+  it('Agent Studio is the first non-nested item in the agentic-ai group', () => {
+    const agenticGroup = NAV_GROUPS.find((g) => g.key === 'agentic-ai');
+    expect(agenticGroup).toBeDefined();
+    const topLevel = agenticGroup!.items.filter((i) => !i.nested);
+    expect(topLevel[0].id).toBe('agent-studio');
   });
 });
 
