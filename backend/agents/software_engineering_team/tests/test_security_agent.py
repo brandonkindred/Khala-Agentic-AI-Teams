@@ -218,21 +218,24 @@ def test_security_agent_blocks_on_capitalized_severity() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_file_context_prefix_precedes_role_instructions() -> None:
-    """The shared microtask file context (language + code) is a stable prefix
-    ahead of the role-specific instructions (schema hint, task, context,
-    architecture) -- pure reorder/isolation, no cache marking yet."""
+def test_user_prompt_contains_only_role_instructions() -> None:
+    """After Story 2c Step 2, the file-context prefix (language + code) is
+    emitted as a CacheBreakpoint in system content — the user prompt now
+    contains only the role instructions."""
     prompt = CybersecurityExpertAgent._build_user_prompt(
         _input(
             context="Runs behind reverse proxy",
             architecture=SystemArchitecture(overview="layered"),
         )
     )
-    code_pos = prompt.index("os.system(cmd)")
-    assert code_pos < prompt.index("Review the code for security vulnerabilities")
-    assert code_pos < prompt.index("**Task:**")
-    assert code_pos < prompt.index("**Context:**")
-    assert code_pos < prompt.index("**Architecture:**")
+    # Role instructions are present
+    assert "Review the code for security vulnerabilities" in prompt
+    assert "**Task:**" in prompt
+    assert "**Context:**" in prompt
+    assert "**Architecture:**" in prompt
+    # File-context prefix is NOT in the user prompt (it's in system content)
+    assert "os.system(cmd)" not in prompt
+    assert "**Language:**" not in prompt
     # DummyLLMClient's pattern-anchor regression guard: both words must still
     # appear somewhere in the prompt (order-independent substring match).
     assert "security" in prompt.lower()

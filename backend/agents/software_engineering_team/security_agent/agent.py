@@ -1,19 +1,21 @@
 """Cybersecurity Expert agent: security review and vulnerability reporting.
 
-Calls the LLM via ``shared.single_shot_review.run_single_shot_review`` in
-schema-validated mode, which resolves the client, validates the reply
-against ``SecurityLLMResponse``, and drives one bounded corrective retry
-(re-prompting with the schema/validation error) before falling back — in
-place of the single-shot, no-retry Strands ``structured_output_model`` path
-this agent used previously.
+Calls the LLM via a Strands ``Agent`` in ``structured_output_model`` mode
+(through :func:`run_structured_persona`), validates the reply against
+``SecurityLLMResponse``, and re-derives the approval flag from reported
+vulnerabilities. The file-context prefix (language + code under review) is
+emitted as a ``CacheBreakpoint`` in system content so the provider caches it
+across Code Review / QA / Security gates and retry cycles (Story 2c, Step 2).
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import List, Optional
 
-from llm_service import LLMClient, get_strands_model
+from strands import Agent
+
+from llm_service import CacheBreakpoint, LLMClient, get_strands_model
 from llm_service.strands_model import model_fingerprint, resolve_strands_model
 from shared.cache import get_shared_cache
 from shared.cache.pydantic_cache import (
@@ -24,8 +26,8 @@ from shared.cache.pydantic_cache import (
     get_cached_model,
     set_cached_model,
 )
+from software_engineering_team.shared.persona_agent_base import run_structured_persona
 from software_engineering_team.shared.security_service import derive_approved
-from software_engineering_team.shared.single_shot_review import run_single_shot_review
 
 from .models import SecurityInput, SecurityLLMResponse, SecurityOutput
 from .prompts import SECURITY_PROMPT
@@ -87,12 +89,8 @@ def clear_review_cache() -> None:
 def _security_model_fingerprint(llm: Optional[LLMClient]) -> str:
     """Best-effort stable identifier for the model a security review will run on.
 
-    Unlike ``qa_agent``, this agent never resolves/holds a Strands model —
-    it calls the LLM via ``run_single_shot_review`` on the raw ``self.llm``.
-    Mirrors ``code_review_agent.mapping._review_model_fingerprint``: resolve
-    a Strands model purely for identity purposes via the generic
-    ``resolve_strands_model`` (not the code-review-specific resolver), then
-    delegate the attribute probing to
+    Resolves a Strands model for identity purposes via ``resolve_strands_model``,
+    then delegates the attribute probing to
     ``llm_service.strands_model.model_fingerprint``.
 
     Preconditions:
@@ -205,14 +203,17 @@ class CybersecurityExpertAgent:
     """
 
     def __init__(self, llm_client: LLMClient | None = None) -> None:
-        """Store the injectable review client.
+        """Resolve the review model and store the system prompt.
 
-        Preconditions: ``llm_client`` is ``None`` or an ``LLMClient``.
-        Postconditions: ``self.llm`` is ``llm_client`` unchanged —
-        ``run_single_shot_review`` resolves the default ``security`` client
-        per call when it is ``None``.
+        Preconditions: ``llm_client`` is ``None``, an ``LLMClient``, or a
+        Strands ``Model``.
+        Postconditions: ``self._model`` is a usable Strands model, and
+        ``self._llm_client`` preserves the original client for fingerprinting.
         """
-        self.llm = llm_client
+        self._llm_client = llm_client
+        self._model = resolve_strands_model(
+            llm_client, agent_key="security", get_strands_model_fn=get_strands_model
+        )
 
     def run(self, input_data: SecurityInput) -> SecurityOutput:
         """Review code for security vulnerabilities.
@@ -225,7 +226,7 @@ class CybersecurityExpertAgent:
             any vulnerability is critical/high severity (severity comparison is
             case-insensitive), regardless of any ``approved`` flag the model
             returned. On any model/validation failure surviving
-            ``run_single_shot_review``'s corrective retry, returns a safe
+            ``run_structured_persona``'s try/except, returns a safe
             fallback with ``approved=False`` and no vulnerabilities. Never
             raises. A cache hit (byte-identical ``SecurityInput`` and resolved
             model) returns the prior result without invoking the LLM. A cache
@@ -239,7 +240,9 @@ class CybersecurityExpertAgent:
         capacity = _review_cache_size()
         cache_key: Optional[str] = None
         if capacity > 0:
-            cache_key = _review_cache_key(input_data, _security_model_fingerprint(self.llm))
+            cache_key = _review_cache_key(
+                input_data, _security_model_fingerprint(self._llm_client)
+            )
             cache = get_shared_cache(_review_cache_namespace())
             cached_result = get_cached_model(_CACHE_LABEL, cache, cache_key, SecurityOutput)
             if cached_result is not None:
@@ -251,22 +254,50 @@ class CybersecurityExpertAgent:
 
         user_prompt = self._build_user_prompt(input_data)
 
-        try:
-            response = run_single_shot_review(
-                self.llm,
-                agent_key="security",
-                prompt=user_prompt,
-                system_prompt=SECURITY_PROMPT,
-                schema=SecurityLLMResponse,
-                objective="security review",
-                temperature=0.0,
-            )
-        except Exception as exc:  # noqa: BLE001 — LLM/validation failures must not crash the run
+        is_fallback = False
+        _fallback_summary = ""
+
+        def _fallback(exc: Exception) -> SecurityLLMResponse:
+            nonlocal is_fallback, _fallback_summary
+            is_fallback = True
+            _fallback_summary = f"Security analysis failed: {exc}"
             logger.warning("Security: structured_output failed (%s); returning fallback", exc)
+            return SecurityLLMResponse(
+                vulnerabilities=[],
+                summary=_fallback_summary,
+                remediations=[],
+            )
+
+        def _finalize(response: SecurityLLMResponse) -> SecurityLLMResponse:
+            return response
+
+        # The file-context prefix (language + code) is marked as a
+        # CacheBreakpoint in system content so the provider caches it across
+        # Code Review / QA / Security gates and retry cycles (Story 2c, Step 2).
+        file_context_content: List[CacheBreakpoint] = []
+        prefix_text = "\n".join(_build_security_file_context_prefix(input_data))
+        if prefix_text:
+            file_context_content = [CacheBreakpoint(prefix_text)]
+
+        response = run_structured_persona(
+            model=self._model,
+            system_prompt=SECURITY_PROMPT,
+            user_prompt=user_prompt,
+            output_model=SecurityLLMResponse,
+            fallback_factory=_fallback,
+            agent_factory=Agent,
+            on_success=_finalize,
+            system_prompt_content=file_context_content or None,
+        )
+
+        # On fallback, return a safe SecurityOutput with approved=False — do not
+        # re-derive approval from the empty vulnerability list (which would
+        # incorrectly yield approved=True).
+        if is_fallback:
             return SecurityOutput(
                 vulnerabilities=[],
                 approved=False,
-                summary=f"Security analysis failed: {exc}",
+                summary=_fallback_summary,
                 remediations=[],
                 suggested_commit_message="",
             )
@@ -299,18 +330,17 @@ class CybersecurityExpertAgent:
     def _build_user_prompt(input_data: SecurityInput) -> str:
         """Assemble the user-facing prompt.
 
-        The persona (``SECURITY_PROMPT``) is passed as
-        ``run_single_shot_review``'s ``system_prompt``. The user prompt
-        carries the code under review (see ``_build_security_file_context_prefix``)
-        as a stable prefix, followed by the schema hint and remaining
-        instructions (see ``_build_security_role_instructions``). The words
-        "security" and "vulnerabilities" MUST appear somewhere in the prompt
-        because ``DummyLLMClient.complete_json``
+        The persona (``SECURITY_PROMPT``) lives on the Strands ``Agent``'s
+        system prompt, alongside the ``CacheBreakpoint``-marked file-context
+        prefix (see ``run()``). The user prompt carries only the per-gate
+        role instructions — the schema hint, task description, context, and
+        architecture. The words "security" and "vulnerabilities" MUST appear
+        somewhere in the prompt because ``DummyLLMClient.complete_json``
         pattern-matches on them (order-independent substring check) to return
         a deterministic stub in tests — see llm_service/README.md "Migration
         rule: keep pattern anchors in the user prompt".
         """
-        parts = _build_security_file_context_prefix(input_data) + _build_security_role_instructions(
-            input_data
-        )
+        # Only role instructions in the user prompt — the file-context prefix
+        # (language + code) is emitted as a CacheBreakpoint in system content.
+        parts = _build_security_role_instructions(input_data)
         return "\n".join(parts)

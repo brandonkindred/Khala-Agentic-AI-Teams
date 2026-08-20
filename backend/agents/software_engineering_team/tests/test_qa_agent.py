@@ -180,22 +180,25 @@ def test_multiple_run_calls_on_same_instance_succeed() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _build_user_prompt: shared file context as a stable prefix
+# _build_user_prompt: file context moved to system content (Story 2c Step 2)
 # ---------------------------------------------------------------------------
 
 
-def test_file_context_prefix_precedes_role_instructions() -> None:
-    """The shared microtask file context (language + code) is a stable prefix
-    ahead of the role-specific instructions (schema hint, task description) --
-    pure reorder/isolation, no cache marking yet."""
+def test_user_prompt_contains_only_role_instructions() -> None:
+    """After Story 2c Step 2, the file-context prefix (language + code) is
+    emitted as a CacheBreakpoint in system content — the user prompt now
+    contains only the role instructions (schema hint, task description)."""
     prompt = QAExpertAgent._build_user_prompt(_input())
-    code_pos = prompt.index("def add(a, b)")
-    assert code_pos < prompt.index("Review the code for bugs")
-    assert code_pos < prompt.index("**Task:**")
+    # Role instructions are present
+    assert "Review the code for bugs" in prompt
+    assert "**Task:**" in prompt
+    # File-context prefix is NOT in the user prompt (it's in system content)
+    assert "def add(a, b)" not in prompt
+    assert "**Language:**" not in prompt
 
 
-def test_file_context_prefix_precedes_architecture_run_instructions_and_build_errors() -> None:
-    """The file-context prefix precedes every optional role-instruction section."""
+def test_user_prompt_includes_architecture_run_instructions_and_build_errors() -> None:
+    """Optional role-instruction sections are still in the user prompt."""
     prompt = QAExpertAgent._build_user_prompt(
         _input(
             architecture=SystemArchitecture(overview="layered"),
@@ -203,10 +206,11 @@ def test_file_context_prefix_precedes_architecture_run_instructions_and_build_er
             build_errors="SyntaxError: bad",
         )
     )
-    code_pos = prompt.index("def add(a, b)")
-    assert code_pos < prompt.index("**Architecture:**")
-    assert code_pos < prompt.index("**Run instructions:**")
-    assert code_pos < prompt.index("**Build/compiler errors:**")
+    assert "**Architecture:**" in prompt
+    assert "**Run instructions:**" in prompt
+    assert "**Build/compiler errors:**" in prompt
+    # File-context prefix is NOT in the user prompt
+    assert "def add(a, b)" not in prompt
 
 
 def test_qa_expert_agent_falls_back_on_validation_error() -> None:

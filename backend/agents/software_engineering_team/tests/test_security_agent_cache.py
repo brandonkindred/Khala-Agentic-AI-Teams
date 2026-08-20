@@ -172,11 +172,22 @@ def test_result_with_vulnerabilities_is_still_cached() -> None:
 def test_fallback_result_is_never_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     """A structured-output failure must be retried for real next time, not
     frozen into the cache as a permanent 'no vulnerabilities' verdict."""
+    from software_engineering_team.shared.persona_agent_base import run_structured_persona as _orig
 
-    def _raise(*a: object, **kw: object) -> object:
-        raise RuntimeError("boom")
+    def _failing_persona(**kwargs: object) -> object:
+        # Replace the agent_factory with one that always raises, then
+        # delegate to the real run_structured_persona so its fallback fires.
+        def _boom_factory(*, model: object, system_prompt: object) -> object:
+            class _BoomAgent:
+                def __call__(self, *a: object, **kw: object) -> object:
+                    raise RuntimeError("boom")
 
-    monkeypatch.setattr(agent_mod, "run_single_shot_review", _raise)
+            return _BoomAgent()
+
+        kwargs["agent_factory"] = _boom_factory  # type: ignore[assignment]
+        return _orig(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(agent_mod, "run_structured_persona", _failing_persona)
 
     agent = CybersecurityExpertAgent(DummyLLMClient())
     input_data = _input()
@@ -184,7 +195,9 @@ def test_fallback_result_is_never_cached(monkeypatch: pytest.MonkeyPatch) -> Non
     assert result.approved is False
     assert "Security analysis failed" in result.summary
 
-    key = agent_mod._review_cache_key(input_data, agent_mod._security_model_fingerprint(agent.llm))
+    key = agent_mod._review_cache_key(
+        input_data, agent_mod._security_model_fingerprint(agent._llm_client)
+    )
     cache = get_shared_cache(agent_mod._review_cache_namespace())
     assert cache.get(key) is None
 
@@ -234,7 +247,9 @@ def test_corrupt_cache_entry_treated_as_miss() -> None:
     agent = CybersecurityExpertAgent(client)
     input_data = _input()
 
-    key = agent_mod._review_cache_key(input_data, agent_mod._security_model_fingerprint(agent.llm))
+    key = agent_mod._review_cache_key(
+        input_data, agent_mod._security_model_fingerprint(agent._llm_client)
+    )
     cache = get_shared_cache(agent_mod._review_cache_namespace())
     cache.set(key, b"not valid json", max_entries=agent_mod._review_cache_size())
 
