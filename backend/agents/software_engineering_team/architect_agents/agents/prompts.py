@@ -1,18 +1,16 @@
 """Prompts for the architect_agents specialist agents and orchestrator."""
 
-import importlib.util as _ilu
+import sys as _sys
 from pathlib import Path as _Path
 
-# Import bedrock_model_supports_prompt_caching directly from the canonical
-# llm_service/capabilities.py without triggering llm_service/__init__.py
-# (which pulls in heavy deps like pydantic that aren't available in the
-# standalone architect-agents virtualenv).
-_capabilities_path = _Path(__file__).resolve().parent.parent.parent.parent / "llm_service" / "capabilities.py"
-_spec = _ilu.spec_from_file_location("llm_service.capabilities", _capabilities_path)
-_capabilities = _ilu.module_from_spec(_spec)
-_spec.loader.exec_module(_capabilities)
-bedrock_model_supports_prompt_caching = _capabilities.bedrock_model_supports_prompt_caching
+# Ensure backend/ is on sys.path so ``shared.llm_capabilities`` is importable
+# in both the SE-team test context (conftest adds it) and the standalone
+# architect-agents entry (main.py / agentcore_main.py).
+_backend_root = str(_Path(__file__).resolve().parent.parent.parent.parent.parent)
+if _backend_root not in _sys.path:
+    _sys.path.insert(0, _backend_root)
 
+from shared.llm_capabilities import bedrock_model_supports_prompt_caching  # noqa: E402
 
 ORCHESTRATOR_PROMPT = """# Enterprise Architect Orchestrator
 
@@ -836,13 +834,27 @@ Use `document_writer_tool` to write the scrutiny report. Use `web_search_tool` t
 # ---------------------------------------------------------------------------
 # Cache-breakpoint helper for Bedrock-native system prompts
 # ---------------------------------------------------------------------------
-
-
-#: Bedrock ``cachePoint`` block placed after a system-prompt text segment to
-#: mark the preceding prefix as a provider-side cached breakpoint.  Returned
-#: as a fresh copy by ``cached_system_prompt`` on each call to prevent shared
-#: mutable state.
-_CACHE_POINT_BLOCK: "dict[str, dict[str, str]]" = {"cachePoint": {"type": "default"}}
+# Design note (dual-abstraction): The SE team has two prompt-caching
+# primitives that serve different integration layers:
+#
+# 1. ``llm_service.CacheBreakpoint`` — for agents using ``LLMClientModel``
+#    (the strands adapter).  The adapter translates CacheBreakpoint into
+#    Anthropic's ``cache_control: {"type": "ephemeral"}`` wire format.
+#    Used by: code_review_agent, QA/Security gates, any agent using
+#    ``run_structured_persona`` / ``run_agent_via_reasoning``.
+#
+# 2. ``cached_system_prompt()`` (here) — for agents using raw Bedrock model
+#    strings with ``strands.Agent(model="...")``.  Returns a Strands
+#    system-prompt list with a native Bedrock ``cachePoint`` block.
+#    Used by: architect specialist agents, orchestrator.
+#
+# These two abstractions coexist because the architect agents intentionally
+# bypass ``llm_service`` (see ARCHITECT_AGENTS_FRAMEWORK_DECISION.md) and
+# construct models from bare Bedrock IDs.  The Bedrock Converse API expects
+# ``cachePoint`` blocks (not Anthropic ``cache_control``), so a different
+# wire format is needed.  Both ultimately solve the same problem — marking a
+# stable prefix for provider-side caching — at different layers.
+# ---------------------------------------------------------------------------
 
 
 def cached_system_prompt(prompt: str, model_id: str = "") -> "str | list[dict]":
