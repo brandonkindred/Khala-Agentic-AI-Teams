@@ -5827,6 +5827,37 @@ class TestRunReviewerFallbackAndMixedMode:
         assert "hunk spec" in result.spec_compliance_notes
 
 
+class _SilentGitHubClient:
+    """Module-level fake GitHub client returning empty defaults for all comment
+    and issue-listing endpoints.
+
+    Used by TestPartitionReviewIssuesUnit (and related suites) to satisfy
+    _partition_review_issues without exercising the real GitHub API.
+    """
+
+    def list_review_comments(self, owner, repo, pr_number):
+        return []
+
+    def list_issue_comments(self, owner, repo, pr_number):
+        return []
+
+    def get_resolved_review_thread_comment_ids(self, owner, repo, pr_number):
+        return set()
+
+    def list_open_issues(self, owner, repo):
+        return iter(())
+
+
+class _UnreachableGitHubClient(_SilentGitHubClient):
+    """Subclass that raises AssertionError from list_review_comments.
+
+    Used to verify that comment-fetching is skipped when no PR issues exist.
+    """
+
+    def list_review_comments(self, owner, repo, pr_number):
+        raise AssertionError("should not be called when pr_issues is empty")
+
+
 class TestPartitionReviewIssuesUnit:
     """Direct unit tests for _partition_review_issues, extracted from
     _run_pr_review_body for exactly this reason."""
@@ -5839,21 +5870,8 @@ class TestPartitionReviewIssuesUnit:
         valid_by_path = {"a.py": [1, 2, 99]}
         changed_by_path = {"a.py": [1]}  # line 99 was NOT added by this PR
 
-        class _FakeGitHubClient:
-            def list_review_comments(self, o, r, n):
-                return []
-
-            def list_issue_comments(self, o, r, n):
-                return []
-
-            def get_resolved_review_thread_comment_ids(self, o, r, n):
-                return set()
-
-            def list_open_issues(self, o, r):
-                return iter(())
-
         result = pr_review._partition_review_issues(
-            output, _FakeGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
+            output, _SilentGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
         )
         assert result.pr_issues == []
         assert result.preexisting_issues == [issue]
@@ -5867,18 +5885,8 @@ class TestPartitionReviewIssuesUnit:
         valid_by_path = {"a.py": [1]}
         changed_by_path = {"a.py": [1]}  # line 1 WAS added by this PR
 
-        class _FakeGitHubClient:
-            def list_review_comments(self, o, r, n):
-                return []
-
-            def list_issue_comments(self, o, r, n):
-                return []
-
-            def get_resolved_review_thread_comment_ids(self, o, r, n):
-                return set()
-
         result = pr_review._partition_review_issues(
-            output, _FakeGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
+            output, _SilentGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
         )
         assert result.pr_issues == [issue]
         assert result.preexisting_issues == []
@@ -5889,12 +5897,8 @@ class TestPartitionReviewIssuesUnit:
 
         output = _FakeOutput(issues=[])
 
-        class _FakeGitHubClient:
-            def list_review_comments(self, o, r, n):
-                raise AssertionError("should not be called when pr_issues is empty")
-
         result = pr_review._partition_review_issues(
-            output, _FakeGitHubClient(), "o", "r", 7, {}, {}
+            output, _UnreachableGitHubClient(), "o", "r", 7, {}, {}
         )
         assert result.pr_issues == []
         assert result.addressed_issues == []
@@ -5911,18 +5915,15 @@ class TestPartitionReviewIssuesUnit:
             id=1, path="a.py", line=2, body="dup finding", html_url="https://example/comment/1"
         )
 
-        class _FakeGitHubClient:
-            def list_review_comments(self, o, r, n):
+        class _ResolvedCommentClient(_SilentGitHubClient):
+            def list_review_comments(self, owner, repo, pr_number):
                 return [existing]
 
-            def list_issue_comments(self, o, r, n):
-                return []
-
-            def get_resolved_review_thread_comment_ids(self, o, r, n):
+            def get_resolved_review_thread_comment_ids(self, owner, repo, pr_number):
                 return {1}  # resolved
 
         result = pr_review._partition_review_issues(
-            output, _FakeGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
+            output, _ResolvedCommentClient(), "o", "r", 7, valid_by_path, changed_by_path
         )
         assert result.pr_issues == []
         assert result.addressed_issues == [issue]
@@ -5939,21 +5940,8 @@ class TestPartitionReviewIssuesUnit:
         valid_by_path = {"a.py": [1, 2]}
         changed_by_path = {"a.py": [1, 2]}
 
-        class _FakeGitHubClient:
-            def list_review_comments(self, o, r, n):
-                return []
-
-            def list_issue_comments(self, o, r, n):
-                return []
-
-            def get_resolved_review_thread_comment_ids(self, o, r, n):
-                return set()
-
-            def list_open_issues(self, o, r):
-                return iter(())
-
         result = pr_review._partition_review_issues(
-            output, _FakeGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
+            output, _SilentGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
         )
         assert result.pr_issues == []
         assert result.preexisting_issues == [issue]
@@ -5974,21 +5962,8 @@ class TestPartitionReviewIssuesUnit:
         valid_by_path = {"a.py": [1, 2]}
         changed_by_path = {"a.py": [1, 2]}
 
-        class _FakeGitHubClient:
-            def list_review_comments(self, o, r, n):
-                return []
-
-            def list_issue_comments(self, o, r, n):
-                return []
-
-            def get_resolved_review_thread_comment_ids(self, o, r, n):
-                return set()
-
-            def list_open_issues(self, o, r):
-                return iter(())
-
         result = pr_review._partition_review_issues(
-            output, _FakeGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
+            output, _SilentGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
         )
         assert result.pr_issues == [issue]
         assert result.preexisting_issues == []
