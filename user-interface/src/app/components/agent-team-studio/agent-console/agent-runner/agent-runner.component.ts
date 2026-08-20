@@ -43,6 +43,7 @@ import type {
 } from '../../../../models/agent-history.model';
 import { AgentRunHistoryComponent } from '../agent-run-history/agent-run-history.component';
 import { AgentSchemaFormComponent } from '../agent-schema-form/agent-schema-form.component';
+import { ConfirmDestructiveService } from '../../../../shared/confirm-destructive.service';
 import { InlineBannerComponent } from '../../../../shared/inline-banner/inline-banner.component';
 import { extractErrorDetail } from '../../../../shared/extract-error-detail';
 import {
@@ -89,11 +90,13 @@ import {
   ],
   templateUrl: './agent-runner.component.html',
   styleUrl: './agent-runner.component.scss',
+  providers: [ConfirmDestructiveService],
 })
 export class AgentRunnerComponent implements OnInit, OnDestroy {
   private readonly catalog = inject(AgentCatalogApiService);
   private readonly runner = inject(AgentRunnerApiService);
   private readonly dialog = inject(MatDialog);
+  private readonly confirmService = inject(ConfirmDestructiveService);
 
   /** Preselect an agent (wired from the Catalog drawer). */
   @Input() set preselectedAgentId(value: string | null) {
@@ -334,18 +337,25 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     ref.afterClosed().subscribe((result) => {
       if (!result) return;
       this.runner
-        .createSavedInput(agent, {
-          name: result.name,
-          input_data: body,
-          description: result.description,
-        })
+        .createSavedInput(
+          agent,
+          {
+            name: result.name,
+            input_data: body,
+            description: result.description,
+          },
+        )
         .subscribe({
           next: (saved) => {
+            this.lastError.set(null);
             this.savedInputs.update((rows) => [saved, ...rows]);
             this.selectedPickerValue.set(`saved:${saved.id}`);
           },
-          // Error toast is handled by the global errorHandlerInterceptor.
-          error: () => undefined,
+          error: (err) => {
+            this.lastError.set(
+              extractErrorDetail(err, 'Failed to save input'),
+            );
+          },
         });
     });
   }
@@ -365,15 +375,32 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     event.stopPropagation();
     const match = this.savedInputs().find((s) => s.id === savedId);
     if (!match) return;
-    if (!confirm(`Delete saved input "${match.name}"?`)) return;
-    this.runner.deleteSavedInput(savedId).subscribe({
-      next: () => {
-        this.savedInputs.update((rows) => rows.filter((s) => s.id !== savedId));
-        if (this.selectedPickerValue() === `saved:${savedId}`) {
-          this.selectedPickerValue.set(null);
-        }
-      },
-    });
+    this.confirmService
+      .confirm({
+        title: 'Delete Saved Input',
+        message: `Delete saved input "${match.name}"?`,
+        confirmLabel: 'Delete',
+        variant: 'danger',
+      })
+      .subscribe((confirmed) => {
+        if (!confirmed) return;
+        this.runner.deleteSavedInput(savedId).subscribe({
+          next: () => {
+            this.lastError.set(null);
+            this.savedInputs.update((rows) =>
+              rows.filter((s) => s.id !== savedId),
+            );
+            if (this.selectedPickerValue() === `saved:${savedId}`) {
+              this.selectedPickerValue.set(null);
+            }
+          },
+          error: (err) => {
+            this.lastError.set(
+              extractErrorDetail(err, 'Failed to delete saved input'),
+            );
+          },
+        });
+      });
   }
 
   // ---------------------------------------------------------------
@@ -431,13 +458,30 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
     const label = this.selectedAgent()?.manifest.name ?? agentId;
-    if (!confirm(`Tear down the ${label} sandbox?`)) return;
-    this.runner.teardown(agentId).subscribe({
-      next: () => {
-        this.sandbox.set({ ...(this.sandbox() as SandboxHandle), status: 'cold', url: null });
-      },
-      error: (err) => console.error('teardown failed', err),
-    });
+    this.confirmService
+      .confirm({
+        title: 'Tear Down Sandbox',
+        message: `Tear down the ${label} sandbox?`,
+        confirmLabel: 'Tear Down',
+        variant: 'danger',
+      })
+      .subscribe((confirmed) => {
+        if (!confirmed) return;
+        this.runner.teardown(agentId).subscribe({
+          next: () => {
+            this.lastError.set(null);
+            const current = this.sandbox();
+            if (current) {
+              this.sandbox.set({ ...current, status: 'cold', url: null });
+            }
+          },
+          error: (err) => {
+            this.lastError.set(
+              extractErrorDetail(err, 'Failed to tear down sandbox'),
+            );
+          },
+        });
+      });
   }
 
   // ---------------------------------------------------------------

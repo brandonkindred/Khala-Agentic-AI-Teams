@@ -6,6 +6,7 @@ import { StrategyLabDestructiveActionsService } from './strategy-lab-destructive
 import { StrategyLabRunService } from './strategy-lab-run.service';
 import { InvestmentApiService } from './investment-api.service';
 import { NotificationService } from '../core/notification.service';
+import { ConfirmDestructiveService } from '../shared/confirm-destructive.service';
 import { createRunServiceStub, type RunServiceStub } from '../testing/strategy-lab-run-service.stub';
 import type { StrategyLabRecord } from '../models';
 
@@ -42,6 +43,7 @@ describe('StrategyLabDestructiveActionsService', () => {
     TestBed.configureTestingModule({
       providers: [
         StrategyLabDestructiveActionsService,
+        ConfirmDestructiveService,
         { provide: StrategyLabRunService, useValue: runService },
         { provide: InvestmentApiService, useValue: apiSpy },
         { provide: NotificationService, useValue: notifySpy },
