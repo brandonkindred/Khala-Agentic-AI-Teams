@@ -50,17 +50,21 @@ def run_structured_persona(
     """Run a one-shot structured-output Strands ``Agent`` call with a safe fallback.
 
     Preconditions:
-        ``agent_factory(model=model, system_prompt=system_prompt)`` returns a
-        callable Strands ``Agent``; ``fallback_factory(exc)`` returns a valid,
+        ``agent_factory(model=model, system_prompt=composed_prompt)`` returns a
+        callable Strands ``Agent``; ``composed_prompt`` is either the original
+        ``system_prompt`` string (when ``system_prompt_content`` is ``None``)
+        or a list produced by wrapping it with ``system_prompt_content``
+        segments (``CacheBreakpoint`` instances, dict blocks, or strings) via
+        ``build_system_prompt_with_content``.
+        ``fallback_factory(exc)`` returns a valid,
         already-final instance of ``output_model`` (e.g. ``approved=False``)
         and may itself log a warning; ``on_success``, if given, returns a
         valid instance of ``output_model``. ``system_prompt_content``, when
-        given, is a list of system-content segments (``CacheBreakpoint``
-        instances, dict blocks, or strings) attached to the ``Agent``'s
-        system prompt — restricted to **trusted** metadata (spec excerpts,
-        architecture overviews) that is safe to elevate to system level.
-        Untrusted content (code under review, repository-controlled text)
-        must remain in ``user_prompt``.
+        given, is a list of system-content segments attached to the
+        ``Agent``'s system prompt — restricted to **trusted** metadata (spec
+        excerpts, architecture overviews) that is safe to elevate to system
+        level. Untrusted content (code under review, repository-controlled
+        text) must remain in ``user_prompt``.
     Postconditions:
         On a successful call whose ``structured_output`` is an instance of
         ``output_model``, returns ``on_success(result)`` (or ``result``
