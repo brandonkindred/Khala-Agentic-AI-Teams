@@ -14,7 +14,11 @@ describe('NAV_GROUPS Cognition entry', () => {
 });
 
 describe('NAV_GROUPS Studio-only journey entry', () => {
-  const agenticGroup = NAV_GROUPS.find((g) => g.key === 'agentic-ai')!;
+  const agenticGroup = NAV_GROUPS.find((g) => g.key === 'agentic-ai');
+
+  it('has an agentic-ai navigation group', () => {
+    expect(agenticGroup).toBeDefined();
+  });
 
   it('uses Agent Studio as the sole exact-match entry point for the agentic-ai group', () => {
     const item = ALL_NAV_ITEMS.find((i) => i.id === 'agent-studio');
@@ -53,7 +57,7 @@ describe('NAV_GROUPS Studio-only journey entry', () => {
   });
 
   it('Agent Studio is the first non-nested item in the agentic-ai group (#6525)', () => {
-    const topLevel = agenticGroup.items.filter((i) => !i.nested);
+    const topLevel = agenticGroup!.items.filter((i) => !i.nested);
     expect(topLevel[0].id).toBe('agent-studio');
   });
 
