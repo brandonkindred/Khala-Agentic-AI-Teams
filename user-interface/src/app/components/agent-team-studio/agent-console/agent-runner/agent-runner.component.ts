@@ -534,7 +534,14 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
         } else if (err.status === 422 && err.error?.detail) {
           // The shim wraps user-space exceptions in a 422 with the envelope
           // as `detail`, so we can surface the output + logs inline.
-          this.lastResponse.set(err.error.detail as InvokeEnvelope);
+          // Guard: only treat it as an envelope if it has the expected shape;
+          // cognition rule-block 422s have a different detail structure.
+          const detail = err.error.detail;
+          if (typeof detail === 'object' && 'trace_id' in detail) {
+            this.lastResponse.set(detail as InvokeEnvelope);
+          } else {
+            this.lastError.set(extractErrorDetail(err, 'Invocation failed.', { joinValidationArray: true }));
+          }
         } else {
           this.lastError.set(extractErrorDetail(err, 'Invocation failed.'));
         }
