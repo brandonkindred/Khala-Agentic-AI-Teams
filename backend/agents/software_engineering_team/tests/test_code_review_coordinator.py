@@ -57,6 +57,9 @@ from strands.models.model import Model
 from tests.chunk_review_prompt_routing import (
     is_chunk_map_reasoning_prompt as _is_chunk_map_reasoning_prompt,
 )
+from tests.chunk_review_prompt_routing import (
+    is_formatting_pass_prompt as _is_formatting_pass_prompt,
+)
 
 from llm_service import (
     LLMClient,
@@ -240,10 +243,9 @@ class _ScriptedClient(DummyLLMClient):
     ``chat()`` delegation) and the formatting pass (a direct ``complete_json``
     call from ``run_agent_via_reasoning``) land on ``complete_json`` now, so
     only the formatting-pass call (identified by
-    ``_is_chunk_map_reasoning_prompt`` returning ``False``) advances the
-    scripted response cursor -- the reasoning-pass call instead gets the
-    inherited dummy default, whose prose is discarded once wrapped for
-    formatting.
+    ``_is_formatting_pass_prompt``) advances the scripted response cursor
+    -- the reasoning-pass call instead gets the inherited dummy default,
+    whose prose is discarded once wrapped for formatting.
     """
 
     def __init__(self, responses: list[dict[str, Any]]) -> None:
@@ -262,7 +264,7 @@ class _ScriptedClient(DummyLLMClient):
         think: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        if _is_chunk_map_reasoning_prompt(prompt):
+        if not _is_formatting_pass_prompt(prompt):
             return super().complete_json(
                 prompt,
                 temperature=temperature,
@@ -1223,7 +1225,7 @@ class _SelectiveRaiser(DummyLLMClient):
     def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         with self._lock:
             self.prompts.append(prompt)
-            if self.marker in prompt and _is_chunk_map_reasoning_prompt(prompt):
+            if self.marker in prompt and not _is_formatting_pass_prompt(prompt):
                 raise self.exc
         return super().complete_json(prompt, **kwargs)
 
@@ -1351,12 +1353,12 @@ class _HalfTimingDummyDelegate:
     def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         # Both the reasoning pass (reached via the Strands Agent's ``chat()``
         # delegation) and the formatting pass (a direct ``complete_json`` call
-        # from ``run_agent_via_reasoning``) land here now. The reasoning pass
-        # is identified by ``_is_chunk_map_reasoning_prompt`` (it carries the
-        # code-to-review header), while the formatting pass wraps the
-        # reasoning prose instead -- so the pass is identified by content,
-        # not by call order (concurrent halves interleave calls).
-        if not _is_chunk_map_reasoning_prompt(prompt):
+        # from ``run_agent_via_reasoning``) land here now. The formatting pass
+        # is identified by ``_is_formatting_pass_prompt`` (it carries the
+        # "--- ANALYSIS" wrapper), while any reasoning prompt never carries
+        # that marker -- so the pass is identified by content, not by call
+        # order (concurrent halves interleave calls).
+        if _is_formatting_pass_prompt(prompt):
             with self._lock:
                 key = self._pending_half
                 self._pending_half = None
@@ -1452,8 +1454,8 @@ class _TimedDummyHalfClient(DummyLLMClient):
 
     def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         # Both passes land on ``complete_json`` now; the formatting pass is
-        # identified by ``_is_chunk_map_reasoning_prompt`` returning False.
-        if not _is_chunk_map_reasoning_prompt(prompt):
+        # identified by ``_is_formatting_pass_prompt``.
+        if _is_formatting_pass_prompt(prompt):
             self._pending_half = None
             return super().complete_json(prompt, **kwargs)
         is_chunk_review = _is_chunk_map_reasoning_prompt(prompt)
@@ -3186,9 +3188,10 @@ def test_rejecting_chunk_with_only_a_summary_degrades_instead_of_blocking() -> N
         _B_MARKER = "B_CHUNK_REJECT_SUMMARY_ONLY"
 
         def complete_json(self, prompt: str, **kwargs: Any) -> Any:
-            if _is_chunk_map_reasoning_prompt(prompt):
+            if not _is_formatting_pass_prompt(prompt):
                 if (
-                    "### b.py ###" in prompt
+                    _is_chunk_map_reasoning_prompt(prompt)
+                    and "### b.py ###" in prompt
                     and "### a.py ###" not in prompt
                 ):
                     return self._B_MARKER
@@ -3246,9 +3249,10 @@ def test_silent_rejection_never_borrows_an_approving_chunks_summary() -> None:
         _B_MARKER = "B_CHUNK_SILENT_REJECT"
 
         def complete_json(self, prompt: str, **kwargs: Any) -> Any:
-            if _is_chunk_map_reasoning_prompt(prompt):
+            if not _is_formatting_pass_prompt(prompt):
                 if (
-                    "### b.py ###" in prompt
+                    _is_chunk_map_reasoning_prompt(prompt)
+                    and "### b.py ###" in prompt
                     and "### a.py ###" not in prompt
                 ):
                     return self._B_MARKER
@@ -3306,7 +3310,7 @@ def test_no_stale_progress_reports_after_map_failure() -> None:
             self.slow_finished = threading.Event()
 
         def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-            if not _is_chunk_map_reasoning_prompt(prompt):
+            if _is_formatting_pass_prompt(prompt) or not _is_chunk_map_reasoning_prompt(prompt):
                 return super().complete_json(prompt, **kwargs)
             if "FAILME" in prompt:
                 assert slow_started.wait(timeout=10), "slow chunk must start first"
