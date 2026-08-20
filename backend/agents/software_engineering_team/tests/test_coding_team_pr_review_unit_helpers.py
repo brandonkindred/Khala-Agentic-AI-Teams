@@ -333,6 +333,23 @@ class TestDiffFirstFocusUnit:
         assert "diff-first" in lower or "what this pull request changes" in lower
         assert "enclosing" in lower
 
+    def test_note_references_change_surface_markers_as_evidence(self) -> None:
+        """The note tells the reviewer to use the +/space change-surface
+        marker column as evidence for what this change touched, matching the
+        markers github_source.pr_review_mapping/change_surface actually
+        render."""
+        result = pr_review._diff_first_focus("")
+        assert "change-surface markers" in result
+        assert "leading `+` on added/modified lines" in result
+
+    def test_note_does_not_default_uncertain_findings_toward_posting(self) -> None:
+        """An uncertain finding must be tagged pre_existing: true, not
+        defaulted to false -- the tag is no longer biased toward posting."""
+        result = pr_review._diff_first_focus("")
+        assert "Default false" not in result
+        assert "uncertain" in result.lower()
+        assert "never defaults toward posting" in result
+
 
 # ---------------------------------------------------------------------------
 # _review_author
