@@ -86,15 +86,73 @@ _SHARED_TASK = "Implement payment processing endpoint"
 
 
 def _cr_chunk_input() -> ChunkReviewInput:
-    """Build Code Review input sharing the same file context."""
+    """Build Code Review input sharing the same file context.
+
+    The spec/architecture/codebase excerpts are sized above Anthropic's
+    minimum cacheable prefix length (~1024 tokens) so the test fixture is
+    realistically cache-eligible when the CacheBreakpoint is translated to a
+    wire-level cache_control block.
+    """
+    # Each excerpt is ~400 tokens (1600 chars), totalling ~1200 tokens for
+    # the combined CacheBreakpoint prefix — above the provider threshold.
+    spec_excerpt = (
+        "## Payment Service Specification\n"
+        "The payment service handles all monetary transactions for the platform. "
+        "It must validate amounts (positive, non-zero, within configured limits), "
+        "sanitize card numbers (strip spaces, validate Luhn checksum), support "
+        "idempotency keys to prevent duplicate charges, and emit structured audit "
+        "events for every state transition. Refunds must be processed within the "
+        "same settlement window when possible. PCI-DSS compliance requires that "
+        "raw card numbers never persist beyond the tokenization boundary; the "
+        "service must delegate to the vault for storage and retrieve only opaque "
+        "payment tokens for subsequent operations. Rate limiting: max 100 charges "
+        "per merchant per minute, with exponential backoff on gateway 429s. "
+        "Timeouts: gateway calls must complete within 30 seconds or abort with a "
+        "retriable error code. All amounts are represented in the smallest currency "
+        "unit (cents for USD, pence for GBP) to avoid floating-point rounding."
+    )
+    architecture_overview = (
+        "## Architecture Overview\n"
+        "Single-region FastAPI monolith deployed on ECS Fargate behind an ALB. "
+        "PostgreSQL 15 for transactional data (payments, refunds, audit log) with "
+        "read replicas for the dashboard queries. Redis cluster for idempotency "
+        "key deduplication (TTL 24h) and rate-limit counters (sliding window). "
+        "Outbound payment gateway calls go through a circuit-breaker (Hystrix "
+        "pattern, 50% failure threshold, 30s recovery window). Async event bus "
+        "(SQS + SNS fan-out) for audit events consumed by the compliance service "
+        "and the real-time fraud-detection pipeline. Secrets (API keys, DB creds) "
+        "in AWS Secrets Manager, rotated every 90 days. Observability: structured "
+        "JSON logs to CloudWatch, OpenTelemetry traces to X-Ray, custom metrics "
+        "(p99 latency, charge success rate, refund ratio) to CloudWatch Metrics "
+        "with alarms on SLO breaches."
+    )
+    existing_codebase_excerpt = (
+        "## Existing Codebase Context\n"
+        "class PaymentGateway:\n"
+        "    def __init__(self, api_key: str, timeout: int = 30):\n"
+        "        self._client = httpx.AsyncClient(timeout=timeout)\n"
+        "        self._api_key = api_key\n\n"
+        "    async def charge(self, amount_cents: int, token: str) -> ChargeResult:\n"
+        "        resp = await self._client.post('/v1/charges', json={...})\n"
+        "        return ChargeResult.from_response(resp)\n\n"
+        "class PaymentRepository:\n"
+        "    async def create_payment(self, payment: Payment) -> Payment: ...\n"
+        "    async def get_by_idempotency_key(self, key: str) -> Optional[Payment]: ...\n"
+        "    async def update_status(self, payment_id: str, status: Status) -> None: ...\n\n"
+        "class AuditLogger:\n"
+        "    def __init__(self, event_bus: EventBus):\n"
+        "        self._bus = event_bus\n\n"
+        "    async def log_state_transition(self, payment: Payment, old: Status, new: Status):\n"
+        "        await self._bus.publish(AuditEvent(...))\n"
+    )
     return ChunkReviewInput(
         code_chunk=f"### app/payments.py ###\n{_SHARED_CODE}",
         file_path_or_label="app/payments.py",
         task_description=_SHARED_TASK,
-        spec_excerpt="Payment service must validate amounts",
+        spec_excerpt=spec_excerpt,
         spec_compliance_single_pass=False,
-        architecture_overview="Monolithic FastAPI service",
-        existing_codebase_excerpt="class PaymentGateway: ...",
+        architecture_overview=architecture_overview,
+        existing_codebase_excerpt=existing_codebase_excerpt,
     )
 
 
