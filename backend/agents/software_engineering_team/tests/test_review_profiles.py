@@ -94,6 +94,15 @@ def test_shared_review_policy_pre_existing_carve_out_points_at_omission() -> Non
     assert "use pre_existing: false and set omission: true instead" in _SHARED_REVIEW_POLICY
 
 
+def test_shared_output_section_pre_existing_defaults_uncertain_to_true() -> None:
+    """The formatting pass's own pre_existing field doc must not contradict
+    the reasoning pass's positive-evidence rule: false requires evidence,
+    and an uncertain finding defaults to true, not false."""
+    assert "Default false: when you cannot tell" not in _SHARED_OUTPUT_SECTION
+    assert "Default true when you cannot tell" in _SHARED_OUTPUT_SECTION
+    assert "only with positive evidence" in _SHARED_OUTPUT_SECTION
+
+
 def test_requirement_citation_guardrail_in_spec_flavored_sections_only() -> None:
     """Guardrail sits under the Ticket/Spec Fit item, not Style."""
     code_review = build_review_system_prompt(ReviewProfile.CODE_REVIEW)

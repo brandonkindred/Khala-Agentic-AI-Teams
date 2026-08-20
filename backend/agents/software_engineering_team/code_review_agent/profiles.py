@@ -125,9 +125,10 @@ _SHARED_OUTPUT_SECTION = (
     '  - "pre_existing": boolean. true when this issue describes a defect in code this change did '
     "NOT add or modify -- a pre-existing defect in code outside the scope of this change (e.g. an "
     "unrelated bug you notice in surrounding, unchanged code you were shown for context). false "
-    "when the defect is in code this change itself added or modified. Default false: when you "
-    "cannot tell whether the code predates this change, treat it as part of the change rather than "
-    "guessing pre-existing. This does NOT apply to findings that the change should have added or "
+    "only with positive evidence the defect is in code this change itself added or modified -- a "
+    "change-surface marker or the task/diff description. Default true when you cannot tell "
+    "whether the code predates this change -- do not guess it into scope. This does NOT apply to "
+    "findings that the change should have added or "
     "modified a file but did not -- those are in-scope defects; use pre_existing: false and set "
     'omission: true instead (see "omission" below).\n'
     '  - "omission": boolean. true when this finding is a required add/modify the change should '
