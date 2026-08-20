@@ -1,17 +1,13 @@
 import { DestroyRef, Injectable, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { MatDialog } from '@angular/material/dialog';
-import { Observable, Subject, of } from 'rxjs';
-import { finalize, map } from 'rxjs/operators';
+import { Observable, Subject } from 'rxjs';
 
 import { InvestmentApiService } from './investment-api.service';
 import { StrategyLabRunService } from './strategy-lab-run.service';
 import { NotificationService } from '../core/notification.service';
 import { extractErrorDetail } from '../shared/extract-error-detail';
-import {
-  ConfirmDialogComponent,
-  type ConfirmDialogData,
-} from '../shared/confirm-dialog/confirm-dialog.component';
+import { ConfirmDestructiveService } from '../shared/confirm-destructive.service';
+import type { ConfirmDialogData } from '../shared/confirm-dialog/confirm-dialog.component';
 import type { StrategyLabRecord } from '../models';
 
 /**
@@ -32,13 +28,10 @@ import type { StrategyLabRecord } from '../models';
 @Injectable()
 export class StrategyLabDestructiveActionsService {
   private readonly api = inject(InvestmentApiService);
-  private readonly dialog = inject(MatDialog);
+  private readonly confirmService = inject(ConfirmDestructiveService);
   private readonly notify = inject(NotificationService);
   private readonly runService = inject(StrategyLabRunService);
   private readonly destroyRef = inject(DestroyRef);
-
-  /** True while a destructive confirm dialog is open — blocks re-entrant opens. */
-  private confirmingDestructive = false;
 
   readonly clearingAll = signal(false);
   /** Lab record id currently being deleted (disables actions on that card). */
@@ -55,29 +48,17 @@ export class StrategyLabDestructiveActionsService {
   /**
    * Open the shared Material confirm dialog for a destructive action.
    *
+   * Delegates to the generic `ConfirmDestructiveService` which owns the
+   * re-entrancy guard and dialog orchestration.
+   *
    * Preconditions: `data.title` and `data.message` are non-empty; the caller
    *   treats a `false` emission as "do not proceed".
    * Postconditions: emits exactly once — `true` only when the user confirms,
    *   `false` on cancel, backdrop/ESC dismissal, or when a confirmation is
-   *   already pending. The re-entrancy guard is released when the dialog closes.
-   *
-   * The native `confirm()` this replaced blocked synchronously; the async
-   * dialog does not, so a rapid double-activation (e.g. Enter pressed twice
-   * before the dialog traps focus) could otherwise stack dialogs and fire
-   * duplicate destructive requests. The guard collapses that window.
+   *   already pending.
    */
   private confirmDestructive(data: ConfirmDialogData) {
-    if (this.confirmingDestructive) return of(false);
-    this.confirmingDestructive = true;
-    return this.dialog
-      .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(ConfirmDialogComponent, { data })
-      .afterClosed()
-      .pipe(
-        map((result) => result === true),
-        finalize(() => {
-          this.confirmingDestructive = false;
-        }),
-      );
+    return this.confirmService.confirm(data);
   }
 
   /**

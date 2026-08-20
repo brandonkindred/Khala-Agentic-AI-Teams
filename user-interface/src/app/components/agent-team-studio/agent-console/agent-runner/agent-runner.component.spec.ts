@@ -410,6 +410,9 @@ describe('AgentRunnerComponent', () => {
 
       component.deleteSavedInput(savedInput.id, new Event('click'));
 
+      expect(confirmServiceConfirm).toHaveBeenCalledWith(
+        expect.objectContaining({ variant: 'danger', confirmLabel: 'Delete' }),
+      );
       expect(runnerApi.deleteSavedInput).not.toHaveBeenCalled();
       expect(component.savedInputs()).toEqual([savedInput]);
     });
@@ -511,6 +514,9 @@ describe('AgentRunnerComponent', () => {
       selectWriter();
       confirmServiceConfirm.mockReturnValue(of(false));
       component.tearDownSandbox();
+      expect(confirmServiceConfirm).toHaveBeenCalledWith(
+        expect.objectContaining({ variant: 'danger', confirmLabel: 'Tear Down' }),
+      );
       expect(runnerApi.teardown).not.toHaveBeenCalled();
     });
 

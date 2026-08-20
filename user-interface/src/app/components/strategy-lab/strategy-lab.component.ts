@@ -33,6 +33,7 @@ import { StrategyLabRunService } from '../../services/strategy-lab-run.service';
 import { StrategyLabActivityLogService } from '../../services/strategy-lab-activity-log.service';
 import { StrategyLabPaperTradingService } from '../../services/strategy-lab-paper-trading.service';
 import { StrategyLabDestructiveActionsService } from '../../services/strategy-lab-destructive-actions.service';
+import { ConfirmDestructiveService } from '../../shared/confirm-destructive.service';
 import { describeRunStatus } from '../../services/strategy-lab-log-message';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { extractErrorDetail } from '../../shared/extract-error-detail';
@@ -101,6 +102,7 @@ const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOpti
     StrategyLabActivityLogService,
     StrategyLabPaperTradingService,
     StrategyLabDestructiveActionsService,
+    ConfirmDestructiveService,
   ],
   imports: [
     CommonModule,

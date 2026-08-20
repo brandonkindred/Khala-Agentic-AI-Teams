@@ -1,8 +1,9 @@
 import { TestBed } from '@angular/core/testing';
 import { MatDialog } from '@angular/material/dialog';
-import { of } from 'rxjs';
+import { Subject, of } from 'rxjs';
 import { vi } from 'vitest';
 import { ConfirmDestructiveService } from './confirm-destructive.service';
+import { ConfirmDialogComponent } from './confirm-dialog/confirm-dialog.component';
 
 describe('ConfirmDestructiveService', () => {
   let service: ConfirmDestructiveService;
@@ -19,14 +20,40 @@ describe('ConfirmDestructiveService', () => {
     service = TestBed.inject(ConfirmDestructiveService);
   });
 
-  it('opens the dialog and emits true on confirm', () => {
+  it('opens the dialog with the provided data and emits true on confirm', () => {
     dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
     let result: boolean | undefined;
     service
       .confirm({ title: 'Delete?', message: 'Really?', variant: 'danger' })
       .subscribe((v) => (result = v));
-    expect(dialogOpen).toHaveBeenCalled();
+
+    expect(dialogOpen).toHaveBeenCalledWith(ConfirmDialogComponent, {
+      data: { title: 'Delete?', message: 'Really?', variant: 'danger' },
+    });
     expect(result).toBe(true);
+  });
+
+  it('forwards confirmLabel and cancelLabel to the dialog data', () => {
+    dialogOpen.mockReturnValue({ afterClosed: () => of(false) });
+    service
+      .confirm({
+        title: 'Tear Down',
+        message: 'Destroy sandbox?',
+        confirmLabel: 'Tear Down',
+        cancelLabel: 'Keep',
+        variant: 'danger',
+      })
+      .subscribe(() => { /* no-op */ });
+
+    expect(dialogOpen).toHaveBeenCalledWith(ConfirmDialogComponent, {
+      data: {
+        title: 'Tear Down',
+        message: 'Destroy sandbox?',
+        confirmLabel: 'Tear Down',
+        cancelLabel: 'Keep',
+        variant: 'danger',
+      },
+    });
   });
 
   it('emits false on cancel/dismiss', () => {
@@ -38,22 +65,34 @@ describe('ConfirmDestructiveService', () => {
     expect(result).toBe(false);
   });
 
-  it('blocks re-entrant opens and emits false immediately', () => {
-    // First call — stays "open" because afterClosed never emits in this tick
-    dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
+  it('blocks re-entrant opens while the dialog is still open', () => {
+    const afterClosed$ = new Subject<boolean | undefined>();
+    dialogOpen.mockReturnValue({ afterClosed: () => afterClosed$.asObservable() });
+
+    // First call — dialog stays open (afterClosed has not emitted yet).
+    let firstResult: boolean | undefined;
     service
       .confirm({ title: 'A', message: 'First', variant: 'danger' })
-      .subscribe(() => { /* consumed */ });
+      .subscribe((v) => (firstResult = v));
+    expect(dialogOpen).toHaveBeenCalledTimes(1);
 
-    // The first dialog already completed (synchronous of(true)), so the
-    // guard was released via finalize. Verify a second call works normally.
+    // Second call while first is still open — should be blocked.
     dialogOpen.mockClear();
-    dialogOpen.mockReturnValue({ afterClosed: () => of(false) });
-    let result: boolean | undefined;
+    let secondResult: boolean | undefined;
     service
       .confirm({ title: 'B', message: 'Second', variant: 'danger' })
-      .subscribe((v) => (result = v));
-    expect(dialogOpen).toHaveBeenCalled();
-    expect(result).toBe(false);
+      .subscribe((v) => (secondResult = v));
+
+    // Dialog was NOT opened again; second call emits false immediately.
+    expect(dialogOpen).not.toHaveBeenCalled();
+    expect(secondResult).toBe(false);
+
+    // First dialog still pending — no result yet.
+    expect(firstResult).toBeUndefined();
+
+    // Now the first dialog closes — guard is released, first result arrives.
+    afterClosed$.next(true);
+    afterClosed$.complete();
+    expect(firstResult).toBe(true);
   });
 });
