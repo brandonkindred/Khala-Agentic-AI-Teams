@@ -74,7 +74,10 @@ def run_structured_persona(
         ``on_success``: callers derive an approval/pass flag from the
         *reported findings* in ``on_success`` (e.g. "no critical/high
         severities"), and an empty findings list from the safe fallback must
-        not be reinterpreted as a clean approval. Never raises.
+        not be reinterpreted as a clean approval. Does not itself raise for
+        agent/LLM/validation failures or ``on_success`` errors (those are
+        caught and passed to ``fallback_factory`` as the failure cause).
+        Exceptions raised by ``fallback_factory`` propagate to the caller.
     """
     try:
         composed_prompt = build_system_prompt_with_content(system_prompt, system_prompt_content)
