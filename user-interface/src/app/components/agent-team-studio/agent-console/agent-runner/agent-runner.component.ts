@@ -344,10 +344,8 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
             this.savedInputs.update((rows) => [saved, ...rows]);
             this.selectedPickerValue.set(`saved:${saved.id}`);
           },
-          error: () => {
-            // Global error interceptor handles the snackbar notification.
-
-          },
+          // Error toast is handled by the global errorHandlerInterceptor.
+          error: () => undefined,
         });
     });
   }
