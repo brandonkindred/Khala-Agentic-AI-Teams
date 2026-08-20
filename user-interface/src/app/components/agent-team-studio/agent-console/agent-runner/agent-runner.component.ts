@@ -49,7 +49,6 @@ import { AgentRunHistoryComponent } from '../agent-run-history/agent-run-history
 import { AgentSchemaFormComponent } from '../agent-schema-form/agent-schema-form.component';
 import { InlineBannerComponent } from '../../../../shared/inline-banner/inline-banner.component';
 import { extractErrorDetail } from '../../../../shared/extract-error-detail';
-import { LatestOnly } from '../../../../shared/latest-only';
 import {
   AgentDiffDialogComponent,
   type AgentDiffDialogData,
@@ -112,7 +111,6 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     if (value && value !== this.selectedAgentId()) {
       this.selectedAgentId.set(value);
       this.destructiveError.set(null);
-      this.latestDestructive.next();
       this.loadAgentDetail(value);
     }
   }
@@ -173,10 +171,6 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   });
 
   private sandboxPollSub: Subscription | null = null;
-  /** Staleness guard for destructive-action emissions (success and error) across agent switches. */
-  private readonly latestDestructive = new LatestOnly();
-  /** Token captured when the component last delegated a destructive action. */
-  private destructiveErrorToken = 0;
 
   ngOnInit(): void {
     this.catalog.listAgents().subscribe({
@@ -187,8 +181,8 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     // Wire destructive-actions service observables.
     this.destructiveActions.savedInputDeleted$
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe(({ payload: savedId }) => {
-        if (!this.latestDestructive.isCurrent(this.destructiveErrorToken)) return;
+      .subscribe(({ agentId, payload: savedId }) => {
+        if (agentId !== this.selectedAgentId()) return;
         this.savedInputs.update((rows) => rows.filter((s) => s.id !== savedId));
         if (this.selectedPickerValue() === `saved:${savedId}`) {
           this.selectedPickerValue.set(null);
@@ -197,8 +191,8 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
 
     this.destructiveActions.sandboxTornDown$
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe(() => {
-        if (!this.latestDestructive.isCurrent(this.destructiveErrorToken)) return;
+      .subscribe(({ agentId }) => {
+        if (agentId !== this.selectedAgentId()) return;
         const current = this.sandbox();
         if (!current) return;
         this.sandbox.set({ ...current, status: 'cold', url: null });
@@ -206,14 +200,9 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
 
     this.destructiveActions.errors$
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe(({ message }) => {
-        // Only apply errors that originated from an action started during the
-        // current agent's lifetime. A null clear is always accepted.
-        if (message === null) {
-          this.destructiveError.set(null);
-        } else if (this.latestDestructive.isCurrent(this.destructiveErrorToken)) {
-          this.destructiveError.set(message);
-        }
+      .subscribe(({ agentId, message }) => {
+        if (agentId !== this.selectedAgentId()) return;
+        this.destructiveError.set(message);
       });
   }
 
@@ -239,7 +228,6 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     this.lastError.set(null);
     this.activeRunId.set(null);
     this.destructiveError.set(null);
-    this.latestDestructive.next();
     this.sandbox.set(null);
     this.sandboxPollSub?.unsubscribe();
     this.sandboxPollSub = null;
@@ -427,7 +415,6 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     if (!match) return;
     const agentId = this.selectedAgentId();
     if (!agentId) return;
-    this.destructiveErrorToken = this.latestDestructive.next();
     this.destructiveActions.deleteSavedInput(agentId, savedId, match.name);
   }
 
@@ -486,7 +473,6 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
     const label = this.selectedAgent()?.manifest.name ?? agentId;
-    this.destructiveErrorToken = this.latestDestructive.next();
     this.destructiveActions.tearDownSandbox(agentId, label);
   }
 

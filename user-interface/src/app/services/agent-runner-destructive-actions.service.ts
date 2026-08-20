@@ -23,8 +23,9 @@ export interface AgentTaggedError {
  * call, loading state, error surfacing) for the Agent Runner tab.
  *
  * Uses the shared `DestructiveActionHelper` for the confirm → execute flow,
- * keeping this service as a thin feature-specific wrapper that supplies only
- * dialog data, the API call, and post-success side effects.
+ * supplying dialog data, the API call, loading-state callbacks
+ * (`deletingSavedInputId`, `tearingDown`), per-call error handling via
+ * `onError` closures, and post-success side effects.
  *
  * All emissions carry the originating `agentId` so the host component can
  * discard stale events from a prior agent's in-flight action. The agent id

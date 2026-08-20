@@ -82,24 +82,29 @@ export class DestructiveActionHelper {
     this.confirmService
       .confirm(opts.dialogData)
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((confirmed) => {
-        if (!confirmed) return;
-        errorCb(null);
-        onStart?.();
-        defer(() => opts.apiCall())
-          .pipe(
-            takeUntilDestroyed(this.destroyRef),
-            finalize(() => onFinally?.()),
-          )
-          .subscribe({
-            next: (result) => {
-              opts.onSuccess(result);
-              this.notify.saved(successToast);
-            },
-            error: (err) => {
-              errorCb(extractErrorDetail(err, opts.errorFallback));
-            },
-          });
+      .subscribe({
+        next: (confirmed) => {
+          if (!confirmed) return;
+          errorCb(null);
+          onStart?.();
+          defer(() => opts.apiCall())
+            .pipe(
+              takeUntilDestroyed(this.destroyRef),
+              finalize(() => onFinally?.()),
+            )
+            .subscribe({
+              next: (result) => {
+                opts.onSuccess(result);
+                this.notify.saved(successToast);
+              },
+              error: (err) => {
+                errorCb(extractErrorDetail(err, opts.errorFallback));
+              },
+            });
+        },
+        error: (err) => {
+          errorCb(extractErrorDetail(err, opts.errorFallback));
+        },
       });
   }
 }
