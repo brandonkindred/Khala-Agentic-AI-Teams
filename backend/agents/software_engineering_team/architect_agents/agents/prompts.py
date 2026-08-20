@@ -823,24 +823,42 @@ Use `document_writer_tool` to write the scrutiny report. Use `web_search_tool` t
 # Cache-breakpoint helper for Bedrock-native system prompts
 # ---------------------------------------------------------------------------
 
-#: Models whose Bedrock model-id contains one of these substrings support the
-#: ``cachePoint`` system-content block.  All default architect model IDs are
-#: Anthropic Claude variants; env-var overrides to a non-Anthropic model
-#: gracefully degrade to a plain string prompt (no caching, no error).
-_CACHE_SUPPORTED_FRAGMENTS = ("anthropic", "claude")
+#: Model-id substrings that identify Bedrock models with prompt-caching
+#: support (cachePoint in system content).  Per AWS docs, supported models
+#: include Claude 3.5 Sonnet v2, Claude 3.7 Sonnet, Claude Sonnet 4+,
+#: Claude Haiku 4.5+, Claude Opus 4.5+, and Nova models.  Older Claude 3
+#: models (claude-3-sonnet, claude-3-haiku, claude-3-opus original releases)
+#: are NOT supported.  The check below uses version-aware fragments so that
+#: env-var overrides to an unsupported model gracefully degrade to a plain
+#: string prompt (no caching, no error).
+_CACHE_SUPPORTED_FRAGMENTS = (
+    # Claude 4.x+ family (Sonnet 4, Opus 4, Haiku 4.5, etc.)
+    "claude-sonnet-4",
+    "claude-opus-4",
+    "claude-haiku-4",
+    # Claude 3.7 Sonnet
+    "claude-3-7-sonnet",
+    # Claude 3.5 Sonnet v2 and Haiku
+    "claude-3-5-sonnet",
+    "claude-3-5-haiku",
+    # Amazon Nova models
+    "amazon.nova",
+)
 
 
 def cached_system_prompt(prompt: str, model_id: str = "") -> "str | list[dict]":
     """Wrap a static system-prompt string as a cached-prefix list for Strands Agent.
 
-    When the *model_id* contains ``"anthropic"`` or ``"claude"`` (the default
-    for all architect models), returns a two-element list suitable for
+    When the *model_id* identifies a model known to support Bedrock prompt
+    caching (Claude 3.5 Sonnet v2+, Claude 3.7+, Claude 4+, Haiku 4.5+,
+    Opus 4.5+, Nova), returns a two-element list suitable for
     ``Agent(system_prompt=...)``:
     ``[{"text": prompt}, {"cachePoint": {"type": "default"}}]``.
 
-    For any other model (e.g. a Llama or Mistral override via env var) the
+    For any other model — including older Claude 3 originals (3-sonnet,
+    3-haiku, 3-opus) and non-Anthropic overrides (Llama, Mistral) — the
     function falls back to returning the plain prompt string so the agent
-    still works — just without the caching optimization.
+    still works without the caching optimization.
 
     On the Bedrock Converse API the ``cachePoint`` block instructs the provider
     to treat the preceding text segment as a stable prefix eligible for
@@ -849,6 +867,6 @@ def cached_system_prompt(prompt: str, model_id: str = "") -> "str | list[dict]":
     identical system prompt is re-sent — this marker avoids re-processing it.
     """
     model_lower = model_id.lower()
-    if model_lower and not any(frag in model_lower for frag in _CACHE_SUPPORTED_FRAGMENTS):
-        return prompt
-    return [{"text": prompt}, {"cachePoint": {"type": "default"}}]
+    if not model_lower or any(frag in model_lower for frag in _CACHE_SUPPORTED_FRAGMENTS):
+        return [{"text": prompt}, {"cachePoint": {"type": "default"}}]
+    return prompt
