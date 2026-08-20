@@ -3,25 +3,78 @@ import {
   HttpClientTestingModule,
   HttpTestingController,
 } from '@angular/common/http/testing';
-import { AgentRunnerApiService } from './agent-runner-api.service';
+import { AgentConsoleApiService } from './agent-console-api.service';
 import { SKIP_ERROR_NOTIFY } from '../core/error-handler.interceptor';
 import { environment } from '../../environments/environment';
 
-describe('AgentRunnerApiService', () => {
-  let service: AgentRunnerApiService;
+describe('AgentConsoleApiService', () => {
+  let service: AgentConsoleApiService;
   let httpMock: HttpTestingController;
   const baseUrl = environment.agentRegistryApiUrl;
 
   beforeEach(() => {
     TestBed.configureTestingModule({
       imports: [HttpClientTestingModule],
-      providers: [AgentRunnerApiService],
+      providers: [AgentConsoleApiService],
     });
-    service = TestBed.inject(AgentRunnerApiService);
+    service = TestBed.inject(AgentConsoleApiService);
     httpMock = TestBed.inject(HttpTestingController);
   });
 
   afterEach(() => httpMock.verify());
+
+  // ----------------------------------------------------------
+  // Phase 1 — Catalog
+  // ----------------------------------------------------------
+
+  it('lists agents without filters', () => {
+    service.listAgents().subscribe();
+    const req = httpMock.expectOne((r) => r.url === baseUrl);
+    expect(req.request.method).toBe('GET');
+    expect(req.request.params.keys().length).toBe(0);
+    req.flush([]);
+  });
+
+  it('lists agents with team/tag/q filters', () => {
+    service.listAgents({ team: 'blogging', tag: 'qa', q: 'writer' }).subscribe();
+    const req = httpMock.expectOne((r) => r.url === baseUrl);
+    expect(req.request.params.get('team')).toBe('blogging');
+    expect(req.request.params.get('tag')).toBe('qa');
+    expect(req.request.params.get('q')).toBe('writer');
+    req.flush([]);
+  });
+
+  it('lists teams', () => {
+    service.listTeams().subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/teams`);
+    expect(req.request.method).toBe('GET');
+    req.flush([]);
+  });
+
+  it('gets agent detail with encoded id', () => {
+    service.getAgent('blog/writer').subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/${encodeURIComponent('blog/writer')}`);
+    expect(req.request.method).toBe('GET');
+    req.flush({ id: 'blog/writer' });
+  });
+
+  it('gets input schema', () => {
+    service.getInputSchema('id-1').subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/id-1/schema/input`);
+    expect(req.request.method).toBe('GET');
+    req.flush({});
+  });
+
+  it('gets output schema', () => {
+    service.getOutputSchema('id-1').subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/id-1/schema/output`);
+    expect(req.request.method).toBe('GET');
+    req.flush({});
+  });
+
+  // ----------------------------------------------------------
+  // Phase 2 — Sandbox lifecycle
+  // ----------------------------------------------------------
 
   it('lists warm sandboxes', () => {
     service.listWarmSandboxes().subscribe();
@@ -50,6 +103,10 @@ describe('AgentRunnerApiService', () => {
     expect(req.request.method).toBe('DELETE');
     req.flush({ agent_id: 'agent.foo', status: 'gone' });
   });
+
+  // ----------------------------------------------------------
+  // Phase 2 — Invoke + samples
+  // ----------------------------------------------------------
 
   it('invokes an agent', () => {
     service.invoke('agent.foo', { a: 1 }).subscribe();
@@ -81,6 +138,10 @@ describe('AgentRunnerApiService', () => {
     req.flush({});
   });
 
+  // ----------------------------------------------------------
+  // Phase 3 — Saved inputs
+  // ----------------------------------------------------------
+
   it('lists saved inputs', () => {
     service.listSavedInputs('agent.foo').subscribe();
     const req = httpMock.expectOne(`${baseUrl}/agent.foo/saved-inputs`);
@@ -89,7 +150,7 @@ describe('AgentRunnerApiService', () => {
   });
 
   it('creates a saved input', () => {
-    service.createSavedInput('agent.foo', { name: 'x', payload: {} }).subscribe();
+    service.createSavedInput('agent.foo', { name: 'x', input_data: {} }).subscribe();
     const req = httpMock.expectOne(`${baseUrl}/agent.foo/saved-inputs`);
     expect(req.request.method).toBe('POST');
     expect(req.request.context.get(SKIP_ERROR_NOTIFY)).toBe(true);
@@ -97,7 +158,7 @@ describe('AgentRunnerApiService', () => {
   });
 
   it('updates a saved input', () => {
-    service.updateSavedInput('id1', { name: 'rename', payload: {} }).subscribe();
+    service.updateSavedInput('id1', { name: 'rename', input_data: {} }).subscribe();
     const req = httpMock.expectOne(`${baseUrl}/saved-inputs/id1`);
     expect(req.request.method).toBe('PUT');
     req.flush({});
@@ -110,6 +171,10 @@ describe('AgentRunnerApiService', () => {
     expect(req.request.context.get(SKIP_ERROR_NOTIFY)).toBe(true);
     req.flush({ id: 'id1', status: 'deleted' });
   });
+
+  // ----------------------------------------------------------
+  // Phase 3 — Runs
+  // ----------------------------------------------------------
 
   it('lists runs without cursor', () => {
     service.listRuns('agent.foo').subscribe();
@@ -140,6 +205,10 @@ describe('AgentRunnerApiService', () => {
     expect(req.request.method).toBe('DELETE');
     req.flush({ id: 'r1', status: 'deleted' });
   });
+
+  // ----------------------------------------------------------
+  // Phase 3 — Diff
+  // ----------------------------------------------------------
 
   it('posts diff', () => {
     service.diff({ left: { a: 1 }, right: { a: 2 } } as never).subscribe();

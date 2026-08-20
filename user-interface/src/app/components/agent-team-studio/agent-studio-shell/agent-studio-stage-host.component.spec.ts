@@ -3,7 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
-import { AgentRunnerApiService } from '../../../services/agent-runner-api.service';
+import { AgentConsoleApiService } from '../../../services/agent-console-api.service';
 import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
@@ -69,7 +69,7 @@ describe('AgentStudioStageHostComponent', () => {
         AgentStudioStateService,
         AgentStudioFacade,
         { provide: AgentStudioApiService, useValue: agentStudioApi },
-        { provide: AgentRunnerApiService, useValue: {} },
+        { provide: AgentConsoleApiService, useValue: {} },
         { provide: AgenticTeamApiService, useValue: {} },
         { provide: PersonaTestingApiService, useValue: {} },
       ],

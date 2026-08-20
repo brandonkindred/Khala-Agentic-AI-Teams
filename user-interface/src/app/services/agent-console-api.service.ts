@@ -4,6 +4,12 @@ import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
 import { SKIP_NOTIFY_OPTIONS } from '../core/error-handler.interceptor';
 import type {
+  AgentCatalogQuery,
+  AgentDetail,
+  AgentSummary,
+  TeamGroup,
+} from '../models/agent-catalog.model';
+import type {
   InvokeEnvelope,
   SandboxHandle,
 } from '../models/agent-runner.model';
@@ -18,20 +24,54 @@ import type {
 } from '../models/agent-history.model';
 
 /**
- * Agent Console Runner API (Phases 2 + 3).
+ * Unified API service for the Agent Console.
  *
- * Phase 2: sandbox lifecycle + invoke + golden samples.
- * Phase 3: saved inputs, run history, diff.
+ * Owns all HTTP calls to the `/api/agents` backend API, covering:
+ *   - Phase 1: Catalog browsing, search, detail & schema.
+ *   - Phase 2: Sandbox lifecycle, invoke, golden samples.
+ *   - Phase 3: Saved inputs, run history, diff.
+ *
+ * Follows the project's "one service per API" boundary. Error handling is
+ * delegated to the global `errorHandlerInterceptor`; callers that need
+ * suppressed toasts should pass a custom `HttpContext` token at call-site.
  */
 @Injectable({ providedIn: 'root' })
-export class AgentRunnerApiService {
+export class AgentConsoleApiService {
   private readonly http = inject(HttpClient);
   private readonly baseUrl = environment.agentRegistryApiUrl;
   private readonly sandboxesUrl = `${this.baseUrl}/sandboxes`;
 
-  // ------------------------------------------------------------
-  // Sandbox lifecycle
-  // ------------------------------------------------------------
+  // ============================================================
+  // Phase 1 — Catalog
+  // ============================================================
+
+  listAgents(query: AgentCatalogQuery = {}): Observable<AgentSummary[]> {
+    let params = new HttpParams();
+    if (query.team) params = params.set('team', query.team);
+    if (query.tag) params = params.set('tag', query.tag);
+    if (query.q) params = params.set('q', query.q);
+    return this.http.get<AgentSummary[]>(this.baseUrl, { params });
+  }
+
+  listTeams(): Observable<TeamGroup[]> {
+    return this.http.get<TeamGroup[]>(`${this.baseUrl}/teams`);
+  }
+
+  getAgent(id: string): Observable<AgentDetail> {
+    return this.http.get<AgentDetail>(`${this.baseUrl}/${encodeURIComponent(id)}`);
+  }
+
+  getInputSchema(id: string): Observable<unknown> {
+    return this.http.get<unknown>(`${this.baseUrl}/${encodeURIComponent(id)}/schema/input`);
+  }
+
+  getOutputSchema(id: string): Observable<unknown> {
+    return this.http.get<unknown>(`${this.baseUrl}/${encodeURIComponent(id)}/schema/output`);
+  }
+
+  // ============================================================
+  // Phase 2 — Sandbox lifecycle
+  // ============================================================
 
   listWarmSandboxes(): Observable<SandboxHandle[]> {
     return this.http.get<SandboxHandle[]>(this.sandboxesUrl);
@@ -54,9 +94,9 @@ export class AgentRunnerApiService {
     );
   }
 
-  // ------------------------------------------------------------
-  // Invoke + samples
-  // ------------------------------------------------------------
+  // ============================================================
+  // Phase 2 — Invoke + samples
+  // ============================================================
 
   /**
    * Return the full HttpResponse so the caller can branch on status. A
@@ -89,9 +129,9 @@ export class AgentRunnerApiService {
     );
   }
 
-  // ------------------------------------------------------------
-  // Saved inputs (Phase 3)
-  // ------------------------------------------------------------
+  // ============================================================
+  // Phase 3 — Saved inputs
+  // ============================================================
 
   listSavedInputs(agentId: string): Observable<SavedInput[]> {
     return this.http.get<SavedInput[]>(
@@ -128,9 +168,9 @@ export class AgentRunnerApiService {
     );
   }
 
-  // ------------------------------------------------------------
-  // Runs (Phase 3)
-  // ------------------------------------------------------------
+  // ============================================================
+  // Phase 3 — Runs
+  // ============================================================
 
   listRuns(agentId: string, cursor?: string | null, limit = 20): Observable<RunSummary[]> {
     let params = new HttpParams().set('limit', String(limit));
@@ -151,9 +191,9 @@ export class AgentRunnerApiService {
     );
   }
 
-  // ------------------------------------------------------------
-  // Diff (Phase 3)
-  // ------------------------------------------------------------
+  // ============================================================
+  // Phase 3 — Diff
+  // ============================================================
 
   diff(body: DiffRequest): Observable<DiffResult> {
     return this.http.post<DiffResult>(`${this.baseUrl}/diff`, body);

@@ -2,7 +2,7 @@ import { Injectable, inject } from '@angular/core';
 import { HttpResponse } from '@angular/common/http';
 import { Observable, of, tap } from 'rxjs';
 import { AgentStudioApiService } from './agent-studio-api.service';
-import { AgentRunnerApiService } from './agent-runner-api.service';
+import { AgentConsoleApiService } from './agent-console-api.service';
 import { AgenticTeamApiService } from './agentic-team-api.service';
 import { PersonaTestingApiService } from './persona-testing-api.service';
 import { AgentStudioStateService } from './agent-studio-state.service';
@@ -34,7 +34,7 @@ import type {
 /**
  * Single integration surface for Agent Studio's Stage 1–4 happy-path data
  * operations. Delegates to the existing `*-api.service.ts` HTTP clients
- * (`AgentStudioApiService`, `AgentRunnerApiService`, `AgenticTeamApiService`,
+ * (`AgentStudioApiService`, `AgentConsoleApiService`, `AgenticTeamApiService`,
  * `PersonaTestingApiService`), which remain available as implementation
  * details for call sites that still need them directly.
  *
@@ -53,7 +53,7 @@ import type {
 @Injectable()
 export class AgentStudioFacade {
   private readonly studioApi = inject(AgentStudioApiService);
-  private readonly runnerApi = inject(AgentRunnerApiService);
+  private readonly runnerApi = inject(AgentConsoleApiService);
   private readonly agenticTeamApi = inject(AgenticTeamApiService);
   private readonly personaApi = inject(PersonaTestingApiService);
   private readonly state = inject(AgentStudioStateService);
