@@ -94,10 +94,17 @@ def test_shared_review_policy_pre_existing_carve_out_points_at_omission() -> Non
     assert "use pre_existing: false and set omission: true instead" in _SHARED_REVIEW_POLICY
 
 
-def test_shared_output_section_pre_existing_defaults_uncertain_to_true() -> None:
-    """The formatting pass's own pre_existing field doc must not contradict
-    the reasoning pass's positive-evidence rule: false requires evidence,
-    and an uncertain finding defaults to true, not false."""
+def test_output_section_pre_existing_default_matches_reasoning_pass() -> None:
+    """Cross-pass consistency guardrail, not a rework of _SHARED_OUTPUT_SECTION's
+    tagging semantics: chunk_reviewer.py runs a second LLM call, guided by
+    _SHARED_OUTPUT_SECTION, to convert the reasoning pass's prose into the
+    final JSON issue objects. Whatever default direction the reasoning pass
+    (_SHARED_REVIEW_POLICY) uses for an uncertain pre_existing tag, this
+    formatting-pass schema doc must use the same one -- otherwise the second
+    call can silently flip an ambiguous finding back into scope. Today that
+    direction is "false requires positive evidence, true is the uncertain
+    default"; if the reasoning pass's default ever changes, this doc must
+    change with it."""
     assert "Default false: when you cannot tell" not in _SHARED_OUTPUT_SECTION
     assert "Default true when you cannot tell" in _SHARED_OUTPUT_SECTION
     assert "only with positive evidence" in _SHARED_OUTPUT_SECTION
