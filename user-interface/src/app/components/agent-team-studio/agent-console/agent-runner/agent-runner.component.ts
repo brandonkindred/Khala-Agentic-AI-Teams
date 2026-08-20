@@ -44,6 +44,7 @@ import type {
 import { AgentRunHistoryComponent } from '../agent-run-history/agent-run-history.component';
 import { AgentSchemaFormComponent } from '../agent-schema-form/agent-schema-form.component';
 import { InlineBannerComponent } from '../../../../shared/inline-banner/inline-banner.component';
+import { extractErrorDetail } from '../../../../shared/extract-error-detail';
 import {
   AgentDiffDialogComponent,
   type AgentDiffDialogData,
@@ -334,7 +335,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
           },
           error: (err) => {
             // Mat dialog is already closed; surface via snackbar-equivalent.
-            alert(err?.error?.detail ?? err?.message ?? 'Failed to save input');
+            alert(extractErrorDetail(err, 'Failed to save input'));
           },
         });
     });
@@ -441,13 +442,13 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
       error: (err: HttpErrorResponse) => {
         this.running.set(false);
         if (err.status === 409) {
-          this.lastError.set(err.error?.detail ?? 'Agent not runnable in sandbox.');
+          this.lastError.set(extractErrorDetail(err, 'Agent not runnable in sandbox.'));
         } else if (err.status === 422 && err.error?.detail) {
           // The shim wraps user-space exceptions in a 422 with the envelope
           // as `detail`, so we can surface the output + logs inline.
           this.lastResponse.set(err.error.detail as InvokeEnvelope);
         } else {
-          this.lastError.set(err.error?.detail ?? err.message ?? 'Invocation failed.');
+          this.lastError.set(extractErrorDetail(err, 'Invocation failed.'));
         }
         this.historyPanel?.refresh();
       },
