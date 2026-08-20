@@ -175,6 +175,23 @@ def test_thoroughness_requirements_are_surface_scoped_not_whole_codebase() -> No
     assert "review every function" not in _SHARED_REVIEW_POLICY.lower()
 
 
+def test_thoroughness_requires_positive_change_surface_evidence_for_scope() -> None:
+    """Regression guard: the THOROUGHNESS block no longer tells the reviewer
+    that narrowing already happened so every shown line is in scope, and no
+    longer tells it to over-report when in doubt. It instead requires
+    positive change-surface-marker (or omission) evidence before a finding
+    counts as in scope for posting, and defaults an uncertain finding to
+    pre_existing: true rather than false."""
+    assert "so treat every line you were shown as in scope" not in _SHARED_REVIEW_POLICY
+    assert "better to over-report than under-report" not in _SHARED_REVIEW_POLICY
+    assert "Default false when uncertain" not in _SHARED_REVIEW_POLICY
+    assert "change surface marks added/modified lines with a leading `+`" in _SHARED_REVIEW_POLICY
+    assert (
+        "require positive evidence before you treat a finding as in scope" in _SHARED_REVIEW_POLICY
+    )
+    assert "Default true when uncertain" in _SHARED_REVIEW_POLICY
+
+
 def test_code_review_criteria_covers_eight_change_focused_headers() -> None:
     """The default CODE_REVIEW profile's checklist covers all eight change-focused
     criteria the diff-first review goal requires."""
@@ -220,9 +237,13 @@ def test_code_review_style_criterion_keeps_no_fixed_word_limit_guidance() -> Non
 
 def test_code_review_new_issues_criterion_reinforces_pre_existing_semantics() -> None:
     """New Issues explicitly ties its scope to the pre_existing JSON field so
-    reviewers separate diff-introduced defects from pre-existing ones."""
+    reviewers separate diff-introduced defects from pre-existing ones, and
+    requires positive change-surface evidence for false rather than treating
+    it as the unmarked default."""
     prompt = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
     assert '"pre_existing" field to make that distinction' in prompt
+    assert "false requires positive evidence" in prompt
+    assert "true only for an unrelated defect" not in prompt
 
 
 def test_output_contract_accepts_new_categories() -> None:
@@ -363,6 +384,10 @@ _RETIRED_THOROUGHNESS_PHRASES = (
     "EVERY function, method, and class",
     "MUST review EVERY file",
     "Do NOT skip files because they",
+    "so treat every line you were shown as in scope",
+    "better to over-report than under-report",
+    "Default false when uncertain",
+    "true only for an unrelated defect",
 )
 
 
