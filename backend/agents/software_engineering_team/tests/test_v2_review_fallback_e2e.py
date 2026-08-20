@@ -14,13 +14,12 @@ chunk -> map-phase LLM call -> merge -> translate chain is exercised for real.
 from __future__ import annotations
 
 import pytest
-from tests._review_fallback_test_doubles import (
-    AlwaysFail as _AlwaysFail,
-    FailBadKeepGood as _FailBadKeepGoodBase,
-    PerFileScriptedClient as _PerFileScriptedClient,
-    PromptCapturingClient as _PromptCapturingClient,
-    ScriptedClient as _ScriptedClient,
-)
+
+from ._review_fallback_test_doubles import AlwaysFail as _AlwaysFail
+from ._review_fallback_test_doubles import FailBadKeepGood as _FailBadKeepGoodBase
+from ._review_fallback_test_doubles import PerFileScriptedClient as _PerFileScriptedClient
+from ._review_fallback_test_doubles import PromptCapturingClient as _PromptCapturingClient
+from ._review_fallback_test_doubles import ScriptedClient as _ScriptedClient
 
 
 @pytest.fixture(autouse=True)

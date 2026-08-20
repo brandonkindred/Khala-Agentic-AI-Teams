@@ -9,6 +9,20 @@ extension, and the rest are extension-agnostic.
 
 Not a test module itself -- its ``_``-prefixed name prevents pytest from
 collecting it (same convention as ``_v2_config_fixtures.py``).
+
+Relationship to ``test_code_review_coordinator.py``
+---------------------------------------------------
+``ScriptedClient`` here is conceptually equivalent to ``_ScriptedClient`` in
+``test_code_review_coordinator.py`` (lines ~238-285), and ``FailBadKeepGood``
+mirrors that file's ``_FailWhenBadPresent``. However, they are *not* fully
+interchangeable: the coordinator-level tests detect reasoning-vs-formatting
+passes via the ``_ANALYSIS_DELIMITER`` string (a local constant), whereas the
+fallback e2e tests use the shared ``is_chunk_map_reasoning_prompt()`` helper
+(which checks for ``CODE_TO_REVIEW_HEADER``). Both approaches correctly
+discriminate the two passes but from opposite detection points. Unifying them
+further would require either reconciling the detection strategy or abstracting
+it behind a callback, which is a larger refactor beyond the scope of issue
+#6791.
 """
 
 from __future__ import annotations
@@ -37,6 +51,11 @@ class ScriptedClient(DummyLLMClient):
     formatting-pass call advances the scripted response cursor and
     ``call_count`` -- the reasoning-pass call gets the inherited dummy
     default, whose prose is discarded once wrapped for formatting.
+
+    Exhaustion behavior: once all scripted responses have been served, the
+    last response in the list is returned indefinitely (or ``{}`` if the list
+    was empty). This keeps tests from crashing due to unexpected extra map
+    chunks while still exercising the real coordinator pipeline.
     """
 
     def __init__(self, responses: list[dict[str, Any]]) -> None:
@@ -221,7 +240,9 @@ class AlwaysFail(DummyLLMClient):
     def __init__(self) -> None:
         super().__init__()
         self.call_count = 0
+        self._lock = threading.Lock()
 
     def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-        self.call_count += 1
+        with self._lock:
+            self.call_count += 1
         raise LLMSemanticExhaustionError("no content", retry_thinking_level=False)
