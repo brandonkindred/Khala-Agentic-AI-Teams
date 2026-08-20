@@ -333,9 +333,9 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
             this.savedInputs.update((rows) => [saved, ...rows]);
             this.selectedPickerValue.set(`saved:${saved.id}`);
           },
-          error: (err) => {
-            // Mat dialog is already closed; surface via snackbar-equivalent.
-            alert(extractErrorDetail(err, 'Failed to save input'));
+          error: () => {
+            // Global error interceptor handles the snackbar notification.
+
           },
         });
     });
