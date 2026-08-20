@@ -2,7 +2,7 @@ import { TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
-import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
+import { AgentConsoleApiService } from '../../../../services/agent-console-api.service';
 import type { AgentDetail, AgentSummary, TeamGroup } from '../../../../models/agent-catalog.model';
 import { AgentCatalogComponent } from './agent-catalog.component';
 
@@ -86,7 +86,7 @@ describe('AgentCatalogComponent', () => {
     };
     await TestBed.configureTestingModule({
       imports: [AgentCatalogComponent, NoopAnimationsModule],
-      providers: [{ provide: AgentCatalogApiService, useValue: api }],
+      providers: [{ provide: AgentConsoleApiService, useValue: api }],
     }).compileComponents();
     const fixture = TestBed.createComponent(AgentCatalogComponent);
     const component = fixture.componentInstance;

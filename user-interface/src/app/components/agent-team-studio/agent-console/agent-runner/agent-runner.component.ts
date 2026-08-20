@@ -25,9 +25,8 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSelectModule } from '@angular/material/select';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
-import { Subscription, interval } from 'rxjs';
-import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
-import { AgentRunnerApiService } from '../../../../services/agent-runner-api.service';
+import { Subscription, timer } from 'rxjs';
+import { AgentConsoleApiService } from '../../../../services/agent-console-api.service';
 import type {
   AgentDetail,
   AgentSummary,
@@ -94,8 +93,7 @@ import {
   providers: [ConfirmDestructiveService],
 })
 export class AgentRunnerComponent implements OnInit, OnDestroy {
-  private readonly catalog = inject(AgentCatalogApiService);
-  private readonly runner = inject(AgentRunnerApiService);
+  private readonly api = inject(AgentConsoleApiService);
   private readonly dialog = inject(MatDialog);
   private readonly notify = inject(NotificationService);
   private readonly confirmService = inject(ConfirmDestructiveService);
@@ -163,9 +161,12 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   private sandboxPollSub: Subscription | null = null;
 
   ngOnInit(): void {
-    this.catalog.listAgents().subscribe({
+    this.api.listAgents().subscribe({
       next: (agents) => this.agents.set(agents),
-      error: (err) => console.error('Runner: failed to load agents', err),
+      error: (err) => {
+        console.error('Runner: failed to load agents', err);
+        this.lastError.set('Could not load agents.');
+      },
     });
   }
 
@@ -197,7 +198,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   }
 
   private loadAgentDetail(id: string): void {
-    this.catalog.getAgent(id).subscribe({
+    this.api.getAgent(id).subscribe({
       next: (detail) => {
         this.selectedAgent.set(detail);
         this.loadSamples(id);
@@ -213,7 +214,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   }
 
   private loadSamples(id: string): void {
-    this.runner.listSamples(id).subscribe({
+    this.api.listSamples(id).subscribe({
       next: (samples) => {
         this.goldenSamples.set(samples);
         if (samples.length > 0 && !this.selectedPickerValue()) {
@@ -225,14 +226,14 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   }
 
   private loadSavedInputs(id: string): void {
-    this.runner.listSavedInputs(id).subscribe({
+    this.api.listSavedInputs(id).subscribe({
       next: (items) => this.savedInputs.set(items),
       error: () => this.savedInputs.set([]),
     });
   }
 
   private loadInputSchema(id: string): void {
-    this.catalog.getInputSchema(id).subscribe({
+    this.api.getInputSchema(id).subscribe({
       next: (schema) => {
         this.inputSchema.set(schema);
         // Default to form when a schema is available. The form component
@@ -266,7 +267,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     const agent = this.selectedAgentId();
     if (!agent) return;
     this.selectedPickerValue.set(`golden:${name}`);
-    this.runner.getSample(agent, name).subscribe({
+    this.api.getSample(agent, name).subscribe({
       next: (body) => this.setInputFromPicker(body),
       error: () => this.inputError.set('Could not load sample.'),
     });
@@ -340,7 +341,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     >(SaveInputDialogComponent, { data: { mode: 'create' } });
     ref.afterClosed().subscribe((result) => {
       if (!result) return;
-      this.runner
+      this.api
         .createSavedInput(
           agent,
           {
@@ -392,7 +393,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
       })
       .subscribe((confirmed) => {
         if (!confirmed) return;
-        this.runner.deleteSavedInput(savedId).subscribe({
+        this.api.deleteSavedInput(savedId).subscribe({
           next: () => {
             this.lastError.set(null);
             this.savedInputs.update((rows) =>
@@ -418,15 +419,22 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
 
   private startSandboxPolling(agentId: string): void {
     this.sandboxPollSub?.unsubscribe();
-    this.runner.getSandbox(agentId).subscribe({
+
+    const initialSub = this.api.getSandbox(agentId).subscribe({
       next: (handle) => this.sandbox.set(handle),
       error: () => this.sandbox.set(null),
     });
-    this.sandboxPollSub = interval(5000).subscribe(() => {
-      this.runner.getSandbox(agentId).subscribe({
+
+    const pollSub = timer(5000, 5000).subscribe(() => {
+      this.api.getSandbox(agentId).subscribe({
         next: (handle) => this.sandbox.set(handle),
+        error: () => this.sandbox.set(null),
       });
     });
+
+    this.sandboxPollSub = new Subscription();
+    this.sandboxPollSub.add(initialSub);
+    this.sandboxPollSub.add(pollSub);
   }
 
   /**
@@ -442,7 +450,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
     this.sandboxPolling.set(true);
-    this.runner.ensureWarm(agentId).subscribe({
+    this.api.ensureWarm(agentId).subscribe({
       next: (handle) => {
         this.sandbox.set(handle);
         this.sandboxPolling.set(false);
@@ -476,7 +484,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
       })
       .subscribe((confirmed) => {
         if (!confirmed) return;
-        this.runner.teardown(agentId).subscribe({
+        this.api.teardown(agentId).subscribe({
           next: () => {
             this.lastError.set(null);
             const current = this.sandbox();
@@ -517,7 +525,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     this.lastResponse.set(null);
     this.lastError.set(null);
     this.activeRunId.set(null);
-    this.runner.invoke(id, body, savedId).subscribe({
+    this.api.invoke(id, body, savedId).subscribe({
       next: (response) => {
         this.running.set(false);
         // 202 is the sandbox "still warming" signal — HttpClient delivers it
@@ -561,7 +569,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   // ---------------------------------------------------------------
 
   onHistoryLoadRun(runId: string): void {
-    this.runner.getRun(runId).subscribe({
+    this.api.getRun(runId).subscribe({
       next: (record) => {
         this.activeRunId.set(record.id);
         this.inputText.set(JSON.stringify(record.input_data ?? {}, null, 2));

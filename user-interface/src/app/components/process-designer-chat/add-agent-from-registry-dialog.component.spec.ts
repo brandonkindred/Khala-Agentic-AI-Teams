@@ -7,7 +7,7 @@ import {
   AddAgentFromRegistryDialogData,
   SEARCH_DEBOUNCE_MS,
 } from './add-agent-from-registry-dialog.component';
-import { AgentCatalogApiService } from '../../services/agent-catalog-api.service';
+import { AgentConsoleApiService } from '../../services/agent-console-api.service';
 import type { AgentSummary } from '../../models/agent-catalog.model';
 
 const summary = (id: string, name = id): AgentSummary => ({
@@ -37,7 +37,7 @@ function configure(data: AddAgentFromRegistryDialogData, listAgents = vi.fn().mo
     providers: [
       { provide: MAT_DIALOG_DATA, useValue: data },
       { provide: MatDialogRef, useValue: ref },
-      { provide: AgentCatalogApiService, useValue: api },
+      { provide: AgentConsoleApiService, useValue: api },
     ],
   });
   const fixture = TestBed.createComponent(AddAgentFromRegistryDialogComponent);

@@ -4,7 +4,7 @@ import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { MatDialog } from '@angular/material/dialog';
 import { NEVER, Subject, of, throwError } from 'rxjs';
 import { CognitionTabComponent } from './cognition-tab.component';
-import { AgentCatalogApiService } from '../../../services/agent-catalog-api.service';
+import { AgentConsoleApiService } from '../../../services/agent-console-api.service';
 import { CognitionApiService } from '../../../services/cognition-api.service';
 import type { AgentSummary } from '../../../models/agent-catalog.model';
 import type { MemoryEvent, Rule, RuleProposal } from '../../../models/cognition.model';
@@ -108,7 +108,7 @@ describe('CognitionTabComponent', () => {
     TestBed.configureTestingModule({
       imports: [CognitionTabComponent, NoopAnimationsModule],
       providers: [
-        { provide: AgentCatalogApiService, useValue: catalog },
+        { provide: AgentConsoleApiService, useValue: catalog },
         { provide: CognitionApiService, useValue: api },
       ],
     });
