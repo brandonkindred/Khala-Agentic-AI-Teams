@@ -308,7 +308,9 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
    * Opens the save-input dialog and, on confirmation, persists the current
    * editor input as a named saved input via the runner API.
    *
-   * Preconditions: a valid agent is selected; `inputText()` is valid JSON.
+   * Preconditions: an agent is selected (`selectedAgentId()` is non-null).
+   * Behavior: attempts to parse `inputText()` as JSON; on parse failure sets
+   * `inputError` to the error message and returns without opening the dialog.
    * Side effects: opens a Material dialog; on success prepends the new entry
    * to `savedInputs` and sets `selectedPickerValue` to the new saved ID;
    * alerts the user on API failure.
@@ -353,7 +355,9 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
    * Prompts the user to confirm deletion of a saved input and, on
    * confirmation, calls the runner API to remove it permanently.
    *
-   * Preconditions: `savedId` corresponds to an existing row in `savedInputs()`.
+   * Preconditions: `savedId` is a non-empty string.
+   * Behavior: if `savedId` does not match any row in `savedInputs()`, the
+   * method returns without side effects.
    * Side effects: stops event propagation; opens a confirmation dialog;
    * removes the row from `savedInputs` on success; resets
    * `selectedPickerValue` if the deleted entry was active.
