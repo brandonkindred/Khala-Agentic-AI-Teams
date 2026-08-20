@@ -389,8 +389,14 @@ describe('AgentRunnerComponent', () => {
 
       expect(snackBarSpy.open).toHaveBeenCalledWith(
         'name taken',
-        'Dismiss',
-        { panelClass: 'kh-snack-error', duration: 5000 },
+        'Close',
+        {
+          duration: 6000,
+          horizontalPosition: 'end',
+          verticalPosition: 'top',
+          politeness: 'assertive',
+          panelClass: 'kh-snack-error',
+        },
       );
     });
   });

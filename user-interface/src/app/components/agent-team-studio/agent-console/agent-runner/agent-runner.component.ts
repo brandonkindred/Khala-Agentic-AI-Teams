@@ -54,8 +54,7 @@ import {
   type SaveInputDialogData,
   type SaveInputDialogResult,
 } from '../save-input-dialog/save-input-dialog.component';
-import { extractErrorDetail } from '../../../../shared/extract-error-detail';
-import { skipErrorNotify } from '../../../../core/error-handler.interceptor';
+import { extractErrorDetail, skipErrorNotify } from '../../../../core/error-handler.interceptor';
 
 /**
  * Runner tab for the Agent Console.
@@ -344,8 +343,14 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
             // Mat dialog is already closed; surface via snackbar.
             this.snackBar.open(
               extractErrorDetail(err, 'Failed to save input'),
-              'Dismiss',
-              { panelClass: 'kh-snack-error', duration: 5000 },
+              'Close',
+              {
+                duration: 6000,
+                horizontalPosition: 'end',
+                verticalPosition: 'top',
+                politeness: 'assertive',
+                panelClass: 'kh-snack-error',
+              },
             );
           },
         });
