@@ -823,50 +823,48 @@ Use `document_writer_tool` to write the scrutiny report. Use `web_search_tool` t
 # Cache-breakpoint helper for Bedrock-native system prompts
 # ---------------------------------------------------------------------------
 
-#: Model-id substrings that identify Bedrock models with prompt-caching
-#: support (cachePoint in system content).  Per AWS docs, supported models
-#: include Claude 3.5 Sonnet v2, Claude 3.7 Sonnet, Claude Sonnet 4+,
-#: Claude Haiku 4.5+, Claude Opus 4.5+, and Nova models.  Older Claude 3
-#: models (claude-3-sonnet, claude-3-haiku, claude-3-opus original releases)
-#: are NOT supported.  The check below uses version-aware fragments so that
-#: env-var overrides to an unsupported model gracefully degrade to a plain
-#: string prompt (no caching, no error).
-_CACHE_SUPPORTED_FRAGMENTS = (
-    # Claude 4.x+ family (Sonnet 4, Opus 4, Haiku 4.5, etc.)
-    "claude-sonnet-4",
-    "claude-opus-4",
-    "claude-haiku-4",
-    # Claude 3.7 Sonnet
-    "claude-3-7-sonnet",
-    # Claude 3.5 Sonnet v2 and Haiku
-    "claude-3-5-sonnet",
-    "claude-3-5-haiku",
-    # Amazon Nova models
-    "amazon.nova",
-)
+try:
+    from llm_service.capabilities import bedrock_model_supports_prompt_caching
+except ModuleNotFoundError:  # standalone architect-agents entry (main.py)
+    from llm_service_compat import bedrock_model_supports_prompt_caching  # type: ignore[no-redef]
+
+#: Bedrock ``cachePoint`` block placed after a system-prompt text segment to
+#: mark the preceding prefix as a provider-side cached breakpoint.  Returned
+#: as a fresh copy by ``cached_system_prompt`` on each call to prevent shared
+#: mutable state.
+_CACHE_POINT_BLOCK: "dict[str, dict[str, str]]" = {"cachePoint": {"type": "default"}}
 
 
 def cached_system_prompt(prompt: str, model_id: str = "") -> "str | list[dict]":
     """Wrap a static system-prompt string as a cached-prefix list for Strands Agent.
 
     When the *model_id* identifies a model known to support Bedrock prompt
-    caching (Claude 3.5 Sonnet v2+, Claude 3.7+, Claude 4+, Haiku 4.5+,
+    caching (Claude 3.5 Sonnet v2, Claude 3.7+, Claude 4+, Haiku 4.5+,
     Opus 4.5+, Nova), returns a two-element list suitable for
     ``Agent(system_prompt=...)``:
     ``[{"text": prompt}, {"cachePoint": {"type": "default"}}]``.
 
+    If *model_id* is empty or omitted, the function assumes caching is
+    supported (safe default — all architect-agent default models are
+    caching-capable Anthropic Claude variants).  Callers whose model may
+    not support caching should pass the resolved model identifier to opt
+    out gracefully.
+
     For any other model — including older Claude 3 originals (3-sonnet,
-    3-haiku, 3-opus) and non-Anthropic overrides (Llama, Mistral) — the
-    function falls back to returning the plain prompt string so the agent
-    still works without the caching optimization.
+    3-haiku, 3-opus), Claude 3.5 Sonnet v1, and non-Anthropic overrides
+    (Llama, Mistral) — the function falls back to returning the plain
+    prompt string so the agent still works without the caching optimization.
 
     On the Bedrock Converse API the ``cachePoint`` block instructs the provider
     to treat the preceding text segment as a stable prefix eligible for
     cross-call caching.  Within the architect scrutiny loop (up to 2
     iterations) and across the security architect's dual invocation, the
     identical system prompt is re-sent — this marker avoids re-processing it.
+
+    Model-support detection is delegated to
+    :func:`llm_service.capabilities.bedrock_model_supports_prompt_caching`
+    — the single source of truth for raw-Bedrock integration paths.
     """
-    model_lower = model_id.lower()
-    if not model_lower or any(frag in model_lower for frag in _CACHE_SUPPORTED_FRAGMENTS):
-        return [{"text": prompt}, {"cachePoint": {"type": "default"}}]
+    if bedrock_model_supports_prompt_caching(model_id):
+        return [{"text": prompt}, {**_CACHE_POINT_BLOCK}]
     return prompt
