@@ -17,7 +17,6 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
-import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
@@ -49,6 +48,7 @@ import {
   type ConfirmDialogData,
 } from '../../../../shared/confirm-dialog/confirm-dialog.component';
 import { InlineBannerComponent } from '../../../../shared/inline-banner/inline-banner.component';
+import { extractErrorDetail } from '../../../../shared/extract-error-detail';
 import {
   AgentDiffDialogComponent,
   type AgentDiffDialogData,
@@ -80,7 +80,6 @@ import {
     MatCardModule,
     MatChipsModule,
     MatDialogModule,
-    MatSnackBarModule,
     MatFormFieldModule,
     MatIconModule,
     MatInputModule,
@@ -99,7 +98,6 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   private readonly catalog = inject(AgentCatalogApiService);
   private readonly runner = inject(AgentRunnerApiService);
   private readonly dialog = inject(MatDialog);
-  private readonly snackBar = inject(MatSnackBar);
 
   /** Preselect an agent (wired from the Catalog drawer). */
   @Input() set preselectedAgentId(value: string | null) {
@@ -340,15 +338,9 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
             this.selectedPickerValue.set(`saved:${saved.id}`);
           },
           error: (err) => {
-            const msg =
-              err?.error?.detail ?? err?.message ?? 'Failed to save input';
-            this.snackBar.open(msg, 'Close', {
-              duration: 6000,
-              horizontalPosition: 'end',
-              verticalPosition: 'top',
-              politeness: 'assertive',
-              panelClass: 'kh-snack-error',
-            });
+            this.lastError.set(
+              extractErrorDetail(err, 'Failed to save input'),
+            );
           },
         });
     });
@@ -381,6 +373,11 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
             if (this.selectedPickerValue() === `saved:${savedId}`) {
               this.selectedPickerValue.set(null);
             }
+          },
+          error: (err) => {
+            this.lastError.set(
+              extractErrorDetail(err, 'Failed to delete saved input'),
+            );
           },
         });
       });

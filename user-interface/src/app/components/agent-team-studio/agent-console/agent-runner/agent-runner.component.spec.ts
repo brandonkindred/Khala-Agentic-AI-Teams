@@ -2,7 +2,6 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { HttpErrorResponse, HttpResponse } from '@angular/common/http';
 import { MatDialog } from '@angular/material/dialog';
-import { MatSnackBar } from '@angular/material/snack-bar';
 import { of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
@@ -118,7 +117,6 @@ describe('AgentRunnerComponent', () => {
   let catalogApi: CatalogApiMock;
   let runnerApi: RunnerApiMock;
   let dialogOpen: ReturnType<typeof vi.fn>;
-  let snackBarOpen: ReturnType<typeof vi.fn>;
   let fixture: ComponentFixture<AgentRunnerComponent>;
   let component: AgentRunnerComponent;
 
@@ -146,7 +144,6 @@ describe('AgentRunnerComponent', () => {
       diff: vi.fn(),
     };
     dialogOpen = vi.fn();
-    snackBarOpen = vi.fn();
 
     TestBed.configureTestingModule({
       imports: [AgentRunnerComponent, NoopAnimationsModule],
@@ -156,7 +153,6 @@ describe('AgentRunnerComponent', () => {
       ],
     });
     TestBed.overrideProvider(MatDialog, { useValue: { open: dialogOpen } });
-    TestBed.overrideProvider(MatSnackBar, { useValue: { open: snackBarOpen } });
     await TestBed.compileComponents();
 
     fixture = TestBed.createComponent(AgentRunnerComponent);
@@ -377,16 +373,13 @@ describe('AgentRunnerComponent', () => {
       expect(component.selectedPickerValue()).toBe(`saved:${savedInput.id}`);
     });
 
-    it('shows a snackbar when creating the saved input fails', () => {
+    it('sets lastError when creating the saved input fails', () => {
       dialogOpen.mockReturnValue({ afterClosed: () => of({ name: 'New save', description: null }) });
       runnerApi.createSavedInput.mockReturnValue(throwError(() => ({ error: { detail: 'name taken' } })));
 
       component.openSaveInputDialog();
 
-      expect(snackBarOpen).toHaveBeenCalledWith('name taken', 'Close', expect.objectContaining({
-        duration: 6000,
-        panelClass: 'kh-snack-error',
-      }));
+      expect(component.lastError()).toBe('name taken');
     });
   });
 
@@ -421,6 +414,20 @@ describe('AgentRunnerComponent', () => {
       expect(stopSpy).toHaveBeenCalled();
       expect(component.savedInputs()).toEqual([]);
       expect(component.selectedPickerValue()).toBeNull();
+    });
+
+    it('sets lastError when the delete API call fails', () => {
+      component.savedInputs.set([savedInput]);
+      dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
+      runnerApi.deleteSavedInput.mockReturnValue(
+        throwError(() => ({ error: { detail: 'still referenced' } })),
+      );
+
+      component.deleteSavedInput(savedInput.id, new Event('click'));
+
+      expect(component.lastError()).toBe('still referenced');
+      // The row is NOT removed because the API call failed.
+      expect(component.savedInputs()).toEqual([savedInput]);
     });
   });
 
