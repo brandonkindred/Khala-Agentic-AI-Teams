@@ -57,11 +57,15 @@ describe('NAV_GROUPS Studio-only journey entry', () => {
     expect(topLevel[0].id).toBe('agent-studio');
   });
 
-  it('does not expose legacy Console, Teams, or Personas as peer navigation items', () => {
-    const ids = agenticGroup.items.map((i) => i.id);
-    expect(ids).not.toContain('agent-console');
-    expect(ids).not.toContain('agentic-teams');
-    expect(ids).not.toContain('persona-testing');
+  it('does not expose legacy Console, Teams, or Personas anywhere in the global nav', () => {
+    // Check IDs globally — catches items reintroduced under any group
+    expect(ALL_NAV_ITEMS.some((i) => i.id === 'agent-console')).toBe(false);
+    expect(ALL_NAV_ITEMS.some((i) => i.id === 'agentic-teams')).toBe(false);
+    expect(ALL_NAV_ITEMS.some((i) => i.id === 'persona-testing')).toBe(false);
+    // Check routes globally — catches renamed IDs that reuse legacy URLs
+    expect(ALL_NAV_ITEMS.some((i) => i.route === '/agent-console')).toBe(false);
+    expect(ALL_NAV_ITEMS.some((i) => i.route === '/agentic-teams')).toBe(false);
+    expect(ALL_NAV_ITEMS.some((i) => i.route === '/persona-testing')).toBe(false);
   });
 
   it('only exposes Studio-based routes as navigable /agent-studio paths', () => {
