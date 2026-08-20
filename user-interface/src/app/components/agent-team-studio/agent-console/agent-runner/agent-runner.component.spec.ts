@@ -368,11 +368,15 @@ describe('AgentRunnerComponent', () => {
 
       component.openSaveInputDialog();
 
-      expect(runnerApi.createSavedInput).toHaveBeenCalledWith('blogging.writer', {
-        name: 'New save',
-        input_data: {},
-        description: null,
-      });
+      expect(runnerApi.createSavedInput).toHaveBeenCalledWith(
+        'blogging.writer',
+        {
+          name: 'New save',
+          input_data: {},
+          description: null,
+        },
+        expect.objectContaining({ context: expect.anything() }),
+      );
       expect(component.savedInputs()).toEqual([savedInput]);
       expect(component.selectedPickerValue()).toBe(`saved:${savedInput.id}`);
     });

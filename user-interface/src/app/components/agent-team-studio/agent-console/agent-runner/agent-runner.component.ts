@@ -55,6 +55,7 @@ import {
   type SaveInputDialogResult,
 } from '../save-input-dialog/save-input-dialog.component';
 import { extractErrorDetail } from '../../../../shared/extract-error-detail';
+import { skipErrorNotify } from '../../../../core/error-handler.interceptor';
 
 /**
  * Runner tab for the Agent Console.
@@ -325,11 +326,15 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     ref.afterClosed().subscribe((result) => {
       if (!result) return;
       this.runner
-        .createSavedInput(agent, {
-          name: result.name,
-          input_data: body,
-          description: result.description,
-        })
+        .createSavedInput(
+          agent,
+          {
+            name: result.name,
+            input_data: body,
+            description: result.description,
+          },
+          { context: skipErrorNotify() },
+        )
         .subscribe({
           next: (saved) => {
             this.savedInputs.update((rows) => [saved, ...rows]);
