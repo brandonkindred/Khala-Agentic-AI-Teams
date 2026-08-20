@@ -177,7 +177,7 @@ flowchart LR
 | LLM client | [`backend/agents/llm_service/`](backend/agents/llm_service/) | Ordered Postgres provider list + failover |
 | Agent cache | `AGENT_CACHE` (Docker: `/data/agents`) | Per-team namespaced artifacts under `{team_name}/` |
 | Agent platform | [`agent_platform/`](backend/agents/agent_platform/) | In-process registry, console, sandbox, and Studio authoring |
-| Agent Console / Registry | UI `/agent-console`; [`registry`](backend/agents/agent_platform/registry/), [`console`](backend/agents/agent_platform/console/) | Discover, inspect, and run specialist agents |
+| Agent Studio | UI `/agent-studio`; [`registry`](backend/agents/agent_platform/registry/), [`console`](backend/agents/agent_platform/console/) | Discover, inspect, build, and run specialist agents (replaces legacy `/agent-console`) |
 
 The Software Engineering deep dive (phases, task graphs, quality gates, Product Delivery loop) lives in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Repo orientation for agents and humans: [`CLAUDE.md`](CLAUDE.md).
 
