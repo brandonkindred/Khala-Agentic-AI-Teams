@@ -471,9 +471,8 @@ describe('ProcessDesignerChatComponent', () => {
     expect(btn).toBeTruthy();
     expect(btn.disabled).toBe(false);
     // No host has set `testAgentTooltip`, so this component's own generic
-    // default (not a Studio-specific stage reference) is used — this is the
-    // "no functional dependency on the embedding host" contract that keeps
-    // the legacy /agentic-teams mount from showing meaningless stage text.
+    // default (not a Studio-specific stage reference) is used — this verifies
+    // the "no functional dependency on the embedding host" contract.
     expect(testBtnTooltip()).toBe('Test this agent');
 
     const emitSpy = vi.spyOn(component.testAgent, 'emit');
