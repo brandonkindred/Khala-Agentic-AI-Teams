@@ -6,7 +6,7 @@ import { MatCardModule } from '@angular/material/card';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { LlmUsageApiService } from '../../services/llm-usage-api.service';
-import { extractErrorDetail } from '../../core/error-handler.interceptor';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import type {
   LlmUsageCall,
@@ -137,7 +137,7 @@ export class LlmUsageDashboardComponent implements OnInit {
             recent: this.api.getRecent(window, 100),
           }).pipe(
             catchError((err) => {
-              this.loadError = extractErrorDetail(err, 'Failed to load LLM usage.');
+              this.loadError = extractErrorDetail(err, 'Failed to load LLM usage.', { joinValidationArray: true });
               this.loading = false;
               const previous = this.summary;
               this.summary = {
