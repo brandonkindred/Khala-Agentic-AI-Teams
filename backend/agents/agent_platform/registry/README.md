@@ -1,6 +1,6 @@
 # Agent Registry
 
-Discovery substrate for the **Agent Console** (UI at `/agent-console`).
+Discovery substrate for the **Agent Studio** (UI at `/agent-studio`).
 
 Loads declarative per-agent manifests from
 `backend/agents/<team>/agent_console/manifests/*.yaml` and serves them as

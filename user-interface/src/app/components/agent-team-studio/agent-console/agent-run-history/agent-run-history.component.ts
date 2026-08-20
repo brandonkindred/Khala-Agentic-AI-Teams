@@ -14,7 +14,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatMenuModule } from '@angular/material/menu';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { AgentRunnerApiService } from '../../../../services/agent-runner-api.service';
+import { AgentConsoleApiService } from '../../../../services/agent-console-api.service';
 import type { RunSummary } from '../../../../models/agent-history.model';
 
 /**
@@ -37,7 +37,7 @@ import type { RunSummary } from '../../../../models/agent-history.model';
   styleUrl: './agent-run-history.component.scss',
 })
 export class AgentRunHistoryComponent implements OnChanges {
-  private readonly api = inject(AgentRunnerApiService);
+  private readonly api = inject(AgentConsoleApiService);
 
   @Input({ required: true }) agentId!: string | null;
   /** Highlights the currently-displayed run in the list. */

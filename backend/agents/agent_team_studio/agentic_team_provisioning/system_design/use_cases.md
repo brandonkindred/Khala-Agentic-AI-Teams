@@ -7,7 +7,7 @@
 ```mermaid
 graph LR
     Actor(["👤 Actor"])
-    UI["UI<br/>(Angular /agentic-teams)"]
+    UI["UI<br/>(Angular /agent-studio)"]
     Team["Agentic Team<br/>(Orchestrator Agent)"]
     FS[("File System")]
     DB[("Database")]

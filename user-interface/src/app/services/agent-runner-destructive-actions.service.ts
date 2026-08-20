@@ -1,7 +1,7 @@
 import { DestroyRef, Injectable, inject, signal } from '@angular/core';
 import { Observable, Subject } from 'rxjs';
 
-import { AgentRunnerApiService } from './agent-runner-api.service';
+import { AgentConsoleApiService } from './agent-console-api.service';
 import { NotificationService } from '../core/notification.service';
 import { ConfirmDestructiveService } from '../shared/confirm-destructive.service';
 import { DestructiveActionHelper } from '../shared/destructive-action.helper';
@@ -36,7 +36,7 @@ export interface AgentTaggedError {
  */
 @Injectable()
 export class AgentRunnerDestructiveActionsService {
-  private readonly api = inject(AgentRunnerApiService);
+  private readonly api = inject(AgentConsoleApiService);
   private readonly destroyRef = inject(DestroyRef);
 
   /** Error-banner messages tagged with originating agent; `null` message clears. */

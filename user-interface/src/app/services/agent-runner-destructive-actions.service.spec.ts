@@ -6,7 +6,7 @@ import {
   AgentTaggedError,
   AgentTaggedEvent,
 } from './agent-runner-destructive-actions.service';
-import { AgentRunnerApiService } from './agent-runner-api.service';
+import { AgentConsoleApiService } from './agent-console-api.service';
 import { NotificationService } from '../core/notification.service';
 import { ConfirmDestructiveService } from '../shared/confirm-destructive.service';
 
@@ -31,7 +31,7 @@ describe('AgentRunnerDestructiveActionsService', () => {
       providers: [
         AgentRunnerDestructiveActionsService,
         { provide: ConfirmDestructiveService, useValue: { confirm: confirmFn } },
-        { provide: AgentRunnerApiService, useValue: runnerApi },
+        { provide: AgentConsoleApiService, useValue: runnerApi },
         { provide: NotificationService, useValue: notify },
       ],
     });

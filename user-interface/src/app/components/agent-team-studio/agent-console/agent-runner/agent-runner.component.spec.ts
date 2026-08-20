@@ -4,8 +4,7 @@ import { HttpErrorResponse, HttpResponse } from '@angular/common/http';
 import { MatDialog } from '@angular/material/dialog';
 import { of, throwError } from 'rxjs';
 import { vi } from 'vitest';
-import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
-import { AgentRunnerApiService } from '../../../../services/agent-runner-api.service';
+import { AgentConsoleApiService } from '../../../../services/agent-console-api.service';
 import { NotificationService } from '../../../../core/notification.service';
 import type { AgentDetail, AgentSummary } from '../../../../models/agent-catalog.model';
 import type { InvokeEnvelope, SandboxHandle } from '../../../../models/agent-runner.model';
@@ -93,13 +92,10 @@ describe('AgentRunnerComponent', () => {
     created_at: '2026-08-01T00:05:00Z',
   };
 
-  interface CatalogApiMock {
+  interface ApiMock {
     listAgents: ReturnType<typeof vi.fn>;
     getAgent: ReturnType<typeof vi.fn>;
     getInputSchema: ReturnType<typeof vi.fn>;
-  }
-
-  interface RunnerApiMock {
     ensureWarm: ReturnType<typeof vi.fn>;
     getSandbox: ReturnType<typeof vi.fn>;
     teardown: ReturnType<typeof vi.fn>;
@@ -115,21 +111,17 @@ describe('AgentRunnerComponent', () => {
     diff: ReturnType<typeof vi.fn>;
   }
 
-  let catalogApi: CatalogApiMock;
-  let runnerApi: RunnerApiMock;
+  let api: ApiMock;
   let dialogOpen: ReturnType<typeof vi.fn>;
   let fixture: ComponentFixture<AgentRunnerComponent>;
   let component: AgentRunnerComponent;
 
-  const setup = async (catalogOverrides: Partial<CatalogApiMock> = {}) => {
+  const setup = async (apiOverrides: Partial<ApiMock> = {}) => {
     TestBed.resetTestingModule();
-    catalogApi = {
+    api = {
       listAgents: vi.fn().mockReturnValue(of([writerSummary])),
       getAgent: vi.fn().mockReturnValue(of(writerDetail)),
       getInputSchema: vi.fn().mockReturnValue(throwError(() => new Error('no schema'))),
-      ...catalogOverrides,
-    };
-    runnerApi = {
       ensureWarm: vi.fn().mockReturnValue(of(warmHandle)),
       getSandbox: vi.fn().mockReturnValue(of(coldHandle)),
       teardown: vi.fn().mockReturnValue(of({ agent_id: 'blogging.writer', status: 'stopped' })),
@@ -143,14 +135,14 @@ describe('AgentRunnerComponent', () => {
       getRun: vi.fn(),
       deleteRun: vi.fn(),
       diff: vi.fn(),
+      ...apiOverrides,
     };
     dialogOpen = vi.fn();
 
     TestBed.configureTestingModule({
       imports: [AgentRunnerComponent, NoopAnimationsModule],
       providers: [
-        { provide: AgentCatalogApiService, useValue: catalogApi },
-        { provide: AgentRunnerApiService, useValue: runnerApi },
+        { provide: AgentConsoleApiService, useValue: api },
         { provide: NotificationService, useValue: { saved: vi.fn() } },
       ],
     });
@@ -190,20 +182,20 @@ describe('AgentRunnerComponent', () => {
     it('loads the agent detail when set to a new id', () => {
       component.preselectedAgentId = 'blogging.writer';
       expect(component.selectedAgentId()).toBe('blogging.writer');
-      expect(catalogApi.getAgent).toHaveBeenCalledWith('blogging.writer');
+      expect(api.getAgent).toHaveBeenCalledWith('blogging.writer');
     });
 
     it('is a no-op when set to null', () => {
       component.preselectedAgentId = null;
       expect(component.selectedAgentId()).toBeNull();
-      expect(catalogApi.getAgent).not.toHaveBeenCalled();
+      expect(api.getAgent).not.toHaveBeenCalled();
     });
 
     it('is a no-op when set to the id already selected', () => {
       component.preselectedAgentId = 'blogging.writer';
-      catalogApi.getAgent.mockClear();
+      api.getAgent.mockClear();
       component.preselectedAgentId = 'blogging.writer';
-      expect(catalogApi.getAgent).not.toHaveBeenCalled();
+      expect(api.getAgent).not.toHaveBeenCalled();
     });
   });
 
@@ -232,7 +224,7 @@ describe('AgentRunnerComponent', () => {
 
   it('logs and surfaces an error when loading agent detail fails', () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    catalogApi.getAgent.mockReturnValue(throwError(() => new Error('missing')));
+    api.getAgent.mockReturnValue(throwError(() => new Error('missing')));
 
     selectWriter();
 
@@ -242,32 +234,32 @@ describe('AgentRunnerComponent', () => {
 
   describe('golden samples', () => {
     it('auto-applies the first sample when none is picked yet', () => {
-      runnerApi.listSamples.mockReturnValue(of(['sample-a', 'sample-b']));
-      runnerApi.getSample.mockReturnValue(of({ topic: 'from sample' }));
+      api.listSamples.mockReturnValue(of(['sample-a', 'sample-b']));
+      api.getSample.mockReturnValue(of({ topic: 'from sample' }));
 
       selectWriter();
 
       expect(component.selectedPickerValue()).toBe('golden:sample-a');
-      expect(runnerApi.getSample).toHaveBeenCalledWith('blogging.writer', 'sample-a');
+      expect(api.getSample).toHaveBeenCalledWith('blogging.writer', 'sample-a');
       expect(component.inputText()).toBe(JSON.stringify({ topic: 'from sample' }, null, 2));
     });
 
     it('clears golden samples on a load failure', () => {
-      runnerApi.listSamples.mockReturnValue(throwError(() => new Error('down')));
+      api.listSamples.mockReturnValue(throwError(() => new Error('down')));
       selectWriter();
       expect(component.goldenSamples()).toEqual([]);
     });
   });
 
   it('clears saved inputs on a load failure', () => {
-    runnerApi.listSavedInputs.mockReturnValue(throwError(() => new Error('down')));
+    api.listSavedInputs.mockReturnValue(throwError(() => new Error('down')));
     selectWriter();
     expect(component.savedInputs()).toEqual([]);
   });
 
   describe('input schema', () => {
     it('switches to form mode when a schema loads', () => {
-      catalogApi.getInputSchema.mockReturnValue(of({ type: 'object', properties: {} }));
+      api.getInputSchema.mockReturnValue(of({ type: 'object', properties: {} }));
       selectWriter();
       expect(component.inputSchema()).toEqual({ type: 'object', properties: {} });
       expect(component.editorMode()).toBe('form');
@@ -290,9 +282,9 @@ describe('AgentRunnerComponent', () => {
     });
 
     it('applies a golden sample', () => {
-      runnerApi.getSample.mockReturnValue(of({ topic: 'golden' }));
+      api.getSample.mockReturnValue(of({ topic: 'golden' }));
       component.onPickerChange('golden:sample-a');
-      expect(runnerApi.getSample).toHaveBeenCalledWith('blogging.writer', 'sample-a');
+      expect(api.getSample).toHaveBeenCalledWith('blogging.writer', 'sample-a');
       expect(component.selectedPickerValue()).toBe('golden:sample-a');
     });
 
@@ -357,16 +349,16 @@ describe('AgentRunnerComponent', () => {
     it('is a no-op on a cancelled dialog', () => {
       dialogOpen.mockReturnValue({ afterClosed: () => of(undefined) });
       component.openSaveInputDialog();
-      expect(runnerApi.createSavedInput).not.toHaveBeenCalled();
+      expect(api.createSavedInput).not.toHaveBeenCalled();
     });
 
     it('creates and selects the saved input on confirm', () => {
       dialogOpen.mockReturnValue({ afterClosed: () => of({ name: 'New save', description: null }) });
-      runnerApi.createSavedInput.mockReturnValue(of(savedInput));
+      api.createSavedInput.mockReturnValue(of(savedInput));
 
       component.openSaveInputDialog();
 
-      expect(runnerApi.createSavedInput).toHaveBeenCalledWith('blogging.writer', {
+      expect(api.createSavedInput).toHaveBeenCalledWith('blogging.writer', {
         name: 'New save',
         input_data: {},
         description: null,
@@ -377,7 +369,7 @@ describe('AgentRunnerComponent', () => {
 
     it('sets lastError when creating the saved input fails', () => {
       dialogOpen.mockReturnValue({ afterClosed: () => of({ name: 'New save', description: null }) });
-      runnerApi.createSavedInput.mockReturnValue(throwError(() => ({ error: { detail: 'name taken' } })));
+      api.createSavedInput.mockReturnValue(throwError(() => ({ error: { detail: 'name taken' } })));
 
       component.openSaveInputDialog();
 
@@ -399,7 +391,7 @@ describe('AgentRunnerComponent', () => {
 
       component.deleteSavedInput(savedInput.id, new Event('click'));
 
-      expect(runnerApi.deleteSavedInput).not.toHaveBeenCalled();
+      expect(api.deleteSavedInput).not.toHaveBeenCalled();
       expect(component.savedInputs()).toEqual([savedInput]);
     });
 
@@ -407,7 +399,7 @@ describe('AgentRunnerComponent', () => {
       component.savedInputs.set([savedInput]);
       component.selectedPickerValue.set(`saved:${savedInput.id}`);
       dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
-      runnerApi.deleteSavedInput.mockReturnValue(of({ id: savedInput.id, status: 'deleted' }));
+      api.deleteSavedInput.mockReturnValue(of({ id: savedInput.id, status: 'deleted' }));
       const event = new Event('click');
       const stopSpy = vi.spyOn(event, 'stopPropagation');
 
@@ -426,21 +418,21 @@ describe('AgentRunnerComponent', () => {
     });
 
     it('sets sandbox to null when the initial poll fails', () => {
-      runnerApi.getSandbox.mockReturnValue(throwError(() => new Error('down')));
+      api.getSandbox.mockReturnValue(throwError(() => new Error('down')));
       selectWriter();
       expect(component.sandbox()).toBeNull();
     });
 
     it('re-polls sandbox status every 5 seconds', () => {
       vi.useFakeTimers();
-      runnerApi.getSandbox.mockReturnValueOnce(of(coldHandle)).mockReturnValue(of(warmHandle));
+      api.getSandbox.mockReturnValueOnce(of(coldHandle)).mockReturnValue(of(warmHandle));
 
       selectWriter();
       expect(component.sandbox()).toEqual(coldHandle);
 
       vi.advanceTimersByTime(5000);
 
-      expect(runnerApi.getSandbox).toHaveBeenCalledTimes(2);
+      expect(api.getSandbox).toHaveBeenCalledTimes(2);
       expect(component.sandbox()).toEqual(warmHandle);
       vi.useRealTimers();
     });
@@ -448,20 +440,20 @@ describe('AgentRunnerComponent', () => {
     it('stops polling the sandbox after destroy', () => {
       vi.useFakeTimers();
       selectWriter();
-      expect(runnerApi.getSandbox).toHaveBeenCalledTimes(1);
+      expect(api.getSandbox).toHaveBeenCalledTimes(1);
 
       fixture.destroy();
       vi.advanceTimersByTime(5000);
 
-      expect(runnerApi.getSandbox).toHaveBeenCalledTimes(1);
+      expect(api.getSandbox).toHaveBeenCalledTimes(1);
       vi.useRealTimers();
     });
 
     it('is a no-op to warm/teardown when no agent is selected', () => {
       component.warmSandbox();
       component.tearDownSandbox();
-      expect(runnerApi.ensureWarm).not.toHaveBeenCalled();
-      expect(runnerApi.teardown).not.toHaveBeenCalled();
+      expect(api.ensureWarm).not.toHaveBeenCalled();
+      expect(api.teardown).not.toHaveBeenCalled();
     });
 
     it('warmSandbox sets the sandbox handle and clears the polling flag', () => {
@@ -474,7 +466,7 @@ describe('AgentRunnerComponent', () => {
     it('warmSandbox logs and clears the polling flag on failure', () => {
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
       selectWriter();
-      runnerApi.ensureWarm.mockReturnValue(throwError(() => new Error('warm failed')));
+      api.ensureWarm.mockReturnValue(throwError(() => new Error('warm failed')));
 
       component.warmSandbox();
 
@@ -486,7 +478,7 @@ describe('AgentRunnerComponent', () => {
       selectWriter();
       dialogOpen.mockReturnValue({ afterClosed: () => of(false) });
       component.tearDownSandbox();
-      expect(runnerApi.teardown).not.toHaveBeenCalled();
+      expect(api.teardown).not.toHaveBeenCalled();
     });
 
     it('tearDownSandbox marks the sandbox cold on confirm', () => {
@@ -499,7 +491,7 @@ describe('AgentRunnerComponent', () => {
     it('tearDownSandbox surfaces an error on failure', () => {
       selectWriter();
       dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
-      runnerApi.teardown.mockReturnValue(throwError(() => ({ error: { detail: 'teardown failed' } })));
+      api.teardown.mockReturnValue(throwError(() => ({ error: { detail: 'teardown failed' } })));
 
       component.tearDownSandbox();
 
@@ -513,30 +505,30 @@ describe('AgentRunnerComponent', () => {
     it('short-circuits on invalid JSON input', () => {
       component.inputText.set('{not json');
       component.run();
-      expect(runnerApi.invoke).not.toHaveBeenCalled();
+      expect(api.invoke).not.toHaveBeenCalled();
       expect(component.inputError()).toContain('JSON');
     });
 
     it('is a no-op when no agent is selected', () => {
       component.onAgentChange(null);
       component.run();
-      expect(runnerApi.invoke).not.toHaveBeenCalled();
+      expect(api.invoke).not.toHaveBeenCalled();
     });
 
     it('passes the saved input id through when a saved input is the active selection', () => {
       component.selectedPickerValue.set(`saved:${savedInput.id}`);
-      runnerApi.invoke.mockReturnValue(
+      api.invoke.mockReturnValue(
         of(new HttpResponse({ status: 200, body: { output: {}, duration_ms: 1, trace_id: 't', logs_tail: [] } })),
       );
 
       component.run();
 
-      expect(runnerApi.invoke).toHaveBeenCalledWith('blogging.writer', {}, savedInput.id);
+      expect(api.invoke).toHaveBeenCalledWith('blogging.writer', {}, savedInput.id);
     });
 
     it('handles a successful invoke and refreshes history', () => {
       const envelope: InvokeEnvelope = { output: { ok: true }, duration_ms: 42, trace_id: 'trace-1234', logs_tail: [] };
-      runnerApi.invoke.mockReturnValue(of(new HttpResponse({ status: 200, body: envelope })));
+      api.invoke.mockReturnValue(of(new HttpResponse({ status: 200, body: envelope })));
       expect(component.historyPanel).toBeTruthy();
       const refreshSpy = vi.spyOn(component.historyPanel!, 'refresh');
 
@@ -548,7 +540,7 @@ describe('AgentRunnerComponent', () => {
     });
 
     it('treats a 202 response as a warming notice, not a result', () => {
-      runnerApi.invoke.mockReturnValue(
+      api.invoke.mockReturnValue(
         of(new HttpResponse({ status: 202, body: { status: 'warming', message: 'still warming', sandbox: { agent_id: 'blogging.writer', status: 'warming' } } })),
       );
 
@@ -559,7 +551,7 @@ describe('AgentRunnerComponent', () => {
     });
 
     it('surfaces a 409 conflict message', () => {
-      runnerApi.invoke.mockReturnValue(
+      api.invoke.mockReturnValue(
         throwError(() => new HttpErrorResponse({ status: 409, error: { detail: 'Agent not runnable in sandbox.' } })),
       );
 
@@ -570,7 +562,7 @@ describe('AgentRunnerComponent', () => {
 
     it('unwraps a 422 envelope from the error detail', () => {
       const envelope: InvokeEnvelope = { output: null, duration_ms: 5, trace_id: 'trace-err', logs_tail: ['boom'], error: 'raised' };
-      runnerApi.invoke.mockReturnValue(throwError(() => new HttpErrorResponse({ status: 422, error: { detail: envelope } })));
+      api.invoke.mockReturnValue(throwError(() => new HttpErrorResponse({ status: 422, error: { detail: envelope } })));
 
       component.run();
 
@@ -581,7 +573,7 @@ describe('AgentRunnerComponent', () => {
       // A bare error object (not a real HttpErrorResponse) has neither
       // `error.detail` nor `message` — HttpErrorResponse always synthesises a
       // `message`, so this is the only way to reach the final `??` fallback.
-      runnerApi.invoke.mockReturnValue(throwError(() => ({})));
+      api.invoke.mockReturnValue(throwError(() => ({})));
 
       component.run();
 
@@ -601,7 +593,7 @@ describe('AgentRunnerComponent', () => {
         logs_tail: ['line 1'],
         sandbox_url: 'http://sandbox/run-1',
       };
-      runnerApi.getRun.mockReturnValue(of(record));
+      api.getRun.mockReturnValue(of(record));
 
       component.onHistoryLoadRun('run-1');
 
@@ -619,7 +611,7 @@ describe('AgentRunnerComponent', () => {
 
     it('omits the sandbox field when the run has no sandbox url', () => {
       const record: RunRecord = { ...runSummary, input_data: {}, logs_tail: [], sandbox_url: null };
-      runnerApi.getRun.mockReturnValue(of(record));
+      api.getRun.mockReturnValue(of(record));
 
       component.onHistoryLoadRun('run-1');
 
@@ -628,7 +620,7 @@ describe('AgentRunnerComponent', () => {
 
     it('logs a failure to load a past run', () => {
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-      runnerApi.getRun.mockReturnValue(throwError(() => new Error('missing run')));
+      api.getRun.mockReturnValue(throwError(() => new Error('missing run')));
 
       component.onHistoryLoadRun('run-1');
 
@@ -705,7 +697,7 @@ describe('AgentRunnerComponent', () => {
     });
 
     it('canRun is false when the agent requires live integrations', () => {
-      catalogApi.getAgent.mockReturnValue(of(liveIntegrationDetail));
+      api.getAgent.mockReturnValue(of(liveIntegrationDetail));
       component.onAgentChange('soc2.auditor');
       expect(component.requiresLiveIntegration()).toBe(true);
       expect(component.canRun()).toBe(false);
