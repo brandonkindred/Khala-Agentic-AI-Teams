@@ -419,16 +419,22 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
 
   private startSandboxPolling(agentId: string): void {
     this.sandboxPollSub?.unsubscribe();
-    this.api.getSandbox(agentId).subscribe({
+
+    const initialSub = this.api.getSandbox(agentId).subscribe({
       next: (handle) => this.sandbox.set(handle),
       error: () => this.sandbox.set(null),
     });
-    this.sandboxPollSub = interval(5000).subscribe(() => {
+
+    const pollSub = interval(5000).subscribe(() => {
       this.api.getSandbox(agentId).subscribe({
         next: (handle) => this.sandbox.set(handle),
         error: () => this.sandbox.set(null),
       });
     });
+
+    this.sandboxPollSub = new Subscription();
+    this.sandboxPollSub.add(initialSub);
+    this.sandboxPollSub.add(pollSub);
   }
 
   /**
