@@ -1,7 +1,11 @@
 import { TestBed } from '@angular/core/testing';
 import { Observable, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
-import { AgentRunnerDestructiveActionsService } from './agent-runner-destructive-actions.service';
+import {
+  AgentRunnerDestructiveActionsService,
+  AgentTaggedError,
+  AgentTaggedEvent,
+} from './agent-runner-destructive-actions.service';
 import { AgentRunnerApiService } from './agent-runner-api.service';
 import { NotificationService } from '../core/notification.service';
 import { ConfirmDestructiveService } from '../shared/confirm-destructive.service';
@@ -42,7 +46,7 @@ describe('AgentRunnerDestructiveActionsService', () => {
   describe('deleteSavedInput', () => {
     it('opens a danger confirm dialog with the saved input name', () => {
       mockDialogResult(false);
-      service.deleteSavedInput('id-1', 'My Input');
+      service.deleteSavedInput('blogging.writer', 'id-1', 'My Input');
 
       expect(confirmFn).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -56,7 +60,7 @@ describe('AgentRunnerDestructiveActionsService', () => {
 
     it('does not call the API when the user cancels', () => {
       mockDialogResult(false);
-      service.deleteSavedInput('id-1', 'My Input');
+      service.deleteSavedInput('blogging.writer', 'id-1', 'My Input');
       expect(runnerApi.deleteSavedInput).not.toHaveBeenCalled();
     });
 
@@ -64,7 +68,6 @@ describe('AgentRunnerDestructiveActionsService', () => {
       mockDialogResult(true);
       runnerApi.deleteSavedInput.mockReturnValue(
         new Observable((subscriber) => {
-          // Verify the loading signal is set while the call is in flight.
           expect(service.deletingSavedInputId()).toBe('id-1');
           subscriber.next({ id: 'id-1', status: 'deleted' });
           subscriber.complete();
@@ -72,49 +75,48 @@ describe('AgentRunnerDestructiveActionsService', () => {
       );
 
       expect(service.deletingSavedInputId()).toBeNull();
-
-      service.deleteSavedInput('id-1', 'My Input');
-
-      // After success, loading signal is cleared.
+      service.deleteSavedInput('blogging.writer', 'id-1', 'My Input');
       expect(service.deletingSavedInputId()).toBeNull();
     });
 
-    it('emits the saved id through savedInputDeleted$ on success', () => {
+    it('emits the saved id tagged with the agent through savedInputDeleted$ on success', () => {
       mockDialogResult(true);
       runnerApi.deleteSavedInput.mockReturnValue(of({ id: 'id-1', status: 'deleted' }));
 
-      const emitted: string[] = [];
-      service.savedInputDeleted$.subscribe((id) => emitted.push(id));
+      const emitted: AgentTaggedEvent<string>[] = [];
+      service.savedInputDeleted$.subscribe((e) => emitted.push(e));
 
-      service.deleteSavedInput('id-1', 'My Input');
+      service.deleteSavedInput('blogging.writer', 'id-1', 'My Input');
 
-      expect(emitted).toEqual(['id-1']);
+      expect(emitted).toEqual([{ agentId: 'blogging.writer', payload: 'id-1' }]);
     });
 
     it('shows a success toast on success', () => {
       mockDialogResult(true);
       runnerApi.deleteSavedInput.mockReturnValue(of({ id: 'id-1', status: 'deleted' }));
 
-      service.deleteSavedInput('id-1', 'My Input');
+      service.deleteSavedInput('blogging.writer', 'id-1', 'My Input');
 
       expect(notify.saved).toHaveBeenCalledWith('Saved input deleted.');
     });
 
-    it('emits the error message through errors$ on failure and clears loading', () => {
+    it('emits the error tagged with the agent through errors$ on failure', () => {
       mockDialogResult(true);
       runnerApi.deleteSavedInput.mockReturnValue(
         throwError(() => ({ error: { detail: 'not found' } })),
       );
 
-      const errors: (string | null)[] = [];
-      service.errors$.subscribe((msg) => errors.push(msg));
-      const deleted: string[] = [];
-      service.savedInputDeleted$.subscribe((id) => deleted.push(id));
+      const errors: AgentTaggedError[] = [];
+      service.errors$.subscribe((e) => errors.push(e));
+      const deleted: AgentTaggedEvent<string>[] = [];
+      service.savedInputDeleted$.subscribe((e) => deleted.push(e));
 
-      service.deleteSavedInput('id-1', 'My Input');
+      service.deleteSavedInput('blogging.writer', 'id-1', 'My Input');
 
-      // First emission is null (clearing previous error), second is the failure.
-      expect(errors).toEqual([null, 'not found']);
+      expect(errors).toEqual([
+        { agentId: 'blogging.writer', message: null },
+        { agentId: 'blogging.writer', message: 'not found' },
+      ]);
       expect(deleted).toEqual([]);
       expect(service.deletingSavedInputId()).toBeNull();
       expect(notify.saved).not.toHaveBeenCalled();
@@ -146,7 +148,6 @@ describe('AgentRunnerDestructiveActionsService', () => {
       mockDialogResult(true);
       runnerApi.teardown.mockReturnValue(
         new Observable((subscriber) => {
-          // Verify the loading signal is set while the call is in flight.
           expect(service.tearingDown()).toBe(true);
           subscriber.next({ agent_id: 'agent-1', status: 'stopped' });
           subscriber.complete();
@@ -154,22 +155,20 @@ describe('AgentRunnerDestructiveActionsService', () => {
       );
 
       expect(service.tearingDown()).toBe(false);
-
       service.tearDownSandbox('agent-1', 'Writer');
-
       expect(service.tearingDown()).toBe(false);
     });
 
-    it('emits through sandboxTornDown$ on success', () => {
+    it('emits through sandboxTornDown$ tagged with the agent on success', () => {
       mockDialogResult(true);
       runnerApi.teardown.mockReturnValue(of({ agent_id: 'agent-1', status: 'stopped' }));
 
-      let emitted = false;
-      service.sandboxTornDown$.subscribe(() => { emitted = true; });
+      const emitted: AgentTaggedEvent[] = [];
+      service.sandboxTornDown$.subscribe((e) => emitted.push(e));
 
       service.tearDownSandbox('agent-1', 'Writer');
 
-      expect(emitted).toBe(true);
+      expect(emitted).toEqual([{ agentId: 'agent-1', payload: undefined }]);
     });
 
     it('shows a success toast on success', () => {
@@ -181,20 +180,23 @@ describe('AgentRunnerDestructiveActionsService', () => {
       expect(notify.saved).toHaveBeenCalledWith('Sandbox torn down.');
     });
 
-    it('emits the error message through errors$ on failure and clears loading', () => {
+    it('emits the error tagged with the agent through errors$ on failure', () => {
       mockDialogResult(true);
       runnerApi.teardown.mockReturnValue(
         throwError(() => ({ error: { detail: 'teardown refused' } })),
       );
 
-      const errors: (string | null)[] = [];
-      service.errors$.subscribe((msg) => errors.push(msg));
+      const errors: AgentTaggedError[] = [];
+      service.errors$.subscribe((e) => errors.push(e));
       let tornDown = false;
       service.sandboxTornDown$.subscribe(() => { tornDown = true; });
 
       service.tearDownSandbox('agent-1', 'Writer');
 
-      expect(errors).toEqual([null, 'teardown refused']);
+      expect(errors).toEqual([
+        { agentId: 'agent-1', message: null },
+        { agentId: 'agent-1', message: 'teardown refused' },
+      ]);
       expect(tornDown).toBe(false);
       expect(service.tearingDown()).toBe(false);
       expect(notify.saved).not.toHaveBeenCalled();

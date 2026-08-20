@@ -171,8 +171,6 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   });
 
   private sandboxPollSub: Subscription | null = null;
-  /** Agent id at the time the last destructive action was delegated. */
-  private _actionAgentId: string | null = null;
 
   ngOnInit(): void {
     this.catalog.listAgents().subscribe({
@@ -183,8 +181,8 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     // Wire destructive-actions service observables.
     this.destructiveActions.savedInputDeleted$
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((savedId) => {
-        if (this._actionAgentId !== this.selectedAgentId()) return;
+      .subscribe(({ agentId, payload: savedId }) => {
+        if (agentId !== this.selectedAgentId()) return;
         this.savedInputs.update((rows) => rows.filter((s) => s.id !== savedId));
         if (this.selectedPickerValue() === `saved:${savedId}`) {
           this.selectedPickerValue.set(null);
@@ -193,8 +191,8 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
 
     this.destructiveActions.sandboxTornDown$
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe(() => {
-        if (this._actionAgentId !== this.selectedAgentId()) return;
+      .subscribe(({ agentId }) => {
+        if (agentId !== this.selectedAgentId()) return;
         const current = this.sandbox();
         if (!current) return;
         this.sandbox.set({ ...current, status: 'cold', url: null });
@@ -202,15 +200,9 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
 
     this.destructiveActions.errors$
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((msg) => {
-        // Only apply errors originating from the currently selected agent.
-        // A null clear is always accepted; non-null errors are discarded if
-        // the agent has changed since the action was initiated.
-        if (msg === null) {
-          this.destructiveError.set(null);
-        } else if (this._actionAgentId === this.selectedAgentId()) {
-          this.destructiveError.set(msg);
-        }
+      .subscribe(({ agentId, message }) => {
+        if (agentId !== this.selectedAgentId()) return;
+        this.destructiveError.set(message);
       });
   }
 
@@ -421,8 +413,9 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     event.stopPropagation();
     const match = this.savedInputs().find((s) => s.id === savedId);
     if (!match) return;
-    this._actionAgentId = this.selectedAgentId();
-    this.destructiveActions.deleteSavedInput(savedId, match.name);
+    const agentId = this.selectedAgentId();
+    if (!agentId) return;
+    this.destructiveActions.deleteSavedInput(agentId, savedId, match.name);
   }
 
   // ---------------------------------------------------------------
@@ -480,7 +473,6 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
     const label = this.selectedAgent()?.manifest.name ?? agentId;
-    this._actionAgentId = agentId;
     this.destructiveActions.tearDownSandbox(agentId, label);
   }
 
