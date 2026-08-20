@@ -149,20 +149,10 @@ describe('App routes', () => {
     expect(children.some((r) => r.path === 'agent-provisioning')).toBe(false);
   });
 
-  it('redirects legacy persona-testing paths to agent-studio (issue #6508)', () => {
+  it('no longer registers the retired persona-testing routes (issue #6517)', () => {
     const shell = routes[0];
     const children = (shell?.children ?? []) as Route[];
-
-    // /persona-testing → /agent-studio (static redirect)
-    const bare = children.find((r) => r.path === 'persona-testing');
-    expect(bare).toBeDefined();
-    expect(bare!.redirectTo).toBe('/agent-studio');
-    expect(bare!.pathMatch).toBe('full');
-
-    // /persona-testing/audit/:runId → guard-based redirect to /agent-studio/persona-run/:runId
-    const audit = children.find((r) => r.path === 'persona-testing/audit/:runId');
-    expect(audit).toBeDefined();
-    expect(audit!.canActivate).toBeDefined();
-    expect(audit!.canActivate!.length).toBe(1);
+    expect(children.some((r) => r.path === 'persona-testing')).toBe(false);
+    expect(children.some((r) => r.path === 'persona-testing/audit/:runId')).toBe(false);
   });
 });
