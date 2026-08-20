@@ -36,8 +36,8 @@ rules, proposals approve/reject) already exists; this work consumes it.
 | File | Change | Design ref |
 |---|---|---|
 | `environments/environment.ts` + `environment.prod.ts` | Add `agentCognitionApiUrl: \`${apiBase}/api/cognition\`` | §2 |
-| `components/agent-console/agent-console.component.ts` | Import `CognitionTabComponent`, add to `imports[]`, bump docstring to seven tabs | §1 |
-| `components/agent-console/agent-console.component.html` | Add 7th `<mat-tab>` (icon `psychology`, label "Cognition") after Feedback | §1 |
+| ~~`components/agent-console/agent-console.component.ts`~~ | ~~Import `CognitionTabComponent`, add to `imports[]`~~ (removed — Console shell deleted; Cognition is now a standalone route) | §1 |
+| ~~`components/agent-console/agent-console.component.html`~~ | ~~Add 7th `<mat-tab>`~~ (removed — Console shell deleted; Cognition lives at `/cognition`) | §1 |
 
 ---
 
