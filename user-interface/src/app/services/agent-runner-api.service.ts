@@ -2,7 +2,6 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpParams, HttpResponse } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
-import { skipErrorNotify } from '../core/error-handler.interceptor';
 import type {
   InvokeEnvelope,
   SandboxHandle,
@@ -104,17 +103,12 @@ export class AgentRunnerApiService {
    *
    * @param agentId - The agent identifier (will be URL-encoded).
    * @param body - The saved input payload.
-   * @param options - Optional request options.
-   * @param options.silent - When `true`, suppresses the global error toast
-   *   so the caller can handle the error locally (e.g. via a component-level
-   *   snackbar).
    * @returns The created saved input.
    */
-  createSavedInput(agentId: string, body: SavedInputCreate, options?: { silent?: boolean }): Observable<SavedInput> {
+  createSavedInput(agentId: string, body: SavedInputCreate): Observable<SavedInput> {
     return this.http.post<SavedInput>(
       `${this.baseUrl}/${encodeURIComponent(agentId)}/saved-inputs`,
       body,
-      options?.silent ? { context: skipErrorNotify() } : undefined,
     );
   }
 

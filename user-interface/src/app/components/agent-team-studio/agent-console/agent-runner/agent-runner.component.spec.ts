@@ -2,7 +2,6 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { HttpErrorResponse, HttpResponse } from '@angular/common/http';
 import { MatDialog } from '@angular/material/dialog';
-import { MatSnackBar } from '@angular/material/snack-bar';
 import { of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
@@ -119,7 +118,6 @@ describe('AgentRunnerComponent', () => {
   let catalogApi: CatalogApiMock;
   let runnerApi: RunnerApiMock;
   let dialogOpen: ReturnType<typeof vi.fn>;
-  let snackBarOpen: ReturnType<typeof vi.fn>;
   let confirmServiceConfirm: ReturnType<typeof vi.fn>;
   let fixture: ComponentFixture<AgentRunnerComponent>;
   let component: AgentRunnerComponent;
@@ -148,7 +146,6 @@ describe('AgentRunnerComponent', () => {
       diff: vi.fn(),
     };
     dialogOpen = vi.fn();
-    snackBarOpen = vi.fn();
     confirmServiceConfirm = vi.fn();
 
     TestBed.configureTestingModule({
@@ -159,7 +156,6 @@ describe('AgentRunnerComponent', () => {
       ],
     });
     TestBed.overrideProvider(MatDialog, { useValue: { open: dialogOpen } });
-    TestBed.overrideProvider(MatSnackBar, { useValue: { open: snackBarOpen } });
     TestBed.overrideProvider(ConfirmDestructiveService, {
       useValue: { confirm: confirmServiceConfirm },
     });
@@ -378,21 +374,18 @@ describe('AgentRunnerComponent', () => {
         name: 'New save',
         input_data: {},
         description: null,
-      }, { silent: true });
+      });
       expect(component.savedInputs()).toEqual([savedInput]);
       expect(component.selectedPickerValue()).toBe(`saved:${savedInput.id}`);
     });
 
-    it('shows a snackbar when creating the saved input fails', () => {
+    it('sets lastError when creating the saved input fails', () => {
       dialogOpen.mockReturnValue({ afterClosed: () => of({ name: 'New save', description: null }) });
       runnerApi.createSavedInput.mockReturnValue(throwError(() => ({ error: { detail: 'name taken' } })));
 
       component.openSaveInputDialog();
 
-      expect(snackBarOpen).toHaveBeenCalledWith('name taken', 'Close', expect.objectContaining({
-        duration: 6000,
-        panelClass: 'kh-snack-error',
-      }));
+      expect(component.lastError()).toBe('name taken');
     });
   });
 

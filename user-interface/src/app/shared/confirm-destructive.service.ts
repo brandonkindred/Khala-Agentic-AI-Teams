@@ -32,6 +32,10 @@ export class ConfirmDestructiveService {
    * confirms, `false` on cancel, backdrop/ESC dismissal, or when a
    * confirmation is already pending. The re-entrancy guard is released
    * when the dialog closes or if `MatDialog.open()` throws synchronously.
+   *
+   * **Important:** The returned observable must be subscribed to. If it is
+   * not subscribed, the re-entrancy guard will remain active for the
+   * lifetime of this service instance, blocking all future confirmations.
    */
   confirm(data: ConfirmDialogData): Observable<boolean> {
     if (this.confirming) return of(false);
