@@ -124,7 +124,7 @@ def _qa_user_prompt() -> str:
         "```",
         "",
         "Review the code for bugs and produce structured JSON with "
-        "fields: bugs_found, test_plan, unit_tests, integration_tests, "
+        "fields: approved, bugs_found, test_plan, unit_tests, integration_tests, "
         "readme_content, summary, live_test_notes, suggested_commit_message.",
         f"**Task:** {_SHARED_TASK}",
     ])

@@ -125,12 +125,27 @@ End-to-end tests in `tests/test_review_cycle_cache_e2e.py` verify:
 
 ## Cost impact
 
-**Code Review** (explicit breakpoint — the realized savings):
-For a typical review with a 2000-token spec/architecture prefix reviewed across 5
-chunks: without caching, 2000 × 5 = 10000 input tokens. With caching, 2000 billed
-once + 2000 × 4 reads at the cached-input discount (90% cheaper on Anthropic) =
-2000 + 800 = 2800 effective input tokens. ~72% reduction for the shared prefix
-portion. Savings compound on retry cycles.
+**Code Review** (explicit breakpoint — realized savings on retries and sequential
+calls):
+The savings apply when a subsequent call reuses a prefix that an earlier call
+already cached. In practice this means:
+- **Retry cycles**: when the outer review loop re-invokes Code Review after a
+  QA/Security failure, the spec/architecture prefix is already cached from the
+  previous cycle.
+- **Sequential chunk pairs**: if a chunk finishes and its cache entry is still warm
+  when the next chunk starts (within Anthropic's 5-minute TTL).
+
+Note: the production coordinator fans out chunks concurrently via `parallel_map`
+(default concurrency up to 8 in `code_review_agent/mapping.py`). In a concurrent
+batch, all requests may start before the first cache entry is available, so
+within-batch savings depend on timing and provider cache propagation latency. The
+primary realized savings are on **retry cycles** (always sequential) and any
+sequential re-invocations within the same TTL window.
+
+Example (retry cycle, sequential): a 2000-token spec/architecture prefix billed
+once on the first cycle, then served at the cached-input discount (90% cheaper on
+Anthropic) on retry cycles: 2000 full + 2000 × 0.1 per retry = 2200 effective
+tokens for two cycles instead of 4000.
 
 **QA/Security** (no explicit opt-in — potential future savings):
 If a supported cache mechanism is added for QA/Security user-message content, the
