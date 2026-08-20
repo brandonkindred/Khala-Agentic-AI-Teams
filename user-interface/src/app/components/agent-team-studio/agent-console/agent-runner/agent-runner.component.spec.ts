@@ -2,7 +2,6 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { HttpErrorResponse, HttpResponse } from '@angular/common/http';
 import { MatDialog } from '@angular/material/dialog';
-import { MatSnackBar } from '@angular/material/snack-bar';
 import { of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
@@ -118,7 +117,6 @@ describe('AgentRunnerComponent', () => {
   let catalogApi: CatalogApiMock;
   let runnerApi: RunnerApiMock;
   let dialogOpen: ReturnType<typeof vi.fn>;
-  let snackBarSpy: { open: ReturnType<typeof vi.fn> };
   let fixture: ComponentFixture<AgentRunnerComponent>;
   let component: AgentRunnerComponent;
 
@@ -146,14 +144,12 @@ describe('AgentRunnerComponent', () => {
       diff: vi.fn(),
     };
     dialogOpen = vi.fn();
-    snackBarSpy = { open: vi.fn() };
 
     TestBed.configureTestingModule({
       imports: [AgentRunnerComponent, NoopAnimationsModule],
       providers: [
         { provide: AgentCatalogApiService, useValue: catalogApi },
         { provide: AgentRunnerApiService, useValue: runnerApi },
-        { provide: MatSnackBar, useValue: snackBarSpy },
       ],
     });
     TestBed.overrideProvider(MatDialog, { useValue: { open: dialogOpen } });
@@ -368,36 +364,20 @@ describe('AgentRunnerComponent', () => {
 
       component.openSaveInputDialog();
 
-      expect(runnerApi.createSavedInput).toHaveBeenCalledWith(
-        'blogging.writer',
-        {
-          name: 'New save',
-          input_data: {},
-          description: null,
-        },
-        expect.objectContaining({ context: expect.anything() }),
-      );
+      expect(runnerApi.createSavedInput).toHaveBeenCalledWith('blogging.writer', {
+        name: 'New save',
+        input_data: {},
+        description: null,
+      });
       expect(component.savedInputs()).toEqual([savedInput]);
       expect(component.selectedPickerValue()).toBe(`saved:${savedInput.id}`);
     });
 
-    it('shows a snackbar when creating the saved input fails', () => {
+    it('does not throw when creating the saved input fails (interceptor toasts)', () => {
       dialogOpen.mockReturnValue({ afterClosed: () => of({ name: 'New save', description: null }) });
       runnerApi.createSavedInput.mockReturnValue(throwError(() => ({ error: { detail: 'name taken' } })));
 
-      component.openSaveInputDialog();
-
-      expect(snackBarSpy.open).toHaveBeenCalledWith(
-        'name taken',
-        'Close',
-        {
-          duration: 6000,
-          horizontalPosition: 'end',
-          verticalPosition: 'top',
-          politeness: 'assertive',
-          panelClass: 'kh-snack-error',
-        },
-      );
+      expect(() => component.openSaveInputDialog()).not.toThrow();
     });
   });
 

@@ -1,5 +1,5 @@
 import { Injectable, inject } from '@angular/core';
-import { HttpClient, HttpContext, HttpParams, HttpResponse } from '@angular/common/http';
+import { HttpClient, HttpParams, HttpResponse } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
 import type {
@@ -98,15 +98,10 @@ export class AgentRunnerApiService {
     );
   }
 
-  createSavedInput(
-    agentId: string,
-    body: SavedInputCreate,
-    options?: { context?: HttpContext },
-  ): Observable<SavedInput> {
+  createSavedInput(agentId: string, body: SavedInputCreate): Observable<SavedInput> {
     return this.http.post<SavedInput>(
       `${this.baseUrl}/${encodeURIComponent(agentId)}/saved-inputs`,
       body,
-      options,
     );
   }
 

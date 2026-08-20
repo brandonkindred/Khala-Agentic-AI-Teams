@@ -17,7 +17,6 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
-import { MatSnackBar } from '@angular/material/snack-bar';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
@@ -54,7 +53,6 @@ import {
   type SaveInputDialogData,
   type SaveInputDialogResult,
 } from '../save-input-dialog/save-input-dialog.component';
-import { extractErrorDetail, skipErrorNotify } from '../../../../core/error-handler.interceptor';
 
 /**
  * Runner tab for the Agent Console.
@@ -95,7 +93,6 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   private readonly catalog = inject(AgentCatalogApiService);
   private readonly runner = inject(AgentRunnerApiService);
   private readonly dialog = inject(MatDialog);
-  private readonly snackBar = inject(MatSnackBar);
 
   /** Preselect an agent (wired from the Catalog drawer). */
   @Input() set preselectedAgentId(value: string | null) {
@@ -325,34 +322,18 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     ref.afterClosed().subscribe((result) => {
       if (!result) return;
       this.runner
-        .createSavedInput(
-          agent,
-          {
-            name: result.name,
-            input_data: body,
-            description: result.description,
-          },
-          { context: skipErrorNotify() },
-        )
+        .createSavedInput(agent, {
+          name: result.name,
+          input_data: body,
+          description: result.description,
+        })
         .subscribe({
           next: (saved) => {
             this.savedInputs.update((rows) => [saved, ...rows]);
             this.selectedPickerValue.set(`saved:${saved.id}`);
           },
-          error: (err) => {
-            // Mat dialog is already closed; surface via snackbar.
-            this.snackBar.open(
-              extractErrorDetail(err, 'Failed to save input'),
-              'Close',
-              {
-                duration: 6000,
-                horizontalPosition: 'end',
-                verticalPosition: 'top',
-                politeness: 'assertive',
-                panelClass: 'kh-snack-error',
-              },
-            );
-          },
+          // Error toast is handled by the global errorHandlerInterceptor.
+          error: () => undefined,
         });
     });
   }
