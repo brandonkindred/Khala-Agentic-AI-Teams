@@ -49,6 +49,8 @@ from llm_service import telemetry
 from llm_service.strands_adapter import LLMClientModel
 from software_engineering_team.shared.single_shot_review import run_single_shot_review
 
+pytestmark = [pytest.mark.usefixtures("_reset_llm_telemetry_state")]
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -222,7 +224,7 @@ def _security_reply() -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_code_review_emits_cache_control_and_records_cache_tokens() -> None:
+def test_cross_gate_cache_telemetry_baseline() -> None:
     """Code Review's reasoning call carries a ``cache_control`` block on the
     wire (the explicit cache opt-in via ``CacheBreakpoint``), and the
     telemetry pipeline records the cache-creation tokens reported by the
@@ -552,8 +554,8 @@ def test_code_review_output_unchanged_regardless_of_cache_state() -> None:
     result_1 = agent.run(_cr_chunk_input())
     result_2 = agent.run(_cr_chunk_input())
 
-    # AC3: outputs are identical
-    assert result_1 == result_2
+    # Output is identical regardless of reported cache state
+    assert result_1.model_dump() == result_2.model_dump()
 
     # Verify cache telemetry confirms the two states differ
     calls = telemetry.get_recent_calls()

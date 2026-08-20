@@ -104,13 +104,18 @@ client requires sequencing (e.g. `DummyLLMClient` in tests).
   shared-cache-backed result caches (keyed on the full input hash + model
   fingerprint). These are a separate, higher-level mechanism — a cache hit there
   skips the LLM call entirely.
-- **Cross-microtask caching**: each microtask's review cycle is independent.
+- **Cross-microtask caching**: microtasks within the same task share the same
+  spec/architecture `review_context`, so their `CacheBreakpoint`-marked prefixes
+  can be identical. If microtasks run within the 5-minute TTL and their marked
+  system-content prefix is byte-identical, later microtasks may read the cache
+  entry created by earlier ones. However, concurrent microtask execution and
+  provider cache propagation latency make this non-deterministic.
 
 ## Verification
 
 End-to-end tests in `tests/test_review_cycle_cache_e2e.py` verify:
 
-1. **Wire-level Code Review cache opt-in** (`test_code_review_emits_cache_control_and_records_cache_tokens`,
+1. **Wire-level Code Review cache opt-in** (`test_cross_gate_cache_telemetry_baseline`,
    `test_code_review_retry_shows_nonzero_cache_read`):
    - Code Review's system content carries `cache_control: {"type": "ephemeral"}`
      blocks on the wire.

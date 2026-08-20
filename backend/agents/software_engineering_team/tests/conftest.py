@@ -263,14 +263,13 @@ def patched_job_store(monkeypatch, fake_job_client):  # noqa: F811 (pytest fixtu
     return fake_job_client
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture()
 def _reset_llm_telemetry_state():
-    """Clear the LLM telemetry call log and JSON-observer state around every test.
+    """Clear the LLM telemetry call log and JSON-observer state around a test.
 
-    Shared by both cache-token E2E test modules
-    (``test_chunk_reviewer_cache_e2e.py``, ``test_review_cycle_cache_e2e.py``)
-    so each test starts with an empty call log and no leaked observer state.
-    Clearing an empty log is trivially cheap, so this runs unconditionally.
+    Used by the cache-token E2E test modules via ``pytestmark =
+    [pytest.mark.usefixtures("_reset_llm_telemetry_state")]`` so each test
+    starts with an empty call log and no leaked observer state.
     """
     _telemetry.clear_call_log()
     _reset_json_obs()

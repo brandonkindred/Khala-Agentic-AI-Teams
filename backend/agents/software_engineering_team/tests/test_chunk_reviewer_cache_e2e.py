@@ -26,12 +26,15 @@ from __future__ import annotations
 import json
 from typing import Any, Dict
 
+import pytest
 from code_review_agent.chunk_reviewer import ChunkReviewAgent
 from code_review_agent.models import ChunkReviewInput
 
 from llm_client_fakes import _make_claude_client, _text_message
 from llm_service import telemetry
 from llm_service.strands_adapter import LLMClientModel
+
+pytestmark = [pytest.mark.usefixtures("_reset_llm_telemetry_state")]
 
 
 def _shared_context() -> Dict[str, Any]:
