@@ -127,8 +127,10 @@ _SHARED_OUTPUT_SECTION = (
     "unrelated bug you notice in surrounding, unchanged code you were shown for context). false "
     "only with positive evidence the defect is in code this change itself added or modified -- a "
     "change-surface marker or the task/diff description. Default true when you cannot tell "
-    "whether the code predates this change -- do not guess it into scope. This does NOT apply to "
-    "findings that the change should have added or "
+    "whether the code predates this change -- do not guess it into scope. The downstream posting "
+    "gate is change-map-driven (is_within_diff + omission), so pre_existing alone does not "
+    "control whether a finding is posted. This does NOT apply to findings that the change "
+    "should have added or "
     "modified a file but did not -- those are in-scope defects; use pre_existing: false and set "
     'omission: true instead (see "omission" below).\n'
     '  - "omission": boolean. true when this finding is a required add/modify the change should '
@@ -185,9 +187,11 @@ _SHARED_REVIEW_POLICY = (
     '  - "pre_existing": boolean. true when the defect is in unchanged, pre-existing code outside '
     "this change; false only with positive evidence the defect is in code this change added or "
     "modified -- a change-surface marker (see THOROUGHNESS REQUIREMENTS below) or the task/diff "
-    "description. Default true when uncertain -- do not guess a defect into scope. This does NOT "
-    "apply to findings that the change should have added or modified a file but did not -- those "
-    "are in-scope defects; use pre_existing: false and set omission: true instead.\n"
+    "description. Default true when uncertain -- do not guess a defect into scope. The downstream "
+    "posting gate is change-map-driven (is_within_diff + omission), so pre_existing alone does "
+    "not control whether a finding is posted. This does NOT apply to findings that the change "
+    "should have added or modified a file but did not -- those are in-scope defects; use "
+    "pre_existing: false and set omission: true instead.\n"
     "- The coding agent that receives these issues will use them as instructions, so each issue "
     "must be detailed enough to be acted upon WITHOUT additional context.\n\n"
     "**NEVER PUBLISH YOUR CHAIN OF THOUGHT:**\n"
