@@ -25,7 +25,7 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSelectModule } from '@angular/material/select';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
-import { Subscription, interval } from 'rxjs';
+import { Subscription, timer } from 'rxjs';
 import { AgentConsoleApiService } from '../../../../services/agent-console-api.service';
 import type {
   AgentDetail,
@@ -425,7 +425,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
       error: () => this.sandbox.set(null),
     });
 
-    const pollSub = interval(5000).subscribe(() => {
+    const pollSub = timer(5000, 5000).subscribe(() => {
       this.api.getSandbox(agentId).subscribe({
         next: (handle) => this.sandbox.set(handle),
         error: () => this.sandbox.set(null),
