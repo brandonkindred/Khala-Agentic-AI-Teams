@@ -439,7 +439,11 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
           next: () => {
             this.sandbox.set({ ...(this.sandbox() as SandboxHandle), status: 'cold', url: null });
           },
-          error: (err) => console.error('teardown failed', err),
+          error: (err) => {
+            this.lastError.set(
+              extractErrorDetail(err, 'Failed to tear down sandbox'),
+            );
+          },
         });
       });
   }

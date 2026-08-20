@@ -508,15 +508,14 @@ describe('AgentRunnerComponent', () => {
       expect(component.sandbox()).toEqual({ ...coldHandle, status: 'cold', url: null });
     });
 
-    it('tearDownSandbox logs on failure', () => {
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    it('tearDownSandbox sets lastError on failure', () => {
       selectWriter();
       dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
-      runnerApi.teardown.mockReturnValue(throwError(() => new Error('teardown failed')));
+      runnerApi.teardown.mockReturnValue(throwError(() => ({ error: { detail: 'sandbox busy' } })));
 
       component.tearDownSandbox();
 
-      expect(consoleSpy).toHaveBeenCalledWith('teardown failed', expect.any(Error));
+      expect(component.lastError()).toBe('sandbox busy');
     });
   });
 
