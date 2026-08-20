@@ -1,16 +1,6 @@
 """Prompts for the architect_agents specialist agents and orchestrator."""
 
-import sys as _sys
-from pathlib import Path as _Path
-
-# Ensure backend/ is on sys.path so ``shared.llm_capabilities`` is importable
-# in both the SE-team test context (conftest adds it) and the standalone
-# architect-agents entry (main.py / agentcore_main.py).
-_backend_root = str(_Path(__file__).resolve().parent.parent.parent.parent.parent)
-if _backend_root not in _sys.path:
-    _sys.path.insert(0, _backend_root)
-
-from shared.llm_capabilities import bedrock_model_supports_prompt_caching  # noqa: E402
+from shared.llm_capabilities import bedrock_model_supports_prompt_caching
 
 ORCHESTRATOR_PROMPT = """# Enterprise Architect Orchestrator
 
@@ -857,6 +847,11 @@ Use `document_writer_tool` to write the scrutiny report. Use `web_search_tool` t
 # ---------------------------------------------------------------------------
 
 
+#: Bedrock ``cachePoint`` block appended after a system-prompt text segment
+#: to mark the preceding prefix as a provider-side cached breakpoint.
+_CACHE_POINT_BLOCK: "dict[str, dict[str, str]]" = {"cachePoint": {"type": "default"}}
+
+
 def cached_system_prompt(prompt: str, model_id: str = "") -> "str | list[dict]":
     """Wrap a static system-prompt string as a cached-prefix list for Strands Agent.
 
@@ -888,5 +883,5 @@ def cached_system_prompt(prompt: str, model_id: str = "") -> "str | list[dict]":
     — the single source of truth for raw-Bedrock integration paths.
     """
     if bedrock_model_supports_prompt_caching(model_id):
-        return [{"text": prompt}, {"cachePoint": {"type": "default"}}]
+        return [{"text": prompt}, {"cachePoint": dict(_CACHE_POINT_BLOCK["cachePoint"])}]
     return prompt
