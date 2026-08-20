@@ -99,9 +99,14 @@ describe('App routes', () => {
     const shell = routes[0];
     const children = (shell?.children ?? []) as Route[];
     for (const route of children) {
-      // Every child is either a redirect or a lazily-loaded component — none
-      // should pin an eager `component` (which would pull it into the main bundle).
+      // Every child is either a redirect, a guard-only redirect (canActivate + children),
+      // or a lazily-loaded component — none should pin an eager `component` (which would
+      // pull it into the main bundle).
       if (route.redirectTo !== undefined) {
+        continue;
+      }
+      // Guard-based redirect routes have canActivate + children:[] (no component).
+      if (route.canActivate && route.children) {
         continue;
       }
       expect(route.component).toBeUndefined();
@@ -137,12 +142,27 @@ describe('App routes', () => {
     expect(await emptyChild!.loadComponent!()).toBe(AgentStudioStageHostComponent);
   });
 
-  it('no longer registers the retired agentic-teams, persona-testing, agent-provisioning, or old persona audit routes', () => {
+  it('no longer registers the retired agentic-teams or agent-provisioning routes as feature routes', () => {
     const shell = routes[0];
     const children = (shell?.children ?? []) as Route[];
     expect(children.some((r) => r.path === 'agentic-teams')).toBe(false);
-    expect(children.some((r) => r.path === 'persona-testing')).toBe(false);
     expect(children.some((r) => r.path === 'agent-provisioning')).toBe(false);
-    expect(children.some((r) => r.path === 'persona-testing/audit/:runId')).toBe(false);
+  });
+
+  it('redirects legacy persona-testing paths to agent-studio (issue #6508)', () => {
+    const shell = routes[0];
+    const children = (shell?.children ?? []) as Route[];
+
+    // /persona-testing → /agent-studio (static redirect)
+    const bare = children.find((r) => r.path === 'persona-testing');
+    expect(bare).toBeDefined();
+    expect(bare!.redirectTo).toBe('/agent-studio');
+    expect(bare!.pathMatch).toBe('full');
+
+    // /persona-testing/audit/:runId → guard-based redirect to /agent-studio/persona-run/:runId
+    const audit = children.find((r) => r.path === 'persona-testing/audit/:runId');
+    expect(audit).toBeDefined();
+    expect(audit!.canActivate).toBeDefined();
+    expect(audit!.canActivate!.length).toBe(1);
   });
 });

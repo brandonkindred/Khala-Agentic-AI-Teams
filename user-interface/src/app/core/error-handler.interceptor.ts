@@ -9,6 +9,8 @@ import { inject } from '@angular/core';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { catchError, throwError } from 'rxjs';
 
+export { extractErrorDetail } from '../shared/extract-error-detail';
+
 /**
  * Set on a request's `HttpContext` to suppress the global error toast for that
  * request (the caller handles failure itself — e.g. background/decorative
@@ -26,29 +28,6 @@ export const SKIP_ERROR_NOTIFY = new HttpContextToken<boolean>(() => false);
  */
 export function skipErrorNotify(): HttpContext {
   return new HttpContext().set(SKIP_ERROR_NOTIFY, true);
-}
-
-/**
- * Extract a human-readable message from an API error for an inline banner —
- * the component-side counterpart to the global toast's formatter, so screens
- * that render their own error don't each re-derive the `detail`/`message`
- * unwrapping.
- *
- * Preconditions: `fallback` is a non-empty default message.
- * Postconditions: returns the FastAPI `detail` (a string, or the joined `msg`
- * fields of a validation-error array), else the error's `message`, else
- * `fallback`. Never throws.
- */
-export function extractErrorDetail(err: unknown, fallback: string): string {
-  const e = err as { error?: { detail?: unknown }; message?: unknown };
-  const detail = e?.error?.detail;
-  if (typeof detail === 'string' && detail) return detail;
-  if (Array.isArray(detail)) {
-    const msgs = detail.map((d: { msg?: string }) => d?.msg).filter(Boolean);
-    if (msgs.length > 0) return msgs.join('; ');
-  }
-  if (typeof e?.message === 'string' && e.message) return e.message;
-  return fallback;
 }
 
 /**
