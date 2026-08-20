@@ -17,6 +17,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
+import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
@@ -26,7 +27,6 @@ import { MatSelectModule } from '@angular/material/select';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { Subscription, interval } from 'rxjs';
-import { finalize } from 'rxjs/operators';
 import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
 import { AgentRunnerApiService } from '../../../../services/agent-runner-api.service';
 import type {
@@ -44,12 +44,10 @@ import type {
 } from '../../../../models/agent-history.model';
 import { AgentRunHistoryComponent } from '../agent-run-history/agent-run-history.component';
 import { AgentSchemaFormComponent } from '../agent-schema-form/agent-schema-form.component';
-import {
-  ConfirmDialogComponent,
-  type ConfirmDialogData,
-} from '../../../../shared/confirm-dialog/confirm-dialog.component';
+import { ConfirmDestructiveService } from '../../../../shared/confirm-destructive.service';
 import { InlineBannerComponent } from '../../../../shared/inline-banner/inline-banner.component';
 import { extractErrorDetail } from '../../../../shared/extract-error-detail';
+import { skipErrorNotify } from '../../../../core/error-handler.interceptor';
 import {
   AgentDiffDialogComponent,
   type AgentDiffDialogData,
@@ -81,6 +79,7 @@ import {
     MatCardModule,
     MatChipsModule,
     MatDialogModule,
+    MatSnackBarModule,
     MatFormFieldModule,
     MatIconModule,
     MatInputModule,
@@ -94,11 +93,14 @@ import {
   ],
   templateUrl: './agent-runner.component.html',
   styleUrl: './agent-runner.component.scss',
+  providers: [ConfirmDestructiveService],
 })
 export class AgentRunnerComponent implements OnInit, OnDestroy {
   private readonly catalog = inject(AgentCatalogApiService);
   private readonly runner = inject(AgentRunnerApiService);
   private readonly dialog = inject(MatDialog);
+  private readonly snackBar = inject(MatSnackBar);
+  private readonly confirmService = inject(ConfirmDestructiveService);
 
   /** Preselect an agent (wired from the Catalog drawer). */
   @Input() set preselectedAgentId(value: string | null) {
@@ -161,9 +163,6 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   });
 
   private sandboxPollSub: Subscription | null = null;
-
-  /** Prevents stacked destructive-action dialogs from rapid double-activation. */
-  private confirmingDestructive = false;
 
   ngOnInit(): void {
     this.catalog.listAgents().subscribe({
@@ -331,19 +330,31 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     ref.afterClosed().subscribe((result) => {
       if (!result) return;
       this.runner
-        .createSavedInput(agent, {
-          name: result.name,
-          input_data: body,
-          description: result.description,
-        })
+        .createSavedInput(
+          agent,
+          {
+            name: result.name,
+            input_data: body,
+            description: result.description,
+          },
+          skipErrorNotify(),
+        )
         .subscribe({
           next: (saved) => {
             this.savedInputs.update((rows) => [saved, ...rows]);
             this.selectedPickerValue.set(`saved:${saved.id}`);
           },
           error: (err) => {
-            this.lastError.set(
+            this.snackBar.open(
               extractErrorDetail(err, 'Failed to save input'),
+              'Close',
+              {
+                duration: 6000,
+                horizontalPosition: 'end',
+                verticalPosition: 'top',
+                politeness: 'assertive',
+                panelClass: 'kh-snack-error',
+              },
             );
           },
         });
@@ -354,22 +365,13 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     event.stopPropagation();
     const match = this.savedInputs().find((s) => s.id === savedId);
     if (!match) return;
-    if (this.confirmingDestructive) return;
-    this.confirmingDestructive = true;
-    this.dialog
-      .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(
-        ConfirmDialogComponent,
-        {
-          data: {
-            title: 'Delete Saved Input',
-            message: `Delete saved input "${match.name}"?`,
-            confirmLabel: 'Delete',
-            variant: 'danger',
-          },
-        },
-      )
-      .afterClosed()
-      .pipe(finalize(() => { this.confirmingDestructive = false; }))
+    this.confirmService
+      .confirm({
+        title: 'Delete Saved Input',
+        message: `Delete saved input "${match.name}"?`,
+        confirmLabel: 'Delete',
+        variant: 'danger',
+      })
       .subscribe((confirmed) => {
         if (!confirmed) return;
         this.runner.deleteSavedInput(savedId).subscribe({
@@ -426,28 +428,22 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   tearDownSandbox(): void {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
-    if (this.confirmingDestructive) return;
-    this.confirmingDestructive = true;
     const label = this.selectedAgent()?.manifest.name ?? agentId;
-    this.dialog
-      .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(
-        ConfirmDialogComponent,
-        {
-          data: {
-            title: 'Tear Down Sandbox',
-            message: `Tear down the ${label} sandbox?`,
-            confirmLabel: 'Tear Down',
-            variant: 'danger',
-          },
-        },
-      )
-      .afterClosed()
-      .pipe(finalize(() => { this.confirmingDestructive = false; }))
+    this.confirmService
+      .confirm({
+        title: 'Tear Down Sandbox',
+        message: `Tear down the ${label} sandbox?`,
+        confirmLabel: 'Tear Down',
+        variant: 'danger',
+      })
       .subscribe((confirmed) => {
         if (!confirmed) return;
         this.runner.teardown(agentId).subscribe({
           next: () => {
-            this.sandbox.set({ ...(this.sandbox() as SandboxHandle), status: 'cold', url: null });
+            const current = this.sandbox();
+            if (current) {
+              this.sandbox.set({ ...current, status: 'cold', url: null });
+            }
           },
           error: (err) => {
             this.lastError.set(
