@@ -44,6 +44,7 @@ import type {
 import { AgentRunHistoryComponent } from '../agent-run-history/agent-run-history.component';
 import { AgentSchemaFormComponent } from '../agent-schema-form/agent-schema-form.component';
 import { InlineBannerComponent } from '../../../../shared/inline-banner/inline-banner.component';
+import { extractErrorDetail } from '../../../../shared/extract-error-detail';
 import {
   AgentDiffDialogComponent,
   type AgentDiffDialogData,
@@ -343,9 +344,9 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
             this.savedInputs.update((rows) => [saved, ...rows]);
             this.selectedPickerValue.set(`saved:${saved.id}`);
           },
-          error: (err) => {
-            // Mat dialog is already closed; surface via snackbar-equivalent.
-            alert(err?.error?.detail ?? err?.message ?? 'Failed to save input');
+          error: () => {
+            // Global error interceptor handles the snackbar notification.
+
           },
         });
     });
@@ -487,7 +488,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
           // as `detail`, so we can surface the output + logs inline.
           this.lastResponse.set(err.error.detail as InvokeEnvelope);
         } else {
-          this.lastError.set(err.error?.detail ?? err.message ?? 'Invocation failed.');
+          this.lastError.set(extractErrorDetail(err, 'Invocation failed.'));
         }
         this.historyPanel?.refresh();
       },

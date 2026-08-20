@@ -29,7 +29,6 @@ export const SKIP_ERROR_NOTIFY = new HttpContextToken<boolean>(() => false);
 export function skipErrorNotify(): HttpContext {
   return new HttpContext().set(SKIP_ERROR_NOTIFY, true);
 }
-
 /**
  * HTTP interceptor that catches API errors and displays user-friendly messages via MatSnackBar.
  * Re-throws the error so callers can still handle it. Requests carrying
