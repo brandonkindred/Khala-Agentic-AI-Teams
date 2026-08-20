@@ -11,7 +11,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSelectModule } from '@angular/material/select';
 import { MatFormFieldModule } from '@angular/material/form-field';
-import { AgentRunnerApiService } from '../../../../services/agent-runner-api.service';
+import { AgentConsoleApiService } from '../../../../services/agent-console-api.service';
 import type {
   DiffResult,
   DiffSide,
@@ -51,7 +51,7 @@ export interface AgentDiffDialogData {
 export class AgentDiffDialogComponent implements OnInit {
   readonly data = inject<AgentDiffDialogData>(MAT_DIALOG_DATA);
   readonly ref = inject<MatDialogRef<AgentDiffDialogComponent>>(MatDialogRef);
-  private readonly api = inject(AgentRunnerApiService);
+  private readonly api = inject(AgentConsoleApiService);
 
   readonly runs = signal<RunSummary[]>([]);
   readonly savedInputs = signal<SavedInput[]>([]);

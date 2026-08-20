@@ -3,7 +3,7 @@ import { of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { AgentStudioFacade } from './agent-studio.facade';
 import { AgentStudioApiService } from './agent-studio-api.service';
-import { AgentRunnerApiService } from './agent-runner-api.service';
+import { AgentConsoleApiService } from './agent-console-api.service';
 import { AgenticTeamApiService } from './agentic-team-api.service';
 import { PersonaTestingApiService } from './persona-testing-api.service';
 import { AgentStudioStateService } from './agent-studio-state.service';
@@ -11,7 +11,7 @@ import { AgentStudioStateService } from './agent-studio-state.service';
 describe('AgentStudioFacade', () => {
   let facade: AgentStudioFacade;
   let studioApi: AgentStudioApiService;
-  let runnerApi: AgentRunnerApiService;
+  let runnerApi: AgentConsoleApiService;
   let agenticTeamApi: AgenticTeamApiService;
   let personaApi: PersonaTestingApiService;
   let state: {
@@ -67,7 +67,7 @@ describe('AgentStudioFacade', () => {
       providers: [
         AgentStudioFacade,
         { provide: AgentStudioApiService, useValue: studioApiStub },
-        { provide: AgentRunnerApiService, useValue: runnerApiStub },
+        { provide: AgentConsoleApiService, useValue: runnerApiStub },
         { provide: AgenticTeamApiService, useValue: agenticTeamApiStub },
         { provide: PersonaTestingApiService, useValue: personaApiStub },
         { provide: AgentStudioStateService, useValue: stateStub },
@@ -76,7 +76,7 @@ describe('AgentStudioFacade', () => {
 
     facade = TestBed.inject(AgentStudioFacade);
     studioApi = TestBed.inject(AgentStudioApiService);
-    runnerApi = TestBed.inject(AgentRunnerApiService);
+    runnerApi = TestBed.inject(AgentConsoleApiService);
     agenticTeamApi = TestBed.inject(AgenticTeamApiService);
     personaApi = TestBed.inject(PersonaTestingApiService);
     state = TestBed.inject(AgentStudioStateService) as unknown as typeof state;

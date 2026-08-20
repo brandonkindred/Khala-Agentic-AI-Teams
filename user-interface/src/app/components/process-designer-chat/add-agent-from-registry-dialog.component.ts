@@ -14,7 +14,7 @@ import { MatInputModule } from '@angular/material/input';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { Subject, catchError, debounceTime, of, switchMap } from 'rxjs';
-import { AgentCatalogApiService } from '../../services/agent-catalog-api.service';
+import { AgentConsoleApiService } from '../../services/agent-console-api.service';
 import type { AgentSummary } from '../../models/agent-catalog.model';
 
 /**
@@ -36,7 +36,7 @@ export type AddAgentFromRegistryDialogResult = string;
  * Agent Studio — Stage 3 "+ Add" → "Search registry agents" (spec §3, Stage 3).
  *
  * A minimal search-and-pick dialog over the Agent Console catalog
- * (`AgentCatalogApiService.listAgents`). Selecting a result closes the dialog
+ * (`AgentConsoleApiService.listAgents`). Selecting a result closes the dialog
  * with the manifest id; the caller (the roster panel) does the actual
  * `POST .../agents/from-registry` and roster refresh.
  */
@@ -59,7 +59,7 @@ export type AddAgentFromRegistryDialogResult = string;
   styleUrl: './add-agent-from-registry-dialog.component.scss',
 })
 export class AddAgentFromRegistryDialogComponent implements OnInit {
-  private readonly api = inject(AgentCatalogApiService);
+  private readonly api = inject(AgentConsoleApiService);
   private readonly destroyRef = inject(DestroyRef);
   readonly data = inject<AddAgentFromRegistryDialogData>(MAT_DIALOG_DATA);
   readonly ref =

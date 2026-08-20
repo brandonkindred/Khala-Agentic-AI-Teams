@@ -2,7 +2,7 @@ import { TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { of, throwError } from 'rxjs';
 import { vi } from 'vitest';
-import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
+import { AgentConsoleApiService } from '../../../../services/agent-console-api.service';
 import { AgentCatalogComponent } from './agent-catalog.component';
 import { expectNoAxeViolations } from '../../../../testing/a11y';
 
@@ -30,7 +30,7 @@ describe('AgentCatalogComponent a11y', () => {
     };
     await TestBed.configureTestingModule({
       imports: [AgentCatalogComponent, NoopAnimationsModule],
-      providers: [{ provide: AgentCatalogApiService, useValue: api }],
+      providers: [{ provide: AgentConsoleApiService, useValue: api }],
     }).compileComponents();
   };
 
