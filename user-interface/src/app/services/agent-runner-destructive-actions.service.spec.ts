@@ -108,11 +108,14 @@ describe('AgentRunnerDestructiveActionsService', () => {
 
       const errors: (string | null)[] = [];
       service.errors$.subscribe((msg) => errors.push(msg));
+      const deleted: string[] = [];
+      service.savedInputDeleted$.subscribe((id) => deleted.push(id));
 
       service.deleteSavedInput('id-1', 'My Input');
 
       // First emission is null (clearing previous error), second is the failure.
       expect(errors).toEqual([null, 'not found']);
+      expect(deleted).toEqual([]);
       expect(service.deletingSavedInputId()).toBeNull();
       expect(notify.saved).not.toHaveBeenCalled();
     });
@@ -186,10 +189,13 @@ describe('AgentRunnerDestructiveActionsService', () => {
 
       const errors: (string | null)[] = [];
       service.errors$.subscribe((msg) => errors.push(msg));
+      let tornDown = false;
+      service.sandboxTornDown$.subscribe(() => { tornDown = true; });
 
       service.tearDownSandbox('agent-1', 'Writer');
 
       expect(errors).toEqual([null, 'teardown refused']);
+      expect(tornDown).toBe(false);
       expect(service.tearingDown()).toBe(false);
       expect(notify.saved).not.toHaveBeenCalled();
     });

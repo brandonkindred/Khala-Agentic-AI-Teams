@@ -111,7 +111,6 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     if (value && value !== this.selectedAgentId()) {
       this.selectedAgentId.set(value);
       this.destructiveError.set(null);
-      this.destructiveActionGeneration++;
       this.loadAgentDetail(value);
     }
   }
@@ -172,10 +171,8 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   });
 
   private sandboxPollSub: Subscription | null = null;
-  /** Increments on agent change to discard stale error emissions from prior agents. */
-  private destructiveActionGeneration = 0;
-  /** Generation captured when the component last delegated a destructive action. */
-  private _actionStartGeneration = 0;
+  /** Agent id at the time the last destructive action was delegated. */
+  private _actionAgentId: string | null = null;
 
   ngOnInit(): void {
     this.catalog.listAgents().subscribe({
@@ -187,6 +184,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     this.destructiveActions.savedInputDeleted$
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((savedId) => {
+        if (this._actionAgentId !== this.selectedAgentId()) return;
         this.savedInputs.update((rows) => rows.filter((s) => s.id !== savedId));
         if (this.selectedPickerValue() === `saved:${savedId}`) {
           this.selectedPickerValue.set(null);
@@ -196,6 +194,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     this.destructiveActions.sandboxTornDown$
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe(() => {
+        if (this._actionAgentId !== this.selectedAgentId()) return;
         const current = this.sandbox();
         if (!current) return;
         this.sandbox.set({ ...current, status: 'cold', url: null });
@@ -204,13 +203,12 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     this.destructiveActions.errors$
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((msg) => {
-        // Only apply errors that originated from an action started during the
-        // current agent's lifetime. The generation is captured when we delegate
-        // to the service (via deleteSavedInput/tearDownSandbox below) and
-        // incremented on agent change; a null clear is always accepted.
+        // Only apply errors originating from the currently selected agent.
+        // A null clear is always accepted; non-null errors are discarded if
+        // the agent has changed since the action was initiated.
         if (msg === null) {
           this.destructiveError.set(null);
-        } else if (this._actionStartGeneration === this.destructiveActionGeneration) {
+        } else if (this._actionAgentId === this.selectedAgentId()) {
           this.destructiveError.set(msg);
         }
       });
@@ -238,7 +236,6 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     this.lastError.set(null);
     this.activeRunId.set(null);
     this.destructiveError.set(null);
-    this.destructiveActionGeneration++;
     this.sandbox.set(null);
     this.sandboxPollSub?.unsubscribe();
     this.sandboxPollSub = null;
@@ -395,6 +392,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
         })
         .subscribe({
           next: (saved) => {
+            this.lastError.set(null);
             this.savedInputs.update((rows) => [saved, ...rows]);
             this.selectedPickerValue.set(`saved:${saved.id}`);
           },
@@ -423,7 +421,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     event.stopPropagation();
     const match = this.savedInputs().find((s) => s.id === savedId);
     if (!match) return;
-    this._actionStartGeneration = this.destructiveActionGeneration;
+    this._actionAgentId = this.selectedAgentId();
     this.destructiveActions.deleteSavedInput(savedId, match.name);
   }
 
@@ -482,7 +480,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
     const label = this.selectedAgent()?.manifest.name ?? agentId;
-    this._actionStartGeneration = this.destructiveActionGeneration;
+    this._actionAgentId = agentId;
     this.destructiveActions.tearDownSandbox(agentId, label);
   }
 
@@ -529,8 +527,20 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
           this.lastError.set(err.error?.detail ?? 'Agent not runnable in sandbox.');
         } else if (err.status === 422 && err.error?.detail) {
           // The shim wraps user-space exceptions in a 422 with the envelope
-          // as `detail`, so we can surface the output + logs inline.
-          this.lastResponse.set(err.error.detail as InvokeEnvelope);
+          // as `detail`, so we can surface the output + logs inline — but only
+          // if the detail actually has the InvokeEnvelope shape. A plain string
+          // or validation-error array must go through extractErrorDetail.
+          const detail = err.error.detail;
+          if (
+            typeof detail === 'object' &&
+            detail !== null &&
+            'trace_id' in detail &&
+            'logs_tail' in detail
+          ) {
+            this.lastResponse.set(detail as InvokeEnvelope);
+          } else {
+            this.lastError.set(extractErrorDetail(err, 'Invocation failed.'));
+          }
         } else {
           this.lastError.set(extractErrorDetail(err, 'Invocation failed.'));
         }

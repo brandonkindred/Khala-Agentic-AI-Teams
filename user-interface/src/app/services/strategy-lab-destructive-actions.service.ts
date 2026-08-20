@@ -42,6 +42,7 @@ export class StrategyLabDestructiveActionsService {
     (msg) => this._errors.next(msg),
   );
 
+  /** True while all strategy lab data is being cleared (disables the clear-all control). */
   readonly clearingAll = signal(false);
   /** Lab record id currently being deleted (disables actions on that card). */
   readonly deletingLabRecordId = signal<string | null>(null);
