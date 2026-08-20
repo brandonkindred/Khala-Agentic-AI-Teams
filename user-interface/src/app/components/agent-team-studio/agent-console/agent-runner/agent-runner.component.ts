@@ -44,7 +44,7 @@ import type {
 import { AgentRunHistoryComponent } from '../agent-run-history/agent-run-history.component';
 import { AgentSchemaFormComponent } from '../agent-schema-form/agent-schema-form.component';
 import { InlineBannerComponent } from '../../../../shared/inline-banner/inline-banner.component';
-import { extractErrorDetail } from '../../../../core/error-handler.interceptor';
+import { extractErrorDetail } from '../../../../shared/extract-error-detail';
 import {
   AgentDiffDialogComponent,
   type AgentDiffDialogData,
