@@ -3668,7 +3668,7 @@ class TestFixedRunPrReview:
 class TestDiffGroundedContractMatrix:
     """The complete posting-gate contract as a single readable matrix.
 
-    Each test encodes exactly one cell of the contract matrix from issue #6335's
+    The first five tests encode the canonical cells from issue #6335's
     acceptance criteria:
 
       1. Defect on added line              → PR comment (line-anchored inline)
@@ -3678,11 +3678,26 @@ class TestDiffGroundedContractMatrix:
       5. Mistagged pre_existing=true on     → still a PR finding (gate overrides)
          an added line
 
+    Two additional tests cover supplementary cases:
+
+      6. Off-diff untagged finding (variant of 4) — proves pre_existing tag
+         plays no part in the gate either way.
+      7. Context line with omission (edge case) — omission carve-out overrides
+         the context-line exclusion.
+
     Validates: issue #6414 acceptance criteria, parent issue #6335 AC9.
     """
 
     @staticmethod
-    def _run(review_app, issues):
+    def _run(review_app: dict, issues: list) -> tuple:
+        """Run a PR review with the given findings and return (gh_client, job).
+
+        Mutates ``review_app["github"]["agent_output"]`` to inject the fake
+        reviewer output, then POSTs ``/review-pr`` with the standard review
+        body fixture.  Returns the ``_FakeReviewClient`` instance (for
+        inspecting posted comments/reviews) and the completed job dict (for
+        inspecting the review_summary).
+        """
         review_app["github"]["agent_output"] = _FakeOutput(issues=issues)
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
@@ -3876,7 +3891,20 @@ class TestDiffGroundedContractMatrix:
         summary = job["review_summary"]
         # In-scope via omission: posts as a PR finding (total_issues counts it).
         assert summary["total_issues"] == 1
+        assert summary["inline_comments"] == 1
         assert summary["pending_issue_proposals"] == []
+        # Verify it landed as a line-anchored inline comment on line 1.
+        all_comments = [
+            c for rev in gh.submitted_reviews for c in rev.get("comments", [])
+        ]
+        assert any(
+            c.get("line") == 1
+            and c.get("side") == "RIGHT"
+            and "omission on context line" in c.get("body", "")
+            for c in all_comments
+        ), f"Expected line-anchored comment on line 1, got: {all_comments}"
+        # Never posted as a standalone comment.
+        assert gh.comments == []
 
 
 # ---------------------------------------------------------------------------
