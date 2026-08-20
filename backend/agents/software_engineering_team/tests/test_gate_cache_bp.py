@@ -244,7 +244,6 @@ def test_security_gate_keeps_file_context_in_user_prompt() -> None:
     The system prompt is the plain SECURITY_PROMPT persona string."""
     from security_agent.agent import CybersecurityExpertAgent, _build_security_file_context_prefix
     from security_agent.models import SecurityInput
-    from security_agent.prompts import SECURITY_PROMPT
 
     input_data = SecurityInput(
         code="import os\nos.system('ls')",
