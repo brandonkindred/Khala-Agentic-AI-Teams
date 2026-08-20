@@ -361,15 +361,23 @@ class QAExpertAgent:
         """Assemble the user-facing prompt.
 
         The persona (``QA_PROMPT`` and its mode-specific addendum) lives on
-        the Strands ``Agent``'s system prompt, so the user prompt only
-        carries the code under review and its context. In the default/
-        fix_build/write_tests modes, the code under review (see
-        ``_build_qa_file_context_prefix``) is a stable prefix, followed by an
-        explicit schema hint (``bugs_found``, ``test_plan``, ...) and the
-        remaining instructions (see ``_build_qa_role_instructions``).
+        the Strands ``Agent``'s system prompt. In the default/fix_build/
+        write_tests modes the user prompt carries the file-context prefix
+        (language + code under review, see ``_build_qa_file_context_prefix``)
+        as a stable prefix, followed by the explicit schema hint
+        (``bugs_found``, ``test_plan``, ...) and remaining per-gate
+        instructions (see ``_build_qa_role_instructions``). The file-context
+        prefix remains in the user message (rather than being elevated to
+        system content) because it is untrusted repository content.
+
+        In ``acceptance_evidence`` mode no code is included; the prompt
+        instead carries the acceptance criteria and tool/test results so the
+        model can map evidence back to criteria.
 
         Preconditions: ``input_data`` is a valid :class:`QAInput`.
-        Postconditions: returns a non-empty str. In ``acceptance_evidence`` mode
+        Postconditions: returns a non-empty str. In non-``acceptance_evidence``
+        modes the returned string contains the code under review followed by
+        role instructions and schema hints. In ``acceptance_evidence`` mode
         the prompt names the acceptance-evidence output fields
         (``quality_gates``/``acceptance_trace``/``validation_evidence``) and
         carries the criteria and tool results instead of the code under review.
