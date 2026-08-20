@@ -82,10 +82,16 @@ describe('App routes', () => {
     expect(route?.canDeactivate).toContain(unsavedChangesGuard);
   });
 
-  it('no longer registers the retired agent-console route', () => {
+  it('uses agent-studio as the sole agentic journey entry point (no legacy peer routes)', () => {
     const shell = routes[0];
     const children = (shell?.children ?? []) as Route[];
-    expect(children.some((r) => r.path === 'agent-console')).toBe(false);
+    // Studio route exists as entry point
+    expect(children.some((r) => r.path === 'agent-studio')).toBe(true);
+    // Legacy Console/Teams/Personas peer routes are absent
+    const legacyPaths = ['agent-console', 'agentic-teams', 'agent-provisioning', 'persona-testing', 'persona-testing/audit/:runId'];
+    for (const legacy of legacyPaths) {
+      expect(children.some((r) => r.path === legacy)).toBe(false);
+    }
   });
 
   it('redirects empty path to /dashboard', () => {
@@ -142,17 +148,17 @@ describe('App routes', () => {
     expect(typeof stageCmp).toBe('function');
   });
 
-  it('no longer registers the retired agentic-teams or agent-provisioning routes as feature routes', () => {
+  it('routes all persona workflow traffic through agent-studio children', async () => {
     const shell = routes[0];
     const children = (shell?.children ?? []) as Route[];
-    expect(children.some((r) => r.path === 'agentic-teams')).toBe(false);
-    expect(children.some((r) => r.path === 'agent-provisioning')).toBe(false);
-  });
-
-  it('no longer registers the retired persona-testing routes (issue #6517)', () => {
-    const shell = routes[0];
-    const children = (shell?.children ?? []) as Route[];
-    expect(children.some((r) => r.path === 'persona-testing')).toBe(false);
-    expect(children.some((r) => r.path === 'persona-testing/audit/:runId')).toBe(false);
+    const studio = children.find((r) => r.path === 'agent-studio');
+    expect(studio).toBeDefined();
+    // Persona audit is nested under Studio — not a standalone route
+    expect(studio!.children?.some((c) => c.path === 'persona-run/:runId')).toBe(true);
+    // Studio sub-routes (provisioning, metrics) are siblings at top level.
+    // NOTE: docs/design/agent-studio-ux-spec.md §2.3 plans to fold provisioning
+    // into the Studio shell; when that lands (#5948), update this assertion.
+    expect(children.some((r) => r.path === 'agent-studio/provisioning')).toBe(true);
+    expect(children.some((r) => r.path === 'agent-studio/metrics')).toBe(true);
   });
 });

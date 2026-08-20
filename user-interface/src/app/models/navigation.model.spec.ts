@@ -13,13 +13,14 @@ describe('NAV_GROUPS Cognition entry', () => {
   });
 });
 
-describe('NAV_GROUPS Agent Console retirement', () => {
-  it('no longer lists Agent Console as a peer product', () => {
-    expect(ALL_NAV_ITEMS.some((i) => i.id === 'agent-console')).toBe(false);
-    expect(ALL_NAV_ITEMS.some((i) => i.route === '/agent-console')).toBe(false);
+describe('NAV_GROUPS Studio-only journey entry', () => {
+  const agenticGroup = NAV_GROUPS.find((g) => g.key === 'agentic-ai');
+
+  it('has an agentic-ai navigation group', () => {
+    expect(agenticGroup).toBeDefined();
   });
 
-  it('marks Agent Studio as an exact-match parent so child routes do not co-activate it', () => {
+  it('uses Agent Studio as the sole exact-match entry point for the agentic-ai group', () => {
     const item = ALL_NAV_ITEMS.find((i) => i.id === 'agent-studio');
     expect(item).toEqual({
       id: 'agent-studio',
@@ -31,7 +32,7 @@ describe('NAV_GROUPS Agent Console retirement', () => {
     });
   });
 
-  it('relocates Provisioning under Agent Studio as a nested route', () => {
+  it('nests Provisioning under Agent Studio', () => {
     const item = ALL_NAV_ITEMS.find((i) => i.id === 'agent-studio-provisioning');
     expect(item).toEqual({
       id: 'agent-studio-provisioning',
@@ -43,7 +44,7 @@ describe('NAV_GROUPS Agent Console retirement', () => {
     });
   });
 
-  it('relocates Metrics under Agent Studio as a nested route', () => {
+  it('nests Metrics under Agent Studio', () => {
     const item = ALL_NAV_ITEMS.find((i) => i.id === 'agent-studio-metrics');
     expect(item).toEqual({
       id: 'agent-studio-metrics',
@@ -54,25 +55,30 @@ describe('NAV_GROUPS Agent Console retirement', () => {
       nested: true,
     });
   });
-});
 
-describe('NAV_GROUPS Agent Studio is the sole product entry (#6525)', () => {
-  it('Agent Studio is the first non-nested item in the agentic-ai group', () => {
-    const agenticGroup = NAV_GROUPS.find((g) => g.key === 'agentic-ai');
-    expect(agenticGroup).toBeDefined();
+  it('Agent Studio is the first non-nested item in the agentic-ai group (#6525)', () => {
     const topLevel = agenticGroup!.items.filter((i) => !i.nested);
     expect(topLevel[0].id).toBe('agent-studio');
   });
-});
 
-describe('NAV_GROUPS Agentic Teams / Testing Personas retirement', () => {
-  it('no longer lists Agentic Teams as a peer product', () => {
+  it('does not expose legacy Console, Teams, or Personas anywhere in the global nav', () => {
+    // Check IDs globally — catches items reintroduced under any group
+    expect(ALL_NAV_ITEMS.some((i) => i.id === 'agent-console')).toBe(false);
     expect(ALL_NAV_ITEMS.some((i) => i.id === 'agentic-teams')).toBe(false);
+    expect(ALL_NAV_ITEMS.some((i) => i.id === 'persona-testing')).toBe(false);
+    // Check routes globally — catches renamed IDs that reuse legacy URLs
+    expect(ALL_NAV_ITEMS.some((i) => i.route === '/agent-console')).toBe(false);
     expect(ALL_NAV_ITEMS.some((i) => i.route === '/agentic-teams')).toBe(false);
+    expect(ALL_NAV_ITEMS.some((i) => i.route === '/persona-testing')).toBe(false);
   });
 
-  it('no longer lists Testing Personas as a peer product', () => {
-    expect(ALL_NAV_ITEMS.some((i) => i.id === 'persona-testing')).toBe(false);
-    expect(ALL_NAV_ITEMS.some((i) => i.route === '/persona-testing')).toBe(false);
+  it('only exposes Studio-based routes as navigable /agent-studio paths', () => {
+    // Check globally so routes added under any group are caught
+    const studioRoutes = ALL_NAV_ITEMS.filter((i) => i.route.startsWith('/agent-studio'));
+    expect(studioRoutes.map((r) => r.id).sort()).toEqual([
+      'agent-studio',
+      'agent-studio-metrics',
+      'agent-studio-provisioning',
+    ]);
   });
 });
