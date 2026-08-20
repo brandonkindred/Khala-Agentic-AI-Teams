@@ -265,7 +265,6 @@ class CybersecurityExpertAgent:
                 approved=False,
                 summary=f"Security analysis failed: {exc}",
                 remediations=[],
-                suggested_commit_message="",
             )
 
         # Re-derive ``approved`` via the unified rule so a disagreement between
