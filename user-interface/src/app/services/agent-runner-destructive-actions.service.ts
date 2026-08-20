@@ -72,7 +72,9 @@ export class AgentRunnerDestructiveActionsService {
    *   `AgentRunnerApiService.deleteSavedInput`, shows a success toast,
    *   and emits through `savedInputDeleted$` tagged with the agent id.
    * Postconditions: on completion (success or failure) `deletingSavedInputId`
-   *   is reset to `null`. On failure, an error is emitted through `errors$`.
+   *   is reset to `null`. On confirmation, emits `{ agentId, message: null }`
+   *   through `errors$` to clear any prior error. On failure, emits a second
+   *   `{ agentId, message: <detail> }` through `errors$`.
    */
   deleteSavedInput(agentId: string, savedId: string, savedName: string): void {
     this.helper.execute(
@@ -103,7 +105,9 @@ export class AgentRunnerDestructiveActionsService {
    *   `AgentRunnerApiService.teardown`, shows a success toast,
    *   and emits through `sandboxTornDown$` tagged with the agent id.
    * Postconditions: on completion (success or failure) `tearingDown`
-   *   is reset to `false`. On failure, an error is emitted through `errors$`.
+   *   is reset to `false`. On confirmation, emits `{ agentId, message: null }`
+   *   through `errors$` to clear any prior error. On failure, emits a second
+   *   `{ agentId, message: <detail> }` through `errors$`.
    */
   tearDownSandbox(agentId: string, agentLabel: string): void {
     this.helper.execute(

@@ -98,12 +98,12 @@ export class DestructiveActionHelper {
                 this.notify.saved(successToast);
               },
               error: (err) => {
-                errorCb(extractErrorDetail(err, opts.errorFallback));
+                errorCb(extractErrorDetail(err, opts.errorFallback, { joinValidationArray: true }));
               },
             });
         },
         error: (err) => {
-          errorCb(extractErrorDetail(err, opts.errorFallback));
+          errorCb(extractErrorDetail(err, opts.errorFallback, { joinValidationArray: true }));
         },
       });
   }
