@@ -102,7 +102,7 @@ describe('AgentRunnerDestructiveActionsService', () => {
         throwError(() => ({ error: { detail: 'not found' } })),
       );
 
-      const errors: Array<string | null> = [];
+      const errors: (string | null)[] = [];
       service.errors$.subscribe((msg) => errors.push(msg));
 
       service.deleteSavedInput('id-1', 'My Input');
@@ -175,7 +175,7 @@ describe('AgentRunnerDestructiveActionsService', () => {
         throwError(() => ({ error: { detail: 'teardown refused' } })),
       );
 
-      const errors: Array<string | null> = [];
+      const errors: (string | null)[] = [];
       service.errors$.subscribe((msg) => errors.push(msg));
 
       service.tearDownSandbox('agent-1', 'Writer');
