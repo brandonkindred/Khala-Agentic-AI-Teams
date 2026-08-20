@@ -45,7 +45,7 @@ def run_structured_persona(
     fallback_factory: Callable[[Exception], OutputT],
     agent_factory: Callable[..., Any],
     on_success: Callable[[OutputT], OutputT] | None = None,
-    system_prompt_content: "List[Any] | None" = None,
+    system_prompt_content: List[Any] | None = None,
 ) -> OutputT:
     """Run a one-shot structured-output Strands ``Agent`` call with a safe fallback.
 
@@ -72,8 +72,8 @@ def run_structured_persona(
         severities"), and an empty findings list from the safe fallback must
         not be reinterpreted as a clean approval. Never raises.
     """
-    composed_prompt = build_system_prompt_with_content(system_prompt, system_prompt_content)
     try:
+        composed_prompt = build_system_prompt_with_content(system_prompt, system_prompt_content)
         agent = agent_factory(model=model, system_prompt=composed_prompt)
         agent_result = agent(user_prompt, structured_output_model=output_model)
         result = agent_result.structured_output
