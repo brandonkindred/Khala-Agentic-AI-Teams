@@ -138,6 +138,9 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   readonly lastError = signal<string | null>(null);
   readonly activeRunId = signal<string | null>(null);
 
+  /** Separate error signal for destructive-action failures (visible alongside a run result). */
+  readonly destructiveError = signal<string | null>(null);
+
   readonly requiresLiveIntegration = computed(() => {
     const detail = this.selectedAgent();
     if (!detail) return false;
@@ -185,12 +188,14 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     this.destructiveActions.sandboxTornDown$
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe(() => {
-        this.sandbox.set({ ...(this.sandbox() as SandboxHandle), status: 'cold', url: null });
+        const current = this.sandbox();
+        if (!current) return;
+        this.sandbox.set({ ...current, status: 'cold', url: null });
       });
 
     this.destructiveActions.errors$
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((msg) => this.lastError.set(msg));
+      .subscribe((msg) => this.destructiveError.set(msg));
   }
 
   ngOnDestroy(): void {

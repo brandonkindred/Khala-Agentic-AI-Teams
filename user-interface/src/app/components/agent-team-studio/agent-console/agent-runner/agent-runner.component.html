@@ -214,6 +214,10 @@
       <app-inline-banner variant="error" [message]="lastError() ?? ''" />
     }
 
+    @if (destructiveError()) {
+      <app-inline-banner variant="error" [message]="destructiveError() ?? ''" />
+    }
+
     <app-agent-run-history
       [agentId]="selectedAgentId()"
       [activeRunId]="activeRunId()"

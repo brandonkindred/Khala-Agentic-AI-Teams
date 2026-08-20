@@ -1,25 +1,18 @@
 import { DestroyRef, Injectable, inject, signal } from '@angular/core';
-import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatDialog } from '@angular/material/dialog';
-import { Observable, Subject, of } from 'rxjs';
-import { finalize, map } from 'rxjs/operators';
+import { Observable, Subject } from 'rxjs';
 
 import { AgentRunnerApiService } from './agent-runner-api.service';
 import { NotificationService } from '../core/notification.service';
-import { extractErrorDetail } from '../shared/extract-error-detail';
-import {
-  ConfirmDialogComponent,
-  type ConfirmDialogData,
-} from '../shared/confirm-dialog/confirm-dialog.component';
+import { DestructiveActionHelper } from '../shared/destructive-action.helper';
 
 /**
  * Owns destructive-action concerns (confirm dialog, re-entrancy guard, API
  * call, loading state, error surfacing) for the Agent Runner tab.
  *
- * Mirrors `StrategyLabDestructiveActionsService`: the host component delegates
- * `deleteSavedInput` and `tearDownSandbox` here rather than opening dialogs or
- * calling APIs itself. Success/refresh and error needs are surfaced as
- * observables that the component subscribes to once.
+ * Uses the shared `DestructiveActionHelper` for the confirm → execute flow,
+ * keeping this service as a thin feature-specific wrapper that supplies only
+ * dialog data, the API call, and post-success side effects.
  *
  * Not `providedIn: 'root'` — intended to be provided at the consuming
  * component so its lifecycle is scoped to that component.
@@ -27,12 +20,14 @@ import {
 @Injectable()
 export class AgentRunnerDestructiveActionsService {
   private readonly api = inject(AgentRunnerApiService);
-  private readonly dialog = inject(MatDialog);
-  private readonly notify = inject(NotificationService);
   private readonly destroyRef = inject(DestroyRef);
 
-  /** True while a destructive confirm dialog is open — blocks re-entrant opens. */
-  private confirmingDestructive = false;
+  private readonly helper = new DestructiveActionHelper(
+    inject(MatDialog),
+    inject(NotificationService),
+    this.destroyRef,
+    (msg) => this._errors.next(msg),
+  );
 
   /** Saved-input id currently being deleted (disables actions on that row). */
   readonly deletingSavedInputId = signal<string | null>(null);
@@ -52,97 +47,46 @@ export class AgentRunnerDestructiveActionsService {
   readonly sandboxTornDown$: Observable<void> = this._sandboxTornDown.asObservable();
 
   /**
-   * Open the shared Material confirm dialog for a destructive action.
-   *
-   * If a confirmation is already pending the method returns `of(false)`,
-   * collapsing the window for rapid double-activation. The guard is released
-   * in `finalize()` regardless of how the dialog closes.
-   */
-  private confirmDestructive(data: ConfirmDialogData): Observable<boolean> {
-    if (this.confirmingDestructive) return of(false);
-    this.confirmingDestructive = true;
-    return this.dialog
-      .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(ConfirmDialogComponent, { data })
-      .afterClosed()
-      .pipe(
-        map((result) => result === true),
-        finalize(() => {
-          this.confirmingDestructive = false;
-        }),
-      );
-  }
-
-  /**
    * Deletes a saved input after user confirmation.
-   *
-   * Opens a destructive-action dialog; on confirmation calls the API, tracks
-   * in-flight state via `deletingSavedInputId`, and on success emits through
-   * `savedInputDeleted$` and shows a toast. On failure, surfaces the error
-   * via `errors$`.
    */
   deleteSavedInput(savedId: string, savedName: string): void {
-    this.confirmDestructive({
-      title: 'Delete saved input',
-      message: `Delete saved input "${savedName}"?\n\nThis cannot be undone.`,
-      confirmLabel: 'Delete',
-      variant: 'danger',
-    })
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((confirmed) => {
-        if (!confirmed) return;
-        this._errors.next(null);
-        this.deletingSavedInputId.set(savedId);
-        this.api
-          .deleteSavedInput(savedId)
-          .pipe(takeUntilDestroyed(this.destroyRef))
-          .subscribe({
-            next: () => {
-              this.deletingSavedInputId.set(null);
-              this._savedInputDeleted.next(savedId);
-              this.notify.saved('Saved input deleted.');
-            },
-            error: (err) => {
-              this.deletingSavedInputId.set(null);
-              this._errors.next(extractErrorDetail(err, 'Failed to delete saved input.'));
-            },
-          });
-      });
+    this.helper.execute(
+      {
+        dialogData: {
+          title: 'Delete saved input',
+          message: `Delete saved input "${savedName}"?\n\nThis cannot be undone.`,
+          confirmLabel: 'Delete',
+          variant: 'danger',
+        },
+        apiCall: () => this.api.deleteSavedInput(savedId),
+        onSuccess: () => this._savedInputDeleted.next(savedId),
+        errorFallback: 'Failed to delete saved input.',
+      },
+      'Saved input deleted.',
+      () => this.deletingSavedInputId.set(savedId),
+      () => this.deletingSavedInputId.set(null),
+    );
   }
 
   /**
    * Tears down a sandbox after user confirmation.
-   *
-   * Opens a destructive-action dialog; on confirmation calls the API, tracks
-   * in-flight state via `tearingDown`, and on success emits through
-   * `sandboxTornDown$` and shows a toast. On failure, surfaces the error
-   * via `errors$`.
    */
   tearDownSandbox(agentId: string, agentLabel: string): void {
-    this.confirmDestructive({
-      title: 'Tear down sandbox',
-      message: `Tear down the ${agentLabel} sandbox?\n\nThe sandbox will need to be re-warmed before the next invocation.`,
-      confirmLabel: 'Tear down',
-      variant: 'danger',
-    })
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((confirmed) => {
-        if (!confirmed) return;
-        this._errors.next(null);
-        this.tearingDown.set(true);
-        this.api
-          .teardown(agentId)
-          .pipe(takeUntilDestroyed(this.destroyRef))
-          .subscribe({
-            next: () => {
-              this.tearingDown.set(false);
-              this._sandboxTornDown.next();
-              this.notify.saved('Sandbox torn down.');
-            },
-            error: (err) => {
-              this.tearingDown.set(false);
-              this._errors.next(extractErrorDetail(err, 'Failed to tear down sandbox.'));
-            },
-          });
-      });
+    this.helper.execute(
+      {
+        dialogData: {
+          title: 'Tear down sandbox',
+          message: `Tear down the ${agentLabel} sandbox?\n\nThe sandbox will need to be re-warmed before the next invocation.`,
+          confirmLabel: 'Tear down',
+          variant: 'danger',
+        },
+        apiCall: () => this.api.teardown(agentId),
+        onSuccess: () => this._sandboxTornDown.next(),
+        errorFallback: 'Failed to tear down sandbox.',
+      },
+      'Sandbox torn down.',
+      () => this.tearingDown.set(true),
+      () => this.tearingDown.set(false),
+    );
   }
 }

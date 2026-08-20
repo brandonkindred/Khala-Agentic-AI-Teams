@@ -6,6 +6,7 @@ import { of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
 import { AgentRunnerApiService } from '../../../../services/agent-runner-api.service';
+import { NotificationService } from '../../../../core/notification.service';
 import type { AgentDetail, AgentSummary } from '../../../../models/agent-catalog.model';
 import type { InvokeEnvelope, SandboxHandle } from '../../../../models/agent-runner.model';
 import type { RunRecord, RunSummary, SavedInput } from '../../../../models/agent-history.model';
@@ -150,6 +151,7 @@ describe('AgentRunnerComponent', () => {
       providers: [
         { provide: AgentCatalogApiService, useValue: catalogApi },
         { provide: AgentRunnerApiService, useValue: runnerApi },
+        { provide: NotificationService, useValue: { saved: vi.fn() } },
       ],
     });
     TestBed.overrideProvider(MatDialog, { useValue: { open: dialogOpen } });
@@ -388,14 +390,13 @@ describe('AgentRunnerComponent', () => {
     beforeEach(() => selectWriter());
 
     it('does nothing for an id with no match', () => {
-      const confirmSpy = vi.spyOn(window, 'confirm');
       component.deleteSavedInput('missing', new Event('click'));
-      expect(confirmSpy).not.toHaveBeenCalled();
+      expect(dialogOpen).not.toHaveBeenCalled();
     });
 
     it('does nothing when the user cancels the confirm', () => {
       component.savedInputs.set([savedInput]);
-      vi.spyOn(window, 'confirm').mockReturnValue(false);
+      dialogOpen.mockReturnValue({ afterClosed: () => of(false) });
 
       component.deleteSavedInput(savedInput.id, new Event('click'));
 
@@ -406,7 +407,7 @@ describe('AgentRunnerComponent', () => {
     it('removes the row and clears the picker when it was selected', () => {
       component.savedInputs.set([savedInput]);
       component.selectedPickerValue.set(`saved:${savedInput.id}`);
-      vi.spyOn(window, 'confirm').mockReturnValue(true);
+      dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
       runnerApi.deleteSavedInput.mockReturnValue(of({ id: savedInput.id, status: 'deleted' }));
       const event = new Event('click');
       const stopSpy = vi.spyOn(event, 'stopPropagation');
@@ -484,27 +485,26 @@ describe('AgentRunnerComponent', () => {
 
     it('tearDownSandbox does nothing when the user cancels the confirm', () => {
       selectWriter();
-      vi.spyOn(window, 'confirm').mockReturnValue(false);
+      dialogOpen.mockReturnValue({ afterClosed: () => of(false) });
       component.tearDownSandbox();
       expect(runnerApi.teardown).not.toHaveBeenCalled();
     });
 
     it('tearDownSandbox marks the sandbox cold on confirm', () => {
       selectWriter();
-      vi.spyOn(window, 'confirm').mockReturnValue(true);
+      dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
       component.tearDownSandbox();
       expect(component.sandbox()).toEqual({ ...coldHandle, status: 'cold', url: null });
     });
 
-    it('tearDownSandbox logs on failure', () => {
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    it('tearDownSandbox surfaces an error on failure', () => {
       selectWriter();
-      vi.spyOn(window, 'confirm').mockReturnValue(true);
-      runnerApi.teardown.mockReturnValue(throwError(() => new Error('teardown failed')));
+      dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
+      runnerApi.teardown.mockReturnValue(throwError(() => ({ error: { detail: 'teardown failed' } })));
 
       component.tearDownSandbox();
 
-      expect(consoleSpy).toHaveBeenCalledWith('teardown failed', expect.any(Error));
+      expect(component.destructiveError()).toBe('teardown failed');
     });
   });
 
