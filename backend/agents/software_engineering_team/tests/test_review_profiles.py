@@ -106,7 +106,7 @@ def test_output_section_pre_existing_default_matches_reasoning_pass() -> None:
     default"; if the reasoning pass's default ever changes, this doc must
     change with it."""
     assert "Default false: when you cannot tell" not in _SHARED_OUTPUT_SECTION
-    assert "Default true when you cannot tell" in _SHARED_OUTPUT_SECTION
+    assert "Set true when you cannot tell" in _SHARED_OUTPUT_SECTION
     assert "only with positive evidence" in _SHARED_OUTPUT_SECTION
 
 
@@ -205,7 +205,8 @@ def test_thoroughness_requires_positive_change_surface_evidence_for_scope() -> N
     assert (
         "require positive evidence before you treat a finding as in scope" in _SHARED_REVIEW_POLICY
     )
-    assert "Default true when uncertain" in _SHARED_REVIEW_POLICY
+    assert "Default true when uncertain" not in _SHARED_REVIEW_POLICY
+    assert "Set true when uncertain" in _SHARED_REVIEW_POLICY
 
 
 def test_code_review_criteria_covers_eight_change_focused_headers() -> None:
