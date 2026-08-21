@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import time
+from abc import abstractmethod
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, Optional, Tuple
 
@@ -1193,18 +1194,19 @@ class ConfigDrivenV2DevelopmentAgent(BaseV2DevelopmentAgent):
         """
         return self._stack_profile().detect_tooling(repo_path)
 
+    @abstractmethod
     def _build_tool_agents(self, llm: LLMClient) -> Dict[Any, Any]:
         """Build the team's tool-agent roster.
 
         Subclasses override this to construct their team-specific tool agents.
-        The base implementation raises ``NotImplementedError`` — a concrete
-        team must supply its own roster (mirroring the module-level
-        ``_build_tool_agents`` each team already defines).
+        The tool-agent builder is kept as a subclass hook (rather than a field
+        on ``V2TeamConfig``) because each team's builder uses deferred imports
+        of heavy strands/llm_service machinery that cannot be eagerly loaded
+        as a frozen-dataclass field.
 
         Preconditions: ``llm`` is a configured ``LLMClient`` (not ``None``).
         Postconditions: returns a ``Dict`` mapping the team's ``ToolAgentKind``
-          enum members to constructed agent instances. Raises
-          ``NotImplementedError`` if not overridden.
+          enum members to constructed agent instances.
         """
         raise NotImplementedError(
             f"{type(self).__name__} must override _build_tool_agents"
@@ -1220,8 +1222,8 @@ class ConfigDrivenV2DevelopmentAgent(BaseV2DevelopmentAgent):
         Preconditions:
             ``llm`` is a configured ``LLMClient`` (not ``None``).
         Postconditions:
-            Returns a ``Dict[ToolAgentKind, Any]`` mapping every
-            ``ToolAgentKind`` declared in ``self.config.tool_agent_kinds`` to a
+            Returns a ``Dict[Any, Any]`` mapping every kind declared in
+            ``self.config.tool_agent_kinds`` (as strings or enum members) to a
             constructed agent instance. Raises ``ValueError`` (from
             ``_validate_tool_agents``) if the built roster does not exactly
             match the config's declared kinds.

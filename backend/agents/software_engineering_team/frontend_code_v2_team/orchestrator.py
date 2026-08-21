@@ -1,5 +1,5 @@
 """
-Frontend-Code-V2 team orchestrator: 5-phase state machine (Setup -> Planning ->
+Frontend-Code-V2 team orchestrator: 5-phase state machine (Pre-flight -> Planning ->
 Execution -> Documentation -> Deliver) for frontend code-generation tasks.
 
 Entry point used by the main orchestrator and by the frontend-code-v2 API.
