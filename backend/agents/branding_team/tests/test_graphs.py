@@ -10,6 +10,7 @@ a dummy Strands model and never invokes it.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from strands import Agent
@@ -60,20 +61,45 @@ def test_build_phase2_swarm_alias_returns_graph() -> None:
     assert isinstance(build_phase2_swarm(), Graph)
 
 
-def test_build_phase2_graph_wires_linear_chain() -> None:
-    """Phase 2 uses a single-predecessor chain (Strands multi-in edges are OR-ready).
-
-    Upstream narrative reaches each specialist as read-only context via the
-    edge-injected ``Inputs from previous nodes``, not fan-in edges or a
-    carry-forward ``structured_output`` model.
+def test_build_phase2_graph_wires_pure_fan_out() -> None:
+    """Phase 2 has no compositor: all six specialists are both entry points
+    and terminal nodes, with no edges between them. Their typed fragments are
+    merged into ``NarrativeMessagingOutput`` in Python by the orchestrator's
+    Phase-2 ``merge_fn``, not by an LLM fan-in node or a sequential chain.
     """
-    from branding_team.graphs.phase2_narrative import _PHASE2_NODE_ORDER
-
     graph = build_phase2_graph()
-    edges = {(e.from_node.node_id, e.to_node.node_id) for e in graph.edges}
-    expected = set(zip(_PHASE2_NODE_ORDER, _PHASE2_NODE_ORDER[1:]))
-    assert edges == expected
-    assert len(edges) == 5
+    expected = {
+        "Storyteller",
+        "ArchetypeAnalyst",
+        "TaglineWriter",
+        "MessageMapper",
+        "PersonaBuilder",
+        "VoicePrinciplesDrafter",
+    }
+    assert set(graph.nodes.keys()) == expected
+    assert {n.node_id for n in graph.entry_points} == expected
+    assert len(graph.edges) == 0
+    assert "narrative_compositor" not in graph.nodes
+
+
+def test_build_phase2_graph_sets_execution_and_node_timeouts(monkeypatch) -> None:
+    """A direct ``build_phase2_graph()`` call (e.g. this test suite, or a future
+    standalone caller) must stay bounded on its own, not only when wrapped by
+    ``build_branding_graph``/``run_single_phase``'s outer timeout -- the same
+    600s/180s budget ``build_sequential`` used to apply before this graph
+    became a bare ``GraphBuilder``."""
+    import branding_team.graphs.phase2_narrative as phase2_mod
+
+    fake_graph = MagicMock()
+    fake_builder = MagicMock()
+    fake_builder.build.return_value = fake_graph
+    monkeypatch.setattr(phase2_mod, "GraphBuilder", MagicMock(return_value=fake_builder))
+
+    result = phase2_mod.build_phase2_graph()
+
+    assert result is fake_graph
+    fake_builder.set_execution_timeout.assert_called_once_with(600.0)
+    fake_builder.set_node_timeout.assert_called_once_with(180.0)
 
 
 def test_build_phase3_graph_is_a_graph() -> None:
@@ -304,10 +330,10 @@ def test_phase5_prompts_drop_redundant_json_reminder() -> None:
 # Top-level builder — each target_phase exercises a different gating branch
 # ---------------------------------------------------------------------------
 
-# No phase has a compositor node anymore — Phase 1's synthesizer, Phase 2's
-# linear chain, and Phase 3/4/5's pure fan-outs are all merged in Python by
-# the orchestrator's per-phase ``merge_fn`` (or, for Phase 1/2, their own
-# terminal/cumulative agent output). See ``test_build_phase3_graph_wires_diverge_and_fan_out``,
+# No phase has a compositor node anymore — Phase 1's synthesizer and Phase
+# 2/3/4/5's pure fan-outs are all merged in Python by the orchestrator's
+# per-phase ``merge_fn``. See ``test_build_phase2_graph_wires_pure_fan_out``,
+# ``test_build_phase3_graph_wires_diverge_and_fan_out``,
 # ``test_build_phase4_graph_wires_pure_fan_out``, and
 # ``test_build_phase5_graph_wires_pure_fan_out``.
 

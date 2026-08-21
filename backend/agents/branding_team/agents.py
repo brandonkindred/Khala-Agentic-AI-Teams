@@ -271,7 +271,7 @@ def make_positioning_synthesizer() -> Agent:
 
 
 # ===================================================================
-# Phase 2 — Narrative & Messaging  (Graph: sequential specialists)
+# Phase 2 — Narrative & Messaging  (Graph: parallel fan-out)
 # ===================================================================
 
 _PHASE2_AGENT_KEY = phase_agent_key(BrandPhase.NARRATIVE_MESSAGING)
@@ -303,10 +303,10 @@ def make_storyteller() -> Agent:
 
 _ARCHETYPE_ANALYST_PROMPT = AgentPromptSpec(
     opening=(
-        "You are a Brand Archetype Analyst. Using the brand story from Inputs from previous "
-        f"nodes and the strategic core as read-only context, select {BRAND_ARCHETYPES_MIN}-"
-        f"{BRAND_ARCHETYPES_MAX} brand archetypes (e.g. The Sage, The Creator, The Explorer) "
-        "that fit the narrative, and add:"
+        "You are a Brand Archetype Analyst. Using the branding mission and strategic core "
+        f"output as context, select {BRAND_ARCHETYPES_MIN}-{BRAND_ARCHETYPES_MAX} brand "
+        "archetypes (e.g. The Sage, The Creator, The Explorer) that fit the brand's "
+        "positioning and values, and add:"
     ),
     fields=(
         PromptFieldSpec(
@@ -341,8 +341,8 @@ def make_archetype_analyst() -> Agent:
 
 _TAGLINE_WRITER_PROMPT = AgentPromptSpec(
     opening=(
-        "You are a Tagline Writer. Using the brand story and archetypes from Inputs from "
-        "previous nodes and the strategic core as read-only context, add:"
+        "You are a Tagline Writer. Using the branding mission and strategic core output as "
+        "context, add:"
     ),
     fields=(
         PromptFieldSpec("tagline", "a memorable brand tagline (max 8 words)"),
@@ -378,8 +378,8 @@ def make_tagline_writer() -> Agent:
 
 _MESSAGE_MAPPER_PROMPT = AgentPromptSpec(
     opening=(
-        "You are a Message Mapper. Using all prior narrative fields from Inputs from previous "
-        "nodes as read-only context, add:"
+        "You are a Message Mapper. Using the branding mission and strategic core output "
+        "(positioning, values, audience segments, differentiation) as context, add:"
     ),
     fields=(
         PromptFieldSpec(
@@ -418,8 +418,8 @@ def make_message_mapper() -> Agent:
 
 _PERSONA_BUILDER_PROMPT = AgentPromptSpec(
     opening=(
-        "You are a Persona Builder. Using audience segments and all prior narrative fields "
-        "from Inputs from previous nodes as read-only context, create:"
+        "You are a Persona Builder. Using the branding mission and the strategic core's "
+        "audience segments as context, create:"
     ),
     fields=(
         PromptFieldSpec(
@@ -454,9 +454,8 @@ def make_persona_builder() -> Agent:
 
 _VOICE_PRINCIPLES_DRAFTER_PROMPT = AgentPromptSpec(
     opening=(
-        "You are a Voice Principles Drafter. Using all prior narrative fields from Inputs from "
-        "previous nodes and the mission's desired_voice as read-only context, produce "
-        "writing_guidelines:"
+        "You are a Voice Principles Drafter. Using the branding mission's desired_voice and "
+        "the strategic core output as context, produce writing_guidelines:"
     ),
     fields=(
         PromptFieldSpec(
@@ -472,7 +471,7 @@ _VOICE_PRINCIPLES_DRAFTER_PROMPT = AgentPromptSpec(
             "piece must meet",
         ),
     ),
-    closing="\nThis is the final step in narrative development.",
+    closing="\nThis runs alongside the other five narrative specialists; do not assume any of their output already exists.",
 )
 
 
@@ -484,8 +483,9 @@ def make_voice_principles_drafter() -> Agent:
         structured output is a ``WritingGuidelinesOutput`` containing voice
         principles, style dos/don'ts, and an editorial quality bar — its own
         field only, merged with the other five specialists' fragments by the
-        orchestrator. The final step in narrative development. The agent is
-        routed through the ``branding_narrative_messaging`` agent_key tier.
+        orchestrator. Runs in parallel with the other five, not after them.
+        The agent is routed through the ``branding_narrative_messaging``
+        agent_key tier.
     """
     return build_agent(
         name="VoicePrinciplesDrafter",

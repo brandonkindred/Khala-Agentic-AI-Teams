@@ -44,8 +44,18 @@ def build_phase2_graph() -> Graph:
     Postconditions:
         Returns a built ``Graph`` whose six specialist nodes are all both entry
         points and terminal nodes, running in parallel with no edges between them.
+        Carries the same 600s execution / 180s per-node timeout budget
+        ``build_sequential`` used to apply, matching Phase 1's
+        ``build_fan_out_fan_in`` graph (Phase 3/4/5's bare ``GraphBuilder``s
+        rely solely on the outer ``build_branding_graph``/``run_single_phase``
+        wrapper's budget; this graph sets its own so a direct
+        ``build_phase2_graph().invoke_async(...)`` — e.g. in tests or a future
+        standalone caller — stays bounded too).
     """
     builder = GraphBuilder()
+    builder.set_graph_id("phase2_narrative")
+    builder.set_execution_timeout(600.0)
+    builder.set_node_timeout(180.0)
 
     factories = {
         "Storyteller": make_storyteller,
@@ -63,5 +73,5 @@ def build_phase2_graph() -> Graph:
 
 
 # Back-compat alias — Phase 2 used to be a Swarm; callers that still import
-# the old name get the Graph that preserves structured_output sequencing.
+# the old name get the same pure fan-out Graph.
 build_phase2_swarm = build_phase2_graph

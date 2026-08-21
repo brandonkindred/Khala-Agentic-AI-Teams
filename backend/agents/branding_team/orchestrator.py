@@ -94,7 +94,7 @@ _PHASE1_NODE_MERGE: dict[str, Optional[str]] = {
 }
 
 
-# Phase 2 linear Graph node id -> nest-under key on NarrativeMessagingOutput,
+# Phase 2 fan-out node id -> nest-under key on NarrativeMessagingOutput,
 # or None to merge fields in flat. Each specialist's structured_output is an
 # own-field-only model (Story 5b Step 1; see models.py) -- no two of the six
 # fragments can set the same flat key, so the merge is a plain flat union with
@@ -399,7 +399,7 @@ class _PhaseSpec(NamedTuple):
         model_cls: The phase's output model.
         merge_fn: When the phase's node wraps several named sub-agents whose
             fragments must be merged into one ``model_cls`` (Phase 1's fan-out,
-            Phase 2's sequential graph, Phase 3's, Phase 4's, and Phase 5's
+            Phase 2's fan-out graph, Phase 3's, Phase 4's, and Phase 5's
             fan-out), the merge function to try first. All five current phases
             supply one; ``None`` remains valid for a hypothetical future phase
             whose node has no fan-out to merge. When ``merge_fn`` is absent or

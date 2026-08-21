@@ -1091,7 +1091,7 @@ def _phase2_nested_node_result() -> MagicMock:
 
 
 def test_extract_phase_output_merges_every_phase2_fragment() -> None:
-    """Phase 2 wraps six sequential Graph agents as one top-level node;
+    """Phase 2 wraps six parallel fan-out Graph agents as one top-level node;
     get_agent_results()[-1] only ever sees VoicePrinciplesDrafter, so the five
     upstream agents' fragments must be merged in separately."""
     mock_result = MagicMock()
