@@ -190,9 +190,15 @@ def try_structured_or_degrade(
 ### Implementation Strategy
 
 `try_structured_or_degrade` is a backend-agnostic degrade primitive.
-`run_structured_persona` can be reimplemented in terms of it:
+`run_structured_persona` can be reimplemented in terms of it (note: the
+return type changes from `OutputT` to `tuple[OutputT, bool]` — this is a
+**breaking change** that requires updating all 3 callers atomically):
 
 ```python
+import logging as _logging
+
+_logger = _logging.getLogger(__name__)
+
 def run_structured_persona(
     *, model, system_prompt, user_prompt, output_model,
     fallback_factory, agent_factory, on_success=None,
@@ -212,13 +218,14 @@ def run_structured_persona(
         fallback_factory=fallback_factory,
         on_success=on_success,
         agent_name=agent_name,
-        logger=logger,
+        logger=_logger,
     )
 ```
 
-This preserves backward compatibility for `run_structured_persona` callers
-(with the tuple return change applied atomically) while giving Security a
-direct path to the same degrade contract without being forced onto Strands.
+This is a **breaking signature change** — callers must be updated to
+destructure the tuple. All 3 `run_structured_persona` call sites (QA,
+Accessibility, Integration) must be updated atomically in a single commit.
+Since they are all in the same subsystem, the blast radius is contained.
 
 ### Migration Path
 
