@@ -23,7 +23,7 @@ primitive — see Section 3.
 | **Exception types caught** | All (`Exception`) via helper | All (`Exception`) inline | All (`Exception`) via helper | All (`Exception`) via helper |
 | **Logging** | `logger.warning("QA: structured_output failed (%s); returning fallback", exc)` | `logger.warning("Security: structured_output failed (%s); returning fallback", exc)` | `logger.warning("Accessibility: structured_output failed (%s); returning fallback", exc)` | `logger.warning("Integration: structured_output failed (%s); returning failed result", exc)` |
 | **Fallback output** | `QAOutput(bugs_found=[], approved=False, quality_gates={"acceptance_evidence":"fail"} if acceptance mode else {}, summary=f"...{exc}")` | `SecurityOutput(vulnerabilities=[], approved=False, summary=f"...{exc}", remediations=[])` | `AccessibilityOutput(issues=[], approved=False, summary=f"...{exc}")` | `IntegrationOutput(passed=False, issues=[], summary=f"...{exc}", fix_task_suggestions=[])` |
-| **Retry / correction logic** | Strands implicit: forced tool-choice re-prompt on omitted tool call; validation error fed back for one event-loop correction turn | 1 explicit self-correction attempt inside `generate_structured` (re-prompts with validation error), then exception propagates | Same as QA (Strands implicit correction turns) | Same as QA (Strands implicit correction turns) |
+| **Retry / correction logic** | Strands implicit: forced tool-choice re-prompt on omitted tool call; validation errors fed back repeatedly (no turn cap — each invalid tool-use triggers another model cycle until success or an unrecoverable failure) | 1 explicit self-correction attempt inside `generate_structured` (re-prompts with validation error), then exception propagates | Same as QA (Strands implicit, unbounded correction cycles) | Same as QA (Strands implicit, unbounded correction cycles) |
 | **Post-success processing** | `_finalize`: re-derives `approved` from severities/gates; mode-dependent logic | Inline: re-derives `approved` via `derive_approved` | `_finalize`: re-derives `approved` from severities | `_finalize`: re-derives `passed` from severities |
 | **Cache interaction** | Fallback results are NOT cached (`is_fallback` flag); genuine results cached | Fallback results are NOT returned to cache (early-return before cache-write block) | No caching | No caching |
 | **Fail-closed guarantee** | Yes (`approved=False`, plus explicit quality gate fail in acceptance mode) | Yes (`approved=False`) | Yes (`approved=False`) | Yes (`passed=False`) |
@@ -36,19 +36,24 @@ primitive — see Section 3.
 
 - **3 agents** (QA, Accessibility, Integration) use the Strands `Agent` with
   `structured_output_model`, which internally uses forced tool-choice to
-  extract structured output. Strands does have implicit correction behavior:
+  extract structured output. Strands has implicit correction behavior:
   if the model omits the output tool call, Strands sends a follow-up forcing
   prompt; if the tool call has Pydantic-invalid arguments, validation errors
-  are fed back for another event-loop turn. These implicit retries happen
-  inside the Strands `Agent.__call__` before any exception propagates to
+  are appended as tool results and the model is re-invoked for another cycle.
+  This correction loop is **unbounded** — Strands (≥1.52.0) does not cap
+  the number of validation-correction turns, so repeated invalid attempts
+  each trigger another model cycle until the model produces valid output or
+  an unrecoverable failure occurs. These implicit retries happen inside the
+  Strands `Agent.__call__` before any exception propagates to
   `run_structured_persona`.
 - **Security** uses `run_single_shot_review` → `generate_structured`, which
   supports `correction_attempts=1` (one explicit self-correction retry on
   parse/validation failure before raising).
 
-Both mechanisms provide some form of self-correction before raising, though
-the retry budgets and triggering conditions differ (Strands' is implicit
-and event-loop-driven; `generate_structured`'s is explicit and bounded).
+Both mechanisms provide self-correction before raising, though the retry
+budgets differ significantly: Strands' correction is implicit and
+**unbounded** (potentially multiple cycles with increasing latency/cost);
+`generate_structured`'s is explicit and **bounded** to one attempt.
 
 **Decision:** PRESERVE. Per `LLM_CALLING_PATTERN_DECISION.md`, the Security
 agent's migration from Pattern 2 to `run_single_shot_review` is an
@@ -97,16 +102,20 @@ fallback results (fallback is already final/safe).
 
 - Security's underlying `generate_structured` gets one explicit
   self-correction attempt (the LLM is re-prompted with the validation
-  error) before raising.
-- The Strands mechanism used by the other 3 has implicit correction turns
-  (forced tool-choice re-prompt on omission; validation error feedback on
-  invalid arguments) that happen inside the agent's event loop before the
-  exception propagates out.
+  error) before raising. This is **bounded** — at most 1 extra call.
+- The Strands mechanism used by the other 3 has implicit, **unbounded**
+  correction cycles: on tool-call omission, a forcing prompt is sent; on
+  Pydantic-invalid arguments, validation errors are appended and the model
+  is re-invoked. There is no turn cap in Strands ≥1.52.0, so a
+  persistently-invalid model can trigger multiple correction cycles with
+  compounding latency and token cost before finally raising.
 
-Both approaches provide correction — the difference is in explicitness and
-budget visibility. From the degrade helper's perspective, these are
-implementation details of the `call` that happen before any exception
-reaches the catch boundary.
+The key implication: Security's correction cost is predictable (at most 2×
+a single call), while the Strands-based agents' correction cost is
+theoretically unbounded. In practice, models typically self-correct within
+1–2 turns, but this is not guaranteed. From the degrade helper's
+perspective, these are still implementation details of the `call` that
+happen before any exception reaches the catch boundary.
 
 **Decision:** PRESERVE. This is an implementation detail of the underlying
 call mechanism, not of the degrade contract. The helper simply wraps
