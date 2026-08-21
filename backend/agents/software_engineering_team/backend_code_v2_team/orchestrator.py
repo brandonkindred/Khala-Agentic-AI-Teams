@@ -113,7 +113,17 @@ class BackendDevelopmentAgent(ConfigDrivenV2DevelopmentAgent):
         super().__init__(llm_client, BACKEND_CONFIG)
 
     def _build_and_validate_tool_agents(self, llm: LLMClient) -> Dict[ToolAgentKind, Any]:
-        """Build tool agents and validate the roster matches the config's declared registry."""
+        """Build tool agents and validate the roster matches the config's declared registry.
+
+        Preconditions:
+            ``llm`` is a configured ``LLMClient`` (not ``None``).
+        Postconditions:
+            Returns a ``Dict[ToolAgentKind, Any]`` mapping every
+            ``ToolAgentKind`` declared in ``self.config.tool_agent_kinds`` to a
+            constructed agent instance. Raises ``ValueError`` (from
+            ``_validate_tool_agents``) if the built roster does not exactly
+            match the config's declared kinds.
+        """
         agents = _build_tool_agents(llm)
         self._validate_tool_agents(agents)
         return agents
