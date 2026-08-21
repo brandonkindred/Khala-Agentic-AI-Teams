@@ -158,20 +158,27 @@ def _validate_runpod_endpoint_id(endpoint_id: str) -> str:
 def _build_runpod_base_url(endpoint_id: str) -> str:
     """Construct the canonical RunPod OpenAI-compatible base URL for an endpoint.
 
+    The LLM client (``OllamaLLMClient``) appends ``/v1/chat/completions`` to the
+    stored ``base_url``, so this must return the path *without* the ``/v1`` suffix.
+    The full inference URL becomes:
+    ``https://api.runpod.ai/v2/{endpoint_id}/openai/v1/chat/completions``.
+
     Preconditions: ``endpoint_id`` is a valid alphanumeric string (caller must
         validate first via ``_validate_runpod_endpoint_id``).
     Postconditions: returns exactly
-        ``https://api.runpod.ai/v2/{endpoint_id}/openai/v1`` with no trailing
+        ``https://api.runpod.ai/v2/{endpoint_id}/openai`` with no trailing
         slash, no extra path segments, and no query parameters.
     """
-    return f"https://api.runpod.ai/v2/{endpoint_id}/openai/v1"
+    return f"https://api.runpod.ai/v2/{endpoint_id}/openai"
 
 
 #: Matches the URL ``_build_runpod_base_url`` produces, capturing the endpoint_id
 #: segment. Deliberately permissive (``[^/]+``, not the stricter alphanumeric-only
 #: charset ``_validate_runpod_endpoint_id`` enforces at create time) so recovery
 #: doesn't depend on that separate, independently-changeable validation rule.
-_RUNPOD_BASE_URL_RE = re.compile(r"^https://api\.runpod\.ai/v2/([^/]+)/openai/v1/?$")
+#: Also matches the legacy ``/openai/v1`` suffix so existing DB rows are still
+#: recognized without a migration.
+_RUNPOD_BASE_URL_RE = re.compile(r"^https://api\.runpod\.ai/v2/([^/]+)/openai(?:/v1)?/?$")
 
 
 def _extract_runpod_endpoint_id(base_url: str) -> str:
@@ -190,9 +197,11 @@ def _extract_runpod_endpoint_id(base_url: str) -> str:
 
 #: Wall-clock ceiling (seconds) for the RunPod reachability probe. It bounds the
 #: added latency of create/update requests that configure a RunPod provider — the
-#: handler blocks for at most this long while the probe runs. Kept short so a slow
-#: or unreachable endpoint fails fast instead of tripping client/gateway timeouts.
-_RUNPOD_PROBE_TIMEOUT_SECONDS = 5.0
+#: handler blocks for at most this long while the probe runs. Set to 10 s to
+#: accommodate RunPod's gateway response time; the /health endpoint is handled at
+#: the gateway level and does not require a warm worker, but network latency and
+#: occasional gateway delays can exceed 5 s.
+_RUNPOD_PROBE_TIMEOUT_SECONDS = 10.0
 
 
 class RunPodProbeError(Exception):
@@ -210,12 +219,14 @@ class RunPodProbeError(Exception):
 
 
 async def _probe_runpod_endpoint(endpoint_id: str, api_key: str) -> None:
-    """Send a GET to the RunPod /models endpoint to verify it is reachable.
+    """Send a GET to the RunPod /health endpoint to verify it is reachable.
 
     Fires a single authenticated GET request to
-    ``https://api.runpod.ai/v2/{endpoint_id}/openai/v1/models`` with a
-    ``_RUNPOD_PROBE_TIMEOUT_SECONDS`` timeout. Used at create/update time to
-    validate that the supplied credentials work before persisting the entry.
+    ``https://api.runpod.ai/v2/{endpoint_id}/health`` with a
+    ``_RUNPOD_PROBE_TIMEOUT_SECONDS`` timeout. The /health endpoint is served by
+    the RunPod gateway itself (no warm worker required), so it responds even when
+    all workers are scaled to zero. Used at create time to validate that the
+    endpoint ID and API key are valid before persisting the entry.
 
     Preconditions: ``endpoint_id`` has passed ``_validate_runpod_endpoint_id``;
         ``api_key`` is non-empty (caller already checked).
@@ -230,7 +241,7 @@ async def _probe_runpod_endpoint(endpoint_id: str, api_key: str) -> None:
         - a connection error or timeout — the endpoint never answered — maps to
           503 (upstream unreachable).
     """
-    url = f"https://api.runpod.ai/v2/{endpoint_id}/openai/v1/models"
+    url = f"https://api.runpod.ai/v2/{endpoint_id}/health"
     try:
         async with httpx.AsyncClient(timeout=_RUNPOD_PROBE_TIMEOUT_SECONDS) as client:
             resp = await client.get(url, headers={"Authorization": f"Bearer {api_key}"})
@@ -572,16 +583,18 @@ async def create_provider(body: LlmProviderCreate) -> LlmProviderListResponse:
             raise HTTPException(status_code=e.status_code, detail=e.detail) from e
         base_url = _build_runpod_base_url(body.endpoint_id)
         label = body.label.strip() or "RunPod"
+        model = ""  # RunPod serverless endpoints serve a single pre-configured model
     else:
         if not body.label.strip():
             raise HTTPException(status_code=400, detail="label must not be empty.")
         base_url = body.base_url
         label = body.label.strip()
+        model = body.model
     try:
         provider_store.create_entry(
             label=label,
             provider=body.provider,
-            model=body.model,
+            model=model,
             base_url=base_url,
             api_key=api_key,
         )
@@ -629,7 +642,7 @@ async def update_provider(entry_id: int, body: LlmProviderUpdate) -> LlmProvider
     settable directly and any value sent for it is ignored — either it is
     recomputed from a non-empty ``endpoint_id`` (which OVERWRITES the stored
     ``base_url`` with the canonical
-    ``https://api.runpod.ai/v2/{endpoint_id}/openai/v1``), or, when ``endpoint_id``
+    ``https://api.runpod.ai/v2/{endpoint_id}/openai``), or, when ``endpoint_id``
     is omitted/empty on an entry that is *already* RunPod, the stored ``base_url``
     is left untouched. Switching a non-RunPod entry to RunPod REQUIRES a non-empty
     ``endpoint_id`` in the same request (400 otherwise) — without one there would be
@@ -698,6 +711,9 @@ async def update_provider(entry_id: int, body: LlmProviderUpdate) -> LlmProvider
             # always derived from endpoint_id, never directly settable — ignore any
             # stray body.base_url instead of overwriting the canonical URL with it.
             base_url = None
+        # RunPod serverless endpoints serve a single pre-configured model; any
+        # client-supplied model value is ignored and the stored field is cleared.
+        model = ""
     try:
         updated = provider_store.update_entry(
             entry_id,
