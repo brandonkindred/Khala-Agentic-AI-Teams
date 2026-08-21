@@ -190,7 +190,7 @@ def adapt_planning_result(
 
     # Adapter-specific: fall back to handoff summary when goals are empty.
     if not project_overview["goals"] and handoff.get("summary"):
-        project_overview["goals"] = handoff["summary"]
+        project_overview["goals"] = handoff["summary"].strip()
 
     # Open/resolved questions are carried across the planning handoff so the SE gate can escalate
     # unanswered product questions to the user instead of letting them be auto-decided downstream.
