@@ -22,7 +22,6 @@ Key differences from ``OllamaLLMClient``:
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Callable, Dict, Optional
 
