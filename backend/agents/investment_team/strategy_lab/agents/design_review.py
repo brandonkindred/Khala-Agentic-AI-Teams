@@ -25,11 +25,8 @@ from typing import Any, Dict, List, Literal, Optional, Set
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from strands import Agent
 
-from llm_service.interface import LLMSemanticExhaustionError
-
 from ...models import StrategySpec
 from .._orchestrator_helpers import _has_short_period_stall
-from ..exceptions import StrategyLabLLMError
 from ..quality_gates.models import QualityGateResult
 from . import _structured_output as so
 from ._llm_budget import DesignBudgetExhausted, charge_active_budget
@@ -101,6 +98,7 @@ def _get_system_prompt() -> str:
     if not body:
         raise ValueError("design_review_system.md must be non-empty")
     return body + "\n\n" + _get_stop_order_semantics() + "\n\n" + _get_sizing_risk_framing()
+
 
 # The JSON Schema the LLM response must conform to, rendered once for
 # injection into the prompt (mirrors ``refinement._REFINEMENT_SCHEMA_JSON``).
@@ -564,7 +562,7 @@ class DesignReviewAgent:
         # Charge outside the fail-closed ``try`` so DesignBudgetExhausted
         # propagates to ``_run_design_loop`` instead of being converted into
         # a fail-closed critique that would let the loop continue past budget.
-        # Structured path: ``invoke_structured_with_schema(charge=True)``
+        # Structured path: ``try_structured_or_degrade(charge=True)``
         # charges once per provider call inside its retried closure
         # (reasoning + formatting). Legacy path: charge once here for the
         # single provider call.
@@ -573,41 +571,25 @@ class DesignReviewAgent:
             charge_active_budget()
 
         try:
-            if structured_available:
-                try:
-                    parsed = so.invoke_structured_with_schema(
-                        "strategy_design_review",
-                        _get_system_prompt(),
-                        user_prompt,
-                        phase="design_review_structured",
-                        schema=CRITIQUE_SCHEMA,
-                        charge=True,
-                        objective="strategy design review (structured)",
-                        logger=logger,
-                        reasoning_system_prompt=so.build_reasoning_system_prompt(
-                            _get_system_prompt()
-                        ),
-                    )
-                except StrategyLabLLMError as exc:
-                    cause = exc.cause
-                    if not (isinstance(cause, LLMSemanticExhaustionError) and cause.schema_forced):
-                        raise
-                    logger.warning(
-                        "structured design-review decode starved (schema_forced); "
-                        "degrading to the legacy single-shot call."
-                    )
-                    # The schema_forced degrade path makes an additional real
-                    # provider call after the structured attempt already charged
-                    # for whichever sub-calls ran — charge for the legacy
-                    # fallback here before invoking it.
-                    charge_active_budget()
-                    parsed = _invoke_legacy()
-                else:
-                    logger.info(
-                        "strategy_lab structured_output outcome=succeeded "
-                        "agent=strategy_design_review phase=design_review_structured",
-                    )
-            else:
+            parsed = so.try_structured_or_degrade(
+                "strategy_design_review",
+                CRITIQUE_SCHEMA,
+                _get_system_prompt(),
+                user_prompt,
+                so.build_reasoning_system_prompt(_get_system_prompt()),
+                phase="design_review_structured",
+                charge=True,
+                objective="strategy design review (structured)",
+                logger=logger,
+            )
+            if parsed is None and structured_available:
+                # The schema_forced degrade path makes an additional real
+                # provider call after the structured attempt already charged
+                # for whichever sub-calls ran — charge for the legacy
+                # fallback here before invoking it.
+                charge_active_budget()
+                parsed = _invoke_legacy()
+            elif parsed is None:
                 parsed = _invoke_legacy()
         except DesignBudgetExhausted:
             # Must propagate uncaught — same rationale as the pre-try charges
