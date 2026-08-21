@@ -46,6 +46,10 @@ from .issue_grooming_split import (
 )
 from .issue_heuristic_scorer import score_issue_heuristically
 from .issue_llm_scorer import score_issue_via_llm
+from .enhanced_issue_builder import (
+    build_enhanced_issue_from_proposal,
+    compute_complexity_score,
+)
 from .issue_proposals import (
     annotate_duplicate_proposals,
     build_issue_from_proposal,
@@ -112,6 +116,7 @@ __all__ = [
     "ScoreBreakdown",
     "SubIssue",
     "annotate_duplicate_proposals",
+    "build_enhanced_issue_from_proposal",
     "build_existing_comments",
     "build_issue_from_proposal",
     "build_review_body",
@@ -119,6 +124,7 @@ __all__ = [
     "build_scoring_prompt",
     "choose_event",
     "complexity_label",
+    "compute_complexity_score",
     "duplicate_check_max_open_issues",
     "extract_checklist_items",
     "find_matching_open_issue",

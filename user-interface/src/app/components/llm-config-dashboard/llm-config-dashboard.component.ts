@@ -302,7 +302,7 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
     const body: LlmProviderCreate = {
       label: form.label.trim(),
       provider: form.provider,
-      model: form.model.trim(),
+      model: this.usesEndpointId(form.provider) ? '' : form.model.trim(),
       base_url: this.usesBaseUrl(form.provider) ? form.base_url.trim() : '',
       api_key: form.api_key.trim(),
       endpoint_id: this.usesEndpointId(form.provider) ? form.endpoint_id.trim() : '',
@@ -376,7 +376,7 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
     const body: LlmProviderUpdate = {
       label: form.label.trim(),
       provider: form.provider,
-      model: form.model.trim(),
+      model: this.usesEndpointId(form.provider) ? '' : form.model.trim(),
       base_url: this.usesBaseUrl(form.provider) ? form.base_url.trim() : '',
       api_key: newKey,
       clear_api_key: form.clear_api_key && !newKey,

@@ -1,0 +1,105 @@
+<section class="oos-issues" aria-labelledby="oos-title">
+  <div class="oos-issues__header">
+    <h2 id="oos-title">
+      <mat-icon aria-hidden="true">report_problem</mat-icon>
+      Out of Scope Issues
+    </h2>
+    <p class="oos-issues__hint">
+      Pre-existing issues found by code reviews in unchanged code. Select the
+      ones worth tracking and file them as GitHub issues.
+    </p>
+  </div>
+
+  @if (error) {
+    <app-inline-banner variant="error" [message]="error" />
+  }
+
+  @if (loading) {
+    <div class="oos-issues__loading">
+      <mat-spinner diameter="24"></mat-spinner>
+      <span>Loading out-of-scope issues...</span>
+    </div>
+  } @else if (proposals.length === 0) {
+    <div class="oos-issues__empty">
+      <mat-icon>check_circle_outline</mat-icon>
+      <span>No unfiled out-of-scope issues found.</span>
+      <button mat-button type="button" (click)="onRefresh()">
+        <mat-icon>refresh</mat-icon>
+        Refresh
+      </button>
+    </div>
+  } @else {
+    <!-- Toolbar: Select All + File button -->
+    <div class="oos-issues__toolbar">
+      <div class="oos-issues__select-controls">
+        <mat-checkbox
+          [checked]="allSelected"
+          [indeterminate]="someSelected"
+          (change)="toggleSelectAll()"
+          aria-label="Select all issues"
+        >
+          Select All ({{ proposals.length }})
+        </mat-checkbox>
+      </div>
+      <div class="oos-issues__actions">
+        <button mat-button type="button" (click)="onRefresh()" [disabled]="filing">
+          <mat-icon>refresh</mat-icon>
+          Refresh
+        </button>
+        <button
+          mat-flat-button
+          color="primary"
+          (click)="onFileIssues()"
+          [disabled]="selectedCount === 0 || filing"
+        >
+          @if (filing) {
+            <mat-spinner diameter="18" aria-hidden="true"></mat-spinner>
+            Filing...
+          } @else {
+            <ng-container>
+              <mat-icon aria-hidden="true">add</mat-icon>
+              Add Github Issues ({{ selectedCount }})
+            </ng-container>
+          }
+        </button>
+      </div>
+    </div>
+
+    <!-- Proposals list -->
+    <ul class="oos-issues__list" role="list">
+      @for (p of proposals; track compositeId(p)) {
+        <li class="oos-issue" role="listitem">
+          <mat-checkbox
+            [checked]="isSelected(p)"
+            (change)="toggleSelection(p)"
+            [attr.aria-label]="'Select: ' + p.description"
+            class="oos-issue__checkbox"
+          ></mat-checkbox>
+
+          <div class="oos-issue__content">
+            <div class="oos-issue__meta">
+              <span class="oos-chip oos-chip--sev-{{ p.severity }}" [matTooltip]="'Severity: ' + p.severity">
+                {{ p.severity }}
+              </span>
+              <span class="oos-chip oos-chip--category" [matTooltip]="'Category: ' + p.category">
+                {{ p.category }}
+              </span>
+              @if (proposalLocation(p); as loc) {
+                <code class="oos-issue__loc">{{ loc }}</code>
+              }
+              <span class="oos-issue__pr" matTooltip="Found during review of this PR">
+                PR #{{ p.pr_number }}
+              </span>
+            </div>
+            <p class="oos-issue__desc">{{ p.description }}</p>
+            @if (p.suggestion) {
+              <p class="oos-issue__suggestion">
+                <strong>Fix:</strong> {{ p.suggestion }}
+              </p>
+            }
+          </div>
+        </li>
+      }
+    </ul>
+  }
+</section>

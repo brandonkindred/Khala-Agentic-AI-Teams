@@ -1567,6 +1567,71 @@ class CreateReviewIssuesResponse(BaseModel):
     proposals: list[dict[str, Any]] = Field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# Out-of-scope issue proposals — aggregated across reviews
+# ---------------------------------------------------------------------------
+
+
+class OutOfScopeProposalItem(BaseModel):
+    """One unfiled out-of-scope issue proposal from code reviews."""
+
+    id: str
+    job_id: str
+    pr_number: int
+    pr_url: str | None = None
+    severity: str
+    category: str
+    file_path: str
+    line: int | None = None
+    description: str
+    suggestion: str = ""
+    locations: list[dict[str, Any]] = Field(default_factory=list)
+    issue_number: int | None = None
+    issue_url: str | None = None
+
+
+class OutOfScopeProposalsResponse(BaseModel):
+    """All unfiled out-of-scope issue proposals for a repository."""
+
+    owner: str
+    repo: str
+    proposals: list[OutOfScopeProposalItem] = Field(default_factory=list)
+    total: int
+    unfiled: int
+
+
+class FileOutOfScopeIssuesBody(BaseModel):
+    """Request body for POST /github/reviews/out-of-scope-issues/file.
+
+    The GitHub token is injected server-side (never sent by the browser).
+    """
+
+    proposal_ids: list[str] = Field(
+        description="Composite ids of the form 'job_id:proposal_id'."
+    )
+    owner: str = Field(description="Repository owner.")
+    repo: str = Field(description="Repository name.")
+
+
+class EnhancedCreatedIssueItem(BaseModel):
+    """One GitHub issue created via the enhanced issue builder."""
+
+    proposal_id: str
+    issue_number: int
+    issue_url: str
+    title: str
+    label: str
+    complexity_score: int
+    merged_into_existing: bool = False
+
+
+class FileOutOfScopeIssuesResponse(BaseModel):
+    """Result of POST /github/reviews/out-of-scope-issues/file."""
+
+    created: list[EnhancedCreatedIssueItem] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
 def _build_github_config_response(
     cfg: dict[str, Any], *, credential_store_unreachable: bool = False
 ) -> GitHubConfigResponse:
@@ -3041,6 +3106,101 @@ async def create_github_review_issues(job_id: str, body: CreateReviewIssuesBody)
     )
     try:
         return CreateReviewIssuesResponse.model_validate(data)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Coding team service returned an unexpected response: {e}",
+        ) from e
+
+
+# ---------------------------------------------------------------------------
+# Out-of-scope issue proposals — aggregated across reviews for a repo
+# ---------------------------------------------------------------------------
+
+
+@router.get("/github/reviews/out-of-scope-issues", response_model=OutOfScopeProposalsResponse)
+async def list_out_of_scope_issues(
+    owner: str,
+    repo: str,
+    limit: int = Query(default=500, ge=1, le=2000),
+) -> OutOfScopeProposalsResponse:
+    """List all unfiled out-of-scope issue proposals across reviews for a repository.
+
+    Powers the Coding Team Issues tab: shows pre-existing bugs found by code
+    reviews that haven't been filed as GitHub issues yet.
+
+    Preconditions:
+        - GitHub integration is enabled with a stored PAT that can reach
+          ``owner``/``repo``.
+        - ``CODING_TEAM_SERVICE_URL`` points at a reachable coding-team service.
+    Postconditions:
+        - Returns unfiled proposals newest-review-first. Each carries the
+          originating review's job_id and PR for provenance.
+    """
+    _cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, None, owner, repo)
+
+    coding_team_url = _require_coding_team_url()
+    await _assert_pat_can_reach_repo(owner, repo, token)
+
+    params: dict[str, Any] = {"owner": owner, "repo": repo, "limit": limit}
+    data = await _forward_to_coding_team(
+        coding_team_url,
+        "reviews/out-of-scope-issues",
+        method="GET",
+        params=params,
+        timeout_s=30.0,
+        log_prefix="github out-of-scope-issues",
+        timeout_detail="Coding team service timed out while listing out-of-scope issues.",
+        generic_failure_detail="Failed to retrieve out-of-scope issues.",
+    )
+    try:
+        return OutOfScopeProposalsResponse.model_validate(data)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Coding team service returned an unexpected response: {e}",
+        ) from e
+
+
+@router.post("/github/reviews/out-of-scope-issues/file", response_model=FileOutOfScopeIssuesResponse)
+async def file_out_of_scope_issues(body: FileOutOfScopeIssuesBody) -> FileOutOfScopeIssuesResponse:
+    """File selected out-of-scope proposals as enhanced GitHub issues.
+
+    For each selected proposal, checks for similar existing issues in the repo.
+    If found, merges into the existing issue. Otherwise creates a new enhanced
+    GitHub issue with Fibonacci complexity scoring, acceptance criteria, etc.
+
+    Preconditions:
+        - GitHub integration is enabled and a PAT is configured.
+        - ``CODING_TEAM_SERVICE_URL`` points at a reachable coding-team service.
+    Postconditions:
+        - Returns created/merged issues and any per-proposal errors.
+    """
+    _cfg, token = await asyncio.to_thread(_resolve_github_access)
+    owner = _validate_repo_component("owner", body.owner)
+    repo = _validate_repo_component("repo", body.repo)
+    if not owner or not repo:
+        raise HTTPException(status_code=400, detail="GitHub owner and repo are required.")
+
+    coding_team_url = _require_coding_team_url()
+    await _assert_pat_can_reach_repo(owner, repo, token)
+
+    payload: dict[str, Any] = {
+        "proposal_ids": body.proposal_ids,
+        "owner": owner,
+        "repo": repo,
+        "github_token": token,
+    }
+    data = await _forward_to_coding_team(
+        coding_team_url,
+        "reviews/out-of-scope-issues/file",
+        json_body=payload,
+        log_prefix="github file-out-of-scope-issues",
+        timeout_detail="Coding team service timed out while filing out-of-scope issues.",
+        generic_failure_detail="Failed to file out-of-scope issues.",
+    )
+    try:
+        return FileOutOfScopeIssuesResponse.model_validate(data)
     except (ValueError, TypeError) as e:
         raise HTTPException(
             status_code=502,

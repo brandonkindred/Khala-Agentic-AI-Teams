@@ -45,7 +45,7 @@ def test_list_masks_keys_and_reports_state(app_client):
 def test_list_returns_endpoint_id_for_runpod_entries_only(app_client):
     client, state = app_client
     state["entries"] = [
-        _entry(1, provider="runpod", api_key="k", base_url="https://api.runpod.ai/v2/abc123/openai/v1"),
+        _entry(1, provider="runpod", api_key="k", base_url="https://api.runpod.ai/v2/abc123/openai"),
         _entry(2, provider="ollama"),
     ]
     resp = client.get("/api/llm-config/providers")
@@ -367,9 +367,11 @@ def test_create_runpod_success_builds_base_url_and_trims_key(app_client, monkeyp
     kw = _find_op(state, "create")[1]
     # The endpoint_id is turned into the canonical OpenAI-compatible base URL, the key
     # is persisted whitespace-trimmed (matching the update path), and the label defaults.
-    assert kw["base_url"] == "https://api.runpod.ai/v2/abc123/openai/v1"
+    assert kw["base_url"] == "https://api.runpod.ai/v2/abc123/openai"
     assert kw["api_key"] == "sk-runpod"
     assert kw["label"] == "RunPod"
+    # RunPod entries never store a model — the serverless endpoint is pre-configured.
+    assert kw["model"] == ""
 
 
 def test_create_runpod_ignores_stray_base_url(app_client, monkeypatch):
@@ -384,6 +386,20 @@ def test_create_runpod_ignores_stray_base_url(app_client, monkeypatch):
     assert resp.status_code == 200
 
 
+def test_create_runpod_ignores_model(app_client, monkeypatch):
+    """RunPod serverless endpoints are pre-configured with a model; any client-supplied
+    model value is ignored and stored as empty."""
+    client, state = app_client
+    _patch_probe(monkeypatch)
+    resp = client.post(
+        "/api/llm-config/providers",
+        json={"provider": "runpod", "api_key": "k", "endpoint_id": "abc123", "model": "some-model"},
+    )
+    assert resp.status_code == 200
+    kw = _find_op(state, "create")[1]
+    assert kw["model"] == ""
+
+
 def test_create_runpod_probe_http_error_propagates_remote_status(app_client, monkeypatch):
     """A 4xx/5xx from RunPod is surfaced with the remote status code, not a blanket 400."""
     from unittest.mock import Mock
@@ -391,7 +407,7 @@ def test_create_runpod_probe_http_error_propagates_remote_status(app_client, mon
     import httpx
 
     client, _state = app_client
-    request = httpx.Request("GET", "https://api.runpod.ai/v2/abc123/openai/v1/models")
+    request = httpx.Request("GET", "https://api.runpod.ai/v2/abc123/health")
 
     # Drive the real probe through a mocked httpx.AsyncClient whose response raises the
     # status error _probe_runpod_endpoint is expected to catch and remap. The route only
@@ -439,7 +455,7 @@ def test_update_runpod_endpoint_id_rebuilds_base_url_without_probe(app_client, m
     resp = client.put("/api/llm-config/providers/1", json={"endpoint_id": "xyz789"})
     assert resp.status_code == 200
     kw = _find_op(state, "update")[2]
-    assert kw["base_url"] == "https://api.runpod.ai/v2/xyz789/openai/v1"
+    assert kw["base_url"] == "https://api.runpod.ai/v2/xyz789/openai"
     # provider was omitted from the request body, so the route passes through the
     # None sentinel rather than re-resolving it — provider_store.update_entry treats
     # None as "leave this column untouched", so the stored provider stays "runpod".
@@ -476,7 +492,9 @@ def test_update_switch_to_runpod_with_endpoint_id_succeeds(app_client):
     assert resp.status_code == 200
     kw = _find_op(state, "update")[2]
     assert kw["provider"] == "runpod"
-    assert kw["base_url"] == "https://api.runpod.ai/v2/abc123/openai/v1"
+    assert kw["base_url"] == "https://api.runpod.ai/v2/abc123/openai"
+    # Model is cleared when switching to RunPod — serverless endpoints are pre-configured.
+    assert kw["model"] == ""
 
 
 def test_update_runpod_ignores_stray_base_url_without_endpoint_id(app_client):
@@ -529,5 +547,5 @@ def test_probe_runpod_endpoint_success_returns_none(monkeypatch):
     mock_client = _patch_async_client_get(monkeypatch, get_return=mock_response)
     assert asyncio.run(route._probe_runpod_endpoint("abc123", "k")) is None
     call = mock_client.get.call_args
-    assert call.args[0].endswith("/v2/abc123/openai/v1/models")
+    assert call.args[0].endswith("/v2/abc123/health")
     assert call.kwargs["headers"] == {"Authorization": "Bearer k"}
