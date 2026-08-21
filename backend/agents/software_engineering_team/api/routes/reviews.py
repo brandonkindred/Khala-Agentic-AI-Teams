@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import logging
 import uuid
 from typing import List, Optional
@@ -10,8 +11,13 @@ from fastapi import APIRouter, HTTPException, Query
 
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.coding_team_models import (
+    CreateEnhancedIssuesRequest,
+    CreateEnhancedIssuesResponse,
     CreateReviewIssuesRequest,
     CreateReviewIssuesResponse,
+    EnhancedCreatedIssueItem,
+    OutOfScopeProposalItem,
+    OutOfScopeProposalsResponse,
     ReviewPrRequest,
     ReviewPrResponse,
     ReviewRunItem,
@@ -22,6 +28,11 @@ from software_engineering_team.api.routes._common import resolve_github_token
 from software_engineering_team.code_review_agent import transcript
 from software_engineering_team.github_source import (
     GitHubAPIError,
+    build_enhanced_issue_from_proposal,
+    compute_complexity_score,
+    duplicate_check_max_open_issues,
+    find_matching_open_issue,
+    scrub_token_from_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -207,3 +218,254 @@ def post_create_review_issues(
     except GitHubAPIError as e:
         raise HTTPException(status_code=502, detail=f"github api error: {e}") from e
     return CreateReviewIssuesResponse.model_validate(data)
+
+
+# ---------------------------------------------------------------------------
+# Out-of-scope issue proposals — aggregated across reviews for a repo
+# ---------------------------------------------------------------------------
+
+
+@router.get("/reviews/out-of-scope-issues", response_model=OutOfScopeProposalsResponse)
+def get_out_of_scope_issues(
+    owner: str,
+    repo: str,
+    limit: int = Query(default=500, ge=1, le=2000),
+) -> OutOfScopeProposalsResponse:
+    """Return all out-of-scope issue proposals across reviews for a repository.
+
+    Aggregates ``pending_issue_proposals`` from every completed review in the
+    repo, returning only unfiled proposals (those without ``issue_url``). Used
+    by the Coding Team Issues tab.
+
+    Preconditions:
+        - ``owner``/``repo`` name a repository with at least one completed review.
+    Postconditions:
+        - Returns unfiled proposals newest-review-first. Each proposal carries
+          the originating review's ``job_id`` and ``pr_number`` for provenance.
+          Returns an empty list (not an error) when no reviews or proposals exist.
+    """
+    rows = _main.list_reviews(owner, repo, limit=limit)
+    proposals: list[OutOfScopeProposalItem] = []
+    total = 0
+
+    for row in rows:
+        summary = row.get("review_summary")
+        if not isinstance(summary, dict):
+            continue
+        pending = summary.get("pending_issue_proposals")
+        if not isinstance(pending, list):
+            continue
+        job_id = str(row.get("job_id") or "")
+        pr_number = row.get("pr_number") or 0
+        pr_url = row.get("pr_url") or ""
+
+        for p in pending:
+            if not isinstance(p, dict):
+                continue
+            total += 1
+            # Skip already-filed proposals
+            if p.get("issue_url"):
+                continue
+            proposals.append(
+                OutOfScopeProposalItem(
+                    id=str(p.get("id") or ""),
+                    job_id=job_id,
+                    pr_number=int(pr_number),
+                    pr_url=pr_url or None,
+                    severity=str(p.get("severity") or "info"),
+                    category=str(p.get("category") or "general"),
+                    file_path=str(p.get("file_path") or ""),
+                    line=p.get("line") if isinstance(p.get("line"), int) else None,
+                    description=str(p.get("description") or ""),
+                    suggestion=str(p.get("suggestion") or ""),
+                    locations=p.get("locations") or [],
+                    issue_number=p.get("issue_number"),
+                    issue_url=p.get("issue_url"),
+                )
+            )
+
+    unfiled = len(proposals)
+    return OutOfScopeProposalsResponse(
+        owner=owner,
+        repo=repo,
+        proposals=proposals,
+        total=total,
+        unfiled=unfiled,
+    )
+
+
+@router.post("/reviews/out-of-scope-issues/file", response_model=CreateEnhancedIssuesResponse)
+def post_file_out_of_scope_issues(
+    request: CreateEnhancedIssuesRequest,
+) -> CreateEnhancedIssuesResponse:
+    """File selected out-of-scope proposals as enhanced GitHub issues.
+
+    For each selected proposal, checks if a similar issue already exists in the
+    repository. If found, merges the proposal into the existing issue (appends a
+    comment). If not, creates a new enhanced GitHub issue with Fibonacci
+    complexity scoring, acceptance criteria, dependencies, and desired outcome.
+
+    Preconditions:
+        - A GitHub token is configured (request body or ``GITHUB_TOKEN``).
+        - ``proposal_ids`` are composite ids of the form ``"job_id:proposal_id"``.
+    Postconditions:
+        - For each valid proposal: creates or merges into a GitHub issue. Updates
+          the proposal's ``issue_url``/``issue_number`` in the review store.
+          Returns the created/merged issues and any per-proposal errors.
+    """
+    token = resolve_github_token(request)
+    created: list[EnhancedCreatedIssueItem] = []
+    errors: list[str] = []
+
+    # Group proposal_ids by job_id for efficient loading
+    proposals_by_job: dict[str, list[str]] = {}
+    for composite_id in request.proposal_ids:
+        parts = composite_id.split(":", 1)
+        if len(parts) != 2:
+            errors.append(f"Invalid proposal id format: {composite_id}")
+            continue
+        job_id, prop_id = parts
+        proposals_by_job.setdefault(job_id, []).append(prop_id)
+
+    try:
+        with _main.GitHubClient(token=token) as client:
+            # Fetch open issues once for duplicate detection
+            try:
+                cap = duplicate_check_max_open_issues()
+                open_issues = list(
+                    itertools.islice(client.list_open_issues(request.owner, request.repo), cap)
+                )
+            except GitHubAPIError:
+                open_issues = []
+
+            for job_id, prop_ids in proposals_by_job.items():
+                # Load the review context
+                review = _main.get_review(job_id)
+                if review is None:
+                    errors.append(f"Review not found: {job_id}")
+                    continue
+
+                # Validate repo match
+                review_owner = str(review.get("owner") or "")
+                review_repo = str(review.get("repo") or "")
+                if (
+                    review_owner.casefold() != request.owner.casefold()
+                    or review_repo.casefold() != request.repo.casefold()
+                ):
+                    errors.append(f"Repo mismatch for review {job_id}")
+                    continue
+
+                summary = review.get("review_summary")
+                if not isinstance(summary, dict):
+                    errors.append(f"No review summary for {job_id}")
+                    continue
+
+                pending = summary.get("pending_issue_proposals")
+                if not isinstance(pending, list):
+                    errors.append(f"No proposals for {job_id}")
+                    continue
+
+                by_id = {str(p.get("id")): p for p in pending if isinstance(p, dict)}
+                pr_number = review.get("pr_number") or 0
+                pr_url = str(review.get("pr_url") or "")
+
+                for prop_id in prop_ids:
+                    composite_id = f"{job_id}:{prop_id}"
+                    proposal = by_id.get(prop_id)
+                    if proposal is None:
+                        errors.append(f"Proposal not found: {composite_id}")
+                        continue
+                    if proposal.get("issue_url"):
+                        # Already filed — skip
+                        continue
+
+                    try:
+                        # Check for similar existing issue
+                        match = find_matching_open_issue(proposal, open_issues)
+
+                        if match is not None:
+                            # Merge into existing issue — add a comment
+                            merge_body = (
+                                f"**Additional occurrence found** during code review of "
+                                f"PR #{pr_number} ({pr_url}):\n\n"
+                                f"- **Severity:** {proposal.get('severity', 'info')}\n"
+                                f"- **Category:** {proposal.get('category', 'general')}\n"
+                                f"- **Location:** `{proposal.get('file_path', 'unknown')}`\n\n"
+                                f"{proposal.get('description', '')}\n\n"
+                                f"**Suggested fix:** {proposal.get('suggestion', 'N/A')}"
+                            )
+                            client.add_issue_comment(
+                                request.owner, request.repo, match.number, merge_body
+                            )
+                            # Mark the proposal as filed (merged into existing)
+                            proposal["issue_number"] = match.number
+                            proposal["issue_url"] = match.html_url
+
+                            complexity = compute_complexity_score(proposal)
+                            created.append(
+                                EnhancedCreatedIssueItem(
+                                    proposal_id=composite_id,
+                                    issue_number=match.number,
+                                    issue_url=match.html_url,
+                                    title=match.title or "",
+                                    label="",
+                                    complexity_score=complexity["aggregate"],
+                                    merged_into_existing=True,
+                                )
+                            )
+                        else:
+                            # Create new enhanced issue
+                            title, body, label = build_enhanced_issue_from_proposal(
+                                proposal, pr_number=int(pr_number), pr_url=pr_url
+                            )
+                            scrubbed_title = scrub_token_from_text(title)
+                            scrubbed_body = scrub_token_from_text(body)
+
+                            # Create the issue with the label
+                            issue = client.create_issue(
+                                request.owner,
+                                request.repo,
+                                title=scrubbed_title,
+                                body=scrubbed_body,
+                                labels=[label],
+                            )
+                            # Mark the proposal as filed
+                            proposal["issue_number"] = issue.number
+                            proposal["issue_url"] = issue.html_url
+
+                            # Add to the open issues list so subsequent proposals
+                            # can be matched against it
+                            open_issues.append(issue)
+
+                            complexity = compute_complexity_score(proposal)
+                            created.append(
+                                EnhancedCreatedIssueItem(
+                                    proposal_id=composite_id,
+                                    issue_number=issue.number,
+                                    issue_url=issue.html_url,
+                                    title=scrubbed_title,
+                                    label=label,
+                                    complexity_score=complexity["aggregate"],
+                                    merged_into_existing=False,
+                                )
+                            )
+                    except GitHubAPIError as e:
+                        errors.append(f"GitHub error for {composite_id}: {e}")
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            "Failed to file proposal %s: %s", composite_id, e, exc_info=True
+                        )
+                        errors.append(f"Error filing {composite_id}: {e}")
+
+                # Persist updated proposals back to the review store (best-effort)
+                try:
+                    _main.update_review(job_id, review_summary=summary)
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "Could not persist updated proposals for %s", job_id, exc_info=True
+                    )
+
+    except GitHubAPIError as e:
+        raise HTTPException(status_code=502, detail=f"github api error: {e}") from e
+
+    return CreateEnhancedIssuesResponse(created=created, errors=errors)

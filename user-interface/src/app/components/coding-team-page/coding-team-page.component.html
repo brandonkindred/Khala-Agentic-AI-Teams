@@ -35,6 +35,10 @@
     <mat-icon>engineering</mat-icon>
     <span class="toggle-label">Jobs</span>
   </mat-button-toggle>
+  <mat-button-toggle value="issues" matTooltip="Out-of-scope issues from code reviews">
+    <mat-icon>report_problem</mat-icon>
+    <span class="toggle-label">Issues</span>
+  </mat-button-toggle>
 </mat-button-toggle-group>
 
 <!-- ────────────────────────────────────────────────────────────────── -->
@@ -622,4 +626,41 @@
       }
     </ng-template>
   </section>
+}
+
+<!-- ────────────────────────────────────────────────────────────────── -->
+<!-- ISSUES view — out-of-scope issues from code reviews                -->
+<!-- ────────────────────────────────────────────────────────────────── -->
+@if (activeView === 'issues') {
+  @if (!githubConfigured && !isLoadingConfig) {
+    <div class="github-section github-section--unconfigured">
+      <mat-icon>info</mat-icon>
+      <span>
+        GitHub integration is not configured.
+        <a routerLink="/integrations">Set up GitHub</a> to view out-of-scope issues.
+      </span>
+    </div>
+  } @else {
+    <section class="oos-section kh-card">
+      @if (!selectedRepo) {
+        <div class="oos-section__repo-prompt">
+          <mat-icon>touch_app</mat-icon>
+          <p>Select a repository to view its out-of-scope issues.</p>
+          <button mat-flat-button color="primary" (click)="activeView = 'github'">
+            <mat-icon>bug_report</mat-icon>
+            Go to GitHub tab
+          </button>
+        </div>
+      } @else {
+        <app-out-of-scope-issues
+          [proposals]="oosProposals"
+          [loading]="oosLoading"
+          [filing]="oosFiling"
+          [error]="oosError"
+          (fileIssuesRequested)="onFileOutOfScopeIssues($event)"
+          (refreshRequested)="loadOutOfScopeIssues()"
+        />
+      }
+    </section>
+  }
 }
