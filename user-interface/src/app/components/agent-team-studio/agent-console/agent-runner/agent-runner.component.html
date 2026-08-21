@@ -43,7 +43,7 @@
           </button>
         }
         @if (sandboxStatusLabel() === 'warm') {
-          <button mat-stroked-button (click)="tearDownSandbox()">
+          <button mat-stroked-button (click)="tearDownSandbox()" [disabled]="tearingDown()">
             <mat-icon>stop</mat-icon> Teardown
           </button>
         }
@@ -111,6 +111,7 @@
             <button
               mat-stroked-button
               (click)="deleteSavedInput(selectedPickerValue()!.slice(6), $event)"
+              [disabled]="!!deletingSavedInputId()"
               matTooltip="Delete the selected saved input"
             >
               <mat-icon>delete</mat-icon>
@@ -212,6 +213,10 @@
 
     @if (lastError()) {
       <app-inline-banner variant="error" [message]="lastError() ?? ''" />
+    }
+
+    @if (destructiveError()) {
+      <app-inline-banner variant="error" [message]="destructiveError() ?? ''" />
     }
 
     <app-agent-run-history

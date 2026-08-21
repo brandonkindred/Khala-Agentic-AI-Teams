@@ -143,6 +143,7 @@ export class AgentConsoleApiService {
   teardown(agentId: string): Observable<{ agent_id: string; status: string }> {
     return this.http.delete<{ agent_id: string; status: string }>(
       `${this.sandboxesUrl}/${encodeURIComponent(agentId)}`,
+      SKIP_NOTIFY_OPTIONS,
     );
   }
 
