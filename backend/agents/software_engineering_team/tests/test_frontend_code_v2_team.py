@@ -381,9 +381,9 @@ class TestPlanningPhase:
 
 class TestToolAgents:
     def test_build_tool_agents_includes_all_kinds(self):
-        from frontend_code_v2_team.orchestrator import _build_tool_agents
+        from frontend_code_v2_team.orchestrator import _build_tool_agents_impl
 
-        agents = _build_tool_agents(MagicMock())
+        agents = _build_tool_agents_impl(MagicMock())
         assert ToolAgentKind.GIT_BRANCH_MANAGEMENT in agents
         assert ToolAgentKind.BUILD_SPECIALIST in agents
         assert ToolAgentKind.UI_DESIGN in agents

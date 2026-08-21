@@ -807,23 +807,21 @@ class TestToolAgents:
 
 class TestBackendDevelopmentAgent:
     def test_read_repo_code(self, tmp_path):
-        from unittest.mock import MagicMock as _MagicMock
-
         from backend_code_v2_team.orchestrator import BackendDevelopmentAgent
 
         (tmp_path / "app.py").write_text("print('hello')")
         (tmp_path / "readme.md").write_text("# Readme")
-        agent = BackendDevelopmentAgent(_MagicMock())
+        agent = BackendDevelopmentAgent(MagicMock())
         code = agent._read_repo_code(tmp_path)
         assert "app.py" in code
         assert "print('hello')" in code
 
     def test_build_tool_runners(self):
-        from backend_code_v2_team.orchestrator import BackendDevelopmentAgent, _build_tool_agents
+        from backend_code_v2_team.orchestrator import BackendDevelopmentAgent, _build_tool_agents_impl
 
         mock_llm = MagicMock()
         dev = BackendDevelopmentAgent(mock_llm)
-        tool_agents = _build_tool_agents(mock_llm)
+        tool_agents = _build_tool_agents_impl(mock_llm)
         runners = dev._build_tool_runners(tool_agents)
         assert ToolAgentKind.DATA_ENGINEERING in runners
         assert ToolAgentKind.API_OPENAPI in runners

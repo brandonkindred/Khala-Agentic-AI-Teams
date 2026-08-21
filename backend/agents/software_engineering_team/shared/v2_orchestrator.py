@@ -1192,3 +1192,40 @@ class ConfigDrivenV2DevelopmentAgent(BaseV2DevelopmentAgent):
           ``self.config.stack_profile`` instead of ``cls.PROFILE``.
         """
         return self._stack_profile().detect_tooling(repo_path)
+
+    def _build_tool_agents(self, llm: LLMClient) -> Dict[Any, Any]:
+        """Build the team's tool-agent roster.
+
+        Subclasses override this to construct their team-specific tool agents.
+        The base implementation raises ``NotImplementedError`` — a concrete
+        team must supply its own roster (mirroring the module-level
+        ``_build_tool_agents`` each team already defines).
+
+        Preconditions: ``llm`` is a configured ``LLMClient`` (not ``None``).
+        Postconditions: returns a ``Dict`` mapping the team's ``ToolAgentKind``
+          enum members to constructed agent instances. Raises
+          ``NotImplementedError`` if not overridden.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} must override _build_tool_agents"
+        )
+
+    def _build_and_validate_tool_agents(self, llm: LLMClient) -> Dict[Any, Any]:
+        """Build tool agents and validate the roster matches the config's declared registry.
+
+        Calls :meth:`_build_tool_agents` (the subclass-supplied hook) then
+        :meth:`_validate_tool_agents` to enforce exact equality with the
+        config's ``tool_agent_kinds``.
+
+        Preconditions:
+            ``llm`` is a configured ``LLMClient`` (not ``None``).
+        Postconditions:
+            Returns a ``Dict[ToolAgentKind, Any]`` mapping every
+            ``ToolAgentKind`` declared in ``self.config.tool_agent_kinds`` to a
+            constructed agent instance. Raises ``ValueError`` (from
+            ``_validate_tool_agents``) if the built roster does not exactly
+            match the config's declared kinds.
+        """
+        agents = self._build_tool_agents(llm)
+        self._validate_tool_agents(agents)
+        return agents

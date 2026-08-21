@@ -69,21 +69,12 @@ from ..models import (
 from ..output_templates import parse_documentation_self_review_template
 from ..prompts import DOCUMENTATION_SELF_REVIEW_PROMPT
 from ._profile import (
-    _ACCESSIBILITY_VERIFY_NOTE,  # noqa: F401 (re-exported for tests)
     FRONTEND_CONFIG,
     PROFILE,
     REVIEW_CONFIG,
 )
 
 logger = logging.getLogger(__name__)
-
-# Restores the accessibility-verification guidance the retired REVIEW_PROMPT
-# used to state explicitly (via build_code_review_prompt's extra_verify_clause);
-# the shared coordinator engine's CODE_REVIEW profile has no per-team criteria
-# slot, so this rides into CodeReviewInput.task_requirements instead (see
-# run_coordinator_llm_review's docstring).
-# Defined in _profile (the single source of truth for V2TeamConfig); imported
-# above alongside PROFILE and REVIEW_CONFIG.
 
 
 def _run_llm_review(

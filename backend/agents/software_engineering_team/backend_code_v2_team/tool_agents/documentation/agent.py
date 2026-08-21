@@ -14,12 +14,12 @@ from software_engineering_team.shared.tool_agent_documentation import (
 
 from ...models import ReviewIssue
 from ...output_templates import parse_problem_solving_single_issue_template, parse_review_template
-from ...phases._profile import BACKEND_CONFIG
 from ...prompts import (
     DOCUMENTATION_MICROTASK_PROMPT,
     DOCUMENTATION_PROBLEM_SOLVE_PROMPT,
     DOCUMENTATION_REVIEW_PROMPT,
 )
+from ..base import BackendReviewToolAgent
 
 MAX_DOC_CODE_CHARS = 15_000
 MAX_RELEVANT_CODE_CHARS = 10_000
@@ -47,13 +47,17 @@ def _extract_doc_files(files: Dict[str, str]) -> Dict[str, str]:
     return extract_doc_files(files, DOC_PATTERNS)
 
 
-class DocumentationToolAgent(DocumentationToolAgentBase):
-    """Documentation tool agent: reviews documentation completeness and updates docs."""
+class DocumentationToolAgent(BackendReviewToolAgent, DocumentationToolAgentBase):
+    """Documentation tool agent: reviews documentation completeness and updates docs.
+
+    Inherits ``conventions_by_language`` from :class:`BackendReviewToolAgent`
+    (the team's shared conventions profile) and documentation-specific behavior
+    from :class:`DocumentationToolAgentBase`.
+    """
 
     doc_patterns = DOC_PATTERNS
     max_doc_code_chars = MAX_DOC_CODE_CHARS
     max_relevant_code_chars = MAX_RELEVANT_CODE_CHARS
-    conventions_by_language = BACKEND_CONFIG.stack_profile.conventions_by_language
     plan_recommendations = [
         "Include README updates for new features.",
         "Document API changes and new endpoints.",

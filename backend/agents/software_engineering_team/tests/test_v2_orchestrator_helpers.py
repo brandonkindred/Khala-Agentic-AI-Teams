@@ -11,10 +11,10 @@ import pytest
 
 def test_be_build_tool_agents():
     from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.backend_code_v2_team.orchestrator import _build_tool_agents
+    from software_engineering_team.backend_code_v2_team.orchestrator import _build_tool_agents_impl
 
     mock_llm = MagicMock()
-    agents = _build_tool_agents(mock_llm)
+    agents = _build_tool_agents_impl(mock_llm)
     assert ToolAgentKind.DOCUMENTATION in agents
     assert ToolAgentKind.SECURITY in agents
     assert ToolAgentKind.TESTING_QA in agents
@@ -120,10 +120,10 @@ def test_be_development_agent_read_repo_code_max_chars(tmp_path: Path):
 
 def test_fe_build_tool_agents():
     from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.frontend_code_v2_team.orchestrator import _build_tool_agents
+    from software_engineering_team.frontend_code_v2_team.orchestrator import _build_tool_agents_impl
 
     mock_llm = MagicMock()
-    agents = _build_tool_agents(mock_llm)
+    agents = _build_tool_agents_impl(mock_llm)
     assert ToolAgentKind.DOCUMENTATION in agents
     assert ToolAgentKind.SECURITY in agents
     assert ToolAgentKind.TESTING_QA in agents
