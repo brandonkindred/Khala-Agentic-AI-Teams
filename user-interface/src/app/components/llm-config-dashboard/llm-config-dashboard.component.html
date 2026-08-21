@@ -65,10 +65,12 @@
                     <mat-option value="runpod">RunPod</mat-option>
                   </mat-select>
                 </mat-form-field>
-                <mat-form-field appearance="outline">
-                  <mat-label>Model</mat-label>
-                  <input matInput name="editModel" [(ngModel)]="editForm.model" placeholder="Model id (optional)" />
-                </mat-form-field>
+                @if (!usesEndpointId(editForm.provider)) {
+                  <mat-form-field appearance="outline">
+                    <mat-label>Model</mat-label>
+                    <input matInput name="editModel" [(ngModel)]="editForm.model" placeholder="Model id (optional)" />
+                  </mat-form-field>
+                }
                 @if (usesBaseUrl(editForm.provider)) {
                   <mat-form-field appearance="outline">
                     <mat-label>Base URL</mat-label>
@@ -163,10 +165,12 @@
               <mat-option value="runpod">RunPod</mat-option>
             </mat-select>
           </mat-form-field>
-          <mat-form-field appearance="outline">
-            <mat-label>Model</mat-label>
-            <input matInput name="addModel" [(ngModel)]="addForm.model" placeholder="Model id (optional)" />
-          </mat-form-field>
+          @if (!usesEndpointId(addForm.provider)) {
+            <mat-form-field appearance="outline">
+              <mat-label>Model</mat-label>
+              <input matInput name="addModel" [(ngModel)]="addForm.model" placeholder="Model id (optional)" />
+            </mat-form-field>
+          }
           @if (usesBaseUrl(addForm.provider)) {
             <mat-form-field appearance="outline">
               <mat-label>Base URL</mat-label>

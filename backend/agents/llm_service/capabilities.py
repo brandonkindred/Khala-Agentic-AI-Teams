@@ -9,7 +9,7 @@ goes through ``llm_service`` — so there is no ``LLMClient`` instance to ask.
 
 from __future__ import annotations
 
-_STRUCTURED_OUTPUT_CAPABLE_PROVIDERS = frozenset({"ollama"})
+_STRUCTURED_OUTPUT_CAPABLE_PROVIDERS = frozenset({"ollama", "runpod"})
 
 
 def provider_supports_structured_output(provider: str) -> bool:
@@ -19,8 +19,9 @@ def provider_supports_structured_output(provider: str) -> bool:
         by ``llm_service.config.resolve_provider`` (e.g. ``"ollama"``,
         ``"bedrock"``, ``"claude"``, ``"dummy"``).
     Postconditions:
-        - Returns True only for ``"ollama"`` — mirrors
-          ``OllamaLLMClient.supports_structured_output``.
+        - Returns True for ``"ollama"`` and ``"runpod"`` — mirrors
+          ``OllamaLLMClient.supports_structured_output`` and
+          ``RunPodLLMClient.supports_structured_output``.
         - Returns False for ``"bedrock"``: NOT a claim that AWS Bedrock's
           Converse API is incapable of constrained decoding in general (it
           could in principle be driven via tool-choice) — only that Strategy
