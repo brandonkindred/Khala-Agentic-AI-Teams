@@ -1,4 +1,4 @@
-import { ALL_NAV_ITEMS, NAV_GROUPS } from './navigation.model';
+import { ALL_NAV_ITEMS, NAV_GROUPS, findGroupForRoute } from './navigation.model';
 
 describe('NAV_GROUPS Cognition entry', () => {
   it('registers Cognition as a top-level agentic-ai item at /cognition', () => {
@@ -80,5 +80,25 @@ describe('NAV_GROUPS Studio-only journey entry', () => {
       'agent-studio-metrics',
       'agent-studio-provisioning',
     ]);
+  });
+});
+
+describe('findGroupForRoute – deep-link resolution', () => {
+  it('resolves /agent-studio to the agentic-ai group', () => {
+    expect(findGroupForRoute('/agent-studio')?.key).toBe('agentic-ai');
+  });
+
+  it('resolves /agent-studio/provisioning to the agentic-ai group', () => {
+    expect(findGroupForRoute('/agent-studio/provisioning')?.key).toBe('agentic-ai');
+  });
+
+  it('resolves /agent-studio/metrics to the agentic-ai group', () => {
+    expect(findGroupForRoute('/agent-studio/metrics')?.key).toBe('agentic-ai');
+  });
+
+  it('returns undefined for removed legacy routes', () => {
+    expect(findGroupForRoute('/agent-console')).toBeUndefined();
+    expect(findGroupForRoute('/agentic-teams')).toBeUndefined();
+    expect(findGroupForRoute('/persona-testing')).toBeUndefined();
   });
 });
