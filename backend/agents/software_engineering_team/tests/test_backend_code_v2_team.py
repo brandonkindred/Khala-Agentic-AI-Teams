@@ -811,16 +811,20 @@ class TestBackendDevelopmentAgent:
 
         (tmp_path / "app.py").write_text("print('hello')")
         (tmp_path / "readme.md").write_text("# Readme")
-        code = BackendDevelopmentAgent._read_repo_code(tmp_path)
+        agent = BackendDevelopmentAgent(MagicMock())
+        code = agent._read_repo_code(tmp_path)
         assert "app.py" in code
         assert "print('hello')" in code
 
     def test_build_tool_runners(self):
-        from backend_code_v2_team.orchestrator import BackendDevelopmentAgent, _build_tool_agents
+        from backend_code_v2_team.orchestrator import (
+            BackendDevelopmentAgent,
+            _build_tool_agents_impl,
+        )
 
         mock_llm = MagicMock()
         dev = BackendDevelopmentAgent(mock_llm)
-        tool_agents = _build_tool_agents(mock_llm)
+        tool_agents = _build_tool_agents_impl(mock_llm)
         runners = dev._build_tool_runners(tool_agents)
         assert ToolAgentKind.DATA_ENGINEERING in runners
         assert ToolAgentKind.API_OPENAPI in runners
@@ -1008,9 +1012,9 @@ class TestBackendDevelopmentAgentBranchReuse:
 
         monkeypatch.setattr(orch, "checkout_branch", _checkout_branch)
         monkeypatch.setattr(
-            orch,
-            "_build_tool_agents",
-            lambda _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: git_agent},
+            orch.BackendDevelopmentAgent,
+            "_build_and_validate_tool_agents",
+            lambda _self, _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: git_agent},
         )
         monkeypatch.setattr(orch.BackendDevelopmentAgent, "_read_repo_code", _read_repo_code)
         monkeypatch.setattr(orch, "run_planning", _run_planning)
@@ -1071,9 +1075,9 @@ class TestBackendDevelopmentAgentBranchReuse:
 
         monkeypatch.setattr(orch, "checkout_branch", lambda *_a, **_kw: (True, "checked out"))
         monkeypatch.setattr(
-            orch,
-            "_build_tool_agents",
-            lambda _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: _GitAgent()},
+            orch.BackendDevelopmentAgent,
+            "_build_and_validate_tool_agents",
+            lambda _self, _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: _GitAgent()},
         )
         monkeypatch.setattr(
             orch.BackendDevelopmentAgent, "_read_repo_code", lambda _self, _repo_path: ""

@@ -38,6 +38,7 @@ from investment_team.strategy_lab.agents._response_schemas import (
     DESIGN_SPEC_SCHEMA,
 )
 from investment_team.strategy_lab.agents.design import DesignAgent
+from investment_team.strategy_lab.exceptions import StrategyLabLLMError
 from llm_service.interface import LLMPermanentError, LLMSemanticExhaustionError
 
 # ---------------------------------------------------------------------------
@@ -539,9 +540,7 @@ def test_schema_forced_starvation_degrades_to_legacy_loop_and_succeeds(
 
     assert parsed["asset_class"] == "stocks"
     assert agent.calls == 1
-    starvation_warnings = [
-        r for r in caplog.records if "structured design decode starved" in r.message
-    ]
+    starvation_warnings = [r for r in caplog.records if "schema_forced_degrade" in r.message]
     assert len(starvation_warnings) == 1
 
 
@@ -558,7 +557,7 @@ def test_non_schema_forced_permanent_error_propagates_without_degrading(
     monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(fatal_client))
     monkeypatch.setattr(design_mod, "Agent", _raise_if_agent_built)
 
-    with pytest.raises(design_mod.StrategyLabLLMError):
+    with pytest.raises(StrategyLabLLMError):
         DesignAgent().run(prior_records=[])
 
 
@@ -577,7 +576,7 @@ def test_non_schema_forced_semantic_exhaustion_propagates_without_degrading(
     monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(exhausted_client))
     monkeypatch.setattr(design_mod, "Agent", _raise_if_agent_built)
 
-    with pytest.raises(design_mod.StrategyLabLLMError):
+    with pytest.raises(StrategyLabLLMError):
         DesignAgent().run(prior_records=[])
 
 
@@ -649,7 +648,7 @@ def test_self_review_schema_forced_starvation_degrades_to_legacy_agent(
 
     assert parsed["asset_class"] == "stocks"
     assert critique_agent.calls == 1
-    warnings = [r for r in caplog.records if "self-review decode starved" in r.message]
+    warnings = [r for r in caplog.records if "schema_forced_degrade" in r.message]
     assert len(warnings) == 1
 
 
@@ -667,7 +666,7 @@ def test_self_review_non_schema_forced_failure_propagates_without_degrading(
     monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(fatal_client))
     monkeypatch.setattr(design_mod, "Agent", _raise_if_agent_built)
 
-    with pytest.raises(design_mod.StrategyLabLLMError):
+    with pytest.raises(StrategyLabLLMError):
         DesignAgent()._self_review(_good_design_payload())
 
 

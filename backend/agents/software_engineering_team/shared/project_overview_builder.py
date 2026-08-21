@@ -29,7 +29,9 @@ def build_project_overview(
         - Returns a dict with exactly two keys:
           ``features_and_functionality_doc`` (str) and ``goals`` (str).
         - ``features_and_functionality_doc`` is the concatenation of the PRD
-          content and any problem_summary / opportunity_statement sections,
+          content and any problem_summary / opportunity_statement sections.
+          Each contributed section is prefixed with a markdown header
+          (``## Problem summary`` or ``## Opportunity``), and all parts are
           joined by double newlines.  Empty string when no inputs are supplied.
         - ``goals`` is the combination of problem_summary and
           opportunity_statement separated by a newline, stripped of leading/

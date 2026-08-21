@@ -34,6 +34,7 @@ from investment_team.strategy_lab.agents import _structured_output as so_mod
 from investment_team.strategy_lab.agents import refinement as mod
 from investment_team.strategy_lab.agents._llm_budget import LLMCallBudget, use_budget
 from investment_team.strategy_lab.agents.refinement import RefinementAgent
+from investment_team.strategy_lab.exceptions import StrategyLabLLMError
 from llm_service.interface import LLMPermanentError, LLMSemanticExhaustionError
 
 
@@ -262,7 +263,7 @@ def test_schema_forced_starvation_degrades_to_legacy_loop_and_succeeds(
     assert agent.calls == 1
     starvation_warnings = [r for r in caplog.records if "schema_forced" in r.message]
     assert len(starvation_warnings) == 1
-    assert "failure_phase=execution" in starvation_warnings[0].message
+    assert "agent=strategy_refinement" in starvation_warnings[0].message
 
 
 def test_reasoning_pass_starvation_also_degrades_to_legacy_loop(
@@ -313,7 +314,7 @@ def test_non_schema_forced_permanent_error_propagates_without_degrading(
     monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(fatal_client))
     monkeypatch.setattr(_agent_runner, "Agent", _raise_if_agent_built)
 
-    with pytest.raises(mod.StrategyLabLLMError):
+    with pytest.raises(StrategyLabLLMError):
         RefinementAgent().run(
             spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
         )
@@ -334,7 +335,7 @@ def test_non_schema_forced_semantic_exhaustion_propagates_without_degrading(
     monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(exhausted_client))
     monkeypatch.setattr(_agent_runner, "Agent", _raise_if_agent_built)
 
-    with pytest.raises(mod.StrategyLabLLMError):
+    with pytest.raises(StrategyLabLLMError):
         RefinementAgent().run(
             spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
         )
@@ -394,7 +395,6 @@ def test_structured_success_logs_outcome_succeeded(
     assert len(succeeded) == 1
     assert "agent=strategy_refinement" in succeeded[0].message
     assert "phase=refinement_structured" in succeeded[0].message
-    assert "failure_phase=execution" in succeeded[0].message
 
 
 def test_structured_path_needs_no_correction_resend_unlike_fallback(

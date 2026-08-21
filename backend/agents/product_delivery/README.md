@@ -37,7 +37,7 @@ If every planned story has reached a terminal status the
    only supplies the Integration list today, so DevOps and QA failures
    are not currently auto-promoted. These rows are queryable via
    `GET /api/product-delivery/feedback?product_id=…&status=open`
-   (and the Agent Console Feedback tab); `POST /groom` itself only
+   (and the Product Delivery Feedback tab); `POST /groom` itself only
    reads story rows today and does not consume feedback automatically,
    so triaging the new failures into stories is what feeds the next
    grooming pass.
@@ -49,7 +49,7 @@ reviewing feedback before the next grooming pass.
 
 ## What's deferred to follow-up issues
 
-- Agent Console "Backlog", "Sprints", and "Releases" tabs (Angular).
+- Product Delivery page "Releases" tab (Angular; Backlog, Sprints, and Feedback are already shipped at `/product-delivery`).
 - Versioning policy beyond date-stamps (semver vs date — issue #371
   explicitly defers this).
 - Temporal-mode plumbing for `sprint_id` runs (Phase 2 raises a 400
@@ -80,7 +80,7 @@ Every row carries:
 - `id TEXT PRIMARY KEY` — UUID4 hex assigned by the store.
 - `author TEXT NOT NULL` — handle from
   `agent_platform.console.author.resolve_author()`. When real auth lands we can
-  migrate both Agent Console (`agent_console_*`) and `product_delivery` rows to user ids
+  migrate both Agent Studio (`agent_console_*`) and `product_delivery` rows to user ids
   in a single pass.
 - `created_at` / `updated_at TIMESTAMPTZ`.
 

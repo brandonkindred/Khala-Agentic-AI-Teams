@@ -470,7 +470,7 @@ Every `llm_service` call emits a span carrying `agent.name`, `task.id`,
 `cost.usd`, and `outcome`, plus a `khala.llm.cost_usd` counter. Per-job cost is
 accumulated and written to the job-store entry (`cost_usd`). DORA metrics and
 cost are exposed at `GET /api/se/metrics` (alias of
-`/api/software-engineering/dora`) and rendered in the Agent Console
+`/api/software-engineering/dora`) and rendered in the Agent Studio
 "Metrics" tab. Post-mortems and quality-gate rejections are distilled into the
 `se_learnings` Postgres table and the top-N relevant ones are injected into the
 Tech Lead's Design prompt. All Postgres-backed pieces no-op when `POSTGRES_HOST`
@@ -1618,7 +1618,7 @@ The full `STRATEGY_LAB_*` knob reference (defaults, backoff math, cascade semant
 
 ---
 
-## Agent Console and Invoke
+## Agent Studio and Invoke
 
 ### AGENT_INVOKE_MAX_PAYLOAD_BYTES
 Hard cap on request body for `POST /api/agents/{id}/invoke` and the sandbox shim (default `1048576`

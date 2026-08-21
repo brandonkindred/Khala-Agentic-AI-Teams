@@ -117,13 +117,15 @@ class TestFrontendParity:
     def _build(self) -> V2TeamConfig:
         """Compose the team's real, already-constructed PROFILE — not a copy of its fields."""
         from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
-        from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
-        from software_engineering_team.frontend_code_v2_team.phases._profile import PROFILE
+        from software_engineering_team.frontend_code_v2_team.phases._profile import (
+            _ACCESSIBILITY_VERIFY_NOTE,
+            PROFILE,
+        )
 
         return V2TeamConfig(
             stack_profile=PROFILE,
             tool_agent_kinds=frozenset(k.value for k in ToolAgentKind),
-            extra_review_clause=review_mod._ACCESSIBILITY_VERIFY_NOTE,
+            extra_review_clause=_ACCESSIBILITY_VERIFY_NOTE,
         )
 
     def test_stack_profile_is_the_real_team_profile(self):
@@ -152,8 +154,10 @@ class TestFrontendParity:
 
     def test_extra_review_clause_is_accessibility_note(self):
         """Frontend's extra review clause is the real accessibility-verification note."""
-        from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
+        from software_engineering_team.frontend_code_v2_team.phases._profile import (
+            _ACCESSIBILITY_VERIFY_NOTE,
+        )
 
         config = self._build()
-        assert config.extra_review_clause == review_mod._ACCESSIBILITY_VERIFY_NOTE
+        assert config.extra_review_clause == _ACCESSIBILITY_VERIFY_NOTE
         assert config.extra_review_clause != ""
