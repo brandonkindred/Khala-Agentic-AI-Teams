@@ -4,7 +4,7 @@
 
 The user interface is an Angular 19 standalone application that connects to multiple agent APIs. Each API has a dedicated feature area with forms, results display, and health indicators. The sidebar navigation is data-driven via `NAV_GROUPS` in `models/navigation.model.ts`.
 
-**Agent Studio** (`/agent-studio`) is the single Agentic AI product entry point. All agent authoring, testing, team composition, and persona-driven validation flows are accessed exclusively through Agent Studio's 4-stage workflow. The legacy surfaces (Agent Console, Agentic Teams, Testing Personas) have been fully removed.
+**Agent Studio** (`/agent-studio`) is the single Agentic AI product entry point. All agent authoring, testing, team composition, and persona-driven validation flows are accessed exclusively through Agent Studio's 4-stage workflow. The legacy standalone routes (`/agent-console`, `/agentic-teams`, `/persona-testing`) have been removed and their components consolidated into Agent Studio's stages — catalog and runner components are reused in Build/Test, team composition in Compose, and persona testing in Persona.
 
 ## High-Level Structure
 
