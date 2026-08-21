@@ -384,18 +384,36 @@ def post_file_out_of_scope_issues(
                         match = find_matching_open_issue(proposal, open_issues)
 
                         if match is not None:
-                            # Merge into existing issue — add a comment
-                            merge_body = (
-                                f"**Additional occurrence found** during code review of "
-                                f"PR #{pr_number} ({pr_url}):\n\n"
+                            # Similar issue exists — update it with the new proposal's details.
+                            # Build the updated body by appending the new occurrence to the
+                            # existing issue body.
+                            existing_body = match.body or ""
+                            update_section = (
+                                f"\n\n---\n\n"
+                                f"## Additional Occurrence\n\n"
+                                f"Found during code review of PR #{pr_number} ({pr_url}):\n\n"
                                 f"- **Severity:** {proposal.get('severity', 'info')}\n"
                                 f"- **Category:** {proposal.get('category', 'general')}\n"
-                                f"- **Location:** `{proposal.get('file_path', 'unknown')}`\n\n"
-                                f"{proposal.get('description', '')}\n\n"
+                                f"- **Location:** `{proposal.get('file_path', 'unknown')}`\n"
+                            )
+                            locations = proposal.get("locations") or []
+                            if len(locations) > 1:
+                                update_section += f"- **Occurrences:** {len(locations)}\n"
+                                for loc in locations:
+                                    fp = str(loc.get("file_path") or "unknown")
+                                    ln = loc.get("line")
+                                    loc_text = f"`{fp}:{ln}`" if isinstance(ln, int) and ln > 0 else f"`{fp}`"
+                                    loc_desc = str(loc.get("description") or "").strip()
+                                    update_section += f"  - {loc_text} — {loc_desc or '_No description._'}\n"
+                            update_section += (
+                                f"\n**Description:** {proposal.get('description', '')}\n\n"
                                 f"**Suggested fix:** {proposal.get('suggestion', 'N/A')}"
                             )
-                            client.add_issue_comment(
-                                request.owner, request.repo, match.number, merge_body
+                            updated_body = existing_body + update_section
+
+                            client.update_issue(
+                                request.owner, request.repo, match.number,
+                                body=scrub_token_from_text(updated_body),
                             )
                             # Mark the proposal as filed (merged into existing)
                             proposal["issue_number"] = match.number
@@ -457,9 +475,20 @@ def post_file_out_of_scope_issues(
                         )
                         errors.append(f"Error filing {composite_id}: {e}")
 
-                # Persist updated proposals back to the review store (best-effort)
+                # Persist updated proposals back to both stores (best-effort):
+                # the in-memory job store (survives for the session) and the durable
+                # review row (survives restarts).
+                review_status = str(review.get("status") or "completed")
                 try:
-                    _main.update_review(job_id, review_summary=summary)
+                    _main.update_job(job_id, review_summary=summary)
+                except Exception:  # noqa: BLE001
+                    pass  # job may have aged out; the review row is the durable copy
+                try:
+                    _main.update_review(
+                        job_id,
+                        status=review_status,
+                        review_summary=summary,
+                    )
                 except Exception:  # noqa: BLE001
                     logger.warning(
                         "Could not persist updated proposals for %s", job_id, exc_info=True

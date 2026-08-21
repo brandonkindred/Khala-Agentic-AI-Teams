@@ -4,7 +4,8 @@ import {
   Input,
   Output,
   ChangeDetectionStrategy,
-  inject,
+  OnChanges,
+  SimpleChanges,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
@@ -39,7 +40,7 @@ import { InlineBannerComponent } from '../../../shared/inline-banner/inline-bann
   templateUrl: './out-of-scope-issues.component.html',
   styleUrl: './out-of-scope-issues.component.scss',
 })
-export class OutOfScopeIssuesComponent {
+export class OutOfScopeIssuesComponent implements OnChanges {
   /** All unfiled out-of-scope proposals to display. */
   @Input({ required: true }) proposals: OutOfScopeProposalItem[] = [];
 
@@ -60,6 +61,17 @@ export class OutOfScopeIssuesComponent {
 
   /** Set of selected composite proposal ids (job_id:proposal_id). */
   private selectedIds = new Set<string>();
+
+  ngOnChanges(changes: SimpleChanges): void {
+    // When the proposals list changes (e.g., after filing removes items),
+    // prune the selection to only IDs still present in the new list.
+    if (changes['proposals'] && !changes['proposals'].firstChange) {
+      const presentIds = new Set(this.proposals.map((p) => this.compositeId(p)));
+      this.selectedIds = new Set(
+        Array.from(this.selectedIds).filter((id) => presentIds.has(id)),
+      );
+    }
+  }
 
   /** Composite id for a proposal (used as selection key and sent to backend). */
   compositeId(proposal: OutOfScopeProposalItem): string {
