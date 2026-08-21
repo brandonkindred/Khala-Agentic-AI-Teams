@@ -32,23 +32,9 @@ from code_review_agent.models import ChunkReviewInput
 
 from llm_client_fakes import _make_claude_client, _text_message
 from llm_service import telemetry
-from llm_service.interface import reset_complete_json_observer_state
 from llm_service.strands_adapter import LLMClientModel
 
-
-@pytest.fixture(autouse=True)
-def _reset_state() -> None:
-    """Isolate each test's telemetry and JSON-observer state.
-
-    Precondition: none.
-    Postcondition: the telemetry call log is empty before the test runs, and
-    the ``complete_json`` observer's per-turn state is empty both before and
-    after, so no test leaks call records into the next.
-    """
-    telemetry.clear_call_log()
-    reset_complete_json_observer_state()
-    yield
-    reset_complete_json_observer_state()
+pytestmark = [pytest.mark.usefixtures("_reset_llm_telemetry_state")]
 
 
 def _shared_context() -> Dict[str, Any]:

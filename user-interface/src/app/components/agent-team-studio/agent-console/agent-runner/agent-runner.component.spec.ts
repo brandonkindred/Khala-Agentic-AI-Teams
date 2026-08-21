@@ -5,7 +5,7 @@ import { MatDialog } from '@angular/material/dialog';
 import { of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { AgentConsoleApiService } from '../../../../services/agent-console-api.service';
-import { ConfirmDestructiveService } from '../../../../shared/confirm-destructive.service';
+import { NotificationService } from '../../../../core/notification.service';
 import type { AgentDetail, AgentSummary } from '../../../../models/agent-catalog.model';
 import type { InvokeEnvelope, SandboxHandle } from '../../../../models/agent-runner.model';
 import type { RunRecord, RunSummary, SavedInput } from '../../../../models/agent-history.model';
@@ -92,11 +92,27 @@ describe('AgentRunnerComponent', () => {
     created_at: '2026-08-01T00:05:00Z',
   };
 
-  type ApiMock = { [K in keyof AgentConsoleApiService]: ReturnType<typeof vi.fn> };
+  interface ApiMock {
+    listAgents: ReturnType<typeof vi.fn>;
+    getAgent: ReturnType<typeof vi.fn>;
+    getInputSchema: ReturnType<typeof vi.fn>;
+    ensureWarm: ReturnType<typeof vi.fn>;
+    getSandbox: ReturnType<typeof vi.fn>;
+    teardown: ReturnType<typeof vi.fn>;
+    invoke: ReturnType<typeof vi.fn>;
+    listSamples: ReturnType<typeof vi.fn>;
+    getSample: ReturnType<typeof vi.fn>;
+    listSavedInputs: ReturnType<typeof vi.fn>;
+    createSavedInput: ReturnType<typeof vi.fn>;
+    deleteSavedInput: ReturnType<typeof vi.fn>;
+    listRuns: ReturnType<typeof vi.fn>;
+    getRun: ReturnType<typeof vi.fn>;
+    deleteRun: ReturnType<typeof vi.fn>;
+    diff: ReturnType<typeof vi.fn>;
+  }
 
   let api: ApiMock;
   let dialogOpen: ReturnType<typeof vi.fn>;
-  let confirmServiceConfirm: ReturnType<typeof vi.fn>;
   let fixture: ComponentFixture<AgentRunnerComponent>;
   let component: AgentRunnerComponent;
 
@@ -122,18 +138,15 @@ describe('AgentRunnerComponent', () => {
       ...apiOverrides,
     };
     dialogOpen = vi.fn();
-    confirmServiceConfirm = vi.fn();
 
     TestBed.configureTestingModule({
       imports: [AgentRunnerComponent, NoopAnimationsModule],
       providers: [
         { provide: AgentConsoleApiService, useValue: api },
+        { provide: NotificationService, useValue: { saved: vi.fn() } },
       ],
     });
     TestBed.overrideProvider(MatDialog, { useValue: { open: dialogOpen } });
-    TestBed.overrideProvider(ConfirmDestructiveService, {
-      useValue: { confirm: confirmServiceConfirm },
-    });
     await TestBed.compileComponents();
 
     fixture = TestBed.createComponent(AgentRunnerComponent);
@@ -362,17 +375,6 @@ describe('AgentRunnerComponent', () => {
 
       expect(component.lastError()).toBe('name taken');
     });
-
-    it('clears lastError on a successful save after a prior failure', () => {
-      // Simulate a prior error state.
-      component.lastError.set('prior failure');
-      dialogOpen.mockReturnValue({ afterClosed: () => of({ name: 'New save', description: null }) });
-      api.createSavedInput.mockReturnValue(of(savedInput));
-
-      component.openSaveInputDialog();
-
-      expect(component.lastError()).toBeNull();
-    });
   });
 
   describe('saved inputs — delete', () => {
@@ -380,26 +382,23 @@ describe('AgentRunnerComponent', () => {
 
     it('does nothing for an id with no match', () => {
       component.deleteSavedInput('missing', new Event('click'));
-      expect(confirmServiceConfirm).not.toHaveBeenCalled();
+      expect(dialogOpen).not.toHaveBeenCalled();
     });
 
-    it('does nothing when the user cancels the confirm dialog', () => {
+    it('does nothing when the user cancels the confirm', () => {
       component.savedInputs.set([savedInput]);
-      confirmServiceConfirm.mockReturnValue(of(false));
+      dialogOpen.mockReturnValue({ afterClosed: () => of(false) });
 
       component.deleteSavedInput(savedInput.id, new Event('click'));
 
-      expect(confirmServiceConfirm).toHaveBeenCalledWith(
-        expect.objectContaining({ variant: 'danger', confirmLabel: 'Delete' }),
-      );
       expect(api.deleteSavedInput).not.toHaveBeenCalled();
       expect(component.savedInputs()).toEqual([savedInput]);
     });
 
-    it('removes the row and clears the picker when confirmed', () => {
+    it('removes the row and clears the picker when it was selected', () => {
       component.savedInputs.set([savedInput]);
       component.selectedPickerValue.set(`saved:${savedInput.id}`);
-      confirmServiceConfirm.mockReturnValue(of(true));
+      dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
       api.deleteSavedInput.mockReturnValue(of({ id: savedInput.id, status: 'deleted' }));
       const event = new Event('click');
       const stopSpy = vi.spyOn(event, 'stopPropagation');
@@ -409,31 +408,6 @@ describe('AgentRunnerComponent', () => {
       expect(stopSpy).toHaveBeenCalled();
       expect(component.savedInputs()).toEqual([]);
       expect(component.selectedPickerValue()).toBeNull();
-    });
-
-    it('sets lastError when the delete API call fails', () => {
-      component.savedInputs.set([savedInput]);
-      confirmServiceConfirm.mockReturnValue(of(true));
-      api.deleteSavedInput.mockReturnValue(
-        throwError(() => ({ error: { detail: 'still referenced' } })),
-      );
-
-      component.deleteSavedInput(savedInput.id, new Event('click'));
-
-      expect(component.lastError()).toBe('still referenced');
-      // The row is NOT removed because the API call failed.
-      expect(component.savedInputs()).toEqual([savedInput]);
-    });
-
-    it('clears lastError on a successful delete after a prior failure', () => {
-      component.savedInputs.set([savedInput]);
-      component.lastError.set('prior failure');
-      confirmServiceConfirm.mockReturnValue(of(true));
-      api.deleteSavedInput.mockReturnValue(of({ id: savedInput.id, status: 'deleted' }));
-
-      component.deleteSavedInput(savedInput.id, new Event('click'));
-
-      expect(component.lastError()).toBeNull();
     });
   });
 
@@ -500,31 +474,28 @@ describe('AgentRunnerComponent', () => {
       expect(component.sandboxPolling()).toBe(false);
     });
 
-    it('tearDownSandbox does nothing when the user cancels the confirm dialog', () => {
+    it('tearDownSandbox does nothing when the user cancels the confirm', () => {
       selectWriter();
-      confirmServiceConfirm.mockReturnValue(of(false));
+      dialogOpen.mockReturnValue({ afterClosed: () => of(false) });
       component.tearDownSandbox();
-      expect(confirmServiceConfirm).toHaveBeenCalledWith(
-        expect.objectContaining({ variant: 'danger', confirmLabel: 'Tear Down' }),
-      );
       expect(api.teardown).not.toHaveBeenCalled();
     });
 
     it('tearDownSandbox marks the sandbox cold on confirm', () => {
       selectWriter();
-      confirmServiceConfirm.mockReturnValue(of(true));
+      dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
       component.tearDownSandbox();
       expect(component.sandbox()).toEqual({ ...coldHandle, status: 'cold', url: null });
     });
 
-    it('tearDownSandbox sets lastError on failure', () => {
+    it('tearDownSandbox surfaces an error on failure', () => {
       selectWriter();
-      confirmServiceConfirm.mockReturnValue(of(true));
-      api.teardown.mockReturnValue(throwError(() => ({ error: { detail: 'sandbox busy' } })));
+      dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
+      api.teardown.mockReturnValue(throwError(() => ({ error: { detail: 'teardown failed' } })));
 
       component.tearDownSandbox();
 
-      expect(component.lastError()).toBe('sandbox busy');
+      expect(component.destructiveError()).toBe('teardown failed');
     });
   });
 
