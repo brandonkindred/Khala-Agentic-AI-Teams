@@ -68,7 +68,7 @@ from ..models import (
 )
 from ..output_templates import parse_documentation_self_review_template
 from ..prompts import DOCUMENTATION_SELF_REVIEW_PROMPT
-from ._profile import PROFILE, REVIEW_CONFIG, _ACCESSIBILITY_VERIFY_NOTE
+from ._profile import _ACCESSIBILITY_VERIFY_NOTE, PROFILE, REVIEW_CONFIG
 
 logger = logging.getLogger(__name__)
 
