@@ -45,6 +45,10 @@ os.environ.setdefault("LLM_PROVIDER", "dummy")
 # the ``integration`` marker / default-skip behaviour for the same reason).
 from job_service_client_fake import fake_job_client  # noqa: F401, E402
 from llm_service import DummyLLMClient, clear_compaction_cache  # noqa: E402
+from llm_service import telemetry as _telemetry  # noqa: E402
+from llm_service.interface import (  # noqa: E402
+    reset_complete_json_observer_state as _reset_json_obs,
+)
 
 # The coordinator's caches exist once per module identity: production code
 # imports the dotted ``software_engineering_team.code_review_agent`` package,
@@ -257,6 +261,20 @@ def patched_job_store(monkeypatch, fake_job_client):  # noqa: F811 (pytest fixtu
 
     monkeypatch.setattr(js, "_client", lambda *a, **kw: fake_job_client)
     return fake_job_client
+
+
+@pytest.fixture()
+def _reset_llm_telemetry_state():
+    """Clear the LLM telemetry call log and JSON-observer state around a test.
+
+    Used by the cache-token E2E test modules via ``pytestmark =
+    [pytest.mark.usefixtures("_reset_llm_telemetry_state")]`` so each test
+    starts with an empty call log and no leaked observer state.
+    """
+    _telemetry.clear_call_log()
+    _reset_json_obs()
+    yield
+    _reset_json_obs()
 
 
 @pytest.fixture(autouse=True)
