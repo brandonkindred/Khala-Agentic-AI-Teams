@@ -324,3 +324,83 @@ class CreateReviewIssuesResponse(BaseModel):
     job_id: str
     created: List[CreatedIssueItem] = Field(default_factory=list)
     proposals: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Out-of-scope issue proposals — aggregated across reviews
+# ---------------------------------------------------------------------------
+
+
+class OutOfScopeProposalItem(BaseModel):
+    """One out-of-scope issue proposal surfaced across code reviews for a repo.
+
+    Aggregates proposals from all completed reviews. Carries the originating
+    review's job_id and PR metadata so the UI can display provenance.
+    """
+
+    id: str = Field(description="Proposal id (unique within its review, e.g. 'p0').")
+    job_id: str = Field(description="The review run that produced this proposal.")
+    pr_number: int = Field(description="PR number the review ran on.")
+    pr_url: Optional[str] = Field(default=None, description="PR HTML url.")
+    severity: str
+    category: str
+    file_path: str
+    line: Optional[int] = None
+    description: str
+    suggestion: str = ""
+    locations: List[Dict[str, Any]] = Field(default_factory=list)
+    issue_number: Optional[int] = Field(
+        default=None, description="Set once a GitHub issue has been filed for this proposal."
+    )
+    issue_url: Optional[str] = Field(
+        default=None, description="Set once a GitHub issue has been filed for this proposal."
+    )
+
+
+class OutOfScopeProposalsResponse(BaseModel):
+    """All unfiled out-of-scope issue proposals for a repository."""
+
+    owner: str
+    repo: str
+    proposals: List[OutOfScopeProposalItem] = Field(default_factory=list)
+    total: int = Field(description="Total proposal count (including already-filed).")
+    unfiled: int = Field(description="Count of proposals not yet filed as GitHub issues.")
+
+
+class CreateEnhancedIssuesRequest(BaseModel):
+    """Request body for POST /reviews/out-of-scope-issues/file.
+
+    Files selected out-of-scope proposals as enhanced GitHub issues with
+    Fibonacci complexity scoring, acceptance criteria, and dependencies.
+    """
+
+    proposal_ids: List[str] = Field(
+        description="Composite ids of the form 'job_id:proposal_id' identifying which proposals to file."
+    )
+    owner: str = Field(description="Repository owner (validated against stored review).")
+    repo: str = Field(description="Repository name (validated against stored review).")
+    github_token: Optional[str] = Field(
+        default=None, description="Overrides GITHUB_TOKEN env var for this request."
+    )
+
+
+class EnhancedCreatedIssueItem(BaseModel):
+    """One GitHub issue created from an out-of-scope proposal via the enhanced builder."""
+
+    proposal_id: str = Field(description="Composite id 'job_id:proposal_id'.")
+    issue_number: int
+    issue_url: str
+    title: str
+    label: str
+    complexity_score: int = Field(description="Fibonacci aggregate complexity score.")
+    merged_into_existing: bool = Field(
+        default=False,
+        description="True when the proposal was merged into an existing GitHub issue rather than creating a new one.",
+    )
+
+
+class CreateEnhancedIssuesResponse(BaseModel):
+    """Result of POST /reviews/out-of-scope-issues/file."""
+
+    created: List[EnhancedCreatedIssueItem] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list, description="Per-proposal errors, if any.")

@@ -49,7 +49,7 @@
     <app-inline-banner variant="error" [message]="reviewError" />
   }
 
-  <!-- All review runs for this PR (newest-first). Reused below by the proposals loop. -->
+  <!-- All review runs for this PR (newest-first). -->
   @if (reviews.length > 0) {
     <table class="cr-reviews-table">
       <caption class="visually-hidden">Review runs for pull request #{{ pull.number }}, newest first</caption>
@@ -129,18 +129,5 @@
         }
       </tbody>
     </table>
-  }
-
-  <!-- Pre-existing bugs the reviewer found in unchanged code:
-       offered as GitHub-issue candidates, one block per run. -->
-  @for (rec of reviews; track rec.jobId) {
-    @if (hasProposals(rec)) {
-      <app-pending-issue-proposals
-        [proposals]="rec.reviewSummary!.pending_issue_proposals!"
-        [creatingIssues]="isCreatingIssues(rec.jobId)"
-        [createIssueError]="createIssueErrorFor(rec.jobId)"
-        (createIssuesRequested)="onCreateIssues(rec, $event)"
-      />
-    }
   }
 </div>
