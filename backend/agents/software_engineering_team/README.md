@@ -457,7 +457,7 @@ software_engineering_team/
 │                          # coding_team_start_workflow.py, coding_team_constants.py)
 ├── postgres/              # Postgres schema (SE observability & learning; Pattern B, no-op without POSTGRES_HOST)
 ├── metrics/               # DORA metrics + cost, derived from se_events / se_agent_traces
-├── agent_console/         # Agent Console manifests + samples for SE agents
+├── agent_console/         # Agent Studio manifests + samples for SE agents
 ├── ci_templates/          # CI workflow templates + renderer
 ├── system_design/         # SE architecture/design reference docs (Markdown); also holds the
 │                          # coding-team engine's own design docs (coding_team_readme.md, architecture.md)

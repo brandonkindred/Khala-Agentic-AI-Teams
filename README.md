@@ -256,7 +256,7 @@ Deep dive: [`backend/agents/llm_service/README.md`](backend/agents/llm_service/R
 Growing the collective is a first-class feature. Three ways in:
 
 1. **Design it conversationally with Agentic Team Provisioning.** Describe the roster in plain English; it drafts agents, roles, and process, and can bridge to Agent Provisioning for the environment. See [`backend/agents/agent_team_studio/agentic_team_provisioning/`](backend/agents/agent_team_studio/agentic_team_provisioning/).
-2. **Author a single agent in Agent Studio.** Draft, clone from the registry, then save and register into the live catalog (`/api/agent-studio`, UI Agent Console).
+2. **Author a single agent in Agent Studio.** Draft, clone from the registry, then save and register into the live catalog (`/api/agent-studio`, UI Agent Studio).
 3. **Write it yourself.** Follow [`AGENT_ANATOMY.md`](backend/agents/agent_team_studio/agent_provisioning_team/AGENT_ANATOMY.md) (I/O, tools, memory, prompts, guardrails, sub-agents), register the team in [`backend/unified_api/config.py`](backend/unified_api/config.py) (`TEAM_CONFIGS`), and it mounts at `/api/<your-slug>` on next restart.
 
 ---
@@ -305,7 +305,7 @@ Growing the collective is a first-class feature. Three ways in:
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — SE pipeline, Product Delivery, Mermaid diagrams
 - [`docs/ENV_VARS.md`](docs/ENV_VARS.md) — full environment-variable reference
 - [`backend/agents/llm_service/`](backend/agents/llm_service/README.md) — provider-list LLM client
-- [`backend/agents/agent_platform/registry/`](backend/agents/agent_platform/registry/README.md) — Agent Console catalog
+- [`backend/agents/agent_platform/registry/`](backend/agents/agent_platform/registry/README.md) — Agent Studio catalog
 - [`backend/agents/agent_platform/console/`](backend/agents/agent_platform/console/README.md) — runs, saved inputs, diff
 - [`backend/unified_api/`](backend/unified_api/README.md) — mounts, `TeamConfig`, proxy behavior
 - [`backend/agents/`](backend/agents/README.md) — agent monorepo overview

@@ -106,7 +106,7 @@ either way:
 | `OLLAMA_WEB_SEARCH_BASE_URL` | Optional override for the web-search endpoint. |
 | `TEMPORAL_ADDRESS` | When set, scans run on a durable Temporal workflow instead of a daemon thread. |
 
-## Agent Console
+## Agent Studio
 
 Two manifests under `agent_console/manifests/`:
 

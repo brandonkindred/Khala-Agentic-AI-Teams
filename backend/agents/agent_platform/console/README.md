@@ -1,6 +1,6 @@
 # agent_platform.console
 
-Phase 3 data layer for the Agent Console Runner. Lives **in-process** inside
+Phase 3 data layer for the Agent Studio Runner. Lives **in-process** inside
 the unified API (like `agent_platform.registry`) — it is not a team container.
 
 Import the façade with a fully-qualified dotted path:
