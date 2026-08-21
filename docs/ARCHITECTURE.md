@@ -559,7 +559,7 @@ flowchart TB
 
 ```mermaid
 sequenceDiagram
-    actor Op as Operator / Agent Console
+    actor Op as Operator / Agent Studio
     participant PD as product_delivery API
     participant PO as ProductOwnerAgent
     participant SP as SprintPlannerAgent
@@ -600,7 +600,7 @@ sequenceDiagram
 The contracts below describe the *intended* self-healing behavior for whenever the release hook is (re)wired. The hook is not currently invoked by the SE pipeline — see "Known limitations".
 
 1. **Non-fatal release hook** — the integration point wraps `ReleaseManagerAgent.ship()` in `try/except` so agent exceptions never fail the SE job; instead a `release-manager-error` feedback item would be opened with the exception text and `job_id`, visible to operators reviewing feedback before the next groom.
-2. **Sprint-scoped feedback as queryable signal** — every Integration-phase failure promoted by the hook carries `sprint_id`, so it surfaces in `GET /api/product-delivery/feedback?product_id=…&status=open` (and the Agent Console Feedback tab). `POST /groom` itself only reads story rows today — it does not consume feedback automatically — so triaging the new feedback into stories (e.g. via the Feedback tab's "link to story" action) is what feeds the next backlog pass.
+2. **Sprint-scoped feedback as queryable signal** — every Integration-phase failure promoted by the hook carries `sprint_id`, so it surfaces in `GET /api/product-delivery/feedback?product_id=…&status=open` (and the Product Delivery Feedback tab). `POST /groom` itself only reads story rows today — it does not consume feedback automatically — so triaging the new feedback into stories (e.g. via the Feedback tab's "link to story" action) is what feeds the next backlog pass.
 
 ### Known limitations
 
@@ -643,7 +643,7 @@ The layers, each documented in depth in `backend/agents/agent_cognition/README.m
 - **Rules** (`rules/`): `store.py` (rules + proposals CRUD; `approve` applies add/retire/amend deterministically), `enforcement.py` + `predicate.py` (fixed-allowlist DSL for precondition / postcondition / `forbid_tool` gates), `reflection.py` (LLM-derived proposals carrying versioned `(summary_id, version)` evidence — **never activates without approval**), `seed_packs.py` (day-one guardrails installed lazily on first invoke).
 - **Tools** (`tools/`): `binding.py` resolves manifest `cognition.tools` ids to handlers tagged by execution site; `runner.py` brokers the tool loop, gating each call against enforced rules pre-dispatch and emitting a trusted out-of-band audit.
 - **Invoke gate & facade** (`invoke_gate.py`, `context.py`, `invoke_context.py`): the run-once idempotency ledger (`claim_run`/`complete_run`/replay), lazy rollup catch-up, context load, and the marker-wrapped `{input, cognition}` ↔ `{output, cognition_writeback}` envelope consumed by the shim and the invoke proxy.
-- **Operator HITL surface**: `/api/cognition/...` routes (`unified_api/routes/cognition.py`) and the Angular **Cognition** panel in the Agent Console back the approve/reject review flow.
+- **Operator HITL surface**: `/api/cognition/...` routes (`unified_api/routes/cognition.py`) and the Angular **Cognition** page (`/cognition`) back the approve/reject review flow.
 
 Per-agent config travels in the manifest `CognitionSpec` block (`agent_platform/registry/models.py`); the Agentic team stamps it onto generated agents and their runtime renders the advisory rules + digest into each LLM call. Operability and tuning env vars (`AGENT_COGNITION_SCHEDULER_INTERVAL_S`, retention, digest budget, `LLM_MODEL_cognition`, writeback cap, ledger TTL) are documented under "Configuration & operability" in `backend/agents/agent_cognition/README.md` and in `docs/ENV_VARS.md`.
 
