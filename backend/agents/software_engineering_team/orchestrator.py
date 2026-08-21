@@ -453,17 +453,17 @@ def _run_architecture_for_planning(
         priority="medium",
         metadata={},
     )
-    project_overview = build_project_overview(
-        prd_content=prd_content, client_context=client_context
-    )
-    features_doc = project_overview["features_and_functionality_doc"]
-    arch_input = ArchitectureInput(
-        requirements=requirements,
-        technology_preferences=technology_preferences,
-        project_overview=project_overview,
-        features_and_functionality_doc=features_doc or None,
-    )
     try:
+        project_overview = build_project_overview(
+            prd_content=prd_content, client_context=client_context
+        )
+        features_doc = project_overview["features_and_functionality_doc"]
+        arch_input = ArchitectureInput(
+            requirements=requirements,
+            technology_preferences=technology_preferences,
+            project_overview=project_overview,
+            features_and_functionality_doc=features_doc or None,
+        )
         arch_output = arch_agent.run(arch_input)
         return (
             (arch_output.architecture.overview or "")
