@@ -3,6 +3,13 @@ Backend-Code-V2 team orchestrator: 5-phase state machine.
 
 Entry point used by the main orchestrator.
 No code from ``backend_agent`` is imported or reused.
+
+Re-expressed (Story 3b, Step 3) as a thin config instance over
+:class:`~software_engineering_team.shared.v2_orchestrator.ConfigDrivenV2DevelopmentAgent`:
+``BackendDevelopmentAgent`` subclasses the config-driven base and supplies only
+a :class:`~software_engineering_team.shared.v2_team_config.V2TeamConfig` — the
+language default, tool-agent registry, and conventions map all flow from that
+config rather than from hand-written class attributes or separate lookups.
 """
 
 from __future__ import annotations
@@ -17,7 +24,7 @@ from shared.git.git_utils import checkout_branch
 from software_engineering_team.shared.phases.deliver import make_run_deliver
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
 from software_engineering_team.shared.team_lead_base import BaseTeamLead
-from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+from software_engineering_team.shared.v2_orchestrator import ConfigDrivenV2DevelopmentAgent
 
 from . import models as _models
 from .models import (
@@ -25,7 +32,7 @@ from .models import (
     MicrotaskReviewConfig,
     ToolAgentKind,
 )
-from .phases._profile import PROFILE
+from .phases._profile import BACKEND_CONFIG, PROFILE
 from .phases.execution import ReviewDependencies, run_execution_with_review_gates
 from .phases.planning import run_planning
 from .phases.setup import configure_quality_tooling, run_setup
@@ -40,7 +47,7 @@ run_deliver = make_run_deliver(
 )
 
 
-def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
+def _build_tool_agents_impl(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
     """Build team-owned tool agent instances (for plan/execute/review/problem_solve/deliver).
 
     The tool-agent imports are deferred to call time on purpose: each adapter
@@ -62,7 +69,7 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
     from .tool_agents.security import SecurityToolAgent
     from .tool_agents.testing_qa import TestingQAToolAgent
 
-    return BaseV2DevelopmentAgent._assemble_tool_agents(
+    return ConfigDrivenV2DevelopmentAgent._assemble_tool_agents(
         (ToolAgentKind.DATA_ENGINEERING, DataEngineeringToolAgent(llm)),
         (ToolAgentKind.API_OPENAPI, ApiOpenApiToolAgent(llm)),
         (ToolAgentKind.AUTH, AuthToolAgent(llm)),
@@ -74,28 +81,40 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
     )
 
 
-class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
+class BackendDevelopmentAgent(ConfigDrivenV2DevelopmentAgent):
     """
-    Backend Development Agent: runs the 5-phase lifecycle (Pre-flight → Planning →
-    Execution → Documentation → Deliver) with per-microtask review gates embedded
+    Backend Development Agent: runs the 5-phase lifecycle (Pre-flight -> Planning ->
+    Execution -> Documentation -> Deliver) with per-microtask review gates embedded
     in the Execution phase. Used by BackendCodeV2TeamLead after it runs Setup.
 
-    Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_repo_code`` /
-    ``_detect_tooling`` / ``_read_existing_code`` / ``_run_preflight`` /
-    ``_run_planning_and_branch_setup`` / ``_run_execution_phase`` /
-    ``_record_execution_bookkeeping`` / ``_run_documentation_phase`` /
-    ``_run_deliver_and_finalize`` / ``_run_development_workflow`` from
-    :class:`BaseV2DevelopmentAgent` (the job-update closure itself comes from
-    the shared ``team_lead_base.make_job_updater``); supplies its ``PROFILE``
-    (backend tooling detection + repo-briefing sets) and a thin
-    ``run_workflow`` that forwards this module's own tool-agent builder,
-    planning/execution/deliver functions, and review classes into
-    ``_run_development_workflow``.
+    Subclasses :class:`ConfigDrivenV2DevelopmentAgent` and supplies only a
+    :class:`V2TeamConfig` instance (``BACKEND_CONFIG``) — the language default,
+    tool-agent registry, conventions map, and (empty) extra review clause all
+    resolve through the config rather than hand-written class attributes.
+
+    The ``PROFILE`` class attribute is retained for backward compatibility with
+    callers that read ``BackendDevelopmentAgent.PROFILE`` (e.g. parity tests,
+    the team-lead's ``_run_setup_and_delegate`` pre-flight); it is *not* used
+    by the config-driven base (which reads ``self.config.stack_profile``
+    instead).
     """
 
     _TEAM_LABEL = "Backend"
     _DELIVER_IN_PROGRESS_STATUS = "Committing changes and preparing delivery"
     PROFILE = PROFILE
+
+    def __init__(self, llm_client: LLMClient) -> None:
+        """Construct with the module-level ``BACKEND_CONFIG``.
+
+        Accepts only ``llm_client`` so the signature stays compatible with
+        ``BaseTeamLead._run_setup_and_delegate``'s
+        ``development_agent_cls(self.llm)`` contract.
+        """
+        super().__init__(llm_client, BACKEND_CONFIG)
+
+    def _build_tool_agents(self, llm: LLMClient) -> Dict[ToolAgentKind, Any]:
+        """Build backend tool agents — delegates to the module-level builder."""
+        return _build_tool_agents_impl(llm)
 
     def run_workflow(
         self,
@@ -149,7 +168,7 @@ class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
             configure_quality_tooling=configure_quality_tooling,
             detect_tooling=self._detect_tooling,
             emit_branch_ready_progress=True,
-            build_tool_agents=_build_tool_agents,
+            build_tool_agents=self._build_and_validate_tool_agents,
             git_branch_management_kind=ToolAgentKind.GIT_BRANCH_MANAGEMENT,
             run_planning=run_planning,
             review_label="Reviewing code",
