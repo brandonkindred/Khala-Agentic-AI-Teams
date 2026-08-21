@@ -406,14 +406,14 @@ flowchart LR
 
     <article class="adr">
       <div class="adr-num">ADR-07</div>
-      <h3>Warm per-team sandboxes for isolated invocation</h3>
+      <h3>Ephemeral per-agent sandboxes for isolated invocation</h3>
       <p class="adr-body">
         The Agent Studio Runner invokes a single specialist in an ephemeral per-agent Docker sandbox
         (dedicated Postgres, Temporal, Prometheus, and Grafana per sandbox). Sandboxes are
         provisioned on demand and reaped after
-        <code>SANDBOX_IDLE_TEARDOWN_MINUTES</code> (default 15).
+        <code>AGENT_PROVISIONING_SANDBOX_IDLE_MINUTES</code> (default 5).
       </p>
-      <p class="adr-tradeoff"><strong>Trade-off we took:</strong> cold-start latency on first invocation per team. In exchange, agents tagged <code>requires-live-integration</code> stay catalogued but clearly marked unrunnable — no silent breakage.</p>
+      <p class="adr-tradeoff"><strong>Trade-off we took:</strong> cold-start latency on first invocation per agent. In exchange, agents tagged <code>requires-live-integration</code> stay catalogued but clearly marked unrunnable — no silent breakage.</p>
     </article>
 
     <article class="adr">
