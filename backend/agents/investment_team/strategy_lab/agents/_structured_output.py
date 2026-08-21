@@ -24,13 +24,14 @@ from __future__ import annotations
 import json
 import logging
 import secrets
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Mapping, Optional
 
 from llm_service import provider_supports_structured_output
 from llm_service.config import resolve_provider, resolve_timeout
 from llm_service.interface import LLMSemanticExhaustionError
 from shared.env_config import env_float
 
+from ..exceptions import StrategyLabLLMError
 from ._llm_budget import charge_active_budget
 from ._llm_envelope import run_structured_agent
 from ._parse_helpers import extract_json_object
@@ -314,3 +315,96 @@ def invoke_structured_with_schema(
         logger=logger,
         timeout_s=timeout_s,
     )
+
+
+def try_structured_or_degrade(
+    agent_key: str,
+    schema: Mapping[str, Any],
+    system_prompt: str,
+    user_prompt: str,
+    reasoning_system_prompt: str,
+    *,
+    phase: str,
+    charge: bool,
+    objective: str,
+    logger: logging.Logger,
+) -> Optional[Dict[str, Any]]:
+    """Attempt provider-enforced structured output, degrading gracefully on schema starvation.
+
+    Encapsulates the availability check, invocation of
+    :func:`invoke_structured_with_schema`, and the degrade-on-schema_forced
+    logic shared across the four strategy-lab gate agents (design, refinement,
+    design_review, alignment/synthesis).
+
+    Callers use the return value to decide whether to fall through to their
+    legacy unconstrained parse-retry loop::
+
+        parsed = so.try_structured_or_degrade(...)
+        if parsed is not None:
+            return parsed  # structured path succeeded
+        # else: degrade to legacy path
+
+    Preconditions:
+        - ``agent_key``, ``system_prompt``, ``user_prompt``,
+          ``reasoning_system_prompt``, ``phase``, and ``objective`` are
+          non-empty strings.
+        - ``schema`` is a non-empty :class:`~collections.abc.Mapping`.
+        - ``logger`` is a configured :class:`logging.Logger` instance.
+        - An active :class:`~._llm_budget.LLMCallBudget` exists on the
+          current context when ``charge`` is True (otherwise
+          :class:`~._llm_budget.DesignBudgetExhausted` cannot trip).
+
+    Postconditions:
+        - Returns a non-empty ``Dict[str, Any]`` (the parsed structured
+          response) on success.
+        - Returns ``None`` when :func:`structured_output_available` is False
+          (provider does not support schema-constrained decoding).
+        - Returns ``None`` when :class:`~..exceptions.StrategyLabLLMError`
+          is raised with a ``cause`` that is an
+          :class:`~llm_service.interface.LLMSemanticExhaustionError` with
+          ``schema_forced=True`` — i.e. the provider-enforced decoding
+          starved the content channel. A warning is logged before returning.
+        - Raises :class:`~._llm_budget.DesignBudgetExhausted` directly
+          (never caught) when the per-cycle budget trips mid-invocation.
+        - Raises :class:`~..exceptions.StrategyLabLLMError` when the cause
+          is NOT schema_forced (fatal transport, auth, or non-degradable
+          exhaustion). These propagate without modification.
+
+    Invariants:
+        - The function never falls back to legacy Agent decoding internally.
+        - No parse/validation retry loop is run — callers own that decision.
+        - ``DesignBudgetExhausted`` is never suppressed or wrapped.
+    """
+    if not structured_output_available():
+        return None
+
+    try:
+        parsed = invoke_structured_with_schema(
+            agent_key,
+            system_prompt,
+            user_prompt,
+            phase=phase,
+            schema=schema,
+            charge=charge,
+            objective=objective,
+            logger=logger,
+            reasoning_system_prompt=reasoning_system_prompt,
+        )
+    except StrategyLabLLMError as exc:
+        cause = exc.cause
+        if not (isinstance(cause, LLMSemanticExhaustionError) and cause.schema_forced):
+            raise
+        logger.warning(
+            "strategy_lab structured_output outcome=schema_forced_degrade "
+            "agent=%s phase=%s; degrading to unconstrained parse-retry loop.",
+            agent_key,
+            phase,
+        )
+        return None
+
+    logger.info(
+        "strategy_lab structured_output outcome=succeeded agent=%s phase=%s",
+        agent_key,
+        phase,
+    )
+    return parsed
