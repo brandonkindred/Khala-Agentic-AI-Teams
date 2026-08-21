@@ -5,9 +5,10 @@ from __future__ import annotations
 import itertools
 import logging
 import uuid
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.coding_team_models import (
@@ -28,14 +29,167 @@ from software_engineering_team.api.routes._common import resolve_github_token
 from software_engineering_team.code_review_agent import transcript
 from software_engineering_team.github_source import (
     GitHubAPIError,
+    Issue,
     build_enhanced_issue_from_proposal,
     compute_complexity_score,
     duplicate_check_max_open_issues,
-    find_matching_open_issue,
     scrub_token_from_text,
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# LLM-based duplicate detection for filing out-of-scope issues
+# ---------------------------------------------------------------------------
+
+
+class _SimilarityVerdict(BaseModel):
+    """LLM response schema for issue-similarity determination."""
+
+    is_duplicate: bool = Field(
+        description="True if the proposed issue is substantially the same problem as one of the "
+        "existing issues — i.e., filing it would create a duplicate."
+    )
+    matched_issue_number: Optional[int] = Field(
+        default=None,
+        description="The issue number of the existing issue that matches, or null if no match.",
+    )
+    reasoning: str = Field(
+        description="Brief explanation of why this is or is not a duplicate.",
+    )
+
+
+_SIMILARITY_SYSTEM_PROMPT = """\
+You are a GitHub issue triage agent. Your job is to determine whether a proposed \
+new issue is a duplicate of any existing open issue in the repository.
+
+Two issues are duplicates if they describe substantially the same underlying \
+problem, bug, or improvement — even if they use different wording, different \
+levels of detail, or are discovered in different files. Focus on the semantic \
+meaning, not surface-level text similarity.
+
+Consider issues as duplicates when:
+- They describe the same bug or defect (even if found in different locations)
+- They request the same enhancement or fix
+- One is a more specific instance of a broader issue already filed
+- They would be resolved by the same code change
+
+Do NOT consider issues as duplicates when:
+- They happen to be in the same file but describe different problems
+- They share a category (e.g., both are "security") but address different concerns
+- They have superficially similar titles but describe distinct issues
+"""
+
+_SIMILARITY_PROMPT_TEMPLATE = """\
+## Proposed Issue
+
+**Description:** {description}
+**File:** {file_path}
+**Category:** {category}
+**Severity:** {severity}
+**Suggestion:** {suggestion}
+
+## Existing Open Issues
+
+{existing_issues_text}
+
+## Task
+
+Is the proposed issue a duplicate of any of the existing open issues listed above? \
+If yes, which issue number is it a duplicate of? Respond with JSON.
+"""
+
+
+def _format_existing_issues(issues: list[Issue], max_issues: int = 30) -> str:
+    """Format existing issues into a text block for the LLM prompt."""
+    if not issues:
+        return "(no existing open issues)"
+    lines: list[str] = []
+    for issue in issues[:max_issues]:
+        title = (issue.title or "").strip()
+        # Truncate body to avoid blowing up the context window
+        body = (issue.body or "").strip()
+        if len(body) > 500:
+            body = body[:500] + "..."
+        labels_str = ", ".join(issue.labels) if issue.labels else "none"
+        lines.append(
+            f"### Issue #{issue.number}: {title}\n"
+            f"**Labels:** {labels_str}\n"
+            f"**Body:** {body}\n"
+        )
+    return "\n".join(lines)
+
+
+def _find_similar_issue_via_llm(
+    proposal: dict[str, Any], open_issues: list[Issue]
+) -> Issue | None:
+    """Use an LLM to determine if a proposal duplicates an existing open issue.
+
+    Makes a single structured LLM call with the proposal details and a summary
+    of existing open issues. The LLM decides whether the proposal is a duplicate
+    and, if so, which existing issue it matches.
+
+    Returns the matched Issue object, or None if no duplicate is found.
+    Falls back to None (create new issue) on any LLM error.
+    """
+    if not open_issues:
+        return None
+
+    description = str(proposal.get("description") or "")
+    file_path = str(proposal.get("file_path") or "")
+    category = str(proposal.get("category") or "general")
+    severity = str(proposal.get("severity") or "info")
+    suggestion = str(proposal.get("suggestion") or "")
+
+    existing_issues_text = _format_existing_issues(open_issues)
+
+    prompt = _SIMILARITY_PROMPT_TEMPLATE.format(
+        description=description,
+        file_path=file_path,
+        category=category,
+        severity=severity,
+        suggestion=suggestion,
+        existing_issues_text=existing_issues_text,
+    )
+
+    try:
+        from llm_service import generate_structured
+
+        verdict = generate_structured(
+            prompt,
+            schema=_SimilarityVerdict,
+            objective="determine if out-of-scope issue duplicates an existing GitHub issue",
+            system_prompt=_SIMILARITY_SYSTEM_PROMPT,
+            agent_key="code_review",
+            temperature=0.0,
+            correction_attempts=1,
+        )
+    except Exception:  # noqa: BLE001
+        # Any LLM failure (not configured, parse error, etc.) degrades to
+        # "no match found" — the issue will be created as new, which is the
+        # safe default (a duplicate is better than a lost finding).
+        logger.warning(
+            "LLM similarity check failed; treating as no duplicate", exc_info=True
+        )
+        return None
+
+    if not verdict.is_duplicate or verdict.matched_issue_number is None:
+        return None
+
+    # Find the matched issue object by number
+    for issue in open_issues:
+        if issue.number == verdict.matched_issue_number:
+            return issue
+
+    # LLM returned a number that doesn't match any issue we gave it — treat as no match
+    logger.warning(
+        "LLM returned issue #%d but it was not in the candidate list",
+        verdict.matched_issue_number,
+    )
+    return None
+
+
 router = APIRouter()
 
 
@@ -381,7 +535,7 @@ def post_file_out_of_scope_issues(
 
                     try:
                         # Check for similar existing issue
-                        match = find_matching_open_issue(proposal, open_issues)
+                        match = _find_similar_issue_via_llm(proposal, open_issues)
 
                         if match is not None:
                             # Similar issue exists — update it with the new proposal's details.
