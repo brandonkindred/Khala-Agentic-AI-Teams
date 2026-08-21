@@ -68,7 +68,7 @@ from ..models import (
 )
 from ..output_templates import parse_documentation_self_review_template
 from ..prompts import DOCUMENTATION_SELF_REVIEW_PROMPT
-from ._profile import PROFILE, REVIEW_CONFIG
+from ._profile import PROFILE, REVIEW_CONFIG, _ACCESSIBILITY_VERIFY_NOTE
 
 logger = logging.getLogger(__name__)
 
@@ -77,10 +77,8 @@ logger = logging.getLogger(__name__)
 # the shared coordinator engine's CODE_REVIEW profile has no per-team criteria
 # slot, so this rides into CodeReviewInput.task_requirements instead (see
 # run_coordinator_llm_review's docstring).
-_ACCESSIBILITY_VERIFY_NOTE = (
-    "Also verify accessibility: semantic markup, ARIA attributes, keyboard "
-    "navigation, and color contrast."
-)
+# Defined in _profile (the single source of truth for V2TeamConfig); imported
+# above alongside PROFILE and REVIEW_CONFIG.
 
 
 def _run_llm_review(

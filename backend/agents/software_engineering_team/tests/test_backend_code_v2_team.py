@@ -1011,9 +1011,9 @@ class TestBackendDevelopmentAgentBranchReuse:
 
         monkeypatch.setattr(orch, "checkout_branch", _checkout_branch)
         monkeypatch.setattr(
-            orch,
-            "_build_tool_agents",
-            lambda _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: git_agent},
+            orch.BackendDevelopmentAgent,
+            "_build_and_validate_tool_agents",
+            lambda _self, _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: git_agent},
         )
         monkeypatch.setattr(orch.BackendDevelopmentAgent, "_read_repo_code", _read_repo_code)
         monkeypatch.setattr(orch, "run_planning", _run_planning)
@@ -1074,9 +1074,9 @@ class TestBackendDevelopmentAgentBranchReuse:
 
         monkeypatch.setattr(orch, "checkout_branch", lambda *_a, **_kw: (True, "checked out"))
         monkeypatch.setattr(
-            orch,
-            "_build_tool_agents",
-            lambda _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: _GitAgent()},
+            orch.BackendDevelopmentAgent,
+            "_build_and_validate_tool_agents",
+            lambda _self, _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: _GitAgent()},
         )
         monkeypatch.setattr(
             orch.BackendDevelopmentAgent, "_read_repo_code", lambda _self, _repo_path: ""

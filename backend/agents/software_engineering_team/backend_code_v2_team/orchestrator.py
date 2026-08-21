@@ -25,7 +25,6 @@ from software_engineering_team.shared.phases.deliver import make_run_deliver
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
 from software_engineering_team.shared.team_lead_base import BaseTeamLead
 from software_engineering_team.shared.v2_orchestrator import ConfigDrivenV2DevelopmentAgent
-from software_engineering_team.shared.v2_team_config import V2TeamConfig
 
 from . import models as _models
 from .models import (
@@ -33,7 +32,7 @@ from .models import (
     MicrotaskReviewConfig,
     ToolAgentKind,
 )
-from .phases._profile import PROFILE
+from .phases._profile import BACKEND_CONFIG, PROFILE
 from .phases.execution import ReviewDependencies, run_execution_with_review_gates
 from .phases.planning import run_planning
 from .phases.setup import configure_quality_tooling, run_setup
@@ -45,16 +44,6 @@ run_deliver = make_run_deliver(
     models=_models,
     commit_msg_template=DELIVER_COMMIT_MSG_TEMPLATE,
     logger=logger,
-)
-
-# ---------------------------------------------------------------------------
-# V2TeamConfig: the single source of truth for backend's team-specific knobs.
-# ---------------------------------------------------------------------------
-
-BACKEND_CONFIG = V2TeamConfig(
-    stack_profile=PROFILE,
-    tool_agent_kinds=frozenset(k.value for k in ToolAgentKind),
-    extra_review_clause="",
 )
 
 
@@ -123,6 +112,12 @@ class BackendDevelopmentAgent(ConfigDrivenV2DevelopmentAgent):
         """
         super().__init__(llm_client, BACKEND_CONFIG)
 
+    def _build_and_validate_tool_agents(self, llm: LLMClient) -> Dict[ToolAgentKind, Any]:
+        """Build tool agents and validate the roster matches the config's declared registry."""
+        agents = _build_tool_agents(llm)
+        self._validate_tool_agents(agents)
+        return agents
+
     def run_workflow(
         self,
         *,
@@ -175,7 +170,7 @@ class BackendDevelopmentAgent(ConfigDrivenV2DevelopmentAgent):
             configure_quality_tooling=configure_quality_tooling,
             detect_tooling=self._detect_tooling,
             emit_branch_ready_progress=True,
-            build_tool_agents=_build_tool_agents,
+            build_tool_agents=self._build_and_validate_tool_agents,
             git_branch_management_kind=ToolAgentKind.GIT_BRANCH_MANAGEMENT,
             run_planning=run_planning,
             review_label="Reviewing code",

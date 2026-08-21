@@ -17,8 +17,9 @@ from shared.repo_context.repo_utils import find_repo_files
 from software_engineering_team.shared.stack_profile import StackProfile
 from software_engineering_team.shared.text_utils import has_section_header, toml_has_section
 from software_engineering_team.shared.v2_review import ReviewConfig
+from software_engineering_team.shared.v2_team_config import V2TeamConfig
 
-from ..models import ToolAgentPhaseInput
+from ..models import ToolAgentKind, ToolAgentPhaseInput
 from ..prompts import JAVA_CONVENTIONS, PYTHON_CONVENTIONS
 
 # Backend repo-briefing filter contract: the extensions read into the development
@@ -202,4 +203,19 @@ REVIEW_CONFIG = ReviewConfig(
     summary_review=_backend_summary_review,
     summary_microtask=_backend_summary_microtask,
     microtask_intro=_backend_microtask_intro,
+)
+
+
+# ---------------------------------------------------------------------------
+# V2TeamConfig: the single source of truth for backend's team-specific knobs.
+# Defined here (alongside PROFILE) so that both the orchestrator and tool agents
+# can import it without creating a circular dependency.
+# ---------------------------------------------------------------------------
+
+BACKEND_CONFIG = V2TeamConfig(
+    stack_profile=PROFILE,
+    tool_agent_kinds=frozenset(
+        k.value for k in ToolAgentKind if k is not ToolAgentKind.GENERAL
+    ),
+    extra_review_clause="",
 )
