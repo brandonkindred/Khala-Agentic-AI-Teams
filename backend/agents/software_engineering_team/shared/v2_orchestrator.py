@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import time
+from abc import abstractmethod
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, Optional, Tuple
 
@@ -1014,11 +1015,10 @@ class ConfigDrivenV2DevelopmentAgent(BaseV2DevelopmentAgent):
     ``_build_tool_agents()`` body), and its optional extra review clause
     (today a bare module constant, e.g. frontend's
     ``_ACCESSIBILITY_VERIFY_NOTE``). This class resolves all four from a
-    ``V2TeamConfig`` instance instead, so a future concrete team can subclass
-    it and supply only that config — see the code-v2 team epic's Step 3,
-    which re-expresses ``backend_code_v2_team``/``frontend_code_v2_team``'s
-    ``orchestrator.py`` adapters on top of this base. This step introduces the
-    base only; no existing team consumes it yet.
+    ``V2TeamConfig`` instance instead, so a concrete team subclasses it and
+    supplies only that config plus a ``_build_tool_agents`` hook.
+    ``backend_code_v2_team`` and ``frontend_code_v2_team`` both subclass this
+    base and supply their team-specific ``V2TeamConfig`` instance.
 
     Invariants: ``self.config`` is set once at construction and never
     reassigned; every property/method below is a pure read through it (or
@@ -1192,3 +1192,41 @@ class ConfigDrivenV2DevelopmentAgent(BaseV2DevelopmentAgent):
           ``self.config.stack_profile`` instead of ``cls.PROFILE``.
         """
         return self._stack_profile().detect_tooling(repo_path)
+
+    @abstractmethod
+    def _build_tool_agents(self, llm: LLMClient) -> Dict[Any, Any]:
+        """Build the team's tool-agent roster.
+
+        Subclasses override this to construct their team-specific tool agents.
+        The tool-agent builder is kept as a subclass hook (rather than a field
+        on ``V2TeamConfig``) because each team's builder uses deferred imports
+        of heavy strands/llm_service machinery that cannot be eagerly loaded
+        as a frozen-dataclass field.
+
+        Preconditions: ``llm`` is a configured ``LLMClient`` (not ``None``).
+        Postconditions: returns a ``Dict`` mapping the team's ``ToolAgentKind``
+          enum members to constructed agent instances.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} must override _build_tool_agents"
+        )
+
+    def _build_and_validate_tool_agents(self, llm: LLMClient) -> Dict[Any, Any]:
+        """Build tool agents and validate the roster matches the config's declared registry.
+
+        Calls :meth:`_build_tool_agents` (the subclass-supplied hook) then
+        :meth:`_validate_tool_agents` to enforce exact equality with the
+        config's ``tool_agent_kinds``.
+
+        Preconditions:
+            ``llm`` is a configured ``LLMClient`` (not ``None``).
+        Postconditions:
+            Returns a ``Dict[Any, Any]`` mapping every kind declared in
+            ``self.config.tool_agent_kinds`` (as strings or enum members) to a
+            constructed agent instance. Raises ``ValueError`` (from
+            ``_validate_tool_agents``) if the built roster does not exactly
+            match the config's declared kinds.
+        """
+        agents = self._build_tool_agents(llm)
+        self._validate_tool_agents(agents)
+        return agents

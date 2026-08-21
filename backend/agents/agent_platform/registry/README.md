@@ -44,7 +44,7 @@ for the locked precedence contract.
 Historically, Khala had a flat, team-level roster in
 [`unified_api/config.py`](../../../unified_api/config.py) and no structured
 metadata for individual specialist agents. `AGENT_ANATOMY.md` prescribed a
-contract in prose but nothing queried it. The Agent Console needed a way to
+contract in prose but nothing queried it. Agent Studio needed a way to
 browse, describe, and (eventually) invoke every agent in the system — the
 registry is that substrate.
 

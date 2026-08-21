@@ -303,7 +303,7 @@ flowchart TB
   agent demonstrably reflects an active advisory rule); anatomy doc updated.
 
 ### Step 15 — HITL review UI (Angular)
-- **Goal:** Operator surface in the Agent Console.
+- **Goal:** Operator surface at the standalone Cognition page (`/cognition`).
 - **Files:** new "Cognition" panel — memory timeline, rules list, proposal review
   (approve/reject); API client service + components.
 - **Depends:** 12

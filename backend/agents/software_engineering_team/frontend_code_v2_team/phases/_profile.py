@@ -18,8 +18,9 @@ from shared.dev_models.models import Task
 from shared.repo_context.repo_utils import find_repo_files
 from software_engineering_team.shared.stack_profile import StackProfile
 from software_engineering_team.shared.v2_review import ReviewConfig
+from software_engineering_team.shared.v2_team_config import V2TeamConfig
 
-from ..models import ToolAgentPhaseInput
+from ..models import ToolAgentKind, ToolAgentPhaseInput
 from ..prompts import TYPESCRIPT_CONVENTIONS
 
 logger = logging.getLogger(__name__)
@@ -210,4 +211,31 @@ REVIEW_CONFIG = ReviewConfig(
     summary_review=_frontend_summary_review,
     summary_microtask=_frontend_summary_microtask,
     microtask_intro=_frontend_microtask_intro,
+)
+
+
+# ---------------------------------------------------------------------------
+# Extra review clause: frontend-specific accessibility-verification note
+# injected into code-review task requirements.
+# Defined here (rather than in review.py) so V2TeamConfig can reference it
+# without creating a circular import (review.py already imports from _profile).
+# ---------------------------------------------------------------------------
+
+_ACCESSIBILITY_VERIFY_NOTE = (
+    "Also verify accessibility: semantic markup, ARIA attributes, keyboard "
+    "navigation, and color contrast."
+)
+
+# ---------------------------------------------------------------------------
+# V2TeamConfig: the single source of truth for frontend's team-specific knobs.
+# Defined here (alongside PROFILE) so that both the orchestrator and tool agents
+# can import it without creating a circular dependency.
+# ---------------------------------------------------------------------------
+
+FRONTEND_CONFIG = V2TeamConfig(
+    stack_profile=PROFILE,
+    tool_agent_kinds=frozenset(
+        k.value for k in ToolAgentKind if k is not ToolAgentKind.GENERAL
+    ),
+    extra_review_clause=_ACCESSIBILITY_VERIFY_NOTE,
 )
