@@ -49,7 +49,7 @@ reviewing feedback before the next grooming pass.
 
 ## What's deferred to follow-up issues
 
-- Agent Studio "Backlog", "Sprints", and "Releases" tabs (Angular).
+- Product Delivery page "Releases" tab (Angular; Backlog, Sprints, and Feedback are already shipped at `/product-delivery`).
 - Versioning policy beyond date-stamps (semver vs date — issue #371
   explicitly defers this).
 - Temporal-mode plumbing for `sprint_id` runs (Phase 2 raises a 400
