@@ -33,3 +33,12 @@ def provider_supports_structured_output(provider: str) -> bool:
           wire). Never raises.
     """
     return provider in _STRUCTURED_OUTPUT_CAPABLE_PROVIDERS
+
+
+# ---------------------------------------------------------------------------
+# Bedrock prompt-caching model support
+# ---------------------------------------------------------------------------
+# Canonical implementation lives in shared.llm_capabilities (zero-dependency,
+# importable by standalone packages without llm_service).  Re-exported here
+# for callers that already import from llm_service.capabilities.
+from shared.llm_capabilities import bedrock_model_supports_prompt_caching  # noqa: F401,E402

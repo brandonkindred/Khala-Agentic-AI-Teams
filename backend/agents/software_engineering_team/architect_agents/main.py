@@ -27,6 +27,13 @@ _ROOT = Path(__file__).resolve().parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+# Add backend/ so shared.llm_capabilities is importable (prompt-caching support).
+# Invariant: this entry point lives at backend/agents/software_engineering_team/
+# architect_agents/ — three levels below backend/.
+_BACKEND_ROOT = str(_ROOT.parent.parent.parent)
+if _BACKEND_ROOT not in sys.path and (Path(_BACKEND_ROOT) / "shared" / "llm_capabilities.py").exists():
+    sys.path.insert(0, _BACKEND_ROOT)
+
 from agents.orchestrator import create_orchestrator  # noqa: E402
 from agents.session import get_session_manager  # noqa: E402
 

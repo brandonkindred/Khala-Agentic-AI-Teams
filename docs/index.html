@@ -464,12 +464,13 @@ flowchart LR
       <div class="time-dot"></div>
       <div class="time-card">
         <div class="time-tag">unreleased · added</div>
-        <h3>Agent Console — Phase 1: Catalog</h3>
+        <h3>Agent Studio</h3>
         <p>
-          New <code>/agent-console</code> page replaces the old provisioning form. Browsable,
-          searchable catalog of every specialist, team/tag filters, detail drawer — backed by
-          declarative YAML manifests. <code>/agent-provisioning</code> redirects here; provisioning
-          and environments live verbatim in the third tab.
+          The <code>/agent-studio</code> surface is a forward-only 4-stage workflow
+          (Build Agent → Test Agent → Compose Team → Test Team w/ Personas) that
+          unifies the former catalog, runner, team composer, and persona testing
+          into a single guided journey. Provisioning and metrics live under
+          <code>/agent-studio/provisioning</code> and <code>/agent-studio/metrics</code>.
         </p>
       </div>
     </li>
