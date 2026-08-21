@@ -161,4 +161,34 @@ describe('App routes', () => {
     expect(children.some((r) => r.path === 'agent-studio/provisioning')).toBe(true);
     expect(children.some((r) => r.path === 'agent-studio/metrics')).toBe(true);
   });
+
+  it('wildcard route redirects unmatched paths (including legacy bookmarks) to /dashboard', () => {
+    const wildcard = routes.find((r) => r.path === '**');
+    expect(wildcard).toBeDefined();
+    expect(wildcard!.redirectTo).toBe('/dashboard');
+  });
+
+  it('agent-studio route carries correct title and breadcrumb metadata', () => {
+    const shell = routes[0];
+    const children = (shell?.children ?? []) as Route[];
+    const studio = children.find((r) => r.path === 'agent-studio');
+    expect(studio?.title).toBe('Agent Studio');
+    expect(studio?.data).toMatchObject({ breadcrumb: 'Agent Studio' });
+  });
+
+  it('agent-studio/provisioning deep-link destination has correct metadata', () => {
+    const shell = routes[0];
+    const children = (shell?.children ?? []) as Route[];
+    const provisioning = children.find((r) => r.path === 'agent-studio/provisioning');
+    expect(provisioning?.title).toBe('Provisioning & Environments');
+    expect(provisioning?.data).toMatchObject({ breadcrumb: 'Provisioning' });
+  });
+
+  it('agent-studio/metrics deep-link destination has correct metadata', () => {
+    const shell = routes[0];
+    const children = (shell?.children ?? []) as Route[];
+    const metrics = children.find((r) => r.path === 'agent-studio/metrics');
+    expect(metrics?.title).toBe('Metrics');
+    expect(metrics?.data).toMatchObject({ breadcrumb: 'Metrics' });
+  });
 });
