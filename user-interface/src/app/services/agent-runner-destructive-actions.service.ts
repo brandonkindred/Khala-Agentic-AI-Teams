@@ -69,7 +69,7 @@ export class AgentRunnerDestructiveActionsService {
    *
    * Preconditions: `agentId`, `savedId`, and `savedName` are non-empty strings.
    * Side effects: opens `ConfirmDialogComponent`, calls
-   *   `AgentRunnerApiService.deleteSavedInput`, shows a success toast,
+   *   `AgentConsoleApiService.deleteSavedInput`, shows a success toast,
    *   and emits through `savedInputDeleted$` tagged with the agent id.
    * Postconditions: on completion (success or failure) `deletingSavedInputId`
    *   is reset to `null`. On confirmation, emits `{ agentId, message: null }`
@@ -102,7 +102,7 @@ export class AgentRunnerDestructiveActionsService {
    * Preconditions: `agentId` is a non-empty agent identifier;
    *   `agentLabel` is the human-readable name shown in the dialog.
    * Side effects: opens `ConfirmDialogComponent`, calls
-   *   `AgentRunnerApiService.teardown`, shows a success toast,
+   *   `AgentConsoleApiService.teardown`, shows a success toast,
    *   and emits through `sandboxTornDown$` tagged with the agent id.
    * Postconditions: on completion (success or failure) `tearingDown`
    *   is reset to `false`. On confirmation, emits `{ agentId, message: null }`

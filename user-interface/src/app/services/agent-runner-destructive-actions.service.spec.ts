@@ -88,6 +88,7 @@ describe('AgentRunnerDestructiveActionsService', () => {
 
       service.deleteSavedInput('blogging.writer', 'id-1', 'My Input');
 
+      expect(runnerApi.deleteSavedInput).toHaveBeenCalledWith('id-1');
       expect(emitted).toEqual([{ agentId: 'blogging.writer', payload: 'id-1' }]);
     });
 
@@ -168,6 +169,7 @@ describe('AgentRunnerDestructiveActionsService', () => {
 
       service.tearDownSandbox('agent-1', 'Writer');
 
+      expect(runnerApi.teardown).toHaveBeenCalledWith('agent-1');
       expect(emitted).toEqual([{ agentId: 'agent-1', payload: undefined }]);
     });
 
