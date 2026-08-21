@@ -12,19 +12,18 @@ representative runs. Exercises:
 - The folded conventions map
 - Full pipeline parity through ``_run_development_workflow``
 """
+
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Dict
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from shared.dev_models.models import Task, TaskStatus, TaskType
 from software_engineering_team.shared.v2_orchestrator import ConfigDrivenV2DevelopmentAgent
 from software_engineering_team.shared.v2_team_config import V2TeamConfig
-
 
 # ---------------------------------------------------------------------------
 # Backend parity tests
