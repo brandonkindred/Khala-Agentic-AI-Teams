@@ -61,6 +61,8 @@ def test_be_development_agent_build_tool_runners():
 
 
 def test_be_development_agent_read_repo_code(tmp_path: Path):
+    from unittest.mock import MagicMock
+
     from software_engineering_team.backend_code_v2_team.orchestrator import (
         BackendDevelopmentAgent,
     )
@@ -69,18 +71,22 @@ def test_be_development_agent_read_repo_code(tmp_path: Path):
     (tmp_path / "y.txt").write_text("plain")
     (tmp_path / "node_modules").mkdir()
     (tmp_path / "node_modules" / "skip.py").write_text("# do not include")
-    out = BackendDevelopmentAgent._read_repo_code(tmp_path)
+    agent = BackendDevelopmentAgent(MagicMock())
+    out = agent._read_repo_code(tmp_path)
     assert "x.py" in out
     assert "print('x')" in out
     assert "skip.py" not in out
 
 
 def test_be_development_agent_read_repo_code_empty(tmp_path: Path):
+    from unittest.mock import MagicMock
+
     from software_engineering_team.backend_code_v2_team.orchestrator import (
         BackendDevelopmentAgent,
     )
 
-    out = BackendDevelopmentAgent._read_repo_code(tmp_path)
+    agent = BackendDevelopmentAgent(MagicMock())
+    out = agent._read_repo_code(tmp_path)
     assert "No code files" in out
 
 
@@ -88,6 +94,8 @@ def test_be_development_agent_read_repo_code_max_chars(tmp_path: Path):
     """The max_chars budget truncates at a whole-file boundary: a file whose
     chunk would push the running total past max_chars is excluded, so the output
     is bounded by max_chars and never contains a partial file or the tail."""
+    from unittest.mock import MagicMock
+
     from software_engineering_team.backend_code_v2_team.orchestrator import (
         BackendDevelopmentAgent,
     )
@@ -97,7 +105,8 @@ def test_be_development_agent_read_repo_code_max_chars(tmp_path: Path):
     # push the running total to 1239 > 1000, so the walk stops at a file boundary.
     for i in range(20):
         (tmp_path / f"f{i}.py").write_text("x" * 400)
-    out = BackendDevelopmentAgent._read_repo_code(tmp_path, max_chars=1000)
+    agent = BackendDevelopmentAgent(MagicMock())
+    out = agent._read_repo_code(tmp_path, max_chars=1000)
     # Bounded by the whole-file budget — not the untruncated 20-file total — and
     # non-empty (at least one file fit), proving max_chars is actually applied.
     assert len(out) <= 1000
@@ -264,7 +273,7 @@ def test_fe_detect_tooling_nothing_configured(tmp_path: Path):
         FrontendDevelopmentAgent,
     )
 
-    assert FrontendDevelopmentAgent._detect_tooling(tmp_path) == (False, False)
+    assert FrontendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path) == (False, False)
 
 
 def test_fe_detect_tooling_angular_and_vitest(tmp_path: Path):
@@ -274,7 +283,7 @@ def test_fe_detect_tooling_angular_and_vitest(tmp_path: Path):
 
     (tmp_path / "angular.json").write_text("{}")
     (tmp_path / "vitest.config.js").write_text("")
-    has_lint, has_test = FrontendDevelopmentAgent._detect_tooling(tmp_path)
+    has_lint, has_test = FrontendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
     assert has_lint and has_test
 
 
@@ -285,7 +294,7 @@ def test_fe_detect_tooling_real_npm_test_script(tmp_path: Path):
 
     (tmp_path / "eslint.config.js").write_text("")
     (tmp_path / "package.json").write_text('{"scripts": {"test": "vitest run"}}')
-    has_lint, has_test = FrontendDevelopmentAgent._detect_tooling(tmp_path)
+    has_lint, has_test = FrontendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
     assert has_lint and has_test
 
 
@@ -297,7 +306,7 @@ def test_fe_detect_tooling_rejects_placeholder_and_unparseable(tmp_path: Path):
 
     (tmp_path / "eslint.config.js").write_text("")
     (tmp_path / "package.json").write_text("not json {")
-    has_lint, has_test = FrontendDevelopmentAgent._detect_tooling(tmp_path)
+    has_lint, has_test = FrontendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
     assert has_lint and not has_test  # unparseable package.json → no test detected
 
 
@@ -311,7 +320,7 @@ def test_be_detect_tooling_nothing_configured(tmp_path: Path):
         BackendDevelopmentAgent,
     )
 
-    assert BackendDevelopmentAgent._detect_tooling(tmp_path) == (False, False)
+    assert BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path) == (False, False)
 
 
 def test_be_detect_tooling_ruff_toml_and_pytest_ini(tmp_path: Path):
@@ -322,7 +331,7 @@ def test_be_detect_tooling_ruff_toml_and_pytest_ini(tmp_path: Path):
     (tmp_path / "ruff.toml").write_text("")
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
-    has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
+    has_lint, has_test = BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
     assert has_lint and has_test
 
 
@@ -336,7 +345,7 @@ def test_be_detect_tooling_pyproject_blocks(tmp_path: Path):
     (tmp_path / "pyproject.toml").write_text(
         "[tool.ruff]\nline-length = 120\n[tool.pytest.ini_options]\n"
     )
-    has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
+    has_lint, has_test = BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
     assert has_lint and has_test
 
 
@@ -347,7 +356,7 @@ def test_be_detect_tooling_tests_dir_required_for_test(tmp_path: Path):
     )
 
     (tmp_path / "ruff.toml").write_text("")
-    has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
+    has_lint, has_test = BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
     assert has_lint and not has_test
 
 
@@ -359,7 +368,7 @@ def test_be_detect_tooling_flake8_satisfies_lint(tmp_path: Path):
     (tmp_path / ".flake8").write_text("[flake8]")
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
-    has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
+    has_lint, has_test = BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
     assert has_lint and has_test
 
 
@@ -374,7 +383,7 @@ def test_be_detect_tooling_setup_cfg_flake8_section_satisfies_lint(tmp_path: Pat
     (tmp_path / "setup.cfg").write_text("[metadata]\nname=app\n\n[flake8]\nmax-line-length=100\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
-    has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
+    has_lint, has_test = BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
     assert has_lint and has_test
 
 
@@ -388,7 +397,7 @@ def test_be_detect_tooling_setup_cfg_without_flake8_section_is_not_lint(tmp_path
     (tmp_path / "setup.cfg").write_text("[metadata]\nname=app\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
-    has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
+    has_lint, has_test = BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
     assert not has_lint and has_test
 
 
@@ -406,7 +415,7 @@ def test_be_detect_tooling_ignores_commented_out_section_headers(tmp_path: Path)
     (tmp_path / "setup.cfg").write_text("# [flake8]\n# max-line-length = 100\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
-    has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
+    has_lint, has_test = BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
     assert not has_lint and has_test
 
 
@@ -420,7 +429,7 @@ def test_be_detect_tooling_matches_indented_section_header(tmp_path: Path):
     (tmp_path / "pyproject.toml").write_text("  [tool.ruff]\n  line-length = 120\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
-    has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
+    has_lint, has_test = BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
     assert has_lint and has_test
 
 
@@ -453,7 +462,7 @@ def test_be_detect_tooling_toml_multiline_string_header_not_a_false_positive(tmp
     )
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
-    has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
+    has_lint, has_test = BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
     assert not has_lint and has_test
 
 

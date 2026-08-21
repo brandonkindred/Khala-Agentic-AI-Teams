@@ -807,11 +807,14 @@ class TestToolAgents:
 
 class TestBackendDevelopmentAgent:
     def test_read_repo_code(self, tmp_path):
+        from unittest.mock import MagicMock as _MagicMock
+
         from backend_code_v2_team.orchestrator import BackendDevelopmentAgent
 
         (tmp_path / "app.py").write_text("print('hello')")
         (tmp_path / "readme.md").write_text("# Readme")
-        code = BackendDevelopmentAgent._read_repo_code(tmp_path)
+        agent = BackendDevelopmentAgent(_MagicMock())
+        code = agent._read_repo_code(tmp_path)
         assert "app.py" in code
         assert "print('hello')" in code
 

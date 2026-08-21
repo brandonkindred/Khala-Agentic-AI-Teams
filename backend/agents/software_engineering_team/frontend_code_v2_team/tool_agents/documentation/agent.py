@@ -14,11 +14,11 @@ from software_engineering_team.shared.tool_agent_documentation import (
 
 from ...models import ReviewIssue
 from ...output_templates import parse_problem_solving_single_issue_template, parse_review_template
+from ...orchestrator import FRONTEND_CONFIG
 from ...prompts import (
     DOCUMENTATION_MICROTASK_PROMPT,
     DOCUMENTATION_PROBLEM_SOLVE_PROMPT,
     DOCUMENTATION_REVIEW_PROMPT,
-    TYPESCRIPT_CONVENTIONS,
 )
 
 MAX_DOC_CODE_CHARS = 15_000
@@ -56,7 +56,7 @@ class DocumentationToolAgent(DocumentationToolAgentBase):
     doc_patterns = DOC_PATTERNS
     max_doc_code_chars = MAX_DOC_CODE_CHARS
     max_relevant_code_chars = MAX_RELEVANT_CODE_CHARS
-    conventions_by_language = {"_default": TYPESCRIPT_CONVENTIONS}
+    conventions_by_language = FRONTEND_CONFIG.stack_profile.conventions_by_language
     plan_recommendations = [
         "Include README updates for new features and components.",
         "Document component props and usage examples.",
