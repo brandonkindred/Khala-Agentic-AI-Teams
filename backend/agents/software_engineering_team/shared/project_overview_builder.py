@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional
 def build_project_overview(
     prd_content: Optional[str] = None,
     client_context: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+) -> Dict[str, str]:
     """Build a project overview dict from PRD content and client context.
 
     Design-by-Contract
@@ -50,7 +50,7 @@ def build_project_overview(
 
     Returns
     -------
-    Dict[str, Any]
+    Dict[str, str]
         ``{"features_and_functionality_doc": str, "goals": str}``
     """
     features_parts: list[str] = []
