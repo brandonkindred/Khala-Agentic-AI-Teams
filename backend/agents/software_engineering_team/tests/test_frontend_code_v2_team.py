@@ -381,9 +381,9 @@ class TestPlanningPhase:
 
 class TestToolAgents:
     def test_build_tool_agents_includes_all_kinds(self):
-        from frontend_code_v2_team.orchestrator import _build_tool_agents
+        from frontend_code_v2_team.orchestrator import _build_tool_agents_impl
 
-        agents = _build_tool_agents(MagicMock())
+        agents = _build_tool_agents_impl(MagicMock())
         assert ToolAgentKind.GIT_BRANCH_MANAGEMENT in agents
         assert ToolAgentKind.BUILD_SPECIALIST in agents
         assert ToolAgentKind.UI_DESIGN in agents
@@ -515,9 +515,9 @@ class TestFrontendDevelopmentAgentBranchReuse:
 
         monkeypatch.setattr(orch, "checkout_branch", _checkout_branch)
         monkeypatch.setattr(
-            orch,
-            "_build_tool_agents",
-            lambda _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: git_agent},
+            orch.FrontendDevelopmentAgent,
+            "_build_and_validate_tool_agents",
+            lambda _self, _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: git_agent},
         )
         monkeypatch.setattr(orch.FrontendDevelopmentAgent, "_read_repo_code", _read_repo_code)
         monkeypatch.setattr(orch, "run_planning", _run_planning)
@@ -578,9 +578,9 @@ class TestFrontendDevelopmentAgentBranchReuse:
 
         monkeypatch.setattr(orch, "checkout_branch", lambda *_a, **_kw: (True, "checked out"))
         monkeypatch.setattr(
-            orch,
-            "_build_tool_agents",
-            lambda _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: _GitAgent()},
+            orch.FrontendDevelopmentAgent,
+            "_build_and_validate_tool_agents",
+            lambda _self, _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: _GitAgent()},
         )
         monkeypatch.setattr(
             orch.FrontendDevelopmentAgent, "_read_repo_code", lambda _self, _repo_path: ""

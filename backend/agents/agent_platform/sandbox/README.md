@@ -1,6 +1,6 @@
 # agent_platform.sandbox
 
-Per-agent ephemeral sandbox lifecycle used by the Agent Console **Runner**.
+Per-agent ephemeral sandbox lifecycle used by the Agent Studio **Runner**.
 
 Each invocation of a specialist agent gets its own self-contained
 **docker compose project** containing the unified

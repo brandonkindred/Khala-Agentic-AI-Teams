@@ -68,19 +68,13 @@ from ..models import (
 )
 from ..output_templates import parse_documentation_self_review_template
 from ..prompts import DOCUMENTATION_SELF_REVIEW_PROMPT
-from ._profile import PROFILE, REVIEW_CONFIG
+from ._profile import (
+    FRONTEND_CONFIG,
+    PROFILE,
+    REVIEW_CONFIG,
+)
 
 logger = logging.getLogger(__name__)
-
-# Restores the accessibility-verification guidance the retired REVIEW_PROMPT
-# used to state explicitly (via build_code_review_prompt's extra_verify_clause);
-# the shared coordinator engine's CODE_REVIEW profile has no per-team criteria
-# slot, so this rides into CodeReviewInput.task_requirements instead (see
-# run_coordinator_llm_review's docstring).
-_ACCESSIBILITY_VERIFY_NOTE = (
-    "Also verify accessibility: semantic markup, ARIA attributes, keyboard "
-    "navigation, and color contrast."
-)
 
 
 def _run_llm_review(
@@ -104,7 +98,7 @@ def _run_llm_review(
     module stays the test patch surface for the coordinator call, matching how
     ``Agent``/``resolve_text_mode_strands_model`` are patched for
     ``run_documentation_self_review`` below. Passes
-    :data:`_ACCESSIBILITY_VERIFY_NOTE` as ``extra_task_requirements`` --
+    :data:`FRONTEND_CONFIG.extra_review_clause` as ``extra_task_requirements`` --
     frontend-specific, since backend's code has no UI to check accessibility
     on.
 
@@ -128,7 +122,7 @@ def _run_llm_review(
         language=language,
         run_coordinator_fn=run_coordinator,
         review_context=review_context,
-        extra_task_requirements=_ACCESSIBILITY_VERIFY_NOTE,
+        extra_task_requirements=FRONTEND_CONFIG.extra_review_clause,
     )
 
 

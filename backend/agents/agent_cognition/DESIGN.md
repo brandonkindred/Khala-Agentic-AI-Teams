@@ -150,7 +150,7 @@ flowchart LR
 ```
 
 **Two execution modes share one contract:**
-- **Sandboxed agents** (Agent Console Runner): isolated, so the proxy injects context and
+- **Sandboxed agents** (Agent Studio Runner): isolated, so the proxy injects context and
   persists writeback on their behalf (steps 1–5).
 - **In-process teams**: call `CognitiveContext` directly (no HTTP hop), same load/writeback.
 

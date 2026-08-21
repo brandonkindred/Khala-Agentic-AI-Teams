@@ -296,7 +296,9 @@ def test_run_llm_review_real_coordinator_forwards_accessibility_note_to_prompt()
     the real chunk-review LLM prompt via ``extra_task_requirements`` -- the
     existing mocked test only proves it lands on
     ``CodeReviewInput.task_requirements``, not that a real prompt renders it."""
-    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.frontend_code_v2_team.phases._profile import (
+        _ACCESSIBILITY_VERIFY_NOTE,
+    )
     from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review
 
     client = _PromptCapturingClient()
@@ -304,4 +306,4 @@ def test_run_llm_review_real_coordinator_forwards_accessibility_note_to_prompt()
     _run_llm_review(llm=client, task=_task(), files={"x.tsx": "const f = () => 1;\n"})
 
     assert client.prompts, "expected at least one real chunk-review call"
-    assert any(review_mod._ACCESSIBILITY_VERIFY_NOTE in p for p in client.prompts)
+    assert any(_ACCESSIBILITY_VERIFY_NOTE in p for p in client.prompts)
