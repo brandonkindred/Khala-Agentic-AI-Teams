@@ -1015,11 +1015,10 @@ class ConfigDrivenV2DevelopmentAgent(BaseV2DevelopmentAgent):
     ``_build_tool_agents()`` body), and its optional extra review clause
     (today a bare module constant, e.g. frontend's
     ``_ACCESSIBILITY_VERIFY_NOTE``). This class resolves all four from a
-    ``V2TeamConfig`` instance instead, so a future concrete team can subclass
-    it and supply only that config — see the code-v2 team epic's Step 3,
-    which re-expresses ``backend_code_v2_team``/``frontend_code_v2_team``'s
-    ``orchestrator.py`` adapters on top of this base. This step introduces the
-    base only; no existing team consumes it yet.
+    ``V2TeamConfig`` instance instead, so a concrete team subclasses it and
+    supplies only that config plus a ``_build_tool_agents`` hook.
+    ``backend_code_v2_team`` and ``frontend_code_v2_team`` both subclass this
+    base and supply their team-specific ``V2TeamConfig`` instance.
 
     Invariants: ``self.config`` is set once at construction and never
     reassigned; every property/method below is a pure read through it (or
