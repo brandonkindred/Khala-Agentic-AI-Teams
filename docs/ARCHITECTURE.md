@@ -559,7 +559,7 @@ flowchart TB
 
 ```mermaid
 sequenceDiagram
-    actor Op as Operator / Agent Studio
+    actor Op as Operator / Product Delivery
     participant PD as product_delivery API
     participant PO as ProductOwnerAgent
     participant SP as SprintPlannerAgent
