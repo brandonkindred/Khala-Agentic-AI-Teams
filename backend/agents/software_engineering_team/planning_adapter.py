@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from shared.dev_models.models import PlanningHierarchy, ProductRequirements
+from software_engineering_team.shared.project_overview_builder import build_project_overview
 
 logger = logging.getLogger(__name__)
 
@@ -171,39 +172,25 @@ def adapt_planning_result(
         metadata={},
     )
 
-    features_doc_parts: List[str] = []
-    if prd_content:
-        features_doc_parts.append(prd_content)
-    if client_context:
-        if client_context.get("problem_summary"):
-            features_doc_parts.append(
-                "## Problem summary\n" + (client_context["problem_summary"] or "")
-            )
-        if client_context.get("opportunity_statement"):
-            features_doc_parts.append(
-                "## Opportunity\n" + (client_context["opportunity_statement"] or "")
-            )
-        if client_context.get("target_users"):
-            features_doc_parts.append(
-                "## Target users\n" + "\n".join(f"- {u}" for u in client_context["target_users"])
-            )
-    features_and_functionality_doc = "\n\n".join(features_doc_parts) if features_doc_parts else ""
-    goals = ""
-    if client_context and (
-        client_context.get("problem_summary") or client_context.get("opportunity_statement")
-    ):
-        goals = (
-            (client_context.get("problem_summary") or "")
-            + "\n"
-            + (client_context.get("opportunity_statement") or "")
-        )
-    if not goals and handoff.get("summary"):
-        goals = handoff["summary"]
+    project_overview: Dict[str, Any] = build_project_overview(
+        prd_content=prd_content, client_context=client_context
+    )
 
-    project_overview: Dict[str, Any] = {
-        "features_and_functionality_doc": features_and_functionality_doc,
-        "goals": goals.strip(),
-    }
+    # Adapter-specific: append target_users to features doc (not in shared helper).
+    features_and_functionality_doc = project_overview["features_and_functionality_doc"]
+    if client_context and client_context.get("target_users"):
+        target_section = "## Target users\n" + "\n".join(
+            f"- {u}" for u in client_context["target_users"]
+        )
+        if features_and_functionality_doc:
+            features_and_functionality_doc += "\n\n" + target_section
+        else:
+            features_and_functionality_doc = target_section
+        project_overview["features_and_functionality_doc"] = features_and_functionality_doc
+
+    # Adapter-specific: fall back to handoff summary when goals are empty.
+    if not project_overview["goals"] and handoff.get("summary"):
+        project_overview["goals"] = handoff["summary"]
 
     # Open/resolved questions are carried across the planning handoff so the SE gate can escalate
     # unanswered product questions to the user instead of letting them be auto-decided downstream.

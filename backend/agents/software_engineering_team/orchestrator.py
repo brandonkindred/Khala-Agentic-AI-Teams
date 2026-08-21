@@ -66,6 +66,7 @@ from software_engineering_team.shared.job_store import (
     update_job,
 )
 from software_engineering_team.shared.plan_dir import ensure_plan_dir
+from software_engineering_team.shared.project_overview_builder import build_project_overview
 
 try:
     from unified_api.slack_notifier import notify_open_questions as slack_notify_open_questions
@@ -452,39 +453,17 @@ def _run_architecture_for_planning(
         priority="medium",
         metadata={},
     )
-    features_parts = []
-    if prd_content:
-        features_parts.append(prd_content)
-    if client_context:
-        if client_context.get("problem_summary"):
-            features_parts.append(
-                "## Problem summary\n" + (client_context["problem_summary"] or "")
-            )
-        if client_context.get("opportunity_statement"):
-            features_parts.append(
-                "## Opportunity\n" + (client_context["opportunity_statement"] or "")
-            )
-    features_doc = "\n\n".join(features_parts) if features_parts else ""
-    goals = ""
-    if client_context and (
-        client_context.get("problem_summary") or client_context.get("opportunity_statement")
-    ):
-        goals = (
-            (client_context.get("problem_summary") or "")
-            + "\n"
-            + (client_context.get("opportunity_statement") or "")
-        )
-    project_overview = {
-        "features_and_functionality_doc": features_doc,
-        "goals": goals.strip(),
-    }
-    arch_input = ArchitectureInput(
-        requirements=requirements,
-        technology_preferences=technology_preferences,
-        project_overview=project_overview,
-        features_and_functionality_doc=features_doc or None,
-    )
     try:
+        project_overview = build_project_overview(
+            prd_content=prd_content, client_context=client_context
+        )
+        features_doc = project_overview["features_and_functionality_doc"]
+        arch_input = ArchitectureInput(
+            requirements=requirements,
+            technology_preferences=technology_preferences,
+            project_overview=project_overview,
+            features_and_functionality_doc=features_doc or None,
+        )
         arch_output = arch_agent.run(arch_input)
         return (
             (arch_output.architecture.overview or "")

@@ -372,8 +372,8 @@ def build_enhanced_issue_from_proposal(
     # --- Fibonacci Complexity Score ---
     lines.append("## Complexity Score")
     lines.append("")
-    lines.append(f"| Dimension | Score | Rationale |")
-    lines.append(f"|-----------|-------|-----------|")
+    lines.append("| Dimension | Score | Rationale |")
+    lines.append("|-----------|-------|-----------|")
     lines.append(
         f"| Conceptual complexity | **{complexity['conceptual']}** | "
         f"{complexity['conceptual_rationale']} |"
