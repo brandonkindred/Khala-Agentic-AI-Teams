@@ -391,13 +391,15 @@ class TestFrontendConfigParity:
     ``TestBackendConfigParity`` above and
     ``test_v2_team_config.py::TestFrontendParity``).
 
-    Reads the real profile via ``FrontendDevelopmentAgent.PROFILE`` (a public
+    Reads the stack profile via ``FrontendDevelopmentAgent.PROFILE`` (a public
     class attribute of the team's public ``orchestrator`` module) rather than
     frontend_code_v2_team's private ``phases._profile`` submodule directly --
     the identical live object either way (``orchestrator.py`` sets
     ``PROFILE = PROFILE`` from that same import), so parity stays real
-    (no hardcoded copy to drift out of sync) without this shared test suite
-    reaching into another team's private internals.
+    (no hardcoded copy to drift out of sync). The extra review clause
+    (``_ACCESSIBILITY_VERIFY_NOTE``) isn't exposed through that public
+    surface, so it is imported directly from ``phases._profile`` below --
+    the one deliberate reach into that team's private internals.
 
     Deliberately narrow in scope: it checks fidelity to frontend's *real*
     values (which have an extra review clause and conventions only for

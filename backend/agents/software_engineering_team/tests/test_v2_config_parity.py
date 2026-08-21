@@ -100,11 +100,6 @@ class TestBackendOrchestratorParity:
         )
         assert agent.tool_agent_kinds == expected
 
-    def test_tool_agent_kinds_count(self):
-        """Backend has 8 registered tool-agent kinds (all minus GENERAL)."""
-        agent = self._make_agent()
-        assert len(agent.tool_agent_kinds) == 8
-
     def test_no_extra_review_clause(self):
         """Backend has no extra review clause (no UI to check accessibility on)."""
         agent = self._make_agent()
@@ -328,11 +323,6 @@ class TestFrontendOrchestratorParity:
             k.value for k in ToolAgentKind if k is not ToolAgentKind.GENERAL
         )
         assert agent.tool_agent_kinds == expected
-
-    def test_tool_agent_kinds_count(self):
-        """Frontend has 15 registered tool-agent kinds (all minus GENERAL)."""
-        agent = self._make_agent()
-        assert len(agent.tool_agent_kinds) == 15
 
     def test_accessibility_in_tool_agent_kinds(self):
         """Frontend registers the accessibility tool agent kind."""

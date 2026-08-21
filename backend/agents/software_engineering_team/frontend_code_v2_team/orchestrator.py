@@ -65,6 +65,9 @@ def _build_tool_agents_impl(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
       ``ToolAgentKind`` this team uses to a constructed agent instance; does
       not raise on the happy path.
     """
+    if llm is None:
+        raise ValueError("llm must be a configured LLMClient (not None)")
+
     from software_engineering_team.shared.tool_agent_git_branch import (
         GitBranchManagementToolAgent,
     )
