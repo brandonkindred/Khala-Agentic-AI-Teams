@@ -817,7 +817,10 @@ class TestBackendDevelopmentAgent:
         assert "print('hello')" in code
 
     def test_build_tool_runners(self):
-        from backend_code_v2_team.orchestrator import BackendDevelopmentAgent, _build_tool_agents_impl
+        from backend_code_v2_team.orchestrator import (
+            BackendDevelopmentAgent,
+            _build_tool_agents_impl,
+        )
 
         mock_llm = MagicMock()
         dev = BackendDevelopmentAgent(mock_llm)

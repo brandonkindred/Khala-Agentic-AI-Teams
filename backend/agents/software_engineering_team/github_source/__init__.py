@@ -24,6 +24,10 @@ from .client import (
     scrub_token_from_text,
 )
 from .dependency_resolver import ReadyCheckResult, is_ready, pick_ready_issue
+from .enhanced_issue_builder import (
+    build_enhanced_issue_from_proposal,
+    compute_complexity_score,
+)
 from .existing_comments import (
     ExistingComment,
     build_existing_comments,
@@ -46,10 +50,6 @@ from .issue_grooming_split import (
 )
 from .issue_heuristic_scorer import score_issue_heuristically
 from .issue_llm_scorer import score_issue_via_llm
-from .enhanced_issue_builder import (
-    build_enhanced_issue_from_proposal,
-    compute_complexity_score,
-)
 from .issue_proposals import (
     annotate_duplicate_proposals,
     build_issue_from_proposal,
