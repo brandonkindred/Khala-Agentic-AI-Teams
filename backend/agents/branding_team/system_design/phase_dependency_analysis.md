@@ -209,26 +209,49 @@ though no current prompt text asks for it. Either way, don't set Phase 4's
 |---|---|---|
 | `ownership_definer` | "You are a Brand Ownership Definer. Define:" | *none* |
 | `approval_workflow_designer` | "You are an Approval Workflow Designer. Define:" | *none* |
-| `asset_wiki_planner` | "You are an Asset & Wiki Planner. Define:" | *none* |
+| `asset_wiki_planner` | "You are an Asset & Wiki Planner. Define: ... wiki_backlog — ... Cover: Brand North Star, Voice Playbook, Design System, Brand Review Intake, Channel Playbook, Governance Charter." (full text, including the `wiki_backlog` field line auto-rendered from `AssetWikiOutput`'s `Field(description=...)`, `models.py:1386-1391`) | STRATEGIC_CORE ("Brand North Star"), NARRATIVE_MESSAGING/VISUAL_IDENTITY ("Voice Playbook" — ambiguous between Phase 2's writing guidelines and Phase 3's voice/tone spectrum), VISUAL_IDENTITY ("Design System" — `VisualIdentityOutput.design_system`), **CHANNEL_ACTIVATION** ("Channel Playbook" — unambiguous, Phase 4 is the only phase this concept exists in) |
 | `training_planner` | "You are a Training Planner. Define:" | *none* |
 | `kpi_designer` | "You are a Brand KPI Designer. Define:" | *none* |
 | `evolution_framer` | "You are a Brand Evolution Framer. Define:" | *none* |
 | `brand_rules_codifier` | "Using the full brand context (positioning, promise, values, narrative, visual identity), produce:" | STRATEGIC_CORE (positioning, promise, values), **NARRATIVE_MESSAGING** (narrative), VISUAL_IDENTITY |
 
-Only `brand_rules_codifier` references upstream context explicitly, and it
-names all three of STRATEGIC_CORE, NARRATIVE_MESSAGING, and
-VISUAL_IDENTITY — not just STRATEGIC_CORE + VISUAL_IDENTITY.
+**Correction:** the `asset_wiki_planner` row above was previously marked
+*none* in error — an earlier pass of this table quoted only each agent's
+`opening` text and missed field lines that `render_agent_prompt` derives
+from `structured_output`'s `Field(description=...)` (per this document's
+own stated Method, the *full* rendered prompt is what counts, not just
+the opening line). `AssetWikiOutput.wiki_backlog`'s description explicitly
+instructs the agent to produce wiki entries covering "Channel Playbook"
+alongside "Brand North Star," "Voice Playbook," "Design System," and two
+Phase-5-internal items — so `asset_wiki_planner`'s full system prompt does
+reference upstream phases, CHANNEL_ACTIVATION included. All other Phase 5
+"*none*" rows were re-checked the same way (each one's `structured_output`
+model read directly) and have no comparable hidden field-description
+references, so they stand.
 
-**Finding — disagrees with #6953's assumed default.** #6953 proposes
-`(STRATEGIC_CORE, VISUAL_IDENTITY)` for Phase 5, omitting
-NARRATIVE_MESSAGING. But `brand_rules_codifier`'s prompt literally lists
-"narrative" alongside "positioning, promise, values" and "visual identity"
-as part of "the full brand context" it's told to use. Dropping
-NARRATIVE_MESSAGING would contradict this agent's own prompt text. No
-Phase 5 agent references CHANNEL_ACTIVATION, so excluding it (per #6953's
-acceptance criteria) is correctly evidence-based.
+Two agents now reference upstream context explicitly: `brand_rules_codifier`
+(STRATEGIC_CORE, NARRATIVE_MESSAGING, VISUAL_IDENTITY) and
+`asset_wiki_planner` (STRATEGIC_CORE, NARRATIVE_MESSAGING and/or
+VISUAL_IDENTITY, VISUAL_IDENTITY, and CHANNEL_ACTIVATION).
 
-**Recommended `context_phases`:** `(STRATEGIC_CORE, NARRATIVE_MESSAGING, VISUAL_IDENTITY)`
+**Finding — disagrees with #6953's assumed default in the opposite
+direction from what an earlier pass of this analysis concluded.** #6953
+proposes `(STRATEGIC_CORE, VISUAL_IDENTITY)` for Phase 5, omitting both
+NARRATIVE_MESSAGING and CHANNEL_ACTIVATION. `brand_rules_codifier`'s
+prompt already contradicts dropping NARRATIVE_MESSAGING (it lists
+"narrative" as part of "the full brand context" it's told to use), and
+`asset_wiki_planner`'s prompt contradicts dropping CHANNEL_ACTIVATION (its
+wiki backlog is explicitly told to cover a "Channel Playbook"). Taken
+together, the evidence-based set for Phase 5 is **all four** upstream
+phases — the full set #6953 lists for CHANNEL_ACTIVATION, applied one
+phase later.
+
+**Recommended `context_phases`:** `(STRATEGIC_CORE, NARRATIVE_MESSAGING, VISUAL_IDENTITY, CHANNEL_ACTIVATION)`
+— note that since this is every phase preceding GOVERNANCE, it is
+operationally identical to leaving `context_phases` unset (`()`, "no
+filtering," per the Phase 4 section's correction above) for the isolated-
+phase/Temporal path: GOVERNANCE is the one phase where the evidence-based
+answer and "don't filter at all" coincide.
 
 ## Summary table
 
@@ -238,7 +261,7 @@ acceptance criteria) is correctly evidence-based.
 | NARRATIVE_MESSAGING | `(STRATEGIC_CORE,)` | `(STRATEGIC_CORE,)` | ✅ |
 | VISUAL_IDENTITY | `(STRATEGIC_CORE, NARRATIVE_MESSAGING)` | `(STRATEGIC_CORE, NARRATIVE_MESSAGING)` | ✅ |
 | CHANNEL_ACTIVATION | `(STRATEGIC_CORE, NARRATIVE_MESSAGING, VISUAL_IDENTITY)` | no prompt evidence for any upstream phase, **but `()` cannot express that** — see Phase 4 section | ⚠️ mechanism gap, needs a #6953 decision |
-| GOVERNANCE | `(STRATEGIC_CORE, VISUAL_IDENTITY)` | `(STRATEGIC_CORE, NARRATIVE_MESSAGING, VISUAL_IDENTITY)` | ⚠️ missing NARRATIVE_MESSAGING |
+| GOVERNANCE | `(STRATEGIC_CORE, VISUAL_IDENTITY)` | `(STRATEGIC_CORE, NARRATIVE_MESSAGING, VISUAL_IDENTITY, CHANNEL_ACTIVATION)` | ⚠️ missing NARRATIVE_MESSAGING and CHANNEL_ACTIVATION |
 
 Three of five phases match the proposed shape exactly. The two mismatches
 (Phase 4, Phase 5) are flagged above with the specific prompt lines that
@@ -246,4 +269,7 @@ justify each recommendation, for #6953 to resolve before finalizing
 `_PHASE_SPEC`. Note the STRATEGIC_CORE row's `()` is not the same kind of
 value as Phase 4's: Phase 1 has no upstream phases to filter (`prior_outputs`
 is empty regardless of `context_phases`), so `()` there is inert rather than
-meaning "include everything."
+meaning "include everything." GOVERNANCE's row is the mirror case: its
+evidence-based value happens to be every upstream phase, so setting it
+explicitly and leaving `context_phases` unset are operationally the same
+thing there too — see the Phase 5 section above.
