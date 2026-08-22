@@ -6,24 +6,35 @@ of the 37 branding-team agent system prompts (`backend/agents/branding_team/agen
 *which upstream phase's output does this agent's system prompt actually
 reference?*
 
-**Counting methodology (for reproducibility):** "37" counts distinct
-`make_*` factory functions / distinct `_..._PROMPT = AgentPromptSpec(...)`
-call sites in `agents.py` — one per named agent role, matching this
-issue's own acceptance criteria ("Analysis covers all 37 agents across 5
-phases"). Two other counts exist depending on what's being counted, and
-this document intentionally uses neither: **39** is the number of graph
-*node instances* actually built (Phase 3's `make_moodboard_conceptualist`
-factory is instantiated 3× with distinct style variants — Editorial,
-Minimalist, Bold — each producing its own node and its own rendered
-prompt text, so 37 factories become 39 nodes); **32** is the number of
-structurally distinct prompt *template shapes* if Phase 4's six
-`_make_channel_guide`-built agents (`website_guide`, `social_guide`,
-`email_guide`, `events_guide`, `partnerships_guide`, `internal_guide`)
-are collapsed into the one shared template they're generated from. Every
-per-agent row below is evaluated against that agent's own fully-rendered
-prompt text regardless of which count it falls under, so the "which
-upstream phase does X reference" evidence is unaffected either way — only
-the summary counts in headers below use the 37-factory convention.
+**Counting methodology (for reproducibility) — three genuinely different
+quantities, not one number under three names:**
+
+- **37** — distinct named `make_*` role factories in `agents.py` (one per
+  agent role the branding team defines, e.g. `make_website_guide` and
+  `make_social_guide` count as two roles even though they share a prompt
+  builder). This is this document's convention, matching the issue's own
+  acceptance criteria ("Analysis covers all 37 agents across 5 phases").
+- **32** — distinct `AgentPromptSpec(...)` *construction call sites* in
+  `agents.py` (confirmed by direct count: `grep -n "AgentPromptSpec(" agents.py`
+  returns exactly 32 lines). Fewer than 37 because two roles are built from
+  a shared, parameterized prompt-building function called multiple times
+  from one source location rather than one `AgentPromptSpec(...)` per
+  role: `_channel_guide_prompt` (Phase 4's six `_make_channel_guide`-built
+  roles — `website_guide`, `social_guide`, `email_guide`, `events_guide`,
+  `partnerships_guide`, `internal_guide` — share it) and the Phase 3
+  moodboard prompt builder (the three `make_moodboard_conceptualist`
+  style variants — Editorial, Minimalist, Bold — share it).
+- **39** — actual graph *node instances* built at runtime: more than 37
+  because `make_moodboard_conceptualist` alone is instantiated 3× (one
+  node per style variant), while every other factory instantiates exactly
+  once.
+
+None of these three counts is interchangeable with another, and this
+document does not conflate them: every per-agent row below is evaluated
+against that specific agent's own fully-rendered prompt text regardless of
+which count it falls under, so the "which upstream phase does X reference"
+evidence is unaffected — only the summary counts in headers below use the
+37-role convention.
 
 **Why:** `_PhaseSpec.context_phases` in `orchestrator.py` (`_PHASE_SPEC`,
 `~orchestrator.py:357-396`) is `()` — "no filtering" — for every phase
