@@ -1183,6 +1183,21 @@ def test_with_self_review_skip_flag_makes_no_llm_call(
     assert capture.calls == []  # no LLM call at all, not even self-review
 
 
+def test_revise_skip_self_review_makes_no_self_review_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``revise(..., skip_self_review=True)`` threads the flag through to
+    ``_with_self_review``: only the revision LLM call fires, no self-review
+    audit call, even with self-review enabled."""
+    capture = _patch_design(monkeypatch, [_good_payload()], enable_self_review=True)
+
+    critique = SpecCritique(ready=False, rationale="external r", issues=[])
+    parsed, _ = DesignAgent().revise(_prior_spec(), critique, skip_self_review=True)
+
+    assert len(capture.calls) == 1  # revision only, no self-review audit
+    assert parsed["asset_class"] == "stocks"
+
+
 def test_self_review_garbage_response_falls_back_to_original(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
