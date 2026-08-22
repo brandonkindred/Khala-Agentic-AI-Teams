@@ -245,7 +245,7 @@ def _code_review_gate(
       cache (rather than re-invoked) when the QA/Security gates already
       computed them earlier in the same cycle, or vice versa.
     """
-    from .review import run_microtask_review
+    from ._profile import run_microtask_review
 
     r = run_microtask_review(
         llm=llm,
@@ -320,7 +320,7 @@ def _qa_gate(
       ``r.passed`` — a stray non-QA issue in ``r.issues`` cannot fail this
       gate.
     """
-    from .review import run_microtask_review
+    from ._profile import run_microtask_review
 
     r = run_microtask_review(
         llm=llm,
@@ -390,7 +390,7 @@ def _security_gate(
       filtering) rather than taken from ``r.passed`` — a stray non-security
       issue in ``r.issues`` cannot fail this gate.
     """
-    from .review import run_microtask_review
+    from ._profile import run_microtask_review
 
     r = run_microtask_review(
         llm=llm,
@@ -437,7 +437,7 @@ def _run_documentation_self_review(**kwargs: Any) -> Any:
       ``.review`` (avoiding the ``review`` <-> ``execution`` circular
       import).
     """
-    from .review import run_documentation_self_review
+    from ._profile import run_documentation_self_review
 
     return run_documentation_self_review(**kwargs)
 

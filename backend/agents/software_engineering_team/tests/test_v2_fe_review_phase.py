@@ -1,4 +1,4 @@
-"""Tests for frontend_code_v2_team.phases.review.run_review and helpers."""
+"""Tests for frontend_code_v2_team.phases._profile.run_review and helpers (shared.v2_review_bindings)."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def _stub_coordinator(monkeypatch, *, approved: bool = True, issues=None) -> Non
     tool-agent orchestration rather than code-review content itself.
     """
     from software_engineering_team.code_review_agent.models import CodeReviewOutput
-    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.shared import v2_review_bindings as review_mod
 
     def _stub(llm, input_data, *args, **kwargs):
         return CodeReviewOutput(
@@ -61,7 +61,7 @@ def _stub_coordinator(monkeypatch, *, approved: bool = True, issues=None) -> Non
 
 
 def test_fe_run_build_verification_no_verifier():
-    from software_engineering_team.frontend_code_v2_team.phases.review import (
+    from software_engineering_team.frontend_code_v2_team.phases._profile import (
         _run_build_verification,
     )
 
@@ -70,7 +70,7 @@ def test_fe_run_build_verification_no_verifier():
 
 
 def test_fe_run_build_verification_raises():
-    from software_engineering_team.frontend_code_v2_team.phases.review import (
+    from software_engineering_team.frontend_code_v2_team.phases._profile import (
         _run_build_verification,
     )
 
@@ -83,8 +83,8 @@ def test_fe_run_build_verification_raises():
 
 
 def test_fe_run_build_verification_uses_profile_label():
-    from software_engineering_team.frontend_code_v2_team.phases._profile import PROFILE
-    from software_engineering_team.frontend_code_v2_team.phases.review import (
+    from software_engineering_team.frontend_code_v2_team.phases._profile import (
+        PROFILE,
         _run_build_verification,
     )
 
@@ -105,11 +105,11 @@ def test_fe_run_llm_review_calls_coordinator_with_skip_tail_passes(monkeypatch):
     _ACCESSIBILITY_VERIFY_NOTE) -- the shared coordinator's CODE_REVIEW profile
     has no per-team criteria slot, so this is how that guidance rides along."""
     from software_engineering_team.code_review_agent.models import CodeReviewOutput
-    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
     from software_engineering_team.frontend_code_v2_team.phases._profile import (
         _ACCESSIBILITY_VERIFY_NOTE,
+        _run_llm_review,
     )
-    from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.shared import v2_review_bindings as review_mod
 
     captured: dict = {}
 
@@ -139,8 +139,8 @@ def test_fe_run_llm_review_defaults_language_to_profile_default(monkeypatch):
     ``REVIEW_PROMPT``/``parse_review_template`` pair had no language
     placeholder."""
     from software_engineering_team.code_review_agent.models import CodeReviewOutput
-    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.frontend_code_v2_team.phases._profile import _run_llm_review
+    from software_engineering_team.shared import v2_review_bindings as review_mod
 
     captured: dict = {}
 
@@ -161,8 +161,8 @@ def test_fe_run_llm_review_forwards_explicit_language(monkeypatch):
     ``shared.v2_review._code_review_step`` (this team's ``_detect_language``
     may pass ``"angular"``/``"react"``, not just ``"typescript"``)."""
     from software_engineering_team.code_review_agent.models import CodeReviewOutput
-    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.frontend_code_v2_team.phases._profile import _run_llm_review
+    from software_engineering_team.shared import v2_review_bindings as review_mod
 
     captured: dict = {}
 
@@ -183,8 +183,8 @@ def test_fe_run_llm_review_forwards_review_context(monkeypatch):
     this context)."""
     from shared.dev_models.models import ReviewContext, SystemArchitecture
     from software_engineering_team.code_review_agent.models import CodeReviewOutput
-    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.frontend_code_v2_team.phases._profile import _run_llm_review
+    from software_engineering_team.shared import v2_review_bindings as review_mod
 
     captured: dict = {}
 
@@ -220,8 +220,8 @@ def test_fe_run_llm_review_translates_issues_to_review_issue(monkeypatch):
         CodeReviewIssue,
         CodeReviewOutput,
     )
-    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.frontend_code_v2_team.phases._profile import _run_llm_review
+    from software_engineering_team.shared import v2_review_bindings as review_mod
 
     monkeypatch.setattr(
         review_mod,
@@ -257,8 +257,8 @@ def test_fe_run_llm_review_raw_issue_count_is_none_on_clean_pass(monkeypatch):
     it must never default back to 0, which grounding_rejection_ratio would
     also treat as "no ratio available" today but could stop doing so."""
     from software_engineering_team.code_review_agent.models import CodeReviewOutput
-    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.frontend_code_v2_team.phases._profile import _run_llm_review
+    from software_engineering_team.shared import v2_review_bindings as review_mod
 
     monkeypatch.setattr(
         review_mod,
@@ -277,8 +277,8 @@ def test_fe_run_llm_review_propagates_coordinator_unavailable(monkeypatch):
     it propagates so the caller's containment produces the fail-closed synthetic
     issue instead of a silent clean pass."""
     from software_engineering_team.code_review_agent.models import CodeReviewUnavailableError
-    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.frontend_code_v2_team.phases._profile import _run_llm_review
+    from software_engineering_team.shared import v2_review_bindings as review_mod
 
     def _raise(llm, input_data, *a, **kw):
         raise CodeReviewUnavailableError("no chunk could be reviewed", unreviewed=[])
@@ -290,7 +290,7 @@ def test_fe_run_llm_review_propagates_coordinator_unavailable(monkeypatch):
 
 
 def test_fe_run_review_clean(monkeypatch, tmp_path: Path):
-    from software_engineering_team.frontend_code_v2_team.phases.review import run_review
+    from software_engineering_team.frontend_code_v2_team.phases._profile import run_review
 
     _stub_coordinator(monkeypatch)
 
@@ -305,7 +305,7 @@ def test_fe_run_review_clean(monkeypatch, tmp_path: Path):
 
 
 def test_fe_run_review_build_fails(monkeypatch, tmp_path: Path):
-    from software_engineering_team.frontend_code_v2_team.phases.review import run_review
+    from software_engineering_team.frontend_code_v2_team.phases._profile import run_review
 
     _stub_coordinator(monkeypatch)
 
@@ -321,7 +321,7 @@ def test_fe_run_review_build_fails(monkeypatch, tmp_path: Path):
 
 
 def test_fe_run_review_with_qa_agent(monkeypatch, tmp_path: Path):
-    from software_engineering_team.frontend_code_v2_team.phases.review import run_review
+    from software_engineering_team.frontend_code_v2_team.phases._profile import run_review
 
     _stub_coordinator(monkeypatch)
 
@@ -346,7 +346,7 @@ def test_fe_run_review_with_qa_agent(monkeypatch, tmp_path: Path):
 
 
 def test_fe_run_review_with_linting_failures(monkeypatch, tmp_path: Path):
-    from software_engineering_team.frontend_code_v2_team.phases.review import run_review
+    from software_engineering_team.frontend_code_v2_team.phases._profile import run_review
 
     _stub_coordinator(monkeypatch)
 
@@ -373,7 +373,7 @@ def test_fe_run_review_with_linting_failures(monkeypatch, tmp_path: Path):
 
 
 def test_fe_run_review_with_security_agent(monkeypatch, tmp_path: Path):
-    from software_engineering_team.frontend_code_v2_team.phases.review import run_review
+    from software_engineering_team.frontend_code_v2_team.phases._profile import run_review
 
     _stub_coordinator(monkeypatch)
 
@@ -423,7 +423,7 @@ def _big_source() -> str:
     fn_0000 (head) and ends with a fn_tail sentinel (tail); tests assert both
     survive chunking, proving neither end is dropped.
     """
-    from software_engineering_team.frontend_code_v2_team.phases.review import MAX_REVIEW_CODE_CHARS
+    from software_engineering_team.shared.review_utils import MAX_REVIEW_CODE_CHARS
 
     lines: list[str] = []
     total = 0
@@ -443,7 +443,7 @@ def test_fe_run_qa_agent_chunks_large_input_without_dropping_tail():
     """The QA agent is run once per raw piece of a large file, so its tail is
     reviewed instead of being truncated at MAX_REVIEW_CODE_CHARS — and the code
     sent is raw source, not the code-review renderer's headers/line prefixes."""
-    from software_engineering_team.frontend_code_v2_team.phases.review import _run_qa_agent
+    from software_engineering_team.frontend_code_v2_team.phases._profile import _run_qa_agent
 
     codes: list[str] = []
 
@@ -474,8 +474,8 @@ def test_fe_run_qa_agent_chunks_large_input_without_dropping_tail():
 
 def test_fe_run_qa_agent_skips_failing_chunk_keeps_others(monkeypatch):
     """A chunk whose QA call raises is skipped; issues from the others survive."""
-    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.frontend_code_v2_team.phases.review import _run_qa_agent
+    from software_engineering_team.frontend_code_v2_team.phases._profile import _run_qa_agent
+    from software_engineering_team.shared import v2_review_bindings as review_mod
 
     calls = {"n": 0}
 
@@ -503,7 +503,7 @@ def test_fe_run_qa_agent_skips_failing_chunk_keeps_others(monkeypatch):
 def test_fe_run_security_agent_chunks_large_input_without_dropping_tail():
     """The security agent is run once per raw piece, covering the whole file
     instead of only the first MAX_REVIEW_CODE_CHARS, on raw source."""
-    from software_engineering_team.frontend_code_v2_team.phases.review import _run_security_agent
+    from software_engineering_team.frontend_code_v2_team.phases._profile import _run_security_agent
 
     codes: list[str] = []
 
@@ -539,7 +539,7 @@ def _oversized_single_line() -> str:
     cannot split at a line boundary, so it returns one over-budget chunk. The
     review paths must hard-split it at character boundaries before any agent call.
     """
-    from software_engineering_team.frontend_code_v2_team.phases.review import MAX_REVIEW_CODE_CHARS
+    from software_engineering_team.shared.review_utils import MAX_REVIEW_CODE_CHARS
 
     line = "const DATA='" + ("a" * (MAX_REVIEW_CODE_CHARS + 5_000)) + "';"
     assert "\n" not in line  # unsplittable at a line boundary
@@ -550,10 +550,8 @@ def _oversized_single_line() -> str:
 def test_fe_run_qa_agent_hard_splits_oversized_single_line():
     """A single line over the cap is hard-split so every QA call stays within
     budget and the file is reviewed instead of sent in one oversized, skippable call."""
-    from software_engineering_team.frontend_code_v2_team.phases.review import (
-        MAX_REVIEW_CODE_CHARS,
-        _run_qa_agent,
-    )
+    from software_engineering_team.frontend_code_v2_team.phases._profile import _run_qa_agent
+    from software_engineering_team.shared.review_utils import MAX_REVIEW_CODE_CHARS
 
     codes: list[str] = []
 
@@ -581,10 +579,8 @@ def test_fe_run_qa_agent_hard_splits_oversized_single_line():
 
 def test_fe_run_security_agent_hard_splits_oversized_single_line():
     """Same hard-split guarantee for the security agent path."""
-    from software_engineering_team.frontend_code_v2_team.phases.review import (
-        MAX_REVIEW_CODE_CHARS,
-        _run_security_agent,
-    )
+    from software_engineering_team.frontend_code_v2_team.phases._profile import _run_security_agent
+    from software_engineering_team.shared.review_utils import MAX_REVIEW_CODE_CHARS
 
     codes: list[str] = []
 
@@ -611,7 +607,7 @@ def test_fe_run_security_agent_hard_splits_oversized_single_line():
 def test_fe_run_qa_agent_defaults_file_path_to_sent_file():
     """When the QA item reports no location, the finding is attributed to the
     file actually sent — so even tail pieces stay attributable."""
-    from software_engineering_team.frontend_code_v2_team.phases.review import _run_qa_agent
+    from software_engineering_team.frontend_code_v2_team.phases._profile import _run_qa_agent
 
     class _NoLocBug:
         severity = "low"
@@ -634,7 +630,7 @@ def test_fe_run_qa_agent_defaults_file_path_to_sent_file():
 
 def test_fe_run_security_agent_single_call_for_small_input():
     """Inputs that already fit are reviewed in one call (no regression)."""
-    from software_engineering_team.frontend_code_v2_team.phases.review import _run_security_agent
+    from software_engineering_team.frontend_code_v2_team.phases._profile import _run_security_agent
 
     calls = {"n": 0}
 
@@ -655,7 +651,7 @@ def test_fe_run_security_agent_single_call_for_small_input():
 
 
 def test_fe_run_review_with_code_review_agent(monkeypatch, tmp_path: Path):
-    from software_engineering_team.frontend_code_v2_team.phases.review import run_review
+    from software_engineering_team.frontend_code_v2_team.phases._profile import run_review
 
     _stub_coordinator(monkeypatch)
 
@@ -682,7 +678,7 @@ def test_fe_run_review_with_code_review_agent(monkeypatch, tmp_path: Path):
 def test_fe_run_review_passes_files_dict_unmodified(monkeypatch, tmp_path: Path):
     """The code review agent receives ``files=`` verbatim — no 60K slice, no
     ``--- path ---`` concatenation."""
-    from software_engineering_team.frontend_code_v2_team.phases.review import run_review
+    from software_engineering_team.frontend_code_v2_team.phases._profile import run_review
 
     _stub_coordinator(monkeypatch)
 
@@ -710,7 +706,7 @@ def test_fe_run_review_forwards_architecture_and_spec_content(monkeypatch, tmp_p
     """``run_review``'s ``architecture``/``spec_content`` reach the code-review
     agent's input, and default to ``None``/``""`` when omitted."""
     from shared.dev_models.models import ReviewContext, SystemArchitecture
-    from software_engineering_team.frontend_code_v2_team.phases.review import run_review
+    from software_engineering_team.frontend_code_v2_team.phases._profile import run_review
 
     _stub_coordinator(monkeypatch)
 
@@ -754,7 +750,7 @@ def test_fe_run_review_forwards_architecture_and_spec_content(monkeypatch, tmp_p
 def test_fe_run_review_code_review_agent_raises_falls_back_to_llm(monkeypatch, tmp_path: Path):
     """If code_review_agent fails, we still call LLM fallback."""
     from software_engineering_team.code_review_agent.models import CodeReviewIssue
-    from software_engineering_team.frontend_code_v2_team.phases.review import run_review
+    from software_engineering_team.frontend_code_v2_team.phases._profile import run_review
 
     _stub_coordinator(
         monkeypatch,
@@ -781,7 +777,7 @@ def test_fe_run_review_with_tool_agents(monkeypatch, tmp_path: Path):
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
-    from software_engineering_team.frontend_code_v2_team.phases.review import run_review
+    from software_engineering_team.frontend_code_v2_team.phases._profile import run_review
 
     _stub_coordinator(monkeypatch)
 
@@ -808,9 +804,7 @@ def test_fe_run_review_with_tool_agents(monkeypatch, tmp_path: Path):
 
 def test_fe_review_steps_run_sequentially_for_dummy_llm():
     from llm_service.clients.dummy import DummyLLMClient
-    from software_engineering_team.frontend_code_v2_team.phases.review import (
-        _review_steps_run_sequentially,
-    )
+    from software_engineering_team.shared.v2_review import _review_steps_run_sequentially
 
     assert _review_steps_run_sequentially(DummyLLMClient()) is True
     assert _review_steps_run_sequentially(MagicMock()) is False
@@ -821,9 +815,7 @@ def test_fe_review_steps_run_sequentially_for_wrapped_dummy_llm():
     (exposing the backing client via a `.client` property) before they reach review.py — a
     DummyLLMClient reached only through that wrapper must still force sequential execution."""
     from llm_service.clients.dummy import DummyLLMClient
-    from software_engineering_team.frontend_code_v2_team.phases.review import (
-        _review_steps_run_sequentially,
-    )
+    from software_engineering_team.shared.v2_review import _review_steps_run_sequentially
 
     class _FakeStrandsModelWrapper:
         def __init__(self, client):
@@ -838,7 +830,7 @@ def test_fe_run_review_steps_run_concurrently(monkeypatch, tmp_path: Path):
     run in parallel worker threads; a sequential loop would deadlock and time out."""
     import threading
 
-    from software_engineering_team.frontend_code_v2_team.phases.review import run_review
+    from software_engineering_team.frontend_code_v2_team.phases._profile import run_review
 
     _stub_coordinator(monkeypatch)
 
@@ -888,8 +880,8 @@ def test_fe_run_review_qa_failure_does_not_drop_other_steps_issues(monkeypatch, 
     """A QA step that fails outright (bypassing the shared per-chunk containment inside
     ``_run_qa_agent``) must not swallow the code-review/security findings collected in the
     same fan-out — each step's failure is contained to a synthetic issue for that step alone."""
-    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.frontend_code_v2_team.phases.review import run_review
+    from software_engineering_team.frontend_code_v2_team.phases._profile import run_review
+    from software_engineering_team.shared import v2_review_bindings as review_mod
 
     _stub_coordinator(monkeypatch)
 
@@ -926,8 +918,8 @@ def test_fe_run_review_security_failure_does_not_drop_other_steps_issues(
     """A security step that fails outright (bypassing the shared per-chunk containment inside
     ``_run_security_agent``) must not swallow the code-review/QA findings collected in the same
     fan-out — each step's failure is contained to a synthetic issue for that step alone."""
-    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.frontend_code_v2_team.phases.review import run_review
+    from software_engineering_team.frontend_code_v2_team.phases._profile import run_review
+    from software_engineering_team.shared import v2_review_bindings as review_mod
 
     _stub_coordinator(monkeypatch)
 
@@ -965,8 +957,8 @@ def test_fe_run_review_code_review_llm_fallback_failure_does_not_drop_other_step
     when the external agent itself fails) must be guarded too — an outright failure there is
     reported as a synthetic issue rather than propagating and cancelling the QA/security steps
     still running in the same fan-out."""
-    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.frontend_code_v2_team.phases.review import run_review
+    from software_engineering_team.frontend_code_v2_team.phases._profile import run_review
+    from software_engineering_team.shared import v2_review_bindings as review_mod
 
     def _boom(**_kw):
         raise RuntimeError("llm fallback exploded")
@@ -1005,10 +997,10 @@ def test_fe_run_code_review_phase_code_review_failure_is_contained(monkeypatch, 
     """A critical code-review finding fails the standalone code-review gate — driven
     solely by the code-review step, with no build/lint step involved."""
     from software_engineering_team.frontend_code_v2_team.models import Microtask
-    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.frontend_code_v2_team.phases.review import (
+    from software_engineering_team.frontend_code_v2_team.phases._profile import (
         run_code_review_phase,
     )
+    from software_engineering_team.shared import v2_review_bindings as review_mod
     from software_engineering_team.shared.v2_models import ReviewIssue
     from software_engineering_team.shared.v2_review import LlmReviewOutput
 
@@ -1055,10 +1047,10 @@ def test_fe_run_qa_testing_phase_agent_failure_is_contained(monkeypatch):
     failure — the guard under test here is for a failure in the step itself, not a chunk.
     """
     from software_engineering_team.frontend_code_v2_team.models import Microtask
-    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.frontend_code_v2_team.phases.review import (
+    from software_engineering_team.frontend_code_v2_team.phases._profile import (
         run_qa_testing_phase,
     )
+    from software_engineering_team.shared import v2_review_bindings as review_mod
 
     def _boom(**_kw):
         raise RuntimeError("qa agent exploded")
@@ -1086,10 +1078,10 @@ def test_fe_run_security_testing_phase_agent_failure_is_contained(monkeypatch):
     ``test_fe_run_qa_testing_phase_agent_failure_is_contained`` for why the step function
     itself (not ``security_agent.run``) is patched."""
     from software_engineering_team.frontend_code_v2_team.models import Microtask
-    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.frontend_code_v2_team.phases.review import (
+    from software_engineering_team.frontend_code_v2_team.phases._profile import (
         run_security_testing_phase,
     )
+    from software_engineering_team.shared import v2_review_bindings as review_mod
 
     def _boom(**_kw):
         raise RuntimeError("security agent exploded")
@@ -1115,10 +1107,10 @@ def test_fe_run_security_testing_phase_agent_failure_is_contained(monkeypatch):
 def test_fe_run_code_review_phase_passes_when_clean(monkeypatch, tmp_path: Path):
     """Empty LLM review → passed with no issues."""
     from software_engineering_team.frontend_code_v2_team.models import Microtask
-    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.frontend_code_v2_team.phases.review import (
+    from software_engineering_team.frontend_code_v2_team.phases._profile import (
         run_code_review_phase,
     )
+    from software_engineering_team.shared import v2_review_bindings as review_mod
     from software_engineering_team.shared.v2_review import LlmReviewOutput
 
     monkeypatch.setattr(
@@ -1143,10 +1135,10 @@ def test_fe_run_code_review_phase_passes_when_clean(monkeypatch, tmp_path: Path)
 def test_fe_run_qa_testing_phase_passes_when_clean(monkeypatch):
     """Successful QA agent with no findings → passed with no issues."""
     from software_engineering_team.frontend_code_v2_team.models import Microtask
-    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.frontend_code_v2_team.phases.review import (
+    from software_engineering_team.frontend_code_v2_team.phases._profile import (
         run_qa_testing_phase,
     )
+    from software_engineering_team.shared import v2_review_bindings as review_mod
 
     monkeypatch.setattr(review_mod, "_run_qa_agent", lambda **_kw: [])
 
@@ -1165,10 +1157,10 @@ def test_fe_run_qa_testing_phase_passes_when_clean(monkeypatch):
 def test_fe_run_security_testing_phase_passes_when_clean(monkeypatch):
     """Successful security agent with no findings → passed with no issues."""
     from software_engineering_team.frontend_code_v2_team.models import Microtask
-    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.frontend_code_v2_team.phases.review import (
+    from software_engineering_team.frontend_code_v2_team.phases._profile import (
         run_security_testing_phase,
     )
+    from software_engineering_team.shared import v2_review_bindings as review_mod
 
     monkeypatch.setattr(review_mod, "_run_security_agent", lambda **_kw: [])
 

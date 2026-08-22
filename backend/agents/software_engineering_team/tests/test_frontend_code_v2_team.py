@@ -787,7 +787,7 @@ class TestDocumentationSelfReviewWiring:
 
     def test_wraps_shared_helper_with_team_prompt_parser_and_result(self):
         from frontend_code_v2_team.models import DocumentationSelfReviewResult
-        from frontend_code_v2_team.phases.review import run_documentation_self_review
+        from frontend_code_v2_team.phases._profile import run_documentation_self_review
         from frontend_code_v2_team.prompts import DOCUMENTATION_SELF_REVIEW_PROMPT
 
         client = _RecordingDocClient(_DOC_REVIEW_RESPONSE)

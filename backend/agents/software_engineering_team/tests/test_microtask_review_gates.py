@@ -224,7 +224,7 @@ class TestFrontendReviewDependencies:
 class TestFrontendRunMicrotaskReview:
     def test_run_microtask_review_passes_when_no_issues(self, tmp_path):
         from frontend_code_v2_team.models import Microtask
-        from frontend_code_v2_team.phases.review import run_microtask_review
+        from frontend_code_v2_team.phases._profile import run_microtask_review
 
         task = _create_test_task("frontend")
         mt = Microtask(id="mt-1", title="Test Microtask")
@@ -256,7 +256,7 @@ class TestFrontendRunMicrotaskReview:
 
     def test_run_microtask_review_fails_with_critical_issue(self, tmp_path):
         from frontend_code_v2_team.models import Microtask
-        from frontend_code_v2_team.phases.review import run_microtask_review
+        from frontend_code_v2_team.phases._profile import run_microtask_review
 
         task = _create_test_task("frontend")
         mt = Microtask(id="mt-1", title="Test Microtask")
@@ -300,7 +300,7 @@ class TestFrontendAgentReviewCache:
         """A second run_microtask_review call with byte-identical files reuses
         the QA/security verdicts instead of calling the agents again."""
         from frontend_code_v2_team.models import Microtask
-        from frontend_code_v2_team.phases.review import run_microtask_review
+        from frontend_code_v2_team.phases._profile import run_microtask_review
 
         from software_engineering_team.shared.agent_review import AgentReviewCache
 
@@ -334,7 +334,7 @@ class TestFrontendAgentReviewCache:
     def test_run_microtask_review_without_cache_calls_agents_every_time(self, tmp_path):
         """Omitting ``cache`` (the default) is unchanged: every call re-invokes the agents."""
         from frontend_code_v2_team.models import Microtask
-        from frontend_code_v2_team.phases.review import run_microtask_review
+        from frontend_code_v2_team.phases._profile import run_microtask_review
 
         task = _create_test_task("frontend")
         mt = Microtask(id="mt-1", title="Test Microtask")
@@ -785,7 +785,7 @@ class TestBackendRunMicrotaskReview:
         and produce a passed review with no build failures and no issues.
         """
         from backend_code_v2_team.models import Microtask
-        from backend_code_v2_team.phases.review import run_microtask_review
+        from backend_code_v2_team.phases._profile import run_microtask_review
 
         task = _create_test_task("backend")
         mt = Microtask(id="mt-1", title="Test Microtask")
@@ -813,7 +813,7 @@ class TestBackendAgentReviewCache:
         """A second run_{qa,security}_testing_phase call with byte-identical files
         reuses the cached verdict instead of calling the agent again."""
         from backend_code_v2_team.models import Microtask
-        from backend_code_v2_team.phases.review import (
+        from backend_code_v2_team.phases._profile import (
             run_qa_testing_phase,
             run_security_testing_phase,
         )
@@ -845,7 +845,7 @@ class TestBackendAgentReviewCache:
     def test_qa_testing_phase_without_cache_calls_agent_every_time(self, tmp_path):
         """Omitting ``cache`` (the default) is unchanged: every call re-invokes the agent."""
         from backend_code_v2_team.models import Microtask
-        from backend_code_v2_team.phases.review import run_qa_testing_phase
+        from backend_code_v2_team.phases._profile import run_qa_testing_phase
 
         task = _create_test_task("backend")
         mt = Microtask(id="mt-1", title="Test Microtask")
@@ -862,7 +862,7 @@ class TestBackendAgentReviewCache:
     def test_qa_testing_phase_recomputes_for_changed_file_content(self, tmp_path):
         """A changed file misses the cache, so the agent is called again."""
         from backend_code_v2_team.models import Microtask
-        from backend_code_v2_team.phases.review import run_qa_testing_phase
+        from backend_code_v2_team.phases._profile import run_qa_testing_phase
 
         from software_engineering_team.shared.agent_review import AgentReviewCache
 
@@ -1089,7 +1089,7 @@ class TestBackendRunExecutionWithReviewGates:
     def test_code_review_gate_forwards_enable_llm_review_grounding(self, tmp_path, monkeypatch):
         """Kill switch on MicrotaskReviewConfig must reach run_code_review_phase."""
         from backend_code_v2_team.models import Microtask
-        from backend_code_v2_team.phases import review as review_mod
+        from backend_code_v2_team.phases import _profile as profile_mod
         from backend_code_v2_team.phases.execution import ReviewDependencies, _code_review_gate
 
         seen: list = []
@@ -1098,7 +1098,13 @@ class TestBackendRunExecutionWithReviewGates:
             seen.append(kwargs.get("enable_llm_review_grounding"))
             return MagicMock(passed=True, issues=[], summary="ok")
 
-        monkeypatch.setattr(review_mod, "run_code_review_phase", fake_phase)
+        # ``_code_review_gate`` does a lazy, function-body-local
+        # ``from ._profile import run_code_review_phase`` on every call, so it
+        # re-reads ``_profile``'s current module attribute each time -- patch
+        # there (not ``shared.v2_review_bindings``) so this test's fake is
+        # actually the one picked up (see ``_profile.py``'s
+        # ``functools.partial``-bound re-export).
+        monkeypatch.setattr(profile_mod, "run_code_review_phase", fake_phase)
 
         task = _create_test_task("backend")
         mt = Microtask(id="mt-1", title="Meal UI")
@@ -1205,13 +1211,13 @@ class TestBackendRunExecutionWithReviewGates:
         compatibility) but no longer changes the outcome: True and False now
         behave identically."""
         from backend_code_v2_team.models import Microtask
-        from backend_code_v2_team.phases import review as review_mod
-        from backend_code_v2_team.phases.review import run_code_review_phase
+        from backend_code_v2_team.phases._profile import run_code_review_phase
 
         from software_engineering_team.code_review_agent.models import (
             CodeReviewIssue,
             CodeReviewOutput,
         )
+        from software_engineering_team.shared import v2_review_bindings as review_mod
 
         monkeypatch.setattr(
             review_mod,

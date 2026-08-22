@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import json
 import logging
+from functools import partial
 from pathlib import Path
 from typing import Tuple
 
 from shared.dev_models.models import Task
 from shared.repo_context.repo_utils import find_repo_files
+from software_engineering_team.shared import v2_review_bindings
 from software_engineering_team.shared.stack_profile import StackProfile
 from software_engineering_team.shared.v2_output_templates import _section as _section  # noqa: F401
 from software_engineering_team.shared.v2_phase_bindings import build_phase_bindings
@@ -25,6 +27,7 @@ from software_engineering_team.shared.v2_team_config import V2TeamConfig
 from .. import models as _models
 from ..models import ToolAgentKind, ToolAgentPhaseInput
 from ..prompts import (
+    DOCUMENTATION_SELF_REVIEW_PROMPT,
     PLANNING_FIXES_FOR_ISSUES_PROMPT,
     PLANNING_PROMPT,
     TYPESCRIPT_CONVENTIONS,
@@ -241,9 +244,7 @@ _ACCESSIBILITY_VERIFY_NOTE = (
 
 FRONTEND_CONFIG = V2TeamConfig(
     stack_profile=PROFILE,
-    tool_agent_kinds=frozenset(
-        k.value for k in ToolAgentKind if k is not ToolAgentKind.GENERAL
-    ),
+    tool_agent_kinds=frozenset(k.value for k in ToolAgentKind if k is not ToolAgentKind.GENERAL),
     extra_review_clause=_ACCESSIBILITY_VERIFY_NOTE,
     output_template_path_prefixes=("frontend/", "./frontend/"),
     output_template_allowed_languages=("angular", "react", "vue", "typescript", "javascript"),
@@ -274,11 +275,48 @@ parse_files_and_summary_template = _bindings.parse_files_and_summary_template
 parse_planning_template = _bindings.parse_planning_template
 parse_review_template = _bindings.parse_review_template
 parse_problem_solving_template = _bindings.parse_problem_solving_template
-parse_problem_solving_single_issue_template = (
-    _bindings.parse_problem_solving_single_issue_template
-)
+parse_problem_solving_single_issue_template = _bindings.parse_problem_solving_single_issue_template
 parse_batch_fix_template = _bindings.parse_batch_fix_template
 parse_documentation_self_review_template = _bindings.parse_documentation_self_review_template
+
+# ---------------------------------------------------------------------------
+# Review bindings: the config-driven review/QA/security/doc-self-review entry
+# points, bound once here from the shared implementation via FRONTEND_CONFIG
+# and REVIEW_CONFIG (see shared/v2_review_bindings.py). Replaces the former
+# per-team phases/review.py wrapper module. Each partial rebinds only
+# config/review_config (and, for doc self-review, prompt/parser) -- the
+# wrapped functions still resolve their sibling helpers
+# (_run_llm_review/_run_qa_agent/_run_security_agent/_run_build_verification)
+# by bare name inside shared.v2_review_bindings on every call, so that module
+# stays the test patch surface (see its module docstring).
+# ---------------------------------------------------------------------------
+
+run_review = partial(
+    v2_review_bindings.run_review, config=FRONTEND_CONFIG, review_config=REVIEW_CONFIG
+)
+run_microtask_review = partial(
+    v2_review_bindings.run_microtask_review, config=FRONTEND_CONFIG, review_config=REVIEW_CONFIG
+)
+run_code_review_phase = partial(v2_review_bindings.run_code_review_phase, config=FRONTEND_CONFIG)
+run_qa_testing_phase = partial(
+    v2_review_bindings.run_qa_testing_phase, config=FRONTEND_CONFIG, review_config=REVIEW_CONFIG
+)
+run_security_testing_phase = partial(
+    v2_review_bindings.run_security_testing_phase,
+    config=FRONTEND_CONFIG,
+    review_config=REVIEW_CONFIG,
+)
+run_documentation_self_review = partial(
+    v2_review_bindings.run_documentation_self_review,
+    prompt=DOCUMENTATION_SELF_REVIEW_PROMPT,
+    parse_template=parse_documentation_self_review_template,
+)
+_run_llm_review = partial(v2_review_bindings._run_llm_review, config=FRONTEND_CONFIG)
+_run_qa_agent = v2_review_bindings._run_qa_agent
+_run_security_agent = v2_review_bindings._run_security_agent
+_run_build_verification = partial(
+    v2_review_bindings._run_build_verification, config=FRONTEND_CONFIG
+)
 
 __all__ = [
     "PROFILE",
@@ -296,4 +334,14 @@ __all__ = [
     "parse_problem_solving_single_issue_template",
     "parse_batch_fix_template",
     "parse_documentation_self_review_template",
+    "run_review",
+    "run_microtask_review",
+    "run_code_review_phase",
+    "run_qa_testing_phase",
+    "run_security_testing_phase",
+    "run_documentation_self_review",
+    "_run_llm_review",
+    "_run_qa_agent",
+    "_run_security_agent",
+    "_run_build_verification",
 ]
