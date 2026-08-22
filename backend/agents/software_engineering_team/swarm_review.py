@@ -125,7 +125,12 @@ def deserialize_review_cache(data: Any) -> Dict[str, "tuple[str, Dict[str, Any]]
           approve/reject decision (e.g. ``_apply_review_decision`` treats
           any truthy ``review.get("approved")`` as approval, so a corrupted
           non-bool like ``"false"`` would wrongly merge the task) while
-          never rejecting a verdict this module actually wrote.
+          never rejecting a verdict this module actually wrote. A truthy
+          ``verdict["error"]`` is rejected for the same reason: an error
+          verdict is never cached live (``_compute_review`` excludes it), so
+          a restored one is definitionally corrupted, and ``_apply_review_decision``
+          would otherwise route it through its error-first branch and fail
+          the task instead of rerunning the review.
         - Returns a dict keyed by ``task_id`` with ``(cache_key, verdict)``
           tuple values, mirroring
           ``CodingTeamSwarm._review_verdict_cache``'s declared type.
@@ -155,6 +160,8 @@ def deserialize_review_cache(data: Any) -> Dict[str, "tuple[str, Dict[str, Any]]
         ):
             continue
         if not isinstance(verdict.get("approved"), bool):
+            continue
+        if verdict.get("error"):
             continue
         result[task_id] = (cache_key, verdict)
     return result
