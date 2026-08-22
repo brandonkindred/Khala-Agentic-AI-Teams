@@ -531,7 +531,7 @@ class _CriticalCodeReviewStubClient(DummyLLMClient):
 
 class TestReviewPhase:
     def test_review_passes_no_issues(self, tmp_path):
-        from backend_code_v2_team.phases.review import run_review
+        from backend_code_v2_team.phases._profile import run_review
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -554,7 +554,7 @@ class TestReviewPhase:
         assert result.build_ok
 
     def test_review_fails_on_critical_issues(self, tmp_path):
-        from backend_code_v2_team.phases.review import run_review
+        from backend_code_v2_team.phases._profile import run_review
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -1189,7 +1189,7 @@ class TestDocumentationSelfReviewWiring:
 
     def test_wraps_shared_helper_with_team_prompt_parser_and_result(self):
         from backend_code_v2_team.models import DocumentationSelfReviewResult
-        from backend_code_v2_team.phases.review import run_documentation_self_review
+        from backend_code_v2_team.phases._profile import run_documentation_self_review
         from backend_code_v2_team.prompts import DOCUMENTATION_SELF_REVIEW_PROMPT
 
         client = _RecordingDocClient(_DOC_REVIEW_RESPONSE)

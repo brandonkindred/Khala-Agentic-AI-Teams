@@ -19,6 +19,19 @@ equivalent constructor). The result type is injected as a narrow constructor,
 :class:`~software_engineering_team.shared.v2_review.ReviewConfig` already uses
 for ``tool_phase_input_factory``. Both code-v2 teams re-export
 ``PhaseReviewResult`` from ``shared.v2_models`` and pass it here.
+
+``_run_qa_agent_impl`` / ``_run_security_agent_impl`` /
+``_run_build_verification_impl`` below back the per-team ``_run_qa_agent`` /
+``_run_security_agent`` / ``_run_build_verification`` in each team's
+``phases/_profile.py`` (Story 3c, Step 2): the orchestration was already
+identical between the twins (both delegated to
+``software_engineering_team.shared.agent_review.run_qa_agent`` /
+``run_security_agent``, or ran a build verifier), varying only in the team's
+``ReviewIssue`` factory / ``StackProfile.build_verify_label`` — so those are
+parameters here instead of hardcoded imports. Each team keeps its own thin
+``def`` in ``_profile.py`` (not a bound closure) so
+``monkeypatch.setattr(profile_mod, "_run_qa_agent", ...)`` continues to work
+exactly as it did when these lived in the deleted per-team ``phases/review.py``.
 """
 
 from __future__ import annotations
@@ -26,16 +39,132 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
 from shared.dev_models.models import ReviewContext, Task
-from software_engineering_team.shared.agent_review import AgentReviewCache
+from software_engineering_team.shared.agent_review import (
+    AgentReviewCache,
+    run_qa_agent,
+    run_security_agent,
+)
+from software_engineering_team.shared.review_utils import (
+    MANY_CHUNKS_WARN_THRESHOLD,
+    MAX_REVIEW_CODE_CHARS,
+)
 from software_engineering_team.shared.security_service import is_blocking
 from software_engineering_team.shared.v2_models import Phase, ReviewIssue
 from software_engineering_team.shared.v2_review import _code_review_step
 
 logger = logging.getLogger(__name__)
+
+
+def _run_qa_agent_impl(
+    *,
+    qa_agent: Any,
+    files: Dict[str, str],
+    language: str,
+    task_description: str,
+    task_id: str,
+    issue_factory: Callable[..., Any],
+    context: str = "",
+    cache: Optional[AgentReviewCache] = None,
+    max_chars: int = MAX_REVIEW_CODE_CHARS,
+    warn_threshold: int = MANY_CHUNKS_WARN_THRESHOLD,
+) -> List[Any]:
+    """Run the external QA agent over each file's raw, function-aware-split source.
+
+    Preconditions:
+        - ``qa_agent`` is not None and exposes ``.run(QAInput) -> QAOutput``.
+        - ``issue_factory`` is the team's ``ReviewIssue`` class.
+        - ``cache``: see ``software_engineering_team.shared.agent_review``.
+        - ``max_chars``/``warn_threshold`` are accepted as explicit
+          parameters (defaulting to the shared constants) rather than
+          hardcoded, so each team's ``_run_qa_agent`` in ``phases/_profile.py``
+          reads them off its own module globals at call time -- preserving
+          ``monkeypatch.setattr(profile_mod, "MANY_CHUNKS_WARN_THRESHOLD", ...)``
+          as a working test seam, same as when this lived in the deleted
+          per-team ``phases/review.py``.
+
+    Postconditions: see ``software_engineering_team.shared.agent_review``; QA
+    bugs become ``issue_factory``-constructed issues with ``source="qa"``.
+    """
+    return run_qa_agent(
+        qa_agent=qa_agent,
+        files=files,
+        language=language,
+        task_description=task_description,
+        task_id=task_id,
+        issue_factory=issue_factory,
+        max_chars=max_chars,
+        warn_threshold=warn_threshold,
+        context=context,
+        cache=cache,
+    )
+
+
+def _run_security_agent_impl(
+    *,
+    security_agent: Any,
+    files: Dict[str, str],
+    language: str,
+    task_description: str,
+    task_id: str,
+    issue_factory: Callable[..., Any],
+    context: str = "",
+    cache: Optional[AgentReviewCache] = None,
+    max_chars: int = MAX_REVIEW_CODE_CHARS,
+    warn_threshold: int = MANY_CHUNKS_WARN_THRESHOLD,
+) -> List[Any]:
+    """Run the external security agent over each file's raw, function-aware-split source.
+
+    Preconditions:
+        - ``security_agent`` is not None and exposes
+          ``.run(SecurityInput) -> SecurityOutput``.
+        - ``issue_factory`` is the team's ``ReviewIssue`` class.
+        - ``cache``: see ``software_engineering_team.shared.agent_review``.
+        - ``max_chars``/``warn_threshold``: see ``_run_qa_agent_impl``.
+
+    Postconditions: see ``software_engineering_team.shared.agent_review``;
+    vulnerabilities become ``issue_factory``-constructed issues with
+    ``source="security"``.
+    """
+    return run_security_agent(
+        security_agent=security_agent,
+        files=files,
+        language=language,
+        task_description=task_description,
+        task_id=task_id,
+        issue_factory=issue_factory,
+        max_chars=max_chars,
+        warn_threshold=warn_threshold,
+        context=context,
+        cache=cache,
+    )
+
+
+def _run_build_verification_impl(
+    repo_path: Path,
+    build_verifier: Optional[Callable[..., Tuple[bool, str]]],
+    task_id: str,
+    *,
+    build_verify_label: str,
+) -> Tuple[bool, str]:
+    """Run the build verifier if provided, else assume success.
+
+    Preconditions: ``build_verify_label`` is the team's
+        ``StackProfile.build_verify_label``.
+    Postconditions: returns ``(True, "No build verifier provided; skipping.")``
+        when ``build_verifier`` is None; otherwise returns its result, or
+        ``(False, str(exc))`` if it raises (logged, never propagated).
+    """
+    if build_verifier is None:
+        return True, "No build verifier provided; skipping."
+    try:
+        return build_verifier(repo_path, build_verify_label, task_id)
+    except Exception as exc:
+        logger.warning("[%s] Build verifier raised: %s", task_id, exc)
+        return False, str(exc)
 
 
 def run_code_review_phase_impl(

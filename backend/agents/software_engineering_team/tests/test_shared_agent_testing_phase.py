@@ -343,6 +343,141 @@ def test_run_code_review_phase_impl_runs_code_review_step_standalone():
     assert result.issues == []
 
 
+# ---------------------------------------------------------------------------
+# ``_run_qa_agent_impl`` / ``_run_security_agent_impl`` / ``_run_build_verification_impl``
+#
+# Backing the per-team ``_run_qa_agent`` / ``_run_security_agent`` /
+# ``_run_build_verification`` in each code-v2 team's ``phases/_profile.py``
+# (Story 3c, Step 2). The per-team review tests already exercise these through
+# their team's thin wrapper; these tests drive the shared body directly with a
+# synthetic ``issue_factory`` to pin its own contract independent of either
+# team's ``ReviewIssue``.
+# ---------------------------------------------------------------------------
+
+
+class _FakeIssue:
+    def __init__(self, *, source, severity, description, recommendation, **_kwargs):
+        self.source = source
+        self.severity = severity
+        self.description = description
+        self.recommendation = recommendation
+
+
+def test_run_qa_agent_impl_forwards_issue_factory_and_chunking_knobs():
+    """Delegates to the shared ``run_qa_agent``, threading the caller's
+    ``issue_factory``/``max_chars``/``warn_threshold`` straight through."""
+    from software_engineering_team.shared.phases.review import _run_qa_agent_impl
+
+    captured: Dict[str, Any] = {}
+
+    class _QAAgent:
+        def run(self, inp):
+            captured["code"] = inp.code
+            return SimpleNamespace(bugs_found=[SimpleNamespace(description="bug", severity="high")])
+
+    issues = _run_qa_agent_impl(
+        qa_agent=_QAAgent(),
+        files={"x.py": "print('hi')"},
+        language="python",
+        task_description="desc",
+        task_id="t1",
+        issue_factory=_FakeIssue,
+        max_chars=10_000,
+        warn_threshold=5,
+    )
+
+    assert captured["code"] == "print('hi')"
+    assert len(issues) == 1
+    assert isinstance(issues[0], _FakeIssue)
+    assert issues[0].source == "qa"
+
+
+def test_run_security_agent_impl_forwards_issue_factory_and_chunking_knobs():
+    """Delegates to the shared ``run_security_agent``, threading the caller's
+    ``issue_factory``/``max_chars``/``warn_threshold`` straight through."""
+    from software_engineering_team.shared.phases.review import _run_security_agent_impl
+
+    captured: Dict[str, Any] = {}
+
+    class _SecAgent:
+        def run(self, inp):
+            captured["code"] = inp.code
+            return SimpleNamespace(
+                vulnerabilities=[SimpleNamespace(description="vuln", severity="critical")]
+            )
+
+    issues = _run_security_agent_impl(
+        security_agent=_SecAgent(),
+        files={"x.py": "print('hi')"},
+        language="python",
+        task_description="desc",
+        task_id="t1",
+        issue_factory=_FakeIssue,
+        max_chars=10_000,
+        warn_threshold=5,
+    )
+
+    assert captured["code"] == "print('hi')"
+    assert len(issues) == 1
+    assert isinstance(issues[0], _FakeIssue)
+    assert issues[0].source == "security"
+
+
+def test_run_build_verification_impl_no_verifier_defaults_to_ok():
+    """No ``build_verifier`` means the build step is skipped, not failed."""
+    from pathlib import Path
+
+    from software_engineering_team.shared.phases.review import _run_build_verification_impl
+
+    ok, msg = _run_build_verification_impl(
+        Path("/tmp/repo"), None, "t1", build_verify_label="backend_code_v2"
+    )
+
+    assert ok is True
+    assert "skipping" in msg.lower()
+
+
+def test_run_build_verification_impl_forwards_label_to_verifier():
+    """The team's ``build_verify_label`` is threaded through to the verifier call."""
+    from pathlib import Path
+
+    from software_engineering_team.shared.phases.review import _run_build_verification_impl
+
+    seen: Dict[str, Any] = {}
+
+    def _verifier(repo_path, label, task_id):
+        seen["repo_path"] = repo_path
+        seen["label"] = label
+        seen["task_id"] = task_id
+        return True, "build ok"
+
+    ok, msg = _run_build_verification_impl(
+        Path("/tmp/repo"), _verifier, "t1", build_verify_label="frontend_code_v2"
+    )
+
+    assert ok is True
+    assert msg == "build ok"
+    assert seen["label"] == "frontend_code_v2"
+    assert seen["task_id"] == "t1"
+
+
+def test_run_build_verification_impl_contains_verifier_exception():
+    """An outright verifier exception is contained, not propagated."""
+    from pathlib import Path
+
+    from software_engineering_team.shared.phases.review import _run_build_verification_impl
+
+    def _bad(*_a, **_kw):
+        raise RuntimeError("build crashed")
+
+    ok, msg = _run_build_verification_impl(
+        Path("/tmp/repo"), _bad, "t1", build_verify_label="backend_code_v2"
+    )
+
+    assert ok is False
+    assert "build crashed" in msg
+
+
 def test_run_code_review_phase_impl_fails_on_code_review_issue():
     """A critical code-review finding fails the phase — driven solely by
     ``_code_review_step``'s output, with no build/lint step involved."""

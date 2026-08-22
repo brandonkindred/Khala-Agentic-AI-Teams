@@ -186,8 +186,8 @@ def run_execution(
 # into ``run_microtask_review`` so the second call within a cycle is served
 # from cache instead of re-invoking the tool agent -- see the caching design in
 # docs/GATE_DEPENDENCY_GRAPH.md.
-# ``.review`` is imported lazily to keep the module import free of the circular
-# ``review`` <-> ``execution`` dependency.
+# ``._profile`` is imported lazily to keep the module import free of the circular
+# ``_profile`` <-> ``execution`` dependency.
 
 
 def _scoped_tool_agents(
@@ -245,7 +245,7 @@ def _code_review_gate(
       cache (rather than re-invoked) when the QA/Security gates already
       computed them earlier in the same cycle, or vice versa.
     """
-    from .review import run_microtask_review
+    from ._profile import run_microtask_review
 
     r = run_microtask_review(
         llm=llm,
@@ -320,7 +320,7 @@ def _qa_gate(
       ``r.passed`` — a stray non-QA issue in ``r.issues`` cannot fail this
       gate.
     """
-    from .review import run_microtask_review
+    from ._profile import run_microtask_review
 
     r = run_microtask_review(
         llm=llm,
@@ -390,7 +390,7 @@ def _security_gate(
       filtering) rather than taken from ``r.passed`` — a stray non-security
       issue in ``r.issues`` cannot fail this gate.
     """
-    from .review import run_microtask_review
+    from ._profile import run_microtask_review
 
     r = run_microtask_review(
         llm=llm,
@@ -431,13 +431,13 @@ def _run_documentation_self_review(**kwargs: Any) -> Any:
     """Lazy binding of the frontend documentation self-review runner.
 
     Preconditions: ``kwargs`` matches
-      ``.review.run_documentation_self_review``'s signature.
+      ``._profile.run_documentation_self_review``'s signature.
     Postconditions: returns that function's result unchanged; the import is
       deferred to call time so this module has no import-time dependency on
-      ``.review`` (avoiding the ``review`` <-> ``execution`` circular
+      ``._profile`` (avoiding the ``_profile`` <-> ``execution`` circular
       import).
     """
-    from .review import run_documentation_self_review
+    from ._profile import run_documentation_self_review
 
     return run_documentation_self_review(**kwargs)
 

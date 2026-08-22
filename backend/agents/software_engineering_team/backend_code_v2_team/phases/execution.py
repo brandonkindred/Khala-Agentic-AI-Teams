@@ -161,9 +161,9 @@ def run_execution(
 # ---------------------------------------------------------------------------
 #
 # The shared ``run_gated_execution_impl`` calls these to normalise the backend
-# team's split gate functions into a ``GateOutcome``. ``.review`` /
+# team's split gate functions into a ``GateOutcome``. ``._profile`` /
 # ``.problem_solving`` are imported lazily inside each adapter to keep the
-# module import free of the circular ``review`` <-> ``execution`` dependency
+# module import free of the circular ``_profile`` <-> ``execution`` dependency
 # (unchanged from the previous inline loop).
 
 
@@ -194,7 +194,7 @@ def _code_review_gate(
       from the resulting ``PhaseReviewResult``, ``raw_issue_count`` defaulting
       to ``None`` if absent.
     """
-    from .review import run_code_review_phase
+    from ._profile import run_code_review_phase
 
     r = run_code_review_phase(
         llm=llm,
@@ -244,7 +244,7 @@ def _qa_gate(
       ``PhaseReviewResult`` (no filtering — the backend's phase call is
       already scoped to QA only, unlike the frontend's ``_qa_gate``).
     """
-    from .review import run_qa_testing_phase
+    from ._profile import run_qa_testing_phase
 
     r = run_qa_testing_phase(
         task=task,
@@ -290,7 +290,7 @@ def _security_gate(
       already scoped to security only, unlike the frontend's
       ``_security_gate``).
     """
-    from .review import run_security_testing_phase
+    from ._profile import run_security_testing_phase
 
     r = run_security_testing_phase(
         task=task,
@@ -324,13 +324,13 @@ def _run_documentation_self_review(**kwargs: Any) -> Any:
     """Lazy binding of the backend documentation self-review runner.
 
     Preconditions: ``kwargs`` matches
-      ``.review.run_documentation_self_review``'s signature.
+      ``._profile.run_documentation_self_review``'s signature.
     Postconditions: returns that function's result unchanged; the import is
       deferred to call time so this module has no import-time dependency on
-      ``.review`` (avoiding the ``review`` <-> ``execution`` circular
+      ``._profile`` (avoiding the ``_profile`` <-> ``execution`` circular
       import).
     """
-    from .review import run_documentation_self_review
+    from ._profile import run_documentation_self_review
 
     return run_documentation_self_review(**kwargs)
 
