@@ -1214,13 +1214,14 @@ jobs:
           pytest -v --tb=short -m integration \
             ../unified_api/tests/test_integration_smoke.py
 
-  # Branding runs its FULL suite (integration + unit) against real Postgres + a
-  # job-service sidecar, gated at 90% coverage. Branding's comprehensive tests
-  # (endpoints, assistant, store) are integration-marked, so this job — not the
-  # -m "not integration" misc-teams job — is where they run. The marker
-  # expression "integration or not integration" un-skips the integration tests
-  # (conftest only skips them when "integration" is absent from -m) while still
-  # running the unit tests, so coverage reflects the whole package.
+  # Branding runs its FULL suite (integration + unit + bench) against real
+  # Postgres + a job-service sidecar, gated at 90% coverage. Branding's
+  # comprehensive tests (endpoints, assistant, store) are integration-marked,
+  # so this job — not the -m "not integration" misc-teams job — is where they
+  # run. The marker expression "integration or not integration or bench"
+  # un-skips both the integration- and bench-marked tests (conftest only
+  # skips a marker when its name is absent from -m) while still running the
+  # unit tests, so coverage reflects the whole package.
   test-branding:
     name: Test – Branding (full suite, Postgres + job service)
     runs-on: ubuntu-latest
@@ -1315,7 +1316,7 @@ jobs:
             tail -100 /tmp/job-service.log
             exit 1
           fi
-          pytest -v --tb=short -m "integration or not integration" \
+          pytest -v --tb=short -m "integration or not integration or bench" \
             branding_team/tests/ \
             --cov=branding_team --cov-report=term-missing --cov-fail-under=90
 

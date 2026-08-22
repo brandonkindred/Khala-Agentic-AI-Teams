@@ -42,6 +42,12 @@ provider already configured would silently build real provider clients
 instead of ``DummyLLMClient`` -- the ``chat`` patch below would then never be
 hit, and this benchmark would either fail on missing credentials or, worse,
 send six real LLM requests instead of measuring the mocked latency.
+
+Marked ``@pytest.mark.bench`` per ``backend/conftest.py``'s wall-clock
+benchmark convention (sleep-based timing tests stay out of the default unit
+run). The dedicated ``test-branding`` CI job un-skips it via its ``-m``
+marker expression, so it still runs as a CI regression guard on every PR --
+it just doesn't tax the fast default ``pytest`` suite teams run locally.
 """
 
 from __future__ import annotations
@@ -51,6 +57,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
+
+import pytest
 
 from branding_team.graphs.phase2_narrative import build_phase2_graph
 from branding_team.graphs.shared import serialize_mission
@@ -90,6 +98,7 @@ def _new_event_loop_with_generous_executor() -> asyncio.AbstractEventLoop:
     return loop
 
 
+@pytest.mark.bench
 def test_phase2_specialists_execute_in_parallel_under_mocked_llm_latency() -> None:
     """Six specialists x 1s mocked LLM latency must finish in well under 6s.
 
