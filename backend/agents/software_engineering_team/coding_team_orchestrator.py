@@ -77,7 +77,7 @@ from software_engineering_team.reasoning_capture import (
 from software_engineering_team.shared.team_lead_base import TeamLeadSharedState
 from software_engineering_team.swarm_assignment import _AssignmentMixin
 from software_engineering_team.swarm_implementation import _ImplementationMixin
-from software_engineering_team.swarm_review import _ReviewMixin
+from software_engineering_team.swarm_review import _ReviewMixin, serialize_review_cache
 from software_engineering_team.swarm_revision_cap import _RevisionCapMixin
 from software_engineering_team.task_graph import TaskGraphService
 from software_engineering_team.team_routing import (
@@ -615,6 +615,10 @@ def run_coding_team_orchestrator(
             engine_provider=engine_provider,
             spec_content=plan_input.final_spec_content or "",
         )
+        # Attach the swarm's cache export so persist_sync can include review_verdict_cache in the
+        # job record from here on (pre-swarm persist_sync calls above leave this unset, so that
+        # field is simply omitted — see GraphPersistCoordinator.review_cache_export).
+        coord.review_cache_export = swarm.export_review_cache
         # Flush captured "thinking" to the job record on an interval for the UI poll.
         # beat_first surfaces any planning-phase reasoning immediately; the final flush
         # after the block captures the tail emitted since the last tick.
@@ -853,6 +857,23 @@ class CodingTeamSwarm(
         # front in run(), never lazily from inside a worker thread. Construction itself does no
         # filesystem/git I/O.
         self._worktrees = WorktreeManager(path, agent_ids)
+
+    def export_review_cache(self) -> List[Dict[str, Any]]:
+        """JSON-safe snapshot of the review verdict cache for durable persistence.
+
+        Preconditions:
+            - None — safe to call at any point in the instance's lifetime, including before any
+              task has been reviewed (``_review_verdict_cache`` empty).
+
+        Postconditions:
+            - Returns ``serialize_review_cache(self._review_verdict_cache)`` (see that function's
+              own contract for the exact shape/cap), computed while holding
+              ``_review_verdict_cache_lock`` so a concurrent ``_review_and_merge`` cache write
+              (fanned out via ``parallel_map``) can never be observed half-written.
+            - Does not mutate ``_review_verdict_cache``.
+        """
+        with self._review_verdict_cache_lock:
+            return serialize_review_cache(self._review_verdict_cache)
 
     def _is_complete(self) -> bool:
         """Whether this round's work is fully drained: nothing left to assign, run, or review.

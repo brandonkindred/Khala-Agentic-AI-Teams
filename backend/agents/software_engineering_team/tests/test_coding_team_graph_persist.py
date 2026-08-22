@@ -74,3 +74,41 @@ def test_persist_sync_lands_snapshot_then_noops_when_unchanged():
         assert len(writes) == n
     finally:
         coord.stop()
+
+
+def test_persist_sync_omits_review_verdict_cache_when_no_swarm_attached():
+    """Pre-swarm phases (review_cache_export unset) never write review_verdict_cache — no
+    KeyError/None, the field is simply absent from the wire payload."""
+    writes: List[Dict[str, Any]] = []
+    coord = _make_coord(writes)
+    try:
+        coord.graph.add_task("t1", title="T1")
+        coord.persist_sync()
+        assert "review_verdict_cache" not in writes[-1]
+    finally:
+        coord.stop()
+
+
+def test_persist_sync_includes_review_verdict_cache_when_swarm_attached():
+    """Once a swarm's export callable is attached, an actual persist_sync write includes its
+    return value under review_verdict_cache.
+
+    Deliberately does not mutate the graph first: a graph mutation's persist_callback fires
+    synchronously and enqueues an async write on the flusher, which persist_sync's own
+    ``drain()`` would land *before* its own no-op check — that async write path never carries
+    review_verdict_cache (only persist_sync's own explicit write does, per scope), so it would
+    make this test pass or fail on the wrong write. The freshly-constructed coordinator's
+    revision/phase/status_text already differ from ``_persist_state``'s initial sentinel, so the
+    very first persist_sync() call performs its own write with nothing queued to race it.
+    """
+    writes: List[Dict[str, Any]] = []
+    coord = _make_coord(writes)
+    try:
+        exported = [{"task_id": "t1", "cache_key": "abc", "verdict": {"approved": True}}]
+        coord.review_cache_export = lambda: exported
+
+        coord.persist_sync()
+
+        assert writes[-1]["review_verdict_cache"] == exported
+    finally:
+        coord.stop()

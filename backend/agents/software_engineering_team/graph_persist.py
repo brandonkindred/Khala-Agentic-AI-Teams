@@ -19,7 +19,7 @@ governs, rather than in a wall of comments in the caller.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from shared.concurrency import LatestValueFlusher
 from software_engineering_team.progress_config import _coding_progress
@@ -88,6 +88,14 @@ class GraphPersistCoordinator:
         # invariant; every real graph mutation bumps ``graph.revision`` and phase/status changes
         # are part of the key, so every actual state change still writes.
         self._persist_state: Dict[str, Any] = {"revision": -1, "phase": None, "status_text": None}
+        # Set by the caller once a CodingTeamSwarm exists (e.g. ``coord.review_cache_export =
+        # swarm.export_review_cache``) so persist_sync can include the review verdict cache in the
+        # job record. A plain attribute rather than a constructor parameter — this module cannot
+        # import CodingTeamSwarm without a circular import (it lives in coding_team_orchestrator.py,
+        # which imports this module) — and rather than duck-typing on a swarm object, so the
+        # coordinator stays decoupled from the swarm's shape. None during pre-swarm phases (task
+        # graph / planning), when review_verdict_cache is correctly absent from the write.
+        self.review_cache_export: Optional[Callable[[], List[Dict[str, Any]]]] = None
         self.flusher = LatestValueFlusher(
             lambda write: write(),
             name=f"coding-persist-{job_id}",
@@ -204,6 +212,10 @@ class GraphPersistCoordinator:
             - No-op when graph revision, phase, and status_text all match the last confirmed
               persist; otherwise writes the current snapshot synchronously and advances
               ``_persist_state``.
+            - When ``review_cache_export`` is set, the write additionally carries
+              ``review_verdict_cache`` (that callable's return value); when it is ``None``
+              (no swarm attached yet — pre-swarm phases), the key is omitted entirely rather than
+              written as ``None``.
         """
         self.flusher.drain()
         if (
@@ -218,6 +230,8 @@ class GraphPersistCoordinator:
             "phase": self.phase,
             "status_text": self.status_text,
         }
+        if self.review_cache_export is not None:
+            wire_payload["review_verdict_cache"] = self.review_cache_export()
         self._raw_update(**wire_payload)
         self._persist_state.update(
             {"revision": self.graph.revision, "phase": self.phase, "status_text": self.status_text}
