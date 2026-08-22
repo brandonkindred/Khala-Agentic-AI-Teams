@@ -385,6 +385,7 @@ class DesignAgent:
         critique: "SpecCritique",
         prior_critiques: Optional[List["SpecCritique"]] = None,
         regression_notice: str = "",
+        skip_self_review: bool = False,
     ) -> Tuple[Dict[str, Any], str]:
         """Revise ``prior_spec`` to address every issue raised in ``critique``.
 
@@ -398,6 +399,13 @@ class DesignAgent:
         "do not reintroduce these" instruction so the loop escalates a
         regression rather than silently oscillating on it. Empty by default
         so existing callers are unaffected.
+
+        ``skip_self_review`` (optional, default ``False``) is forwarded
+        verbatim to :meth:`_with_self_review`. The decision logic for when to
+        set it lives with the caller (the orchestrator's design ↔ review
+        loop), not here: it is a fast path for a revision the caller already
+        knows is structurally clean, and skips the internal self-review LLM
+        call entirely when ``True``.
 
         The accumulated external lineage (``prior_critiques``, which already
         includes the current ``critique``) is forwarded into the internal
@@ -432,6 +440,7 @@ class DesignAgent:
             rationale,
             prior_critiques=prior_critiques,
             regression_notice=regression_notice,
+            skip_self_review=skip_self_review,
         )
 
     def _invoke_and_parse(self, system_prompt: str, user_prompt: str) -> Tuple[Dict[str, Any], str]:

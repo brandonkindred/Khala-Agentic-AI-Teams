@@ -234,3 +234,43 @@ def test_revise_returns_rebuilt_spec_and_new_rationale(monkeypatch) -> None:
 
     assert rationale_out == "new rationale"
     assert spec_out.strategy_id == "rebuilt-id"
+
+
+def test_revise_forwards_skip_self_review_to_design_agent(monkeypatch) -> None:
+    """``skip_self_review`` is forwarded verbatim to ``design_agent.revise``;
+    it defaults to ``False`` when the caller omits it."""
+    orch = StrategyLabOrchestrator()
+    captured_kwargs: Dict[str, Any] = {}
+
+    def _fake_revise(*_a: Any, **kwargs: Any) -> Any:
+        captured_kwargs.update(kwargs)
+        return _spec_dict(), "new rationale"
+
+    monkeypatch.setattr(orch.design_agent, "revise", _fake_revise)
+    critique = SpecCritique(ready=False, rationale="fix the entry")
+    delta = SimpleNamespace(regressed=[])
+
+    orch._revise_with_regression_notice(
+        spec=_spec(),
+        rationale="old rationale",
+        critique=critique,
+        delta=delta,
+        critique_history=[critique],
+        strategy_id="rebuilt-id",
+        mechanical_repair_count=0,
+        drift_collector=None,
+    )
+    assert captured_kwargs["skip_self_review"] is False
+
+    orch._revise_with_regression_notice(
+        spec=_spec(),
+        rationale="old rationale",
+        critique=critique,
+        delta=delta,
+        critique_history=[critique],
+        strategy_id="rebuilt-id",
+        mechanical_repair_count=0,
+        drift_collector=None,
+        skip_self_review=True,
+    )
+    assert captured_kwargs["skip_self_review"] is True

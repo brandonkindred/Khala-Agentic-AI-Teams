@@ -787,6 +787,7 @@ class DesignMixin:
             # Step 2 — deterministic mechanical pre-flight (repair criticals,
             # then trial-compile a readiness-clean spec to pick the code path)
             # before every review round.
+            repair_count_before_round = mechanical_repair_count
             if repair_enabled:
                 (
                     spec,
@@ -866,7 +867,13 @@ class DesignMixin:
                 stop_reason = "round_cap"
                 break
 
-            # Step 5 — revise the spec from this round's critique.
+            # Step 5 — revise the spec from this round's critique. Skip the
+            # designer's internal self-review LLM call when this round's
+            # readiness gate passed AND no mechanical repair fired this round
+            # — the spec is already known structurally clean, so the
+            # self-review audit would be redundant work.
+            repair_fired_this_round = mechanical_repair_count > repair_count_before_round
+            skip_self_review = deterministic_ready and not repair_fired_this_round
             spec, rationale = self._revise_with_regression_notice(
                 spec=spec,
                 rationale=rationale,
@@ -876,6 +883,7 @@ class DesignMixin:
                 strategy_id=strategy_id,
                 mechanical_repair_count=mechanical_repair_count,
                 drift_collector=drift_collector,
+                skip_self_review=skip_self_review,
             )
 
         loop_telemetry = _design_loop_telemetry_summary(
@@ -1138,6 +1146,7 @@ class DesignMixin:
         strategy_id: str,
         mechanical_repair_count: int,
         drift_collector: Optional[_DriftCollector],
+        skip_self_review: bool = False,
     ) -> Tuple[StrategySpec, str]:
         """Revise the spec from the round's critique, flagging regressions.
 
@@ -1148,6 +1157,11 @@ class DesignMixin:
         explicit "do not reintroduce" notice (advisory, not a hard block — a
         hard block risks deadlock if the model cannot avoid it). Records the
         spec drift when a collector is present.
+        ``skip_self_review`` (default ``False``) is forwarded verbatim to
+        :meth:`DesignAgent.revise` — the caller (``_run_design_review_rounds``)
+        computes it as "this round's readiness gate passed AND no mechanical
+        repair fired this round", so a structurally clean revision skips the
+        designer's internal self-review LLM call.
         Raises: ``DesignBudgetExhausted`` with the latest spec / rationale /
         repair count attached — revise has not yet produced a new spec, so the
         latest fully-realised spec is the current (post mechanical-repair) one.
@@ -1160,6 +1174,7 @@ class DesignMixin:
                 critique,
                 prior_critiques=critique_history,
                 regression_notice=regression_notice,
+                skip_self_review=skip_self_review,
             )
         except DesignBudgetExhausted as exc:
             _annotate_budget_exhaustion(
