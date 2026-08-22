@@ -41,7 +41,7 @@ from strands.multiagent.graph import GraphBuilder
 from branding_team.shared.coro_runner import run_coroutine
 from branding_team.shared.json_recovery import recover_json_object
 
-from .agents import BrandComplianceAgent
+from .agents import CHANNEL_SPECS, BrandComplianceAgent
 from .graphs.phase1_strategic_core import build_phase1_graph
 from .graphs.phase2_narrative import build_phase2_graph
 from .graphs.phase3_visual import build_phase3_graph
@@ -141,19 +141,16 @@ _PHASE3_NODE_MERGE: dict[str, Optional[str]] = {
 # structured_output nests under, or None to merge its fields in flat. Three
 # specialists (brand_experience_principler, brand_architecture_builder,
 # brand_in_action_illustrator) already match ChannelActivationOutput field
-# names 1:1 and merge flat. The six *_guide specialists each emit a single
-# ChannelGuidelineOutput for their own channel, all nesting under the same
-# "channel_guidelines" key -- since that's a List field on
-# ChannelActivationOutput, _merge_named_fragments appends each one as a list
-# element instead of overwriting, so all six survive the merge.
+# names 1:1 and merge flat. The channel-guide specialists (one per
+# CHANNEL_SPECS entry) each emit a single ChannelGuidelineOutput for their
+# own channel, all nesting under the same "channel_guidelines" key -- since
+# that's a List field on ChannelActivationOutput, _merge_named_fragments
+# appends each one as a list element instead of overwriting, so all of them
+# survive the merge. Generated from CHANNEL_SPECS so adding a channel there
+# automatically adds its merge entry here.
 _PHASE4_NODE_MERGE: dict[str, Optional[str]] = {
     "brand_experience_principler": None,
-    "website_guide": "channel_guidelines",
-    "social_guide": "channel_guidelines",
-    "email_guide": "channel_guidelines",
-    "events_guide": "channel_guidelines",
-    "partnerships_guide": "channel_guidelines",
-    "internal_guide": "channel_guidelines",
+    **{f"{channel}_guide": "channel_guidelines" for channel, _ in CHANNEL_SPECS},
     "brand_architecture_builder": None,
     "brand_in_action_illustrator": None,
 }
@@ -339,12 +336,18 @@ class _PhaseSpec(NamedTuple):
             not merge" — never a default-constructed ``model_cls()`` — since
             ``_extract_phase_output`` trusts any non-``None`` return as a
             successful, non-degraded extraction.
+        context_phases: Which upstream ``BrandPhase``s' outputs this phase
+            should receive as context. Defaults to ``()`` (no filtering —
+            current behavior, where every phase can see all prior outputs,
+            is unaffected). Infrastructure only: not yet consumed by
+            ``_phase_task`` and not yet populated for any phase.
     """
 
     builder_fn: Callable[[], Any]
     node_id: str
     model_cls: type[BaseModel]
     merge_fn: Optional[Callable[[Any, type[BaseModel]], Optional[BaseModel]]] = None
+    context_phases: tuple[BrandPhase, ...] = ()
 
 
 # Per-phase spec, keyed by BrandPhase in PHASE_ORDER order. This is the single

@@ -815,6 +815,8 @@ CHANNEL_SPECS: tuple[tuple[str, str], ...] = (
     ("internal", "Internal comms, employee branding, onboarding."),
 )
 
+_CHANNEL_DESCRIPTIONS: dict[str, str] = dict(CHANNEL_SPECS)
+
 
 def _channel_guide_prompt(channel: str, description: str) -> AgentPromptSpec:
     """Build the channel-guide prompt spec for one activation channel.
@@ -890,74 +892,96 @@ def _make_channel_guide(
 
 
 def make_website_guide() -> Agent:
-    """Build the Phase 4 website channel guide agent.
+    """Deprecated alias for the website channel guide.
+
+    .. deprecated::
+        Superseded by iterating ``CHANNEL_SPECS`` and calling
+        ``_make_channel_guide`` directly (see ``build_phase4_graph``).
+        Retained only for tests that import this factory by name.
 
     Postconditions:
         Returns ``_make_channel_guide("website", ...)`` — see that
         function's contract.
     """
-    return _make_channel_guide(
-        "website", "Company website, landing pages, product pages.", ChannelGuidelineOutput
-    )
+    return _make_channel_guide("website", _CHANNEL_DESCRIPTIONS["website"], ChannelGuidelineOutput)
 
 
 def make_social_guide() -> Agent:
-    """Build the Phase 4 social media channel guide agent.
+    """Deprecated alias for the social media channel guide.
+
+    .. deprecated::
+        Superseded by iterating ``CHANNEL_SPECS`` and calling
+        ``_make_channel_guide`` directly (see ``build_phase4_graph``).
+        Retained only for tests that import this factory by name.
 
     Postconditions:
         Returns ``_make_channel_guide("social", ...)`` — see that
         function's contract.
     """
-    return _make_channel_guide(
-        "social", "Social media platforms (LinkedIn, Twitter, Instagram).", ChannelGuidelineOutput
-    )
+    return _make_channel_guide("social", _CHANNEL_DESCRIPTIONS["social"], ChannelGuidelineOutput)
 
 
 def make_email_guide() -> Agent:
-    """Build the Phase 4 email channel guide agent.
+    """Deprecated alias for the email channel guide.
+
+    .. deprecated::
+        Superseded by iterating ``CHANNEL_SPECS`` and calling
+        ``_make_channel_guide`` directly (see ``build_phase4_graph``).
+        Retained only for tests that import this factory by name.
 
     Postconditions:
         Returns ``_make_channel_guide("email", ...)`` — see that
         function's contract.
     """
-    return _make_channel_guide(
-        "email", "Email marketing, newsletters, transactional emails.", ChannelGuidelineOutput
-    )
+    return _make_channel_guide("email", _CHANNEL_DESCRIPTIONS["email"], ChannelGuidelineOutput)
 
 
 def make_events_guide() -> Agent:
-    """Build the Phase 4 events channel guide agent.
+    """Deprecated alias for the events channel guide.
+
+    .. deprecated::
+        Superseded by iterating ``CHANNEL_SPECS`` and calling
+        ``_make_channel_guide`` directly (see ``build_phase4_graph``).
+        Retained only for tests that import this factory by name.
 
     Postconditions:
         Returns ``_make_channel_guide("events", ...)`` — see that
         function's contract.
     """
-    return _make_channel_guide(
-        "events", "Conferences, webinars, meetups, trade shows.", ChannelGuidelineOutput
-    )
+    return _make_channel_guide("events", _CHANNEL_DESCRIPTIONS["events"], ChannelGuidelineOutput)
 
 
 def make_partnerships_guide() -> Agent:
-    """Build the Phase 4 partnerships channel guide agent.
+    """Deprecated alias for the partnerships channel guide.
+
+    .. deprecated::
+        Superseded by iterating ``CHANNEL_SPECS`` and calling
+        ``_make_channel_guide`` directly (see ``build_phase4_graph``).
+        Retained only for tests that import this factory by name.
 
     Postconditions:
         Returns ``_make_channel_guide("partnerships", ...)`` — see that
         function's contract.
     """
     return _make_channel_guide(
-        "partnerships", "Co-branding, sponsorships, partner marketing.", ChannelGuidelineOutput
+        "partnerships", _CHANNEL_DESCRIPTIONS["partnerships"], ChannelGuidelineOutput
     )
 
 
 def make_internal_guide() -> Agent:
-    """Build the Phase 4 internal comms channel guide agent.
+    """Deprecated alias for the internal comms channel guide.
+
+    .. deprecated::
+        Superseded by iterating ``CHANNEL_SPECS`` and calling
+        ``_make_channel_guide`` directly (see ``build_phase4_graph``).
+        Retained only for tests that import this factory by name.
 
     Postconditions:
         Returns ``_make_channel_guide("internal", ...)`` — see that
         function's contract.
     """
     return _make_channel_guide(
-        "internal", "Internal comms, employee branding, onboarding.", ChannelGuidelineOutput
+        "internal", _CHANNEL_DESCRIPTIONS["internal"], ChannelGuidelineOutput
     )
 
 
