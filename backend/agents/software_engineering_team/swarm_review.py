@@ -130,7 +130,14 @@ def deserialize_review_cache(data: Any) -> Dict[str, "tuple[str, Dict[str, Any]]
           verdict is never cached live (``_compute_review`` excludes it), so
           a restored one is definitionally corrupted, and ``_apply_review_decision``
           would otherwise route it through its error-first branch and fail
-          the task instead of rerunning the review.
+          the task instead of rerunning the review. ``reason`` (if present)
+          must be a ``str`` and ``requested_changes`` (if present) must be a
+          ``list`` — ``_request_revision`` feeds both straight into revision
+          feedback shown to the implementer (``review.get("reason", "")`` /
+          ``review.get("requested_changes") or []``), so a malformed value
+          would otherwise be threaded through as if it were real reviewer
+          feedback; a verdict this module wrote always has both fields in
+          this shape (or omits them, which the same ``.get`` defaults cover).
         - Returns a dict keyed by ``task_id`` with ``(cache_key, verdict)``
           tuple values, mirroring
           ``CodingTeamSwarm._review_verdict_cache``'s declared type.
@@ -162,6 +169,10 @@ def deserialize_review_cache(data: Any) -> Dict[str, "tuple[str, Dict[str, Any]]
         if not isinstance(verdict.get("approved"), bool):
             continue
         if verdict.get("error"):
+            continue
+        if "reason" in verdict and not isinstance(verdict["reason"], str):
+            continue
+        if "requested_changes" in verdict and not isinstance(verdict["requested_changes"], list):
             continue
         result[task_id] = (cache_key, verdict)
     return result
