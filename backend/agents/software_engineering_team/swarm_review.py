@@ -101,6 +101,83 @@ def serialize_review_cache(
     ]
 
 
+def deserialize_review_cache(data: Any) -> Dict[str, "tuple[str, Dict[str, Any]]"]:
+    """Restore the in-memory review verdict cache from serialize_review_cache's output.
+
+    Preconditions:
+        - None — ``data`` may be any value, including corrupt/malformed
+          stored state; this function never raises on bad input.
+
+    Postconditions:
+        - Non-list ``data`` (None, str, int, dict, ...) returns ``{}``.
+        - Each list entry is included only when it is a dict containing all
+          of ``task_id``, ``cache_key``, ``verdict``; ``task_id`` and
+          ``cache_key`` are both ``str``; and ``verdict`` is a dict with a
+          real ``bool`` ``approved`` field — entries failing any check are
+          skipped. The ``task_id``/``cache_key`` type check also guards the
+          dict-key assignment below against an unhashable ``task_id`` (e.g.
+          a list or dict smuggled into corrupted JSON), which would
+          otherwise raise ``TypeError`` instead of being skipped. The
+          ``approved`` check matters beyond crash-safety: ``_compute_review``
+          only ever caches a non-``error`` ``run_code_review`` verdict, which
+          always carries a real bool ``approved``, so this rejects exactly
+          the corrupted shapes that could otherwise be misread as a genuine
+          approve/reject decision (e.g. ``_apply_review_decision`` treats
+          any truthy ``review.get("approved")`` as approval, so a corrupted
+          non-bool like ``"false"`` would wrongly merge the task) while
+          never rejecting a verdict this module actually wrote. A truthy
+          ``verdict["error"]`` is rejected for the same reason: an error
+          verdict is never cached live (``_compute_review`` excludes it), so
+          a restored one is definitionally corrupted, and ``_apply_review_decision``
+          would otherwise route it through its error-first branch and fail
+          the task instead of rerunning the review. ``reason`` (if present)
+          must be a ``str`` and ``requested_changes`` (if present) must be a
+          ``list`` — ``_request_revision`` feeds both straight into revision
+          feedback shown to the implementer (``review.get("reason", "")`` /
+          ``review.get("requested_changes") or []``), so a malformed value
+          would otherwise be threaded through as if it were real reviewer
+          feedback; a verdict this module wrote always has both fields in
+          this shape (or omits them, which the same ``.get`` defaults cover).
+        - Returns a dict keyed by ``task_id`` with ``(cache_key, verdict)``
+          tuple values, mirroring
+          ``CodingTeamSwarm._review_verdict_cache``'s declared type.
+        - When multiple kept entries share a ``task_id``, the later entry
+          (by list order) wins — matching plain dict-construction semantics
+          and ``serialize_review_cache``'s insertion-order-preserving output,
+          so ``deserialize_review_cache(serialize_review_cache(cache)) ==
+          cache`` for any cache with at most 20 entries (``verdict`` dicts
+          are not deep-copied here since the caller owns the freshly parsed
+          ``data``).
+    """
+    if not isinstance(data, list):
+        return {}
+    result: Dict[str, "tuple[str, Dict[str, Any]]"] = {}
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        if not {"task_id", "cache_key", "verdict"} <= entry.keys():
+            continue
+        task_id = entry["task_id"]
+        cache_key = entry["cache_key"]
+        verdict = entry["verdict"]
+        if (
+            not isinstance(task_id, str)
+            or not isinstance(cache_key, str)
+            or not isinstance(verdict, dict)
+        ):
+            continue
+        if not isinstance(verdict.get("approved"), bool):
+            continue
+        if verdict.get("error"):
+            continue
+        if "reason" in verdict and not isinstance(verdict["reason"], str):
+            continue
+        if "requested_changes" in verdict and not isinstance(verdict["requested_changes"], list):
+            continue
+        result[task_id] = (cache_key, verdict)
+    return result
+
+
 class _ReviewMixin:
     """Tech Lead review, merge, and revision/fail bookkeeping for CodingTeamSwarm."""
 
