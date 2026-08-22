@@ -21,17 +21,40 @@ per-phase/`phase_cache` branch of `BrandingTeamOrchestrator.run()`
 activity (`temporal/activities.py` calls `run_single_phase` directly).
 `run()`'s **default** branch (`phase_cache is None`, `orchestrator.py:553-560`)
 never calls `_phase_task` at all: it builds one monolithic Strands `Graph`
-from only the serialized mission and lets the graph's sequential node
-edges carry each phase's result to the next phase internally — a
-mechanism `_PhaseSpec.context_phases` has no hook into today. So in the
-default (non-cached, non-Temporal) run, every phase already receives every
-upstream phase's full output via graph edges, and populating
-`context_phases` per this document changes nothing there; it only takes
-effect for isolated-phase/Temporal execution. This document is the
-evidence base for populating `context_phases` correctly (tracked
-separately as issue #6953), which will also need to decide whether the
-monolithic graph path needs an equivalent filtering mechanism to make the
-two paths' behavior consistent.
+from only the serialized mission, wired as a strict linear chain — each
+phase node has exactly one incoming edge, from its immediate predecessor
+only (`graphs/top_level.py:59-93`, `builder.add_edge(last_node, p{n}_node)`).
+
+**Correction — the default path does not forward every upstream phase's
+output either; it forwards only one hop.** Strands' own node-input
+builder (`_build_node_input` in `strands.multiagent.graph`, the
+`strands-agents` dependency pinned in `backend/requirements.txt`)
+constructs a node's input from the original task plus **only the results
+of edges pointing directly at that node** — i.e. its immediate
+predecessor(s), not every previously-completed node. Since the top-level
+chain is 1→2→3→4→5 with no other edges, Phase 5's node input is "the
+mission" + "Phase 4's agent outputs" only; it does not itself contain
+Phase 1–3's raw output. (Phase 4's own outputs may *indirectly* reflect
+earlier phases, to the extent Phase 4's agents were themselves grounded in
+Phase 3's forwarded content when they generated their text — but that is
+not the same as the full Phase 1–3 JSON payloads reaching Phase 5, and it
+attenuates further with each hop.) `_PhaseSpec.context_phases` has no hook
+into this mechanism at all — it isn't a "no filtering, so everything gets
+through" situation; it's a structurally different, non-configurable
+single-hop-per-phase propagation that the isolated-phase/Temporal path
+(via `_phase_task`, which really does serialize *all* `prior_outputs`
+unless filtered) does not share.
+
+**Consequence for #6953:** the evidence in this document (which upstream
+phase each agent's prompt references) is directly actionable for the
+isolated-phase/Temporal path via `context_phases`. It says nothing about
+whether the default monolithic-graph path already gives each phase
+enough of the *right* upstream content — that path's one-hop-only
+forwarding is a separate, pre-existing behavior `context_phases` cannot
+change, and #6953 (or a follow-up) needs to decide whether the default
+path also needs an explicit multi-hop context mechanism (mirroring what
+`_phase_task` does) rather than relying on whatever survives one hop of
+Strands' graph-edge forwarding.
 
 **Method:** every agent's system prompt is fully data-driven —
 `AgentPromptSpec.opening` + `fields`/`structured_output`-derived field
