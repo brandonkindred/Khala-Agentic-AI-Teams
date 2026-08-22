@@ -1,0 +1,158 @@
+# Phase Dependency Analysis — Upstream Context per Phase
+
+**Scope:** analysis only. No agent prompts or orchestrator code were
+changed to produce this document. It answers a single question for each
+of the 37 branding-team agent system prompts (`backend/agents/branding_team/agents.py`):
+*which upstream phase's output does this agent's system prompt actually
+reference?*
+
+**Why:** `_PhaseSpec.context_phases` in `orchestrator.py` (`_PHASE_SPEC`,
+`~orchestrator.py:357-396`) is `()` — "no filtering" — for every phase
+today. `_phase_task` (`orchestrator.py:727-769`) already knows how to
+honor a non-empty `context_phases` tuple (it restricts which prior phase
+outputs get JSON-serialized into the downstream prompt, `orchestrator.py:751-753`),
+but no phase declares one yet, so every phase currently receives **every**
+previously-completed phase's full output. This document is the evidence
+base for populating `context_phases` correctly (tracked separately as
+issue #6953).
+
+**Method:** every agent's system prompt is fully data-driven —
+`AgentPromptSpec.opening` + `fields`/`structured_output`-derived field
+lines + optional `closing`, rendered verbatim by `render_agent_prompt`
+(`prompt_spec.py:117-141`) with no hidden boilerplate injected elsewhere.
+So reading each `_..._PROMPT = AgentPromptSpec(...)` literal in `agents.py`
+is reading the complete system prompt text sent to the LLM. A phase is
+counted as "referenced" only when an agent's prompt text explicitly names
+that phase's output (by concept — "strategic core", "narrative",
+"moodboard direction", "writing guidelines", "visual identity" — or by
+field, e.g. "positioning, values, audience segments, differentiation").
+Same-phase artifacts (e.g. Phase 3's `converge_decider` output referenced
+by later Phase 3 agents) don't count as an upstream-phase dependency.
+
+## Phase 1 — Strategic Core (6 agents)
+
+No upstream phase exists. All six factories (`discovery_auditor`,
+`purpose_vision_writer`, `values_articulator`, `audience_segmenter`,
+`differentiation_mapper`, `positioning_synthesizer`) work only from the
+branding mission and, for `positioning_synthesizer`, the other five Phase 1
+fragments (same phase, not upstream).
+
+**Recommended `context_phases`:** `()`
+
+## Phase 2 — Narrative & Messaging (6 agents)
+
+| Agent | Prompt text (verbatim excerpt) | Upstream phase referenced |
+|---|---|---|
+| `Storyteller` | "Using the strategic core output and branding mission" | STRATEGIC_CORE |
+| `ArchetypeAnalyst` | "Using the branding mission and strategic core output as context" | STRATEGIC_CORE |
+| `TaglineWriter` | "Using the branding mission and strategic core output as context" | STRATEGIC_CORE |
+| `MessageMapper` | "Using the branding mission and strategic core output (positioning, values, audience segments, differentiation) as context" | STRATEGIC_CORE |
+| `PersonaBuilder` | "Using the branding mission and the strategic core's audience segments as context" | STRATEGIC_CORE |
+| `VoicePrinciplesDrafter` | "Using the branding mission's desired_voice and the strategic core output as context" | STRATEGIC_CORE |
+
+All six Phase 2 agents reference Phase 1 explicitly; none reference each
+other's fragments (they run in a parallel fan-out) or any phase further
+upstream (there is none).
+
+**Recommended `context_phases`:** `(STRATEGIC_CORE,)` — matches the shape
+proposed in #6953.
+
+## Phase 3 — Visual & Expressive Identity (9 distinct factories, 11 graph nodes)
+
+| Agent | Prompt text (verbatim excerpt) | Upstream phase(s) referenced |
+|---|---|---|
+| `MoodBoardConceptualist_{variant}` (×3) | "Given a brand's strategic core and narrative, create a moodboard concept" | STRATEGIC_CORE, NARRATIVE_MESSAGING |
+| `converge_decider` | "You receive moodboard candidates from the diverge phase plus the brand's strategic core and values" | STRATEGIC_CORE (moodboard candidates are same-phase) |
+| `logo_specifier` | "Based on the winning moodboard direction, define a logo suite" | *none explicit* — only the same-phase `converge_decider` winner |
+| `color_system_builder` | "Based on the winning moodboard direction, define {N} colors" | *none explicit* — same-phase only |
+| `typography_builder` | "Based on the winning moodboard direction, define a typography system" | *none explicit* — same-phase only |
+| `iconography_director` | "Based on the winning moodboard, define:" | *none explicit* — same-phase only |
+| `photography_video_director` | "Based on the winning moodboard, define:" | *none explicit* — same-phase only |
+| `voice_tone_builder` | "Using the brand narrative's writing guidelines and the moodboard direction, define:" | NARRATIVE_MESSAGING (+ same-phase moodboard) |
+| `design_system_codifier` | "Based on the full visual identity work, produce:" | *none explicit* — same-phase only |
+
+6 of 9 Phase 3 factories reference no upstream phase at all in their
+prompt text — they only build on the same-phase `converge_decider` output.
+Only `MoodBoardConceptualist` (STRATEGIC_CORE + NARRATIVE_MESSAGING),
+`converge_decider` (STRATEGIC_CORE), and `voice_tone_builder`
+(NARRATIVE_MESSAGING) explicitly need upstream context. Since the phase
+receives one shared task string, the phase-level set must satisfy the
+neediest agents.
+
+**Recommended `context_phases`:** `(STRATEGIC_CORE, NARRATIVE_MESSAGING)` —
+matches the shape proposed in #6953.
+
+## Phase 4 — Experience & Channel Activation (9 factories)
+
+| Agent | Prompt text (verbatim excerpt) | Upstream phase(s) referenced |
+|---|---|---|
+| `brand_experience_principler` | "You are a Brand Experience Architect. Define:" | *none* |
+| `{channel}_guide` ×6 (website/social/email/events/partnerships/internal) | "Define guidelines for the {channel} channel:" … "Context: {static channel description}" | *none* — "Context" is a hardcoded one-line channel description (e.g. "Company website, landing pages, product pages."), not upstream phase output |
+| `brand_architecture_builder` | "You are a Brand Architecture Specialist. Define:" | *none* |
+| `brand_in_action_illustrator` | "Create {N} applied examples showing correct vs incorrect brand usage:" | *none* |
+
+**Finding — disagrees with #6953's assumed default.** None of the 9 Phase 4
+system prompts mention Phase 1, 2, or 3 output by name or concept (no
+"strategic core", "positioning", "narrative", "tagline", "voice",
+"moodboard", "logo", "color", "typography", or "visual identity" anywhere
+in `agents.py:785-1037`). Every Phase 4 agent's prompt is self-contained:
+it describes only its own channel/topic and asks the model to "Define:".
+Per the acceptance criteria of #6953 ("Phase 4 task prompt contains
+`strategic_core` + `narrative_messaging` + `visual_identity` context"),
+that default would inject three full upstream JSON payloads into prompts
+whose own text never references any of that content. This may still be a
+deliberate product choice (e.g. giving the model brand context it isn't
+explicitly told to use, so channel guides stay on-brand even without an
+explicit instruction to consult it) — but it is **not evidence-based** the
+way Phases 1–3, 5 are. Flagging for a decision rather than silently
+recommending an empty tuple, since an LLM channel-guide agent producing
+guidance with zero grounding in the brand's actual identity is a real
+regression risk even though today's prompts don't ask for that grounding
+explicitly.
+
+**Recommended `context_phases` (evidence-only):** `()`
+**If preserving today's implicit-grounding behavior is required:** keep
+`(STRATEGIC_CORE, NARRATIVE_MESSAGING, VISUAL_IDENTITY)` as in #6953, but
+note it is a product decision, not something the current prompts ask for.
+
+## Phase 5 — Governance & Evolution (7 agents)
+
+| Agent | Prompt text (verbatim excerpt) | Upstream phase(s) referenced |
+|---|---|---|
+| `ownership_definer` | "You are a Brand Ownership Definer. Define:" | *none* |
+| `approval_workflow_designer` | "You are an Approval Workflow Designer. Define:" | *none* |
+| `asset_wiki_planner` | "You are an Asset & Wiki Planner. Define:" | *none* |
+| `training_planner` | "You are a Training Planner. Define:" | *none* |
+| `kpi_designer` | "You are a Brand KPI Designer. Define:" | *none* |
+| `evolution_framer` | "You are a Brand Evolution Framer. Define:" | *none* |
+| `brand_rules_codifier` | "Using the full brand context (positioning, promise, values, narrative, visual identity), produce:" | STRATEGIC_CORE (positioning, promise, values), **NARRATIVE_MESSAGING** (narrative), VISUAL_IDENTITY |
+
+Only `brand_rules_codifier` references upstream context explicitly, and it
+names all three of STRATEGIC_CORE, NARRATIVE_MESSAGING, and
+VISUAL_IDENTITY — not just STRATEGIC_CORE + VISUAL_IDENTITY.
+
+**Finding — disagrees with #6953's assumed default.** #6953 proposes
+`(STRATEGIC_CORE, VISUAL_IDENTITY)` for Phase 5, omitting
+NARRATIVE_MESSAGING. But `brand_rules_codifier`'s prompt literally lists
+"narrative" alongside "positioning, promise, values" and "visual identity"
+as part of "the full brand context" it's told to use. Dropping
+NARRATIVE_MESSAGING would contradict this agent's own prompt text. No
+Phase 5 agent references CHANNEL_ACTIVATION, so excluding it (per #6953's
+acceptance criteria) is correctly evidence-based.
+
+**Recommended `context_phases`:** `(STRATEGIC_CORE, NARRATIVE_MESSAGING, VISUAL_IDENTITY)`
+
+## Summary table
+
+| Phase | #6953's proposed `context_phases` | Evidence-based `context_phases` | Agreement |
+|---|---|---|---|
+| STRATEGIC_CORE | `()` | `()` | ✅ |
+| NARRATIVE_MESSAGING | `(STRATEGIC_CORE,)` | `(STRATEGIC_CORE,)` | ✅ |
+| VISUAL_IDENTITY | `(STRATEGIC_CORE, NARRATIVE_MESSAGING)` | `(STRATEGIC_CORE, NARRATIVE_MESSAGING)` | ✅ |
+| CHANNEL_ACTIVATION | `(STRATEGIC_CORE, NARRATIVE_MESSAGING, VISUAL_IDENTITY)` | `()` per prompt text; product decision needed | ⚠️ no prompt evidence for any upstream phase |
+| GOVERNANCE | `(STRATEGIC_CORE, VISUAL_IDENTITY)` | `(STRATEGIC_CORE, NARRATIVE_MESSAGING, VISUAL_IDENTITY)` | ⚠️ missing NARRATIVE_MESSAGING |
+
+Three of five phases match the proposed shape exactly. The two mismatches
+(Phase 4, Phase 5) are flagged above with the specific prompt lines that
+justify each recommendation, for #6953 to resolve before finalizing
+`_PHASE_SPEC`.
