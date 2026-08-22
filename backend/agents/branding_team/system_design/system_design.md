@@ -338,7 +338,8 @@ digest. `phase` must be one of the five runnable phases in
 `shared/phase_output_cache.py` — a thin wrapper over
 `shared.cache.get_shared_cache("branding:phase:v1")` (Redis when
 configured, else in-process memory; see `backend/shared/cache/`), keyed by
-`f"{phase.value}:{input_hash}"`. `get(phase, input_hash)` deserializes and
+`f"{phase.value}.{input_hash}"` (a `.`, not a `:` — `RedisBackend`'s
+`_require_logical_key` rejects any logical key containing `:`). `get(phase, input_hash)` deserializes and
 returns the stored output when a live entry exists for that exact `(phase,
 input_hash)` pair (a hit); otherwise it returns `None` (a miss) — including
 when a stored entry's bytes fail to deserialize, which evicts the corrupt
