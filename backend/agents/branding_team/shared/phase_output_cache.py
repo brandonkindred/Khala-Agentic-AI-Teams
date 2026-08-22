@@ -21,9 +21,13 @@ source of per-conversation cache isolation.
 
 Storage is namespaced (``branding:phase:v1``, suffixed with a build id via
 ``shared.cache.pydantic_cache.cache_namespace_for`` so a deploy cold-starts
-the cache) and keyed by ``f"{phase.value}:{input_hash}"``, so every distinct
-``(phase, input_hash)`` pair addresses its own entry rather than sharing one
-slot per phase. This means a ``put`` for a phase under a *new* hash does not
+the cache) and keyed by ``f"{phase.value}:{input_hash}"`` (a ``.``, not a
+``:`` — ``RedisBackend._require_logical_key`` rejects any logical key
+containing ``:``, so a colon here would make every ``get``/``put`` raise
+under Redis, silently swallowed by ``pydantic_cache``'s fail-open handling
+as a permanent miss/no-op), so every distinct ``(phase, input_hash)`` pair
+addresses its own entry rather than sharing one slot per phase. This means
+a ``put`` for a phase under a *new* hash does not
 evict the *old* hash's entry — entries only leave the cache via the shared
 backend's LRU (bounded by ``_MAX_ENTRIES``) or an explicit
 ``clear_phase_output_cache()``. Because the underlying backend is a
@@ -72,7 +76,9 @@ def _phase_cache_namespace() -> str:
 
 
 def _cache_key(phase: BrandPhase, input_hash: str) -> str:
-    return f"{phase.value}:{input_hash}"
+    # `.`, not `:` -- RedisBackend._require_logical_key rejects any logical
+    # key containing `:` (see module docstring).
+    return f"{phase.value}.{input_hash}"
 
 
 def clear_phase_output_cache() -> None:
