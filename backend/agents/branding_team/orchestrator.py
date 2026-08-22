@@ -740,7 +740,18 @@ class BrandingTeamOrchestrator:
               extended with the serialized upstream outputs when present so an
               isolated downstream phase sees the context the sequential edge would
               otherwise carry (a superset — never less context).
+            - When ``phase``'s ``_PHASE_SPEC`` entry has a non-empty
+              ``context_phases``, only ``prior_outputs`` entries whose key
+              matches one of those upstream phases' values are included.
+              When ``context_phases`` is empty (the default), every entry in
+              ``prior_outputs`` is included — unchanged, backward-compatible
+              behavior.
         """
+        spec = _PHASE_SPEC[phase]
+        if spec.context_phases:
+            allowed = {p.value for p in spec.context_phases}
+            prior_outputs = {k: v for k, v in prior_outputs.items() if k in allowed}
+
         base = (
             "Create a comprehensive brand strategy for the following company.\n\n"
             f"Branding Mission:\n{serialize_mission(mission)}"
