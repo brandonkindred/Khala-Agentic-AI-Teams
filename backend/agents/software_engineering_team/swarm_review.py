@@ -75,6 +75,32 @@ def _review_verdict_cache_key(
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
+def serialize_review_cache(
+    cache: Dict[str, "tuple[str, Dict[str, Any]]"],
+) -> List[Dict[str, Any]]:
+    """Convert the in-memory review verdict cache to a JSON-safe list.
+
+    Preconditions:
+        - ``cache`` maps task id -> (cache_key, verdict) tuples, matching
+          ``CodingTeamSwarm._review_verdict_cache``'s declared type.
+
+    Postconditions:
+        - Returns one dict per kept entry: ``{"task_id", "cache_key", "verdict"}``.
+        - At most 20 entries are returned; when ``cache`` has more than 20
+          entries, only the last 20 in the dict's iteration (insertion)
+          order are kept.
+        - Empty cache returns ``[]``.
+        - Result is pure JSON-safe (no tuples; the nested ``verdict`` dict
+          is deep-copied so later mutation of the live cache cannot alias it).
+    """
+    max_cached_verdicts = 20
+    items = list(cache.items())[-max_cached_verdicts:]
+    return [
+        {"task_id": task_id, "cache_key": cache_key, "verdict": copy.deepcopy(verdict)}
+        for task_id, (cache_key, verdict) in items
+    ]
+
+
 class _ReviewMixin:
     """Tech Lead review, merge, and revision/fail bookkeeping for CodingTeamSwarm."""
 
