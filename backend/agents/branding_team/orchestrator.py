@@ -244,11 +244,9 @@ def _merge_named_fragments(
 
     The sole merge implementation for all five phases: each wraps several
     named agents as a single top-level node whose nested
-    ``MultiAgentResult.results`` is keyed by node/agent id. Phase 1 and
-    Phase 2 bind ``node_merge``/``require_all`` directly as a
-    ``functools.partial`` in ``_PHASE_SPEC``; Phases 3-5 go through a thin
-    per-phase wrapper (``_merge_phase3_fragments`` etc.) that does the same
-    binding by construction.
+    ``MultiAgentResult.results`` is keyed by node/agent id. All five phases
+    bind ``node_merge``/``require_all`` directly as a ``functools.partial``
+    in ``_PHASE_SPEC``.
 
     Preconditions:
         ``node_result`` is the ``NodeResult`` for a single top-level graph node
@@ -308,76 +306,6 @@ def _merge_named_fragments(
         return model_class.model_validate(merged)
     except ValidationError:
         return None
-
-
-def _merge_phase3_fragments(node_result: Any, model_class: type[BaseModel]) -> Optional[BaseModel]:
-    """Merge every Phase 3 node's ``structured_output`` into one phase output.
-
-    Phase 3 wraps eleven agents (three moodboard conceptualists, converge_decider,
-    and seven post-converge specialists) as a single top-level ``"phase3_visual"``
-    node (see ``graphs/phase3_visual.py``); the same nested-``MultiAgentResult``
-    recovery Phase 1 and Phase 4/5 use applies here. All eleven must be present --
-    a partial run must not silently validate as a complete ``VisualIdentityOutput``
-    via field defaults.
-
-    Preconditions:
-        ``node_result`` is the ``NodeResult`` for a single top-level graph node
-        (may or may not wrap a nested multi-agent result).
-    Postconditions:
-        Returns a validated ``model_class`` instance merging every recognized
-        Phase 3 node's ``structured_output`` when all of ``_PHASE3_NODE_MERGE``'s
-        node ids were found -- the three moodboard conceptualists each contribute
-        one element of ``mood_board_candidates``; returns None when any node is
-        missing or the merged data fails validation -- same None contract as
-        ``_merge_named_fragments``.
-    """
-    return _merge_named_fragments(node_result, model_class, _PHASE3_NODE_MERGE, require_all=True)
-
-
-def _merge_phase4_fragments(node_result: Any, model_class: type[BaseModel]) -> Optional[BaseModel]:
-    """Merge every Phase 4 specialist's ``structured_output`` into one phase output.
-
-    Phase 4 wraps nine parallel fan-out agents as a single top-level
-    ``"phase4_channel"`` node (see ``graphs/phase4_channel.py``); the same
-    nested-``MultiAgentResult`` recovery Phase 1 uses applies here. All nine
-    specialists must be present — a partial run must not silently validate as
-    a complete ``ChannelActivationOutput`` via field defaults.
-
-    Preconditions:
-        ``node_result`` is the ``NodeResult`` for a single top-level graph node
-        (may or may not wrap a nested multi-agent result).
-    Postconditions:
-        Returns a validated ``model_class`` instance merging every Phase 4
-        specialist's ``structured_output`` when all of ``_PHASE4_NODE_MERGE``'s
-        node ids were found — the six ``*_guide`` fragments each contribute one
-        element of ``channel_guidelines``; returns None when any specialist is
-        missing or the merged data fails validation — same None contract as
-        ``_merge_named_fragments``.
-    """
-    return _merge_named_fragments(node_result, model_class, _PHASE4_NODE_MERGE, require_all=True)
-
-
-def _merge_phase5_fragments(node_result: Any, model_class: type[BaseModel]) -> Optional[BaseModel]:
-    """Merge every Phase 5 specialist's ``structured_output`` into one phase output.
-
-    Phase 5 wraps seven parallel fan-out agents as a single top-level
-    ``"phase5_governance"`` node (see ``graphs/phase5_governance.py``); the
-    same nested-``MultiAgentResult`` recovery Phase 1 and Phase 4 use applies
-    here. All seven specialists must be present -- a partial run must not
-    silently validate as a complete ``GovernanceOutput`` via field defaults.
-
-    Preconditions:
-        ``node_result`` is the ``NodeResult`` for a single top-level graph node
-        (may or may not wrap a nested multi-agent result).
-    Postconditions:
-        Returns a validated ``model_class`` instance merging every recognized
-        Phase 5 specialist's ``structured_output`` when all of
-        ``_PHASE5_NODE_MERGE``'s node ids were found -- every specialist's
-        fields land flat since none of them nest under a shared key; returns
-        None when any specialist is missing or the merged data fails
-        validation -- same None contract as ``_merge_named_fragments``.
-    """
-    return _merge_named_fragments(node_result, model_class, _PHASE5_NODE_MERGE, require_all=True)
 
 
 class _PhaseSpec(NamedTuple):
@@ -442,19 +370,25 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
         build_phase3_graph,
         "phase3_visual",
         PHASE_OUTPUT_MODELS[BrandPhase.VISUAL_IDENTITY],
-        merge_fn=_merge_phase3_fragments,
+        merge_fn=functools.partial(
+            _merge_named_fragments, node_merge=_PHASE3_NODE_MERGE, require_all=True
+        ),
     ),
     BrandPhase.CHANNEL_ACTIVATION: _PhaseSpec(
         build_phase4_graph,
         "phase4_channel",
         PHASE_OUTPUT_MODELS[BrandPhase.CHANNEL_ACTIVATION],
-        merge_fn=_merge_phase4_fragments,
+        merge_fn=functools.partial(
+            _merge_named_fragments, node_merge=_PHASE4_NODE_MERGE, require_all=True
+        ),
     ),
     BrandPhase.GOVERNANCE: _PhaseSpec(
         build_phase5_graph,
         "phase5_governance",
         PHASE_OUTPUT_MODELS[BrandPhase.GOVERNANCE],
-        merge_fn=_merge_phase5_fragments,
+        merge_fn=functools.partial(
+            _merge_named_fragments, node_merge=_PHASE5_NODE_MERGE, require_all=True
+        ),
     ),
 }
 

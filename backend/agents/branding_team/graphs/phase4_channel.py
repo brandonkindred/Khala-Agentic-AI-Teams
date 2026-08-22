@@ -2,9 +2,10 @@
 
 Nine specialist agents produce channel-specific guidelines and brand
 experience artefacts in parallel. Each is a terminal node — there is no
-compositor; the orchestrator's Phase-4 ``merge_fn``
-(``_merge_phase4_fragments``) assembles their typed fragments into a
-unified ``ChannelActivationOutput`` in Python.
+compositor; the orchestrator's Phase-4 ``merge_fn`` (``functools.partial``
+binding ``_merge_named_fragments`` to ``_PHASE4_NODE_MERGE``, ``require_all=True``)
+assembles their typed fragments into a unified ``ChannelActivationOutput`` in
+Python.
 """
 
 from __future__ import annotations
@@ -41,7 +42,8 @@ def build_phase4_graph() -> Graph:
 
     All nine nodes are both entry points and terminal nodes — they run in
     parallel and have no edges between them. There is no fan-in node: the
-    orchestrator's Phase-4 ``merge_fn`` (``_merge_phase4_fragments``)
+    orchestrator's Phase-4 ``merge_fn`` (``functools.partial`` binding
+    ``_merge_named_fragments`` to ``_PHASE4_NODE_MERGE``, ``require_all=True``)
     assembles their typed ``structured_output`` fragments into a single
     ``ChannelActivationOutput`` deterministically in Python.
 
@@ -52,8 +54,10 @@ def build_phase4_graph() -> Graph:
         Returns a built ``Graph`` whose nine specialist nodes are all both entry
         points and terminal nodes, running in parallel with no edges between them.
         There is no fan-in node; the orchestrator's Phase-4 ``merge_fn``
-        (``_merge_phase4_fragments``) assembles their typed ``structured_output``
-        fragments into a single ``ChannelActivationOutput`` outside the graph.
+        (``functools.partial`` binding ``_merge_named_fragments`` to
+        ``_PHASE4_NODE_MERGE``, ``require_all=True``) assembles their typed
+        ``structured_output`` fragments into a single ``ChannelActivationOutput``
+        outside the graph.
     """
     builder = GraphBuilder()
 
