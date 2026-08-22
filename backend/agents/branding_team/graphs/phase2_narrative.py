@@ -1,26 +1,14 @@
-"""Phase 2 — Narrative & Messaging graph (linear specialists).
+"""Phase 2 — Narrative & Messaging graph (pure fan-out).
 
-Six agents run Storyteller → ArchetypeAnalyst → TaglineWriter →
-MessageMapper → PersonaBuilder → VoicePrinciplesDrafter.
-
-This is intentionally a Graph rather than a Swarm. Agents built with
-``structured_output=`` force Strands' structured-output tool and then
-stop the agent loop (``stop_loop=True``), so they never call
-``handoff_to_agent``.
-
-Edges are a *single-predecessor chain*. Strands' readiness check treats
-multiple incoming edges as OR (any one satisfied predecessor makes the
-node ready), so a fan-in would launch every downstream agent as soon as
-Storyteller finished. The single-predecessor edge into each node is what
-makes Strands auto-populate ``Inputs from previous nodes`` with the
-immediate predecessor's typed output; each specialist's own-field
-``structured_output`` model (Story 5b Step 1) only ever emits its own new
-fields and reads the predecessor's output from there as read-only context.
+Six specialist agents produce narrative and messaging artefacts in parallel.
+Each is a terminal node — there is no compositor; the orchestrator's Phase-2
+merge function assembles their typed fragments into a unified
+``NarrativeMessagingOutput`` in Python.
 """
 
 from __future__ import annotations
 
-from strands.multiagent.graph import Graph
+from strands.multiagent.graph import Graph, GraphBuilder
 
 from branding_team.agents import (
     make_archetype_analyst,
@@ -30,37 +18,45 @@ from branding_team.agents import (
     make_tagline_writer,
     make_voice_principles_drafter,
 )
-from shared.graph import build_sequential
-
-_PHASE2_NODE_ORDER: tuple[str, ...] = (
-    "Storyteller",
-    "ArchetypeAnalyst",
-    "TaglineWriter",
-    "MessageMapper",
-    "PersonaBuilder",
-    "VoicePrinciplesDrafter",
-)
 
 
 def build_phase2_graph() -> Graph:
-    """Build the Phase 2 Narrative & Messaging linear Graph.
+    """Build the Phase 2 Narrative & Messaging pure fan-out graph.
 
     Topology::
 
-        Storyteller → ArchetypeAnalyst → TaglineWriter → MessageMapper
-            → PersonaBuilder → VoicePrinciplesDrafter
+        Storyteller
+        ArchetypeAnalyst
+        TaglineWriter
+        MessageMapper
+        PersonaBuilder
+        VoicePrinciplesDrafter
 
-    Each node emits its own disjoint ``structured_output`` fragment; the
-    orchestrator merges them into ``NarrativeMessagingOutput``.
+    All six nodes are both entry points and terminal nodes — they run in
+    parallel and have no edges between them. There is no fan-in node: the
+    orchestrator's Phase-2 merge function assembles their typed
+    ``structured_output`` fragments into a single
+    ``NarrativeMessagingOutput`` deterministically in Python.
 
     Preconditions:
         None — the builder wires a fixed six-agent factory set and takes no
         arguments.
     Postconditions:
-        Returns a built ``Graph`` with ``Storyteller`` as the entry point and a
-        single-predecessor chain through to ``VoicePrinciplesDrafter``, so each
-        node runs only after its immediate predecessor (never a premature fan-in).
+        Returns a built ``Graph`` whose six specialist nodes are all both entry
+        points and terminal nodes, running in parallel with no edges between them.
+        Carries the same 600s execution / 180s per-node timeout budget
+        ``build_sequential`` used to apply, matching Phase 1's
+        ``build_fan_out_fan_in`` graph (Phase 3/4/5's bare ``GraphBuilder``s
+        rely solely on the outer ``build_branding_graph``/``run_single_phase``
+        wrapper's budget; this graph sets its own so a direct
+        ``build_phase2_graph().invoke_async(...)`` — e.g. in tests or a future
+        standalone caller — stays bounded too).
     """
+    builder = GraphBuilder()
+    builder.set_graph_id("phase2_narrative")
+    builder.set_execution_timeout(600.0)
+    builder.set_node_timeout(180.0)
+
     factories = {
         "Storyteller": make_storyteller,
         "ArchetypeAnalyst": make_archetype_analyst,
@@ -69,13 +65,13 @@ def build_phase2_graph() -> Graph:
         "PersonaBuilder": make_persona_builder,
         "VoicePrinciplesDrafter": make_voice_principles_drafter,
     }
+    for node_id, factory in factories.items():
+        builder.add_node(factory(), node_id=node_id)
+        builder.set_entry_point(node_id)
 
-    return build_sequential(
-        stages=[(node_id, factories[node_id]()) for node_id in _PHASE2_NODE_ORDER],
-        graph_id="branding_phase2_narrative",
-    )
+    return builder.build()
 
 
 # Back-compat alias — Phase 2 used to be a Swarm; callers that still import
-# the old name get the Graph that preserves structured_output sequencing.
+# the old name get the same pure fan-out Graph.
 build_phase2_swarm = build_phase2_graph
