@@ -846,11 +846,12 @@ class BrandingTeamOrchestrator:
         store: Optional["BrandingStore"] = None,
         client_id: Optional[str] = None,
         brand_id: Optional[str] = None,
-        phase_cache: Optional[PhaseOutputCache] = None,
+        phase_cache: Optional[PhaseOutputCache] = PhaseOutputCache(),
     ) -> TeamOutput:
         """Convenience method: run the pipeline up to (and including) a specific
-        phase. Accepts an optional ``phase_cache`` to reuse cached phase
-        outputs (see ``run()``)."""
+        phase. Mirrors ``run()``'s ``phase_cache`` default -- a fresh
+        ``PhaseOutputCache()`` unless the caller passes ``phase_cache=None``
+        explicitly to force the monolithic-graph path (see ``run()``)."""
         return self.run(
             mission=mission,
             human_review=human_review,
