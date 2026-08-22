@@ -288,3 +288,27 @@ def test_run_llm_review_real_coordinator_propagates_unavailable_when_all_chunks_
 
     with pytest.raises(CodeReviewUnavailableError):
         _run_llm_review(llm=client, task=_task(), files={"x.py": "def f():\n    return 1\n"})
+
+
+def test_run_llm_review_real_coordinator_injects_no_extra_clause():
+    """Backend's ``V2TeamConfig.extra_review_clause`` is ``""`` (no
+    accessibility clause -- that's frontend-only). This is the backend-side
+    negative-space counterpart to
+    ``test_v2_fe_review_fallback_e2e.test_run_llm_review_real_coordinator_forwards_accessibility_note_to_prompt``:
+    it proves the real chunk-review prompt carries no injected extra
+    requirements when the config's clause is empty, i.e. the shared
+    ``extra_task_requirements`` injection path degrades to a no-op for
+    backend rather than always appending something."""
+    from software_engineering_team.backend_code_v2_team.phases._profile import (
+        BACKEND_CONFIG,
+        _run_llm_review,
+    )
+
+    assert BACKEND_CONFIG.extra_review_clause == ""
+
+    client = _PromptCapturingClient()
+
+    _run_llm_review(llm=client, task=_task(), files={"x.py": "def f():\n    return 1\n"})
+
+    assert client.prompts, "expected at least one real chunk-review call"
+    assert not any("accessibility" in p.lower() for p in client.prompts)
