@@ -101,6 +101,44 @@ def serialize_review_cache(
     ]
 
 
+def deserialize_review_cache(data: Any) -> Dict[str, "tuple[str, Dict[str, Any]]"]:
+    """Restore the in-memory review verdict cache from serialize_review_cache's output.
+
+    Preconditions:
+        - None — ``data`` may be any value, including corrupt/malformed
+          stored state; this function never raises on bad input.
+
+    Postconditions:
+        - Non-list ``data`` (None, str, int, dict, ...) returns ``{}``.
+        - Each list entry is included only when it is a dict containing all
+          of ``task_id``, ``cache_key``, ``verdict`` and ``verdict`` is
+          itself a dict; entries failing either check are skipped.
+        - Returns a dict keyed by ``task_id`` with ``(cache_key, verdict)``
+          tuple values, mirroring
+          ``CodingTeamSwarm._review_verdict_cache``'s declared type.
+        - When multiple kept entries share a ``task_id``, the later entry
+          (by list order) wins — matching plain dict-construction semantics
+          and ``serialize_review_cache``'s insertion-order-preserving output,
+          so ``deserialize_review_cache(serialize_review_cache(cache)) ==
+          cache`` for any cache with at most 20 entries (``verdict`` dicts
+          are not deep-copied here since the caller owns the freshly parsed
+          ``data``).
+    """
+    if not isinstance(data, list):
+        return {}
+    result: Dict[str, "tuple[str, Dict[str, Any]]"] = {}
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        if not {"task_id", "cache_key", "verdict"} <= entry.keys():
+            continue
+        verdict = entry["verdict"]
+        if not isinstance(verdict, dict):
+            continue
+        result[entry["task_id"]] = (entry["cache_key"], verdict)
+    return result
+
+
 class _ReviewMixin:
     """Tech Lead review, merge, and revision/fail bookkeeping for CodingTeamSwarm."""
 
