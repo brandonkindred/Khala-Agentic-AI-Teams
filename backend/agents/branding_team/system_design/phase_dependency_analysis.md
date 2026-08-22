@@ -10,11 +10,28 @@ reference?*
 `~orchestrator.py:357-396`) is `()` — "no filtering" — for every phase
 today. `_phase_task` (`orchestrator.py:727-769`) already knows how to
 honor a non-empty `context_phases` tuple (it restricts which prior phase
-outputs get JSON-serialized into the downstream prompt, `orchestrator.py:751-753`),
-but no phase declares one yet, so every phase currently receives **every**
-previously-completed phase's full output. This document is the evidence
-base for populating `context_phases` correctly (tracked separately as
-issue #6953).
+outputs get JSON-serialized into the downstream prompt,
+`orchestrator.py:751-753`), but no phase declares one yet.
+
+**Scoped to which execution path, precisely:** `context_phases` and
+`_phase_task` are consulted only by `run_single_phase`
+(`orchestrator.py:677-725`), which backs two paths — the isolated
+per-phase/`phase_cache` branch of `BrandingTeamOrchestrator.run()`
+(`orchestrator.py:572-573`, `_run_phases_with_cache`) and every Temporal
+activity (`temporal/activities.py` calls `run_single_phase` directly).
+`run()`'s **default** branch (`phase_cache is None`, `orchestrator.py:553-560`)
+never calls `_phase_task` at all: it builds one monolithic Strands `Graph`
+from only the serialized mission and lets the graph's sequential node
+edges carry each phase's result to the next phase internally — a
+mechanism `_PhaseSpec.context_phases` has no hook into today. So in the
+default (non-cached, non-Temporal) run, every phase already receives every
+upstream phase's full output via graph edges, and populating
+`context_phases` per this document changes nothing there; it only takes
+effect for isolated-phase/Temporal execution. This document is the
+evidence base for populating `context_phases` correctly (tracked
+separately as issue #6953), which will also need to decide whether the
+monolithic graph path needs an equivalent filtering mechanism to make the
+two paths' behavior consistent.
 
 **Method:** every agent's system prompt is fully data-driven —
 `AgentPromptSpec.opening` + `fields`/`structured_output`-derived field
