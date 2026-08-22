@@ -500,6 +500,7 @@ class BrandingTeamOrchestrator:
         include_design_assets: bool = False,
         target_phase: Optional[BrandPhase] = None,
         phase_cache: Optional[PhaseOutputCache] = PhaseOutputCache(),
+        _use_monolithic: bool = False,
     ) -> TeamOutput:
         """Run the branding pipeline up to and including *target_phase*
         (default: all phases). When *target_phase* is None, every phase is
@@ -516,8 +517,10 @@ class BrandingTeamOrchestrator:
               every phase runs).
             - When ``store`` and ``brand_id`` are supplied, ``store`` implements
               ``get_brand``/``get_brand_by_id``/``append_brand_version``.
-            - ``phase_cache`` is a ``PhaseOutputCache`` instance (possibly
-              empty) or ``None``.
+            - When ``_use_monolithic`` is ``False`` (the default), ``phase_cache``
+              is a ``PhaseOutputCache`` instance (possibly empty) -- it must not
+              be ``None``. When ``_use_monolithic`` is ``True``, ``phase_cache``
+              is ignored.
 
         Postconditions:
             - Returns a fully populated ``TeamOutput``.
@@ -529,16 +532,15 @@ class BrandingTeamOrchestrator:
               without persistence.
             - ``phase_cache`` defaults to a fresh ``PhaseOutputCache()`` (a
               thin view over the shared, process-wide phase cache -- see
-              ``PhaseOutputCache``), so per-phase cached execution is now the
-              default for every caller that does not pass ``phase_cache``
-              explicitly.
-            - When ``phase_cache`` is ``None`` -- only when a caller
-              explicitly passes ``phase_cache=None`` -- the pipeline runs as
-              one monolithic graph invocation instead, exactly as before this
-              parameter existed.
-            - When ``phase_cache`` is a ``PhaseOutputCache`` (the default, or
-              any explicitly supplied instance), each phase up to
-              ``target_phase`` is run in isolation (see
+              ``PhaseOutputCache``), so per-phase cached execution is the
+              single production execution path.
+            - ``_use_monolithic=True`` is a testing/comparison-only escape
+              hatch: it runs the pipeline as one monolithic graph invocation
+              instead of the per-phase cached path, exactly as this method
+              behaved before ``phase_cache`` existed. No production caller
+              sets it.
+            - When ``_use_monolithic`` is ``False`` (the default), each phase
+              up to ``target_phase`` is run in isolation (see
               ``_run_phases_with_cache``): a phase whose input hash matches a
               cached entry reuses that cached output instead of being
               invoked; a miss runs the phase via ``run_single_phase`` and, if
@@ -561,7 +563,7 @@ class BrandingTeamOrchestrator:
 
         stop_idx = phase_index(target_phase) if target_phase else len(PHASE_ORDER) - 1
 
-        if phase_cache is None:
+        if _use_monolithic:
             # ---- Build and invoke the graph ----
             graph = build_branding_graph(target_phase=target_phase)
             task = (
@@ -581,6 +583,9 @@ class BrandingTeamOrchestrator:
                 for min_idx, spec in enumerate(phase_specs)
             ]
         else:
+            assert phase_cache is not None, (
+                "phase_cache must be a PhaseOutputCache instance when _use_monolithic=False"
+            )
             extractions = self._run_phases_with_cache(mission, stop_idx, phase_cache)
 
         strategic_core, narrative, visual_identity, channel_activation, governance = (
@@ -873,11 +878,13 @@ class BrandingTeamOrchestrator:
         client_id: Optional[str] = None,
         brand_id: Optional[str] = None,
         phase_cache: Optional[PhaseOutputCache] = PhaseOutputCache(),
+        _use_monolithic: bool = False,
     ) -> TeamOutput:
         """Convenience method: run the pipeline up to (and including) a specific
         phase. Mirrors ``run()``'s ``phase_cache`` default -- a fresh
-        ``PhaseOutputCache()`` unless the caller passes ``phase_cache=None``
-        explicitly to force the monolithic-graph path (see ``run()``)."""
+        ``PhaseOutputCache()`` -- and forwards ``_use_monolithic`` so a caller
+        can force the testing/comparison-only monolithic-graph path (see
+        ``run()``)."""
         return self.run(
             mission=mission,
             human_review=human_review,
@@ -887,6 +894,7 @@ class BrandingTeamOrchestrator:
             brand_id=brand_id,
             target_phase=phase,
             phase_cache=phase_cache,
+            _use_monolithic=_use_monolithic,
         )
 
     @staticmethod
