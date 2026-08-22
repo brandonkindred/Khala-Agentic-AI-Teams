@@ -499,7 +499,7 @@ class BrandingTeamOrchestrator:
         include_market_research: bool = False,
         include_design_assets: bool = False,
         target_phase: Optional[BrandPhase] = None,
-        phase_cache: Optional[PhaseOutputCache] = None,
+        phase_cache: Optional[PhaseOutputCache] = PhaseOutputCache(),
     ) -> TeamOutput:
         """Run the branding pipeline up to and including *target_phase*
         (default: all phases). When *target_phase* is None, every phase is
@@ -527,17 +527,28 @@ class BrandingTeamOrchestrator:
               during the run (``append_brand_version`` returns ``None``), so the
               caller can mark the run as failed instead of reporting success
               without persistence.
-            - When ``phase_cache`` is ``None`` (the default), execution is
-              identical to omitting it entirely -- the pipeline always runs as
-              one monolithic graph invocation, exactly as before this
+            - ``phase_cache`` defaults to a fresh ``PhaseOutputCache()`` (a
+              thin view over the shared, process-wide phase cache -- see
+              ``PhaseOutputCache``), so per-phase cached execution is now the
+              default for every caller that does not pass ``phase_cache``
+              explicitly.
+            - When ``phase_cache`` is ``None`` -- only when a caller
+              explicitly passes ``phase_cache=None`` -- the pipeline runs as
+              one monolithic graph invocation instead, exactly as before this
               parameter existed.
-            - When ``phase_cache`` is supplied, each phase up to
+            - When ``phase_cache`` is a ``PhaseOutputCache`` (the default, or
+              any explicitly supplied instance), each phase up to
               ``target_phase`` is run in isolation (see
               ``_run_phases_with_cache``): a phase whose input hash matches a
               cached entry reuses that cached output instead of being
               invoked; a miss runs the phase via ``run_single_phase`` and, if
               the result is not degraded, stores it in ``phase_cache`` for a
-              future call.
+              future call. Each ``run_single_phase`` call gets its own fresh
+              ``DEFAULT_EXECUTION_TIMEOUT_SECONDS`` (600s) /
+              ``DEFAULT_NODE_TIMEOUT_SECONDS`` (180s) budget -- there is no
+              deadline shared across phases within one call -- so a call whose
+              phases all miss can take up to roughly 5x the monolithic path's
+              single 600s execution-timeout cap, not the same 600s ceiling.
             - ``phase_cache`` is thread-path-only by construction, not by
               convention: the Temporal activity (``temporal/activities.py``)
               calls ``run_single_phase`` directly and never this method, and
@@ -650,6 +661,13 @@ class BrandingTeamOrchestrator:
             - Only a non-degraded phase output is ever stored in ``cache``; a
               degraded (default-constructed) output is returned but never
               cached, so a transient parse failure cannot poison a later call.
+            - No deadline is shared across the sequential ``run_single_phase``
+              calls this makes: each gets its own fresh execution/node
+              timeout budget (see ``run_single_phase``), so a call with
+              several misses can take up to roughly the sum of those
+              per-phase budgets -- not capped at any single overall deadline
+              the way the monolithic-graph path's one execution timeout caps
+              the whole run.
         """
         upstream_models: dict[BrandPhase, BaseModel] = {}
         prior_outputs: dict[str, dict] = {}
@@ -854,11 +872,12 @@ class BrandingTeamOrchestrator:
         store: Optional["BrandingStore"] = None,
         client_id: Optional[str] = None,
         brand_id: Optional[str] = None,
-        phase_cache: Optional[PhaseOutputCache] = None,
+        phase_cache: Optional[PhaseOutputCache] = PhaseOutputCache(),
     ) -> TeamOutput:
         """Convenience method: run the pipeline up to (and including) a specific
-        phase. Accepts an optional ``phase_cache`` to reuse cached phase
-        outputs (see ``run()``)."""
+        phase. Mirrors ``run()``'s ``phase_cache`` default -- a fresh
+        ``PhaseOutputCache()`` unless the caller passes ``phase_cache=None``
+        explicitly to force the monolithic-graph path (see ``run()``)."""
         return self.run(
             mission=mission,
             human_review=human_review,
