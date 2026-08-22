@@ -379,8 +379,9 @@ every downstream phase's cached entry without any separate invalidation
 step. A caller can still get the original cache-free behavior — one
 monolithic `build_branding_graph` invocation covering every phase up to
 `target_phase`, exactly as before this parameter existed — by passing
-`phase_cache=None` explicitly; `run_phase()` (`orchestrator.py:840`)
-mirrors the same default for the same reason.
+`_use_monolithic=True` explicitly (a testing/comparison-only escape hatch;
+no production caller sets it); `run_phase()` (`orchestrator.py:840`)
+forwards the same flag for the same reason.
 
 Because `PhaseOutputCache` is a thin view over a process-wide shared
 namespace (previous section), defaulting every caller into it means every
@@ -398,7 +399,7 @@ out of the box a redeploy does **not** cold-start the cache -- an operator
 must set one of those env vars per deploy to get that. Constructing a
 caller-local `PhaseOutputCache()` does **not** provide isolation either:
 every instance in a process addresses the same shared entries by design
-(previous section) -- `phase_cache=None` (the monolithic-graph path) is
+(previous section) -- `_use_monolithic=True` (the monolithic-graph path) is
 the only way a caller currently opts out of stale-entry risk.
 
 `_run_phases_with_cache` also changes the timeout envelope: it shares no
