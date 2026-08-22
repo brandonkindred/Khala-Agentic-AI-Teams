@@ -5,16 +5,19 @@ Proves that ``BackendDevelopmentAgent`` and ``FrontendDevelopmentAgent`` — now
 re-expressed as thin ``ConfigDrivenV2DevelopmentAgent`` subclasses over
 ``V2TeamConfig`` — behave identically to their pre-change implementations for
 representative runs. The config/property axes (default_language,
-conventions_for, tool_agent_kinds, extra_review_clause,
-build_task_requirements) against each team's *real* values are already
-proven by ``test_v2_team_config.py`` (``TestBackendParity``/
-``TestFrontendParity``) and ``test_v2_config_orchestrator.py``
-(``TestBackendConfigParity``/``TestFrontendConfigParity``) -- this module
-doesn't re-assert them. It instead exercises what's unique to the real
-production classes:
+conventions_for, extra_review_clause, build_task_requirements) against each
+team's *real* values are already proven by ``test_v2_team_config.py``
+(``TestBackendParity``/``TestFrontendParity``) and
+``test_v2_config_orchestrator.py`` (``TestBackendConfigParity``/
+``TestFrontendConfigParity``) -- this module doesn't re-assert them. It
+instead exercises what's unique to the real production classes:
 
 - That each agent is wired to its module-level config singleton
   (``BACKEND_CONFIG``/``FRONTEND_CONFIG``), not a copy
+- ``tool_agent_kinds`` read through that real singleton against the enum --
+  the other files' parity classes build a synthetic ``V2TeamConfig``
+  straight from the enum, so only this catches ``BACKEND_CONFIG``/
+  ``FRONTEND_CONFIG`` themselves drifting from it
 - The real tool-agent registry actually constructs (via
   ``_build_and_validate_tool_agents``)
 - The frontend accessibility-verification note's content and exact
@@ -51,11 +54,14 @@ class TestBackendOrchestratorParity:
     wired to the module-level ``BACKEND_CONFIG`` singleton, its tool-agent
     registry actually constructs, and a full mocked ``run_workflow`` drives
     config-resolved values into deliver. The config/property axes
-    (default_language, conventions_for, tool_agent_kinds, extra_review_clause,
+    (default_language, conventions_for, extra_review_clause,
     build_task_requirements) are already proven against backend's real
     values by ``test_v2_team_config.py::TestBackendParity`` and
     ``test_v2_config_orchestrator.py::TestBackendConfigParity`` -- not
-    re-asserted here.
+    re-asserted here. ``tool_agent_kinds`` *is* kept, though: those other
+    classes build a synthetic ``V2TeamConfig`` straight from the enum, so
+    they can't catch the production ``BACKEND_CONFIG`` singleton itself
+    drifting from it; only reading through the real config here can.
     """
 
     def _make_agent(self):
@@ -83,6 +89,21 @@ class TestBackendOrchestratorParity:
 
         agent = self._make_agent()
         assert agent.config is BACKEND_CONFIG
+
+    def test_tool_agent_kinds_match_enum_excluding_general(self):
+        """The *production* ``BACKEND_CONFIG`` singleton's registered kinds match
+        the enum -- unlike ``TestBackendParity``/``TestBackendConfigParity``
+        (whose ``_build()`` helpers construct a fresh, synthetic ``V2TeamConfig``
+        straight from the enum), this reads ``tool_agent_kinds`` off the real
+        agent/config, so it would catch ``BACKEND_CONFIG`` itself drifting from
+        the enum it's meant to mirror."""
+        from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
+
+        agent = self._make_agent()
+        expected = frozenset(
+            k.value for k in ToolAgentKind if k is not ToolAgentKind.GENERAL
+        )
+        assert agent.tool_agent_kinds == expected
 
     def test_build_task_requirements_empty_base_returns_empty(self):
         """Empty base + empty clause == empty."""
@@ -237,12 +258,15 @@ class TestFrontendOrchestratorParity:
     wired to the module-level ``FRONTEND_CONFIG`` singleton, its tool-agent
     registry actually constructs, and a full mocked ``run_workflow`` drives
     config-resolved values into deliver. The config/property axes
-    (default_language, conventions_for, tool_agent_kinds) are already
-    proven against frontend's real values by
-    ``test_v2_team_config.py::TestFrontendParity`` and
-    ``test_v2_config_orchestrator.py::TestFrontendConfigParity`` -- not
-    re-asserted here. The accessibility-clause *content* and its exact
-    append structure are kept below since neither other file checks them.
+    (default_language, conventions_for) are already proven against
+    frontend's real values by ``test_v2_team_config.py::TestFrontendParity``
+    and ``test_v2_config_orchestrator.py::TestFrontendConfigParity`` -- not
+    re-asserted here. ``tool_agent_kinds`` *is* kept, though: those other
+    classes build a synthetic ``V2TeamConfig`` straight from the enum, so
+    they can't catch the production ``FRONTEND_CONFIG`` singleton itself
+    drifting from it; only reading through the real config here can. The
+    accessibility-clause *content* and its exact append structure are also
+    kept since neither other file checks them.
     """
 
     def _make_agent(self):
@@ -270,6 +294,21 @@ class TestFrontendOrchestratorParity:
 
         agent = self._make_agent()
         assert agent.config is FRONTEND_CONFIG
+
+    def test_tool_agent_kinds_match_enum_excluding_general(self):
+        """The *production* ``FRONTEND_CONFIG`` singleton's registered kinds match
+        the enum -- unlike ``TestFrontendParity``/``TestFrontendConfigParity``
+        (whose ``_build()`` helpers construct a fresh, synthetic ``V2TeamConfig``
+        straight from the enum), this reads ``tool_agent_kinds`` off the real
+        agent/config, so it would catch ``FRONTEND_CONFIG`` itself drifting from
+        the enum it's meant to mirror."""
+        from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+
+        agent = self._make_agent()
+        expected = frozenset(
+            k.value for k in ToolAgentKind if k is not ToolAgentKind.GENERAL
+        )
+        assert agent.tool_agent_kinds == expected
 
     def test_conventions_map_has_exactly_one_key(self):
         """Frontend's conventions map contains only _default — no language-specific entries."""
