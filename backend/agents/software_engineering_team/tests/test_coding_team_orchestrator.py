@@ -29,6 +29,7 @@ from software_engineering_team.models import (
     TaskStatus,
 )
 from software_engineering_team.shared.team_lead_base import TeamLeadSharedState
+from software_engineering_team.swarm_review import serialize_review_cache
 from software_engineering_team.task_graph import TaskGraphService
 from software_engineering_team.team_routing import (
     _BACKEND_V2_STACK_SPEC,
@@ -372,6 +373,28 @@ def test_swarm_completes_when_dependency_fails(tmp_path, monkeypatch):
 
 
 # ----------------------------------------------------- review-verdict cache (_review_verdict_cache)
+
+
+def test_export_review_cache_empty_when_nothing_reviewed_yet(tmp_path):
+    """export_review_cache() on a freshly-constructed swarm (no reviews run) returns []."""
+    swarm, _graph = _make_swarm(tmp_path, StubTechLead(approved=True), [StubWorker("a1")])
+    assert swarm.export_review_cache() == []
+
+
+def test_export_review_cache_matches_serialize_review_cache_of_live_cache(tmp_path, monkeypatch):
+    """export_review_cache() returns exactly serialize_review_cache(_review_verdict_cache)."""
+    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 20)
+    _patch_git(monkeypatch, diff="some diff")
+    tech_lead = StubTechLead(approved=True)
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+
+    swarm._review_and_merge(lambda **kw: None)
+
+    assert swarm._review_verdict_cache  # sanity: a verdict was actually cached
+    assert swarm.export_review_cache() == serialize_review_cache(swarm._review_verdict_cache)
 
 
 def test_identical_diff_reuses_cached_verdict_without_second_review_call(tmp_path, monkeypatch):
@@ -1011,6 +1034,9 @@ def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
             }
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
 
@@ -1068,6 +1094,9 @@ def test_terminal_status_write_survives_slow_pending_graph_persist(tmp_path, mon
             }
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
 
@@ -1133,6 +1162,9 @@ def test_failed_background_persist_write_is_retried_at_round_boundary(tmp_path, 
             }
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         aborted = False
 
         def __init__(self, *a, **k):
@@ -1215,6 +1247,9 @@ def test_status_write_survives_concurrent_worker_graph_mutation(tmp_path, monkey
     mutation_enqueued = threading.Event()
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         aborted = False
 
         def __init__(self, *a, **k):
@@ -1318,6 +1353,9 @@ def test_background_graph_write_after_pause_carries_pause_phase_not_stale_coding
     mutation_enqueued = threading.Event()
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         aborted = False
 
         def __init__(self, *a, **k):
@@ -1407,6 +1445,9 @@ def test_failed_direct_write_does_not_leak_into_background_graph_persist(tmp_pat
             }
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         aborted = False
 
         def __init__(self, *a, **k):
@@ -2549,6 +2590,9 @@ def test_resume_from_snapshot_skips_planning(tmp_path, monkeypatch):
     captured: Dict[str, Any] = {}
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
             captured["graph"] = self.graph
@@ -2614,6 +2658,9 @@ def test_fresh_run_persists_stack_specs(tmp_path, monkeypatch):
             }
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
 
@@ -2661,6 +2708,9 @@ def test_fresh_run_defaults_missing_task_id(tmp_path, monkeypatch):
     captured: Dict[str, TaskGraphService] = {}
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
             captured["graph"] = self.graph
@@ -2711,6 +2761,9 @@ def test_fresh_run_preserves_falsy_task_id(tmp_path, monkeypatch):
     captured: Dict[str, TaskGraphService] = {}
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
             captured["graph"] = self.graph
@@ -2784,6 +2837,9 @@ def test_task_creation_grooms_every_task_after_planning(tmp_path, monkeypatch):
     captured: Dict[str, Any] = {}
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             captured["graph"] = k["graph"]
             call_order.append("swarm_built")
@@ -2858,6 +2914,9 @@ def test_task_creation_grooming_failure_falls_back_for_that_task_only(
     captured: Dict[str, Any] = {}
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             captured["graph"] = k["graph"]
 
@@ -2932,6 +2991,9 @@ def test_groom_fanout_runs_concurrently(tmp_path, monkeypatch):
     captured: Dict[str, Any] = {}
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             captured["graph"] = k["graph"]
 
@@ -2994,6 +3056,9 @@ def test_groomed_acceptance_criteria_reaches_code_review(tmp_path, monkeypatch):
     captured: Dict[str, Any] = {}
 
     class CapturingSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             captured["graph"] = k["graph"]
 
@@ -3116,6 +3181,9 @@ def test_status_is_completed_when_no_failures(tmp_path, monkeypatch):
             }
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
 
@@ -3502,6 +3570,9 @@ def test_whole_job_already_complete_when_all_resolved_without_changes(tmp_path, 
             }
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
 
@@ -3551,6 +3622,9 @@ def test_not_already_complete_when_a_task_is_left_non_terminal(tmp_path, monkeyp
             }
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
 
@@ -3623,6 +3697,9 @@ def test_planning_already_complete_short_circuits_swarm(tmp_path, monkeypatch):
             }
 
     class ExplodingSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             raise AssertionError("swarm must not be built when the work is already complete")
 
@@ -3750,6 +3827,9 @@ def test_orchestrator_does_not_stamp_activity_and_terminal_clears(tmp_path, monk
             return {"tasks": [], "stacks": [{"name": "backend", "tools_services": []}]}
 
     class _NoopSwarm:
+        def export_review_cache(self):
+            return []
+
         aborted = False
 
         def __init__(self, **kw):
@@ -3955,6 +4035,9 @@ def test_orchestrator_writes_job_progress_through_coding_phase(tmp_path, monkeyp
             }
 
     class _MergingSwarm:
+        def export_review_cache(self):
+            return []
+
         aborted = False
 
         def __init__(self, **kw):
@@ -4009,6 +4092,9 @@ def test_orchestrator_resume_never_regresses_progress(tmp_path, monkeypatch):
     ]
 
     class _NoopSwarm:
+        def export_review_cache(self):
+            return []
+
         aborted = False
 
         def __init__(self, **kw):
@@ -4937,6 +5023,9 @@ def _run_resume_capturing_graph(tmp_path, monkeypatch, *, retry_failed: bool):
     captured: Dict[str, Any] = {}
 
     class _StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *, graph, **kwargs):
             captured["graph"] = graph
             self.aborted = False
