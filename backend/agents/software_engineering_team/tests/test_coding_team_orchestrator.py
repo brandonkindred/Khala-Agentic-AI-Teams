@@ -1792,7 +1792,11 @@ def test_pinned_agent_reserved_before_unrelated_tech_lead_assignment(tmp_path):
     unrelated task's assignment in the same response can never claim it first and starve the
     pinned task — even when the Tech Lead's own (wrong) proposal for the pinned task is listed
     before a proposal that would otherwise legitimately claim the pinned agent for something
-    else."""
+    else.
+
+    Two unpinned, untargeted tasks (rather than one) are left in play after the pinned task is
+    reserved, so the round stays ambiguous for the deterministic fast path (two candidates each)
+    and this exercises the Tech-Lead LLM path the test is actually about."""
 
     class AdversarialOrderingTL(StubTechLead):
         def run_assignments(self, agent_ids, ready_tasks, free_agents):
@@ -1806,20 +1810,22 @@ def test_pinned_agent_reserved_before_unrelated_tech_lead_assignment(tmp_path):
                 ]
             }
 
-    workers = [StubWorker("frontend_v2"), StubWorker("backend_v2")]
+    workers = [StubWorker("frontend_v2"), StubWorker("backend_v2"), StubWorker("devops")]
     swarm, graph = _make_swarm(tmp_path, AdversarialOrderingTL(approved=True), workers)
     graph.add_task("pinned_task", title="Pinned")
     graph.update_task(
         "pinned_task", feature_branch="feature/pinned", feature_branch_agent_id="backend_v2"
     )
     graph.add_task("other_task", title="Other")
+    graph.add_task("third_task", title="Third")
 
-    swarm._assign_tasks(graph.get_tasks(), ["frontend_v2", "backend_v2"])
+    swarm._assign_tasks(graph.get_tasks(), ["frontend_v2", "backend_v2", "devops"])
 
     assert graph.get_task("pinned_task").assigned_agent_id == "backend_v2"
     # other_task lost the race for backend_v2 and stays unassigned this round rather than
     # starving the pinned task — it will be picked up once an agent frees up.
     assert graph.get_task("other_task").assigned_agent_id is None
+    assert graph.get_task("third_task").assigned_agent_id is None
 
 
 def test_assignment_normalizes_backend_owned_target_aliases(tmp_path):
