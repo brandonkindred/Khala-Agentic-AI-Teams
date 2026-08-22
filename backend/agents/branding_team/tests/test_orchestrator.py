@@ -2696,7 +2696,7 @@ def test_run_with_phase_cache_matches_cold_monolithic_run() -> None:
 
     with _patch_graph_invoke(ALL_PHASES):
         cold_orchestrator = BrandingTeamOrchestrator()
-        cold_result = cold_orchestrator.run(mission=mission, human_review=human_review)
+        cold_result = cold_orchestrator.run(mission=mission, human_review=human_review, phase_cache=None)
 
     cache = PhaseOutputCache()
     miss_orchestrator = BrandingTeamOrchestrator()

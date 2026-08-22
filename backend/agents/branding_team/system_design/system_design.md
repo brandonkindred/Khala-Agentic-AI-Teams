@@ -358,23 +358,42 @@ degrades to a miss/no-op, never an exception).
 ### Wiring status
 
 `orchestrator.py` is wired: `run()` accepts an optional `phase_cache:
-PhaseOutputCache` (`orchestrator.py:616`). When it's `None` (the default),
-`run()` is unchanged — one monolithic `build_branding_graph` invocation
-covering every phase up to `target_phase`, exactly as before this
-parameter existed. When a `phase_cache` is supplied, `run()` instead calls
-`_run_phases_with_cache()` (`orchestrator.py:746`), which walks
-`PHASE_ORDER` one phase at a time: for each phase it computes
-`phase_input_hash(phase, mission, upstream_outputs)` from the mission and
-every upstream output produced so far *this call* (cache hits or fresh
-runs), checks it against `phase_cache.get()`, and on a hit reuses the
-cached output without invoking the phase. On a miss it runs the phase via
-`run_single_phase()` (the same per-phase isolation `run_single_phase()` has
-always used for Temporal activities) and, only if the result isn't
-degraded, stores it with `phase_cache.put()` — a degraded output is never
-cached, so a transient parse failure can't poison a later call. Because
-each phase's hash always reflects the upstream outputs actually used this
-call, a changed upstream phase naturally invalidates every downstream
-phase's cached entry without any separate invalidation step.
+PhaseOutputCache` (`orchestrator.py:499`), defaulting to a fresh
+`PhaseOutputCache()` — per-phase cached execution is the default for every
+caller that doesn't pass `phase_cache` explicitly, including callers that
+predate this parameter and never opted in (`api/routes/sessions.py`,
+`api/background.py`). `run()` instead calls `_run_phases_with_cache()`
+(`orchestrator.py:624`), which walks `PHASE_ORDER` one phase at a time: for
+each phase it computes `phase_input_hash(phase, mission, upstream_outputs)`
+from the mission and every upstream output produced so far *this call*
+(cache hits or fresh runs), checks it against `phase_cache.get()`, and on a
+hit reuses the cached output without invoking the phase. On a miss it runs
+the phase via `run_single_phase()` (the same per-phase isolation
+`run_single_phase()` has always used for Temporal activities) and, only if
+the result isn't degraded, stores it with `phase_cache.put()` — a degraded
+output is never cached, so a transient parse failure can't poison a later
+call. Because each phase's hash always reflects the upstream outputs
+actually used this call, a changed upstream phase naturally invalidates
+every downstream phase's cached entry without any separate invalidation
+step. A caller can still get the original cache-free behavior — one
+monolithic `build_branding_graph` invocation covering every phase up to
+`target_phase`, exactly as before this parameter existed — by passing
+`phase_cache=None` explicitly; `run_phase()` (`orchestrator.py:840`)
+mirrors the same default for the same reason.
+
+Because `PhaseOutputCache` is a thin view over a process-wide shared
+namespace (previous section), defaulting every caller into it means every
+thread-path run in the same process — regardless of caller — can serve or
+populate the same cache entries, not just the conversation call sites that
+deliberately opted in before this default changed. `phase_input_hash` folds
+in only the phase, the mission, and upstream outputs (see above); it does
+not fold in the LLM model, prompt template, or agent code version, so a
+cached entry survives those changing mid-process. The namespace is
+build-id-suffixed (`cache_namespace_for`, prior section) so a fresh deploy
+still cold-starts the cache; a mid-process prompt/model/code change without
+a redeploy does not. Callers for whom that staleness window is
+unacceptable must pass their own isolated `PhaseOutputCache` or
+`phase_cache=None`.
 
 `api/conversation.py` holds and consumes a per-conversation storage slot:
 `_get_or_create_phase_cache()` returns a `PhaseOutputCache` retained
@@ -390,10 +409,14 @@ output, so that short-circuit remains the outermost fast path and an
 unchanged mission never even reaches the phase cache. When a mission edit
 does trigger a run, `orchestrator.run` walks each phase via
 `_run_phases_with_cache`, so only the earliest phase whose input hash
-changed — and everything downstream of it — is recomputed. The rest of the
-conversation layer (`api/routes/conversations.py`, `assistant/agent.py`,
-`assistant/store.py`, `assistant/prompts.py`) remains fully unwired — no
-caller there constructs or references a `PhaseOutputCache` at all.
+changed — and everything downstream of it — is recomputed. This gives the
+conversation layer a per-conversation cache identity even though the
+underlying storage is process-wide; other callers that don't construct
+their own `PhaseOutputCache` share the single default instance instead. The
+rest of the conversation layer (`api/routes/conversations.py`,
+`assistant/agent.py`, `assistant/store.py`, `assistant/prompts.py`) remains
+fully unwired — no caller there constructs or references a
+`PhaseOutputCache` at all.
 `tests/test_memoization_isolation.py` enforces the fully-unwired boundary
 structurally for those four files (it no longer guards `orchestrator.py`,
 which is deliberately wired, or `api/conversation.py`, which deliberately
