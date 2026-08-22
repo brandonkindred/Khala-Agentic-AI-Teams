@@ -6,6 +6,25 @@ of the 37 branding-team agent system prompts (`backend/agents/branding_team/agen
 *which upstream phase's output does this agent's system prompt actually
 reference?*
 
+**Counting methodology (for reproducibility):** "37" counts distinct
+`make_*` factory functions / distinct `_..._PROMPT = AgentPromptSpec(...)`
+call sites in `agents.py` — one per named agent role, matching this
+issue's own acceptance criteria ("Analysis covers all 37 agents across 5
+phases"). Two other counts exist depending on what's being counted, and
+this document intentionally uses neither: **39** is the number of graph
+*node instances* actually built (Phase 3's `make_moodboard_conceptualist`
+factory is instantiated 3× with distinct style variants — Editorial,
+Minimalist, Bold — each producing its own node and its own rendered
+prompt text, so 37 factories become 39 nodes); **32** is the number of
+structurally distinct prompt *template shapes* if Phase 4's six
+`_make_channel_guide`-built agents (`website_guide`, `social_guide`,
+`email_guide`, `events_guide`, `partnerships_guide`, `internal_guide`)
+are collapsed into the one shared template they're generated from. Every
+per-agent row below is evaluated against that agent's own fully-rendered
+prompt text regardless of which count it falls under, so the "which
+upstream phase does X reference" evidence is unaffected either way — only
+the summary counts in headers below use the 37-factory convention.
+
 **Why:** `_PhaseSpec.context_phases` in `orchestrator.py` (`_PHASE_SPEC`,
 `~orchestrator.py:357-396`) is `()` — "no filtering" — for every phase
 today. `_phase_task` (`orchestrator.py:727-769`) already knows how to
