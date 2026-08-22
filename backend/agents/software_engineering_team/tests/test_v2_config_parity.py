@@ -214,7 +214,7 @@ class TestBackendOrchestratorParity:
         )
 
         from software_engineering_team.backend_code_v2_team.phases import (
-            documentation as doc_phase,
+            _profile as doc_phase,
         )
 
         monkeypatch.setattr(
@@ -439,7 +439,7 @@ class TestFrontendOrchestratorParity:
         )
 
         from software_engineering_team.frontend_code_v2_team.phases import (
-            documentation as doc_phase,
+            _profile as doc_phase,
         )
 
         monkeypatch.setattr(

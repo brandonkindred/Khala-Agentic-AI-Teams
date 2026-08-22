@@ -6,7 +6,7 @@ from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this mod
 
 from software_engineering_team.shared.tool_agent_base import BaseReviewToolAgent
 
-from ...output_templates import parse_review_template
+from ...phases._profile import parse_review_template
 from ...prompts import SECURITY_TOOL_AGENT_REVIEW_PROMPT
 
 MAX_RELEVANT_CODE_CHARS = 8_000

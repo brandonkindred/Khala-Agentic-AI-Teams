@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
-from ...output_templates import parse_files_and_summary_template
+from ...phases._profile import parse_files_and_summary_template
 from ...prompts import FILES_OUTPUT_TEMPLATE_INSTRUCTIONS
 from ..static_agents import FileGeneratorToolAgent
 

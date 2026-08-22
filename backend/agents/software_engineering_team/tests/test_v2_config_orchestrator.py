@@ -43,12 +43,18 @@ def _make_config(
     stack_profile: StackProfile | None = None,
     tool_agent_kinds: frozenset[str] = frozenset({"security", "testing_qa"}),
     extra_review_clause: str = "",
+    output_template_path_prefixes: tuple[str, ...] = ("backend/", "./backend/"),
+    output_template_allowed_languages: tuple[str, ...] = ("python", "java"),
+    output_template_coerce_unknown: bool = True,
 ) -> V2TeamConfig:
     """Build a minimal V2TeamConfig for tests, defaulting to a synthetic StackProfile."""
     return V2TeamConfig(
         stack_profile=stack_profile or _make_stack_profile(),
         tool_agent_kinds=tool_agent_kinds,
         extra_review_clause=extra_review_clause,
+        output_template_path_prefixes=output_template_path_prefixes,
+        output_template_allowed_languages=output_template_allowed_languages,
+        output_template_coerce_unknown=output_template_coerce_unknown,
     )
 
 
@@ -355,6 +361,9 @@ class TestBackendConfigParity:
             stack_profile=BackendDevelopmentAgent.PROFILE,
             tool_agent_kinds=frozenset(k.value for k in ToolAgentKind),
             extra_review_clause="",
+            output_template_path_prefixes=("backend/", "./backend/"),
+            output_template_allowed_languages=("python", "java"),
+            output_template_coerce_unknown=True,
         )
         return ConfigDrivenV2DevelopmentAgent(MagicMock(), config)
 
@@ -425,6 +434,15 @@ class TestFrontendConfigParity:
                 k.value for k in FrontendToolAgentKind if k is not FrontendToolAgentKind.GENERAL
             ),
             extra_review_clause=_ACCESSIBILITY_VERIFY_NOTE,
+            output_template_path_prefixes=("frontend/", "./frontend/"),
+            output_template_allowed_languages=(
+                "angular",
+                "react",
+                "vue",
+                "typescript",
+                "javascript",
+            ),
+            output_template_coerce_unknown=False,
         )
         return ConfigDrivenV2DevelopmentAgent(MagicMock(), config)
 

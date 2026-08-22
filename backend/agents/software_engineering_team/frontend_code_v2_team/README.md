@@ -254,15 +254,13 @@ frontend_code_v2_team/
 ├── orchestrator.py        # FrontendCodeV2TeamLead, FrontendDevelopmentAgent
 ├── models.py              # Phase, Microtask, all result models
 ├── prompts.py             # LLM prompts for phases
-├── output_templates.py    # Code templates
 ├── phases/
+│   ├── _profile.py        # Stack profile, V2TeamConfig, and config-driven
+│   │                       # documentation/planning/output-template bindings
 │   ├── setup.py           # Repo initialization
-│   ├── planning.py        # Microtask generation
 │   ├── execution.py       # Run microtasks via tool agents
 │   ├── review.py          # Code review, a11y, performance
-│   ├── problem_solving.py # Fix issues
-│   ├── documentation.py   # Add docs, Storybook
-│   └── deliver.py         # Commit and merge
+│   └── problem_solving.py # Fix issues
 └── tool_agents/
     ├── state_management/  # State management setup
     ├── auth/              # Auth UI components

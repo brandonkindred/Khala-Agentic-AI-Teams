@@ -25,7 +25,7 @@ this object into the orchestrator; as of this change no team does so yet.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import FrozenSet
+from typing import FrozenSet, Tuple
 
 from software_engineering_team.shared.stack_profile import StackProfile
 
@@ -61,3 +61,19 @@ class V2TeamConfig:
     frontend's accessibility-verification note, restoring what its retired
     ``REVIEW_PROMPT`` used to state explicitly). ``""`` means no extra
     clause (e.g. backend, whose code has no UI to check accessibility on)."""
+
+    output_template_path_prefixes: Tuple[str, ...]
+    """Path prefixes this team's output-template parsers strip from file
+    paths (e.g. ``("backend/", "./backend/")``). Passed straight through to
+    ``make_output_templates``."""
+
+    output_template_allowed_languages: Tuple[str, ...]
+    """Language values this team's output-template parsers accept (e.g.
+    ``("python", "java")``). Passed straight through to
+    ``make_output_templates``; the default language for an unrecognised
+    value is ``stack_profile.default_language`` — not duplicated here."""
+
+    output_template_coerce_unknown: bool
+    """Whether this team's output-template parsers coerce an unrecognised
+    language value to the default rather than passing it through verbatim.
+    Passed straight through to ``make_output_templates``."""

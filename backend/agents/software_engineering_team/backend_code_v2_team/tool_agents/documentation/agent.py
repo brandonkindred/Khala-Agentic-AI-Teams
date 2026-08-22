@@ -13,7 +13,7 @@ from software_engineering_team.shared.tool_agent_documentation import (
 )
 
 from ...models import ReviewIssue
-from ...output_templates import parse_problem_solving_single_issue_template, parse_review_template
+from ...phases._profile import parse_problem_solving_single_issue_template, parse_review_template
 from ...prompts import (
     DOCUMENTATION_MICROTASK_PROMPT,
     DOCUMENTATION_PROBLEM_SOLVE_PROMPT,

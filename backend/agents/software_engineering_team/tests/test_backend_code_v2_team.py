@@ -340,7 +340,7 @@ class TestSetupPhase:
 
 class TestPlanningPhase:
     def test_language_detection_python(self, tmp_path):
-        from backend_code_v2_team.phases.planning import _detect_language
+        from backend_code_v2_team.phases._profile import _detect_language
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -355,7 +355,7 @@ class TestPlanningPhase:
         assert _detect_language(tmp_path, task) == "python"
 
     def test_language_detection_java(self, tmp_path):
-        from backend_code_v2_team.phases.planning import _detect_language
+        from backend_code_v2_team.phases._profile import _detect_language
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -370,7 +370,7 @@ class TestPlanningPhase:
         assert _detect_language(tmp_path, task) == "java"
 
     def test_language_detection_from_description(self, tmp_path):
-        from backend_code_v2_team.phases.planning import _detect_language
+        from backend_code_v2_team.phases._profile import _detect_language
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -384,7 +384,7 @@ class TestPlanningPhase:
         assert _detect_language(tmp_path, task) == "java"
 
     def test_parse_planning_output(self):
-        from backend_code_v2_team.phases.planning import _parse_planning_output
+        from backend_code_v2_team.phases._profile import _parse_planning_output
 
         raw = {
             "microtasks": [
@@ -411,7 +411,7 @@ class TestPlanningPhase:
         assert result.microtasks[1].depends_on == ["mt-1"]
 
     def test_run_planning_fallback(self, tmp_path):
-        from backend_code_v2_team.phases.planning import run_planning
+        from backend_code_v2_team.phases._profile import run_planning
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -1008,7 +1008,7 @@ class TestBackendDevelopmentAgentBranchReuse:
                 summary="ready",
             )
 
-        from backend_code_v2_team.phases import documentation as doc_phase
+        from backend_code_v2_team.phases import _profile as doc_phase
 
         monkeypatch.setattr(orch, "checkout_branch", _checkout_branch)
         monkeypatch.setattr(
@@ -1097,7 +1097,7 @@ class TestBackendDevelopmentAgentBranchReuse:
             ),
         )
 
-        from backend_code_v2_team.phases import documentation as doc_phase
+        from backend_code_v2_team.phases import _profile as doc_phase
 
         monkeypatch.setattr(
             doc_phase,

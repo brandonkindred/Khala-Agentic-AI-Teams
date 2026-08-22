@@ -301,7 +301,7 @@ class TestSetupPhase:
 
 class TestPlanningPhase:
     def test_language_detection_angular(self, tmp_path):
-        from frontend_code_v2_team.phases.planning import _detect_language
+        from frontend_code_v2_team.phases._profile import _detect_language
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -316,7 +316,7 @@ class TestPlanningPhase:
         assert _detect_language(tmp_path, task) == "angular"
 
     def test_language_detection_from_description(self, tmp_path):
-        from frontend_code_v2_team.phases.planning import _detect_language
+        from frontend_code_v2_team.phases._profile import _detect_language
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -330,7 +330,7 @@ class TestPlanningPhase:
         assert _detect_language(tmp_path, task) == "react"
 
     def test_parse_planning_output(self):
-        from frontend_code_v2_team.phases.planning import _parse_planning_output
+        from frontend_code_v2_team.phases._profile import _parse_planning_output
 
         raw = {
             "microtasks": [
@@ -358,7 +358,7 @@ class TestPlanningPhase:
         assert result.language == "angular"
 
     def test_run_planning_fallback(self, tmp_path):
-        from frontend_code_v2_team.phases.planning import run_planning
+        from frontend_code_v2_team.phases._profile import run_planning
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -511,7 +511,7 @@ class TestFrontendDevelopmentAgentBranchReuse:
                 summary="ready",
             )
 
-        from frontend_code_v2_team.phases import documentation as doc_phase
+        from frontend_code_v2_team.phases import _profile as doc_phase
 
         monkeypatch.setattr(orch, "checkout_branch", _checkout_branch)
         monkeypatch.setattr(
@@ -600,7 +600,7 @@ class TestFrontendDevelopmentAgentBranchReuse:
             ),
         )
 
-        from frontend_code_v2_team.phases import documentation as doc_phase
+        from frontend_code_v2_team.phases import _profile as doc_phase
 
         monkeypatch.setattr(
             doc_phase,

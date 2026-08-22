@@ -33,12 +33,12 @@ from software_engineering_team.shared.phases.problem_solving import (
 
 from .. import models as _models
 from ..models import Microtask, ProblemSolvingResult, ReviewIssue, ReviewResult, ToolAgentKind
-from ..output_templates import (
+from ..prompts import BATCH_FIX_PROMPT, PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
+from ._profile import (
+    PROFILE,
     parse_batch_fix_template,
     parse_problem_solving_single_issue_template,
 )
-from ..prompts import BATCH_FIX_PROMPT, PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
-from ._profile import PROFILE
 
 __all__ = [
     "MAX_ITERATIONS_PER_ISSUE",

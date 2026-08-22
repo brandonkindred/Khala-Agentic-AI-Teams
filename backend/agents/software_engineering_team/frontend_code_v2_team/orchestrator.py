@@ -33,9 +33,8 @@ from .models import (
     MicrotaskReviewConfig,
     ToolAgentKind,
 )
-from .phases._profile import FRONTEND_CONFIG, PROFILE
+from .phases._profile import FRONTEND_CONFIG, PROFILE, run_planning
 from .phases.execution import ReviewDependencies, run_execution_with_review_gates
-from .phases.planning import run_planning
 from .phases.setup import configure_quality_tooling, run_setup
 from .prompts import DELIVER_COMMIT_MSG_TEMPLATE
 
@@ -170,7 +169,7 @@ class FrontendDevelopmentAgent(ConfigDrivenV2DevelopmentAgent):
         a feature branch and leaves it ready for external Tech Lead review instead of
         merging it into the development branch.
         """
-        from .phases.documentation import run_documentation_phase
+        from .phases._profile import run_documentation_phase
 
         return self._run_development_workflow(
             repo_path=repo_path,
