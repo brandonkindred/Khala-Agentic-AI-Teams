@@ -59,7 +59,9 @@ def _issue(*, file_path="x.py", team="backend_code_v2_team", **overrides):
     else:
         from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
 
-    base = dict(source="documentation", severity="low", description="missing docstring", file_path=file_path)
+    base = dict(
+        source="documentation", severity="low", description="missing docstring", file_path=file_path
+    )
     base.update(overrides)
     return ReviewIssue(**base)
 
