@@ -112,12 +112,20 @@ def deserialize_review_cache(data: Any) -> Dict[str, "tuple[str, Dict[str, Any]]
         - Non-list ``data`` (None, str, int, dict, ...) returns ``{}``.
         - Each list entry is included only when it is a dict containing all
           of ``task_id``, ``cache_key``, ``verdict``; ``task_id`` and
-          ``cache_key`` are both ``str``; and ``verdict`` is itself a dict —
-          entries failing any check are skipped. The ``task_id``/``cache_key``
-          type check also guards the dict-key assignment below against an
-          unhashable ``task_id`` (e.g. a list or dict smuggled into corrupted
-          JSON), which would otherwise raise ``TypeError`` instead of being
-          skipped.
+          ``cache_key`` are both ``str``; and ``verdict`` is a dict with a
+          real ``bool`` ``approved`` field — entries failing any check are
+          skipped. The ``task_id``/``cache_key`` type check also guards the
+          dict-key assignment below against an unhashable ``task_id`` (e.g.
+          a list or dict smuggled into corrupted JSON), which would
+          otherwise raise ``TypeError`` instead of being skipped. The
+          ``approved`` check matters beyond crash-safety: ``_compute_review``
+          only ever caches a non-``error`` ``run_code_review`` verdict, which
+          always carries a real bool ``approved``, so this rejects exactly
+          the corrupted shapes that could otherwise be misread as a genuine
+          approve/reject decision (e.g. ``_apply_review_decision`` treats
+          any truthy ``review.get("approved")`` as approval, so a corrupted
+          non-bool like ``"false"`` would wrongly merge the task) while
+          never rejecting a verdict this module actually wrote.
         - Returns a dict keyed by ``task_id`` with ``(cache_key, verdict)``
           tuple values, mirroring
           ``CodingTeamSwarm._review_verdict_cache``'s declared type.
@@ -145,6 +153,8 @@ def deserialize_review_cache(data: Any) -> Dict[str, "tuple[str, Dict[str, Any]]
             or not isinstance(cache_key, str)
             or not isinstance(verdict, dict)
         ):
+            continue
+        if not isinstance(verdict.get("approved"), bool):
             continue
         result[task_id] = (cache_key, verdict)
     return result
