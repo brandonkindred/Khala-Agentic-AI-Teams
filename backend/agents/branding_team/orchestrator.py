@@ -496,7 +496,7 @@ class BrandingTeamOrchestrator:
         include_market_research: bool = False,
         include_design_assets: bool = False,
         target_phase: Optional[BrandPhase] = None,
-        phase_cache: Optional[PhaseOutputCache] = None,
+        phase_cache: Optional[PhaseOutputCache] = PhaseOutputCache(),
     ) -> TeamOutput:
         """Run the branding pipeline up to and including *target_phase*
         (default: all phases). When *target_phase* is None, every phase is
@@ -524,11 +524,17 @@ class BrandingTeamOrchestrator:
               during the run (``append_brand_version`` returns ``None``), so the
               caller can mark the run as failed instead of reporting success
               without persistence.
-            - When ``phase_cache`` is ``None`` (the default), execution is
-              identical to omitting it entirely -- the pipeline always runs as
-              one monolithic graph invocation, exactly as before this
+            - ``phase_cache`` defaults to a fresh ``PhaseOutputCache()`` (a
+              thin view over the shared, process-wide phase cache -- see
+              ``PhaseOutputCache``), so per-phase cached execution is now the
+              default for every caller that does not pass ``phase_cache``
+              explicitly.
+            - When ``phase_cache`` is ``None`` -- only when a caller
+              explicitly passes ``phase_cache=None`` -- the pipeline runs as
+              one monolithic graph invocation instead, exactly as before this
               parameter existed.
-            - When ``phase_cache`` is supplied, each phase up to
+            - When ``phase_cache`` is a ``PhaseOutputCache`` (the default, or
+              any explicitly supplied instance), each phase up to
               ``target_phase`` is run in isolation (see
               ``_run_phases_with_cache``): a phase whose input hash matches a
               cached entry reuses that cached output instead of being
