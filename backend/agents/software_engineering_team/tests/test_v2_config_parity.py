@@ -4,19 +4,32 @@ Parity tests for the config-driven backend and frontend v2 orchestrators.
 Proves that ``BackendDevelopmentAgent`` and ``FrontendDevelopmentAgent`` — now
 re-expressed as thin ``ConfigDrivenV2DevelopmentAgent`` subclasses over
 ``V2TeamConfig`` — behave identically to their pre-change implementations for
-representative runs. Exercises:
+representative runs. The config/property axes (default_language,
+conventions_for, tool_agent_kinds, extra_review_clause,
+build_task_requirements) against each team's *real* values are already
+proven by ``test_v2_team_config.py`` (``TestBackendParity``/
+``TestFrontendParity``) and ``test_v2_config_orchestrator.py``
+(``TestBackendConfigParity``/``TestFrontendConfigParity``) -- this module
+doesn't re-assert them. It instead exercises what's unique to the real
+production classes:
 
-- The config-driven language default
-- The tool-agent registry (via ``_build_and_validate_tool_agents``)
-- The optional review clause (frontend's accessibility-verification note)
-- The folded conventions map
-- Full pipeline run via ``run_workflow`` verifying config values flow to deliver
+- That each agent is wired to its module-level config singleton
+  (``BACKEND_CONFIG``/``FRONTEND_CONFIG``), not a copy
+- The real tool-agent registry actually constructs (via
+  ``_build_and_validate_tool_agents``)
+- The frontend accessibility-verification note's content and exact
+  append structure (nothing else checks these)
+- Full pipeline run via ``run_workflow`` verifying config values flow to
+  deliver -- ``run_workflow`` is a thin public wrapper that immediately
+  delegates to ``_run_development_workflow``
+- Cross-team divergence: the two teams' real configs differ only on the
+  declared axes
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -33,6 +46,16 @@ from software_engineering_team.shared.v2_team_config import V2TeamConfig
 class TestBackendOrchestratorParity:
     """Prove ``BackendDevelopmentAgent`` (now a ``ConfigDrivenV2DevelopmentAgent``
     subclass) behaves identically to the pre-change hand-wired implementation.
+
+    Focuses on what's unique to the *real* production class: that it is
+    wired to the module-level ``BACKEND_CONFIG`` singleton, its tool-agent
+    registry actually constructs, and a full mocked ``run_workflow`` drives
+    config-resolved values into deliver. The config/property axes
+    (default_language, conventions_for, tool_agent_kinds, extra_review_clause,
+    build_task_requirements) are already proven against backend's real
+    values by ``test_v2_team_config.py::TestBackendParity`` and
+    ``test_v2_config_orchestrator.py::TestBackendConfigParity`` -- not
+    re-asserted here.
     """
 
     def _make_agent(self):
@@ -48,66 +71,18 @@ class TestBackendOrchestratorParity:
         assert isinstance(agent, ConfigDrivenV2DevelopmentAgent)
 
     def test_config_is_the_module_level_backend_config(self):
-        """The agent's config is the canonical BACKEND_CONFIG instance."""
+        """The agent's config is the canonical BACKEND_CONFIG instance.
+
+        ``BACKEND_CONFIG`` has no public alias (unlike ``PROFILE``, which
+        ``BackendDevelopmentAgent`` re-exposes for exactly this reason), so
+        this is a deliberate, singular reach into the team's private
+        ``phases._profile`` module -- matching the pattern established in
+        ``test_v2_config_orchestrator.py``.
+        """
         from software_engineering_team.backend_code_v2_team.phases._profile import BACKEND_CONFIG
 
         agent = self._make_agent()
         assert agent.config is BACKEND_CONFIG
-
-    def test_default_language_is_python(self):
-        """Backend's language default resolves to python through the config."""
-        assert self._make_agent().default_language == "python"
-
-    def test_default_language_matches_class_profile(self):
-        """Config-driven default_language agrees with the class-level PROFILE."""
-        from software_engineering_team.backend_code_v2_team.orchestrator import (
-            BackendDevelopmentAgent,
-        )
-
-        agent = self._make_agent()
-        assert agent.default_language == BackendDevelopmentAgent.PROFILE.default_language
-
-    def test_conventions_for_java(self):
-        """Backend's Java conventions are the real JAVA_CONVENTIONS from prompts."""
-        from software_engineering_team.backend_code_v2_team.prompts import JAVA_CONVENTIONS
-
-        agent = self._make_agent()
-        assert agent.conventions_for("java") == JAVA_CONVENTIONS
-
-    def test_conventions_for_python_falls_back_to_default(self):
-        """Python isn't a separate key — falls back to _default (PYTHON_CONVENTIONS)."""
-        from software_engineering_team.backend_code_v2_team.prompts import PYTHON_CONVENTIONS
-
-        agent = self._make_agent()
-        assert agent.conventions_for("python") == PYTHON_CONVENTIONS
-        assert agent.conventions_for("python") == agent.conventions_for("_default")
-
-    def test_conventions_for_unknown_language_falls_back_to_default(self):
-        """An unlisted language (e.g. rust) also resolves to the _default conventions."""
-        from software_engineering_team.backend_code_v2_team.prompts import PYTHON_CONVENTIONS
-
-        agent = self._make_agent()
-        assert agent.conventions_for("rust") == PYTHON_CONVENTIONS
-
-    def test_tool_agent_kinds_match_enum_excluding_general(self):
-        """Config-driven tool_agent_kinds == all ToolAgentKind values except GENERAL."""
-        from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-
-        agent = self._make_agent()
-        expected = frozenset(
-            k.value for k in ToolAgentKind if k is not ToolAgentKind.GENERAL
-        )
-        assert agent.tool_agent_kinds == expected
-
-    def test_no_extra_review_clause(self):
-        """Backend has no extra review clause (no UI to check accessibility on)."""
-        agent = self._make_agent()
-        assert agent.extra_review_clause == ""
-
-    def test_build_task_requirements_passes_base_through_unchanged(self):
-        """With no extra clause, build_task_requirements returns input unchanged."""
-        agent = self._make_agent()
-        assert agent.build_task_requirements("Build the API.") == "Build the API."
 
     def test_build_task_requirements_empty_base_returns_empty(self):
         """Empty base + empty clause == empty."""
@@ -116,10 +91,12 @@ class TestBackendOrchestratorParity:
 
     def test_stack_profile_is_the_real_profile_object(self):
         """The config's stack_profile is the team's canonical PROFILE, not a copy."""
-        from software_engineering_team.backend_code_v2_team.phases._profile import PROFILE
+        from software_engineering_team.backend_code_v2_team.orchestrator import (
+            BackendDevelopmentAgent,
+        )
 
         agent = self._make_agent()
-        assert agent._stack_profile() is PROFILE
+        assert agent._stack_profile() is BackendDevelopmentAgent.PROFILE
 
     def test_build_verify_label_from_profile(self):
         """build_verify_label resolves through the config's stack_profile."""
@@ -147,15 +124,16 @@ class TestBackendOrchestratorParity:
         agent = self._make_agent()
         agents = agent._build_and_validate_tool_agents(MagicMock())
         # Keys are ToolAgentKind enum members — their string values must match
-        built_kinds = frozenset(
-            str(k.value if hasattr(k, "value") else k) for k in agents
-        )
+        built_kinds = frozenset(k.value for k in agents)
         assert built_kinds == agent.tool_agent_kinds
 
     def test_run_workflow_full_pipeline_parity(self, tmp_path: Path, monkeypatch):
         """A representative mocked run through BackendDevelopmentAgent.run_workflow
         succeeds, verifying the config-driven base resolves and passes the correct
-        build_verify_label and lint_agent_type to the deliver phase."""
+        build_verify_label and lint_agent_type to the deliver phase. ``run_workflow``
+        is a thin public wrapper that immediately delegates to
+        ``_run_development_workflow``, so exercising it here also exercises that
+        seam end-to-end."""
         from software_engineering_team.backend_code_v2_team import orchestrator as orch
         from software_engineering_team.backend_code_v2_team.models import (
             DeliverResult,
@@ -178,7 +156,7 @@ class TestBackendOrchestratorParity:
             def commit_current_changes(self, *_a, **_kw):
                 return True, "committed"
 
-        captured_deliver_kwargs: Dict[str, Any] = {}
+        captured_deliver_kwargs: dict[str, Any] = {}
 
         def _run_deliver(**kwargs):
             captured_deliver_kwargs.update(kwargs)
@@ -234,7 +212,7 @@ class TestBackendOrchestratorParity:
             description="Implement API endpoints",
         )
 
-        result = orch.BackendDevelopmentAgent(MagicMock()).run_workflow(
+        result = self._make_agent().run_workflow(
             repo_path=tmp_path,
             task=task,
         )
@@ -254,6 +232,17 @@ class TestBackendOrchestratorParity:
 class TestFrontendOrchestratorParity:
     """Prove ``FrontendDevelopmentAgent`` (now a ``ConfigDrivenV2DevelopmentAgent``
     subclass) behaves identically to the pre-change hand-wired implementation.
+
+    Focuses on what's unique to the *real* production class: that it is
+    wired to the module-level ``FRONTEND_CONFIG`` singleton, its tool-agent
+    registry actually constructs, and a full mocked ``run_workflow`` drives
+    config-resolved values into deliver. The config/property axes
+    (default_language, conventions_for, tool_agent_kinds) are already
+    proven against frontend's real values by
+    ``test_v2_team_config.py::TestFrontendParity`` and
+    ``test_v2_config_orchestrator.py::TestFrontendConfigParity`` -- not
+    re-asserted here. The accessibility-clause *content* and its exact
+    append structure are kept below since neither other file checks them.
     """
 
     def _make_agent(self):
@@ -269,92 +258,37 @@ class TestFrontendOrchestratorParity:
         assert isinstance(agent, ConfigDrivenV2DevelopmentAgent)
 
     def test_config_is_the_module_level_frontend_config(self):
-        """The agent's config is the canonical FRONTEND_CONFIG instance."""
+        """The agent's config is the canonical FRONTEND_CONFIG instance.
+
+        ``FRONTEND_CONFIG`` has no public alias (unlike ``PROFILE``, which
+        ``FrontendDevelopmentAgent`` re-exposes for exactly this reason), so
+        this is a deliberate, singular reach into the team's private
+        ``phases._profile`` module -- matching the pattern established in
+        ``test_v2_config_orchestrator.py``.
+        """
         from software_engineering_team.frontend_code_v2_team.phases._profile import FRONTEND_CONFIG
 
         agent = self._make_agent()
         assert agent.config is FRONTEND_CONFIG
-
-    def test_default_language_is_typescript(self):
-        """Frontend's language default resolves to typescript through the config."""
-        assert self._make_agent().default_language == "typescript"
-
-    def test_default_language_matches_class_profile(self):
-        """Config-driven default_language agrees with the class-level PROFILE."""
-        from software_engineering_team.frontend_code_v2_team.orchestrator import (
-            FrontendDevelopmentAgent,
-        )
-
-        agent = self._make_agent()
-        assert agent.default_language == FrontendDevelopmentAgent.PROFILE.default_language
-
-    def test_conventions_for_default(self):
-        """Frontend's only conventions key is _default (TYPESCRIPT_CONVENTIONS)."""
-        from software_engineering_team.frontend_code_v2_team.prompts import TYPESCRIPT_CONVENTIONS
-
-        agent = self._make_agent()
-        assert agent.conventions_for("_default") == TYPESCRIPT_CONVENTIONS
-
-    def test_conventions_for_typescript_falls_back_to_default(self):
-        """Typescript isn't a separate key — falls back to _default."""
-        from software_engineering_team.frontend_code_v2_team.prompts import TYPESCRIPT_CONVENTIONS
-
-        agent = self._make_agent()
-        assert agent.conventions_for("typescript") == TYPESCRIPT_CONVENTIONS
-
-    def test_conventions_for_unknown_language_falls_back_to_default(self):
-        """An unlisted language (e.g. python) also resolves to _default."""
-        from software_engineering_team.frontend_code_v2_team.prompts import TYPESCRIPT_CONVENTIONS
-
-        agent = self._make_agent()
-        assert agent.conventions_for("python") == TYPESCRIPT_CONVENTIONS
 
     def test_conventions_map_has_exactly_one_key(self):
         """Frontend's conventions map contains only _default — no language-specific entries."""
         agent = self._make_agent()
         assert set(agent.config.stack_profile.conventions_by_language.keys()) == {"_default"}
 
-    def test_tool_agent_kinds_match_enum_excluding_general(self):
-        """Config-driven tool_agent_kinds == all ToolAgentKind values except GENERAL."""
-        from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
-
-        agent = self._make_agent()
-        expected = frozenset(
-            k.value for k in ToolAgentKind if k is not ToolAgentKind.GENERAL
-        )
-        assert agent.tool_agent_kinds == expected
-
-    def test_accessibility_in_tool_agent_kinds(self):
-        """Frontend registers the accessibility tool agent kind."""
-        agent = self._make_agent()
-        assert "accessibility" in agent.tool_agent_kinds
-
-    def test_extra_review_clause_is_accessibility_note(self):
-        """Frontend's extra review clause is the accessibility-verification note."""
-        from software_engineering_team.frontend_code_v2_team.phases._profile import (
-            _ACCESSIBILITY_VERIFY_NOTE,
-        )
-
-        agent = self._make_agent()
-        assert agent.extra_review_clause == _ACCESSIBILITY_VERIFY_NOTE
-        assert agent.extra_review_clause != ""
-
     def test_extra_review_clause_content(self):
         """The accessibility note mentions key concerns."""
         agent = self._make_agent()
         clause = agent.extra_review_clause
         assert "accessibility" in clause.lower()
-        assert "ARIA" in clause
+        assert "aria" in clause.lower()
         assert "keyboard" in clause
 
     def test_build_task_requirements_appends_accessibility_clause(self):
         """With a non-empty base, build_task_requirements appends the clause after a blank line."""
         agent = self._make_agent()
         result = agent.build_task_requirements("Review the code.")
-        assert "Review the code." in result
-        assert agent.extra_review_clause in result
-        # The clause is separated by a blank line
-        assert "\n\n" in result
+        assert result == "Review the code.\n\n" + agent.extra_review_clause
 
     def test_build_task_requirements_empty_base_returns_clause_verbatim(self):
         """With empty base, build_task_requirements returns the clause verbatim."""
@@ -364,10 +298,12 @@ class TestFrontendOrchestratorParity:
 
     def test_stack_profile_is_the_real_profile_object(self):
         """The config's stack_profile is the team's canonical PROFILE, not a copy."""
-        from software_engineering_team.frontend_code_v2_team.phases._profile import PROFILE
+        from software_engineering_team.frontend_code_v2_team.orchestrator import (
+            FrontendDevelopmentAgent,
+        )
 
         agent = self._make_agent()
-        assert agent._stack_profile() is PROFILE
+        assert agent._stack_profile() is FrontendDevelopmentAgent.PROFILE
 
     def test_build_verify_label_from_profile(self):
         """build_verify_label resolves through the config's stack_profile."""
@@ -394,15 +330,17 @@ class TestFrontendOrchestratorParity:
         """The real tool-agent builder passes validation against the config registry."""
         agent = self._make_agent()
         agents = agent._build_and_validate_tool_agents(MagicMock())
-        built_kinds = frozenset(
-            str(k.value if hasattr(k, "value") else k) for k in agents
-        )
+        # Keys are ToolAgentKind enum members — their string values must match
+        built_kinds = frozenset(k.value for k in agents)
         assert built_kinds == agent.tool_agent_kinds
 
     def test_run_workflow_full_pipeline_parity(self, tmp_path: Path, monkeypatch):
         """A representative mocked run through FrontendDevelopmentAgent.run_workflow
         succeeds, verifying the config-driven base resolves and passes the correct
-        build_verify_label and lint_agent_type to the deliver phase."""
+        build_verify_label and lint_agent_type to the deliver phase. ``run_workflow``
+        is a thin public wrapper that immediately delegates to
+        ``_run_development_workflow``, so exercising it here also exercises that
+        seam end-to-end."""
         from software_engineering_team.frontend_code_v2_team import orchestrator as orch
         from software_engineering_team.frontend_code_v2_team.models import (
             DeliverResult,
@@ -425,7 +363,7 @@ class TestFrontendOrchestratorParity:
             def commit_current_changes(self, *_a, **_kw):
                 return True, "committed"
 
-        captured_deliver_kwargs: Dict[str, Any] = {}
+        captured_deliver_kwargs: dict[str, Any] = {}
 
         def _run_deliver(**kwargs):
             captured_deliver_kwargs.update(kwargs)
@@ -481,7 +419,7 @@ class TestFrontendOrchestratorParity:
             description="Implement login component",
         )
 
-        result = orch.FrontendDevelopmentAgent(MagicMock()).run_workflow(
+        result = self._make_agent().run_workflow(
             repo_path=tmp_path,
             task=task,
         )
@@ -501,7 +439,14 @@ class TestFrontendOrchestratorParity:
 class TestCrossTeamConfigDivergence:
     """Assert backend and frontend configs diverge only on the documented axes
     (language default, tool-agent registry, conventions map, extra review clause)
-    and agree on structural properties."""
+    and agree on structural properties.
+
+    Needs the whole ``V2TeamConfig`` object (not just ``stack_profile``,
+    which ``PROFILE`` covers), so it reaches into each team's private
+    ``phases._profile`` module for ``BACKEND_CONFIG``/``FRONTEND_CONFIG`` --
+    neither has a public alias, the same deliberate exception documented on
+    ``TestBackendOrchestratorParity``/``TestFrontendOrchestratorParity`` above.
+    """
 
     def _backend_config(self) -> V2TeamConfig:
         from software_engineering_team.backend_code_v2_team.phases._profile import BACKEND_CONFIG
