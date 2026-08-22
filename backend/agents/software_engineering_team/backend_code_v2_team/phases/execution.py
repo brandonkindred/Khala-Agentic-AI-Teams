@@ -194,7 +194,7 @@ def _code_review_gate(
       from the resulting ``PhaseReviewResult``, ``raw_issue_count`` defaulting
       to ``None`` if absent.
     """
-    from .review import run_code_review_phase
+    from ._profile import run_code_review_phase
 
     r = run_code_review_phase(
         llm=llm,
@@ -244,7 +244,7 @@ def _qa_gate(
       ``PhaseReviewResult`` (no filtering — the backend's phase call is
       already scoped to QA only, unlike the frontend's ``_qa_gate``).
     """
-    from .review import run_qa_testing_phase
+    from ._profile import run_qa_testing_phase
 
     r = run_qa_testing_phase(
         task=task,
@@ -290,7 +290,7 @@ def _security_gate(
       already scoped to security only, unlike the frontend's
       ``_security_gate``).
     """
-    from .review import run_security_testing_phase
+    from ._profile import run_security_testing_phase
 
     r = run_security_testing_phase(
         task=task,
@@ -330,7 +330,7 @@ def _run_documentation_self_review(**kwargs: Any) -> Any:
       ``.review`` (avoiding the ``review`` <-> ``execution`` circular
       import).
     """
-    from .review import run_documentation_self_review
+    from ._profile import run_documentation_self_review
 
     return run_documentation_self_review(**kwargs)
 
