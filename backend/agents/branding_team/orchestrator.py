@@ -339,12 +339,18 @@ class _PhaseSpec(NamedTuple):
             not merge" — never a default-constructed ``model_cls()`` — since
             ``_extract_phase_output`` trusts any non-``None`` return as a
             successful, non-degraded extraction.
+        context_phases: Which upstream ``BrandPhase``s' outputs this phase
+            should receive as context. Defaults to ``()`` (no filtering —
+            current behavior, where every phase can see all prior outputs,
+            is unaffected). Infrastructure only: not yet consumed by
+            ``_phase_task`` and not yet populated for any phase.
     """
 
     builder_fn: Callable[[], Any]
     node_id: str
     model_cls: type[BaseModel]
     merge_fn: Optional[Callable[[Any, type[BaseModel]], Optional[BaseModel]]] = None
+    context_phases: tuple[BrandPhase, ...] = ()
 
 
 # Per-phase spec, keyed by BrandPhase in PHASE_ORDER order. This is the single
