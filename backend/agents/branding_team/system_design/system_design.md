@@ -401,6 +401,15 @@ every instance in a process addresses the same shared entries by design
 (previous section) -- `phase_cache=None` (the monolithic-graph path) is
 the only way a caller currently opts out of stale-entry risk.
 
+`_run_phases_with_cache` also changes the timeout envelope: it shares no
+deadline across its sequential `run_single_phase` calls, and each of those
+gets its own fresh `DEFAULT_EXECUTION_TIMEOUT_SECONDS` (600s) /
+`DEFAULT_NODE_TIMEOUT_SECONDS` (180s) budget (`graphs/top_level.py`). The
+monolithic path caps a whole 5-phase run at one 600s execution timeout; a
+default-path call whose phases all miss can instead take up to roughly the
+sum of five such budgets before the last phase's own timeout would fire --
+several times the monolithic path's ceiling, not the same one.
+
 `api/conversation.py` holds and consumes a per-conversation storage slot:
 `_get_or_create_phase_cache()` returns a `PhaseOutputCache` retained
 per-conversation (in-memory only, keyed by `conversation_id`, created empty

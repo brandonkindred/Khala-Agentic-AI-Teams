@@ -543,7 +543,12 @@ class BrandingTeamOrchestrator:
               cached entry reuses that cached output instead of being
               invoked; a miss runs the phase via ``run_single_phase`` and, if
               the result is not degraded, stores it in ``phase_cache`` for a
-              future call.
+              future call. Each ``run_single_phase`` call gets its own fresh
+              ``DEFAULT_EXECUTION_TIMEOUT_SECONDS`` (600s) /
+              ``DEFAULT_NODE_TIMEOUT_SECONDS`` (180s) budget -- there is no
+              deadline shared across phases within one call -- so a call whose
+              phases all miss can take up to roughly 5x the monolithic path's
+              single 600s execution-timeout cap, not the same 600s ceiling.
             - ``phase_cache`` is thread-path-only by construction, not by
               convention: the Temporal activity (``temporal/activities.py``)
               calls ``run_single_phase`` directly and never this method, and
@@ -656,6 +661,13 @@ class BrandingTeamOrchestrator:
             - Only a non-degraded phase output is ever stored in ``cache``; a
               degraded (default-constructed) output is returned but never
               cached, so a transient parse failure cannot poison a later call.
+            - No deadline is shared across the sequential ``run_single_phase``
+              calls this makes: each gets its own fresh execution/node
+              timeout budget (see ``run_single_phase``), so a call with
+              several misses can take up to roughly the sum of those
+              per-phase budgets -- not capped at any single overall deadline
+              the way the monolithic-graph path's one execution timeout caps
+              the whole run.
         """
         upstream_models: dict[BrandPhase, BaseModel] = {}
         prior_outputs: dict[str, dict] = {}
