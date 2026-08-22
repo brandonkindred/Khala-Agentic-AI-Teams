@@ -1,4 +1,4 @@
-"""Tests for backend_code_v2_team.phases.documentation.run_documentation_phase."""
+"""Tests for backend_code_v2_team.phases._profile.run_documentation_phase."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def _issue(**overrides):
 
 
 def test_run_documentation_phase_no_agent(tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.phases.documentation import (
+    from software_engineering_team.backend_code_v2_team.phases._profile import (
         run_documentation_phase,
     )
 
@@ -58,7 +58,7 @@ def test_run_documentation_phase_no_agent(tmp_path: Path):
 
 def test_run_documentation_phase_missing_methods(tmp_path: Path):
     from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.backend_code_v2_team.phases.documentation import (
+    from software_engineering_team.backend_code_v2_team.phases._profile import (
         run_documentation_phase,
     )
 
@@ -79,7 +79,7 @@ def test_run_documentation_phase_clean_review(tmp_path: Path):
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
-    from software_engineering_team.backend_code_v2_team.phases.documentation import (
+    from software_engineering_team.backend_code_v2_team.phases._profile import (
         run_documentation_phase,
     )
 
@@ -100,7 +100,7 @@ def test_run_documentation_phase_clean_review(tmp_path: Path):
 
 def test_run_documentation_phase_review_raises(tmp_path: Path):
     from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.backend_code_v2_team.phases.documentation import (
+    from software_engineering_team.backend_code_v2_team.phases._profile import (
         run_documentation_phase,
     )
 
@@ -125,7 +125,7 @@ def test_run_documentation_phase_problem_solve_raises(tmp_path: Path):
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
-    from software_engineering_team.backend_code_v2_team.phases.documentation import (
+    from software_engineering_team.backend_code_v2_team.phases._profile import (
         run_documentation_phase,
     )
 
@@ -149,7 +149,7 @@ def test_run_documentation_phase_writes_files(tmp_path: Path):
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
-    from software_engineering_team.backend_code_v2_team.phases.documentation import (
+    from software_engineering_team.backend_code_v2_team.phases._profile import (
         run_documentation_phase,
     )
 
@@ -183,7 +183,7 @@ def test_run_documentation_phase_problem_solve_no_files(tmp_path: Path):
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
-    from software_engineering_team.backend_code_v2_team.phases.documentation import (
+    from software_engineering_team.backend_code_v2_team.phases._profile import (
         run_documentation_phase,
     )
 
@@ -208,7 +208,7 @@ def test_run_documentation_phase_max_iterations(tmp_path: Path):
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
-    from software_engineering_team.backend_code_v2_team.phases.documentation import (
+    from software_engineering_team.backend_code_v2_team.phases._profile import (
         run_documentation_phase,
     )
 
@@ -229,14 +229,14 @@ def test_run_documentation_phase_max_iterations(tmp_path: Path):
 
 
 def test_write_files_creates_dirs(tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.phases.documentation import _write_files
+    from software_engineering_team.shared.phases.documentation import _write_files
 
     _write_files(tmp_path, {"docs/nested/x.md": "content"})
     assert (tmp_path / "docs" / "nested" / "x.md").exists()
 
 
 def test_write_files_strips_leading_slash(tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.phases.documentation import _write_files
+    from software_engineering_team.shared.phases.documentation import _write_files
 
     _write_files(tmp_path, {"/x.md": "y"})
     assert (tmp_path / "x.md").exists()

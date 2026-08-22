@@ -47,12 +47,12 @@ from ..models import (
     ToolAgentKind,
     ToolAgentPhaseInput,
 )
-from ..output_templates import (
+from ..prompts import BATCH_FIX_PROMPT, PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
+from ._profile import (
+    PROFILE,
     parse_batch_fix_template,
     parse_problem_solving_single_issue_template,
 )
-from ..prompts import BATCH_FIX_PROMPT, PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
-from ._profile import PROFILE
 
 logger = logging.getLogger(__name__)
 

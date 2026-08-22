@@ -11,7 +11,7 @@ from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this mod
 
 from software_engineering_team.shared.testing_qa_tool_agent import SharedTestingQAToolAgent
 
-from ...output_templates import parse_review_template
+from ...phases._profile import parse_review_template
 from ...prompts import QA_TOOL_AGENT_REVIEW_PROMPT
 from ..base import BackendReviewToolAgent
 

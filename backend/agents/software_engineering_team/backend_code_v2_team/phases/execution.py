@@ -51,9 +51,8 @@ from ..models import (
     ToolAgentKind,
     ToolAgentOutput,
 )
-from ..output_templates import parse_files_and_summary_template
 from ..prompts import EXECUTION_PROMPT
-from ._profile import PROFILE
+from ._profile import PROFILE, parse_files_and_summary_template
 
 logger = logging.getLogger(__name__)
 

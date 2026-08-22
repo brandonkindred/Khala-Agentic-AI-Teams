@@ -66,12 +66,12 @@ from ..models import (
     ReviewResult,
     ToolAgentKind,
 )
-from ..output_templates import parse_documentation_self_review_template
 from ..prompts import DOCUMENTATION_SELF_REVIEW_PROMPT
 from ._profile import (
     FRONTEND_CONFIG,
     PROFILE,
     REVIEW_CONFIG,
+    parse_documentation_self_review_template,
 )
 
 logger = logging.getLogger(__name__)

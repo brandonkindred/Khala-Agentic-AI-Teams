@@ -17,11 +17,18 @@ from typing import Tuple
 from shared.dev_models.models import Task
 from shared.repo_context.repo_utils import find_repo_files
 from software_engineering_team.shared.stack_profile import StackProfile
+from software_engineering_team.shared.v2_output_templates import _section as _section  # noqa: F401
+from software_engineering_team.shared.v2_phase_bindings import build_phase_bindings
 from software_engineering_team.shared.v2_review import ReviewConfig
 from software_engineering_team.shared.v2_team_config import V2TeamConfig
 
+from .. import models as _models
 from ..models import ToolAgentKind, ToolAgentPhaseInput
-from ..prompts import TYPESCRIPT_CONVENTIONS
+from ..prompts import (
+    PLANNING_FIXES_FOR_ISSUES_PROMPT,
+    PLANNING_PROMPT,
+    TYPESCRIPT_CONVENTIONS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -238,4 +245,55 @@ FRONTEND_CONFIG = V2TeamConfig(
         k.value for k in ToolAgentKind if k is not ToolAgentKind.GENERAL
     ),
     extra_review_clause=_ACCESSIBILITY_VERIFY_NOTE,
+    output_template_path_prefixes=("frontend/", "./frontend/"),
+    output_template_allowed_languages=("angular", "react", "vue", "typescript", "javascript"),
+    output_template_coerce_unknown=False,
 )
+
+
+# ---------------------------------------------------------------------------
+# Phase bindings: the config-driven documentation/planning/output-template
+# entry points, bound once here from the shared implementations via
+# ``FRONTEND_CONFIG`` (see ``shared/v2_phase_bindings.py``). Replaces the
+# former per-team ``phases/documentation.py``, ``phases/planning.py``, and
+# ``output_templates.py`` twin wrapper modules.
+# ---------------------------------------------------------------------------
+
+_bindings = build_phase_bindings(
+    models=_models,
+    config=FRONTEND_CONFIG,
+    planning_prompt=PLANNING_PROMPT,
+    planning_fixes_prompt=PLANNING_FIXES_FOR_ISSUES_PROMPT,
+)
+
+run_documentation_phase = _bindings.run_documentation_phase
+run_planning = _bindings.run_planning
+plan_fixes_for_unresolved_issues = _bindings.plan_fixes_for_unresolved_issues
+_parse_planning_output = _bindings.parse_planning_output
+parse_files_and_summary_template = _bindings.parse_files_and_summary_template
+parse_planning_template = _bindings.parse_planning_template
+parse_review_template = _bindings.parse_review_template
+parse_problem_solving_template = _bindings.parse_problem_solving_template
+parse_problem_solving_single_issue_template = (
+    _bindings.parse_problem_solving_single_issue_template
+)
+parse_batch_fix_template = _bindings.parse_batch_fix_template
+parse_documentation_self_review_template = _bindings.parse_documentation_self_review_template
+
+__all__ = [
+    "PROFILE",
+    "REVIEW_CONFIG",
+    "FRONTEND_CONFIG",
+    "run_documentation_phase",
+    "run_planning",
+    "plan_fixes_for_unresolved_issues",
+    "_parse_planning_output",
+    "_detect_language",
+    "parse_files_and_summary_template",
+    "parse_planning_template",
+    "parse_review_template",
+    "parse_problem_solving_template",
+    "parse_problem_solving_single_issue_template",
+    "parse_batch_fix_template",
+    "parse_documentation_self_review_template",
+]
