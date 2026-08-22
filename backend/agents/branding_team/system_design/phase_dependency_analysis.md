@@ -110,10 +110,28 @@ guidance with zero grounding in the brand's actual identity is a real
 regression risk even though today's prompts don't ask for that grounding
 explicitly.
 
-**Recommended `context_phases` (evidence-only):** `()`
-**If preserving today's implicit-grounding behavior is required:** keep
-`(STRATEGIC_CORE, NARRATIVE_MESSAGING, VISUAL_IDENTITY)` as in #6953, but
-note it is a product decision, not something the current prompts ask for.
+**Correction:** the empty tuple cannot represent "inject nothing" as
+`_PhaseSpec.context_phases` and `_phase_task` are implemented today
+(`orchestrator.py:750-753`): `if spec.context_phases:` treats an empty
+tuple as "no filtering configured," which falls through to including
+*every* `prior_outputs` entry — the same all-upstream-context behavior as
+never touching `_PHASE_SPEC` at all. So `context_phases = ()` for Phase 4
+would not produce the zero-grounding behavior the evidence above supports;
+it is operationally identical to
+`(STRATEGIC_CORE, NARRATIVE_MESSAGING, VISUAL_IDENTITY)`. Representing
+"deliberately no upstream context" requires either a distinct sentinel
+(e.g. a dedicated "explicitly empty" marker distinguishable from "unset")
+or inverting the default so unset means "no context" and phases opt in —
+both are code changes in #6953's scope, not something this evidence-only
+analysis can resolve by picking a tuple value.
+
+**Recommendation:** #6953 must decide, as a product/mechanism question,
+between (a) extending `_PhaseSpec`/`_phase_task` with a way to express
+"no upstream context" and setting it for Phase 4, or (b) keeping
+`(STRATEGIC_CORE, NARRATIVE_MESSAGING, VISUAL_IDENTITY)` for Phase 4 as a
+deliberate choice to ground channel-guide agents in brand identity even
+though no current prompt text asks for it. Either way, don't set Phase 4's
+`context_phases` to `()` expecting it to mean "none" — today it means "all."
 
 ## Phase 5 — Governance & Evolution (7 agents)
 
@@ -149,10 +167,13 @@ acceptance criteria) is correctly evidence-based.
 | STRATEGIC_CORE | `()` | `()` | ✅ |
 | NARRATIVE_MESSAGING | `(STRATEGIC_CORE,)` | `(STRATEGIC_CORE,)` | ✅ |
 | VISUAL_IDENTITY | `(STRATEGIC_CORE, NARRATIVE_MESSAGING)` | `(STRATEGIC_CORE, NARRATIVE_MESSAGING)` | ✅ |
-| CHANNEL_ACTIVATION | `(STRATEGIC_CORE, NARRATIVE_MESSAGING, VISUAL_IDENTITY)` | `()` per prompt text; product decision needed | ⚠️ no prompt evidence for any upstream phase |
+| CHANNEL_ACTIVATION | `(STRATEGIC_CORE, NARRATIVE_MESSAGING, VISUAL_IDENTITY)` | no prompt evidence for any upstream phase, **but `()` cannot express that** — see Phase 4 section | ⚠️ mechanism gap, needs a #6953 decision |
 | GOVERNANCE | `(STRATEGIC_CORE, VISUAL_IDENTITY)` | `(STRATEGIC_CORE, NARRATIVE_MESSAGING, VISUAL_IDENTITY)` | ⚠️ missing NARRATIVE_MESSAGING |
 
 Three of five phases match the proposed shape exactly. The two mismatches
 (Phase 4, Phase 5) are flagged above with the specific prompt lines that
 justify each recommendation, for #6953 to resolve before finalizing
-`_PHASE_SPEC`.
+`_PHASE_SPEC`. Note the STRATEGIC_CORE row's `()` is not the same kind of
+value as Phase 4's: Phase 1 has no upstream phases to filter (`prior_outputs`
+is empty regardless of `context_phases`), so `()` there is inert rather than
+meaning "include everything."
