@@ -300,6 +300,7 @@ def test_full_run_approved() -> None:
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=True),
+            phase_cache=None,
         )
 
     assert result.status == WorkflowStatus.READY_FOR_ROLLOUT
@@ -336,6 +337,7 @@ def test_requires_human_approval() -> None:
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=False, feedback="Need legal review."),
+            phase_cache=None,
         )
 
     assert result.status == WorkflowStatus.NEEDS_HUMAN_DECISION
@@ -370,6 +372,7 @@ def test_brand_checks() -> None:
             ),
             human_review=HumanReview(approved=True),
             brand_checks=checks,
+            phase_cache=None,
         )
 
     assert len(result.brand_checks) == 2
@@ -401,6 +404,7 @@ def test_market_research_integration() -> None:
             ),
             human_review=HumanReview(approved=True),
             include_market_research=True,
+            phase_cache=None,
         )
     assert result.competitive_snapshot is not None
     assert result.competitive_snapshot.summary == "Competitive summary"
@@ -417,6 +421,7 @@ def test_design_assets_integration() -> None:
             ),
             human_review=HumanReview(approved=True),
             include_design_assets=True,
+            phase_cache=None,
         )
     assert result.design_asset_result is not None
     assert result.design_asset_result.request_id.startswith("design_")
@@ -451,6 +456,7 @@ def test_run_with_store_appends_version() -> None:
             store=store,
             client_id=brand.client_id,
             brand_id=brand.id,
+            phase_cache=None,
         )
 
     store.append_brand_version.assert_called_once()
@@ -498,6 +504,7 @@ def test_run_with_store_append_brand_version_none_raises() -> None:
                 store=store,
                 client_id=brand.client_id,
                 brand_id=brand.id,
+                phase_cache=None,
             )
 
 
@@ -566,6 +573,7 @@ def test_run_phase_stops_at_strategic_core() -> None:
             ),
             phase=BrandPhase.STRATEGIC_CORE,
             human_review=HumanReview(approved=True),
+            phase_cache=None,
         )
     assert result.strategic_core is not None
     assert result.narrative_messaging is None
@@ -624,6 +632,7 @@ def test_approved_partial_run_is_not_rollout_ready() -> None:
                 ),
                 phase=phase,
                 human_review=HumanReview(approved=True),
+                phase_cache=None,
             )
         assert result.status == WorkflowStatus.NEEDS_HUMAN_DECISION, (
             f"Phase {phase.value} with approved=True should not be READY_FOR_ROLLOUT"
@@ -661,6 +670,7 @@ def test_unapproved_partial_run_labels_current_phase_not_target() -> None:
                 ),
                 phase=phase,
                 human_review=HumanReview(approved=False),
+                phase_cache=None,
             )
         assert expected_label in result.mission_summary, (
             f"Phase {phase.value}: expected {expected_label!r} in {result.mission_summary!r}"
@@ -679,6 +689,7 @@ def test_default_human_feedback_message_survives_when_feedback_omitted() -> None
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=True),
+            phase_cache=None,
         )
     assert approved_result.human_feedback == "Approved for rollout."
 
@@ -690,6 +701,7 @@ def test_default_human_feedback_message_survives_when_feedback_omitted() -> None
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=False),
+            phase_cache=None,
         )
     assert unapproved_result.human_feedback == "Awaiting approval from brand leadership."
 
@@ -728,6 +740,7 @@ def test_phase_gates_are_populated() -> None:
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=True),
+            phase_cache=None,
         )
     assert len(result.phase_gates) == 5
     for gate in result.phase_gates:
@@ -744,6 +757,7 @@ def test_phase_absorbed_fields_populated() -> None:
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=True),
+            phase_cache=None,
         )
 
     # Writing guidelines absorbed into narrative_messaging
