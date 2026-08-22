@@ -793,6 +793,7 @@ def test_unparseable_phase_output_marks_phase_degraded(caplog) -> None:
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=True),
+            phase_cache=None,
         )
 
     assert result.degraded_phases == [BrandPhase.NARRATIVE_MESSAGING]
@@ -837,6 +838,7 @@ def test_trailing_unrelated_json_object_does_not_win_over_real_payload() -> None
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=True),
+            phase_cache=None,
         )
 
     assert result.degraded_phases == []
@@ -1215,6 +1217,7 @@ def test_full_run_phase2_not_degraded_with_six_fragments() -> None:
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=True),
+            phase_cache=None,
         )
 
     assert result.degraded_phases == []
@@ -2068,6 +2071,7 @@ def test_full_run_phase3_not_degraded_with_eleven_fragments() -> None:
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=True),
+            phase_cache=None,
         )
 
     assert result.degraded_phases == []
@@ -2450,8 +2454,11 @@ def _run_single_phase_fixture_side_effect(mission, phase, prior_outputs=None):
     return _PHASE_FIXTURES[phase](), False
 
 
-def test_run_without_phase_cache_never_calls_run_single_phase() -> None:
-    """Omitting ``phase_cache`` (the default) preserves the monolithic-graph path."""
+def test_run_with_explicit_none_phase_cache_never_calls_run_single_phase() -> None:
+    """Explicitly passing ``phase_cache=None`` still selects the monolithic-graph
+    path, even though it's no longer the default -- see
+    test_run_with_phase_cache_miss_falls_through_and_populates_cache for the
+    (now-default) per-phase path."""
     orchestrator = BrandingTeamOrchestrator()
     with (
         _patch_graph_invoke(ALL_PHASES),
@@ -2460,6 +2467,7 @@ def test_run_without_phase_cache_never_calls_run_single_phase() -> None:
         result = orchestrator.run(
             mission=make_mission(),
             human_review=HumanReview(approved=True),
+            phase_cache=None,
         )
 
     mock_run_single_phase.assert_not_called()
