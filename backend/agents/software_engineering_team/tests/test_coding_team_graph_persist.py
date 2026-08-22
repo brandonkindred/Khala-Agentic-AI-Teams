@@ -54,6 +54,26 @@ def test_persist_async_is_noop_when_revision_unchanged():
         coord.stop()
 
 
+def test_persist_async_includes_review_verdict_cache_when_swarm_attached():
+    """A background graph-mutation write (persist_async) carries review_verdict_cache too — not
+    just persist_sync's own write. This is the write that actually reaches the wire in the common
+    case (a review's graph mutation queues this write moments before the next persist_sync's
+    drain() runs it, so persist_sync's own no-op check then finds nothing left to do)."""
+    writes: List[Dict[str, Any]] = []
+    coord = _make_coord(writes)
+    try:
+        exported = [{"task_id": "t1", "cache_key": "abc", "verdict": {"approved": True}}]
+        coord.review_cache_export = lambda: exported
+
+        coord.graph.add_task("t1", title="T1")  # queues a persist_async write via persist_callback
+        coord.flusher.drain()
+
+        assert writes
+        assert writes[-1]["review_verdict_cache"] == exported
+    finally:
+        coord.stop()
+
+
 def test_persist_sync_lands_snapshot_then_noops_when_unchanged():
     """persist_sync surfaces a mutation's snapshot (draining the pending background write or
     writing synchronously), then short-circuits on a second call while nothing has changed."""

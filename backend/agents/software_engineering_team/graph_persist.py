@@ -175,10 +175,20 @@ class GraphPersistCoordinator:
         this write always carries whatever phase/status_text is current when it reaches the wire,
         so it can only repeat or advance the authoritative state, never regress it.
 
+        ``review_cache_export`` (when set) is read the same way — live, inside the closure — for
+        the same reason phase/status_text are: a review-verdict-cache write landing here is what
+        drains ahead of a round-boundary ``persist_sync()`` call whenever a review's
+        ``_apply_review_decision`` mutation queued this write moments earlier (the common case —
+        see ``persist_sync``'s docstring), so this is the write that actually needs to carry the
+        cache for the cache to reach the job record at all in that case.
+
         Postconditions:
             - No-op when the graph revision is unchanged; otherwise a background write is enqueued
               that, on success, advances ``_persist_state`` to the written (revision, phase,
               status_text).
+            - When ``review_cache_export`` is set, the enqueued write additionally carries
+              ``review_verdict_cache`` (that callable's return value, read live at write time);
+              omitted when it is ``None``.
         """
         computed = self._compute_snapshot_if_changed()
         if computed is None:
@@ -192,6 +202,8 @@ class GraphPersistCoordinator:
                 "phase": live_phase,
                 "status_text": live_status_text,
             }
+            if self.review_cache_export is not None:
+                wire_payload["review_verdict_cache"] = self.review_cache_export()
             self._raw_update(**wire_payload)
             self._persist_state.update(
                 {"revision": revision, "phase": live_phase, "status_text": live_status_text}
@@ -207,6 +219,14 @@ class GraphPersistCoordinator:
         change check below naturally retries it here instead of silently accepting a stale
         snapshot. Reads phase/status_text directly (not lazily): this path writes synchronously
         with no enqueue-then-execute gap, so there is nothing for a live read to protect against.
+
+        In the common case the drain above is exactly what lands the review verdict cache: a
+        review's ``_apply_review_decision`` graph mutation queues a ``persist_async`` write moments
+        before the next round boundary calls this method, so that queued write (which also carries
+        ``review_verdict_cache`` — see ``persist_async``) is what ``flusher.drain()`` runs, and the
+        no-op check below then correctly finds nothing left to do. This method's own write below
+        only fires when nothing was queued (e.g. only phase/status_text changed, or the very first
+        call) — it carries the cache too so that path is covered as well.
 
         Postconditions:
             - No-op when graph revision, phase, and status_text all match the last confirmed
