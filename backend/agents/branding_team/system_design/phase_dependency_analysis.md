@@ -16,18 +16,21 @@ quantities, not one number under three names:**
   acceptance criteria ("Analysis covers all 37 agents across 5 phases").
 - **32** — distinct `AgentPromptSpec(...)` *construction call sites* in
   `agents.py` (confirmed by direct count: `grep -n "AgentPromptSpec(" agents.py`
-  returns exactly 32 lines). Fewer than 37 because two roles are built from
-  a shared, parameterized prompt-building function called multiple times
-  from one source location rather than one `AgentPromptSpec(...)` per
-  role: `_channel_guide_prompt` (Phase 4's six `_make_channel_guide`-built
-  roles — `website_guide`, `social_guide`, `email_guide`, `events_guide`,
-  `partnerships_guide`, `internal_guide` — share it) and the Phase 3
-  moodboard prompt builder (the three `make_moodboard_conceptualist`
-  style variants — Editorial, Minimalist, Bold — share it).
+  returns exactly 32 lines). The entire 5-item gap from 37 down to 32 comes
+  from a single source: Phase 4's six `_make_channel_guide`-built roles
+  (`website_guide`, `social_guide`, `email_guide`, `events_guide`,
+  `partnerships_guide`, `internal_guide`) all share one `AgentPromptSpec(...)`
+  call site inside `_channel_guide_prompt`, collapsing 6 roles to 1 site
+  (net −5). Phase 3's `make_moodboard_conceptualist` does **not** contribute
+  to this particular gap — it is one role factory with its own one
+  `AgentPromptSpec(...)` call site (inside `_moodboard_conceptualist_prompt`,
+  called with a different `variant` argument each time it's invoked), so it
+  counts as 1 in both the 37 and the 32.
 - **39** — actual graph *node instances* built at runtime: more than 37
   because `make_moodboard_conceptualist` alone is instantiated 3× (one
-  node per style variant), while every other factory instantiates exactly
-  once.
+  node per style variant — Editorial, Minimalist, Bold), while every other
+  factory, including the six channel-guide roles, instantiates exactly
+  once each.
 
 None of these three counts is interchangeable with another, and this
 document does not conflate them: every per-agent row below is evaluated
