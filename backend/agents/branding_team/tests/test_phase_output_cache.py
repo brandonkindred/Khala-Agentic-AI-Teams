@@ -11,6 +11,8 @@ from branding_team.shared.phase_output_cache import (
     _phase_cache_namespace,
 )
 from shared.cache import get_shared_cache
+from shared.cache.redis_backend import RedisBackend
+from shared.cache.tests.fake_redis import FakeRedis
 
 
 def test_get_on_empty_cache_is_a_miss() -> None:
@@ -113,3 +115,20 @@ def test_two_instances_share_the_same_backing_cache() -> None:
     writer.put(BrandPhase.STRATEGIC_CORE, "hash-a", output)
 
     assert reader.get(BrandPhase.STRATEGIC_CORE, "hash-a") == output
+
+
+def test_cache_key_is_a_valid_redis_logical_key() -> None:
+    """``_cache_key`` must never contain ``:`` -- RedisBackend's
+    _require_logical_key rejects any logical key containing one, and that
+    rejection would otherwise be silently swallowed by pydantic_cache's
+    fail-open get/set as a permanent miss/no-op under Redis, even though the
+    in-process MemoryBackend used by every other test in this file has no
+    such restriction and would never surface the bug."""
+    key = _cache_key(BrandPhase.STRATEGIC_CORE, "some-hash")
+
+    assert ":" not in key
+
+    backend = RedisBackend(FakeRedis(), "branding-phase-test")
+    output = StrategicCoreOutput(brand_purpose="Ship calm software")
+    backend.set(key, output.model_dump_json().encode("utf-8"), max_entries=64)
+    assert backend.get(key) is not None
