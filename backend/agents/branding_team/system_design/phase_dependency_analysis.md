@@ -159,10 +159,31 @@ matches the shape proposed in #6953.
 
 | Agent | Prompt text (verbatim excerpt) | Upstream phase(s) referenced |
 |---|---|---|
-| `brand_experience_principler` | "You are a Brand Experience Architect. Define:" | *none* |
+| `brand_experience_principler` | "You are a Brand Experience Architect. Define:" ... `signature_moments` field description: "key moments in the customer journey that should feel distinctly on-brand" (`models.py:1145-1151`) | *none phase-specific* — see note below |
 | `{channel}_guide` ×6 (website/social/email/events/partnerships/internal) | "Define guidelines for the {channel} channel:" … "Context: {static channel description}" | *none* — "Context" is a hardcoded one-line channel description (e.g. "Company website, landing pages, product pages."), not upstream phase output |
 | `brand_architecture_builder` | "You are a Brand Architecture Specialist. Define:" | *none* |
-| `brand_in_action_illustrator` | "Create {N} applied examples showing correct vs incorrect brand usage:" | *none* |
+| `brand_in_action_illustrator` | "Create {N} applied examples showing correct vs incorrect brand usage:" ... `brand_in_action` field description: "correct_example (the on-brand version), incorrect_example (the off-brand version)" (`models.py:1205-1212`) | *none phase-specific* — see note below |
+
+**Note on "on-brand"/"off-brand" phrasing (`brand_experience_principler`,
+`brand_in_action_illustrator`):** both agents' full rendered prompts do use
+generic on-brand/off-brand language, considered and deliberately excluded
+from the "referenced" column under this document's stated Method (top of
+this file): being evaluated as "referenced" requires naming a specific
+upstream phase's output *by concept or field* ("strategic core",
+"narrative", "positioning, values, audience segments" — the kind of
+specificity `brand_rules_codifier`'s "positioning, promise, values,
+narrative, visual identity" and `asset_wiki_planner`'s "Channel Playbook"
+have). "On-brand"/"distinctly on-brand"/"off-brand" name no particular
+phase or field — they're generic brand-adherence framing that could
+equally be said to implicate *every* upstream phase (or none specifically),
+for every agent in every phase, not just these two. Counting it as
+phase-specific evidence would make the distinction this document exists to
+draw meaningless. This is exactly the "real regression risk" already
+flagged in the Finding below: these two agents may well need broad brand
+grounding to do their job well, but that need isn't expressed anywhere in
+their actual prompt text as evidence pointing at one specific phase — it's
+the same "not evidence-based, flagging for a product decision" situation
+as the rest of Phase 4, not a fact this document got wrong.
 
 **Finding — disagrees with #6953's assumed default.** None of the 9 Phase 4
 system prompts mention Phase 1, 2, or 3 output by name or concept (no
