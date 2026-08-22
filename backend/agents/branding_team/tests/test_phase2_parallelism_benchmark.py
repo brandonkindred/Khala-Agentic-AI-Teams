@@ -30,19 +30,23 @@ executor directly on the event loop ``run_coroutine`` creates (by patching
 to create that loop), guaranteeing enough workers for the barrier regardless
 of the runner's real core count or Python version.
 
-This also forces ``LLM_PROVIDER=dummy`` and clears the LLM client/Strands
-model caches for the run: ``conftest.py`` only *defaults* that env var
-(``setdefault``), so a developer running this file with a different provider
-already exported would silently build real provider clients instead of
-``DummyLLMClient`` -- the ``chat`` patch below would then never be hit, and
-this benchmark would either fail on missing credentials or, worse, send six
-real LLM requests instead of measuring the mocked latency.
+This also forces the dummy provider and clears the LLM client/Strands model
+caches for the run. ``llm_service.config.resolve_provider()`` -- the sole
+gate both ``factory.get_client()`` and ``strands_provider.get_strands_model()``
+call -- resolves runtime config (Postgres, set via the ``/llm-config`` UI)
+*ahead of* the ``LLM_PROVIDER`` env var, so merely setting the env var isn't
+enough when a provider is persisted there; patching ``resolve_provider``
+itself is the one interception point that holds regardless of env var or
+runtime config. Without this, a developer or CI job with a different
+provider already configured would silently build real provider clients
+instead of ``DummyLLMClient`` -- the ``chat`` patch below would then never be
+hit, and this benchmark would either fail on missing credentials or, worse,
+send six real LLM requests instead of measuring the mocked latency.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -120,7 +124,7 @@ def test_phase2_specialists_execute_in_parallel_under_mocked_llm_latency() -> No
     )
 
     with (
-        patch.dict(os.environ, {"LLM_PROVIDER": "dummy"}),
+        patch("llm_service.config.resolve_provider", return_value="dummy"),
         patch("asyncio.events.new_event_loop", side_effect=_new_event_loop_with_generous_executor),
         patch.object(DummyLLMClient, "chat", slow_chat),
     ):
