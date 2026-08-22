@@ -851,6 +851,32 @@ def test_phase_task_filters_prior_outputs_by_context_phases(monkeypatch) -> None
     assert "VISUAL_MARKER" not in task
 
 
+def test_governance_phase_task_excludes_channel_activation_context() -> None:
+    """Integration-level check of the real (non-monkeypatched) ``_PHASE_SPEC``
+    values set by #6965: GOVERNANCE's ``context_phases`` is
+    ``(STRATEGIC_CORE, VISUAL_IDENTITY)``, so its task string must include
+    strategic-core and visual-identity context but never channel-activation
+    content -- the acceptance criterion #6965 exists to enforce."""
+    mission = make_mission()
+    prior_outputs = {
+        BrandPhase.STRATEGIC_CORE.value: {"marker": "STRATEGIC_MARKER"},
+        BrandPhase.NARRATIVE_MESSAGING.value: {"marker": "NARRATIVE_MARKER"},
+        BrandPhase.VISUAL_IDENTITY.value: {"marker": "VISUAL_MARKER"},
+        BrandPhase.CHANNEL_ACTIVATION.value: {
+            "channel_guidelines": [{"channel": "website", "marker": "CHANNEL_ACTIVATION_MARKER"}]
+        },
+    }
+
+    task = orch_phase_task(mission, BrandPhase.GOVERNANCE, prior_outputs)
+
+    assert "STRATEGIC_MARKER" in task
+    assert "VISUAL_MARKER" in task
+    assert "NARRATIVE_MARKER" not in task
+    assert BrandPhase.CHANNEL_ACTIVATION.value not in task
+    assert "channel_guidelines" not in task
+    assert "CHANNEL_ACTIVATION_MARKER" not in task
+
+
 def test_run_single_phase_rejects_non_runnable_phase() -> None:
     from branding_team.orchestrator import BrandingTeamOrchestrator
 

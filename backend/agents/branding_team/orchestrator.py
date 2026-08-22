@@ -338,9 +338,12 @@ class _PhaseSpec(NamedTuple):
             successful, non-degraded extraction.
         context_phases: Which upstream ``BrandPhase``s' outputs this phase
             should receive as context. Defaults to ``()`` (no filtering —
-            current behavior, where every phase can see all prior outputs,
-            is unaffected). Infrastructure only: not yet consumed by
-            ``_phase_task`` and not yet populated for any phase.
+            every prior output is included; this remains STRATEGIC_CORE's
+            value since it has no upstream phases at all). ``_phase_task``
+            filters ``prior_outputs`` down to this set when non-empty (see
+            ``_phase_task``). Every phase's value below is the evidence/
+            story-driven set from #6953: the minimal upstream context that
+            phase's agent prompts actually reference.
     """
 
     builder_fn: Callable[[], Any]
@@ -368,6 +371,7 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
         merge_fn=functools.partial(
             _merge_named_fragments, node_merge=_PHASE2_NODE_MERGE, require_all=True
         ),
+        context_phases=(BrandPhase.STRATEGIC_CORE,),
     ),
     BrandPhase.VISUAL_IDENTITY: _PhaseSpec(
         build_phase3_graph,
@@ -376,6 +380,7 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
         merge_fn=functools.partial(
             _merge_named_fragments, node_merge=_PHASE3_NODE_MERGE, require_all=True
         ),
+        context_phases=(BrandPhase.STRATEGIC_CORE, BrandPhase.NARRATIVE_MESSAGING),
     ),
     BrandPhase.CHANNEL_ACTIVATION: _PhaseSpec(
         build_phase4_graph,
@@ -383,6 +388,11 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
         PHASE_OUTPUT_MODELS[BrandPhase.CHANNEL_ACTIVATION],
         merge_fn=functools.partial(
             _merge_named_fragments, node_merge=_PHASE4_NODE_MERGE, require_all=True
+        ),
+        context_phases=(
+            BrandPhase.STRATEGIC_CORE,
+            BrandPhase.NARRATIVE_MESSAGING,
+            BrandPhase.VISUAL_IDENTITY,
         ),
     ),
     BrandPhase.GOVERNANCE: _PhaseSpec(
@@ -392,6 +402,7 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
         merge_fn=functools.partial(
             _merge_named_fragments, node_merge=_PHASE5_NODE_MERGE, require_all=True
         ),
+        context_phases=(BrandPhase.STRATEGIC_CORE, BrandPhase.VISUAL_IDENTITY),
     ),
 }
 
