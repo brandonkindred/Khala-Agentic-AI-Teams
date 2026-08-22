@@ -104,6 +104,71 @@ class _AssignmentMixin:
                 assigned.add(task.id)
         return assigned
 
+    def _try_deterministic_assign(
+        self,
+        ready: List[Task],
+        free_agents: List[str],
+        used_agents: set[str],
+        assigned_tasks: set[str],
+    ) -> bool:
+        """Assign every still-unassigned ready task via pure ``target_team`` matching,
+        bypassing the Tech-Lead LLM call, when the mapping is unambiguous.
+
+        Reuses ``_target_matches_agent`` (the same predicate the LLM-path guardrails use) to
+        find each remaining task's candidate agents among the remaining free agents. The
+        mapping is unambiguous only when every remaining task has exactly one candidate and no
+        two tasks share the same candidate — this also covers the trivial "one free agent, one
+        ready task" case, since an untargeted task matches any agent and a single remaining
+        free agent is then its sole candidate.
+
+        A pinned task whose pinned agent isn't free this round is excluded from this pool
+        entirely rather than treated as a candidate for some other free agent: only
+        ``_reserve_pinned_tasks`` (or the pinned-agent check in the LLM path) may place a
+        pinned task, and only onto its own pinned agent — never here.
+
+        Preconditions:
+            - ``used_agents`` and ``assigned_tasks`` already reflect this round's pinned-task
+              reservation (``_reserve_pinned_tasks``) and nothing else.
+        Postconditions:
+            - Returns False and makes no assignments if there is no remaining, unpinned ready
+              task or free agent to place, if any such task has zero or more than one matching
+              free agent, or if two such tasks would resolve to the same agent — callers must
+              then fall through to the unchanged Tech-Lead LLM path.
+            - Returns True only when the mapping is unambiguous; in that case every remaining,
+              unpinned ready task is attempted via ``self._try_assign``, with ``used_agents``
+              and ``assigned_tasks`` updated in place for each successful placement, and no LLM
+              call is made.
+        """
+        remaining_ready = [
+            t for t in ready if t.id not in assigned_tasks and not self._pinned_agent_for(t)
+        ]
+        remaining_free = [a for a in free_agents if a not in used_agents]
+        if not remaining_ready or not remaining_free:
+            return False
+
+        agent_for_task: dict[str, str] = {}
+        for task in remaining_ready:
+            matches = [
+                agent_id
+                for agent_id in remaining_free
+                if _target_matches_agent(
+                    task.target_team, self.agent_team_keys.get(agent_id, agent_id)
+                )
+            ]
+            if len(matches) != 1:
+                return False
+            agent_for_task[task.id] = matches[0]
+
+        if len(set(agent_for_task.values())) != len(agent_for_task):
+            return False
+
+        for task in remaining_ready:
+            agent_id = agent_for_task[task.id]
+            if self._try_assign(task.id, agent_id):
+                used_agents.add(agent_id)
+                assigned_tasks.add(task.id)
+        return True
+
     def _assign_tasks(self, ready: List[Task], free_agents: List[str]) -> None:
         """Coordinator decides which tasks go to which workers."""
         if not free_agents or not ready:
@@ -111,49 +176,55 @@ class _AssignmentMixin:
         ready_by_id = {t.id: t for t in ready}
         used_agents: set[str] = set()
         assigned_tasks: set[str] = self._reserve_pinned_tasks(ready, free_agents, used_agents)
-        assignments = self.tech_lead.run_assignments(
-            agent_ids=self.agent_ids,
-            ready_tasks=[
-                {
-                    "id": t.id,
-                    "title": t.title,
-                    "target_team": t.target_team or "",
-                    "assignee": t.assigned_agent_id or "unassigned",
-                }
-                for t in ready
-            ],
-            free_agents=free_agents,
-        )
-        for a in assignments.get("assignments") or []:
-            agent_id = a.get("agent_id")
-            task_id = a.get("task_id")
-            task = ready_by_id.get(task_id)
-            if not agent_id or not task or agent_id not in free_agents or agent_id in used_agents:
-                continue
-            pinned = self._pinned_agent_for(task)
-            if pinned and agent_id != pinned:
-                logger.warning(
-                    "Ignoring assignment of task %s to agent %s; its feature branch is "
-                    "pinned to %s",
-                    task.id,
-                    agent_id,
-                    pinned,
-                )
-                continue
-            if not _target_matches_agent(
-                task.target_team,
-                self.agent_team_keys.get(agent_id, agent_id),
-            ):
-                logger.warning(
-                    "Ignoring assignment of task %s target_team=%s to mismatched agent %s",
-                    task.id,
+        if not self._try_deterministic_assign(ready, free_agents, used_agents, assigned_tasks):
+            assignments = self.tech_lead.run_assignments(
+                agent_ids=self.agent_ids,
+                ready_tasks=[
+                    {
+                        "id": t.id,
+                        "title": t.title,
+                        "target_team": t.target_team or "",
+                        "assignee": t.assigned_agent_id or "unassigned",
+                    }
+                    for t in ready
+                ],
+                free_agents=free_agents,
+            )
+            for a in assignments.get("assignments") or []:
+                agent_id = a.get("agent_id")
+                task_id = a.get("task_id")
+                task = ready_by_id.get(task_id)
+                if (
+                    not agent_id
+                    or not task
+                    or agent_id not in free_agents
+                    or agent_id in used_agents
+                ):
+                    continue
+                pinned = self._pinned_agent_for(task)
+                if pinned and agent_id != pinned:
+                    logger.warning(
+                        "Ignoring assignment of task %s to agent %s; its feature branch is "
+                        "pinned to %s",
+                        task.id,
+                        agent_id,
+                        pinned,
+                    )
+                    continue
+                if not _target_matches_agent(
                     task.target_team,
-                    agent_id,
-                )
-                continue
-            if self._try_assign(task.id, agent_id):
-                used_agents.add(agent_id)
-                assigned_tasks.add(task.id)
+                    self.agent_team_keys.get(agent_id, agent_id),
+                ):
+                    logger.warning(
+                        "Ignoring assignment of task %s target_team=%s to mismatched agent %s",
+                        task.id,
+                        task.target_team,
+                        agent_id,
+                    )
+                    continue
+                if self._try_assign(task.id, agent_id):
+                    used_agents.add(agent_id)
+                    assigned_tasks.add(task.id)
 
         # Deterministic guardrail: if the Tech Lead already labeled a ready task for a v2 team
         # (or the task is pinned to a specific agent) but the assignment call omitted it, assign

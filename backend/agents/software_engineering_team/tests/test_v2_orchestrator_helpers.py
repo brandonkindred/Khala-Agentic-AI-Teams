@@ -61,8 +61,6 @@ def test_be_development_agent_build_tool_runners():
 
 
 def test_be_development_agent_read_repo_code(tmp_path: Path):
-    from unittest.mock import MagicMock
-
     from software_engineering_team.backend_code_v2_team.orchestrator import (
         BackendDevelopmentAgent,
     )
@@ -79,8 +77,6 @@ def test_be_development_agent_read_repo_code(tmp_path: Path):
 
 
 def test_be_development_agent_read_repo_code_empty(tmp_path: Path):
-    from unittest.mock import MagicMock
-
     from software_engineering_team.backend_code_v2_team.orchestrator import (
         BackendDevelopmentAgent,
     )
@@ -94,8 +90,6 @@ def test_be_development_agent_read_repo_code_max_chars(tmp_path: Path):
     """The max_chars budget truncates at a whole-file boundary: a file whose
     chunk would push the running total past max_chars is excluded, so the output
     is bounded by max_chars and never contains a partial file or the tail."""
-    from unittest.mock import MagicMock
-
     from software_engineering_team.backend_code_v2_team.orchestrator import (
         BackendDevelopmentAgent,
     )
