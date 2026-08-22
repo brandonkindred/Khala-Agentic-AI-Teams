@@ -20,36 +20,70 @@ rather than merely being fast enough to slip under a numeric threshold.
 
 Every specialist's mocked LLM call reaches this barrier via
 ``asyncio.to_thread`` (see ``llm_service/strands_adapter.py``'s
-``LLMClientModel.stream``), which offloads onto asyncio's default
-executor -- lazily sized to ``min(32, (os.cpu_count() or 1) + 4)`` the first
-time it's used. On a CI runner with only one visible CPU that caps out at 5
-workers, one short of the six the barrier needs, which would time out (and
-fail) a *correctly* parallel graph, not just a regressed one. Patching
-``os.cpu_count`` for the duration of the run keeps that lazy sizing
-independent of the runner's real core count, guaranteeing enough workers
-for the barrier regardless of environment.
+``LLMClientModel.stream``), which offloads onto asyncio's default executor --
+lazily created the first time it's needed, sized by a CPU-count heuristic
+that is itself version-dependent (``os.cpu_count()`` pre-3.13,
+``os.process_cpu_count()`` on 3.13+). Rather than chase that sizing hook
+across Python versions, this test installs an explicit oversized default
+executor directly on the event loop ``run_coroutine`` creates (by patching
+``asyncio.events.new_event_loop``, the primitive ``asyncio.run`` itself calls
+to create that loop), guaranteeing enough workers for the barrier regardless
+of the runner's real core count or Python version.
+
+This also forces ``LLM_PROVIDER=dummy`` and clears the LLM client/Strands
+model caches for the run: ``conftest.py`` only *defaults* that env var
+(``setdefault``), so a developer running this file with a different provider
+already exported would silently build real provider clients instead of
+``DummyLLMClient`` -- the ``chat`` patch below would then never be hit, and
+this benchmark would either fail on missing credentials or, worse, send six
+real LLM requests instead of measuring the mocked latency.
 """
 
 from __future__ import annotations
 
+import asyncio
+import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from branding_team.graphs.phase2_narrative import build_phase2_graph
 from branding_team.graphs.shared import serialize_mission
 from branding_team.shared.coro_runner import run_coroutine
 from branding_team.tests.conftest import make_mission
-from llm_service import DummyLLMClient
+from llm_service import DummyLLMClient, clear_client_cache
 
 _NUM_SPECIALISTS = 6
 _PER_CALL_DELAY_SECONDS = 1.0
 _BARRIER_TIMEOUT_SECONDS = 2.0  # generous scheduling margin; true fan-out clears near-instantly
 _MAX_WALL_CLOCK_SECONDS = 3.0  # well under the ~6s a sequential chain would take
-# Fake os.cpu_count() the default asyncio executor sizes itself against, so the
-# barrier always has enough workers regardless of the runner's real core count
-# (min(32, cpu_count + 4) must clear _NUM_SPECIALISTS).
-_FAKE_CPU_COUNT_FOR_EXECUTOR_SIZING = _NUM_SPECIALISTS + 2
+_EXECUTOR_WORKERS = _NUM_SPECIALISTS + 2  # headroom above what the barrier needs
+
+# Captured before the test below ever patches ``asyncio.events.new_event_loop``,
+# so the replacement can still create a real loop instead of recursing into itself.
+_real_new_event_loop = asyncio.events.new_event_loop
+
+
+def _new_event_loop_with_generous_executor() -> asyncio.AbstractEventLoop:
+    """Create a real event loop, pre-sized with a default executor that always
+    clears ``_NUM_SPECIALISTS`` workers.
+
+    Postconditions:
+        Returns a fresh, unstarted event loop (via the real, pre-patch
+        ``asyncio.events.new_event_loop``) whose default executor is a
+        ``ThreadPoolExecutor`` with ``_EXECUTOR_WORKERS`` threads --
+        independent of ``os.cpu_count()``/``os.process_cpu_count()``, so the
+        loop's ``asyncio.to_thread`` offloads (what every mocked ``chat()``
+        call rides) can never be capped below what the barrier requires.
+        ``asyncio.run``'s own cleanup (``shutdown_default_executor``) still
+        shuts this executor down when the loop closes.
+    """
+    loop = _real_new_event_loop()
+    loop.set_default_executor(
+        ThreadPoolExecutor(max_workers=_EXECUTOR_WORKERS, thread_name_prefix="phase2-benchmark")
+    )
+    return loop
 
 
 def test_phase2_specialists_execute_in_parallel_under_mocked_llm_latency() -> None:
@@ -86,12 +120,17 @@ def test_phase2_specialists_execute_in_parallel_under_mocked_llm_latency() -> No
     )
 
     with (
-        patch("os.cpu_count", return_value=_FAKE_CPU_COUNT_FOR_EXECUTOR_SIZING),
+        patch.dict(os.environ, {"LLM_PROVIDER": "dummy"}),
+        patch("asyncio.events.new_event_loop", side_effect=_new_event_loop_with_generous_executor),
         patch.object(DummyLLMClient, "chat", slow_chat),
     ):
-        start = time.monotonic()
-        run_coroutine(build_phase2_graph().invoke_async(task))
-        elapsed = time.monotonic() - start
+        clear_client_cache()
+        try:
+            start = time.monotonic()
+            run_coroutine(build_phase2_graph().invoke_async(task))
+            elapsed = time.monotonic() - start
+        finally:
+            clear_client_cache()
 
     assert elapsed <= _MAX_WALL_CLOCK_SECONDS, (
         f"Phase 2 took {elapsed:.2f}s with 6 specialists at "
