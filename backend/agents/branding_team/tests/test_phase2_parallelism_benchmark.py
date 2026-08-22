@@ -17,6 +17,17 @@ requires every specialist's mocked LLM call to be concurrently in-flight
 before any of them is allowed to proceed, so *any* serialized edge -- full
 chain or a single pair -- times out the barrier and fails the test loudly,
 rather than merely being fast enough to slip under a numeric threshold.
+
+Every specialist's mocked LLM call reaches this barrier via
+``asyncio.to_thread`` (see ``llm_service/strands_adapter.py``'s
+``LLMClientModel.stream``), which offloads onto asyncio's default
+executor -- lazily sized to ``min(32, (os.cpu_count() or 1) + 4)`` the first
+time it's used. On a CI runner with only one visible CPU that caps out at 5
+workers, one short of the six the barrier needs, which would time out (and
+fail) a *correctly* parallel graph, not just a regressed one. Patching
+``os.cpu_count`` for the duration of the run keeps that lazy sizing
+independent of the runner's real core count, guaranteeing enough workers
+for the barrier regardless of environment.
 """
 
 from __future__ import annotations
@@ -35,6 +46,10 @@ _NUM_SPECIALISTS = 6
 _PER_CALL_DELAY_SECONDS = 1.0
 _BARRIER_TIMEOUT_SECONDS = 2.0  # generous scheduling margin; true fan-out clears near-instantly
 _MAX_WALL_CLOCK_SECONDS = 3.0  # well under the ~6s a sequential chain would take
+# Fake os.cpu_count() the default asyncio executor sizes itself against, so the
+# barrier always has enough workers regardless of the runner's real core count
+# (min(32, cpu_count + 4) must clear _NUM_SPECIALISTS).
+_FAKE_CPU_COUNT_FOR_EXECUTOR_SIZING = _NUM_SPECIALISTS + 2
 
 
 def test_phase2_specialists_execute_in_parallel_under_mocked_llm_latency() -> None:
@@ -70,7 +85,10 @@ def test_phase2_specialists_execute_in_parallel_under_mocked_llm_latency() -> No
         f"Branding Mission:\n{serialize_mission(mission)}"
     )
 
-    with patch.object(DummyLLMClient, "chat", slow_chat):
+    with (
+        patch("os.cpu_count", return_value=_FAKE_CPU_COUNT_FOR_EXECUTOR_SIZING),
+        patch.object(DummyLLMClient, "chat", slow_chat),
+    ):
         start = time.monotonic()
         run_coroutine(build_phase2_graph().invoke_async(task))
         elapsed = time.monotonic() - start
