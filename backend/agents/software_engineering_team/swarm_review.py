@@ -111,8 +111,13 @@ def deserialize_review_cache(data: Any) -> Dict[str, "tuple[str, Dict[str, Any]]
     Postconditions:
         - Non-list ``data`` (None, str, int, dict, ...) returns ``{}``.
         - Each list entry is included only when it is a dict containing all
-          of ``task_id``, ``cache_key``, ``verdict`` and ``verdict`` is
-          itself a dict; entries failing either check are skipped.
+          of ``task_id``, ``cache_key``, ``verdict``; ``task_id`` and
+          ``cache_key`` are both ``str``; and ``verdict`` is itself a dict —
+          entries failing any check are skipped. The ``task_id``/``cache_key``
+          type check also guards the dict-key assignment below against an
+          unhashable ``task_id`` (e.g. a list or dict smuggled into corrupted
+          JSON), which would otherwise raise ``TypeError`` instead of being
+          skipped.
         - Returns a dict keyed by ``task_id`` with ``(cache_key, verdict)``
           tuple values, mirroring
           ``CodingTeamSwarm._review_verdict_cache``'s declared type.
@@ -132,10 +137,16 @@ def deserialize_review_cache(data: Any) -> Dict[str, "tuple[str, Dict[str, Any]]
             continue
         if not {"task_id", "cache_key", "verdict"} <= entry.keys():
             continue
+        task_id = entry["task_id"]
+        cache_key = entry["cache_key"]
         verdict = entry["verdict"]
-        if not isinstance(verdict, dict):
+        if (
+            not isinstance(task_id, str)
+            or not isinstance(cache_key, str)
+            or not isinstance(verdict, dict)
+        ):
             continue
-        result[entry["task_id"]] = (entry["cache_key"], verdict)
+        result[task_id] = (cache_key, verdict)
     return result
 
 
