@@ -1487,6 +1487,7 @@ def test_full_run_phase4_not_degraded_with_nine_fragments() -> None:
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=True),
+            phase_cache=None,
         )
 
     assert result.degraded_phases == []
@@ -1784,6 +1785,7 @@ def test_full_run_phase5_not_degraded_with_seven_fragments() -> None:
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=True),
+            phase_cache=None,
         )
 
     assert result.degraded_phases == []
