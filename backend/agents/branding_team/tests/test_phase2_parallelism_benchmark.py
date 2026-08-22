@@ -28,7 +28,14 @@ across Python versions, this test installs an explicit oversized default
 executor directly on the event loop ``run_coroutine`` creates (by patching
 ``asyncio.events.new_event_loop``, the primitive ``asyncio.run`` itself calls
 to create that loop), guaranteeing enough workers for the barrier regardless
-of the runner's real core count or Python version.
+of the runner's real core count or Python version. This is hidden coupling to
+``run_coroutine``'s internal use of ``asyncio.run`` -- if it is ever
+refactored to drive coroutines a different way (e.g. reusing an existing
+loop), this patch would silently stop taking effect and the barrier could
+then deadlock on a low-CPU runner for a reason unrelated to Phase 2 itself.
+The ``executor_injected`` assertion below exists specifically to catch that:
+it fails loudly, distinct from a barrier timeout, if the patched factory is
+never invoked.
 
 This also forces the dummy provider and clears the LLM client/Strands model
 caches for the run. ``llm_service.config.resolve_provider()`` -- the sole
@@ -68,8 +75,13 @@ from llm_service import DummyLLMClient, clear_client_cache
 
 _NUM_SPECIALISTS = 6
 _PER_CALL_DELAY_SECONDS = 1.0
-_BARRIER_TIMEOUT_SECONDS = 2.0  # generous scheduling margin; true fan-out clears near-instantly
-_MAX_WALL_CLOCK_SECONDS = 3.0  # well under the ~6s a sequential chain would take
+# A true fan-out clears the barrier near-instantly (all six threads reach it
+# within milliseconds of each other) and the whole run finishes in ~1s, so
+# both bounds carry generous slack for scheduling jitter/CPU contention on
+# shared CI runners -- while staying far below the ~6s a sequential chain, or
+# ~2s a single-edge partial regression, would take.
+_BARRIER_TIMEOUT_SECONDS = 10.0
+_MAX_WALL_CLOCK_SECONDS = 8.0
 _EXECUTOR_WORKERS = _NUM_SPECIALISTS + 2  # headroom above what the barrier needs
 
 # Captured before the test below ever patches ``asyncio.events.new_event_loop``,
@@ -100,20 +112,29 @@ def _new_event_loop_with_generous_executor() -> asyncio.AbstractEventLoop:
 
 @pytest.mark.bench
 def test_phase2_specialists_execute_in_parallel_under_mocked_llm_latency() -> None:
-    """Six specialists x 1s mocked LLM latency must finish in well under 6s.
+    """Six specialists x 1s mocked LLM latency must finish in well under the
+    sequential baseline.
 
     Fails if Phase 2 regresses from its zero-edge fan-out back to a
     sequential chain, or if any single edge is (re)introduced between two
     specialists (partial serialization) -- the shared barrier requires all
     six mocked LLM calls to be concurrently in-flight before any completes,
     so even a two-node chain deadlocks the barrier instead of slipping under
-    the wall-clock bound. Together this proves the parallelism epic's
-    latency claim as a durable CI guard.
+    the wall-clock bound. A separate call-count assertion distinguishes "the
+    wrong number of LLM calls happened" (e.g. a specialist retries, or the
+    graph gains/loses a node) from true serialization, so a failure here
+    doesn't get misdiagnosed as the other. Together this proves the
+    parallelism epic's latency claim as a durable CI guard.
     """
     barrier = threading.Barrier(_NUM_SPECIALISTS, timeout=_BARRIER_TIMEOUT_SECONDS)
     original_chat = DummyLLMClient.chat
+    call_count_lock = threading.Lock()
+    call_count = 0
 
     def slow_chat(self: DummyLLMClient, messages, **kwargs):
+        nonlocal call_count
+        with call_count_lock:
+            call_count += 1
         try:
             barrier.wait()
         except threading.BrokenBarrierError as exc:
@@ -126,6 +147,14 @@ def test_phase2_specialists_execute_in_parallel_under_mocked_llm_latency() -> No
         time.sleep(_PER_CALL_DELAY_SECONDS)
         return original_chat(self, messages, **kwargs)
 
+    executor_injected = False
+
+    def tracking_new_event_loop() -> asyncio.AbstractEventLoop:
+        nonlocal executor_injected
+        loop = _new_event_loop_with_generous_executor()
+        executor_injected = True
+        return loop
+
     mission = make_mission()
     task = (
         f"Create a comprehensive brand strategy for the following company.\n\n"
@@ -134,7 +163,7 @@ def test_phase2_specialists_execute_in_parallel_under_mocked_llm_latency() -> No
 
     with (
         patch("llm_service.config.resolve_provider", return_value="dummy"),
-        patch("asyncio.events.new_event_loop", side_effect=_new_event_loop_with_generous_executor),
+        patch("asyncio.events.new_event_loop", side_effect=tracking_new_event_loop),
         patch.object(DummyLLMClient, "chat", slow_chat),
     ):
         clear_client_cache()
@@ -145,6 +174,18 @@ def test_phase2_specialists_execute_in_parallel_under_mocked_llm_latency() -> No
         finally:
             clear_client_cache()
 
+    assert executor_injected, (
+        "asyncio.events.new_event_loop was never called -- run_coroutine no longer "
+        "creates its loop via asyncio.run's default path, so this benchmark's "
+        "injected executor never took effect; the barrier/wall-clock results above "
+        "cannot be trusted until this coupling is fixed"
+    )
+    assert call_count == _NUM_SPECIALISTS, (
+        f"expected exactly {_NUM_SPECIALISTS} LLM calls (one per Phase 2 specialist), "
+        f"got {call_count} -- a specialist retried, or the graph's specialist count "
+        "changed; this is a different failure than serialization, fix the count "
+        "mismatch before trusting the wall-clock assertion below"
+    )
     assert elapsed <= _MAX_WALL_CLOCK_SECONDS, (
         f"Phase 2 took {elapsed:.2f}s with 6 specialists at "
         f"{_PER_CALL_DELAY_SECONDS}s/call mocked LLM latency -- expected <= "
