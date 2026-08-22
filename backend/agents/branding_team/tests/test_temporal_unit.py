@@ -829,6 +829,28 @@ def test_run_single_phase_first_phase_has_no_prior_context() -> None:
     assert "upstream" not in task.lower()
 
 
+def test_phase_task_filters_prior_outputs_by_context_phases(monkeypatch) -> None:
+    import branding_team.orchestrator as orch_mod
+
+    monkeypatch.setitem(
+        orch_mod._PHASE_SPEC,
+        BrandPhase.NARRATIVE_MESSAGING,
+        orch_mod._PHASE_SPEC[BrandPhase.NARRATIVE_MESSAGING]._replace(
+            context_phases=(BrandPhase.STRATEGIC_CORE,)
+        ),
+    )
+
+    mission = make_mission()
+    prior_outputs = {
+        BrandPhase.STRATEGIC_CORE.value: {"marker": "STRATEGIC_MARKER"},
+        BrandPhase.VISUAL_IDENTITY.value: {"marker": "VISUAL_MARKER"},
+    }
+    task = orch_phase_task(mission, BrandPhase.NARRATIVE_MESSAGING, prior_outputs)
+
+    assert "STRATEGIC_MARKER" in task
+    assert "VISUAL_MARKER" not in task
+
+
 def test_run_single_phase_rejects_non_runnable_phase() -> None:
     from branding_team.orchestrator import BrandingTeamOrchestrator
 
