@@ -8,6 +8,7 @@ correctly assembles ``TeamOutput`` from it.
 """
 
 import asyncio
+import functools
 import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -93,11 +94,11 @@ from branding_team.models import (
 from branding_team.orchestrator import (
     _PHASE1_NODE_MERGE,
     _PHASE2_NODE_MERGE,
+    _PHASE3_NODE_MERGE,
+    _PHASE4_NODE_MERGE,
+    _PHASE5_NODE_MERGE,
     _PHASE_SPEC,
     _merge_named_fragments,
-    _merge_phase3_fragments,
-    _merge_phase4_fragments,
-    _merge_phase5_fragments,
 )
 from branding_team.shared.memoization import phase_input_hash
 from branding_team.shared.phase_output_cache import PhaseOutputCache
@@ -1448,7 +1449,7 @@ def test_phase4_fragments_collectively_populate_every_output_field() -> None:
 def test_full_run_phase4_not_degraded_with_nine_fragments() -> None:
     """Phase 4's real runtime shape is nine separate specialist fragments,
     not the single flat block _mock_graph_result's default gives every
-    phase (which never actually exercises _merge_phase4_fragments, since it
+    phase (which never actually exercises the Phase 4 merge_fn partial, since it
     bails out unless node_result.result.results is a dict). Wire that real
     shape through orchestrator.run() end-to-end and confirm the Python merge
     keeps Phase 4 out of degraded_phases and fully populates its output."""
@@ -1476,13 +1477,13 @@ def test_full_run_phase4_not_degraded_with_nine_fragments() -> None:
     _assert_every_field_populated(result.channel_activation)
 
 
-def test_merge_phase4_fragments_rejects_incomplete_specialist_set() -> None:
+def test_merge_named_fragments_phase4_rejects_incomplete_specialist_set() -> None:
     """A Phase 4 run missing one of the nine specialists (e.g. events_guide
     never completed) must not validate as a complete ChannelActivationOutput
     via field defaults — every field on it defaults to empty/absent, so a
     partial merge would otherwise pass validation silently.
 
-    Tested directly against ``_merge_phase4_fragments`` (require_all=True) as
+    Tested directly against ``_merge_named_fragments`` bound with ``_PHASE4_NODE_MERGE`` (require_all=True) as
     a focused unit test of the merge function in isolation. See
     ``test_extract_phase_output_rejects_incomplete_phase4_fragments`` for the
     end-to-end path through ``_extract_phase_output``.
@@ -1508,7 +1509,9 @@ def test_merge_phase4_fragments_rejects_incomplete_specialist_set() -> None:
     node_result = MagicMock()
     node_result.result = inner_multi_result
 
-    merged = _merge_phase4_fragments(node_result, ChannelActivationOutput)
+    merged = functools.partial(
+        _merge_named_fragments, node_merge=_PHASE4_NODE_MERGE, require_all=True
+    )(node_result, ChannelActivationOutput)
 
     assert merged is None
 
@@ -1743,7 +1746,7 @@ def test_phase5_fragments_collectively_populate_every_output_field() -> None:
 def test_full_run_phase5_not_degraded_with_seven_fragments() -> None:
     """Phase 5's real runtime shape is seven separate specialist fragments,
     not the single flat block _mock_graph_result's default gives every
-    phase (which never actually exercises _merge_phase5_fragments, since it
+    phase (which never actually exercises the Phase 5 merge_fn partial, since it
     bails out unless node_result.result.results is a dict). Wire that real
     shape through orchestrator.run() end-to-end and confirm the Python merge
     keeps Phase 5 out of degraded_phases and fully populates its output."""
@@ -1771,21 +1774,23 @@ def test_full_run_phase5_not_degraded_with_seven_fragments() -> None:
     _assert_every_field_populated(result.governance)
 
 
-def test_merge_phase5_fragments_rejects_incomplete_specialist_set() -> None:
+def test_merge_named_fragments_phase5_rejects_incomplete_specialist_set() -> None:
     """A Phase 5 run missing one of the seven specialists (e.g.
     evolution_framer never completed) must not validate as a complete
     GovernanceOutput via field defaults — every field on it defaults to
     empty/absent, so a partial merge would otherwise pass validation
     silently.
 
-    Tested directly against ``_merge_phase5_fragments`` (require_all=True) as
+    Tested directly against ``_merge_named_fragments`` bound with ``_PHASE5_NODE_MERGE`` (require_all=True) as
     a focused unit test of the merge function in isolation. See
     ``test_extract_phase_output_rejects_incomplete_phase5_fragments`` for the
     end-to-end path through ``_extract_phase_output``.
     """
     node_result = _phase5_nested_node_result(omit="evolution_framer")
 
-    merged = _merge_phase5_fragments(node_result, GovernanceOutput)
+    merged = functools.partial(
+        _merge_named_fragments, node_merge=_PHASE5_NODE_MERGE, require_all=True
+    )(node_result, GovernanceOutput)
 
     assert merged is None
 
@@ -2042,7 +2047,7 @@ def test_phase3_fragments_collectively_populate_every_output_field() -> None:
 def test_full_run_phase3_not_degraded_with_eleven_fragments() -> None:
     """Phase 3's real runtime shape is eleven separate node fragments, not the
     single flat block _mock_graph_result's default gives every phase (which
-    never actually exercises _merge_phase3_fragments, since it bails out
+    never actually exercises the Phase 3 merge_fn partial, since it bails out
     unless node_result.result.results is a dict). Wire that real shape
     through orchestrator.run() end-to-end and confirm the Python merge keeps
     Phase 3 out of degraded_phases."""
@@ -2071,20 +2076,22 @@ def test_full_run_phase3_not_degraded_with_eleven_fragments() -> None:
     _assert_every_field_populated(result.visual_identity)
 
 
-def test_merge_phase3_fragments_rejects_incomplete_specialist_set() -> None:
+def test_merge_named_fragments_phase3_rejects_incomplete_specialist_set() -> None:
     """A Phase 3 run missing one node (e.g. design_system_codifier never
     completed) must not validate as a complete VisualIdentityOutput via field
     defaults -- every field on it defaults to empty/absent, so a partial
     merge would otherwise pass validation silently.
 
-    Tested directly against ``_merge_phase3_fragments`` (require_all=True) as
+    Tested directly against ``_merge_named_fragments`` bound with ``_PHASE3_NODE_MERGE`` (require_all=True) as
     a focused unit test of the merge function in isolation. See
     ``test_extract_phase_output_rejects_incomplete_phase3_fragments`` for the
     end-to-end path through ``_extract_phase_output``.
     """
     node_result = _phase3_nested_node_result(omit="design_system_codifier")
 
-    merged = _merge_phase3_fragments(node_result, VisualIdentityOutput)
+    merged = functools.partial(
+        _merge_named_fragments, node_merge=_PHASE3_NODE_MERGE, require_all=True
+    )(node_result, VisualIdentityOutput)
 
     assert merged is None
 
