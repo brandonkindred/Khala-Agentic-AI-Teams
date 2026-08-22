@@ -806,6 +806,16 @@ def make_brand_experience_principler() -> Agent:
     )
 
 
+CHANNEL_SPECS: tuple[tuple[str, str], ...] = (
+    ("website", "Company website, landing pages, product pages."),
+    ("social", "Social media platforms (LinkedIn, Twitter, Instagram)."),
+    ("email", "Email marketing, newsletters, transactional emails."),
+    ("events", "Conferences, webinars, meetups, trade shows."),
+    ("partnerships", "Co-branding, sponsorships, partner marketing."),
+    ("internal", "Internal comms, employee branding, onboarding."),
+)
+
+
 def _channel_guide_prompt(channel: str, description: str) -> AgentPromptSpec:
     """Build the channel-guide prompt spec for one activation channel.
 

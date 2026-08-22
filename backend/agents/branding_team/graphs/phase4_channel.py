@@ -12,16 +12,13 @@ from __future__ import annotations
 from strands.multiagent.graph import Graph, GraphBuilder
 
 from branding_team.agents import (
+    CHANNEL_SPECS,
+    _make_channel_guide,
     make_brand_architecture_builder,
     make_brand_experience_principler,
     make_brand_in_action_illustrator,
-    make_email_guide,
-    make_events_guide,
-    make_internal_guide,
-    make_partnerships_guide,
-    make_social_guide,
-    make_website_guide,
 )
+from branding_team.models import ChannelGuidelineOutput
 
 
 def build_phase4_graph() -> Graph:
@@ -57,19 +54,21 @@ def build_phase4_graph() -> Graph:
     """
     builder = GraphBuilder()
 
-    factories = {
+    non_channel_factories = {
         "brand_experience_principler": make_brand_experience_principler,
-        "website_guide": make_website_guide,
-        "social_guide": make_social_guide,
-        "email_guide": make_email_guide,
-        "events_guide": make_events_guide,
-        "partnerships_guide": make_partnerships_guide,
-        "internal_guide": make_internal_guide,
         "brand_architecture_builder": make_brand_architecture_builder,
         "brand_in_action_illustrator": make_brand_in_action_illustrator,
     }
-    for node_id, factory in factories.items():
+    for node_id, factory in non_channel_factories.items():
         builder.add_node(factory(), node_id=node_id)
+        builder.set_entry_point(node_id)
+
+    for channel, description in CHANNEL_SPECS:
+        node_id = f"{channel}_guide"
+        builder.add_node(
+            _make_channel_guide(channel, description, ChannelGuidelineOutput),
+            node_id=node_id,
+        )
         builder.set_entry_point(node_id)
 
     return builder.build()
