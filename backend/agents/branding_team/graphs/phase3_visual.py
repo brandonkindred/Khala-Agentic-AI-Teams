@@ -7,10 +7,10 @@ collector agent: Strands' Graph engine assembles all three completed
 predecessors' outputs into converge_decider's input deterministically (in
 Python, no LLM call needed) once every entry-point node in the diverge batch
 has finished. The seven post-converge specialists are terminal nodes -- there
-is no compositor; the orchestrator's Phase-3 ``merge_fn``
-(``_merge_phase3_fragments``) assembles their typed fragments, plus
-converge_decider's own decision and the three moodboard candidates, into a
-unified ``VisualIdentityOutput`` in Python.
+is no compositor; the orchestrator's Phase-3 ``merge_fn`` (``functools.partial``
+binding ``_merge_named_fragments`` to ``_PHASE3_NODE_MERGE``, ``require_all=True``)
+assembles their typed fragments, plus converge_decider's own decision and the
+three moodboard candidates, into a unified ``VisualIdentityOutput`` in Python.
 
 This is intentionally a Graph rather than a Swarm. Agents built with
 ``structured_output=`` force Strands' structured-output tool and then
@@ -79,8 +79,9 @@ def build_phase3_graph() -> Graph:
     Postconditions:
         Returns a built ``Graph`` whose entry points are the three moodboard
         conceptualists and whose seven specialist nodes are terminal -- there is
-        no compositor; the orchestrator's Phase-3 ``merge_fn``
-        (``_merge_phase3_fragments``) assembles their typed ``structured_output``
+        no compositor; the orchestrator's Phase-3 ``merge_fn`` (``functools.partial``
+        binding ``_merge_named_fragments`` to ``_PHASE3_NODE_MERGE``,
+        ``require_all=True``) assembles their typed ``structured_output``
         fragments into a single ``VisualIdentityOutput`` outside the graph.
     """
 

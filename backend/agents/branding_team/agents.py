@@ -271,7 +271,7 @@ def make_positioning_synthesizer() -> Agent:
 
 
 # ===================================================================
-# Phase 2 — Narrative & Messaging  (Graph: sequential specialists)
+# Phase 2 — Narrative & Messaging  (Graph: parallel fan-out)
 # ===================================================================
 
 _PHASE2_AGENT_KEY = phase_agent_key(BrandPhase.NARRATIVE_MESSAGING)
@@ -303,10 +303,10 @@ def make_storyteller() -> Agent:
 
 _ARCHETYPE_ANALYST_PROMPT = AgentPromptSpec(
     opening=(
-        "You are a Brand Archetype Analyst. Using the brand story from Inputs from previous "
-        f"nodes and the strategic core as read-only context, select {BRAND_ARCHETYPES_MIN}-"
-        f"{BRAND_ARCHETYPES_MAX} brand archetypes (e.g. The Sage, The Creator, The Explorer) "
-        "that fit the narrative, and add:"
+        "You are a Brand Archetype Analyst. Using the branding mission and strategic core "
+        f"output as context, select {BRAND_ARCHETYPES_MIN}-{BRAND_ARCHETYPES_MAX} brand "
+        "archetypes (e.g. The Sage, The Creator, The Explorer) that fit the brand's "
+        "positioning and values, and add:"
     ),
     fields=(
         PromptFieldSpec(
@@ -341,8 +341,8 @@ def make_archetype_analyst() -> Agent:
 
 _TAGLINE_WRITER_PROMPT = AgentPromptSpec(
     opening=(
-        "You are a Tagline Writer. Using the brand story and archetypes from Inputs from "
-        "previous nodes and the strategic core as read-only context, add:"
+        "You are a Tagline Writer. Using the branding mission and strategic core output as "
+        "context, add:"
     ),
     fields=(
         PromptFieldSpec("tagline", "a memorable brand tagline (max 8 words)"),
@@ -378,8 +378,8 @@ def make_tagline_writer() -> Agent:
 
 _MESSAGE_MAPPER_PROMPT = AgentPromptSpec(
     opening=(
-        "You are a Message Mapper. Using all prior narrative fields from Inputs from previous "
-        "nodes as read-only context, add:"
+        "You are a Message Mapper. Using the branding mission and strategic core output "
+        "(positioning, values, audience segments, differentiation) as context, add:"
     ),
     fields=(
         PromptFieldSpec(
@@ -418,8 +418,8 @@ def make_message_mapper() -> Agent:
 
 _PERSONA_BUILDER_PROMPT = AgentPromptSpec(
     opening=(
-        "You are a Persona Builder. Using audience segments and all prior narrative fields "
-        "from Inputs from previous nodes as read-only context, create:"
+        "You are a Persona Builder. Using the branding mission and the strategic core's "
+        "audience segments as context, create:"
     ),
     fields=(
         PromptFieldSpec(
@@ -454,9 +454,8 @@ def make_persona_builder() -> Agent:
 
 _VOICE_PRINCIPLES_DRAFTER_PROMPT = AgentPromptSpec(
     opening=(
-        "You are a Voice Principles Drafter. Using all prior narrative fields from Inputs from "
-        "previous nodes and the mission's desired_voice as read-only context, produce "
-        "writing_guidelines:"
+        "You are a Voice Principles Drafter. Using the branding mission's desired_voice and "
+        "the strategic core output as context, produce writing_guidelines:"
     ),
     fields=(
         PromptFieldSpec(
@@ -472,7 +471,7 @@ _VOICE_PRINCIPLES_DRAFTER_PROMPT = AgentPromptSpec(
             "piece must meet",
         ),
     ),
-    closing="\nThis is the final step in narrative development.",
+    closing="\nThis runs alongside the other five narrative specialists; do not assume any of their output already exists.",
 )
 
 
@@ -484,8 +483,9 @@ def make_voice_principles_drafter() -> Agent:
         structured output is a ``WritingGuidelinesOutput`` containing voice
         principles, style dos/don'ts, and an editorial quality bar — its own
         field only, merged with the other five specialists' fragments by the
-        orchestrator. The final step in narrative development. The agent is
-        routed through the ``branding_narrative_messaging`` agent_key tier.
+        orchestrator. Runs in parallel with the other five, not after them.
+        The agent is routed through the ``branding_narrative_messaging``
+        agent_key tier.
     """
     return build_agent(
         name="VoicePrinciplesDrafter",
@@ -806,6 +806,18 @@ def make_brand_experience_principler() -> Agent:
     )
 
 
+CHANNEL_SPECS: tuple[tuple[str, str], ...] = (
+    ("website", "Company website, landing pages, product pages."),
+    ("social", "Social media platforms (LinkedIn, Twitter, Instagram)."),
+    ("email", "Email marketing, newsletters, transactional emails."),
+    ("events", "Conferences, webinars, meetups, trade shows."),
+    ("partnerships", "Co-branding, sponsorships, partner marketing."),
+    ("internal", "Internal comms, employee branding, onboarding."),
+)
+
+_CHANNEL_DESCRIPTIONS: dict[str, str] = dict(CHANNEL_SPECS)
+
+
 def _channel_guide_prompt(channel: str, description: str) -> AgentPromptSpec:
     """Build the channel-guide prompt spec for one activation channel.
 
@@ -880,74 +892,96 @@ def _make_channel_guide(
 
 
 def make_website_guide() -> Agent:
-    """Build the Phase 4 website channel guide agent.
+    """Deprecated alias for the website channel guide.
+
+    .. deprecated::
+        Superseded by iterating ``CHANNEL_SPECS`` and calling
+        ``_make_channel_guide`` directly (see ``build_phase4_graph``).
+        Retained only for tests that import this factory by name.
 
     Postconditions:
         Returns ``_make_channel_guide("website", ...)`` — see that
         function's contract.
     """
-    return _make_channel_guide(
-        "website", "Company website, landing pages, product pages.", ChannelGuidelineOutput
-    )
+    return _make_channel_guide("website", _CHANNEL_DESCRIPTIONS["website"], ChannelGuidelineOutput)
 
 
 def make_social_guide() -> Agent:
-    """Build the Phase 4 social media channel guide agent.
+    """Deprecated alias for the social media channel guide.
+
+    .. deprecated::
+        Superseded by iterating ``CHANNEL_SPECS`` and calling
+        ``_make_channel_guide`` directly (see ``build_phase4_graph``).
+        Retained only for tests that import this factory by name.
 
     Postconditions:
         Returns ``_make_channel_guide("social", ...)`` — see that
         function's contract.
     """
-    return _make_channel_guide(
-        "social", "Social media platforms (LinkedIn, Twitter, Instagram).", ChannelGuidelineOutput
-    )
+    return _make_channel_guide("social", _CHANNEL_DESCRIPTIONS["social"], ChannelGuidelineOutput)
 
 
 def make_email_guide() -> Agent:
-    """Build the Phase 4 email channel guide agent.
+    """Deprecated alias for the email channel guide.
+
+    .. deprecated::
+        Superseded by iterating ``CHANNEL_SPECS`` and calling
+        ``_make_channel_guide`` directly (see ``build_phase4_graph``).
+        Retained only for tests that import this factory by name.
 
     Postconditions:
         Returns ``_make_channel_guide("email", ...)`` — see that
         function's contract.
     """
-    return _make_channel_guide(
-        "email", "Email marketing, newsletters, transactional emails.", ChannelGuidelineOutput
-    )
+    return _make_channel_guide("email", _CHANNEL_DESCRIPTIONS["email"], ChannelGuidelineOutput)
 
 
 def make_events_guide() -> Agent:
-    """Build the Phase 4 events channel guide agent.
+    """Deprecated alias for the events channel guide.
+
+    .. deprecated::
+        Superseded by iterating ``CHANNEL_SPECS`` and calling
+        ``_make_channel_guide`` directly (see ``build_phase4_graph``).
+        Retained only for tests that import this factory by name.
 
     Postconditions:
         Returns ``_make_channel_guide("events", ...)`` — see that
         function's contract.
     """
-    return _make_channel_guide(
-        "events", "Conferences, webinars, meetups, trade shows.", ChannelGuidelineOutput
-    )
+    return _make_channel_guide("events", _CHANNEL_DESCRIPTIONS["events"], ChannelGuidelineOutput)
 
 
 def make_partnerships_guide() -> Agent:
-    """Build the Phase 4 partnerships channel guide agent.
+    """Deprecated alias for the partnerships channel guide.
+
+    .. deprecated::
+        Superseded by iterating ``CHANNEL_SPECS`` and calling
+        ``_make_channel_guide`` directly (see ``build_phase4_graph``).
+        Retained only for tests that import this factory by name.
 
     Postconditions:
         Returns ``_make_channel_guide("partnerships", ...)`` — see that
         function's contract.
     """
     return _make_channel_guide(
-        "partnerships", "Co-branding, sponsorships, partner marketing.", ChannelGuidelineOutput
+        "partnerships", _CHANNEL_DESCRIPTIONS["partnerships"], ChannelGuidelineOutput
     )
 
 
 def make_internal_guide() -> Agent:
-    """Build the Phase 4 internal comms channel guide agent.
+    """Deprecated alias for the internal comms channel guide.
+
+    .. deprecated::
+        Superseded by iterating ``CHANNEL_SPECS`` and calling
+        ``_make_channel_guide`` directly (see ``build_phase4_graph``).
+        Retained only for tests that import this factory by name.
 
     Postconditions:
         Returns ``_make_channel_guide("internal", ...)`` — see that
         function's contract.
     """
     return _make_channel_guide(
-        "internal", "Internal comms, employee branding, onboarding.", ChannelGuidelineOutput
+        "internal", _CHANNEL_DESCRIPTIONS["internal"], ChannelGuidelineOutput
     )
 
 

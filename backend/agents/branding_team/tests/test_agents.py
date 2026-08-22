@@ -142,16 +142,16 @@ _EXPECTED_STORYTELLER_PROMPT = (
 )
 
 _EXPECTED_ARCHETYPE_ANALYST_PROMPT = (
-    "You are a Brand Archetype Analyst. Using the brand story from Inputs from previous "
-    "nodes and the strategic core as read-only context, select 1-2 brand archetypes (e.g. "
-    "The Sage, The Creator, The Explorer) that fit the narrative, and add:\n"
+    "You are a Brand Archetype Analyst. Using the branding mission and strategic core "
+    "output as context, select 1-2 brand archetypes (e.g. The Sage, The Creator, The "
+    "Explorer) that fit the brand's positioning and values, and add:\n"
     "1. brand_archetypes — for each archetype: archetype (name), rationale (why this fits), "
     "and personality_traits (3-5 traits)"
 )
 
 _EXPECTED_TAGLINE_WRITER_PROMPT = (
-    "You are a Tagline Writer. Using the brand story and archetypes from Inputs from "
-    "previous nodes and the strategic core as read-only context, add:\n"
+    "You are a Tagline Writer. Using the branding mission and strategic core output as "
+    "context, add:\n"
     "1. tagline — a memorable brand tagline (max 8 words)\n"
     "2. tagline_rationale — why this tagline works\n"
     "3. elevator_pitches — three variants: tier '5-second' pitch, tier '30-second' pitch, "
@@ -159,29 +159,29 @@ _EXPECTED_TAGLINE_WRITER_PROMPT = (
 )
 
 _EXPECTED_MESSAGE_MAPPER_PROMPT = (
-    "You are a Message Mapper. Using all prior narrative fields from Inputs from previous "
-    "nodes as read-only context, add:\n"
+    "You are a Message Mapper. Using the branding mission and strategic core output "
+    "(positioning, values, audience segments, differentiation) as context, add:\n"
     "1. messaging_framework — 3-4 messaging pillars, each with: pillar, key_message, and proof_points\n"
     "2. audience_message_maps — one per audience segment, each with: audience_segment, "
     "primary_message, supporting_messages, and tone_adjustments"
 )
 
 _EXPECTED_PERSONA_BUILDER_PROMPT = (
-    "You are a Persona Builder. Using audience segments and all prior narrative fields "
-    "from Inputs from previous nodes as read-only context, create:\n"
+    "You are a Persona Builder. Using the branding mission and the strategic core's "
+    "audience segments as context, create:\n"
     "1. persona_profiles — 2-3 persona profiles, each with: name, role, demographics, "
     "psychographics, goals, frustrations, media_habits, jobs_to_be_done"
 )
 
 _EXPECTED_VOICE_PRINCIPLES_DRAFTER_PROMPT = (
-    "You are a Voice Principles Drafter. Using all prior narrative fields from Inputs from "
-    "previous nodes and the mission's desired_voice as read-only context, produce "
-    "writing_guidelines:\n"
+    "You are a Voice Principles Drafter. Using the branding mission's desired_voice and "
+    "the strategic core output as context, produce writing_guidelines:\n"
     "1. voice_principles — 3-4 principles (e.g. 'Use a confident, human voice')\n"
     "2. style_dos — 3-4 writing best practices\n"
     "3. style_donts — 3-4 things to avoid\n"
     "4. editorial_quality_bar — 3-4 quality standards every piece must meet\n\n"
-    "This is the final step in narrative development."
+    "This runs alongside the other five narrative specialists; do not assume any of their "
+    "output already exists."
 )
 
 _EXPECTED_PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT = (

@@ -57,11 +57,11 @@ flowchart TB
 
     P1 --> P2
 
-    subgraph P2 ["Phase 2 · Narrative & Messaging (Graph, linear + read-only context)"]
+    subgraph P2 ["Phase 2 · Narrative & Messaging (Graph, pure fan-out — no compositor)"]
         direction LR
-        P2a[Storyteller] --> P2b[ArchetypeAnalyst]
-        P2b --> P2rest["TaglineWriter → MessageMapper →
-        PersonaBuilder → VoicePrinciplesDrafter"]
+        P2nodes["Storyteller, ArchetypeAnalyst, TaglineWriter,
+        MessageMapper, PersonaBuilder, VoicePrinciplesDrafter
+        (six parallel terminal nodes, Python-merged)"]
     end
 
     P2 --> P3
@@ -141,7 +141,7 @@ Per-phase participating nodes. Node identifiers are the explicit `node_id` value
 | Phase | Construct | Nodes |
 |---|---|---|
 | 1 — Strategic Core | `Graph`, fan-out/fan-in | `discovery_auditor`, `purpose_vision_writer`, `values_articulator`, `audience_segmenter`, `differentiation_mapper` → `positioning_synthesizer` |
-| 2 — Narrative & Messaging | `Graph`, linear + read-only context | `Storyteller` → `ArchetypeAnalyst` → `TaglineWriter` → `MessageMapper` → `PersonaBuilder` → `VoicePrinciplesDrafter` (single-predecessor chain; each `structured_output` is own-field-only, reading upstream output as read-only context) |
+| 2 — Narrative & Messaging | `Graph`, pure fan-out (no compositor) | `Storyteller`, `ArchetypeAnalyst`, `TaglineWriter`, `MessageMapper`, `PersonaBuilder`, `VoicePrinciplesDrafter` (six parallel terminal nodes; merged in Python via `_PHASE2_NODE_MERGE`) |
 | 3 — Visual & Expressive Identity | `Graph`, diverge fan-out + converge fan-out (no compositor) | `MoodBoardConceptualist_{Editorial,Minimalist,Bold}` → `converge_decider` → 7-way fan-out (`logo_specifier`, `color_system_builder`, `typography_builder`, `iconography_director`, `photography_video_director`, `voice_tone_builder`, `design_system_codifier`) (seven parallel terminal nodes; merged in Python via `_PHASE3_NODE_MERGE`) |
 | 4 — Channel Activation | `Graph`, pure fan-out (no compositor) | `brand_experience_principler`, `website_guide`, `social_guide`, `email_guide`, `events_guide`, `partnerships_guide`, `internal_guide`, `brand_architecture_builder`, `brand_in_action_illustrator` (nine parallel terminal nodes; merged in Python via `_PHASE4_NODE_MERGE`) |
 | 5 — Governance & Evolution | `Graph`, pure fan-out (no compositor) | `ownership_definer`, `approval_workflow_designer`, `asset_wiki_planner`, `training_planner`, `kpi_designer`, `evolution_framer`, `brand_rules_codifier` (seven parallel terminal nodes; merged in Python via `_PHASE5_NODE_MERGE`) |
@@ -217,19 +217,20 @@ Output model: `StrategicCoreOutput`
 | `differentiation_mapper` | Maps competitive differentiation pillars with proof points | `differentiation_pillars` |
 | `positioning_synthesizer` | Synthesises the fragments above into a positioning statement and brand promise | `positioning_statement`, `brand_promise` |
 
-### Phase 2 — Narrative & Messaging (Graph: linear + read-only context)
+### Phase 2 — Narrative & Messaging (Graph: pure fan-out, no compositor)
 
 Output model: `NarrativeMessagingOutput`
 
 Phase 2 is a Graph (not a Swarm). Agents use `structured_output=`, which stops
 Strands' agent loop after the structured payload is produced, so tool-based
-`handoff_to_agent` cannot sequence them. Edges are a single-predecessor chain
-(multi-in edges are OR-ready in Strands and would race). Each specialist's
-`structured_output` model is own-field-only (Story 5b Step 1): the
-single-predecessor edge into a node is what makes Strands auto-populate
-`Inputs from previous nodes` with the immediate predecessor's typed output,
-which downstream specialists read as read-only context rather than
-re-emitting.
+`handoff_to_agent` cannot sequence them. All six specialists are both entry
+points and terminal nodes, with no edges between them: they run concurrently
+and none receives another's output — each prompt draws only on the branding
+mission and the upstream `StrategicCoreOutput` (Phase 1), not on any sibling
+Phase 2 fragment. Each specialist's `structured_output` model is
+own-field-only (Story 5b Step 1); the orchestrator's Phase-2 `merge_fn`
+(`_PHASE2_NODE_MERGE`) assembles the six typed fragments into
+`NarrativeMessagingOutput` in Python, the same pattern Phase 3, 4, and 5 use.
 
 | Agent | Purpose | Output field(s) |
 |-------|---------|------------------|
