@@ -1229,3 +1229,74 @@ def test_run_microtask_review_forwards_cache(monkeypatch, tmp_path: Path):
     )
 
     assert seen["cache"] is cache
+
+
+def test_run_code_review_phase_passes_when_clean(monkeypatch, tmp_path: Path):
+    """Empty LLM review → passed with no issues (backend counterpart to
+    ``test_fe_run_code_review_phase_passes_when_clean``)."""
+    from software_engineering_team.backend_code_v2_team.models import Microtask
+    from software_engineering_team.backend_code_v2_team.phases._profile import run_code_review_phase
+    from software_engineering_team.shared import v2_review_bindings as review_mod
+    from software_engineering_team.shared.v2_review import LlmReviewOutput
+
+    monkeypatch.setattr(
+        review_mod,
+        "_run_llm_review",
+        lambda **_kw: LlmReviewOutput(issues=[], raw_issue_count=0),
+    )
+
+    result = run_code_review_phase(
+        llm=MagicMock(),
+        task=_task(),
+        microtask=Microtask(id="mt-1"),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+    )
+
+    assert result.passed is True
+    assert result.phase_name == "code_review"
+    assert result.issues == []
+
+
+def test_run_qa_testing_phase_passes_when_clean(monkeypatch):
+    """Successful QA agent with no findings → passed with no issues (backend
+    counterpart to ``test_fe_run_qa_testing_phase_passes_when_clean``)."""
+    from software_engineering_team.backend_code_v2_team.models import Microtask
+    from software_engineering_team.backend_code_v2_team.phases._profile import run_qa_testing_phase
+    from software_engineering_team.shared import v2_review_bindings as review_mod
+
+    monkeypatch.setattr(review_mod, "_run_qa_agent", lambda **_kw: [])
+
+    result = run_qa_testing_phase(
+        task=_task(),
+        microtask=Microtask(id="mt-1"),
+        files={"x.py": "code"},
+        qa_agent=MagicMock(),
+    )
+
+    assert result.passed is True
+    assert result.phase_name == "qa"
+    assert result.issues == []
+
+
+def test_run_security_testing_phase_passes_when_clean(monkeypatch):
+    """Successful security agent with no findings → passed with no issues
+    (backend counterpart to ``test_fe_run_security_testing_phase_passes_when_clean``)."""
+    from software_engineering_team.backend_code_v2_team.models import Microtask
+    from software_engineering_team.backend_code_v2_team.phases._profile import (
+        run_security_testing_phase,
+    )
+    from software_engineering_team.shared import v2_review_bindings as review_mod
+
+    monkeypatch.setattr(review_mod, "_run_security_agent", lambda **_kw: [])
+
+    result = run_security_testing_phase(
+        task=_task(),
+        microtask=Microtask(id="mt-1"),
+        files={"x.py": "code"},
+        security_agent=MagicMock(),
+    )
+
+    assert result.passed is True
+    assert result.phase_name == "security"
+    assert result.issues == []

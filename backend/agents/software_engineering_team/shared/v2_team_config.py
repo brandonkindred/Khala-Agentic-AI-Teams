@@ -18,8 +18,10 @@ This module holds **only** the dataclass. It imports
 shared → shared import, not shared → team), but nothing from either team
 package, so the ``shared → team → shared`` import cycle cannot form —
 mirroring ``StackProfile``'s and ``ReviewConfig``'s identical constraint.
-Each team will construct its own frozen instance when a later story wires
-this object into the orchestrator; as of this change no team does so yet.
+Each team constructs its own frozen instance (``BACKEND_CONFIG``,
+``FRONTEND_CONFIG`` in each team's ``phases/_profile.py``) and wires it into
+its orchestrator via ``ConfigDrivenV2DevelopmentAgent`` (see
+``shared/v2_orchestrator.py``).
 """
 
 from __future__ import annotations

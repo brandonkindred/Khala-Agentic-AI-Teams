@@ -1,8 +1,9 @@
 """
 Unit tests for :class:`V2TeamConfig` — construction, immutability, and
 parity against each code-v2 team's real ``ToolAgentKind``/``PROFILE``/
-accessibility-clause values — independent of any orchestrator consumption
-(none exists yet; see the class docstring). ``StackProfile``'s own
+accessibility-clause values, at the dataclass level rather than through the
+orchestrator (orchestrator-level property/consumption tests live in
+``test_v2_config_orchestrator.py``). ``StackProfile``'s own
 construction/invariant/frozen behavior is covered in full by
 ``test_stack_profile.py``; this module includes one targeted test showing
 that the ``"_default"`` invariant is enforced by ``StackProfile`` before

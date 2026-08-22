@@ -345,6 +345,51 @@ def test_fe_run_review_with_qa_agent(monkeypatch, tmp_path: Path):
     assert any(i.source == "qa" for i in out.issues)
 
 
+def test_fe_run_review_qa_agent_raises(monkeypatch, tmp_path: Path):
+    """A QA agent that raises must not propagate; the review just continues
+    without its findings (backend counterpart: ``test_run_review_qa_agent_raises``)."""
+    from software_engineering_team.frontend_code_v2_team.phases._profile import run_review
+
+    _stub_coordinator(monkeypatch)
+
+    qa_agent = MagicMock()
+    qa_agent.run.side_effect = RuntimeError("qa crashed")
+
+    result = run_review(
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.ts": "code"}),
+        repo_path=tmp_path,
+        qa_agent=qa_agent,
+    )
+    # Should not raise; just continues
+    assert result is not None
+
+
+def test_fe_run_review_with_linting_agent_pass(monkeypatch, tmp_path: Path):
+    """A linting agent reporting success/passed=True yields lint_ok=True
+    (backend counterpart: ``test_run_review_with_linting_agent_pass``)."""
+    from software_engineering_team.frontend_code_v2_team.phases._profile import run_review
+
+    _stub_coordinator(monkeypatch)
+
+    lint_agent = MagicMock()
+    lint_agent.run.return_value = MagicMock(
+        execution_result=MagicMock(success=True),
+        passed=True,
+        linter_issues=[],
+    )
+
+    result = run_review(
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.ts": "code"}),
+        repo_path=tmp_path,
+        linting_tool_agent=lint_agent,
+    )
+    assert result.lint_ok
+
+
 def test_fe_run_review_with_linting_failures(monkeypatch, tmp_path: Path):
     from software_engineering_team.frontend_code_v2_team.phases._profile import run_review
 
