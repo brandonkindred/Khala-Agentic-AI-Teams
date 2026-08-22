@@ -390,11 +390,16 @@ deliberately opted in before this default changed. `phase_input_hash` folds
 in only the phase, the mission, and upstream outputs (see above); it does
 not fold in the LLM model, prompt template, or agent code version, so a
 cached entry survives those changing mid-process. The namespace is
-build-id-suffixed (`cache_namespace_for`, prior section) so a fresh deploy
-still cold-starts the cache; a mid-process prompt/model/code change without
-a redeploy does not. Callers for whom that staleness window is
-unacceptable must pass their own isolated `PhaseOutputCache` or
-`phase_cache=None`.
+build-id-suffixed only when `KHALA_CACHE_BUILD_ID` / `KHALA_BUILD_ID` is
+set to a non-blank, safe value (`with_cache_build_id`,
+`shared/cache/build_id.py`); both are blank by default in
+`docker/docker-compose.yml` and commented out in `docker/.env.example`, so
+out of the box a redeploy does **not** cold-start the cache -- an operator
+must set one of those env vars per deploy to get that. Constructing a
+caller-local `PhaseOutputCache()` does **not** provide isolation either:
+every instance in a process addresses the same shared entries by design
+(previous section) -- `phase_cache=None` (the monolithic-graph path) is
+the only way a caller currently opts out of stale-entry risk.
 
 `api/conversation.py` holds and consumes a per-conversation storage slot:
 `_get_or_create_phase_cache()` returns a `PhaseOutputCache` retained
