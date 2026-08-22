@@ -10,7 +10,7 @@ representative runs. Exercises:
 - The tool-agent registry (via ``_build_and_validate_tool_agents``)
 - The optional review clause (frontend's accessibility-verification note)
 - The folded conventions map
-- Full pipeline parity through ``_run_development_workflow``
+- Full pipeline run via ``run_workflow`` verifying config values flow to deliver
 """
 
 from __future__ import annotations
@@ -154,7 +154,8 @@ class TestBackendOrchestratorParity:
 
     def test_run_workflow_full_pipeline_parity(self, tmp_path: Path, monkeypatch):
         """A representative mocked run through BackendDevelopmentAgent.run_workflow
-        succeeds, proving the config-driven base drives the full pipeline identically."""
+        succeeds, verifying the config-driven base resolves and passes the correct
+        build_verify_label and lint_agent_type to the deliver phase."""
         from software_engineering_team.backend_code_v2_team import orchestrator as orch
         from software_engineering_team.backend_code_v2_team.models import (
             DeliverResult,
@@ -400,7 +401,8 @@ class TestFrontendOrchestratorParity:
 
     def test_run_workflow_full_pipeline_parity(self, tmp_path: Path, monkeypatch):
         """A representative mocked run through FrontendDevelopmentAgent.run_workflow
-        succeeds, proving the config-driven base drives the full pipeline identically."""
+        succeeds, verifying the config-driven base resolves and passes the correct
+        build_verify_label and lint_agent_type to the deliver phase."""
         from software_engineering_team.frontend_code_v2_team import orchestrator as orch
         from software_engineering_team.frontend_code_v2_team.models import (
             DeliverResult,
