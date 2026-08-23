@@ -484,6 +484,7 @@ describe('AgentRunnerComponent', () => {
     it('tearDownSandbox marks the sandbox cold on confirm', () => {
       selectWriter();
       dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
+      api.teardown.mockReturnValue(of({ agent_id: coldHandle.agent_id, status: 'cold' }));
       component.tearDownSandbox();
       expect(component.sandbox()).toEqual({ ...coldHandle, status: 'cold', url: null });
     });
