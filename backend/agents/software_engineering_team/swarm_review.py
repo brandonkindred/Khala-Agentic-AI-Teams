@@ -148,9 +148,18 @@ def deserialize_review_cache(data: Any) -> Dict[str, "tuple[str, Dict[str, Any]]
           cache`` for any cache with at most 20 entries (``verdict`` dicts
           are not deep-copied here since the caller owns the freshly parsed
           ``data``).
+        - At most 20 entries are ever returned, mirroring
+          ``serialize_review_cache``'s cap: when more than 20 entries in
+          ``data`` pass validation, only the last 20 (by list order) are
+          kept. This holds even for a stored value that itself has more
+          than 20 entries (e.g. hand-edited or written by something other
+          than ``serialize_review_cache``) — restore never grows the live
+          cache past the size the rest of the system assumes it is bounded
+          to.
     """
     if not isinstance(data, list):
         return {}
+    max_cached_verdicts = 20
     result: Dict[str, "tuple[str, Dict[str, Any]]"] = {}
     for entry in data:
         if not isinstance(entry, dict):
@@ -175,6 +184,8 @@ def deserialize_review_cache(data: Any) -> Dict[str, "tuple[str, Dict[str, Any]]
         if "requested_changes" in verdict and not isinstance(verdict["requested_changes"], list):
             continue
         result[task_id] = (cache_key, verdict)
+    if len(result) > max_cached_verdicts:
+        result = dict(list(result.items())[-max_cached_verdicts:])
     return result
 
 

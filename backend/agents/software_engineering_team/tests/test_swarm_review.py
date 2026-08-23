@@ -174,6 +174,15 @@ class TestDeserializeReviewCache:
         result = deserialize_review_cache(data)
         assert result == {"t": ("k2", {"approved": False})}
 
+    def test_twenty_five_valid_entries_caps_at_twenty_most_recent(self):
+        data = [
+            {"task_id": f"task-{i}", "cache_key": f"cache-key-{i}", "verdict": {"approved": True}}
+            for i in range(25)
+        ]
+        result = deserialize_review_cache(data)
+        assert len(result) == 20
+        assert set(result.keys()) == {f"task-{i}" for i in range(5, 25)}
+
     def test_nested_verdict_structures_round_trip(self):
         verdict = {
             "approved": True,
