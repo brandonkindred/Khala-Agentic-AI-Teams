@@ -2536,7 +2536,9 @@ def test_run_with_phase_cache_miss_falls_through_and_populates_cache() -> None:
 
     upstream: dict[BrandPhase, Any] = {}
     for phase in PHASE_ORDER:
-        expected_hash = phase_input_hash(phase, mission, upstream)
+        expected_hash = phase_input_hash(
+            phase, mission, upstream, _PHASE_SPEC[phase].context_phases
+        )
         cached = cache.get(phase, expected_hash)
         assert cached is not None
         upstream[phase] = cached
