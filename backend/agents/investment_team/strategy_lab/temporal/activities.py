@@ -1340,6 +1340,7 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "kind": "skipped",
             "reason": "no_market_data",
+            "design_context": None,
             "convergence_tracker_state": convergence_tracker_to_wire(orch.convergence_tracker),
             "gate_results": [g.model_dump(mode="json") for g in cumulative_gate_results],
             "budget_calls": budget.calls_made,
