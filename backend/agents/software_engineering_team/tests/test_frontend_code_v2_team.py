@@ -98,7 +98,7 @@ class TestModels:
 class TestSetupPhase:
     def test_run_setup_on_existing_repo(self, tmp_path):
         """Verify setup on an existing repo stays on development without creating a branch."""
-        from frontend_code_v2_team.phases.setup import run_setup
+        from frontend_code_v2_team.phases._profile import run_setup
 
         init_repo_with_existing_development(tmp_path)
         result = run_setup(repo_path=tmp_path, task_title="My App")
@@ -117,7 +117,7 @@ class TestSetupPhase:
 
     def test_run_setup_creates_repo_when_missing(self, tmp_path):
         """Verify setup initializes a new git repository when none exists."""
-        from frontend_code_v2_team.phases.setup import run_setup
+        from frontend_code_v2_team.phases._profile import run_setup
 
         assert not (tmp_path / ".git").exists()
         result = run_setup(repo_path=tmp_path, task_title="New App")
@@ -131,7 +131,7 @@ class TestSetupPhase:
         files on a later pass and blocks the development agent's checkout of the
         review feature branch.
         """
-        from frontend_code_v2_team.phases.setup import run_setup
+        from frontend_code_v2_team.phases._profile import run_setup
 
         init_repo_with_existing_development(tmp_path)
         run_setup(repo_path=tmp_path, task_title="My App")
@@ -152,7 +152,7 @@ class TestSetupPhase:
         ``run_setup`` on development must not strand untracked copies that abort
         the feature-branch checkout.
         """
-        from frontend_code_v2_team.phases.setup import run_setup
+        from frontend_code_v2_team.phases._profile import run_setup
 
         init_repo_with_existing_development(tmp_path)
         run_setup(repo_path=tmp_path, task_title="My App")
@@ -185,7 +185,7 @@ class TestSetupPhase:
         Pre-existing uncommitted/untracked work must not be swept onto
         ``development`` under the scaffolding commit.
         """
-        from frontend_code_v2_team.phases.setup import run_setup
+        from frontend_code_v2_team.phases._profile import run_setup
 
         init_repo_with_existing_development(tmp_path)
         subprocess.run(
@@ -216,7 +216,7 @@ class TestSetupPhase:
         Otherwise setup reports success while the scaffolding stays uncommitted,
         silently reintroducing the feature-branch checkout conflict.
         """
-        from frontend_code_v2_team.phases import setup as setup_mod
+        from frontend_code_v2_team.phases import _profile as setup_mod
 
         init_repo_with_existing_development(tmp_path)
         monkeypatch.setattr(setup_mod, "commit_paths", lambda *a, **k: (False, "rejected by hook"))
@@ -233,7 +233,7 @@ class TestSetupPhase:
         """
         import json
 
-        from frontend_code_v2_team.phases.setup import run_setup
+        from frontend_code_v2_team.phases._profile import run_setup
 
         init_repo_with_existing_development(tmp_path)
         subprocess.run(
@@ -263,7 +263,7 @@ class TestSetupPhase:
         lacks the eslint/vitest config until the dev-agent calls
         configure_quality_tooling on it.
         """
-        from frontend_code_v2_team.phases.setup import configure_quality_tooling, run_setup
+        from frontend_code_v2_team.phases._profile import configure_quality_tooling, run_setup
 
         init_repo_with_existing_development(tmp_path)
         subprocess.run(
@@ -297,6 +297,68 @@ class TestSetupPhase:
             text=True,
         )
         assert status.stdout.strip() == ""  # config committed to the feature branch, tree clean
+
+
+class TestSetupPhaseHooks:
+    """Direct unit tests for the frontend lint/test detection hooks.
+
+    These hooks moved from the (coverage-omitted) former ``phases/setup.py``
+    into ``phases/_profile.py`` as part of unifying setup onto shared config;
+    ``_profile.py`` is not coverage-omitted, so the Angular-project and
+    unreadable/malformed-config branches need direct coverage here rather
+    than relying solely on the happy-path exercised via ``run_setup`` above.
+    """
+
+    def test_ensure_linting_configured_creates_config_for_angular_project(self, tmp_path):
+        from frontend_code_v2_team.phases._profile import _ensure_linting_configured
+
+        (tmp_path / "angular.json").write_text("{}", encoding="utf-8")
+        written: set = set()
+        assert _ensure_linting_configured(tmp_path, written) is True
+        assert (tmp_path / "eslint.config.js").exists()
+        assert "eslint.config.js" in written
+
+    def test_ensure_linting_configured_angular_config_already_present(self, tmp_path):
+        """An Angular project whose eslint.config.js already exists must not
+        be overwritten (and must not be reported as newly written)."""
+        from frontend_code_v2_team.phases._profile import _ensure_linting_configured
+
+        (tmp_path / "angular.json").write_text("{}", encoding="utf-8")
+        (tmp_path / "eslint.config.js").write_text("// existing\n", encoding="utf-8")
+        written: set = set()
+        assert _ensure_linting_configured(tmp_path, written) is True
+        assert written == set()
+        assert (tmp_path / "eslint.config.js").read_text(encoding="utf-8") == "// existing\n"
+
+    def test_ensure_testing_configured_malformed_package_json(self, tmp_path):
+        """A malformed package.json must not raise while probing for an
+        existing test script; setup falls through to creating vitest config."""
+        from frontend_code_v2_team.phases._profile import _ensure_testing_configured
+
+        (tmp_path / "package.json").write_text("{not valid json", encoding="utf-8")
+        written: set = set()
+        assert _ensure_testing_configured(tmp_path, written) is True
+        assert (tmp_path / "vitest.config.ts").exists()
+
+    def test_ensure_testing_configured_creates_config_for_angular_project(self, tmp_path):
+        from frontend_code_v2_team.phases._profile import _ensure_testing_configured
+
+        (tmp_path / "angular.json").write_text("{}", encoding="utf-8")
+        written: set = set()
+        assert _ensure_testing_configured(tmp_path, written) is True
+        assert (tmp_path / "vitest.config.mts").exists()
+        assert (tmp_path / "src" / "test-setup.ts").exists()
+        assert "vitest.config.mts" in written
+        assert "src/test-setup.ts" in written
+
+    def test_ensure_package_script_handles_unreadable_package_json(self, tmp_path):
+        """An unreadable package.json must not raise; the script is simply
+        not added and no write is reported."""
+        from frontend_code_v2_team.phases._profile import _ensure_package_script
+
+        # A directory named package.json makes read_text raise IsADirectoryError.
+        (tmp_path / "package.json").mkdir()
+        assert _ensure_package_script(tmp_path, "lint", "eslint .") is False
 
 
 class TestPlanningPhase:

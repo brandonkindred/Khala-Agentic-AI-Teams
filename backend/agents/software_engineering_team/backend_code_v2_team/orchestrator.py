@@ -32,9 +32,14 @@ from .models import (
     MicrotaskReviewConfig,
     ToolAgentKind,
 )
-from .phases._profile import BACKEND_CONFIG, PROFILE, run_planning
+from .phases._profile import (
+    BACKEND_CONFIG,
+    PROFILE,
+    configure_quality_tooling,
+    run_planning,
+    run_setup,
+)
 from .phases.execution import ReviewDependencies, run_execution_with_review_gates
-from .phases.setup import configure_quality_tooling, run_setup
 from .prompts import DELIVER_COMMIT_MSG_TEMPLATE
 
 logger = logging.getLogger(__name__)
