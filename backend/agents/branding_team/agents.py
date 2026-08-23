@@ -45,6 +45,8 @@ from .models import (
     MESSAGING_PILLARS_MIN,
     PERSONA_PROFILES_MAX,
     PERSONA_PROFILES_MIN,
+    PERSONALITY_TRAITS_MAX,
+    PERSONALITY_TRAITS_MIN,
     STYLE_DONTS_MAX,
     STYLE_DONTS_MIN,
     STYLE_DOS_MAX,
@@ -312,7 +314,7 @@ _ARCHETYPE_ANALYST_PROMPT = AgentPromptSpec(
         PromptFieldSpec(
             "brand_archetypes",
             "for each archetype: archetype (name), rationale (why this fits), and "
-            "personality_traits (3-5 traits)",
+            f"personality_traits ({PERSONALITY_TRAITS_MIN}-{PERSONALITY_TRAITS_MAX} traits)",
         ),
     ),
 )

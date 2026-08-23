@@ -40,7 +40,7 @@ from shared.cache.pydantic_cache import (
 from software_engineering_team.shared.persona_agent_base import run_structured_persona
 from software_engineering_team.shared.security_service import derive_approved
 
-from .models import QAInput, QAOutput
+from .models import AcceptanceEvidenceModel, QAInput, QAOutput
 from .prompts import (
     QA_PROMPT,
     QA_PROMPT_ACCEPTANCE_EVIDENCE,
@@ -397,10 +397,10 @@ class QAExpertAgent:
                 )
                 or "(none provided)"
             )
+            fields_text = ", ".join(AcceptanceEvidenceModel.model_fields.keys())
             return (
                 "Interpret the tool/test results below and map the evidence back to the "
-                "acceptance criteria. Produce structured JSON with fields: approved, "
-                "quality_gates, acceptance_trace, validation_evidence, summary.\n\n"
+                f"acceptance criteria. Produce structured JSON with fields: {fields_text}.\n\n"
                 f"**Acceptance criteria:**\n{criteria_text}\n\n"
                 f"**Tool results:**\n{tool_results_text}"
             )
