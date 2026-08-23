@@ -2721,6 +2721,68 @@ def test_run_with_phase_cache_cascades_recompute_through_three_phase_chain() -> 
     assert result.visual_identity == fresh_upstream[BrandPhase.VISUAL_IDENTITY]
 
 
+def test_run_called_twice_with_identical_mission_only_invokes_run_single_phase_once() -> None:
+    """Two ``run()`` calls sharing one cache, with an identical mission, invoke
+    ``run_single_phase`` only on the first call -- the second is served
+    entirely from cache."""
+    mission = make_mission()
+    cache = PhaseOutputCache()
+    orchestrator = BrandingTeamOrchestrator()
+
+    with patch.object(
+        orchestrator, "run_single_phase", side_effect=_run_single_phase_fixture_side_effect
+    ) as mock_run_single_phase:
+        first_result = orchestrator.run(
+            mission=mission,
+            human_review=HumanReview(approved=True),
+            phase_cache=cache,
+        )
+        assert mock_run_single_phase.call_count == len(PHASE_ORDER)
+
+        second_result = orchestrator.run(
+            mission=mission,
+            human_review=HumanReview(approved=True),
+            phase_cache=cache,
+        )
+
+    assert mock_run_single_phase.call_count == len(PHASE_ORDER)
+    assert second_result == first_result
+
+
+def test_run_called_twice_with_changed_mission_reinvokes_affected_phases() -> None:
+    """Two ``run()`` calls sharing one cache: the first populates it for one
+    mission, the second uses a mission with a changed field. Since every
+    phase's hash folds in the full mission, the changed field invalidates
+    every phase, and the second call re-invokes ``run_single_phase`` for all
+    of them again."""
+    first_mission = make_mission(company_name="Northstar Labs")
+    second_mission = make_mission(company_name="Different Co")
+    cache = PhaseOutputCache()
+    orchestrator = BrandingTeamOrchestrator()
+
+    with patch.object(
+        orchestrator, "run_single_phase", side_effect=_run_single_phase_fixture_side_effect
+    ) as mock_run_single_phase:
+        orchestrator.run(
+            mission=first_mission,
+            human_review=HumanReview(approved=True),
+            phase_cache=cache,
+        )
+        assert mock_run_single_phase.call_count == len(PHASE_ORDER)
+
+        orchestrator.run(
+            mission=second_mission,
+            human_review=HumanReview(approved=True),
+            phase_cache=cache,
+        )
+
+    assert mock_run_single_phase.call_count == 2 * len(PHASE_ORDER)
+    second_call_phases = [
+        call.args[1] for call in mock_run_single_phase.call_args_list[len(PHASE_ORDER) :]
+    ]
+    assert second_call_phases == list(PHASE_ORDER)
+
+
 # ---------------------------------------------------------------------------
 # Story 2b Step 3: thread/Temporal confinement + cached-vs-cold output parity.
 # The Temporal path (temporal/activities.py) never calls `run` -- it calls
