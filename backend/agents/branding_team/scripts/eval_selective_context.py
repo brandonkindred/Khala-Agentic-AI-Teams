@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -40,6 +41,9 @@ from branding_team.models import BrandingMission, BrandPhase
 from branding_team.orchestrator import _PHASE_SPEC, BrandingTeamOrchestrator
 from branding_team.tests.eval_fixtures.sample_missions import SAMPLE_MISSIONS
 from llm_service import config as _llm_config
+from llm_service import factory as _llm_factory
+from llm_service import provider_store as _llm_provider_store
+from llm_service.strands_provider import _clear_strands_model_cache_for_testing
 
 PHASE5_REDUCTION_TARGET_PCT = 40.0
 
@@ -50,32 +54,64 @@ DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "eval_results"
 def _force_dummy_llm_provider():
     """Force every agent constructed inside this block through the dummy stub client.
 
-    ``resolve_provider()`` prefers a live provider selected via the
-    Postgres-backed runtime config over ``LLM_PROVIDER``, and every call site
-    (``llm_service.factory``, ``llm_service.strands_provider``) reads it as a
-    module attribute (``llm_config.resolve_provider()``), never via a
-    ``from ... import resolve_provider`` local binding -- so overriding the
-    attribute here forces every agent this script constructs through the
-    dummy stub client (no live LLM call, network access, or spend) even when
-    Postgres holds a live provider or the caller's shell already exported a
-    non-dummy ``LLM_PROVIDER`` (which a mere ``os.environ.setdefault`` would
-    not override).
+    Every ``resolve_*`` function in ``llm_service.config`` (provider, model,
+    base URL, API keys) funnels through the single ``_runtime(key)``
+    chokepoint, which -- when ``POSTGRES_HOST`` is set -- round-trips
+    Postgres via ``runtime_config.get_runtime`` (including a
+    ``CREATE TABLE IF NOT EXISTS`` the first time). Setting ``LLM_PROVIDER``
+    alone, or even overriding ``resolve_provider`` itself, is not enough:
+    ``resolve_model_for_provider`` falls through to ``resolve_model`` for
+    every non-Claude provider (dummy included), which calls ``_runtime``
+    for the Ollama model key unconditionally, regardless of the active
+    provider. Blanking ``_runtime`` itself -- the same fix
+    ``branding_team/tests/test_agents.py``'s ``force_dummy_llm`` fixture
+    applies, for the identical reason -- is the only chokepoint that
+    actually stops every one of these resolvers from touching Postgres.
+
+    With ``_runtime`` blanked, ``resolve_provider()`` falls through to the
+    ``LLM_PROVIDER`` env var, so that is also pinned to ``"dummy"`` here
+    (restored on exit) rather than relying on a caller's ``os.environ``
+    state, which a mere ``os.environ.setdefault`` would not override if
+    already set to something else.
+
+    Separately, ``get_strands_model`` (``llm_service/strands_provider.py``)
+    unconditionally calls ``provider_store.list_fingerprint()`` -- regardless
+    of the resolved provider -- to fold the provider list's structural
+    fingerprint into the Strands model cache key; that also round-trips
+    Postgres when configured. Blank ``load_ordered_entries`` too (the same
+    fixture applies this fix as well), and clear the Strands-model / LLM-
+    client caches on entry so a warm adapter from before this override took
+    effect can't leak through.
 
     Preconditions:
         None.
     Postconditions:
-        ``llm_service.config.resolve_provider`` is restored to its original
-        value on exit, even if the wrapped block raises -- so importing or
-        unit-testing this module never leaves the process-wide LLM provider
-        resolution permanently patched for unrelated code (e.g. other tests
-        in the same pytest session).
+        ``llm_service.config._runtime``, ``LLM_PROVIDER``, and
+        ``llm_service.provider_store.load_ordered_entries`` are all restored
+        to their original values on exit, even if the wrapped block raises
+        -- so importing or unit-testing this module never leaves
+        process-wide LLM provider/config resolution permanently patched for
+        unrelated code (e.g. other tests in the same pytest session).
     """
-    original = _llm_config.resolve_provider
-    _llm_config.resolve_provider = lambda: "dummy"
+    original_runtime = _llm_config._runtime
+    original_load_ordered_entries = _llm_provider_store.load_ordered_entries
+    original_provider_env = os.environ.get("LLM_PROVIDER")
+    _llm_config._runtime = lambda _key: ""
+    _llm_provider_store.load_ordered_entries = lambda *args, **kwargs: []
+    os.environ["LLM_PROVIDER"] = "dummy"
+    _llm_factory.clear_client_cache()
+    _clear_strands_model_cache_for_testing()
     try:
         yield
     finally:
-        _llm_config.resolve_provider = original
+        _llm_config._runtime = original_runtime
+        _llm_provider_store.load_ordered_entries = original_load_ordered_entries
+        if original_provider_env is None:
+            os.environ.pop("LLM_PROVIDER", None)
+        else:
+            os.environ["LLM_PROVIDER"] = original_provider_env
+        _llm_factory.clear_client_cache()
+        _clear_strands_model_cache_for_testing()
 
 
 def _approx_token_count(text: str) -> int:
