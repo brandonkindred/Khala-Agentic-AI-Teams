@@ -385,6 +385,7 @@ class DesignAgent:
         critique: "SpecCritique",
         prior_critiques: Optional[List["SpecCritique"]] = None,
         regression_notice: str = "",
+        skip_self_review: bool = False,
     ) -> Tuple[Dict[str, Any], str]:
         """Revise ``prior_spec`` to address every issue raised in ``critique``.
 
@@ -398,6 +399,13 @@ class DesignAgent:
         "do not reintroduce these" instruction so the loop escalates a
         regression rather than silently oscillating on it. Empty by default
         so existing callers are unaffected.
+
+        ``skip_self_review`` (optional, default ``False``) is forwarded
+        verbatim to :meth:`_with_self_review`. The decision logic for when to
+        set it lives with the caller (the orchestrator's design ↔ review
+        loop), not here: it is a fast path for a revision the caller already
+        knows is structurally clean, and skips the internal self-review LLM
+        call entirely when ``True``.
 
         The accumulated external lineage (``prior_critiques``, which already
         includes the current ``critique``) is forwarded into the internal
@@ -432,6 +440,7 @@ class DesignAgent:
             rationale,
             prior_critiques=prior_critiques,
             regression_notice=regression_notice,
+            skip_self_review=skip_self_review,
         )
 
     def _invoke_and_parse(self, system_prompt: str, user_prompt: str) -> Tuple[Dict[str, Any], str]:
@@ -624,6 +633,7 @@ class DesignAgent:
         *,
         prior_critiques: Optional[List["SpecCritique"]] = None,
         regression_notice: str = "",
+        skip_self_review: bool = False,
     ) -> Tuple[Dict[str, Any], str]:
         """Audit a freshly emitted spec and self-revise (then re-audit) if needed.
 
@@ -638,13 +648,19 @@ class DesignAgent:
         "do not reintroduce" block (empty on the :meth:`run` path); it is
         threaded into the self-revision prompt so a self-revision cannot undo
         a prior-round defect the regression machinery is keeping fixed.
+        ``skip_self_review`` is a caller-controlled fast path for specs
+        already known to be structurally clean (the decision logic for
+        when to set it lives with the caller, not here): when ``True`` the
+        method returns immediately, making no LLM call at all — not even
+        :meth:`_self_review`.
         Post: returns ``(strategy_dict, rationale)`` — either the input
-        unchanged (self-review disabled, the spec is already ready, or a
-        best-effort failure) or a self-revised spec. Whenever a self-revision
-        fires, the revised spec has been re-audited through self-review at
-        least once. Never raises except :class:`DesignBudgetExhausted`, which
-        propagates so the cycle can stop; the external review loop is still
-        authoritative — this is purely an internal pre-flight.
+        unchanged (``skip_self_review`` requested, self-review disabled,
+        the spec is already ready, or a best-effort failure) or a
+        self-revised spec. Whenever a self-revision fires, the revised spec
+        has been re-audited through self-review at least once. Never raises
+        except :class:`DesignBudgetExhausted`, which propagates so the
+        cycle can stop; the external review loop is still authoritative —
+        this is purely an internal pre-flight.
         Invariant: at most ``_design_self_revision_rounds()`` self-revisions
         fire per call, each followed by a re-audit; the loop cannot run
         unbounded.
@@ -658,6 +674,9 @@ class DesignAgent:
         introduced a *new* contradiction that then reached the external
         reviewer unchecked.
         """
+        if skip_self_review:
+            return strategy_dict, rationale
+
         if not _design_self_review_enabled():
             return strategy_dict, rationale
 

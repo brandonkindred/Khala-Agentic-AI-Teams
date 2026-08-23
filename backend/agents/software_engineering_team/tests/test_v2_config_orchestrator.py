@@ -43,12 +43,18 @@ def _make_config(
     stack_profile: StackProfile | None = None,
     tool_agent_kinds: frozenset[str] = frozenset({"security", "testing_qa"}),
     extra_review_clause: str = "",
+    output_template_path_prefixes: tuple[str, ...] = ("backend/", "./backend/"),
+    output_template_allowed_languages: tuple[str, ...] = ("python", "java"),
+    output_template_coerce_unknown: bool = True,
 ) -> V2TeamConfig:
     """Build a minimal V2TeamConfig for tests, defaulting to a synthetic StackProfile."""
     return V2TeamConfig(
         stack_profile=stack_profile or _make_stack_profile(),
         tool_agent_kinds=tool_agent_kinds,
         extra_review_clause=extra_review_clause,
+        output_template_path_prefixes=output_template_path_prefixes,
+        output_template_allowed_languages=output_template_allowed_languages,
+        output_template_coerce_unknown=output_template_coerce_unknown,
     )
 
 
@@ -355,6 +361,9 @@ class TestBackendConfigParity:
             stack_profile=BackendDevelopmentAgent.PROFILE,
             tool_agent_kinds=frozenset(k.value for k in ToolAgentKind),
             extra_review_clause="",
+            output_template_path_prefixes=("backend/", "./backend/"),
+            output_template_allowed_languages=("python", "java"),
+            output_template_coerce_unknown=True,
         )
         return ConfigDrivenV2DevelopmentAgent(MagicMock(), config)
 
@@ -383,3 +392,114 @@ class TestBackendConfigParity:
         assert self._build().conventions_for(
             "python"
         ) == BackendDevelopmentAgent.PROFILE.conventions_for("_default")
+
+
+class TestFrontendConfigParity:
+    """Proves ``ConfigDrivenV2DevelopmentAgent`` can faithfully hold
+    ``frontend_code_v2_team``'s real config values (mirroring
+    ``TestBackendConfigParity`` above and
+    ``test_v2_team_config.py::TestFrontendParity``).
+
+    Reads the stack profile via ``FrontendDevelopmentAgent.PROFILE`` (a public
+    class attribute of the team's public ``orchestrator`` module) rather than
+    frontend_code_v2_team's private ``phases._profile`` submodule directly --
+    the identical live object either way (``orchestrator.py`` sets
+    ``PROFILE = PROFILE`` from that same import), so parity stays real
+    (no hardcoded copy to drift out of sync). The extra review clause
+    (``_ACCESSIBILITY_VERIFY_NOTE``) isn't exposed through that public
+    surface, so it is imported directly from ``phases._profile`` below --
+    the one deliberate reach into that team's private internals.
+
+    Deliberately narrow in scope: it checks fidelity to frontend's *real*
+    values (which have an extra review clause and conventions only for
+    ``"_default"``), not general merge/delegation behavior --
+    that is already covered against synthetic configs by
+    ``TestBuildTaskRequirements`` and ``TestConfigDrivenAxes`` above.
+    """
+
+    def _build(self) -> ConfigDrivenV2DevelopmentAgent:
+        from software_engineering_team.frontend_code_v2_team.models import (
+            ToolAgentKind as FrontendToolAgentKind,
+        )
+        from software_engineering_team.frontend_code_v2_team.orchestrator import (
+            FrontendDevelopmentAgent,
+        )
+        from software_engineering_team.frontend_code_v2_team.phases._profile import (
+            _ACCESSIBILITY_VERIFY_NOTE,
+        )
+
+        config = V2TeamConfig(
+            stack_profile=FrontendDevelopmentAgent.PROFILE,
+            tool_agent_kinds=frozenset(
+                k.value for k in FrontendToolAgentKind if k is not FrontendToolAgentKind.GENERAL
+            ),
+            extra_review_clause=_ACCESSIBILITY_VERIFY_NOTE,
+            output_template_path_prefixes=("frontend/", "./frontend/"),
+            output_template_allowed_languages=(
+                "angular",
+                "react",
+                "vue",
+                "typescript",
+                "javascript",
+            ),
+            output_template_coerce_unknown=False,
+        )
+        return ConfigDrivenV2DevelopmentAgent(MagicMock(), config)
+
+    def test_default_language_matches_frontend_profile(self):
+        assert self._build().default_language == "typescript"
+
+    def test_tool_agent_kinds_match_frontend_enum(self):
+        from software_engineering_team.frontend_code_v2_team.models import (
+            ToolAgentKind as FrontendToolAgentKind,
+        )
+
+        agent = self._build()
+        expected = frozenset(
+            k.value for k in FrontendToolAgentKind if k is not FrontendToolAgentKind.GENERAL
+        )
+        assert agent.tool_agent_kinds == expected
+
+    def test_extra_review_clause_is_accessibility_note(self):
+        from software_engineering_team.frontend_code_v2_team.phases._profile import (
+            _ACCESSIBILITY_VERIFY_NOTE,
+        )
+
+        agent = self._build()
+        assert agent.extra_review_clause == _ACCESSIBILITY_VERIFY_NOTE
+        assert agent.extra_review_clause != ""
+
+    def test_build_task_requirements_appends_clause(self):
+        """Frontend's extra clause is appended to a non-empty base."""
+        agent = self._build()
+        result = agent.build_task_requirements("Review the component.")
+        assert "Review the component." in result
+        assert agent.extra_review_clause in result
+
+    def test_conventions_for_typescript_falls_back_to_default(self):
+        """Frontend's real profile only defines ``_default`` -- ``typescript``
+        is not a separate key, so it must resolve through the ``_default`` entry."""
+        from software_engineering_team.frontend_code_v2_team.orchestrator import (
+            FrontendDevelopmentAgent,
+        )
+
+        assert self._build().conventions_for(
+            "typescript"
+        ) == FrontendDevelopmentAgent.PROFILE.conventions_for("typescript")
+        assert self._build().conventions_for(
+            "typescript"
+        ) == FrontendDevelopmentAgent.PROFILE.conventions_for("_default")
+
+    def test_conventions_for_unknown_language_falls_back_to_frontend_default(self):
+        """An unlisted language (e.g. ``python``) must still resolve through
+        the real profile's ``_default`` entry, not an empty/synthetic one."""
+        from software_engineering_team.frontend_code_v2_team.orchestrator import (
+            FrontendDevelopmentAgent,
+        )
+
+        assert self._build().conventions_for(
+            "python"
+        ) == FrontendDevelopmentAgent.PROFILE.conventions_for("python")
+        assert self._build().conventions_for(
+            "python"
+        ) == FrontendDevelopmentAgent.PROFILE.conventions_for("_default")

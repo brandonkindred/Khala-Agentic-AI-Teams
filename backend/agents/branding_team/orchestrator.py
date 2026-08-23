@@ -41,7 +41,7 @@ from strands.multiagent.graph import GraphBuilder
 from branding_team.shared.coro_runner import run_coroutine
 from branding_team.shared.json_recovery import recover_json_object
 
-from .agents import BrandComplianceAgent
+from .agents import CHANNEL_SPECS, BrandComplianceAgent
 from .graphs.phase1_strategic_core import build_phase1_graph
 from .graphs.phase2_narrative import build_phase2_graph
 from .graphs.phase3_visual import build_phase3_graph
@@ -141,19 +141,16 @@ _PHASE3_NODE_MERGE: dict[str, Optional[str]] = {
 # structured_output nests under, or None to merge its fields in flat. Three
 # specialists (brand_experience_principler, brand_architecture_builder,
 # brand_in_action_illustrator) already match ChannelActivationOutput field
-# names 1:1 and merge flat. The six *_guide specialists each emit a single
-# ChannelGuidelineOutput for their own channel, all nesting under the same
-# "channel_guidelines" key -- since that's a List field on
-# ChannelActivationOutput, _merge_named_fragments appends each one as a list
-# element instead of overwriting, so all six survive the merge.
+# names 1:1 and merge flat. The channel-guide specialists (one per
+# CHANNEL_SPECS entry) each emit a single ChannelGuidelineOutput for their
+# own channel, all nesting under the same "channel_guidelines" key -- since
+# that's a List field on ChannelActivationOutput, _merge_named_fragments
+# appends each one as a list element instead of overwriting, so all of them
+# survive the merge. Generated from CHANNEL_SPECS so adding a channel there
+# automatically adds its merge entry here.
 _PHASE4_NODE_MERGE: dict[str, Optional[str]] = {
     "brand_experience_principler": None,
-    "website_guide": "channel_guidelines",
-    "social_guide": "channel_guidelines",
-    "email_guide": "channel_guidelines",
-    "events_guide": "channel_guidelines",
-    "partnerships_guide": "channel_guidelines",
-    "internal_guide": "channel_guidelines",
+    **{f"{channel}_guide": "channel_guidelines" for channel, _ in CHANNEL_SPECS},
     "brand_architecture_builder": None,
     "brand_in_action_illustrator": None,
 }
@@ -341,9 +338,12 @@ class _PhaseSpec(NamedTuple):
             successful, non-degraded extraction.
         context_phases: Which upstream ``BrandPhase``s' outputs this phase
             should receive as context. Defaults to ``()`` (no filtering —
-            current behavior, where every phase can see all prior outputs,
-            is unaffected). Infrastructure only: not yet consumed by
-            ``_phase_task`` and not yet populated for any phase.
+            every prior output is included; this remains STRATEGIC_CORE's
+            value since it has no upstream phases at all). ``_phase_task``
+            filters ``prior_outputs`` down to this set when non-empty (see
+            ``_phase_task``). Every phase's value below is the evidence/
+            story-driven set from #6953: the minimal upstream context that
+            phase's agent prompts actually reference.
     """
 
     builder_fn: Callable[[], Any]
@@ -371,6 +371,7 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
         merge_fn=functools.partial(
             _merge_named_fragments, node_merge=_PHASE2_NODE_MERGE, require_all=True
         ),
+        context_phases=(BrandPhase.STRATEGIC_CORE,),
     ),
     BrandPhase.VISUAL_IDENTITY: _PhaseSpec(
         build_phase3_graph,
@@ -379,6 +380,7 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
         merge_fn=functools.partial(
             _merge_named_fragments, node_merge=_PHASE3_NODE_MERGE, require_all=True
         ),
+        context_phases=(BrandPhase.STRATEGIC_CORE, BrandPhase.NARRATIVE_MESSAGING),
     ),
     BrandPhase.CHANNEL_ACTIVATION: _PhaseSpec(
         build_phase4_graph,
@@ -386,6 +388,11 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
         PHASE_OUTPUT_MODELS[BrandPhase.CHANNEL_ACTIVATION],
         merge_fn=functools.partial(
             _merge_named_fragments, node_merge=_PHASE4_NODE_MERGE, require_all=True
+        ),
+        context_phases=(
+            BrandPhase.STRATEGIC_CORE,
+            BrandPhase.NARRATIVE_MESSAGING,
+            BrandPhase.VISUAL_IDENTITY,
         ),
     ),
     BrandPhase.GOVERNANCE: _PhaseSpec(
@@ -395,6 +402,7 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
         merge_fn=functools.partial(
             _merge_named_fragments, node_merge=_PHASE5_NODE_MERGE, require_all=True
         ),
+        context_phases=(BrandPhase.STRATEGIC_CORE, BrandPhase.VISUAL_IDENTITY),
     ),
 }
 
@@ -502,7 +510,8 @@ class BrandingTeamOrchestrator:
         include_market_research: bool = False,
         include_design_assets: bool = False,
         target_phase: Optional[BrandPhase] = None,
-        phase_cache: Optional[PhaseOutputCache] = None,
+        phase_cache: Optional[PhaseOutputCache] = PhaseOutputCache(),
+        _use_monolithic: bool = False,
     ) -> TeamOutput:
         """Run the branding pipeline up to and including *target_phase*
         (default: all phases). When *target_phase* is None, every phase is
@@ -519,8 +528,10 @@ class BrandingTeamOrchestrator:
               every phase runs).
             - When ``store`` and ``brand_id`` are supplied, ``store`` implements
               ``get_brand``/``get_brand_by_id``/``append_brand_version``.
-            - ``phase_cache`` is a ``PhaseOutputCache`` instance (possibly
-              empty) or ``None``.
+            - When ``_use_monolithic`` is ``False`` (the default), ``phase_cache``
+              is a ``PhaseOutputCache`` instance (possibly empty) -- it must not
+              be ``None``. When ``_use_monolithic`` is ``True``, ``phase_cache``
+              is ignored.
 
         Postconditions:
             - Returns a fully populated ``TeamOutput``.
@@ -530,17 +541,27 @@ class BrandingTeamOrchestrator:
               during the run (``append_brand_version`` returns ``None``), so the
               caller can mark the run as failed instead of reporting success
               without persistence.
-            - When ``phase_cache`` is ``None`` (the default), execution is
-              identical to omitting it entirely -- the pipeline always runs as
-              one monolithic graph invocation, exactly as before this
-              parameter existed.
-            - When ``phase_cache`` is supplied, each phase up to
-              ``target_phase`` is run in isolation (see
+            - ``phase_cache`` defaults to a fresh ``PhaseOutputCache()`` (a
+              thin view over the shared, process-wide phase cache -- see
+              ``PhaseOutputCache``), so per-phase cached execution is the
+              single production execution path.
+            - ``_use_monolithic=True`` is a testing/comparison-only escape
+              hatch: it runs the pipeline as one monolithic graph invocation
+              instead of the per-phase cached path, exactly as this method
+              behaved before ``phase_cache`` existed. No production caller
+              sets it.
+            - When ``_use_monolithic`` is ``False`` (the default), each phase
+              up to ``target_phase`` is run in isolation (see
               ``_run_phases_with_cache``): a phase whose input hash matches a
               cached entry reuses that cached output instead of being
               invoked; a miss runs the phase via ``run_single_phase`` and, if
               the result is not degraded, stores it in ``phase_cache`` for a
-              future call.
+              future call. Each ``run_single_phase`` call gets its own fresh
+              ``DEFAULT_EXECUTION_TIMEOUT_SECONDS`` (600s) /
+              ``DEFAULT_NODE_TIMEOUT_SECONDS`` (180s) budget -- there is no
+              deadline shared across phases within one call -- so a call whose
+              phases all miss can take up to roughly 5x the monolithic path's
+              single 600s execution-timeout cap, not the same 600s ceiling.
             - ``phase_cache`` is thread-path-only by construction, not by
               convention: the Temporal activity (``temporal/activities.py``)
               calls ``run_single_phase`` directly and never this method, and
@@ -553,7 +574,7 @@ class BrandingTeamOrchestrator:
 
         stop_idx = phase_index(target_phase) if target_phase else len(PHASE_ORDER) - 1
 
-        if phase_cache is None:
+        if _use_monolithic:
             # ---- Build and invoke the graph ----
             graph = build_branding_graph(target_phase=target_phase)
             task = (
@@ -573,6 +594,9 @@ class BrandingTeamOrchestrator:
                 for min_idx, spec in enumerate(phase_specs)
             ]
         else:
+            assert phase_cache is not None, (
+                "phase_cache must be a PhaseOutputCache instance when _use_monolithic=False"
+            )
             extractions = self._run_phases_with_cache(mission, stop_idx, phase_cache)
 
         strategic_core, narrative, visual_identity, channel_activation, governance = (
@@ -653,6 +677,13 @@ class BrandingTeamOrchestrator:
             - Only a non-degraded phase output is ever stored in ``cache``; a
               degraded (default-constructed) output is returned but never
               cached, so a transient parse failure cannot poison a later call.
+            - No deadline is shared across the sequential ``run_single_phase``
+              calls this makes: each gets its own fresh execution/node
+              timeout budget (see ``run_single_phase``), so a call with
+              several misses can take up to roughly the sum of those
+              per-phase budgets -- not capped at any single overall deadline
+              the way the monolithic-graph path's one execution timeout caps
+              the whole run.
         """
         upstream_models: dict[BrandPhase, BaseModel] = {}
         prior_outputs: dict[str, dict] = {}
@@ -662,7 +693,9 @@ class BrandingTeamOrchestrator:
                 extractions.append((None, False))
                 continue
 
-            input_hash = phase_input_hash(phase, mission, upstream_models)
+            input_hash = phase_input_hash(
+                phase, mission, upstream_models, _PHASE_SPEC[phase].context_phases
+            )
             cached_output = cache.get(phase, input_hash)
             if cached_output is not None:
                 output, degraded = cached_output, False
@@ -743,7 +776,18 @@ class BrandingTeamOrchestrator:
               extended with the serialized upstream outputs when present so an
               isolated downstream phase sees the context the sequential edge would
               otherwise carry (a superset — never less context).
+            - When ``phase``'s ``_PHASE_SPEC`` entry has a non-empty
+              ``context_phases``, only ``prior_outputs`` entries whose key
+              matches one of those upstream phases' values are included.
+              When ``context_phases`` is empty (the default), every entry in
+              ``prior_outputs`` is included — unchanged, backward-compatible
+              behavior.
         """
+        spec = _PHASE_SPEC[phase]
+        if spec.context_phases:
+            allowed = {p.value for p in spec.context_phases}
+            prior_outputs = {k: v for k, v in prior_outputs.items() if k in allowed}
+
         base = (
             "Create a comprehensive brand strategy for the following company.\n\n"
             f"Branding Mission:\n{serialize_mission(mission)}"
@@ -846,11 +890,14 @@ class BrandingTeamOrchestrator:
         store: Optional["BrandingStore"] = None,
         client_id: Optional[str] = None,
         brand_id: Optional[str] = None,
-        phase_cache: Optional[PhaseOutputCache] = None,
+        phase_cache: Optional[PhaseOutputCache] = PhaseOutputCache(),
+        _use_monolithic: bool = False,
     ) -> TeamOutput:
         """Convenience method: run the pipeline up to (and including) a specific
-        phase. Accepts an optional ``phase_cache`` to reuse cached phase
-        outputs (see ``run()``)."""
+        phase. Mirrors ``run()``'s ``phase_cache`` default -- a fresh
+        ``PhaseOutputCache()`` -- and forwards ``_use_monolithic`` so a caller
+        can force the testing/comparison-only monolithic-graph path (see
+        ``run()``)."""
         return self.run(
             mission=mission,
             human_review=human_review,
@@ -860,6 +907,7 @@ class BrandingTeamOrchestrator:
             brand_id=brand_id,
             target_phase=phase,
             phase_cache=phase_cache,
+            _use_monolithic=_use_monolithic,
         )
 
     @staticmethod

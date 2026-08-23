@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
-from ...output_templates import parse_review_template
+from ...phases._profile import parse_review_template
 from ...prompts import SECURITY_TOOL_AGENT_REVIEW_PROMPT
 from ..base import BackendReviewToolAgent
 

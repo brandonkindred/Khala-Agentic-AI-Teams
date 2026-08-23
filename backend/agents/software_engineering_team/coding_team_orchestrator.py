@@ -77,7 +77,11 @@ from software_engineering_team.reasoning_capture import (
 from software_engineering_team.shared.team_lead_base import TeamLeadSharedState
 from software_engineering_team.swarm_assignment import _AssignmentMixin
 from software_engineering_team.swarm_implementation import _ImplementationMixin
-from software_engineering_team.swarm_review import _ReviewMixin
+from software_engineering_team.swarm_review import (
+    _ReviewMixin,
+    deserialize_review_cache,
+    serialize_review_cache,
+)
 from software_engineering_team.swarm_revision_cap import _RevisionCapMixin
 from software_engineering_team.task_graph import TaskGraphService
 from software_engineering_team.team_routing import (
@@ -614,7 +618,12 @@ def run_coding_team_orchestrator(
             resolved_questions=plan_input.resolved_questions,
             engine_provider=engine_provider,
             spec_content=plan_input.final_spec_content or "",
+            restored_review_cache=existing.get("review_verdict_cache"),
         )
+        # Attach the swarm's cache export so persist_sync can include review_verdict_cache in the
+        # job record from here on (pre-swarm persist_sync calls above leave this unset, so that
+        # field is simply omitted — see GraphPersistCoordinator.review_cache_export).
+        coord.review_cache_export = swarm.export_review_cache
         # Flush captured "thinking" to the job record on an interval for the UI poll.
         # beat_first surfaces any planning-phase reasoning immediately; the final flush
         # after the block captures the tail emitted since the last tick.
@@ -772,6 +781,7 @@ class CodingTeamSwarm(
         resolved_questions: Optional[List[Dict[str, Any]]] = None,
         engine_provider: Any = None,
         spec_content: str = "",
+        restored_review_cache: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """Construct the swarm; performs no I/O (worktrees are created in ``run()``).
 
@@ -779,11 +789,23 @@ class CodingTeamSwarm(
             - Every worker in ``workers`` has an ``agent_id`` that appears in ``agent_ids``
               (the two rosters correspond 1:1); ``graph`` is a ``TaskGraphService`` the caller
               owns and continues to control after construction.
+            - ``restored_review_cache`` is ``None`` (fresh run) or whatever
+              ``export_review_cache``/``serialize_review_cache`` last produced, persisted and
+              handed back by the caller on a snapshot resume; the caller never validates it —
+              ``deserialize_review_cache`` degrades any malformed/corrupt value to ``{}`` on its
+              own (see that function's contract), so this constructor never raises on bad input.
         Postconditions:
             - Constructs exactly one ``WorktreeManager`` for ``path``/``agent_ids`` (unprepared —
-              see class invariants); ``aborted`` is ``False`` and ``_review_verdict_cache`` is
-              empty. ``resolved_questions`` is copied into an independent list, so later mutation
-              by the caller's original list does not affect this instance.
+              see class invariants); ``aborted`` is ``False``. ``resolved_questions`` is copied
+              into an independent list, so later mutation by the caller's original list does not
+              affect this instance.
+            - ``_review_verdict_cache`` is seeded from
+              ``deserialize_review_cache(restored_review_cache)`` — empty when
+              ``restored_review_cache`` is ``None``/empty/malformed (fresh run, no regression),
+              otherwise populated with the caller's previously-persisted verdicts (snapshot
+              resume, including under ``retry_failed=True``). ``_review_verdict_cache_lock`` is
+              always a freshly constructed ``threading.Lock()`` — lock objects are never restored
+              from storage.
         """
         TeamLeadSharedState.__init__(
             self,
@@ -844,15 +866,37 @@ class CodingTeamSwarm(
         # sees (changes_summary/evidence, which embeds the branch diff, plus user_decisions) — not
         # the branch diff alone, so a changed changes_summary or a newly answered HITL decision still
         # misses the cache even when the branch itself is unchanged. Reusing the cached verdict skips
-        # paying for another run_code_review call (see swarm_review._compute_review). Scoped to this
-        # swarm instance's own run — never persisted/restored across a resume. Locked because
-        # _review_and_merge fans _compute_review out across multiple in-review tasks via parallel_map.
-        self._review_verdict_cache: Dict[str, tuple[str, Dict[str, Any]]] = {}
+        # paying for another run_code_review call (see swarm_review._compute_review). Seeded from
+        # restored_review_cache on a snapshot resume (see export_review_cache and
+        # GraphPersistCoordinator, which round-trip it through the job record's
+        # "review_verdict_cache" field); empty on a fresh run. Locked because _review_and_merge
+        # fans _compute_review out across multiple in-review tasks via parallel_map — the lock
+        # itself is always freshly constructed here, never restored.
+        self._review_verdict_cache: Dict[str, tuple[str, Dict[str, Any]]] = (
+            deserialize_review_cache(restored_review_cache)
+        )
         self._review_verdict_cache_lock = threading.Lock()
         # One isolated git worktree per worker (see coding_team.worktree_manager) — created up
         # front in run(), never lazily from inside a worker thread. Construction itself does no
         # filesystem/git I/O.
         self._worktrees = WorktreeManager(path, agent_ids)
+
+    def export_review_cache(self) -> List[Dict[str, Any]]:
+        """JSON-safe snapshot of the review verdict cache for durable persistence.
+
+        Preconditions:
+            - None — safe to call at any point in the instance's lifetime, including before any
+              task has been reviewed (``_review_verdict_cache`` empty).
+
+        Postconditions:
+            - Returns ``serialize_review_cache(self._review_verdict_cache)`` (see that function's
+              own contract for the exact shape/cap), computed while holding
+              ``_review_verdict_cache_lock`` so a concurrent ``_review_and_merge`` cache write
+              (fanned out via ``parallel_map``) can never be observed half-written.
+            - Does not mutate ``_review_verdict_cache``.
+        """
+        with self._review_verdict_cache_lock:
+            return serialize_review_cache(self._review_verdict_cache)
 
     def _is_complete(self) -> bool:
         """Whether this round's work is fully drained: nothing left to assign, run, or review.

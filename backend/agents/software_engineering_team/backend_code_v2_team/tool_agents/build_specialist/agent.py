@@ -19,7 +19,7 @@ from software_engineering_team.shared.tool_agent_build_specialist import (
 )
 
 from ...models import ToolAgentInput, ToolAgentOutput, ToolAgentPhaseInput, ToolAgentPhaseOutput
-from ...output_templates import parse_problem_solving_single_issue_template
+from ...phases._profile import parse_problem_solving_single_issue_template
 from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
 from ..base import BackendReviewToolAgent
 

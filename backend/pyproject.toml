@@ -137,20 +137,12 @@ omit = [
     # phases remain covered by unit tests with mocked tool agents.
     "agents/software_engineering_team/backend_code_v2_team/phases/review.py",
     "agents/software_engineering_team/backend_code_v2_team/phases/problem_solving.py",
-    "agents/software_engineering_team/backend_code_v2_team/phases/execution.py",
     "agents/software_engineering_team/frontend_code_v2_team/phases/review.py",
     "agents/software_engineering_team/frontend_code_v2_team/phases/problem_solving.py",
-    "agents/software_engineering_team/frontend_code_v2_team/phases/execution.py",
     # software_engineering_team: v2-team build specialist — wraps the
     # real `ng build`/`pytest` runners + LLM prompt repair loop, only
     # meaningful when those binaries and the LLM are reachable.
     "agents/software_engineering_team/backend_code_v2_team/tool_agents/build_specialist/agent.py",
-    # software_engineering_team: v2-team setup phases — ensure_linting_configured,
-    # ensure_testing_configured, run_setup write real linter/test scaffolding
-    # into the agent-generated repo on disk and only meaningfully run when a
-    # writable workspace is present.
-    "agents/software_engineering_team/backend_code_v2_team/phases/setup.py",
-    "agents/software_engineering_team/frontend_code_v2_team/phases/setup.py",
     # software_engineering_team: linting_tool_agent.linter_runner — wraps
     # `ruff`/`pylint` subprocess invocations on the agent-generated tree;
     # only runs against real lint binaries + a generated repo.

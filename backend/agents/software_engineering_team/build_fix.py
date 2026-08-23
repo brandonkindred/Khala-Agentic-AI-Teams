@@ -743,7 +743,7 @@ def _try_build_fix_one_at_a_time(
         logger.warning("Build fix: could not get model: %s", e)
         return False, result.error_summary if result is not None else "Build failed"
 
-    from software_engineering_team.backend_code_v2_team.output_templates import (
+    from software_engineering_team.backend_code_v2_team.phases._profile import (
         parse_problem_solving_single_issue_template,
     )
 

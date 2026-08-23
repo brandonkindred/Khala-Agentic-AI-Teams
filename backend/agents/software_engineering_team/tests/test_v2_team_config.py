@@ -1,8 +1,9 @@
 """
 Unit tests for :class:`V2TeamConfig` — construction, immutability, and
 parity against each code-v2 team's real ``ToolAgentKind``/``PROFILE``/
-accessibility-clause values — independent of any orchestrator consumption
-(none exists yet; see the class docstring). ``StackProfile``'s own
+accessibility-clause values, at the dataclass level rather than through the
+orchestrator (orchestrator-level property/consumption tests live in
+``test_v2_config_orchestrator.py``). ``StackProfile``'s own
 construction/invariant/frozen behavior is covered in full by
 ``test_stack_profile.py``; this module includes one targeted test showing
 that the ``"_default"`` invariant is enforced by ``StackProfile`` before
@@ -24,6 +25,9 @@ _CONFIG_KWARGS = dict(
     stack_profile=_make_stack_profile(),
     tool_agent_kinds=frozenset({"security", "testing_qa"}),
     extra_review_clause="",
+    output_template_path_prefixes=("backend/", "./backend/"),
+    output_template_allowed_languages=("python", "java"),
+    output_template_coerce_unknown=True,
 )
 
 
@@ -35,6 +39,9 @@ def test_construction_round_trips_all_fields():
     assert config.stack_profile.conventions_by_language == {"_default": "PY"}
     assert config.tool_agent_kinds == frozenset({"security", "testing_qa"})
     assert config.extra_review_clause == ""
+    assert config.output_template_path_prefixes == ("backend/", "./backend/")
+    assert config.output_template_allowed_languages == ("python", "java")
+    assert config.output_template_coerce_unknown is True
 
 
 def test_frozen_instance_rejects_attribute_assignment():
@@ -79,6 +86,9 @@ class TestBackendParity:
             stack_profile=PROFILE,
             tool_agent_kinds=frozenset(k.value for k in ToolAgentKind),
             extra_review_clause="",
+            output_template_path_prefixes=("backend/", "./backend/"),
+            output_template_allowed_languages=("python", "java"),
+            output_template_coerce_unknown=True,
         )
 
     def test_stack_profile_is_the_real_team_profile(self):
@@ -126,6 +136,15 @@ class TestFrontendParity:
             stack_profile=PROFILE,
             tool_agent_kinds=frozenset(k.value for k in ToolAgentKind),
             extra_review_clause=_ACCESSIBILITY_VERIFY_NOTE,
+            output_template_path_prefixes=("frontend/", "./frontend/"),
+            output_template_allowed_languages=(
+                "angular",
+                "react",
+                "vue",
+                "typescript",
+                "javascript",
+            ),
+            output_template_coerce_unknown=False,
         )
 
     def test_stack_profile_is_the_real_team_profile(self):

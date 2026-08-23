@@ -33,6 +33,7 @@ docstring).
 from __future__ import annotations
 
 import logging
+import warnings
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, Mapping, Optional, Sequence, Tuple, TypeVar
 
@@ -64,6 +65,40 @@ _DEVELOPMENT_RESULT_FIELDS = (
     "failure_reason",
     "needs_followup",
 )
+
+
+def warn_doc_agent_deprecated(doc_agent: Any) -> None:
+    """Warn once per call site when a caller passes a non-None ``doc_agent``.
+
+    ``doc_agent`` is accepted by all four public ``run_workflow`` entry
+    points (frontend/backend dev-agent and team-lead) for backward
+    compatibility but is never forwarded to
+    ``ConfigDrivenV2DevelopmentAgent._run_development_workflow`` (which has no
+    such parameter) — real per-microtask documentation is produced instead by
+    the ``ToolAgentKind.DOCUMENTATION`` tool agent each team builds
+    internally. Each of the four ``run_workflow`` methods calls this helper
+    directly (not via an intermediate forwarding layer) so the deprecation
+    message cannot drift between them and ``stacklevel=3`` reliably points at
+    the external caller: frame 1 is this function's own ``warnings.warn``
+    call, frame 2 is the ``run_workflow`` line that calls this helper, and
+    frame 3 is whoever called that ``run_workflow``. A team-lead
+    ``run_workflow`` warns for itself and then passes ``doc_agent=None``
+    onward to ``_run_setup_and_delegate`` so the forwarded call into the
+    dev agent's ``run_workflow`` does not warn a second time for the same
+    external call.
+
+    Preconditions: none.
+    Postconditions: emits a ``DeprecationWarning`` via ``warnings.warn`` iff
+      ``doc_agent is not None``; otherwise a no-op.
+    """
+    if doc_agent is not None:
+        warnings.warn(
+            "doc_agent is deprecated and has no effect: it is not forwarded to "
+            "the development workflow. Documentation is generated via the "
+            "DocumentationToolAgent (ToolAgentKind.DOCUMENTATION) instead.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
 
 
 def make_job_updater(
@@ -392,6 +427,13 @@ class BaseTeamLead(TeamLeadSharedState):
         ``merge_to_development``) are forwarded unchanged to the development agent's
         ``run_workflow``. ``merge_to_development`` defaults to True; when False,
         delivery prepares a feature branch for external review instead of merging.
+        ``doc_agent`` is deprecated and ignored; it is forwarded unchanged to the
+        development agent's ``run_workflow`` here too, but the deprecation
+        warning itself (:func:`warn_doc_agent_deprecated`) is the caller's
+        responsibility — a team-lead ``run_workflow`` warns for itself before
+        calling this method and passes ``doc_agent=None`` onward, so it fires
+        exactly once and unconditionally (even on a setup or lint/test-gate
+        failure that returns before ``doc_agent`` would otherwise reach here).
 
         Preconditions:
           - ``repo_path`` is a filesystem path the setup phase can operate on (created

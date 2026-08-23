@@ -33,6 +33,7 @@ from branding_team.shared.job_store import (
     mark_completed,
     mark_failed,
 )
+from branding_team.shared.phase_output_cache import PhaseOutputCache
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,7 @@ def _run_branding_core(
                 include_market_research=include_market_research,
                 include_design_assets=include_design_assets,
                 target_phase=target_phase,
+                phase_cache=_main._get_brand_cache(brand_id) if brand_id else PhaseOutputCache(),
             )
         mark_completed(job_id, result.model_dump())
     except Exception as e:

@@ -674,6 +674,9 @@ def test_entry_gate_pauses_then_resumes_and_threads_answers(tmp_path, monkeypatc
             }
 
     class Swarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
             self.aborted = False
@@ -714,6 +717,9 @@ def test_orchestrator_fails_when_tech_lead_never_stops_asking(tmp_path, monkeypa
             return {"tasks": [], "stacks": [], "open_questions": [{"question_text": "Q?"}]}
 
     class Swarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
             self.aborted = False
@@ -748,6 +754,9 @@ def test_entry_gate_no_answer_makes_zero_llm_calls(tmp_path, monkeypatch):
             return {"tasks": [], "stacks": [], "open_questions": []}
 
     class Swarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
             self.aborted = False
@@ -791,6 +800,9 @@ def test_already_resolved_entry_questions_do_not_pause(tmp_path, monkeypatch):
             }
 
     class Swarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
             self.aborted = False
@@ -943,6 +955,9 @@ def test_tech_lead_question_pause_without_answers_aborts(tmp_path, monkeypatch):
             return {"tasks": [], "stacks": [], "open_questions": [{"question_text": "Q?"}]}
 
     class Swarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
             self.aborted = False
@@ -978,6 +993,9 @@ def test_orchestrator_returns_when_swarm_aborts(tmp_path, monkeypatch):
             }
 
     class Swarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
             self.aborted = False
@@ -1072,6 +1090,9 @@ def test_entry_gate_returns_paused_without_blocking(tmp_path, monkeypatch):
             raise AssertionError("must not plan before the entry gate resolves")
 
     class Swarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
             self.aborted = False
@@ -1132,6 +1153,9 @@ def test_tech_lead_clarify_returns_paused_without_blocking(tmp_path, monkeypatch
             return {"tasks": [], "stacks": [], "open_questions": [{"question_text": "Which DB?"}]}
 
     class Swarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
             self.aborted = False
@@ -1245,6 +1269,9 @@ def test_reentry_matching_token_consumes_and_continues(tmp_path, monkeypatch):
             }
 
     class Swarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
             self.aborted = False
@@ -1301,6 +1328,9 @@ def test_reentry_stale_token_reemits_without_rerunning_work(tmp_path, monkeypatc
             raise AssertionError("a pre-work retry must not re-run any planning work")
 
     class Swarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
             self.aborted = False

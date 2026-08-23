@@ -376,7 +376,7 @@ class BaseV2DevelopmentAgent:
         and the one real per-team difference (``review_label``) is resolved
         there rather than duplicated here. ``review_deps`` (a
         ``ReviewDependencies``, itself defined once in ``shared.phases.execution``
-        and reused verbatim by both teams' ``phases/execution.py``) and
+        and re-exported verbatim by both teams' ``phases/_profile.py``) and
         ``review_config`` (the team's already-resolved ``MicrotaskReviewConfig``,
         i.e. ``review_config or MicrotaskReviewConfig()`` -- left to the caller
         since that class differs per team) are passed in fully constructed.

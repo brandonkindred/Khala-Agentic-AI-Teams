@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Optional
 from unittest.mock import MagicMock
 
+import pytest
+
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
@@ -98,7 +100,7 @@ class TestModels:
 class TestSetupPhase:
     def test_run_setup_on_existing_repo(self, tmp_path):
         """Verify setup on an existing repo stays on development without creating a branch."""
-        from frontend_code_v2_team.phases.setup import run_setup
+        from frontend_code_v2_team.phases._profile import run_setup
 
         init_repo_with_existing_development(tmp_path)
         result = run_setup(repo_path=tmp_path, task_title="My App")
@@ -117,7 +119,7 @@ class TestSetupPhase:
 
     def test_run_setup_creates_repo_when_missing(self, tmp_path):
         """Verify setup initializes a new git repository when none exists."""
-        from frontend_code_v2_team.phases.setup import run_setup
+        from frontend_code_v2_team.phases._profile import run_setup
 
         assert not (tmp_path / ".git").exists()
         result = run_setup(repo_path=tmp_path, task_title="New App")
@@ -131,7 +133,7 @@ class TestSetupPhase:
         files on a later pass and blocks the development agent's checkout of the
         review feature branch.
         """
-        from frontend_code_v2_team.phases.setup import run_setup
+        from frontend_code_v2_team.phases._profile import run_setup
 
         init_repo_with_existing_development(tmp_path)
         run_setup(repo_path=tmp_path, task_title="My App")
@@ -152,7 +154,7 @@ class TestSetupPhase:
         ``run_setup`` on development must not strand untracked copies that abort
         the feature-branch checkout.
         """
-        from frontend_code_v2_team.phases.setup import run_setup
+        from frontend_code_v2_team.phases._profile import run_setup
 
         init_repo_with_existing_development(tmp_path)
         run_setup(repo_path=tmp_path, task_title="My App")
@@ -185,7 +187,7 @@ class TestSetupPhase:
         Pre-existing uncommitted/untracked work must not be swept onto
         ``development`` under the scaffolding commit.
         """
-        from frontend_code_v2_team.phases.setup import run_setup
+        from frontend_code_v2_team.phases._profile import run_setup
 
         init_repo_with_existing_development(tmp_path)
         subprocess.run(
@@ -216,7 +218,7 @@ class TestSetupPhase:
         Otherwise setup reports success while the scaffolding stays uncommitted,
         silently reintroducing the feature-branch checkout conflict.
         """
-        from frontend_code_v2_team.phases import setup as setup_mod
+        from frontend_code_v2_team.phases import _profile as setup_mod
 
         init_repo_with_existing_development(tmp_path)
         monkeypatch.setattr(setup_mod, "commit_paths", lambda *a, **k: (False, "rejected by hook"))
@@ -233,7 +235,7 @@ class TestSetupPhase:
         """
         import json
 
-        from frontend_code_v2_team.phases.setup import run_setup
+        from frontend_code_v2_team.phases._profile import run_setup
 
         init_repo_with_existing_development(tmp_path)
         subprocess.run(
@@ -263,7 +265,7 @@ class TestSetupPhase:
         lacks the eslint/vitest config until the dev-agent calls
         configure_quality_tooling on it.
         """
-        from frontend_code_v2_team.phases.setup import configure_quality_tooling, run_setup
+        from frontend_code_v2_team.phases._profile import configure_quality_tooling, run_setup
 
         init_repo_with_existing_development(tmp_path)
         subprocess.run(
@@ -299,9 +301,71 @@ class TestSetupPhase:
         assert status.stdout.strip() == ""  # config committed to the feature branch, tree clean
 
 
+class TestSetupPhaseHooks:
+    """Direct unit tests for the frontend lint/test detection hooks.
+
+    These hooks moved from the (coverage-omitted) former ``phases/setup.py``
+    into ``phases/_profile.py`` as part of unifying setup onto shared config;
+    ``_profile.py`` is not coverage-omitted, so the Angular-project and
+    unreadable/malformed-config branches need direct coverage here rather
+    than relying solely on the happy-path exercised via ``run_setup`` above.
+    """
+
+    def test_ensure_linting_configured_creates_config_for_angular_project(self, tmp_path):
+        from frontend_code_v2_team.phases._profile import _ensure_linting_configured
+
+        (tmp_path / "angular.json").write_text("{}", encoding="utf-8")
+        written: set = set()
+        assert _ensure_linting_configured(tmp_path, written) is True
+        assert (tmp_path / "eslint.config.js").exists()
+        assert "eslint.config.js" in written
+
+    def test_ensure_linting_configured_angular_config_already_present(self, tmp_path):
+        """An Angular project whose eslint.config.js already exists must not
+        be overwritten (and must not be reported as newly written)."""
+        from frontend_code_v2_team.phases._profile import _ensure_linting_configured
+
+        (tmp_path / "angular.json").write_text("{}", encoding="utf-8")
+        (tmp_path / "eslint.config.js").write_text("// existing\n", encoding="utf-8")
+        written: set = set()
+        assert _ensure_linting_configured(tmp_path, written) is True
+        assert written == set()
+        assert (tmp_path / "eslint.config.js").read_text(encoding="utf-8") == "// existing\n"
+
+    def test_ensure_testing_configured_malformed_package_json(self, tmp_path):
+        """A malformed package.json must not raise while probing for an
+        existing test script; setup falls through to creating vitest config."""
+        from frontend_code_v2_team.phases._profile import _ensure_testing_configured
+
+        (tmp_path / "package.json").write_text("{not valid json", encoding="utf-8")
+        written: set = set()
+        assert _ensure_testing_configured(tmp_path, written) is True
+        assert (tmp_path / "vitest.config.ts").exists()
+
+    def test_ensure_testing_configured_creates_config_for_angular_project(self, tmp_path):
+        from frontend_code_v2_team.phases._profile import _ensure_testing_configured
+
+        (tmp_path / "angular.json").write_text("{}", encoding="utf-8")
+        written: set = set()
+        assert _ensure_testing_configured(tmp_path, written) is True
+        assert (tmp_path / "vitest.config.mts").exists()
+        assert (tmp_path / "src" / "test-setup.ts").exists()
+        assert "vitest.config.mts" in written
+        assert "src/test-setup.ts" in written
+
+    def test_ensure_package_script_handles_unreadable_package_json(self, tmp_path):
+        """An unreadable package.json must not raise; the script is simply
+        not added and no write is reported."""
+        from frontend_code_v2_team.phases._profile import _ensure_package_script
+
+        # A directory named package.json makes read_text raise IsADirectoryError.
+        (tmp_path / "package.json").mkdir()
+        assert _ensure_package_script(tmp_path, "lint", "eslint .") is False
+
+
 class TestPlanningPhase:
     def test_language_detection_angular(self, tmp_path):
-        from frontend_code_v2_team.phases.planning import _detect_language
+        from frontend_code_v2_team.phases._profile import _detect_language
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -316,7 +380,7 @@ class TestPlanningPhase:
         assert _detect_language(tmp_path, task) == "angular"
 
     def test_language_detection_from_description(self, tmp_path):
-        from frontend_code_v2_team.phases.planning import _detect_language
+        from frontend_code_v2_team.phases._profile import _detect_language
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -330,7 +394,7 @@ class TestPlanningPhase:
         assert _detect_language(tmp_path, task) == "react"
 
     def test_parse_planning_output(self):
-        from frontend_code_v2_team.phases.planning import _parse_planning_output
+        from frontend_code_v2_team.phases._profile import _parse_planning_output
 
         raw = {
             "microtasks": [
@@ -358,7 +422,7 @@ class TestPlanningPhase:
         assert result.language == "angular"
 
     def test_run_planning_fallback(self, tmp_path):
-        from frontend_code_v2_team.phases.planning import run_planning
+        from frontend_code_v2_team.phases._profile import run_planning
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -511,7 +575,7 @@ class TestFrontendDevelopmentAgentBranchReuse:
                 summary="ready",
             )
 
-        from frontend_code_v2_team.phases import documentation as doc_phase
+        from frontend_code_v2_team.phases import _profile as doc_phase
 
         monkeypatch.setattr(orch, "checkout_branch", _checkout_branch)
         monkeypatch.setattr(
@@ -600,7 +664,7 @@ class TestFrontendDevelopmentAgentBranchReuse:
             ),
         )
 
-        from frontend_code_v2_team.phases import documentation as doc_phase
+        from frontend_code_v2_team.phases import _profile as doc_phase
 
         monkeypatch.setattr(
             doc_phase,
@@ -641,6 +705,165 @@ class TestFrontendDevelopmentAgentBranchReuse:
         assert mock_debug.called
         logged = " ".join(str(arg) for call in mock_debug.call_args_list for arg in call[0])
         assert "job_updater failed" in logged
+
+
+class TestFrontendDocAgentDeprecated:
+    """doc_agent is accepted for backward compatibility but never forwarded downstream."""
+
+    def _patch_success(self, monkeypatch, orch, doc_phase):
+        from frontend_code_v2_team.models import (
+            DeliverResult,
+            DocumentationPhaseResult,
+            ExecutionResult,
+            PlanningResult,
+        )
+
+        class _GitAgent:
+            def create_feature_branch(self, *_args, **_kwargs):
+                return True, "feature/ui"
+
+            def commit_current_changes(self, *_args, **_kwargs):
+                return True, "committed"
+
+        monkeypatch.setattr(orch, "checkout_branch", lambda *_a, **_kw: (True, "checked out"))
+        monkeypatch.setattr(
+            orch.FrontendDevelopmentAgent,
+            "_build_and_validate_tool_agents",
+            lambda _self, _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: _GitAgent()},
+        )
+        monkeypatch.setattr(
+            orch.FrontendDevelopmentAgent, "_read_repo_code", lambda _self, _repo_path: ""
+        )
+        monkeypatch.setattr(
+            orch,
+            "run_planning",
+            lambda **_kwargs: PlanningResult(microtasks=[Microtask(id="mt-1")], summary="planned"),
+        )
+        monkeypatch.setattr(
+            orch,
+            "run_execution_with_review_gates",
+            lambda **_kwargs: ExecutionResult(
+                files={"src/app.component.ts": "export class AppComponent {}\n"},
+                microtasks=[Microtask(id="mt-1", status=MicrotaskStatus.COMPLETED)],
+                summary="implemented",
+            ),
+        )
+        monkeypatch.setattr(
+            doc_phase,
+            "run_documentation_phase",
+            lambda **_kwargs: DocumentationPhaseResult(summary="docs"),
+        )
+        monkeypatch.setattr(
+            orch,
+            "run_deliver",
+            lambda **kwargs: DeliverResult(
+                branch_name=kwargs["feature_branch_name"], branch_ready=True, summary="ready"
+            ),
+        )
+
+    def _task(self):
+        from shared.dev_models.models import Task, TaskStatus, TaskType
+
+        return Task(
+            id="ui",
+            type=TaskType.FRONTEND,
+            assignee="frontend-code-v2",
+            status=TaskStatus.PENDING,
+            title="UI",
+            description="Build UI",
+        )
+
+    def test_dev_agent_warns_when_doc_agent_passed(self, tmp_path, monkeypatch):
+        from frontend_code_v2_team import orchestrator as orch
+        from frontend_code_v2_team.phases import _profile as doc_phase
+
+        (tmp_path / "eslint.config.js").write_text("export default [];\n")
+        (tmp_path / "package.json").write_text('{"scripts":{"test":"vitest run"}}\n')
+
+        self._patch_success(monkeypatch, orch, doc_phase)
+
+        with pytest.warns(DeprecationWarning, match="doc_agent"):
+            result = orch.FrontendDevelopmentAgent(MagicMock()).run_workflow(
+                repo_path=tmp_path,
+                task=self._task(),
+                merge_to_development=False,
+                doc_agent=MagicMock(),
+            )
+
+        assert result.success is True
+
+    def test_dev_agent_no_warning_when_doc_agent_omitted(self, tmp_path, monkeypatch, recwarn):
+        from frontend_code_v2_team import orchestrator as orch
+        from frontend_code_v2_team.phases import _profile as doc_phase
+
+        (tmp_path / "eslint.config.js").write_text("export default [];\n")
+        (tmp_path / "package.json").write_text('{"scripts":{"test":"vitest run"}}\n')
+
+        self._patch_success(monkeypatch, orch, doc_phase)
+
+        result = orch.FrontendDevelopmentAgent(MagicMock()).run_workflow(
+            repo_path=tmp_path,
+            task=self._task(),
+            merge_to_development=False,
+        )
+
+        assert result.success is True
+        assert not any(issubclass(w.category, DeprecationWarning) for w in recwarn.list)
+
+    def test_team_lead_warns_even_when_setup_fails(self, tmp_path, monkeypatch):
+        """The team-lead warns for doc_agent unconditionally, before the lint/test gate."""
+        from frontend_code_v2_team import orchestrator as orch
+
+        monkeypatch.setattr(
+            orch,
+            "run_setup",
+            lambda **_kwargs: SetupResult(linting_configured=False, testing_configured=False),
+        )
+
+        with pytest.warns(DeprecationWarning, match="doc_agent"):
+            result = orch.FrontendCodeV2TeamLead(MagicMock()).run_workflow(
+                repo_path=tmp_path,
+                task=self._task(),
+                doc_agent=MagicMock(),
+            )
+
+        assert result.success is False
+        assert "linting is not configured" in result.failure_reason.lower()
+
+    def test_team_lead_warns_exactly_once_when_delegation_succeeds(self, tmp_path, monkeypatch):
+        """The forwarded doc_agent=None to the dev agent must not double the warning."""
+        from frontend_code_v2_team import orchestrator as orch
+        from frontend_code_v2_team.models import FrontendCodeV2WorkflowResult
+
+        received: dict = {}
+
+        class _DevelopmentAgent:
+            def __init__(self, _llm):
+                pass
+
+            def run_workflow(self, **kwargs):
+                received.update(kwargs)
+                return FrontendCodeV2WorkflowResult(task_id="ui", success=True)
+
+        monkeypatch.setattr(
+            orch,
+            "run_setup",
+            lambda **_kwargs: SetupResult(linting_configured=True, testing_configured=True),
+        )
+        monkeypatch.setattr(orch, "FrontendDevelopmentAgent", _DevelopmentAgent)
+
+        with pytest.warns(DeprecationWarning, match="doc_agent") as record:
+            result = orch.FrontendCodeV2TeamLead(MagicMock()).run_workflow(
+                repo_path=tmp_path,
+                task=self._task(),
+                merge_to_development=False,
+                doc_agent=MagicMock(),
+            )
+
+        assert result.success is True
+        assert received["doc_agent"] is None
+        doc_agent_warnings = [w for w in record.list if issubclass(w.category, DeprecationWarning)]
+        assert len(doc_agent_warnings) == 1
 
 
 class TestFrontendDevelopmentAgent:
@@ -787,7 +1010,7 @@ class TestDocumentationSelfReviewWiring:
 
     def test_wraps_shared_helper_with_team_prompt_parser_and_result(self):
         from frontend_code_v2_team.models import DocumentationSelfReviewResult
-        from frontend_code_v2_team.phases.review import run_documentation_self_review
+        from frontend_code_v2_team.phases._profile import run_documentation_self_review
         from frontend_code_v2_team.prompts import DOCUMENTATION_SELF_REVIEW_PROMPT
 
         client = _RecordingDocClient(_DOC_REVIEW_RESPONSE)
@@ -820,7 +1043,7 @@ class TestDbCSelfReviewWiring:
     """
 
     def test_gate_config_wires_dbc_self_review(self):
-        from frontend_code_v2_team.phases.execution import GATE_CONFIG
+        from frontend_code_v2_team.phases._profile import GATE_CONFIG
 
         from software_engineering_team.shared.phases.dbc_phase import run_dbc_comments_review
 
@@ -840,7 +1063,7 @@ class TestDbCSelfReviewWiring:
         """
         from types import SimpleNamespace
 
-        from frontend_code_v2_team.phases.execution import GATE_CONFIG
+        from frontend_code_v2_team.phases._profile import GATE_CONFIG
 
         from software_engineering_team.shared.phases import dbc_phase
         from software_engineering_team.shared.phases.dbc_phase import _run_dbc_self_review

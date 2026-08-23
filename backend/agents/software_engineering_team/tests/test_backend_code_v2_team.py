@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Optional
 from unittest.mock import MagicMock
 
+import pytest
+
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
@@ -127,7 +129,7 @@ class TestModels:
 class TestSetupPhase:
     def test_run_setup_on_existing_repo(self, tmp_path):
         """Verify setup on an existing repo stays on development without creating a branch."""
-        from backend_code_v2_team.phases.setup import run_setup
+        from backend_code_v2_team.phases._profile import run_setup
 
         init_repo_with_existing_development(tmp_path)
         result = run_setup(repo_path=tmp_path, task_title="My Project")
@@ -146,7 +148,7 @@ class TestSetupPhase:
 
     def test_run_setup_creates_repo_when_missing(self, tmp_path):
         """Verify setup initializes a new git repository when none exists."""
-        from backend_code_v2_team.phases.setup import run_setup
+        from backend_code_v2_team.phases._profile import run_setup
 
         assert not (tmp_path / ".git").exists()
         result = run_setup(repo_path=tmp_path, task_title="New Project")
@@ -160,7 +162,7 @@ class TestSetupPhase:
         files on a later pass and blocks the development agent's checkout of the
         review feature branch.
         """
-        from backend_code_v2_team.phases.setup import run_setup
+        from backend_code_v2_team.phases._profile import run_setup
 
         init_repo_with_existing_development(tmp_path)
         run_setup(repo_path=tmp_path, task_title="My Project")
@@ -181,7 +183,7 @@ class TestSetupPhase:
         ``run_setup`` on development must not strand untracked copies that abort
         the feature-branch checkout.
         """
-        from backend_code_v2_team.phases.setup import run_setup
+        from backend_code_v2_team.phases._profile import run_setup
 
         init_repo_with_existing_development(tmp_path)
         # Pass 1: configure + commit scaffolding on development.
@@ -217,7 +219,7 @@ class TestSetupPhase:
         Pre-existing uncommitted/untracked work must not be swept onto
         ``development`` under the scaffolding commit.
         """
-        from backend_code_v2_team.phases.setup import run_setup
+        from backend_code_v2_team.phases._profile import run_setup
 
         init_repo_with_existing_development(tmp_path)
         subprocess.run(
@@ -250,7 +252,7 @@ class TestSetupPhase:
         Otherwise setup reports success while the scaffolding stays uncommitted,
         silently reintroducing the feature-branch checkout conflict.
         """
-        from backend_code_v2_team.phases import setup as setup_mod
+        from backend_code_v2_team.phases import _profile as setup_mod
 
         init_repo_with_existing_development(tmp_path)
         monkeypatch.setattr(setup_mod, "commit_paths", lambda *a, **k: (False, "rejected by hook"))
@@ -266,7 +268,7 @@ class TestSetupPhase:
         and re-blocking the later feature-branch checkout. The committed file
         must be clean afterward.
         """
-        from backend_code_v2_team.phases.setup import run_setup
+        from backend_code_v2_team.phases._profile import run_setup
 
         init_repo_with_existing_development(tmp_path)
         subprocess.run(
@@ -295,7 +297,7 @@ class TestSetupPhase:
         it. Without that, pre-flight (and later quality gates) fail on a
         config-less branch.
         """
-        from backend_code_v2_team.phases.setup import configure_quality_tooling, run_setup
+        from backend_code_v2_team.phases._profile import configure_quality_tooling, run_setup
 
         init_repo_with_existing_development(tmp_path)
         subprocess.run(
@@ -333,6 +335,101 @@ class TestSetupPhase:
         assert status.stdout.strip() == ""  # config committed to the feature branch, tree clean
 
 
+class TestSetupPhaseHooks:
+    """Direct unit tests for the backend lint/test detection hooks.
+
+    These hooks moved from the (coverage-omitted) former ``phases/setup.py``
+    into ``phases/_profile.py`` as part of unifying setup onto shared config;
+    ``_profile.py`` is not coverage-omitted, so the "already configured" and
+    unreadable-config branches need direct coverage here rather than relying
+    on the happy-path exercised via ``run_setup`` above.
+    """
+
+    def test_ensure_linting_configured_detects_existing_ruff_toml(self, tmp_path):
+        from backend_code_v2_team.phases._profile import _ensure_linting_configured
+
+        (tmp_path / "ruff.toml").write_text("", encoding="utf-8")
+        written: set = set()
+        assert _ensure_linting_configured(tmp_path, written) is True
+        assert written == set()
+
+    def test_ensure_linting_configured_detects_existing_flake8_file(self, tmp_path):
+        from backend_code_v2_team.phases._profile import _ensure_linting_configured
+
+        (tmp_path / ".flake8").write_text("", encoding="utf-8")
+        written: set = set()
+        assert _ensure_linting_configured(tmp_path, written) is True
+        assert written == set()
+
+    def test_ensure_linting_configured_detects_setup_cfg_flake8_section(self, tmp_path):
+        from backend_code_v2_team.phases._profile import _ensure_linting_configured
+
+        (tmp_path / "setup.cfg").write_text("[flake8]\nmax-line-length = 120\n", encoding="utf-8")
+        written: set = set()
+        assert _ensure_linting_configured(tmp_path, written) is True
+        assert written == set()
+
+    def test_ensure_linting_configured_handles_unreadable_pyproject(self, tmp_path, monkeypatch):
+        """A pyproject.toml that raises on its first (existing-config probe)
+        read must not raise; setup falls through to appending ruff config."""
+        from backend_code_v2_team.phases._profile import _ensure_linting_configured
+
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+        original_read_text = Path.read_text
+        calls = {"n": 0}
+
+        def flaky_read_text(self, *args, **kwargs):
+            if self.name == "pyproject.toml" and calls["n"] == 0:
+                calls["n"] += 1
+                raise OSError("simulated unreadable pyproject.toml")
+            return original_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", flaky_read_text)
+        written: set = set()
+        assert _ensure_linting_configured(tmp_path, written) is True
+        assert "[tool.ruff]" in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+
+    def test_ensure_linting_configured_handles_unreadable_setup_cfg(self, tmp_path):
+        from backend_code_v2_team.phases._profile import _ensure_linting_configured
+
+        (tmp_path / "setup.cfg").mkdir()
+        written: set = set()
+        assert _ensure_linting_configured(tmp_path, written) is True
+        assert "pyproject.toml" in written
+
+    def test_ensure_testing_configured_handles_unreadable_pyproject(self, tmp_path, monkeypatch):
+        """A pyproject.toml that raises on its first (existing-config probe)
+        read must not raise while probing for a pytest config; setup falls
+        through to creating one."""
+        from backend_code_v2_team.phases._profile import _ensure_testing_configured
+
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+        original_read_text = Path.read_text
+        calls = {"n": 0}
+
+        def flaky_read_text(self, *args, **kwargs):
+            if self.name == "pyproject.toml" and calls["n"] == 0:
+                calls["n"] += 1
+                raise OSError("simulated unreadable pyproject.toml")
+            return original_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", flaky_read_text)
+        written: set = set()
+        assert _ensure_testing_configured(tmp_path, written) is True
+        assert "tests/test_main.py" in written
+        assert "[tool.pytest" in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+
+    def test_ensure_testing_configured_writes_pytest_ini_without_pyproject(self, tmp_path):
+        """When no pyproject.toml exists at all, testing config falls back to
+        a standalone pytest.ini."""
+        from backend_code_v2_team.phases._profile import _ensure_testing_configured
+
+        written: set = set()
+        assert _ensure_testing_configured(tmp_path, written) is True
+        assert (tmp_path / "pytest.ini").exists()
+        assert "pytest.ini" in written
+
+
 # ---------------------------------------------------------------------------
 # Planning phase tests
 # ---------------------------------------------------------------------------
@@ -340,7 +437,7 @@ class TestSetupPhase:
 
 class TestPlanningPhase:
     def test_language_detection_python(self, tmp_path):
-        from backend_code_v2_team.phases.planning import _detect_language
+        from backend_code_v2_team.phases._profile import _detect_language
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -355,7 +452,7 @@ class TestPlanningPhase:
         assert _detect_language(tmp_path, task) == "python"
 
     def test_language_detection_java(self, tmp_path):
-        from backend_code_v2_team.phases.planning import _detect_language
+        from backend_code_v2_team.phases._profile import _detect_language
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -370,7 +467,7 @@ class TestPlanningPhase:
         assert _detect_language(tmp_path, task) == "java"
 
     def test_language_detection_from_description(self, tmp_path):
-        from backend_code_v2_team.phases.planning import _detect_language
+        from backend_code_v2_team.phases._profile import _detect_language
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -384,7 +481,7 @@ class TestPlanningPhase:
         assert _detect_language(tmp_path, task) == "java"
 
     def test_parse_planning_output(self):
-        from backend_code_v2_team.phases.planning import _parse_planning_output
+        from backend_code_v2_team.phases._profile import _parse_planning_output
 
         raw = {
             "microtasks": [
@@ -411,7 +508,7 @@ class TestPlanningPhase:
         assert result.microtasks[1].depends_on == ["mt-1"]
 
     def test_run_planning_fallback(self, tmp_path):
-        from backend_code_v2_team.phases.planning import run_planning
+        from backend_code_v2_team.phases._profile import run_planning
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -439,7 +536,7 @@ class TestPlanningPhase:
 
 class TestExecutionPhase:
     def test_run_execution_with_tool_runners(self, tmp_path):
-        from backend_code_v2_team.phases.execution import run_execution
+        from backend_code_v2_team.phases._profile import run_execution
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -474,7 +571,7 @@ class TestExecutionPhase:
         assert result.microtasks[0].status == MicrotaskStatus.COMPLETED
 
     def test_run_execution_general_fallback(self, tmp_path):
-        from backend_code_v2_team.phases.execution import run_execution
+        from backend_code_v2_team.phases._profile import run_execution
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -531,7 +628,7 @@ class _CriticalCodeReviewStubClient(DummyLLMClient):
 
 class TestReviewPhase:
     def test_review_passes_no_issues(self, tmp_path):
-        from backend_code_v2_team.phases.review import run_review
+        from backend_code_v2_team.phases._profile import run_review
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -554,7 +651,7 @@ class TestReviewPhase:
         assert result.build_ok
 
     def test_review_fails_on_critical_issues(self, tmp_path):
-        from backend_code_v2_team.phases.review import run_review
+        from backend_code_v2_team.phases._profile import run_review
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -1008,7 +1105,7 @@ class TestBackendDevelopmentAgentBranchReuse:
                 summary="ready",
             )
 
-        from backend_code_v2_team.phases import documentation as doc_phase
+        from backend_code_v2_team.phases import _profile as doc_phase
 
         monkeypatch.setattr(orch, "checkout_branch", _checkout_branch)
         monkeypatch.setattr(
@@ -1097,7 +1194,7 @@ class TestBackendDevelopmentAgentBranchReuse:
             ),
         )
 
-        from backend_code_v2_team.phases import documentation as doc_phase
+        from backend_code_v2_team.phases import _profile as doc_phase
 
         monkeypatch.setattr(
             doc_phase,
@@ -1138,6 +1235,165 @@ class TestBackendDevelopmentAgentBranchReuse:
         assert mock_debug.called
         logged = " ".join(str(arg) for call in mock_debug.call_args_list for arg in call[0])
         assert "job_updater failed" in logged
+
+
+class TestBackendDocAgentDeprecated:
+    """doc_agent is accepted for backward compatibility but never forwarded downstream."""
+
+    def _patch_success(self, monkeypatch, orch, doc_phase):
+        from backend_code_v2_team.models import (
+            DeliverResult,
+            DocumentationPhaseResult,
+            ExecutionResult,
+            PlanningResult,
+        )
+
+        class _GitAgent:
+            def create_feature_branch(self, *_args, **_kwargs):
+                return True, "feature/api"
+
+            def commit_current_changes(self, *_args, **_kwargs):
+                return True, "committed"
+
+        monkeypatch.setattr(orch, "checkout_branch", lambda *_a, **_kw: (True, "checked out"))
+        monkeypatch.setattr(
+            orch.BackendDevelopmentAgent,
+            "_build_and_validate_tool_agents",
+            lambda _self, _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: _GitAgent()},
+        )
+        monkeypatch.setattr(
+            orch.BackendDevelopmentAgent, "_read_repo_code", lambda _self, _repo_path: ""
+        )
+        monkeypatch.setattr(
+            orch,
+            "run_planning",
+            lambda **_kwargs: PlanningResult(microtasks=[Microtask(id="mt-1")], summary="planned"),
+        )
+        monkeypatch.setattr(
+            orch,
+            "run_execution_with_review_gates",
+            lambda **_kwargs: ExecutionResult(
+                files={"app.py": "print('ok')\n"},
+                microtasks=[Microtask(id="mt-1", status=MicrotaskStatus.COMPLETED)],
+                summary="implemented",
+            ),
+        )
+        monkeypatch.setattr(
+            doc_phase,
+            "run_documentation_phase",
+            lambda **_kwargs: DocumentationPhaseResult(summary="docs"),
+        )
+        monkeypatch.setattr(
+            orch,
+            "run_deliver",
+            lambda **kwargs: DeliverResult(
+                branch_name=kwargs["feature_branch_name"], branch_ready=True, summary="ready"
+            ),
+        )
+
+    def _task(self):
+        from shared.dev_models.models import Task, TaskStatus, TaskType
+
+        return Task(
+            id="api",
+            type=TaskType.BACKEND,
+            assignee="backend-code-v2",
+            status=TaskStatus.PENDING,
+            title="API",
+            description="Build API",
+        )
+
+    def test_dev_agent_warns_when_doc_agent_passed(self, tmp_path, monkeypatch):
+        from backend_code_v2_team import orchestrator as orch
+        from backend_code_v2_team.phases import _profile as doc_phase
+
+        (tmp_path / "pyproject.toml").write_text("[tool.ruff]\n[tool.pytest.ini_options]\n")
+        (tmp_path / "tests").mkdir()
+
+        self._patch_success(monkeypatch, orch, doc_phase)
+
+        with pytest.warns(DeprecationWarning, match="doc_agent"):
+            result = orch.BackendDevelopmentAgent(MagicMock()).run_workflow(
+                repo_path=tmp_path,
+                task=self._task(),
+                merge_to_development=False,
+                doc_agent=MagicMock(),
+            )
+
+        assert result.success is True
+
+    def test_dev_agent_no_warning_when_doc_agent_omitted(self, tmp_path, monkeypatch, recwarn):
+        from backend_code_v2_team import orchestrator as orch
+        from backend_code_v2_team.phases import _profile as doc_phase
+
+        (tmp_path / "pyproject.toml").write_text("[tool.ruff]\n[tool.pytest.ini_options]\n")
+        (tmp_path / "tests").mkdir()
+
+        self._patch_success(monkeypatch, orch, doc_phase)
+
+        result = orch.BackendDevelopmentAgent(MagicMock()).run_workflow(
+            repo_path=tmp_path,
+            task=self._task(),
+            merge_to_development=False,
+        )
+
+        assert result.success is True
+        assert not any(issubclass(w.category, DeprecationWarning) for w in recwarn.list)
+
+    def test_team_lead_warns_even_when_setup_fails(self, tmp_path, monkeypatch):
+        """The team-lead warns for doc_agent unconditionally, before the lint/test gate."""
+        from backend_code_v2_team import orchestrator as orch
+
+        monkeypatch.setattr(
+            orch,
+            "run_setup",
+            lambda **_kwargs: SetupResult(linting_configured=False, testing_configured=False),
+        )
+
+        with pytest.warns(DeprecationWarning, match="doc_agent"):
+            result = orch.BackendCodeV2TeamLead(MagicMock()).run_workflow(
+                repo_path=tmp_path,
+                task=self._task(),
+                doc_agent=MagicMock(),
+            )
+
+        assert result.success is False
+        assert "linting is not configured" in result.failure_reason.lower()
+
+    def test_team_lead_warns_exactly_once_when_delegation_succeeds(self, tmp_path, monkeypatch):
+        """The forwarded doc_agent=None to the dev agent must not double the warning."""
+        from backend_code_v2_team import orchestrator as orch
+        from backend_code_v2_team.models import BackendCodeV2WorkflowResult
+
+        received: dict = {}
+
+        class _DevelopmentAgent:
+            def __init__(self, _llm):
+                pass
+
+            def run_workflow(self, **kwargs):
+                received.update(kwargs)
+                return BackendCodeV2WorkflowResult(task_id="api", success=True)
+
+        monkeypatch.setattr(
+            orch,
+            "run_setup",
+            lambda **_kwargs: SetupResult(linting_configured=True, testing_configured=True),
+        )
+        monkeypatch.setattr(orch, "BackendDevelopmentAgent", _DevelopmentAgent)
+
+        with pytest.warns(DeprecationWarning, match="doc_agent") as record:
+            result = orch.BackendCodeV2TeamLead(MagicMock()).run_workflow(
+                repo_path=tmp_path,
+                task=self._task(),
+                merge_to_development=False,
+                doc_agent=MagicMock(),
+            )
+
+        assert result.success is True
+        assert received["doc_agent"] is None
+        doc_agent_warnings = [w for w in record.list if issubclass(w.category, DeprecationWarning)]
+        assert len(doc_agent_warnings) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1189,7 +1445,7 @@ class TestDocumentationSelfReviewWiring:
 
     def test_wraps_shared_helper_with_team_prompt_parser_and_result(self):
         from backend_code_v2_team.models import DocumentationSelfReviewResult
-        from backend_code_v2_team.phases.review import run_documentation_self_review
+        from backend_code_v2_team.phases._profile import run_documentation_self_review
         from backend_code_v2_team.prompts import DOCUMENTATION_SELF_REVIEW_PROMPT
 
         client = _RecordingDocClient(_DOC_REVIEW_RESPONSE)
@@ -1218,7 +1474,7 @@ class TestDbCSelfReviewWiring:
     """
 
     def test_gate_config_wires_dbc_self_review(self):
-        from backend_code_v2_team.phases.execution import GATE_CONFIG
+        from backend_code_v2_team.phases._profile import GATE_CONFIG
 
         from software_engineering_team.shared.phases.dbc_phase import run_dbc_comments_review
 

@@ -44,7 +44,7 @@ def test_fe_documentation_phase_no_agent() -> None:
         ExecutionResult,
         PlanningResult,
     )
-    from software_engineering_team.frontend_code_v2_team.phases.documentation import (
+    from software_engineering_team.frontend_code_v2_team.phases._profile import (
         run_documentation_phase,
     )
 
@@ -66,7 +66,7 @@ def test_fe_documentation_phase_missing_methods() -> None:
         PlanningResult,
         ToolAgentKind,
     )
-    from software_engineering_team.frontend_code_v2_team.phases.documentation import (
+    from software_engineering_team.frontend_code_v2_team.phases._profile import (
         run_documentation_phase,
     )
 
@@ -89,7 +89,7 @@ def test_fe_documentation_phase_clean_review(tmp_path: Path) -> None:
         PlanningResult,
         ToolAgentKind,
     )
-    from software_engineering_team.frontend_code_v2_team.phases.documentation import (
+    from software_engineering_team.frontend_code_v2_team.phases._profile import (
         run_documentation_phase,
     )
 
@@ -115,7 +115,7 @@ def test_fe_documentation_phase_fixes_issues(tmp_path: Path) -> None:
         PlanningResult,
         ToolAgentKind,
     )
-    from software_engineering_team.frontend_code_v2_team.phases.documentation import (
+    from software_engineering_team.frontend_code_v2_team.phases._profile import (
         run_documentation_phase,
     )
 
@@ -153,7 +153,7 @@ def test_fe_documentation_phase_review_exception(tmp_path) -> None:
         PlanningResult,
         ToolAgentKind,
     )
-    from software_engineering_team.frontend_code_v2_team.phases.documentation import (
+    from software_engineering_team.frontend_code_v2_team.phases._profile import (
         run_documentation_phase,
     )
 
@@ -178,7 +178,7 @@ def test_fe_documentation_phase_problem_solve_exception(tmp_path) -> None:
         PlanningResult,
         ToolAgentKind,
     )
-    from software_engineering_team.frontend_code_v2_team.phases.documentation import (
+    from software_engineering_team.frontend_code_v2_team.phases._profile import (
         run_documentation_phase,
     )
 
@@ -209,7 +209,7 @@ def test_fe_documentation_phase_problem_solve_no_files(tmp_path) -> None:
         ReviewIssue,
         ToolAgentKind,
     )
-    from software_engineering_team.frontend_code_v2_team.phases.documentation import (
+    from software_engineering_team.frontend_code_v2_team.phases._profile import (
         run_documentation_phase,
     )
 
@@ -241,7 +241,7 @@ def test_be_documentation_phase_no_agent() -> None:
     from software_engineering_team.backend_code_v2_team.models import (
         PlanningResult as _Plan,
     )
-    from software_engineering_team.backend_code_v2_team.phases.documentation import (
+    from software_engineering_team.backend_code_v2_team.phases._profile import (
         run_documentation_phase,
     )
 

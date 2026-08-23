@@ -68,7 +68,7 @@ def test_run_llm_review_real_coordinator_single_chunk_translates_issue():
     ``CodeReviewIssue`` is translated into a ``ReviewIssue`` end-to-end
     (``suggestion`` -> ``recommendation``), with ``raw_issue_count`` staying
     ``None`` -- no monkeypatched ``run_coordinator`` involved."""
-    from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.backend_code_v2_team.phases._profile import _run_llm_review
 
     client = _ScriptedClient(
         [
@@ -113,7 +113,7 @@ def test_run_llm_review_real_coordinator_multi_chunk_attributes_issues_to_source
     genuinely verify per-file attribution rather than merely echoing
     hard-coded ``file_path`` values back from whichever response landed on
     whichever call index."""
-    from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.backend_code_v2_team.phases._profile import _run_llm_review
 
     file_a = "x" * 20_000
     file_b = "y" * 20_000
@@ -175,7 +175,7 @@ def test_run_llm_review_real_coordinator_isolates_per_chunk_failure(monkeypatch)
     surviving file's genuine finding.
     """
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
-    from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.backend_code_v2_team.phases._profile import _run_llm_review
 
     client = _FailBadKeepGood()
 
@@ -196,7 +196,7 @@ def test_run_llm_review_real_coordinator_forwards_review_context_to_prompt():
     mocked test only proves the field lands on ``CodeReviewInput``, not that a
     real prompt renders it."""
     from shared.dev_models.models import ReviewContext, SystemArchitecture
-    from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.backend_code_v2_team.phases._profile import _run_llm_review
 
     client = _PromptCapturingClient()
     architecture = SystemArchitecture(overview="Layered service architecture.")
@@ -229,7 +229,7 @@ def test_run_llm_review_real_coordinator_oversized_single_line_file_is_reviewed(
     in ``shared/agent_review.py``). Parity here means "still reviewed, still
     correctly attributed" -- not "still hard-split".
     """
-    from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.backend_code_v2_team.phases._profile import _run_llm_review
 
     line = "DATA = '" + ("a" * 100_000) + "'"
     assert "\n" not in line  # unsplittable at a line boundary
@@ -268,7 +268,7 @@ def test_run_llm_review_real_coordinator_empty_files_raises_value_error():
     constructs ``CodeReviewInput`` directly, and that type's own fail-closed
     validation raises so a caller bug (e.g. a glob miss) never silently
     becomes an approved empty review (see its docstring's Preconditions)."""
-    from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.backend_code_v2_team.phases._profile import _run_llm_review
 
     client = _ScriptedClient([])
 
@@ -281,10 +281,34 @@ def test_run_llm_review_real_coordinator_propagates_unavailable_when_all_chunks_
     ``CodeReviewUnavailableError`` through the real pipeline -- the
     real-coordinator counterpart to the existing mocked
     ``test_run_llm_review_propagates_coordinator_unavailable``."""
-    from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.backend_code_v2_team.phases._profile import _run_llm_review
     from software_engineering_team.code_review_agent.models import CodeReviewUnavailableError
 
     client = _AlwaysFail()
 
     with pytest.raises(CodeReviewUnavailableError):
         _run_llm_review(llm=client, task=_task(), files={"x.py": "def f():\n    return 1\n"})
+
+
+def test_run_llm_review_real_coordinator_injects_no_extra_clause():
+    """Backend's ``V2TeamConfig.extra_review_clause`` is ``""`` (no
+    accessibility clause -- that's frontend-only). This is the backend-side
+    negative-space counterpart to
+    ``test_v2_fe_review_fallback_e2e.test_run_llm_review_real_coordinator_forwards_accessibility_note_to_prompt``:
+    it proves the real chunk-review prompt carries no injected extra
+    requirements when the config's clause is empty, i.e. the shared
+    ``extra_task_requirements`` injection path degrades to a no-op for
+    backend rather than always appending something."""
+    from software_engineering_team.backend_code_v2_team.phases._profile import (
+        BACKEND_CONFIG,
+        _run_llm_review,
+    )
+
+    assert BACKEND_CONFIG.extra_review_clause == ""
+
+    client = _PromptCapturingClient()
+
+    _run_llm_review(llm=client, task=_task(), files={"x.py": "def f():\n    return 1\n"})
+
+    assert client.prompts, "expected at least one real chunk-review call"
+    assert not any("accessibility" in p.lower() for p in client.prompts)

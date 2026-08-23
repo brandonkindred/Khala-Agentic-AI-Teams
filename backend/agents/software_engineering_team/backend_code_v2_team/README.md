@@ -232,15 +232,13 @@ backend_code_v2_team/
 ├── orchestrator.py        # BackendCodeV2TeamLead, BackendDevelopmentAgent
 ├── models.py              # Phase, Microtask, all result models
 ├── prompts.py             # LLM prompts for phases
-├── output_templates.py    # Code templates
 ├── phases/
+│   ├── _profile.py        # Stack profile, V2TeamConfig, and config-driven
+│   │                       # documentation/planning/output-template bindings
 │   ├── setup.py           # Repo initialization
-│   ├── planning.py        # Microtask generation
 │   ├── execution.py       # Run microtasks via tool agents
 │   ├── review.py          # Code review, QA, security
-│   ├── problem_solving.py # Fix issues
-│   ├── documentation.py   # Add docs
-│   └── deliver.py         # Commit and merge
+│   └── problem_solving.py # Fix issues
 └── tool_agents/
     ├── data_engineering/  # Database models, schemas
     ├── api_openapi/       # REST endpoints

@@ -75,6 +75,134 @@ def _review_verdict_cache_key(
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
+def serialize_review_cache(
+    cache: Dict[str, "tuple[str, Dict[str, Any]]"],
+) -> List[Dict[str, Any]]:
+    """Convert the in-memory review verdict cache to a JSON-safe list.
+
+    Preconditions:
+        - ``cache`` maps task id -> (cache_key, verdict) tuples, matching
+          ``CodingTeamSwarm._review_verdict_cache``'s declared type.
+
+    Postconditions:
+        - Returns one dict per kept entry: ``{"task_id", "cache_key", "verdict"}``.
+        - At most 20 entries are returned; when ``cache`` has more than 20
+          entries, only the last 20 in the dict's iteration (insertion)
+          order are kept.
+        - Empty cache returns ``[]``.
+        - Result is pure JSON-safe (no tuples; the nested ``verdict`` dict
+          is deep-copied so later mutation of the live cache cannot alias it).
+    """
+    max_cached_verdicts = 20
+    items = list(cache.items())[-max_cached_verdicts:]
+    return [
+        {"task_id": task_id, "cache_key": cache_key, "verdict": copy.deepcopy(verdict)}
+        for task_id, (cache_key, verdict) in items
+    ]
+
+
+def deserialize_review_cache(data: Any) -> Dict[str, "tuple[str, Dict[str, Any]]"]:
+    """Restore the in-memory review verdict cache from serialize_review_cache's output.
+
+    Preconditions:
+        - None — ``data`` may be any value, including corrupt/malformed
+          stored state; this function never raises on bad input.
+
+    Postconditions:
+        - Non-list ``data`` (None, str, int, dict, ...) returns ``{}``.
+        - Each list entry is included only when it is a dict containing all
+          of ``task_id``, ``cache_key``, ``verdict``; ``task_id`` and
+          ``cache_key`` are both ``str``; and ``verdict`` is a dict with a
+          real ``bool`` ``approved`` field — entries failing any check are
+          skipped. The ``task_id``/``cache_key`` type check also guards the
+          dict-key assignment below against an unhashable ``task_id`` (e.g.
+          a list or dict smuggled into corrupted JSON), which would
+          otherwise raise ``TypeError`` instead of being skipped. The
+          ``approved`` check matters beyond crash-safety: ``_compute_review``
+          only ever caches a non-``error`` ``run_code_review`` verdict, which
+          always carries a real bool ``approved``, so this rejects exactly
+          the corrupted shapes that could otherwise be misread as a genuine
+          approve/reject decision (e.g. ``_apply_review_decision`` treats
+          any truthy ``review.get("approved")`` as approval, so a corrupted
+          non-bool like ``"false"`` would wrongly merge the task) while
+          never rejecting a verdict this module actually wrote. A truthy
+          ``verdict["error"]`` is rejected for the same reason: an error
+          verdict is never cached live (``_compute_review`` excludes it), so
+          a restored one is definitionally corrupted, and ``_apply_review_decision``
+          would otherwise route it through its error-first branch and fail
+          the task instead of rerunning the review. ``reason`` (if present)
+          must be a ``str`` and ``requested_changes`` (if present) must be a
+          ``list`` — ``_request_revision`` feeds both straight into revision
+          feedback shown to the implementer (``review.get("reason", "")`` /
+          ``review.get("requested_changes") or []``), so a malformed value
+          would otherwise be threaded through as if it were real reviewer
+          feedback; a verdict this module wrote always has both fields in
+          this shape (or omits them, which the same ``.get`` defaults cover).
+        - Returns a dict keyed by ``task_id`` with ``(cache_key, verdict)``
+          tuple values, mirroring
+          ``CodingTeamSwarm._review_verdict_cache``'s declared type.
+        - When multiple kept entries share a ``task_id``, the later entry
+          (by list order) wins — matching plain dict-construction semantics
+          and ``serialize_review_cache``'s insertion-order-preserving output,
+          so ``deserialize_review_cache(serialize_review_cache(cache)) ==
+          cache`` for any cache with at most 20 entries (``verdict`` dicts
+          are not deep-copied here since the caller owns the freshly parsed
+          ``data``).
+        - At most 20 entries are ever returned, mirroring
+          ``serialize_review_cache``'s cap: when more than 20 *distinct*
+          ``task_id``s among the valid entries in ``data`` pass validation,
+          only the last 20 by recency are kept, where an entry's recency is
+          its *last* occurrence's list position — a duplicate ``task_id``
+          that reappears later moves that key to the end, so overwriting an
+          early entry with a fresher one (the "later entry wins" rule above)
+          also makes it count as fresh for the cap, rather than being
+          dropped as if it were still at its first, stale position. This
+          holds even for a stored value that itself has more than 20 valid
+          entries (e.g. hand-edited or written by something other than
+          ``serialize_review_cache``) — restore never grows the live cache
+          past the size the rest of the system assumes it is bounded to.
+          The cap is enforced during iteration (evicting the oldest entry
+          the moment a new one would exceed it), not by first collecting
+          every valid entry and slicing afterward — so peak memory stays
+          O(20) regardless of how many entries ``data`` contains, rather
+          than O(len(data)) for an arbitrarily oversized stored value.
+    """
+    if not isinstance(data, list):
+        return {}
+    max_cached_verdicts = 20
+    result: Dict[str, "tuple[str, Dict[str, Any]]"] = {}
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        if not {"task_id", "cache_key", "verdict"} <= entry.keys():
+            continue
+        task_id = entry["task_id"]
+        cache_key = entry["cache_key"]
+        verdict = entry["verdict"]
+        if (
+            not isinstance(task_id, str)
+            or not isinstance(cache_key, str)
+            or not isinstance(verdict, dict)
+        ):
+            continue
+        if not isinstance(verdict.get("approved"), bool):
+            continue
+        if verdict.get("error"):
+            continue
+        if "reason" in verdict and not isinstance(verdict["reason"], str):
+            continue
+        if "requested_changes" in verdict and not isinstance(verdict["requested_changes"], list):
+            continue
+        # A duplicate task_id must move to the end of iteration order on overwrite (dict
+        # reassignment alone keeps a key at its *first* insertion position), so eviction below
+        # measures recency by each key's last occurrence, not its first.
+        result.pop(task_id, None)
+        result[task_id] = (cache_key, verdict)
+        if len(result) > max_cached_verdicts:
+            del result[next(iter(result))]
+    return result
+
+
 class _ReviewMixin:
     """Tech Lead review, merge, and revision/fail bookkeeping for CodingTeamSwarm."""
 

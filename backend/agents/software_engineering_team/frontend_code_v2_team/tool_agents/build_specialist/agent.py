@@ -15,7 +15,7 @@ from software_engineering_team.shared.tool_agent_build_specialist import (
     run_frontend_build_and_parse,
 )
 
-from ...output_templates import parse_problem_solving_single_issue_template
+from ...phases._profile import parse_problem_solving_single_issue_template
 from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
 
 __all__ = ["BuildSpecialistAdapterAgent", "MAX_RELEVANT_CODE_CHARS"]

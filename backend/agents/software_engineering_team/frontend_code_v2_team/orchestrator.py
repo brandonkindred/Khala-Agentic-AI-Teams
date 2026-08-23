@@ -24,7 +24,7 @@ from shared.dev_models.models import SystemArchitecture, Task
 from shared.git.git_utils import checkout_branch
 from software_engineering_team.shared.phases.deliver import make_run_deliver
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
-from software_engineering_team.shared.team_lead_base import BaseTeamLead
+from software_engineering_team.shared.team_lead_base import BaseTeamLead, warn_doc_agent_deprecated
 from software_engineering_team.shared.v2_orchestrator import ConfigDrivenV2DevelopmentAgent
 
 from . import models as _models
@@ -33,10 +33,15 @@ from .models import (
     MicrotaskReviewConfig,
     ToolAgentKind,
 )
-from .phases._profile import FRONTEND_CONFIG, PROFILE
-from .phases.execution import ReviewDependencies, run_execution_with_review_gates
-from .phases.planning import run_planning
-from .phases.setup import configure_quality_tooling, run_setup
+from .phases._profile import (
+    FRONTEND_CONFIG,
+    PROFILE,
+    ReviewDependencies,
+    configure_quality_tooling,
+    run_execution_with_review_gates,
+    run_planning,
+    run_setup,
+)
 from .prompts import DELIVER_COMMIT_MSG_TEMPLATE
 
 logger = logging.getLogger(__name__)
@@ -65,6 +70,9 @@ def _build_tool_agents_impl(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
       ``ToolAgentKind`` this team uses to a constructed agent instance; does
       not raise on the happy path.
     """
+    if llm is None:
+        raise ValueError("llm must be a configured LLMClient (not None)")
+
     from software_engineering_team.shared.tool_agent_git_branch import (
         GitBranchManagementToolAgent,
     )
@@ -166,8 +174,13 @@ class FrontendDevelopmentAgent(ConfigDrivenV2DevelopmentAgent):
         merge_to_development defaults to True. When False, the deliver phase commits
         a feature branch and leaves it ready for external Tech Lead review instead of
         merging it into the development branch.
+
+        ``doc_agent`` is deprecated and ignored — see
+        :func:`software_engineering_team.shared.team_lead_base.warn_doc_agent_deprecated`.
         """
-        from .phases.documentation import run_documentation_phase
+        warn_doc_agent_deprecated(doc_agent)
+
+        from .phases._profile import run_documentation_phase
 
         return self._run_development_workflow(
             repo_path=repo_path,
@@ -240,7 +253,15 @@ class FrontendCodeV2TeamLead(BaseTeamLead):
 
         merge_to_development defaults to True. When False, delivery prepares a
         feature branch for external review instead of merging it.
+
+        ``doc_agent`` is deprecated and ignored — see
+        :func:`software_engineering_team.shared.team_lead_base.warn_doc_agent_deprecated`.
+        The warning fires here, unconditionally, before setup runs (so it
+        still fires even if setup or the lint/test readiness gate fails);
+        ``doc_agent`` is not forwarded past this point.
         """
+        warn_doc_agent_deprecated(doc_agent)
+
         return self._run_setup_and_delegate(
             repo_path=repo_path,
             task=task,
@@ -253,7 +274,7 @@ class FrontendCodeV2TeamLead(BaseTeamLead):
             security_agent=security_agent,
             code_review_agent=code_review_agent,
             build_verifier=build_verifier,
-            doc_agent=doc_agent,
+            doc_agent=None,
             linting_tool_agent=linting_tool_agent,
             job_updater=job_updater,
             review_config=review_config,

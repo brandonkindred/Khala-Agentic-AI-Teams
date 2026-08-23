@@ -1,15 +1,33 @@
 """
-Review phase: code review, QA, security.
+Shared review-phase bindings for the code-v2 teams.
 
-Build verification and linting run via the full review paths
-(``run_review``, ``run_microtask_review``) or the pre-review quality gate,
-not via the standalone code-review phase wrapper.
+``backend_code_v2_team`` and ``frontend_code_v2_team`` each used to carry a
+twin ``phases/review.py`` that differed only in: the team's default
+``language`` (``V2TeamConfig.stack_profile.default_language``), the team's
+``extra_review_clause`` (``V2TeamConfig.extra_review_clause``), the team's
+``build_verify_label`` (``V2TeamConfig.stack_profile.build_verify_label``),
+the team's ``REVIEW_CONFIG`` (a ``ReviewConfig`` instance already defined in
+each team's ``phases/_profile.py``), and (for documentation self-review only)
+the team's prompt template and parser. Every model class the old files
+referenced (``ReviewIssue``, ``PhaseReviewResult``, ``ReviewResult``,
+``ExecutionResult``, ``Microtask``, ``DocumentationSelfReviewResult``) is
+already identical between the two teams -- re-exported unchanged from
+``software_engineering_team.shared.v2_models`` -- so this module imports them
+directly and does not need a team-supplied models bundle.
 
-Invokes passed-in quality agents when available; otherwise uses the team's
-own LLM-based review. No code from the legacy ``frontend_team`` agent is used.
-The code-review fallback calls the shared engine's coordinator directly (JSON
-output, schema-validated); documentation self-review still uses
-template-based output so parsing works across model providers.
+Every function below is a plain module-level ``def`` (not a closure built by
+a factory) so that a sibling function referencing another by bare name (e.g.
+``run_review`` calling ``_run_llm_review``) resolves that name afresh, from
+this module's globals, on every call -- this is what lets
+``monkeypatch.setattr(v2_review_bindings, "_run_llm_review", ...)`` intercept
+calls made through ``run_review``/``run_microtask_review``/etc, exactly the
+technique the former per-team ``phases/review.py`` files documented and
+relied on. Each team's ``phases/_profile.py`` binds ``config``/
+``review_config`` (and, for doc self-review, ``prompt``/``parse_template``)
+via one level of ``functools.partial`` to reproduce the old per-team public
+signatures; that partial-binding does not change which module's globals the
+wrapped function's body reads from, so the single patch target below serves
+both teams.
 """
 
 from __future__ import annotations
@@ -45,8 +63,17 @@ from software_engineering_team.shared.review_utils import (
 from software_engineering_team.shared.review_utils import (
     run_documentation_self_review as _shared_run_documentation_self_review,
 )
+from software_engineering_team.shared.v2_models import (
+    DocumentationSelfReviewResult,
+    ExecutionResult,
+    Microtask,
+    PhaseReviewResult,
+    ReviewIssue,
+    ReviewResult,
+)
 from software_engineering_team.shared.v2_review import (
     LlmReviewOutput,
+    ReviewConfig,
     _review_steps_run_sequentially,  # noqa: F401  (re-exported for tests)
     run_coordinator_llm_review,
 )
@@ -56,65 +83,51 @@ from software_engineering_team.shared.v2_review import (
 from software_engineering_team.shared.v2_review import (
     run_review as _shared_run_review,
 )
-
-from ..models import (
-    DocumentationSelfReviewResult,
-    ExecutionResult,
-    Microtask,
-    PhaseReviewResult,
-    ReviewIssue,
-    ReviewResult,
-    ToolAgentKind,
-)
-from ..output_templates import parse_documentation_self_review_template
-from ..prompts import DOCUMENTATION_SELF_REVIEW_PROMPT
-from ._profile import (
-    FRONTEND_CONFIG,
-    PROFILE,
-    REVIEW_CONFIG,
-)
+from software_engineering_team.shared.v2_team_config import V2TeamConfig
 
 logger = logging.getLogger(__name__)
 
 
 def _run_llm_review(
     *,
+    config: V2TeamConfig,
     llm: LLMClient,
     task: Task,
     files: Dict[str, str],
-    language: str = PROFILE.default_language,
+    language: Optional[str] = None,
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
 ) -> LlmReviewOutput[ReviewIssue]:
     """Lightweight code review when no external review agent is available.
 
-    Thin wrapper over the shared
+    Thin wrapper over
     :func:`software_engineering_team.shared.v2_review.run_coordinator_llm_review`
     (see its docstring for the full contract: ``CodeReviewInput`` construction,
     issue translation, ``raw_issue_count``/grounding-breaker rationale,
     ``CodeReviewUnavailableError`` propagation, and the empty-``files``
     fail-closed behavior). ``run_coordinator`` is imported here (not into the
-    shared module) and passed through as ``run_coordinator_fn``, so this
-    module stays the test patch surface for the coordinator call, matching how
-    ``Agent``/``resolve_text_mode_strands_model`` are patched for
-    ``run_documentation_self_review`` below. Passes
-    :data:`FRONTEND_CONFIG.extra_review_clause` as ``extra_task_requirements`` --
-    frontend-specific, since backend's code has no UI to check accessibility
-    on.
+    shared ``v2_review`` engine) and passed through as ``run_coordinator_fn``,
+    so this module stays the test patch surface for the coordinator call, for
+    both teams.
 
     Preconditions:
-        - ``language`` defaults to this team's ``PROFILE.default_language``
-          ("typescript") so an existing caller that does not pass it yet
-          keeps reviewing under the correct language; this team's
-          ``_detect_language`` may also pass ``"angular"``/``"react"``
-          explicitly.
+        - ``language`` defaults to ``config.stack_profile.default_language``
+          when omitted/``None`` (was a fixed per-team default-arg value
+          before this collapse; now resolved per-call since ``config``
+          varies by caller).
         - ``enable_llm_review_grounding`` is accepted for call-signature
           compatibility with ``llm_review_fn``'s contract (see
           ``shared.v2_review._code_review_step``) but is otherwise unused:
           the coordinator's chunk reviewer only ever reports on the literal
           code slice it was shown, so there is no free-text hallucinated-claim
           filter left to toggle.
+    Postconditions:
+        - Passes ``config.extra_review_clause`` as ``extra_task_requirements``
+          (``""`` for backend, the accessibility note for frontend --
+          identical net behavior to the former per-team wrappers).
     """
+    if language is None:
+        language = config.stack_profile.default_language
     return run_coordinator_llm_review(
         llm=llm,
         task=task,
@@ -122,7 +135,7 @@ def _run_llm_review(
         language=language,
         run_coordinator_fn=run_coordinator,
         review_context=review_context,
-        extra_task_requirements=FRONTEND_CONFIG.extra_review_clause,
+        extra_task_requirements=config.extra_review_clause,
     )
 
 
@@ -138,15 +151,16 @@ def _run_qa_agent(
 ) -> List[ReviewIssue]:
     """Run the external QA agent over each file's raw, function-aware-split source.
 
-    Thin wrapper that delegates to the shared ``run_qa_agent``, injecting this
-    team's ``ReviewIssue`` factory and chunking constants.
+    Thin wrapper that delegates to the shared ``run_qa_agent``, injecting the
+    shared ``ReviewIssue`` factory and chunking constants -- both already
+    identical for backend and frontend, so no per-team injection is needed.
 
     Preconditions:
         - ``qa_agent`` is not None and exposes ``.run(QAInput) -> QAOutput``.
         - ``cache``: see ``software_engineering_team.shared.agent_review``.
 
-    Postconditions: see ``software_engineering_team.shared.agent_review``; QA bugs
-    become ``ReviewIssue``s with ``source="qa"``.
+    Postconditions: see ``software_engineering_team.shared.agent_review``; QA
+    bugs become ``ReviewIssue``s with ``source="qa"``.
     """
     return run_qa_agent(
         qa_agent=qa_agent,
@@ -174,8 +188,9 @@ def _run_security_agent(
 ) -> List[ReviewIssue]:
     """Run the external security agent over each file's raw, function-aware-split source.
 
-    Thin wrapper that delegates to the shared ``run_security_agent``, injecting
-    this team's ``ReviewIssue`` factory and chunking constants.
+    Thin wrapper that delegates to the shared ``run_security_agent``,
+    injecting the shared ``ReviewIssue`` factory and chunking constants (see
+    ``_run_qa_agent``).
 
     Preconditions:
         - ``security_agent`` is not None and exposes
@@ -203,12 +218,22 @@ def _run_build_verification(
     repo_path: Path,
     build_verifier: Optional[Callable[..., Tuple[bool, str]]],
     task_id: str,
+    *,
+    config: V2TeamConfig,
 ) -> Tuple[bool, str]:
-    """Run the build verifier if provided, else assume success."""
+    """Run the build verifier if provided, else assume success.
+
+    ``repo_path``/``build_verifier``/``task_id`` stay positional (not
+    keyword-only) because the shared engine
+    (``software_engineering_team.shared.v2_review``) calls
+    ``build_verify_fn(repo_path, build_verifier, task_id)`` positionally;
+    only ``config`` is keyword-only so ``functools.partial(..., config=...)``
+    can bind it per-team without disturbing that positional call contract.
+    """
     if build_verifier is None:
         return True, "No build verifier provided; skipping."
     try:
-        return build_verifier(repo_path, PROFILE.build_verify_label, task_id)
+        return build_verifier(repo_path, config.stack_profile.build_verify_label, task_id)
     except Exception as exc:
         logger.warning("[%s] Build verifier raised: %s", task_id, exc)
         return False, str(exc)
@@ -216,6 +241,8 @@ def _run_build_verification(
 
 def run_review(
     *,
+    config: V2TeamConfig,
+    review_config: ReviewConfig,
     llm: LLMClient,
     task: Task,
     execution_result: ExecutionResult,
@@ -225,24 +252,27 @@ def run_review(
     security_agent: Any = None,
     code_review_agent: Any = None,
     linting_tool_agent: Any = None,
-    tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
-    language: str = PROFILE.default_language,
+    tool_agents: Optional[Dict[Any, Any]] = None,
+    language: Optional[str] = None,
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
 ) -> ReviewResult:
     """Execute the Review phase.
 
     Thin wrapper over the shared parametrised reviewer
-    (:func:`software_engineering_team.shared.v2_review.run_review`) driven by this
-    team's :data:`REVIEW_CONFIG`. The per-team code-review/QA/security runners
-    are injected as module-level callables so this module stays the test patch
-    surface for ``_run_llm_review`` / ``_run_qa_agent`` / ``_run_security_agent``.
+    (:func:`software_engineering_team.shared.v2_review.run_review`) driven by
+    ``review_config``. ``_run_llm_review`` / ``_run_qa_agent`` /
+    ``_run_security_agent`` / ``_run_build_verification`` are referenced by
+    bare module-global name (resolved at call time), so this module stays the
+    test patch surface for both teams.
 
     Preconditions: ``execution_result`` exposes ``.files``.
     Postconditions: see the shared ``run_review``.
     """
+    if language is None:
+        language = config.stack_profile.default_language
     return _shared_run_review(
-        config=REVIEW_CONFIG,
+        config=review_config,
         llm=llm,
         task=task,
         execution_result=execution_result,
@@ -254,10 +284,10 @@ def run_review(
         linting_tool_agent=linting_tool_agent,
         tool_agents=tool_agents,
         language=language,
-        llm_review_fn=_run_llm_review,
+        llm_review_fn=partial(_run_llm_review, config=config),
         qa_agent_fn=_run_qa_agent,
         security_agent_fn=_run_security_agent,
-        build_verify_fn=_run_build_verification,
+        build_verify_fn=partial(_run_build_verification, config=config),
         review_context=review_context,
         enable_llm_review_grounding=enable_llm_review_grounding,
     )
@@ -265,6 +295,8 @@ def run_review(
 
 def run_microtask_review(
     *,
+    config: V2TeamConfig,
+    review_config: ReviewConfig,
     llm: LLMClient,
     task: Task,
     microtask: Microtask,
@@ -275,9 +307,9 @@ def run_microtask_review(
     security_agent: Any = None,
     code_review_agent: Any = None,
     linting_tool_agent: Any = None,
-    tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
+    tool_agents: Optional[Dict[Any, Any]] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
-    language: str = PROFILE.default_language,
+    language: Optional[str] = None,
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
     cache: Optional[AgentReviewCache] = None,
@@ -286,8 +318,14 @@ def run_microtask_review(
     """Run full review on a single microtask's output files.
 
     Thin wrapper over
-    :func:`software_engineering_team.shared.v2_review.run_microtask_review`; see
-    :func:`run_review` for the injection rationale.
+    :func:`software_engineering_team.shared.v2_review.run_microtask_review`;
+    see :func:`run_review` for the injection rationale. Always accepts and
+    forwards ``tool_agent_cache`` -- a no-op for a caller (backend) whose
+    gate callables never read ``deps.tool_agent_cache`` (only frontend's do
+    -- see ``ReviewDependencies`` in ``shared.phases.execution`` and the
+    "residual 2x" caching design note in ``docs/GATE_DEPENDENCY_GRAPH.md``),
+    resolving the former backend/frontend signature divergence without
+    changing observable behavior.
 
     Preconditions:
         - ``microtask`` exposes ``.id``/``.title``/``.description``.
@@ -295,23 +333,20 @@ def run_microtask_review(
           forwarded to the QA/security steps only.
         - ``tool_agent_cache``: within *this* call, consulted/populated only
           by the tool-agent fan-out step (not the QA/security LLM steps,
-          which use ``cache`` instead). Because the three gates
-          (``_code_review_gate``/``_qa_gate``/``_security_gate``) each pass
-          the *same* ``tool_agent_cache`` instance (read off
-          ``ReviewDependencies.tool_agent_cache``, one instance per microtask
-          cycle), a tool agent computed by an earlier gate's call within the
-          same cycle is reused by a later gate's call instead of recomputed.
+          which use ``cache`` instead).
 
     Postconditions:
         - Delegates to ``_shared_run_microtask_review``, which forwards
           ``review_context`` into the code-review step's ``CodeReviewInput``
-          (``None`` when omitted, so existing callers are unaffected). See the
-          shared function for the full review-result contract.
+          (``None`` when omitted, so existing callers are unaffected). See
+          the shared function for the full review-result contract.
         - When given, ``tool_agent_cache`` and ``cache`` may each be mutated
           (populated with new entries) as a side effect of a live agent call.
     """
+    if language is None:
+        language = config.stack_profile.default_language
     return _shared_run_microtask_review(
-        config=REVIEW_CONFIG,
+        config=review_config,
         llm=llm,
         task=task,
         microtask=microtask,
@@ -325,10 +360,10 @@ def run_microtask_review(
         tool_agents=tool_agents,
         detail_callback=detail_callback,
         language=language,
-        llm_review_fn=_run_llm_review,
+        llm_review_fn=partial(_run_llm_review, config=config),
         qa_agent_fn=_run_qa_agent,
         security_agent_fn=_run_security_agent,
-        build_verify_fn=_run_build_verification,
+        build_verify_fn=partial(_run_build_verification, config=config),
         review_context=review_context,
         enable_llm_review_grounding=enable_llm_review_grounding,
         agent_review_cache=cache,
@@ -338,6 +373,7 @@ def run_microtask_review(
 
 def run_code_review_phase(
     *,
+    config: V2TeamConfig,
     llm: LLMClient,
     task: Task,
     microtask: Microtask,
@@ -345,7 +381,7 @@ def run_code_review_phase(
     files: Dict[str, str],
     code_review_agent: Any = None,
     detail_callback: Optional[Callable[[str], None]] = None,
-    language: str = PROFILE.default_language,
+    language: Optional[str] = None,
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
 ) -> PhaseReviewResult:
@@ -354,22 +390,21 @@ def run_code_review_phase(
 
     This is the first phase after coding, focusing on code quality, syntax,
     and adherence to coding standards. Build verification and linting run
-    elsewhere (this team's own pre-review quality gate, or the separate
+    elsewhere (the team's own pre-review quality gate, or the separate
     ``run_review``/``run_microtask_review`` path), not in this phase.
 
     Thin wrapper over the shared parametrised implementation
     (:func:`software_engineering_team.shared.phases.review.run_code_review_phase_impl`)
-    that injects this team's LLM-based reviewer via ``llm_review_fn`` and the
-    per-team result class via ``phase_review_result_cls``. ``_run_llm_review``
-    is referenced here by bare module-global name (resolved at call time, not
-    captured at import time), so this module stays the test patch surface for
+    that injects ``_run_llm_review`` (bound to ``config``) via
+    ``llm_review_fn`` and the shared ``PhaseReviewResult`` via
+    ``phase_review_result_cls``. ``_run_llm_review`` is referenced here by
+    bare module-global name (resolved at call time, not captured at import
+    time), so this module stays the test patch surface for
     ``_run_llm_review``/``run_coordinator`` itself -- exactly the technique
-    ``run_review`` / ``run_microtask_review`` already use for the same reason.
-    ``enable_llm_review_grounding`` is forwarded for call-signature
+    ``run_review`` / ``run_microtask_review`` already use for the same
+    reason. ``enable_llm_review_grounding`` is forwarded for call-signature
     compatibility with ``llm_review_fn``'s contract but is a no-op on this
-    path: the coordinator's chunk reviewer only ever reports on the literal
-    code it was shown, so there is no free-text hallucinated-claim filter
-    left to toggle (see ``_run_llm_review``'s own docstring).
+    path (see ``_run_llm_review``'s own docstring).
 
     Preconditions:
         - ``llm`` is a usable text-mode LLM client (forwarded to
@@ -387,10 +422,12 @@ def run_code_review_phase(
           caller-supplied ``detail_callback`` -- exceptions it raises still
           propagate to the caller.
     Invariants:
-        - Does not run build verification or linting -- those run in this
+        - Does not run build verification or linting -- those run in the
           team's own pre-review quality gate, or the separate
           ``run_review``/``run_microtask_review`` path.
     """
+    if language is None:
+        language = config.stack_profile.default_language
     return run_code_review_phase_impl(
         llm=llm,
         task=task,
@@ -402,21 +439,23 @@ def run_code_review_phase(
         language=language,
         review_context=review_context,
         enable_llm_review_grounding=enable_llm_review_grounding,
-        llm_review_fn=_run_llm_review,
+        llm_review_fn=partial(_run_llm_review, config=config),
         phase_review_result_cls=PhaseReviewResult,
     )
 
 
 def run_qa_testing_phase(
     *,
+    config: V2TeamConfig,
+    review_config: ReviewConfig,
     task: Task,
     microtask: Microtask,
     files: Dict[str, str],
     qa_agent: Any = None,
-    tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
+    tool_agents: Optional[Dict[Any, Any]] = None,
     repo_path: Optional[Path] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
-    language: str = PROFILE.default_language,
+    language: Optional[str] = None,
     cache: Optional[AgentReviewCache] = None,
 ) -> PhaseReviewResult:
     """
@@ -424,14 +463,16 @@ def run_qa_testing_phase(
 
     Thin wrapper over the shared parametrised implementation
     (:func:`software_engineering_team.shared.phases.review.run_qa_testing_phase_impl`).
-    ``_run_qa_agent`` is referenced by bare module-global name inside ``partial``
-    at call time so this module stays the test patch surface.
+    ``_run_qa_agent`` is referenced by bare module-global name inside
+    ``partial`` at call time so this module stays the test patch surface.
 
     Preconditions:
         - ``microtask`` exposes ``.id`` / ``.title`` / ``.description``.
     Postconditions:
         - Returns a :class:`PhaseReviewResult`; never raises (shared containment).
     """
+    if language is None:
+        language = config.stack_profile.default_language
     return run_qa_testing_phase_impl(
         task=task,
         microtask=microtask,
@@ -444,21 +485,23 @@ def run_qa_testing_phase(
         language=language,
         cache=cache,
         phase_review_result_cls=PhaseReviewResult,
-        tool_phase_input_factory=REVIEW_CONFIG.tool_phase_input_factory,
-        tool_phase_includes_context=REVIEW_CONFIG.tool_phase_includes_context,
+        tool_phase_input_factory=review_config.tool_phase_input_factory,
+        tool_phase_includes_context=review_config.tool_phase_includes_context,
     )
 
 
 def run_security_testing_phase(
     *,
+    config: V2TeamConfig,
+    review_config: ReviewConfig,
     task: Task,
     microtask: Microtask,
     files: Dict[str, str],
     security_agent: Any = None,
-    tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
+    tool_agents: Optional[Dict[Any, Any]] = None,
     repo_path: Optional[Path] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
-    language: str = PROFILE.default_language,
+    language: Optional[str] = None,
     cache: Optional[AgentReviewCache] = None,
 ) -> PhaseReviewResult:
     """
@@ -474,6 +517,8 @@ def run_security_testing_phase(
     Postconditions:
         - Returns a :class:`PhaseReviewResult`; never raises (shared containment).
     """
+    if language is None:
+        language = config.stack_profile.default_language
     return run_security_testing_phase_impl(
         task=task,
         microtask=microtask,
@@ -486,8 +531,8 @@ def run_security_testing_phase(
         language=language,
         cache=cache,
         phase_review_result_cls=PhaseReviewResult,
-        tool_phase_input_factory=REVIEW_CONFIG.tool_phase_input_factory,
-        tool_phase_includes_context=REVIEW_CONFIG.tool_phase_includes_context,
+        tool_phase_input_factory=review_config.tool_phase_input_factory,
+        tool_phase_includes_context=review_config.tool_phase_includes_context,
     )
 
 
@@ -498,6 +543,8 @@ def run_security_testing_phase(
 
 def run_documentation_self_review(
     *,
+    prompt: str,
+    parse_template: Callable[[str], Dict[str, Any]],
     llm: LLMClient,
     documentation: Dict[str, str],
     code_files: Dict[str, str],
@@ -509,32 +556,36 @@ def run_documentation_self_review(
 ) -> DocumentationSelfReviewResult:
     """Self-review documentation across iterations for quality refinement.
 
-    Thin wrapper that delegates the chunking/iteration orchestration to the shared
-    ``run_documentation_self_review`` helper, passing this team's prompt, parser,
-    and ``DocumentationSelfReviewResult`` factory. The Strands ``Agent`` invocation
-    is built here so this module stays the patch surface for ``Agent`` and
-    ``resolve_text_mode_strands_model``.
+    Thin wrapper that delegates the chunking/iteration orchestration to the
+    shared ``run_documentation_self_review`` helper, passing the team's
+    ``prompt``/``parse_template`` (threaded explicitly, like
+    ``planning_prompt`` in ``build_phase_bindings``, since neither lives on
+    ``V2TeamConfig`` or the fully-shared models) and the shared
+    ``DocumentationSelfReviewResult`` factory. The Strands ``Agent``
+    invocation is built here so this module stays the patch surface for
+    ``Agent`` and ``resolve_text_mode_strands_model``.
 
     Preconditions:
-        - ``documentation`` maps doc file paths to content; ``code_files`` maps
-          code file paths to their full source text.
+        - ``documentation`` maps doc file paths to content; ``code_files``
+          maps code file paths to their full source text.
 
     Postconditions:
         - See ``software_engineering_team.shared.review_utils.run_documentation_self_review``:
-          always runs at least ``min_iterations`` (when no chunk fails) and at most
-          ``max_iterations``, one LLM call per function-aware code chunk per
-          iteration, with per-chunk skip-on-failure and a chunk-failure early-stop
-          suppression. Never "fails" — always returns refined documentation.
+          always runs at least ``min_iterations`` (when no chunk fails) and at
+          most ``max_iterations``, one LLM call per function-aware code chunk
+          per iteration, with per-chunk skip-on-failure and a chunk-failure
+          early-stop suppression. Never "fails" -- always returns refined
+          documentation.
     """
 
-    def _invoke(prompt: str) -> str:
-        return str(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
+    def _invoke(p: str) -> str:
+        return str(Agent(model=resolve_text_mode_strands_model(llm))(p)).strip()
 
     return _shared_run_documentation_self_review(
         documentation=documentation,
         code_files=code_files,
-        prompt_template=DOCUMENTATION_SELF_REVIEW_PROMPT,
-        parse_template=parse_documentation_self_review_template,
+        prompt_template=prompt,
+        parse_template=parse_template,
         result_factory=DocumentationSelfReviewResult,
         invoke_model=_invoke,
         task_description=task_description,
