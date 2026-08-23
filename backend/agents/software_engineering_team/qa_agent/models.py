@@ -146,3 +146,23 @@ class QAOutput(BaseModel):
         if v and "\\n" in v:
             return v.replace("\\n", "\n")
         return v
+
+
+class AcceptanceEvidenceModel(BaseModel):
+    """Single source of truth for the ``acceptance_evidence`` prompt's field list.
+
+    Mirrors the acceptance-evidence subset of :class:`QAOutput` — the fields
+    the LLM must populate in ``acceptance_evidence`` mode. The QA agent's
+    user prompt derives its "Produce structured JSON with fields: ..." text
+    from ``AcceptanceEvidenceModel.model_fields.keys()`` instead of a
+    hard-coded string, so the prompt cannot silently drift from the schema.
+
+    Invariants:
+        - Field names are always a subset of ``QAOutput.model_fields``.
+    """
+
+    approved: bool
+    quality_gates: Dict[str, str]
+    acceptance_trace: List[Dict[str, object]]
+    validation_evidence: List[Dict[str, str]]
+    summary: str
