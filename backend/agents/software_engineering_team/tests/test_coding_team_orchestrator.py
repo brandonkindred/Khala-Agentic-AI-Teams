@@ -10,6 +10,7 @@ serialization round-trip, the branch_diff helper, and the final status line.
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -169,7 +170,7 @@ class _FakeWorktreeManager:
         self.cleanup_calls += 1
 
 
-def _make_swarm(tmp_path, tech_lead, workers, *, spec_content=""):
+def _make_swarm(tmp_path, tech_lead, workers, *, spec_content="", restored_review_cache=None):
     graph = TaskGraphService(job_id="j1")
     swarm = CodingTeamSwarm(
         tech_lead=tech_lead,
@@ -179,6 +180,7 @@ def _make_swarm(tmp_path, tech_lead, workers, *, spec_content=""):
         agent_ids=[w.agent_id for w in workers],
         llm_getter=lambda key: None,
         spec_content=spec_content,
+        restored_review_cache=restored_review_cache,
     )
     # Real worktree creation is exercised in test_worktree_manager.py; give these
     # stub-worker tests a git-free stand-in instead (see _FakeWorktreeManager).
@@ -379,6 +381,62 @@ def test_export_review_cache_empty_when_nothing_reviewed_yet(tmp_path):
     """export_review_cache() on a freshly-constructed swarm (no reviews run) returns []."""
     swarm, _graph = _make_swarm(tmp_path, StubTechLead(approved=True), [StubWorker("a1")])
     assert swarm.export_review_cache() == []
+
+
+def test_coding_team_swarm_init_fresh_run_empty_review_cache(tmp_path):
+    """Preconditions: no restored_review_cache passed (default None), matching a fresh job.
+    Postconditions: _review_verdict_cache is {} — no regression vs. pre-restore behavior.
+    """
+    swarm, _graph = _make_swarm(tmp_path, StubTechLead(approved=True), [StubWorker("a1")])
+    assert swarm._review_verdict_cache == {}
+
+
+def test_coding_team_swarm_init_restores_valid_review_cache(tmp_path):
+    """Preconditions: restored_review_cache is a well-formed serialize_review_cache() output.
+    Postconditions: _review_verdict_cache is seeded with the deserialized entries, keyed by
+      task_id, with (cache_key, verdict) tuple values.
+    """
+    serialized = [{"task_id": "t1", "cache_key": "ck1", "verdict": {"approved": True}}]
+    swarm, _graph = _make_swarm(
+        tmp_path, StubTechLead(approved=True), [StubWorker("a1")], restored_review_cache=serialized
+    )
+    assert swarm._review_verdict_cache == {"t1": ("ck1", {"approved": True})}
+
+
+def test_coding_team_swarm_init_corrupt_review_cache_degrades_to_empty(tmp_path):
+    """Preconditions: restored_review_cache is malformed (wrong type / missing/invalid fields).
+    Postconditions: _review_verdict_cache is {} — construction never raises on bad input.
+    """
+    for bad in (
+        "not-a-list",
+        {"task_id": "t1"},
+        [{"task_id": "t1"}],
+        [{"task_id": 1, "cache_key": "c", "verdict": {}}],
+    ):
+        swarm, _graph = _make_swarm(
+            tmp_path, StubTechLead(approved=True), [StubWorker("a1")], restored_review_cache=bad
+        )
+        assert swarm._review_verdict_cache == {}
+
+
+def test_coding_team_swarm_init_review_cache_lock_always_fresh(tmp_path):
+    """Preconditions: two swarms constructed, one fresh and one with a restored cache.
+    Postconditions: _review_verdict_cache_lock is a distinct, unlocked threading.Lock instance
+      on each — never shared/restored from storage.
+    """
+    swarm_a, _graph_a = _make_swarm(tmp_path, StubTechLead(approved=True), [StubWorker("a1")])
+    swarm_b, _graph_b = _make_swarm(
+        tmp_path,
+        StubTechLead(approved=True),
+        [StubWorker("a1")],
+        restored_review_cache=[
+            {"task_id": "t1", "cache_key": "ck1", "verdict": {"approved": True}}
+        ],
+    )
+    assert isinstance(swarm_a._review_verdict_cache_lock, type(threading.Lock()))
+    assert swarm_a._review_verdict_cache_lock is not swarm_b._review_verdict_cache_lock
+    assert not swarm_a._review_verdict_cache_lock.locked()
+    assert not swarm_b._review_verdict_cache_lock.locked()
 
 
 def test_export_review_cache_matches_serialize_review_cache_of_live_cache(tmp_path, monkeypatch):
