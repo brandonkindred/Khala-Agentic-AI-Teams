@@ -903,17 +903,22 @@ class TestBackendQaSecurityGateToolAgentScoping:
     """
 
     def test_qa_gate_never_calls_scope_tool_agents_by_kind(self, tmp_path, monkeypatch):
+        import backend_code_v2_team.phases._profile as backend_profile
         from backend_code_v2_team.models import Microtask, ToolAgentKind
         from backend_code_v2_team.phases._profile import ReviewDependencies, _qa_gate
 
         from software_engineering_team.shared import v2_execution_bindings
 
         calls = []
-        monkeypatch.setattr(
-            v2_execution_bindings,
-            "scope_tool_agents_by_kind",
-            lambda *a, **kw: calls.append((a, kw)),
-        )
+        spy = lambda *a, **kw: calls.append((a, kw))  # noqa: E731
+        # Patch both the defining module's attribute (catches
+        # ``v2_execution_bindings.scope_tool_agents_by_kind(...)``-style calls)
+        # and any same-named binding backend's own module may carry (catches a
+        # future ``from ...v2_execution_bindings import scope_tool_agents_by_kind``
+        # import there, which would otherwise keep its own reference to the
+        # unpatched original and silently defeat this guard).
+        monkeypatch.setattr(v2_execution_bindings, "scope_tool_agents_by_kind", spy)
+        monkeypatch.setattr(backend_profile, "scope_tool_agents_by_kind", spy, raising=False)
 
         task = _create_test_task("backend")
         mt = Microtask(id="mt-1", title="Test Microtask")
@@ -937,17 +942,16 @@ class TestBackendQaSecurityGateToolAgentScoping:
         assert calls == []
 
     def test_security_gate_never_calls_scope_tool_agents_by_kind(self, tmp_path, monkeypatch):
+        import backend_code_v2_team.phases._profile as backend_profile
         from backend_code_v2_team.models import Microtask, ToolAgentKind
         from backend_code_v2_team.phases._profile import ReviewDependencies, _security_gate
 
         from software_engineering_team.shared import v2_execution_bindings
 
         calls = []
-        monkeypatch.setattr(
-            v2_execution_bindings,
-            "scope_tool_agents_by_kind",
-            lambda *a, **kw: calls.append((a, kw)),
-        )
+        spy = lambda *a, **kw: calls.append((a, kw))  # noqa: E731
+        monkeypatch.setattr(v2_execution_bindings, "scope_tool_agents_by_kind", spy)
+        monkeypatch.setattr(backend_profile, "scope_tool_agents_by_kind", spy, raising=False)
 
         task = _create_test_task("backend")
         mt = Microtask(id="mt-1", title="Test Microtask")
