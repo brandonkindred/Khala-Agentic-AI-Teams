@@ -2,7 +2,7 @@
 
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, create_model, field_validator, model_validator
 
 from shared.dev_models.models import SystemArchitecture
 
@@ -148,21 +148,36 @@ class QAOutput(BaseModel):
         return v
 
 
-class AcceptanceEvidenceModel(BaseModel):
-    """Single source of truth for the ``acceptance_evidence`` prompt's field list.
+ACCEPTANCE_EVIDENCE_FIELD_NAMES = (
+    "approved",
+    "quality_gates",
+    "acceptance_trace",
+    "validation_evidence",
+    "summary",
+)
+"""Names of the ``QAOutput`` fields the LLM must populate in
+``acceptance_evidence`` mode. This is the only hand-maintained piece of the
+acceptance-evidence subset — *which* fields matter for this mode is a
+domain decision that can't itself be derived. Everything else (types,
+defaults) is pulled live from ``QAOutput`` via :data:`AcceptanceEvidenceModel`
+below, so a field's type changing on ``QAOutput`` can't silently drift out
+of sync with the prompt.
+"""
 
-    Mirrors the acceptance-evidence subset of :class:`QAOutput` — the fields
-    the LLM must populate in ``acceptance_evidence`` mode. The QA agent's
-    user prompt derives its "Produce structured JSON with fields: ..." text
-    from ``AcceptanceEvidenceModel.model_fields.keys()`` instead of a
-    hard-coded string, so the prompt cannot silently drift from the schema.
-
-    Invariants:
-        - Field names are always a subset of ``QAOutput.model_fields``.
-    """
-
-    approved: bool
-    quality_gates: Dict[str, str]
-    acceptance_trace: List[Dict[str, object]]
-    validation_evidence: List[Dict[str, str]]
-    summary: str
+AcceptanceEvidenceModel = create_model(
+    "AcceptanceEvidenceModel",
+    __doc__=(
+        "Single source of truth for the ``acceptance_evidence`` prompt's field "
+        "list. Its fields are built directly from ``QAOutput.model_fields`` "
+        "(same names, types, and defaults) for the names in "
+        "``ACCEPTANCE_EVIDENCE_FIELD_NAMES``, so the QA agent's user prompt — "
+        'which derives its "Produce structured JSON with fields: ..." text '
+        "from ``AcceptanceEvidenceModel.model_fields.keys()`` — cannot drift "
+        "from the real ``QAOutput`` schema, including when a field's type "
+        "changes."
+    ),
+    **{
+        name: (QAOutput.model_fields[name].annotation, QAOutput.model_fields[name].default)
+        for name in ACCEPTANCE_EVIDENCE_FIELD_NAMES
+    },
+)

@@ -238,6 +238,14 @@ def test_acceptance_evidence_model_fields_are_subset_of_qa_output() -> None:
     assert set(AcceptanceEvidenceModel.model_fields) <= set(QAOutput.model_fields)
 
 
+def test_acceptance_evidence_model_field_types_match_qa_output() -> None:
+    """``AcceptanceEvidenceModel`` fields are built from ``QAOutput``'s actual
+    field annotations, not hand-copied ones — if a QAOutput field's type
+    changes, this model (and thus the prompt) picks it up automatically."""
+    for name, field in AcceptanceEvidenceModel.model_fields.items():
+        assert field.annotation == QAOutput.model_fields[name].annotation
+
+
 def test_acceptance_evidence_prompt_field_list_matches_model() -> None:
     """The 'Produce structured JSON with fields: ...' text names exactly the
     ``AcceptanceEvidenceModel`` fields, not a hard-coded list."""
