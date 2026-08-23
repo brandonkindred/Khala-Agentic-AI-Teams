@@ -39,6 +39,9 @@ def _startup() -> None:
             "agentic_team_provisioning Temporal worker start (lifespan backstop) failed",
             exc_info=True,
         )
-    from agent_team_studio.agentic_team_provisioning.api.state import initialize_service
+    # Dereferenced through main (not imported directly from state) so a test or
+    # embedded app that does monkeypatch.setattr(main, "initialize_service", ...)
+    # — main re-exports it for exactly that reason — is honored here too.
+    from agent_team_studio.agentic_team_provisioning.api import main as _main
 
-    initialize_service()
+    _main.initialize_service()
