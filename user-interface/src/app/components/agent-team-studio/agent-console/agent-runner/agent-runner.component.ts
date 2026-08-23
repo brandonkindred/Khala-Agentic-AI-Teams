@@ -169,6 +169,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   });
 
   private sandboxPollSub: Subscription | null = null;
+  private runSub: Subscription | null = null;
 
   ngOnInit(): void {
     this.api.listAgents().subscribe({
@@ -206,6 +207,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.sandboxPollSub?.unsubscribe();
+    this.runSub?.unsubscribe();
   }
 
   // ---------------------------------------------------------------
@@ -229,6 +231,9 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     this.sandbox.set(null);
     this.sandboxPollSub?.unsubscribe();
     this.sandboxPollSub = null;
+    this.runSub?.unsubscribe();
+    this.runSub = null;
+    this.running.set(false);
     if (id) this.loadAgentDetail(id);
   }
 
@@ -499,7 +504,8 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     this.lastResponse.set(null);
     this.lastError.set(null);
     this.activeRunId.set(null);
-    this.api.invoke(id, body, savedId).subscribe({
+    this.runSub?.unsubscribe();
+    this.runSub = this.api.invoke(id, body, savedId).subscribe({
       next: (response) => {
         this.running.set(false);
         // 202 is the sandbox "still warming" signal — HttpClient delivers it
