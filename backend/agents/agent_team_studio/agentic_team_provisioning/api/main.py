@@ -104,6 +104,9 @@ from agent_team_studio.agentic_team_provisioning.api.routes import (  # noqa: E4
 from agent_team_studio.agentic_team_provisioning.api.routes import (  # noqa: E402
     testing as testing_routes,
 )
+from agent_team_studio.agentic_team_provisioning.api.routes.health import (  # noqa: E402,F401
+    health,  # re-export: keeps `from …api.main import health` / `main.health` working
+)
 from agent_team_studio.agentic_team_provisioning.api.services.assets import (  # noqa: E402,F401
     _ASSET_UPLOAD_CHUNK_BYTES,  # re-export: tests monkeypatch via main
     _safe_asset_name,  # re-export: tests call directly via main
