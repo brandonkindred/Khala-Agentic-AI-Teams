@@ -4,18 +4,20 @@ Moved out of ``api.main`` (see its docstring) so that module stays a thin
 factory + router-include composition root, mirroring the
 ``software_engineering_team``/``branding_team`` ``api/state.py`` split.
 
-Collaborators the test suite monkeypatches directly on ``main`` — currently
+Every collaborator ``main.py`` re-exports (``_store``, ``_pipeline_runner``,
 ``get_team_infrastructure``, ``register_team_manifests``, ``resolve_persona``,
-and ``schedule_provision_step_agents`` — are re-imported by ``main.py`` after
-this module, so they remain module attributes of ``main``. Any function here
-that calls one of those internally does so through a deferred
-``from ...api import main as _main`` import (the same late-binding pattern
-``api.services.*`` already uses) rather than the bare name this module also
-imports, so ``monkeypatch.setattr(main, "X", …)`` is observed regardless of
-whether the call originates in ``main.py`` or here. Calls to methods on the
-shared singleton objects (``_store``, ``_pipeline_runner``) need no such
-indirection: those are patched by mutating the object itself, so any
-reference to the same instance already sees the patch.
+``schedule_provision_step_agents``, ``enrich_roster_agent``,
+``_save_agents_from_llm``, ``_after_process_saved``, …) is a name tests may
+replace wholesale via ``monkeypatch.setattr(main, "X", …)`` — including
+``_store``/``_pipeline_runner`` themselves (see
+``test_api_router_scaffold.py``, which swaps in a fake store/runner object
+outright, not just a method on the original one). A bare reference to any of
+these names from *within* this module would resolve against this module's
+own globals, not ``main``'s current (possibly patched) attribute, silently
+defeating the patch. So every internal call to one of these names goes
+through a deferred ``from ...api import main as _main`` import (the same
+late-binding pattern ``api.services.*`` already uses) rather than the bare
+name this module also imports for re-export purposes.
 """
 
 from __future__ import annotations
@@ -120,7 +122,7 @@ def initialize_service() -> None:
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
     try:
-        existing_teams = _store.list_teams()
+        existing_teams = _main._store.list_teams()
     except Exception as exc:
         logger.warning("Could not list existing teams for retroactive provisioning: %s", exc)
         existing_teams = []
@@ -134,14 +136,14 @@ def initialize_service() -> None:
                 "Could not retroactively provision infrastructure for team %s: %s", team_id, exc
             )
         try:
-            team = _store.get_team(team_id)
+            team = _main._store.get_team(team_id)
             if team is not None and team.agents:
                 _main.register_team_manifests(team_id, team.agents)
         except Exception as exc:
             logger.warning("Could not register generated manifests for team %s: %s", team_id, exc)
 
     try:
-        reaped = _pipeline_runner.reap_orphaned_runs()
+        reaped = _main._pipeline_runner.reap_orphaned_runs()
         if reaped:
             logger.warning("Reaped %d orphaned pipeline run(s) on startup", reaped)
     except Exception as exc:
@@ -179,12 +181,14 @@ def _chat_context_agents(team_id: str) -> list[dict[str, str]] | None:
         ``{"agent_name", "role"}`` dicts with ``role`` resolved from each agent's
         linked ``AgentManifest``.
     """
-    agents = _store.list_team_agents(team_id)
+    from agent_team_studio.agentic_team_provisioning.api import main as _main
+
+    agents = _main._store.list_team_agents(team_id)
     if not agents:
         return None
     out: list[dict[str, str]] = []
     for a in agents:
-        enriched = enrich_roster_agent(a)
+        enriched = _main.enrich_roster_agent(a)
         out.append({"agent_name": enriched.agent_name, "role": enriched.role})
     return out
 
@@ -215,6 +219,8 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
     single-agent routes' registry cleanup — a chat-save register can't interleave
     with a concurrent add/delete cleanup.
     """
+    from agent_team_studio.agentic_team_provisioning.api import main as _main
+
     if not agents_data:
         return
     generated: list[AgenticTeamAgent] = []
@@ -258,22 +264,20 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
         # roster + registry back together. Raises on registry failure so
         # merge_generated_agents rolls back the roster write and keeps both
         # stores consistent.
-        from agent_team_studio.agentic_team_provisioning.api import main as _main
-
         _main.register_team_manifests(
             team_id, merged, summaries=summaries, skill_tags=skill_tags, conn=conn
         )
 
     # Merge under a team-row lock so the read (preserve registry agents), the write,
     # and the registry register all happen in one atomic, serialized transaction.
-    _store.merge_generated_agents(team_id, generated, on_merged=_register)
+    _main._store.merge_generated_agents(team_id, generated, on_merged=_register)
 
 
 def _after_process_saved(team_id: str, process: ProcessDefinition) -> None:
     """Provision per-step agent environments via agent_provisioning_team (background)."""
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
-    _main.schedule_provision_step_agents(team_id, process, _store)
+    _main.schedule_provision_step_agents(team_id, process, _main._store)
 
 
 def _save_agents_and_process(
@@ -324,13 +328,15 @@ def _save_agents_and_process(
         ``HTTPException(503)`` instead of the underlying exception, so the
         caller gets a clear "try again" signal.
     """
+    from agent_team_studio.agentic_team_provisioning.api import main as _main
+
     try:
-        _save_agents_from_llm(team_id, agents_data)
+        _main._save_agents_from_llm(team_id, agents_data)
         if process:
-            _store.save_process(team_id, process)
-            _store.set_conversation_process(conversation_id, process.process_id)
+            _main._store.save_process(team_id, process)
+            _main._store.set_conversation_process(conversation_id, process.process_id)
             try:
-                _after_process_saved(team_id, process)
+                _main._after_process_saved(team_id, process)
             except Exception:
                 # Best-effort: scheduling provisioning must not discard an
                 # already-committed roster/process, nor the turn about to be
@@ -379,7 +385,7 @@ def _get_infra_or_404(team_id: str) -> TeamInfrastructure:
     """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
-    team = _store.get_team(team_id)
+    team = _main._store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
     return _main.get_team_infrastructure(team_id)
@@ -392,7 +398,9 @@ def _get_team_or_404(team_id: str) -> AgenticTeam:
     Postconditions: returns the team when found; otherwise raises HTTPException(404)
         and never returns.
     """
-    team = _store.get_team(team_id)
+    from agent_team_studio.agentic_team_provisioning.api import main as _main
+
+    team = _main._store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
     return team
