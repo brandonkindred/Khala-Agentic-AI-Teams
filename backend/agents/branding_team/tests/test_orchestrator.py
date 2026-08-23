@@ -1,10 +1,14 @@
 """Tests for the branding team orchestrator.
 
 Since all agents are now LLM-backed strands.Agent instances running inside
-Strands SDK Graph/Swarm orchestration, we patch
-``branding_team.orchestrator.build_branding_graph`` so the returned graph's
-``invoke_async`` yields a canned result, and verify the orchestrator
-correctly assembles ``TeamOutput`` from it.
+Strands SDK Graph/Swarm orchestration, most tests patch
+``branding_team.orchestrator.GraphBuilder`` so the isolated per-phase graph
+``run_single_phase`` builds for each phase (the default, production
+execution path) yields a canned ``invoke_async`` result, and verify the
+orchestrator correctly assembles ``TeamOutput`` from it. A couple of tests
+patch ``branding_team.orchestrator.build_branding_graph`` directly instead —
+those specifically cover the `_use_monolithic=True` escape hatch, which is
+not used in production.
 """
 
 import asyncio
@@ -282,6 +286,26 @@ def _patch_graph_invoke(phases_to_include: list[str]):
     )
 
 
+def _patch_phase_graph_invoke(phases_to_include: list[str]):
+    """Return a context manager that patches ``branding_team.orchestrator.GraphBuilder``
+    so each isolated per-phase graph's ``invoke_async`` yields a canned result --
+    the ``run_single_phase`` (default execution path) analogue of
+    ``_patch_graph_invoke``. ``run_single_phase`` builds a fresh single-node
+    graph per phase, but since every call shares this mock's ``invoke_async``
+    result (keyed by node id), each phase's real ``_extract_phase_output``
+    call still reads its own entry out of it -- exactly like the monolithic
+    graph's single shared result did."""
+    mock_result = _mock_graph_result(phases_to_include)
+
+    async def mock_invoke_async(task, **kwargs):
+        return mock_result
+
+    mock_graph = MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async))
+    mock_builder = MagicMock()
+    mock_builder.build.return_value = mock_graph
+    return patch("branding_team.orchestrator.GraphBuilder", return_value=mock_builder)
+
+
 ALL_PHASES = [
     "phase1_strategic_core",
     "phase2_narrative",
@@ -292,7 +316,7 @@ ALL_PHASES = [
 
 
 def test_full_run_approved() -> None:
-    with _patch_graph_invoke(ALL_PHASES):
+    with _patch_phase_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
             mission=make_mission(
@@ -300,7 +324,6 @@ def test_full_run_approved() -> None:
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=True),
-            _use_monolithic=True,
         )
 
     assert result.status == WorkflowStatus.READY_FOR_ROLLOUT
@@ -329,7 +352,7 @@ def test_full_run_approved() -> None:
 
 
 def test_requires_human_approval() -> None:
-    with _patch_graph_invoke(ALL_PHASES):
+    with _patch_phase_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
             mission=make_mission(
@@ -337,7 +360,6 @@ def test_requires_human_approval() -> None:
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=False, feedback="Need legal review."),
-            _use_monolithic=True,
         )
 
     assert result.status == WorkflowStatus.NEEDS_HUMAN_DECISION
@@ -353,7 +375,7 @@ def test_requires_human_approval() -> None:
 
 
 def test_brand_checks() -> None:
-    with _patch_graph_invoke(ALL_PHASES):
+    with _patch_phase_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         checks = [
             BrandCheckRequest(
@@ -372,7 +394,6 @@ def test_brand_checks() -> None:
             ),
             human_review=HumanReview(approved=True),
             brand_checks=checks,
-            _use_monolithic=True,
         )
 
     assert len(result.brand_checks) == 2
@@ -384,7 +405,7 @@ def test_market_research_integration() -> None:
     # The orchestrator runs integrations concurrently via the async adapter
     # variant, so patch that (not the sync wrapper).
     with (
-        _patch_graph_invoke(ALL_PHASES),
+        _patch_phase_graph_invoke(ALL_PHASES),
         patch(
             "branding_team.adapters.market_research.request_market_research_async",
             new_callable=AsyncMock,
@@ -404,7 +425,6 @@ def test_market_research_integration() -> None:
             ),
             human_review=HumanReview(approved=True),
             include_market_research=True,
-            _use_monolithic=True,
         )
     assert result.competitive_snapshot is not None
     assert result.competitive_snapshot.summary == "Competitive summary"
@@ -412,7 +432,7 @@ def test_market_research_integration() -> None:
 
 
 def test_design_assets_integration() -> None:
-    with _patch_graph_invoke(ALL_PHASES):
+    with _patch_phase_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
             mission=make_mission(
@@ -421,7 +441,6 @@ def test_design_assets_integration() -> None:
             ),
             human_review=HumanReview(approved=True),
             include_design_assets=True,
-            _use_monolithic=True,
         )
     assert result.design_asset_result is not None
     assert result.design_asset_result.request_id.startswith("design_")
@@ -448,7 +467,7 @@ def test_run_with_store_appends_version() -> None:
     store.get_brand.return_value = brand
     store.append_brand_version.return_value = updated
 
-    with _patch_graph_invoke(ALL_PHASES):
+    with _patch_phase_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         orchestrator.run(
             mission=mission,
@@ -456,7 +475,6 @@ def test_run_with_store_appends_version() -> None:
             store=store,
             client_id=brand.client_id,
             brand_id=brand.id,
-            _use_monolithic=True,
         )
 
     store.append_brand_version.assert_called_once()
@@ -492,7 +510,7 @@ def test_run_with_store_append_brand_version_none_raises() -> None:
     store.get_brand.return_value = brand
     store.append_brand_version.return_value = None
 
-    with _patch_graph_invoke(ALL_PHASES):
+    with _patch_phase_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         with pytest.raises(
             BrandVersionAppendConflict,
@@ -504,7 +522,6 @@ def test_run_with_store_append_brand_version_none_raises() -> None:
                 store=store,
                 client_id=brand.client_id,
                 brand_id=brand.id,
-                _use_monolithic=True,
             )
 
 
@@ -564,7 +581,7 @@ def test_run_branding_team_route_does_not_remap_unrelated_runtime_error() -> Non
 
 
 def test_run_phase_stops_at_strategic_core() -> None:
-    with _patch_graph_invoke(["phase1_strategic_core"]):
+    with _patch_phase_graph_invoke(["phase1_strategic_core"]):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run_phase(
             mission=make_mission(
@@ -573,7 +590,6 @@ def test_run_phase_stops_at_strategic_core() -> None:
             ),
             phase=BrandPhase.STRATEGIC_CORE,
             human_review=HumanReview(approved=True),
-            _use_monolithic=True,
         )
     assert result.strategic_core is not None
     assert result.narrative_messaging is None
@@ -623,7 +639,7 @@ def test_approved_partial_run_is_not_rollout_ready() -> None:
         ],
     }
     for phase, phases in phase_sets.items():
-        with _patch_graph_invoke(phases):
+        with _patch_phase_graph_invoke(phases):
             orchestrator = BrandingTeamOrchestrator()
             result = orchestrator.run_phase(
                 mission=make_mission(
@@ -632,7 +648,6 @@ def test_approved_partial_run_is_not_rollout_ready() -> None:
                 ),
                 phase=phase,
                 human_review=HumanReview(approved=True),
-                _use_monolithic=True,
             )
         assert result.status == WorkflowStatus.NEEDS_HUMAN_DECISION, (
             f"Phase {phase.value} with approved=True should not be READY_FOR_ROLLOUT"
@@ -661,7 +676,7 @@ def test_unapproved_partial_run_labels_current_phase_not_target() -> None:
         ),
     }
     for phase, (phases, expected_label) in phase_sets.items():
-        with _patch_graph_invoke(phases):
+        with _patch_phase_graph_invoke(phases):
             orchestrator = BrandingTeamOrchestrator()
             result = orchestrator.run_phase(
                 mission=make_mission(
@@ -670,7 +685,6 @@ def test_unapproved_partial_run_labels_current_phase_not_target() -> None:
                 ),
                 phase=phase,
                 human_review=HumanReview(approved=False),
-                _use_monolithic=True,
             )
         assert expected_label in result.mission_summary, (
             f"Phase {phase.value}: expected {expected_label!r} in {result.mission_summary!r}"
@@ -681,7 +695,7 @@ def test_default_human_feedback_message_survives_when_feedback_omitted() -> None
     """Locks in the current (deliberately unchanged) fallback behavior for
     #3435: HumanReview.feedback is typed str = "", so omitted feedback must
     still produce the status-appropriate default message."""
-    with _patch_graph_invoke(ALL_PHASES):
+    with _patch_phase_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         approved_result = orchestrator.run(
             mission=make_mission(
@@ -689,11 +703,10 @@ def test_default_human_feedback_message_survives_when_feedback_omitted() -> None
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=True),
-            _use_monolithic=True,
         )
     assert approved_result.human_feedback == "Approved for rollout."
 
-    with _patch_graph_invoke(ALL_PHASES):
+    with _patch_phase_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         unapproved_result = orchestrator.run(
             mission=make_mission(
@@ -701,7 +714,6 @@ def test_default_human_feedback_message_survives_when_feedback_omitted() -> None
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=False),
-            _use_monolithic=True,
         )
     assert unapproved_result.human_feedback == "Awaiting approval from brand leadership."
 
@@ -732,7 +744,7 @@ def test_determine_current_phase_treats_degraded_default_as_reached() -> None:
 
 
 def test_phase_gates_are_populated() -> None:
-    with _patch_graph_invoke(ALL_PHASES):
+    with _patch_phase_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
             mission=make_mission(
@@ -740,7 +752,6 @@ def test_phase_gates_are_populated() -> None:
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=True),
-            _use_monolithic=True,
         )
     assert len(result.phase_gates) == 5
     for gate in result.phase_gates:
@@ -749,7 +760,7 @@ def test_phase_gates_are_populated() -> None:
 
 def test_phase_absorbed_fields_populated() -> None:
     """Verify sub-team outputs are accessible via their phase-output homes."""
-    with _patch_graph_invoke(ALL_PHASES):
+    with _patch_phase_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
             mission=make_mission(
@@ -757,7 +768,6 @@ def test_phase_absorbed_fields_populated() -> None:
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=True),
-            _use_monolithic=True,
         )
 
     # Writing guidelines absorbed into narrative_messaging
@@ -795,8 +805,12 @@ def test_unparseable_phase_output_marks_phase_degraded(caplog) -> None:
 
     with (
         patch(
-            "branding_team.orchestrator.build_branding_graph",
-            return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+            "branding_team.orchestrator.GraphBuilder",
+            return_value=MagicMock(
+                build=MagicMock(
+                    return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async))
+                )
+            ),
         ),
         caplog.at_level("WARNING", logger="branding_team.orchestrator"),
     ):
@@ -807,7 +821,6 @@ def test_unparseable_phase_output_marks_phase_degraded(caplog) -> None:
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=True),
-            _use_monolithic=True,
         )
 
     assert result.degraded_phases == [BrandPhase.NARRATIVE_MESSAGING]
@@ -842,8 +855,12 @@ def test_trailing_unrelated_json_object_does_not_win_over_real_payload() -> None
         return mock_result
 
     with patch(
-        "branding_team.orchestrator.build_branding_graph",
-        return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+        "branding_team.orchestrator.GraphBuilder",
+        return_value=MagicMock(
+            build=MagicMock(
+                return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async))
+            )
+        ),
     ):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
@@ -852,7 +869,6 @@ def test_trailing_unrelated_json_object_does_not_win_over_real_payload() -> None
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=True),
-            _use_monolithic=True,
         )
 
     assert result.degraded_phases == []
@@ -1221,8 +1237,12 @@ def test_full_run_phase2_not_degraded_with_six_fragments() -> None:
         return mock_result
 
     with patch(
-        "branding_team.orchestrator.build_branding_graph",
-        return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+        "branding_team.orchestrator.GraphBuilder",
+        return_value=MagicMock(
+            build=MagicMock(
+                return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async))
+            )
+        ),
     ):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
@@ -1231,7 +1251,6 @@ def test_full_run_phase2_not_degraded_with_six_fragments() -> None:
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=True),
-            _use_monolithic=True,
         )
 
     assert result.degraded_phases == []
@@ -1477,8 +1496,12 @@ def test_full_run_phase4_not_degraded_with_nine_fragments() -> None:
         return mock_result
 
     with patch(
-        "branding_team.orchestrator.build_branding_graph",
-        return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+        "branding_team.orchestrator.GraphBuilder",
+        return_value=MagicMock(
+            build=MagicMock(
+                return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async))
+            )
+        ),
     ):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
@@ -1487,7 +1510,6 @@ def test_full_run_phase4_not_degraded_with_nine_fragments() -> None:
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=True),
-            _use_monolithic=True,
         )
 
     assert result.degraded_phases == []
@@ -1775,8 +1797,12 @@ def test_full_run_phase5_not_degraded_with_seven_fragments() -> None:
         return mock_result
 
     with patch(
-        "branding_team.orchestrator.build_branding_graph",
-        return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+        "branding_team.orchestrator.GraphBuilder",
+        return_value=MagicMock(
+            build=MagicMock(
+                return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async))
+            )
+        ),
     ):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
@@ -1785,7 +1811,6 @@ def test_full_run_phase5_not_degraded_with_seven_fragments() -> None:
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=True),
-            _use_monolithic=True,
         )
 
     assert result.degraded_phases == []
@@ -2077,8 +2102,12 @@ def test_full_run_phase3_not_degraded_with_eleven_fragments() -> None:
         return mock_result
 
     with patch(
-        "branding_team.orchestrator.build_branding_graph",
-        return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+        "branding_team.orchestrator.GraphBuilder",
+        return_value=MagicMock(
+            build=MagicMock(
+                return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async))
+            )
+        ),
     ):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
@@ -2087,7 +2116,6 @@ def test_full_run_phase3_not_degraded_with_eleven_fragments() -> None:
                 values=["clarity", "trust", "momentum"],
             ),
             human_review=HumanReview(approved=True),
-            _use_monolithic=True,
         )
 
     assert result.degraded_phases == []
