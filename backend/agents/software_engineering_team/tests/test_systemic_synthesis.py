@@ -120,6 +120,41 @@ def test_synthesis_resolves_finding_indices_to_locations() -> None:
     ]
 
 
+def test_synthesis_scrubs_tokens_from_title_description_and_locations() -> None:
+    """review_summary.systemic_findings is persisted and served through the Code
+    Review API/UI, not just posted (already-scrubbed) as a GitHub comment --
+    so a credential-bearing remote URL in the model's own title/description,
+    or in a finding's description carried into a related location, must be
+    redacted before this ever reaches storage (mirrors proposal_from_findings)."""
+    leaky = "https://user:hunter2@github.com/acme/widgets.git failed"
+
+    def _responder(_prompt: str) -> Dict[str, Any]:
+        return {
+            "systemic_findings": [
+                {
+                    "title": f"Leaked in title: {leaky}",
+                    "description": f"Leaked in description: {leaky}",
+                    "finding_indices": [0, 1],
+                }
+            ]
+        }
+
+    stub = _Stub(_responder)
+    issues = [
+        _issue(file_path="a.py", description=f"leaked in finding: {leaky}"),
+        _issue(file_path="b.py", description="unrelated"),
+    ]
+    out = synthesize_systemic_findings(issues, llm=stub)
+    assert len(out) == 1
+    entry = out[0]
+    assert "hunter2" not in entry["title"]
+    assert "hunter2" not in entry["description"]
+    assert "https://***@" in entry["title"]
+    assert "https://***@" in entry["description"]
+    assert "hunter2" not in entry["related_locations"][0]["description"]
+    assert "https://***@" in entry["related_locations"][0]["description"]
+
+
 def test_empty_systemic_findings_is_a_normal_result() -> None:
     """No genuine cross-cutting pattern is the common, correct answer."""
     stub = _Stub(lambda _p: {"systemic_findings": []})

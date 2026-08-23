@@ -26,7 +26,7 @@ import logging
 from typing import Any, Dict, List, Optional, Sequence
 
 from llm_service.interface import LLMClient
-from software_engineering_team.github_source import group_similar_findings
+from software_engineering_team.github_source import group_similar_findings, scrub_token_from_text
 from software_engineering_team.shared.single_shot_review import run_single_shot_review
 
 from ._llm_client_utils import is_unscripted_dummy
@@ -82,10 +82,15 @@ def _build_synthesis_prompt(issues: Sequence[CodeReviewIssue]) -> str:
 
 
 def _location_for(issue: CodeReviewIssue) -> Dict[str, Any]:
-    """Postconditions: ``{"file_path", "description"}`` for one finding, JSON-safe."""
+    """Postconditions: ``{"file_path", "description"}`` for one finding, JSON-safe.
+
+    ``description`` is token-scrubbed (mirrors ``proposal_from_findings``):
+    this dict is persisted on ``review_summary`` and served through the Code
+    Review API/UI, not just posted (already-scrubbed) as a GitHub comment.
+    """
     return {
         "file_path": str(issue.file_path or ""),
-        "description": str(issue.description or ""),
+        "description": scrub_token_from_text(str(issue.description or "")),
     }
 
 
@@ -101,8 +106,13 @@ def _parse_systemic_findings(
           least two valid, in-range, non-duplicate ``finding_indices``; an
           entry failing any of that is dropped rather than partially kept.
         - A kept entry's ``related_locations`` resolves each valid index back
-          to :func:`_location_for` — no index leaks into the output.
-          Malformed replies yield ``[]``. Pure; never raises.
+          to :func:`_location_for` — no index leaks into the output. The
+          entry's own ``title``/``description`` (model-generated text, not
+          sourced from a single finding) are token-scrubbed the same way
+          :func:`_location_for` scrubs each location's description: this
+          result is persisted on ``review_summary`` and served through the
+          Code Review API/UI, not just posted (already-scrubbed) as a GitHub
+          comment. Malformed replies yield ``[]``. Pure; never raises.
     """
     if not isinstance(data, dict):
         return []
@@ -132,7 +142,13 @@ def _parse_systemic_findings(
             locations.append(_location_for(issues[raw_index]))
         if len(locations) < MIN_FINDINGS_FOR_SYNTHESIS:
             continue
-        results.append({"title": title, "description": description, "related_locations": locations})
+        results.append(
+            {
+                "title": scrub_token_from_text(title),
+                "description": scrub_token_from_text(description),
+                "related_locations": locations,
+            }
+        )
     return results
 
 
