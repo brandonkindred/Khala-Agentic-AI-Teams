@@ -25,6 +25,7 @@ import { MatInputModule } from '@angular/material/input';
 import { MatMenuModule } from '@angular/material/menu';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSelectModule } from '@angular/material/select';
+import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { Subscription, timer } from 'rxjs';
@@ -85,6 +86,7 @@ import {
     MatMenuModule,
     MatProgressSpinnerModule,
     MatSelectModule,
+    MatSnackBarModule,
     MatTooltipModule,
     AgentRunHistoryComponent,
     AgentSchemaFormComponent,
@@ -97,6 +99,7 @@ import {
 export class AgentRunnerComponent implements OnInit, OnDestroy {
   private readonly api = inject(AgentConsoleApiService);
   private readonly dialog = inject(MatDialog);
+  private readonly snackBar = inject(MatSnackBar);
   private readonly destructiveActions = inject(AgentRunnerDestructiveActionsService);
   private readonly destroyRef = inject(DestroyRef);
 
@@ -400,10 +403,17 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
             this.savedInputs.update((rows) => [saved, ...rows]);
             this.selectedPickerValue.set(`saved:${saved.id}`);
           },
-          // Error toast is handled by the global errorHandlerInterceptor.
           error: (err) => {
-            this.lastError.set(
+            this.snackBar.open(
               extractErrorDetail(err, 'Failed to save input', { joinValidationArray: true }),
+              'Close',
+              {
+                duration: 6000,
+                horizontalPosition: 'end',
+                verticalPosition: 'top',
+                politeness: 'assertive',
+                panelClass: 'kh-snack-error',
+              },
             );
           },
         });
