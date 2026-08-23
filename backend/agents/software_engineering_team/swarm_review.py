@@ -149,13 +149,18 @@ def deserialize_review_cache(data: Any) -> Dict[str, "tuple[str, Dict[str, Any]]
           are not deep-copied here since the caller owns the freshly parsed
           ``data``).
         - At most 20 entries are ever returned, mirroring
-          ``serialize_review_cache``'s cap: when more than 20 entries in
-          ``data`` pass validation, only the last 20 (by list order) are
-          kept. This holds even for a stored value that itself has more
-          than 20 entries (e.g. hand-edited or written by something other
-          than ``serialize_review_cache``) — restore never grows the live
-          cache past the size the rest of the system assumes it is bounded
-          to.
+          ``serialize_review_cache``'s cap: when more than 20 *distinct*
+          ``task_id``s among the valid entries in ``data`` pass validation,
+          only the last 20 by recency are kept, where an entry's recency is
+          its *last* occurrence's list position — a duplicate ``task_id``
+          that reappears later moves that key to the end, so overwriting an
+          early entry with a fresher one (the "later entry wins" rule above)
+          also makes it count as fresh for the cap, rather than being
+          dropped as if it were still at its first, stale position. This
+          holds even for a stored value that itself has more than 20 valid
+          entries (e.g. hand-edited or written by something other than
+          ``serialize_review_cache``) — restore never grows the live cache
+          past the size the rest of the system assumes it is bounded to.
     """
     if not isinstance(data, list):
         return {}
@@ -183,6 +188,10 @@ def deserialize_review_cache(data: Any) -> Dict[str, "tuple[str, Dict[str, Any]]
             continue
         if "requested_changes" in verdict and not isinstance(verdict["requested_changes"], list):
             continue
+        # A duplicate task_id must move to the end of iteration order on overwrite (dict
+        # reassignment alone keeps a key at its *first* insertion position), so the cap below
+        # measures recency by each key's last occurrence, not its first.
+        result.pop(task_id, None)
         result[task_id] = (cache_key, verdict)
     if len(result) > max_cached_verdicts:
         result = dict(list(result.items())[-max_cached_verdicts:])
