@@ -1,10 +1,13 @@
-"""Unit tests for the selective-context eval script's pure/deterministic logic.
+"""Unit tests for the selective-context eval script's logic.
 
-Covers the token-count heuristic and the full-vs-selective prompt comparison
-helper (``compare_phase_prompts``). Does not run the LLM-driven pipeline
-(``run_eval``) -- that's exercised manually per the script's docstring and is
-intentionally out of scope for CI, matching #6969's "Out of Scope: CI
-integration of eval."
+Covers the token-count heuristic, the full-context-phases derivation, the
+``_phase_spec_context_override`` primitive, and ``_run_variant`` -- which
+genuinely executes each phase via ``run_single_phase`` (dummy LLM, isolated
+single-node graphs, no network) so both the "selective" and "full-context"
+variants produce real per-phase output, not just prompt strings. Does not
+exercise ``run_eval`` end-to-end against every sample mission -- that's run
+manually per the script's docstring and is intentionally out of scope for
+CI, matching #6969's "Out of Scope: CI integration of eval."
 """
 
 from __future__ import annotations
@@ -12,11 +15,13 @@ from __future__ import annotations
 import pytest
 
 from branding_team.models import BrandPhase
-from branding_team.orchestrator import _PHASE_SPEC
+from branding_team.orchestrator import _PHASE_SPEC, BrandingTeamOrchestrator
 from branding_team.scripts.eval_selective_context import (
     _approx_token_count,
+    _force_dummy_llm_provider,
     _full_context_phases,
-    compare_phase_prompts,
+    _phase_spec_context_override,
+    _run_variant,
 )
 from branding_team.tests.conftest import make_mission
 
@@ -46,56 +51,75 @@ def test_full_context_phases_strategic_core_has_none() -> None:
     assert _full_context_phases(BrandPhase.STRATEGIC_CORE) == ()
 
 
-def test_compare_phase_prompts_full_is_never_smaller_than_selective() -> None:
-    mission = make_mission()
-    prior_outputs = {
-        BrandPhase.STRATEGIC_CORE.value: {"marker": "STRATEGIC_MARKER"},
-        BrandPhase.NARRATIVE_MESSAGING.value: {"marker": "NARRATIVE_MARKER"},
-        BrandPhase.VISUAL_IDENTITY.value: {"marker": "VISUAL_MARKER"},
-        BrandPhase.CHANNEL_ACTIVATION.value: {
-            "channel_guidelines": [{"channel": "website", "marker": "CHANNEL_MARKER"}]
-        },
-    }
-
-    comparison = compare_phase_prompts(mission, BrandPhase.GOVERNANCE, prior_outputs)
-
-    assert comparison.full_tokens >= comparison.selective_tokens
-    assert comparison.reduction_pct > 0
-
-
-def test_compare_phase_prompts_does_not_mutate_phase_spec() -> None:
+def test_phase_spec_context_override_restores_on_error() -> None:
     original = _PHASE_SPEC[BrandPhase.GOVERNANCE].context_phases
-
-    compare_phase_prompts(make_mission(), BrandPhase.GOVERNANCE, {})
-
-    assert _PHASE_SPEC[BrandPhase.GOVERNANCE].context_phases == original
-
-
-def test_compare_phase_prompts_restores_spec_even_on_error(monkeypatch) -> None:
-    """The second (full-context) ``_phase_task`` call fails after ``_PHASE_SPEC``
-    has already been mutated; the ``finally`` in ``compare_phase_prompts`` must
-    still restore the original ``context_phases`` before the exception propagates.
-    """
-    original = _PHASE_SPEC[BrandPhase.GOVERNANCE].context_phases
-
-    from branding_team import orchestrator as orchestrator_module
-
-    call_count = {"n": 0}
-    real_method = orchestrator_module.BrandingTeamOrchestrator._phase_task
-
-    def _fail_on_second_call(*args, **kwargs):
-        call_count["n"] += 1
-        if call_count["n"] >= 2:
-            raise RuntimeError("simulated failure building the full-context task string")
-        return real_method(*args, **kwargs)
-
-    monkeypatch.setattr(
-        orchestrator_module.BrandingTeamOrchestrator,
-        "_phase_task",
-        staticmethod(_fail_on_second_call),
-    )
 
     with pytest.raises(RuntimeError):
-        compare_phase_prompts(make_mission(), BrandPhase.GOVERNANCE, {})
+        with _phase_spec_context_override(BrandPhase.GOVERNANCE, ()):
+            assert _PHASE_SPEC[BrandPhase.GOVERNANCE].context_phases == ()
+            raise RuntimeError("boom")
 
     assert _PHASE_SPEC[BrandPhase.GOVERNANCE].context_phases == original
+
+
+def test_run_variant_selective_excludes_channel_activation_context() -> None:
+    """Integration check that _run_variant(full_context=False) genuinely goes
+    through the real, non-monkeypatched _PHASE_SPEC -- GOVERNANCE's task
+    string must never mention channel_activation or narrative_messaging,
+    the acceptance criterion #6965 exists to enforce.
+    """
+    orchestrator = BrandingTeamOrchestrator()
+    with _force_dummy_llm_provider():
+        _outputs, task_strings = _run_variant(orchestrator, make_mission(), full_context=False)
+
+    governance_task = task_strings[BrandPhase.GOVERNANCE]
+    assert BrandPhase.CHANNEL_ACTIVATION.value not in governance_task
+    assert BrandPhase.NARRATIVE_MESSAGING.value not in governance_task
+    assert BrandPhase.STRATEGIC_CORE.value in governance_task
+    assert BrandPhase.VISUAL_IDENTITY.value in governance_task
+
+
+def test_run_variant_full_context_includes_all_upstream() -> None:
+    orchestrator = BrandingTeamOrchestrator()
+    with _force_dummy_llm_provider():
+        _outputs, task_strings = _run_variant(orchestrator, make_mission(), full_context=True)
+
+    governance_task = task_strings[BrandPhase.GOVERNANCE]
+    assert BrandPhase.CHANNEL_ACTIVATION.value in governance_task
+    assert BrandPhase.NARRATIVE_MESSAGING.value in governance_task
+    assert BrandPhase.STRATEGIC_CORE.value in governance_task
+    assert BrandPhase.VISUAL_IDENTITY.value in governance_task
+
+
+def test_run_variant_full_context_task_is_never_shorter() -> None:
+    orchestrator = BrandingTeamOrchestrator()
+    mission = make_mission()
+    with _force_dummy_llm_provider():
+        _selective_outputs, selective_tasks = _run_variant(
+            orchestrator, mission, full_context=False
+        )
+        _full_outputs, full_tasks = _run_variant(orchestrator, mission, full_context=True)
+
+    assert len(full_tasks[BrandPhase.GOVERNANCE]) >= len(selective_tasks[BrandPhase.GOVERNANCE])
+
+
+def test_run_variant_returns_real_output_for_every_phase() -> None:
+    orchestrator = BrandingTeamOrchestrator()
+    with _force_dummy_llm_provider():
+        outputs, _task_strings = _run_variant(orchestrator, make_mission(), full_context=False)
+
+    from branding_team.graphs.shared import PHASE_ORDER
+
+    assert set(outputs.keys()) == set(PHASE_ORDER)
+    assert all(output is not None for output in outputs.values())
+
+
+def test_run_variant_restores_phase_spec_after_full_context() -> None:
+    orchestrator = BrandingTeamOrchestrator()
+    originals = {phase: spec.context_phases for phase, spec in _PHASE_SPEC.items()}
+
+    with _force_dummy_llm_provider():
+        _run_variant(orchestrator, make_mission(), full_context=True)
+
+    for phase, spec in _PHASE_SPEC.items():
+        assert spec.context_phases == originals[phase]

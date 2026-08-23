@@ -40,7 +40,6 @@ from branding_team.models import BrandingMission, BrandPhase
 from branding_team.orchestrator import _PHASE_SPEC, BrandingTeamOrchestrator
 from branding_team.tests.eval_fixtures.sample_missions import SAMPLE_MISSIONS
 from llm_service import config as _llm_config
-from shared.hitl.models import HumanReview
 
 PHASE5_REDUCTION_TARGET_PCT = 40.0
 
@@ -136,37 +135,68 @@ class PhasePromptComparison:
         return 100.0 * (self.full_tokens - self.selective_tokens) / self.full_tokens
 
 
-def compare_phase_prompts(
-    mission: BrandingMission, phase: BrandPhase, prior_outputs: dict[str, dict]
-) -> PhasePromptComparison:
-    """Build the selective- and full-context task prompts for *phase* and token-count both.
+@contextlib.contextmanager
+def _phase_spec_context_override(phase: BrandPhase, context_phases: tuple[BrandPhase, ...]):
+    """Temporarily replace ``_PHASE_SPEC[phase].context_phases``.
 
     Preconditions:
-        - ``phase`` is a runnable phase (a key of ``_PHASE_SPEC``).
-        - ``prior_outputs`` maps upstream phase value strings to JSON-safe
-          phase-output dicts.
+        ``phase`` is a key of ``_PHASE_SPEC``.
     Postconditions:
-        - Returns a comparison with both token counts computed.
-        - ``_PHASE_SPEC`` is left unmodified on return, even if an exception
-          is raised while building the full-context prompt.
+        ``_PHASE_SPEC[phase]`` is restored to its original value on exit,
+        even if the wrapped block raises.
     """
-    selective_task = BrandingTeamOrchestrator._phase_task(  # noqa: SLF001
-        mission, phase, prior_outputs
-    )
-
-    original_spec = _PHASE_SPEC[phase]
+    original = _PHASE_SPEC[phase]
+    _PHASE_SPEC[phase] = original._replace(context_phases=context_phases)
     try:
-        _PHASE_SPEC[phase] = original_spec._replace(context_phases=_full_context_phases(phase))
-        full_task = BrandingTeamOrchestrator._phase_task(mission, phase, prior_outputs)  # noqa: SLF001
+        yield
     finally:
-        _PHASE_SPEC[phase] = original_spec
+        _PHASE_SPEC[phase] = original
 
-    return PhasePromptComparison(
-        mission_name=mission.company_name,
-        phase=phase,
-        selective_tokens=_approx_token_count(selective_task),
-        full_tokens=_approx_token_count(full_task),
-    )
+
+def _run_variant(
+    orchestrator: BrandingTeamOrchestrator, mission: BrandingMission, *, full_context: bool
+) -> tuple[dict[BrandPhase, object], dict[BrandPhase, str]]:
+    """Run every phase for *mission* via ``run_single_phase``, genuinely executing one variant.
+
+    Calling ``run_single_phase`` phase by phase (mirroring the loop
+    ``orchestrator._run_phases_with_cache`` runs in production) rather than
+    ``orchestrator.run()`` means every phase's task prompt is built by the
+    real ``_phase_task`` -- the actual selective-context filtering logic --
+    and ``run_single_phase`` takes no ``phase_cache`` parameter at all (it's
+    what the Temporal activity calls directly), so this never touches the
+    shared, Redis-backed-when-configured ``PhaseOutputCache`` either.
+
+    Preconditions:
+        ``full_context`` selects which variant to run: ``False`` uses the
+        real ``_PHASE_SPEC[phase].context_phases`` for every phase (the
+        actual production/selective behavior); ``True`` temporarily widens
+        every phase's ``context_phases`` to its full upstream prefix (via
+        ``_full_context_phases``), simulating pre-selective-context behavior.
+    Postconditions:
+        - Returns ``(outputs, task_strings)``: ``outputs`` maps every
+          ``BrandPhase`` in ``PHASE_ORDER`` to its real (never degraded to
+          ``None``) output model; ``task_strings`` maps each phase to the
+          exact task string ``_phase_task`` built for it under this variant.
+        - ``_PHASE_SPEC`` is left unmodified on return, even if a phase
+          invocation raises.
+    """
+    outputs: dict[BrandPhase, object] = {}
+    task_strings: dict[BrandPhase, str] = {}
+    prior_outputs: dict[str, dict] = {}
+
+    for phase in PHASE_ORDER:
+        context_phases = (
+            _full_context_phases(phase) if full_context else _PHASE_SPEC[phase].context_phases
+        )
+        with _phase_spec_context_override(phase, context_phases):
+            task_strings[phase] = BrandingTeamOrchestrator._phase_task(  # noqa: SLF001
+                mission, phase, dict(prior_outputs)
+            )
+            output, _degraded = orchestrator.run_single_phase(mission, phase, prior_outputs)
+        outputs[phase] = output
+        prior_outputs[phase.value] = output.model_dump(mode="json")
+
+    return outputs, task_strings
 
 
 def run_eval(
@@ -180,20 +210,30 @@ def run_eval(
     Postconditions:
         - Returns one ``PhasePromptComparison`` per (mission, phase) pair for
           every phase after ``STRATEGIC_CORE`` (which never filters).
-        - Writes each mission's Phase 4 and Phase 5 outputs to
-          ``output_dir/<mission-slug>.json``.
+        - Writes each mission's Phase 4 and Phase 5 outputs, under both the
+          ``selective`` and ``full_context`` variants, to
+          ``output_dir/<mission-slug>.json`` -- each produced by its own
+          real, independent phase execution against genuinely different
+          task prompts (not a shared prompt-string-only comparison). Under
+          the forced dummy client the two variants' output *content* will
+          typically be identical regardless of prompt differences --
+          ``DummyLLMClient`` replies from an agent's output schema, not its
+          prompt text -- so this script validates that the real
+          selective-context code path runs (and measures its prompt-size
+          effect), not output quality; a live-provider run swapping in for
+          ``_force_dummy_llm_provider`` would be needed for actual
+          LLM-as-judge or manual quality comparison, which issue #6969
+          explicitly leaves out of scope.
         - Every phase genuinely executes through the forced dummy client for
-          every mission in this call: ``orchestrator.run`` is invoked with
-          ``_use_monolithic=True`` (its documented "testing/comparison-only
-          escape hatch"), which runs the pipeline as one graph invocation
-          and never touches ``PhaseOutputCache`` -- the shared, Redis-backed
-          (when configured) cache the production thread path memoizes
-          through. That cache's ``phase_input_hash`` omits
-          provider/model/code-version, so reusing it here (even clearing it
-          before/after) could still let a concurrent request observe a
-          dummy-produced entry, or a fail-open clear leave a stale live
-          entry in place; running fully outside it avoids both risks
-          structurally instead of racing them.
+          every mission in this call, via ``_run_variant`` -> ``run_single_phase``
+          (never ``orchestrator.run()``'s cached thread path or its
+          ``_use_monolithic`` escape hatch): ``run_single_phase`` takes no
+          ``phase_cache`` parameter at all, so this never touches the
+          shared, Redis-backed-when-configured ``PhaseOutputCache``, and it
+          genuinely calls the real ``_phase_task`` selective-context
+          filtering logic for both variants (unlike the monolithic graph
+          path, which wires phases via Strands edges and never calls
+          ``_phase_task`` at all).
     """
     missions = list(missions) if missions is not None else SAMPLE_MISSIONS
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -203,36 +243,37 @@ def run_eval(
 
     with _force_dummy_llm_provider():
         for mission in missions:
-            result = orchestrator.run(
-                mission=mission, human_review=HumanReview(approved=True), _use_monolithic=True
+            selective_outputs, selective_tasks = _run_variant(
+                orchestrator, mission, full_context=False
             )
+            full_outputs, full_tasks = _run_variant(orchestrator, mission, full_context=True)
 
-            prior_outputs: dict[str, dict] = {}
-            phase_outputs = {
-                BrandPhase.STRATEGIC_CORE: result.strategic_core,
-                BrandPhase.NARRATIVE_MESSAGING: result.narrative_messaging,
-                BrandPhase.VISUAL_IDENTITY: result.visual_identity,
-                BrandPhase.CHANNEL_ACTIVATION: result.channel_activation,
-                BrandPhase.GOVERNANCE: result.governance,
-            }
             for phase in PHASE_ORDER:
-                output = phase_outputs[phase]
-                if output is None:
+                if phase == BrandPhase.STRATEGIC_CORE:
                     continue
-                if phase != BrandPhase.STRATEGIC_CORE:
-                    comparisons.append(compare_phase_prompts(mission, phase, dict(prior_outputs)))
-                prior_outputs[phase.value] = output.model_dump(mode="json")
+                comparisons.append(
+                    PhasePromptComparison(
+                        mission_name=mission.company_name,
+                        phase=phase,
+                        selective_tokens=_approx_token_count(selective_tasks[phase]),
+                        full_tokens=_approx_token_count(full_tasks[phase]),
+                    )
+                )
 
             eval_record = {
                 "mission": mission.company_name,
-                "channel_activation": (
-                    result.channel_activation.model_dump(mode="json")
-                    if result.channel_activation
-                    else None
-                ),
-                "governance": (
-                    result.governance.model_dump(mode="json") if result.governance else None
-                ),
+                "selective": {
+                    "channel_activation": selective_outputs[
+                        BrandPhase.CHANNEL_ACTIVATION
+                    ].model_dump(mode="json"),
+                    "governance": selective_outputs[BrandPhase.GOVERNANCE].model_dump(mode="json"),
+                },
+                "full_context": {
+                    "channel_activation": full_outputs[BrandPhase.CHANNEL_ACTIVATION].model_dump(
+                        mode="json"
+                    ),
+                    "governance": full_outputs[BrandPhase.GOVERNANCE].model_dump(mode="json"),
+                },
             }
             out_path = output_dir / f"{_slugify(mission.company_name)}.json"
             out_path.write_text(json.dumps(eval_record, indent=2, default=str))
