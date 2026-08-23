@@ -24,7 +24,7 @@ from shared.dev_models.models import SystemArchitecture, Task
 from shared.git.git_utils import checkout_branch
 from software_engineering_team.shared.phases.deliver import make_run_deliver
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
-from software_engineering_team.shared.team_lead_base import BaseTeamLead
+from software_engineering_team.shared.team_lead_base import BaseTeamLead, warn_doc_agent_deprecated
 from software_engineering_team.shared.v2_orchestrator import ConfigDrivenV2DevelopmentAgent
 
 from . import models as _models
@@ -174,7 +174,12 @@ class FrontendDevelopmentAgent(ConfigDrivenV2DevelopmentAgent):
         merge_to_development defaults to True. When False, the deliver phase commits
         a feature branch and leaves it ready for external Tech Lead review instead of
         merging it into the development branch.
+
+        ``doc_agent`` is deprecated and ignored — see
+        :func:`software_engineering_team.shared.team_lead_base.warn_doc_agent_deprecated`.
         """
+        warn_doc_agent_deprecated(doc_agent)
+
         from .phases._profile import run_documentation_phase
 
         return self._run_development_workflow(
@@ -248,6 +253,10 @@ class FrontendCodeV2TeamLead(BaseTeamLead):
 
         merge_to_development defaults to True. When False, delivery prepares a
         feature branch for external review instead of merging it.
+
+        ``doc_agent`` is deprecated and ignored (see the dev-agent's
+        ``run_workflow``, which is where the deprecation warning fires once
+        this call delegates to it).
         """
         return self._run_setup_and_delegate(
             repo_path=repo_path,

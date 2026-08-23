@@ -33,6 +33,7 @@ docstring).
 from __future__ import annotations
 
 import logging
+import warnings
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, Mapping, Optional, Sequence, Tuple, TypeVar
 
@@ -64,6 +65,32 @@ _DEVELOPMENT_RESULT_FIELDS = (
     "failure_reason",
     "needs_followup",
 )
+
+
+def warn_doc_agent_deprecated(doc_agent: Any) -> None:
+    """Warn once per call site when a caller passes a non-None ``doc_agent``.
+
+    ``doc_agent`` is accepted by ``run_workflow``/``_run_setup_and_delegate``
+    for backward compatibility but is never forwarded to
+    ``ConfigDrivenV2DevelopmentAgent._run_development_workflow`` (which has no
+    such parameter) — real per-microtask documentation is produced instead by
+    the ``ToolAgentKind.DOCUMENTATION`` tool agent each team builds
+    internally. The four call sites (frontend/backend dev-agent and
+    team-lead ``run_workflow``) and ``_run_setup_and_delegate`` share this
+    helper so the deprecation message cannot drift between them.
+
+    Preconditions: none.
+    Postconditions: emits a ``DeprecationWarning`` via ``warnings.warn`` iff
+      ``doc_agent is not None``; otherwise a no-op.
+    """
+    if doc_agent is not None:
+        warnings.warn(
+            "doc_agent is deprecated and has no effect: it is not forwarded to "
+            "the development workflow. Documentation is generated via the "
+            "DocumentationToolAgent (ToolAgentKind.DOCUMENTATION) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
 
 def make_job_updater(
@@ -392,6 +419,9 @@ class BaseTeamLead(TeamLeadSharedState):
         ``merge_to_development``) are forwarded unchanged to the development agent's
         ``run_workflow``. ``merge_to_development`` defaults to True; when False,
         delivery prepares a feature branch for external review instead of merging.
+        ``doc_agent`` is deprecated and ignored; it is forwarded unchanged to the
+        development agent's ``run_workflow``, which is the single place the
+        deprecation warning (:func:`warn_doc_agent_deprecated`) fires.
 
         Preconditions:
           - ``repo_path`` is a filesystem path the setup phase can operate on (created
