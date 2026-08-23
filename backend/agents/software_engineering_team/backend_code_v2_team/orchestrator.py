@@ -35,11 +35,12 @@ from .models import (
 from .phases._profile import (
     BACKEND_CONFIG,
     PROFILE,
+    ReviewDependencies,
     configure_quality_tooling,
+    run_execution_with_review_gates,
     run_planning,
     run_setup,
 )
-from .phases.execution import ReviewDependencies, run_execution_with_review_gates
 from .prompts import DELIVER_COMMIT_MSG_TEMPLATE
 
 logger = logging.getLogger(__name__)

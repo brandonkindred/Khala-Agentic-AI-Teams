@@ -534,7 +534,7 @@ class TestPlanningPhase:
 
 class TestExecutionPhase:
     def test_run_execution_with_tool_runners(self, tmp_path):
-        from backend_code_v2_team.phases.execution import run_execution
+        from backend_code_v2_team.phases._profile import run_execution
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -569,7 +569,7 @@ class TestExecutionPhase:
         assert result.microtasks[0].status == MicrotaskStatus.COMPLETED
 
     def test_run_execution_general_fallback(self, tmp_path):
-        from backend_code_v2_team.phases.execution import run_execution
+        from backend_code_v2_team.phases._profile import run_execution
 
         from shared.dev_models.models import Task, TaskStatus, TaskType
 
@@ -1313,7 +1313,7 @@ class TestDbCSelfReviewWiring:
     """
 
     def test_gate_config_wires_dbc_self_review(self):
-        from backend_code_v2_team.phases.execution import GATE_CONFIG
+        from backend_code_v2_team.phases._profile import GATE_CONFIG
 
         from software_engineering_team.shared.phases.dbc_phase import run_dbc_comments_review
 

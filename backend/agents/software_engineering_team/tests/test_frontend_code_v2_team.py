@@ -882,7 +882,7 @@ class TestDbCSelfReviewWiring:
     """
 
     def test_gate_config_wires_dbc_self_review(self):
-        from frontend_code_v2_team.phases.execution import GATE_CONFIG
+        from frontend_code_v2_team.phases._profile import GATE_CONFIG
 
         from software_engineering_team.shared.phases.dbc_phase import run_dbc_comments_review
 
@@ -902,7 +902,7 @@ class TestDbCSelfReviewWiring:
         """
         from types import SimpleNamespace
 
-        from frontend_code_v2_team.phases.execution import GATE_CONFIG
+        from frontend_code_v2_team.phases._profile import GATE_CONFIG
 
         from software_engineering_team.shared.phases import dbc_phase
         from software_engineering_team.shared.phases.dbc_phase import _run_dbc_self_review

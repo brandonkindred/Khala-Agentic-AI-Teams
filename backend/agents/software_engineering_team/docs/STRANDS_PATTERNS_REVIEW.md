@@ -19,8 +19,8 @@ This is a **review and recommendation document**, not a full implementation. The
 ### 1. Backend & Frontend Code V2 review gates → `Graph`  *(quick win, highest ROI)*
 
 **Files**
-- `backend/agents/software_engineering_team/backend_code_v2_team/phases/execution.py:384-641` — `run_execution_with_review_gates()`
-- `backend/agents/software_engineering_team/frontend_code_v2_team/phases/execution.py` — identical structure
+- `backend/agents/software_engineering_team/backend_code_v2_team/phases/_profile.py` — `run_execution_with_review_gates()`
+- `backend/agents/software_engineering_team/frontend_code_v2_team/phases/_profile.py` — identical structure
 
 **Current state.** A single `while total_cycles < max_total_cycles` loop runs Code Review → QA → Security strictly sequentially. On QA failure (`:570`) and Security failure (`:638`) it calls `run_batch_coding_fixes(...)` and `continue`s, which **re-enters Code Review** on now-mutated files. `max_total_cycles = code_review_retries + qa_retries + security_retries = 9` by default.
 
@@ -161,8 +161,8 @@ Applied: #1 #2 #3 are flowcharts with typed outcomes → **Graph**. #4 is author
 
 ## Critical files to be modified (if proceeding with implementation)
 
-- `backend/agents/software_engineering_team/backend_code_v2_team/phases/execution.py` (#1)
-- `backend/agents/software_engineering_team/frontend_code_v2_team/phases/execution.py` (#1)
+- `backend/agents/software_engineering_team/backend_code_v2_team/phases/_profile.py` (#1)
+- `backend/agents/software_engineering_team/frontend_code_v2_team/phases/_profile.py` (#1)
 - `backend/agents/software_engineering_team/devops_team/orchestrator.py` (#2, #3)
 - `backend/agents/software_engineering_team/integration_team/agent.py` + siblings (#4 — also needs new resolver agent files)
 - `backend/agents/coding_team/orchestrator.py` (#5)

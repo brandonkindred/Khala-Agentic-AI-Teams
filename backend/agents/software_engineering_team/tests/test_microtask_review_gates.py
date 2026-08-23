@@ -199,7 +199,7 @@ class TestFrontendMicrotaskReviewFailedError:
 
 class TestFrontendReviewDependencies:
     def test_review_deps_defaults(self):
-        from frontend_code_v2_team.phases.execution import ReviewDependencies
+        from frontend_code_v2_team.phases._profile import ReviewDependencies
 
         deps = ReviewDependencies()
         assert deps.build_verifier is None
@@ -208,7 +208,7 @@ class TestFrontendReviewDependencies:
         assert deps.tool_agent_cache is None
 
     def test_review_deps_with_agents(self):
-        from frontend_code_v2_team.phases.execution import ReviewDependencies
+        from frontend_code_v2_team.phases._profile import ReviewDependencies
 
         from software_engineering_team.shared.agent_review import AgentReviewCache
 
@@ -391,7 +391,7 @@ class TestFrontendRunExecutionWithReviewGates:
             PlanningResult,
             ToolAgentKind,
         )
-        from frontend_code_v2_team.phases.execution import (
+        from frontend_code_v2_team.phases._profile import (
             ReviewDependencies,
             run_execution_with_review_gates,
         )
@@ -451,7 +451,7 @@ class TestFrontendRunExecutionWithReviewGates:
             PlanningResult,
             ToolAgentKind,
         )
-        from frontend_code_v2_team.phases.execution import (
+        from frontend_code_v2_team.phases._profile import (
             ReviewDependencies,
             run_execution_with_review_gates,
         )
@@ -527,7 +527,7 @@ class TestFrontendQaSecurityGateToolAgentScoping:
 
     def test_qa_gate_invokes_only_testing_qa_tool_agent(self, tmp_path):
         from frontend_code_v2_team.models import Microtask, ToolAgentKind
-        from frontend_code_v2_team.phases.execution import ReviewDependencies, _qa_gate
+        from frontend_code_v2_team.phases._profile import ReviewDependencies, _qa_gate
 
         qa_tool_agent = _FakeToolAgent()
         security_tool_agent = _FakeToolAgent()
@@ -555,7 +555,7 @@ class TestFrontendQaSecurityGateToolAgentScoping:
 
     def test_security_gate_invokes_only_security_tool_agent(self, tmp_path):
         from frontend_code_v2_team.models import Microtask, ToolAgentKind
-        from frontend_code_v2_team.phases.execution import ReviewDependencies, _security_gate
+        from frontend_code_v2_team.phases._profile import ReviewDependencies, _security_gate
 
         qa_tool_agent = _FakeToolAgent()
         security_tool_agent = _FakeToolAgent()
@@ -595,7 +595,7 @@ class TestFrontendQaSecurityGateToolAgentScoping:
             PlanningResult,
             ToolAgentKind,
         )
-        from frontend_code_v2_team.phases.execution import (
+        from frontend_code_v2_team.phases._profile import (
             ReviewDependencies,
             run_execution_with_review_gates,
         )
@@ -679,8 +679,8 @@ class TestFrontendQaSecurityCombinedPhaseSignal:
             PlanningResult,
             ToolAgentKind,
         )
-        from frontend_code_v2_team.phases import execution as exec_mod
-        from frontend_code_v2_team.phases.execution import (
+        from frontend_code_v2_team.phases import _profile as exec_mod
+        from frontend_code_v2_team.phases._profile import (
             ReviewDependencies,
             run_execution_with_review_gates,
         )
@@ -768,7 +768,7 @@ class TestBackendMicrotaskStatus:
 
 class TestBackendReviewDependencies:
     def test_review_deps_defaults(self):
-        from backend_code_v2_team.phases.execution import ReviewDependencies
+        from backend_code_v2_team.phases._profile import ReviewDependencies
 
         deps = ReviewDependencies()
         assert deps.build_verifier is None
@@ -925,7 +925,7 @@ class TestBackendRunExecutionWithReviewGates:
             PlanningResult,
             ToolAgentKind,
         )
-        from backend_code_v2_team.phases.execution import (
+        from backend_code_v2_team.phases._profile import (
             ReviewDependencies,
             run_execution_with_review_gates,
         )
@@ -1010,7 +1010,7 @@ class TestBackendRunExecutionWithReviewGates:
             PlanningResult,
             ToolAgentKind,
         )
-        from backend_code_v2_team.phases.execution import (
+        from backend_code_v2_team.phases._profile import (
             ReviewDependencies,
             run_execution_with_review_gates,
         )
@@ -1090,7 +1090,7 @@ class TestBackendRunExecutionWithReviewGates:
         """Kill switch on MicrotaskReviewConfig must reach run_code_review_phase."""
         from backend_code_v2_team.models import Microtask
         from backend_code_v2_team.phases import _profile as profile_mod
-        from backend_code_v2_team.phases.execution import ReviewDependencies, _code_review_gate
+        from backend_code_v2_team.phases._profile import ReviewDependencies, _code_review_gate
 
         seen: list = []
 
@@ -1131,8 +1131,8 @@ class TestBackendRunExecutionWithReviewGates:
             PlanningResult,
             ToolAgentKind,
         )
-        from backend_code_v2_team.phases import execution as exec_mod
-        from backend_code_v2_team.phases.execution import (
+        from backend_code_v2_team.phases import _profile as exec_mod
+        from backend_code_v2_team.phases._profile import (
             ReviewDependencies,
             run_execution_with_review_gates,
         )
