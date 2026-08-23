@@ -1,6 +1,6 @@
 """Tests for the lazy SE agent fleet built by ``_get_agents``.
 
-The fleet is a :class:`_LazyAgentRegistry`: agents are constructed on first
+The fleet is a :class:`_LazyAgentRegistry`: the agent is constructed on first
 subscript and cached, while membership tests and iteration never construct. Only
 ``architecture`` is read in production, so these tests pin that building the
 registry (and probing it with ``in`` / ``len`` / iteration) resolves *no*
@@ -22,20 +22,10 @@ if str(_team_dir) not in sys.path:
 import orchestrator  # noqa: E402
 import pytest  # noqa: E402
 
-# The 11 roles the fleet factory exposes. Kept explicit so a drift in the
+# The single role the fleet factory exposes. Kept explicit so a drift in the
 # registry's key set is a visible test failure, not a silent behavior change.
 _EXPECTED_ROLES = {
     "architecture",
-    "integration",
-    "devops",
-    "backend",
-    "frontend_code_v2",
-    "accessibility",
-    "documentation",
-    "git_setup",
-    "repair",
-    "linting_tool_agent",
-    "build_fix_specialist",
 }
 
 
@@ -65,9 +55,6 @@ def test_building_and_probing_the_fleet_constructs_nothing(get_client_spy):
     assert isinstance(agents, orchestrator._LazyAgentRegistry)
     # Membership reflects the key set without constructing.
     assert "architecture" in agents
-    assert "backend" in agents
-    # The standalone ``backend_code_v2`` key was replaced by ``backend``.
-    assert "backend_code_v2" not in agents
     # Iteration and length see every role, still without constructing.
     assert set(agents) == _EXPECTED_ROLES
     assert len(agents) == len(_EXPECTED_ROLES)
@@ -90,16 +77,6 @@ def test_subscript_builds_and_caches_the_agent(get_client_spy):
     # Second access returns the identical cached instance and adds no new call.
     assert agents["architecture"] is arch
     assert get_client_spy == ["architecture"]
-
-
-def test_git_setup_entry_resolves_without_get_client(get_client_spy):
-    """``git_setup`` uses a zero-arg class factory — no ``get_client`` cost."""
-    from software_engineering_team.git_setup_agent import GitSetupAgent
-
-    agents = orchestrator._get_agents()
-
-    assert isinstance(agents["git_setup"], GitSetupAgent)
-    assert get_client_spy == []
 
 
 def test_unknown_role_raises_key_error():

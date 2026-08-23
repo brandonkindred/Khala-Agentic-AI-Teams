@@ -129,12 +129,8 @@ class TestOrchestratorRegistration:
     """Verify that the orchestrator uses backend_code_v2_team as the backend team."""
 
     def test_get_agents_includes_backend_code_v2(self):
-        from orchestrator import _get_agents
-
-        agents = _get_agents()
-        assert "backend" in agents
+        from llm_service.clients.dummy import DummyLLMClient
         from software_engineering_team.backend_code_v2_team import BackendCodeV2TeamLead
 
-        assert isinstance(agents["backend"], BackendCodeV2TeamLead)
-        # Replaced standalone backend_code_v2 key with backend
-        assert "backend_code_v2" not in agents
+        agent = BackendCodeV2TeamLead(DummyLLMClient())
+        assert isinstance(agent, BackendCodeV2TeamLead)

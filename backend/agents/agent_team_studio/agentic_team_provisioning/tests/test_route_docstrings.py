@@ -18,7 +18,7 @@ import pytest
 
 _HERE = Path(__file__).resolve().parent
 _API_DIR = _HERE.parent / "api"
-_MAIN_PY = _API_DIR / "main.py"
+_ROUTES_HEALTH_PY = _API_DIR / "routes" / "health.py"
 _ROUTES_TESTING_PY = _API_DIR / "routes" / "testing.py"
 _SERVICES_TESTING_PY = _API_DIR / "services" / "testing.py"
 _ROUTES_PROCESSES_PY = _API_DIR / "routes" / "processes.py"
@@ -32,9 +32,7 @@ _SERVICES_ASSETS_PY = _API_DIR / "services" / "assets.py"
 _ROUTES_FORMS_PY = _API_DIR / "routes" / "forms.py"
 _SERVICES_FORMS_PY = _API_DIR / "services" / "forms.py"
 
-# Only the liveness probe is still defined directly on main.py; every other
-# endpoint group has been extracted into a dedicated router/service pair.
-_MAIN_ROUTE_HANDLERS = {
+_ROUTES_HEALTH_HANDLERS = {
     "health",
 }
 
@@ -138,15 +136,17 @@ def _missing_contract_sections(doc: str | None) -> List[str]:
     return missing
 
 
-def test_main_route_handlers_document_contracts():
-    funcs = _top_level_funcs(_MAIN_PY)
+def test_routes_health_handlers_document_contracts():
+    funcs = _top_level_funcs(_ROUTES_HEALTH_PY)
     violations = []
-    for name in sorted(_MAIN_ROUTE_HANDLERS):
+    for name in sorted(_ROUTES_HEALTH_HANDLERS):
         node = funcs.get(name)
-        assert node is not None, f"{name} not found as a top-level function in main.py"
+        assert node is not None, f"{name} not found as a top-level function in routes/health.py"
         missing = _missing_contract_sections(ast.get_docstring(node))
         if missing:
-            violations.append(f"main.py:{node.lineno}: {name} missing {', '.join(missing)}")
+            violations.append(
+                f"routes/health.py:{node.lineno}: {name} missing {', '.join(missing)}"
+            )
     assert violations == []
 
 
