@@ -192,8 +192,19 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
       .subscribe(({ agentId }) => {
         if (agentId !== this.selectedAgentId()) return;
         const current = this.sandbox();
-        if (!current) return;
-        this.sandbox.set({ ...current, status: 'cold', url: null });
+        this.sandbox.set(
+          current
+            ? { ...current, status: 'cold', url: null }
+            : {
+                agent_id: agentId,
+                team: '',
+                status: 'cold',
+                url: null,
+                service_name: '',
+                container_name: '',
+                host_port: 0,
+              },
+        );
       });
 
     this.destructiveActions.errors$
