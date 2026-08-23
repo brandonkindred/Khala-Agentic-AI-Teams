@@ -161,6 +161,11 @@ def deserialize_review_cache(data: Any) -> Dict[str, "tuple[str, Dict[str, Any]]
           entries (e.g. hand-edited or written by something other than
           ``serialize_review_cache``) — restore never grows the live cache
           past the size the rest of the system assumes it is bounded to.
+          The cap is enforced during iteration (evicting the oldest entry
+          the moment a new one would exceed it), not by first collecting
+          every valid entry and slicing afterward — so peak memory stays
+          O(20) regardless of how many entries ``data`` contains, rather
+          than O(len(data)) for an arbitrarily oversized stored value.
     """
     if not isinstance(data, list):
         return {}
@@ -189,12 +194,12 @@ def deserialize_review_cache(data: Any) -> Dict[str, "tuple[str, Dict[str, Any]]
         if "requested_changes" in verdict and not isinstance(verdict["requested_changes"], list):
             continue
         # A duplicate task_id must move to the end of iteration order on overwrite (dict
-        # reassignment alone keeps a key at its *first* insertion position), so the cap below
+        # reassignment alone keeps a key at its *first* insertion position), so eviction below
         # measures recency by each key's last occurrence, not its first.
         result.pop(task_id, None)
         result[task_id] = (cache_key, verdict)
-    if len(result) > max_cached_verdicts:
-        result = dict(list(result.items())[-max_cached_verdicts:])
+        if len(result) > max_cached_verdicts:
+            del result[next(iter(result))]
     return result
 
 
