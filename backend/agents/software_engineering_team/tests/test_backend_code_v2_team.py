@@ -127,7 +127,7 @@ class TestModels:
 class TestSetupPhase:
     def test_run_setup_on_existing_repo(self, tmp_path):
         """Verify setup on an existing repo stays on development without creating a branch."""
-        from backend_code_v2_team.phases.setup import run_setup
+        from backend_code_v2_team.phases._profile import run_setup
 
         init_repo_with_existing_development(tmp_path)
         result = run_setup(repo_path=tmp_path, task_title="My Project")
@@ -146,7 +146,7 @@ class TestSetupPhase:
 
     def test_run_setup_creates_repo_when_missing(self, tmp_path):
         """Verify setup initializes a new git repository when none exists."""
-        from backend_code_v2_team.phases.setup import run_setup
+        from backend_code_v2_team.phases._profile import run_setup
 
         assert not (tmp_path / ".git").exists()
         result = run_setup(repo_path=tmp_path, task_title="New Project")
@@ -160,7 +160,7 @@ class TestSetupPhase:
         files on a later pass and blocks the development agent's checkout of the
         review feature branch.
         """
-        from backend_code_v2_team.phases.setup import run_setup
+        from backend_code_v2_team.phases._profile import run_setup
 
         init_repo_with_existing_development(tmp_path)
         run_setup(repo_path=tmp_path, task_title="My Project")
@@ -181,7 +181,7 @@ class TestSetupPhase:
         ``run_setup`` on development must not strand untracked copies that abort
         the feature-branch checkout.
         """
-        from backend_code_v2_team.phases.setup import run_setup
+        from backend_code_v2_team.phases._profile import run_setup
 
         init_repo_with_existing_development(tmp_path)
         # Pass 1: configure + commit scaffolding on development.
@@ -217,7 +217,7 @@ class TestSetupPhase:
         Pre-existing uncommitted/untracked work must not be swept onto
         ``development`` under the scaffolding commit.
         """
-        from backend_code_v2_team.phases.setup import run_setup
+        from backend_code_v2_team.phases._profile import run_setup
 
         init_repo_with_existing_development(tmp_path)
         subprocess.run(
@@ -250,7 +250,7 @@ class TestSetupPhase:
         Otherwise setup reports success while the scaffolding stays uncommitted,
         silently reintroducing the feature-branch checkout conflict.
         """
-        from backend_code_v2_team.phases import setup as setup_mod
+        from backend_code_v2_team.phases import _profile as setup_mod
 
         init_repo_with_existing_development(tmp_path)
         monkeypatch.setattr(setup_mod, "commit_paths", lambda *a, **k: (False, "rejected by hook"))
@@ -266,7 +266,7 @@ class TestSetupPhase:
         and re-blocking the later feature-branch checkout. The committed file
         must be clean afterward.
         """
-        from backend_code_v2_team.phases.setup import run_setup
+        from backend_code_v2_team.phases._profile import run_setup
 
         init_repo_with_existing_development(tmp_path)
         subprocess.run(
@@ -295,7 +295,7 @@ class TestSetupPhase:
         it. Without that, pre-flight (and later quality gates) fail on a
         config-less branch.
         """
-        from backend_code_v2_team.phases.setup import configure_quality_tooling, run_setup
+        from backend_code_v2_team.phases._profile import configure_quality_tooling, run_setup
 
         init_repo_with_existing_development(tmp_path)
         subprocess.run(
@@ -331,6 +331,101 @@ class TestSetupPhase:
             text=True,
         )
         assert status.stdout.strip() == ""  # config committed to the feature branch, tree clean
+
+
+class TestSetupPhaseHooks:
+    """Direct unit tests for the backend lint/test detection hooks.
+
+    These hooks moved from the (coverage-omitted) former ``phases/setup.py``
+    into ``phases/_profile.py`` as part of unifying setup onto shared config;
+    ``_profile.py`` is not coverage-omitted, so the "already configured" and
+    unreadable-config branches need direct coverage here rather than relying
+    on the happy-path exercised via ``run_setup`` above.
+    """
+
+    def test_ensure_linting_configured_detects_existing_ruff_toml(self, tmp_path):
+        from backend_code_v2_team.phases._profile import _ensure_linting_configured
+
+        (tmp_path / "ruff.toml").write_text("", encoding="utf-8")
+        written: set = set()
+        assert _ensure_linting_configured(tmp_path, written) is True
+        assert written == set()
+
+    def test_ensure_linting_configured_detects_existing_flake8_file(self, tmp_path):
+        from backend_code_v2_team.phases._profile import _ensure_linting_configured
+
+        (tmp_path / ".flake8").write_text("", encoding="utf-8")
+        written: set = set()
+        assert _ensure_linting_configured(tmp_path, written) is True
+        assert written == set()
+
+    def test_ensure_linting_configured_detects_setup_cfg_flake8_section(self, tmp_path):
+        from backend_code_v2_team.phases._profile import _ensure_linting_configured
+
+        (tmp_path / "setup.cfg").write_text("[flake8]\nmax-line-length = 120\n", encoding="utf-8")
+        written: set = set()
+        assert _ensure_linting_configured(tmp_path, written) is True
+        assert written == set()
+
+    def test_ensure_linting_configured_handles_unreadable_pyproject(self, tmp_path, monkeypatch):
+        """A pyproject.toml that raises on its first (existing-config probe)
+        read must not raise; setup falls through to appending ruff config."""
+        from backend_code_v2_team.phases._profile import _ensure_linting_configured
+
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+        original_read_text = Path.read_text
+        calls = {"n": 0}
+
+        def flaky_read_text(self, *args, **kwargs):
+            if self.name == "pyproject.toml" and calls["n"] == 0:
+                calls["n"] += 1
+                raise OSError("simulated unreadable pyproject.toml")
+            return original_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", flaky_read_text)
+        written: set = set()
+        assert _ensure_linting_configured(tmp_path, written) is True
+        assert "[tool.ruff]" in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+
+    def test_ensure_linting_configured_handles_unreadable_setup_cfg(self, tmp_path):
+        from backend_code_v2_team.phases._profile import _ensure_linting_configured
+
+        (tmp_path / "setup.cfg").mkdir()
+        written: set = set()
+        assert _ensure_linting_configured(tmp_path, written) is True
+        assert "pyproject.toml" in written
+
+    def test_ensure_testing_configured_handles_unreadable_pyproject(self, tmp_path, monkeypatch):
+        """A pyproject.toml that raises on its first (existing-config probe)
+        read must not raise while probing for a pytest config; setup falls
+        through to creating one."""
+        from backend_code_v2_team.phases._profile import _ensure_testing_configured
+
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+        original_read_text = Path.read_text
+        calls = {"n": 0}
+
+        def flaky_read_text(self, *args, **kwargs):
+            if self.name == "pyproject.toml" and calls["n"] == 0:
+                calls["n"] += 1
+                raise OSError("simulated unreadable pyproject.toml")
+            return original_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", flaky_read_text)
+        written: set = set()
+        assert _ensure_testing_configured(tmp_path, written) is True
+        assert "tests/test_main.py" in written
+        assert "[tool.pytest" in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+
+    def test_ensure_testing_configured_writes_pytest_ini_without_pyproject(self, tmp_path):
+        """When no pyproject.toml exists at all, testing config falls back to
+        a standalone pytest.ini."""
+        from backend_code_v2_team.phases._profile import _ensure_testing_configured
+
+        written: set = set()
+        assert _ensure_testing_configured(tmp_path, written) is True
+        assert (tmp_path / "pytest.ini").exists()
+        assert "pytest.ini" in written
 
 
 # ---------------------------------------------------------------------------

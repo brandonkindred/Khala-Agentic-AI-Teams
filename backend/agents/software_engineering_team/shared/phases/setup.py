@@ -4,9 +4,9 @@ Shared Setup-phase implementation for the code-v2 teams.
 ``run_setup`` and ``configure_quality_tooling`` were identical between the
 backend and frontend teams; only the stack-specific ``_ensure_linting_configured``
 / ``_ensure_testing_configured`` hooks differ. Those hooks stay in each team's
-``phases/setup.py`` and are injected here. ``commit_paths`` is likewise injected
-(rather than imported here) so the team module remains the monkeypatch boundary
-for the scaffolding-commit tests.
+``phases/_profile.py`` and are injected here. ``commit_paths`` is likewise injected
+(rather than imported here) so the team's ``_profile.py`` module remains the
+monkeypatch boundary for the scaffolding-commit tests.
 """
 
 from __future__ import annotations
