@@ -137,10 +137,8 @@ omit = [
     # phases remain covered by unit tests with mocked tool agents.
     "agents/software_engineering_team/backend_code_v2_team/phases/review.py",
     "agents/software_engineering_team/backend_code_v2_team/phases/problem_solving.py",
-    "agents/software_engineering_team/backend_code_v2_team/phases/execution.py",
     "agents/software_engineering_team/frontend_code_v2_team/phases/review.py",
     "agents/software_engineering_team/frontend_code_v2_team/phases/problem_solving.py",
-    "agents/software_engineering_team/frontend_code_v2_team/phases/execution.py",
     # software_engineering_team: v2-team build specialist — wraps the
     # real `ng build`/`pytest` runners + LLM prompt repair loop, only
     # meaningful when those binaries and the LLM are reachable.
