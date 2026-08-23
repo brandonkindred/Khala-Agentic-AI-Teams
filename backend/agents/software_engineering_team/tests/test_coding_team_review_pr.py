@@ -2317,6 +2317,29 @@ class TestSystemicFindingsSynthesis:
         assert job["status"] == "completed"
         assert job["review_summary"]["systemic_findings"] == []
 
+    def test_main_review_submission_failure_never_orphans_the_systemic_comment(
+        self, monkeypatch: pytest.MonkeyPatch, review_app
+    ) -> None:
+        """The systemic comment posts only after _post_review_comments succeeds.
+
+        If it posted first and the main review submission then hit an
+        untolerated (non-API) error, the job would fail but the systemic
+        comment would already be on the PR, referencing findings whose own
+        comments never landed -- and a retried review would post a second
+        copy on top of it. Simulating that failure here must leave zero
+        standalone comments posted at all.
+        """
+        result = [{"title": "t", "description": "d", "related_locations": []}]
+        self._install_provider(monkeypatch, review_app, lambda *a: result)
+        review_app["github"]["client"].review_exc = RuntimeError("kaboom")
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert not any("Systemic / cross-cutting findings" in b for _n, b in gh.comments)
+
 
 class TestReviewPersistence:
     """The review flow records a code_review_runs row on start and keeps it in

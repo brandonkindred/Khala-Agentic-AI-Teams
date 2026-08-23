@@ -90,6 +90,15 @@
                   <span class="cr-chip">{{ s.total_issues }} finding(s)</span>
                   <span class="cr-chip">{{ s.inline_comments }} inline</span>
                   <span class="cr-chip">{{ commentFindings(s) }} comments</span>
+                  @if (systemicFindingsCount(s) > 0) {
+                    <button
+                      type="button"
+                      class="cr-chip cr-chip--systemic"
+                      (click)="onViewSystemicFindings(rec)"
+                    >
+                      {{ systemicFindingsCount(s) }} systemic pattern(s)
+                    </button>
+                  }
                 </span>
               } @else {
                 —

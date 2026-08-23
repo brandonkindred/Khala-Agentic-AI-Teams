@@ -1693,10 +1693,15 @@ def _synthesize_systemic_findings(
 ) -> List[Dict[str, Any]]:
     """Best-effort systemic/cross-cutting synthesis over this review's in-scope findings.
 
-    Runs after :func:`_partition_review_issues` (which already applied
-    :func:`partition_issues_by_existing_comments`) and before comment posting,
-    so it operates on the same deduped ``partition.pr_issues`` the individual
-    findings post from.
+    The synthesis CALL runs after :func:`_partition_review_issues` (which
+    already applied :func:`partition_issues_by_existing_comments`) and before
+    :func:`_post_review_comments`, so it operates on the same deduped
+    ``partition.pr_issues`` the individual findings post from. The caller
+    posts the resulting standalone comment separately, only once
+    :func:`_post_review_comments` has actually succeeded — computing the
+    synthesis here does not itself post anything, so an untolerated
+    ``GitHubAPIError`` from the main review submission can never leave an
+    orphaned systemic comment referencing findings that were never posted.
 
     Preconditions:
         - ``partition`` was produced by :func:`_partition_review_issues` for
@@ -2080,7 +2085,16 @@ def _run_pr_review_body(
                 mode.valid_by_path,
                 mode.changed_by_path,
             )
+            # Synthesize now (it only needs partition.pr_issues, already final), but
+            # defer POSTING the standalone comment until _post_review_comments below
+            # has actually succeeded: that call can raise an untolerated
+            # GitHubAPIError, and posting first would leave an orphaned systemic
+            # comment on the PR referencing findings that were never posted -- and a
+            # retried review would then post a second copy on top of it.
             systemic_findings = _synthesize_systemic_findings(provider, partition, mode, pr)
+            posting = _post_review_comments(
+                client, owner, repo, pr_number, pr, reviewer_login, output, partition
+            )
             if systemic_findings:
                 _main._safe_comment(
                     client,
@@ -2089,9 +2103,6 @@ def _run_pr_review_body(
                     pr_number,
                     format_systemic_findings_comment(systemic_findings),
                 )
-            posting = _post_review_comments(
-                client, owner, repo, pr_number, pr, reviewer_login, output, partition
-            )
             _finalize_review_outcome(
                 client,
                 job_id,
