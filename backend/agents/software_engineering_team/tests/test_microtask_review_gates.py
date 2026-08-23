@@ -891,6 +891,149 @@ class TestBackendAgentReviewCache:
         assert mock_qa.run.call_count == 2
 
 
+class TestBackendQaSecurityGateToolAgentScoping:
+    """Proves the backend path is unaffected by the frontend-only
+    ``scope_tool_agents_by_kind`` config hook (see
+    ``shared/v2_execution_bindings.py``'s module docstring): backend's
+    ``_qa_gate``/``_security_gate`` forward ``deps.tool_agents`` to
+    ``run_qa_testing_phase``/``run_security_testing_phase`` unscoped, relying
+    on those shared phase functions' own internal per-kind self-scoping --
+    unlike frontend's gates, which must narrow ``tool_agents`` themselves
+    before calling the unified ``run_microtask_review``.
+    """
+
+    def test_qa_gate_never_calls_scope_tool_agents_by_kind(self, tmp_path, monkeypatch):
+        import backend_code_v2_team.phases._profile as backend_profile
+        from backend_code_v2_team.models import Microtask, ToolAgentKind
+        from backend_code_v2_team.phases._profile import ReviewDependencies, _qa_gate
+
+        from software_engineering_team.shared import v2_execution_bindings
+
+        calls = []
+        spy = lambda *a, **kw: calls.append((a, kw))  # noqa: E731
+        # Patch both the defining module's attribute (catches
+        # ``v2_execution_bindings.scope_tool_agents_by_kind(...)``-style calls)
+        # and any same-named binding backend's own module may carry (catches a
+        # future ``from ...v2_execution_bindings import scope_tool_agents_by_kind``
+        # import there, which would otherwise keep its own reference to the
+        # unpatched original and silently defeat this guard).
+        monkeypatch.setattr(v2_execution_bindings, "scope_tool_agents_by_kind", spy)
+        monkeypatch.setattr(backend_profile, "scope_tool_agents_by_kind", spy, raising=False)
+
+        task = _create_test_task("backend")
+        mt = Microtask(id="mt-1", title="Test Microtask")
+        deps = ReviewDependencies(
+            tool_agents={
+                ToolAgentKind.TESTING_QA: _FakeToolAgent(),
+                ToolAgentKind.SECURITY: _FakeToolAgent(),
+            }
+        )
+
+        _qa_gate(
+            llm=MagicMock(),
+            task=task,
+            microtask=mt,
+            repo_path=tmp_path,
+            files={"src/main.py": "print('hi')"},
+            deps=deps,
+            detail_callback=lambda _d: None,
+        )
+
+        assert calls == []
+
+    def test_security_gate_never_calls_scope_tool_agents_by_kind(self, tmp_path, monkeypatch):
+        import backend_code_v2_team.phases._profile as backend_profile
+        from backend_code_v2_team.models import Microtask, ToolAgentKind
+        from backend_code_v2_team.phases._profile import ReviewDependencies, _security_gate
+
+        from software_engineering_team.shared import v2_execution_bindings
+
+        calls = []
+        spy = lambda *a, **kw: calls.append((a, kw))  # noqa: E731
+        monkeypatch.setattr(v2_execution_bindings, "scope_tool_agents_by_kind", spy)
+        monkeypatch.setattr(backend_profile, "scope_tool_agents_by_kind", spy, raising=False)
+
+        task = _create_test_task("backend")
+        mt = Microtask(id="mt-1", title="Test Microtask")
+        deps = ReviewDependencies(
+            tool_agents={
+                ToolAgentKind.TESTING_QA: _FakeToolAgent(),
+                ToolAgentKind.SECURITY: _FakeToolAgent(),
+            }
+        )
+
+        _security_gate(
+            llm=MagicMock(),
+            task=task,
+            microtask=mt,
+            repo_path=tmp_path,
+            files={"src/main.py": "print('hi')"},
+            deps=deps,
+            detail_callback=lambda _d: None,
+        )
+
+        assert calls == []
+
+    def test_qa_gate_invokes_only_testing_qa_tool_agent_via_self_scoping(self, tmp_path):
+        """Backend's shared ``run_qa_testing_phase`` narrows ``tool_agents`` to
+        ``testing_qa`` internally, so the outcome matches frontend's explicit
+        ``scope_tool_agents_by_kind`` narrowing even though the mechanism differs."""
+        from backend_code_v2_team.models import Microtask, ToolAgentKind
+        from backend_code_v2_team.phases._profile import ReviewDependencies, _qa_gate
+
+        qa_tool_agent = _FakeToolAgent()
+        security_tool_agent = _FakeToolAgent()
+        task = _create_test_task("backend")
+        mt = Microtask(id="mt-1", title="Test Microtask")
+        deps = ReviewDependencies(
+            tool_agents={
+                ToolAgentKind.TESTING_QA: qa_tool_agent,
+                ToolAgentKind.SECURITY: security_tool_agent,
+            }
+        )
+
+        _qa_gate(
+            llm=MagicMock(),
+            task=task,
+            microtask=mt,
+            repo_path=tmp_path,
+            files={"src/main.py": "print('hi')"},
+            deps=deps,
+            detail_callback=lambda _d: None,
+        )
+
+        assert qa_tool_agent.review_calls == 1
+        assert security_tool_agent.review_calls == 0
+
+    def test_security_gate_invokes_only_security_tool_agent_via_self_scoping(self, tmp_path):
+        from backend_code_v2_team.models import Microtask, ToolAgentKind
+        from backend_code_v2_team.phases._profile import ReviewDependencies, _security_gate
+
+        qa_tool_agent = _FakeToolAgent()
+        security_tool_agent = _FakeToolAgent()
+        task = _create_test_task("backend")
+        mt = Microtask(id="mt-1", title="Test Microtask")
+        deps = ReviewDependencies(
+            tool_agents={
+                ToolAgentKind.TESTING_QA: qa_tool_agent,
+                ToolAgentKind.SECURITY: security_tool_agent,
+            }
+        )
+
+        _security_gate(
+            llm=MagicMock(),
+            task=task,
+            microtask=mt,
+            repo_path=tmp_path,
+            files={"src/main.py": "print('hi')"},
+            deps=deps,
+            detail_callback=lambda _d: None,
+        )
+
+        assert security_tool_agent.review_calls == 1
+        assert qa_tool_agent.review_calls == 0
+
+
 class TestBackendRunProblemSolvingForMicrotask:
     def test_problem_solving_no_issues(self):
         """Problem solving should report resolved when the review has no issues.

@@ -5058,6 +5058,68 @@ class TestDuplicateProposalDetection:
         )
         assert job["review_summary"]["pending_issue_proposals"] == []
 
+    def test_full_chain_from_preexisting_split_to_persisted_survivors(self, review_app) -> None:
+        """End-to-end regression for the out-of-scope dedup path (issue #6364):
+        drives real off-diff/pre_existing findings through the current
+        change-map-driven scope split in ``_partition_review_issues``, then
+        through ``group_similar_findings`` -> ``proposal_from_findings`` ->
+        ``_detect_duplicate_proposals`` -> the ``matched_existing`` drop, and
+        asserts the exact set of proposals that survives to
+        ``pending_issue_proposals`` for human review on the Code Review page.
+
+        Three off-diff findings feed the split: two near-identical "bare
+        import" findings (same category/description shape) group into one
+        proposal, and a distinct "off-by-one" finding matches an already-open
+        GitHub issue and must be dropped. Only the grouped, unmatched proposal
+        should survive.
+        """
+        gh = review_app["github"]["client"]
+        gh.open_issues = [
+            Issue(
+                number=42,
+                title="off-by-one error in loop bound",
+                body="",
+                state="open",
+                html_url="https://example/issues/42",
+                labels=(),
+                id=42,
+            )
+        ]
+        job = _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high",
+                    line=2,
+                    file_path="legacy.py",
+                    description="off-by-one error in loop bound",
+                    pre_existing=True,
+                ),
+                _FakeReviewIssue(
+                    "low",
+                    line=3,
+                    file_path="legacy_a.py",
+                    description="bare import statement",
+                    pre_existing=True,
+                ),
+                _FakeReviewIssue(
+                    "low",
+                    line=4,
+                    file_path="legacy_b.py",
+                    description="bare import statement",
+                    pre_existing=True,
+                ),
+            ],
+        )
+        proposals = job["review_summary"]["pending_issue_proposals"]
+        assert len(proposals) == 1
+        survivor = proposals[0]
+        assert survivor["matched_existing"] is False
+        assert "bare import" in survivor["description"]
+        assert "off-by-one" not in survivor["description"]
+        # The matched finding was dropped, not merely flagged.
+        assert all("off-by-one" not in p["description"] for p in proposals)
+
     def test_unrelated_open_issue_does_not_mark_proposal_matched(self, review_app) -> None:
         gh = review_app["github"]["client"]
         gh.open_issues = [

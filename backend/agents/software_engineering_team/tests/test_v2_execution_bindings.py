@@ -21,6 +21,8 @@ from software_engineering_team.backend_code_v2_team.models import (
     ToolAgentKind,
 )
 from software_engineering_team.backend_code_v2_team.phases._profile import PROFILE as BE_PROFILE
+from software_engineering_team.frontend_code_v2_team import models as fe_models
+from software_engineering_team.frontend_code_v2_team.phases._profile import PROFILE as FE_PROFILE
 from software_engineering_team.shared.phases.execution import GateOutcome
 from software_engineering_team.shared.v2_execution_bindings import (
     ExecutionBindings,
@@ -147,3 +149,79 @@ class TestBuildExecutionBindings:
 
         bindings = _build_test_bindings(run_dbc_self_review=fake_dbc)
         assert bindings.gate_config.run_dbc_self_review is fake_dbc
+
+
+class TestFrontendProfileGateConfigMatchesProductionWiring:
+    """Proves the *actual* ``frontend_code_v2_team.phases._profile`` module-level
+    ``GATE_CONFIG`` -- built by ``build_execution_bindings`` at import time --
+    carries frontend's real gate closures and knobs, not just that the factory
+    accepts frontend-shaped arguments in the abstract. Mirrors
+    ``TestBuildExecutionBindings`` above (which does the analogous check via a
+    synthetic ``_build_test_bindings`` call against backend's real ``PROFILE``)."""
+
+    def test_gate_config_wires_the_real_frontend_gate_closures_and_statuses(self):
+        from frontend_code_v2_team.phases._profile import (
+            GATE_CONFIG,
+            _code_review_gate,
+            _qa_gate,
+            _security_gate,
+        )
+
+        assert GATE_CONFIG.run_code_review_gate is _code_review_gate
+        assert GATE_CONFIG.run_qa_gate is _qa_gate
+        assert GATE_CONFIG.run_security_gate is _security_gate
+        # Frontend's unified-review architecture funnels code-review/QA/security
+        # all through the same ``IN_REVIEW`` status (see _profile.py's module
+        # docstring) -- unlike backend's four distinct per-gate statuses.
+        assert GATE_CONFIG.status_code_review == MicrotaskStatus.IN_REVIEW
+        assert GATE_CONFIG.status_qa == MicrotaskStatus.IN_REVIEW
+        assert GATE_CONFIG.status_security == MicrotaskStatus.IN_REVIEW
+        assert GATE_CONFIG.status_qa_security == MicrotaskStatus.IN_QA_SECURITY_TESTING
+        assert GATE_CONFIG.max_cycles_requires_failing_gate is False
+        assert GATE_CONFIG.parallelize_qa_security is True
+
+
+class TestBuildExecutionBindingsFrontendParity:
+    """Proves ``build_execution_bindings`` itself is behavior-equivalent when
+    wired with ``frontend_code_v2_team``'s ``models``/``PROFILE``, not just
+    ``backend_code_v2_team``'s -- exercising the factory's general-microtask
+    execution path with frontend's stack profile. (The other constructor
+    arguments below stay ``_build_test_bindings``'s generic backend-shaped
+    stand-ins -- this test isn't a stand-in for frontend's real production
+    wiring, which ``TestFrontendProfileGateConfigMatchesProductionWiring``
+    above verifies directly.)"""
+
+    def test_run_execution_general_fallback_produces_files(self, tmp_path: Path):
+        stub_llm = MagicMock()
+
+        def parse_files_and_summary(raw: str) -> Dict[str, Any]:
+            return {"files": {"app.tsx": "export default function App() {}"}, "summary": "done"}
+
+        bindings = _build_test_bindings(
+            models=fe_models,
+            profile=FE_PROFILE,
+            parse_files_and_summary=parse_files_and_summary,
+        )
+
+        task = Task(
+            id="t1",
+            type=TaskType.FRONTEND,
+            assignee="frontend-code-v2",
+            status=TaskStatus.PENDING,
+            description="build",
+        )
+        planning = PlanningResult(
+            microtasks=[
+                Microtask(id="mt-1", tool_agent=ToolAgentKind.GENERAL, description="general task")
+            ],
+            language="typescript",
+        )
+
+        result = bindings.run_execution(
+            llm=stub_llm,
+            task=task,
+            planning_result=planning,
+            repo_path=tmp_path,
+        )
+        assert "app.tsx" in result.files
+        assert result.microtasks[0].status == MicrotaskStatus.COMPLETED
