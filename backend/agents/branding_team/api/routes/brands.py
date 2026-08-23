@@ -69,9 +69,9 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
     When the linking step reports a failure — a non-OK ``attach_conversation``
     result, or an ``update_brand`` that finds no row — the just-created brand is
     rolled back with ``store.delete_brand`` so that path leaves no listable,
-    conversation-less orphan. (An exception raised while creating the fresh
-    conversation on the create-new path, before the link is attempted, is not
-    caught here and would leave the brand row persisted.)
+    conversation-less orphan. On the create-new path, any exception raised by
+    ``conversation_store.create`` or ``store.update_brand`` is likewise caught,
+    the brand is rolled back, and the exception is re-raised to the caller.
 
     Preconditions:
         ``client_id`` is a non-empty path string; ``payload`` is a validated
@@ -84,7 +84,9 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
         deletes the just-created brand and maps the failure to HTTP status: 404
         for ``CONVERSATION_NOT_FOUND``/``BRAND_NOT_FOUND`` and 409 for
         ``ALREADY_ATTACHED``. On the create-new path, deletes the brand and raises
-        404 "Brand not found" if the conversation link cannot be written.
+        404 "Brand not found" if the conversation link cannot be written, or
+        deletes the brand and re-raises the original exception if
+        ``conversation_store.create``/``store.update_brand`` raises.
     """
     from branding_team.api import main as _main
 
@@ -124,8 +126,18 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
             raise HTTPException(status_code=404, detail="Brand not found")
         return attached_brand
 
-    conv_id = conversation_store.create(brand_id=brand.id, mission=mission)
-    updated_brand = _main.branding_store.update_brand(client_id, brand.id, conversation_id=conv_id)
+    try:
+        conv_id = conversation_store.create(brand_id=brand.id, mission=mission)
+        updated_brand = _main.branding_store.update_brand(
+            client_id, brand.id, conversation_id=conv_id
+        )
+    except Exception:
+        # Either call failing after create_brand already committed the brand
+        # row above would otherwise leave a listable, conversation-less
+        # orphan — roll it back and let the caller see the original error.
+        _main.branding_store.delete_brand(client_id, brand.id)
+        raise
+
     if not updated_brand:
         _main.branding_store.delete_brand(client_id, brand.id)
         raise HTTPException(status_code=404, detail="Brand not found")

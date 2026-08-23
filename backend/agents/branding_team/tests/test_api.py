@@ -767,6 +767,36 @@ def test_create_brand_with_unknown_conversation_id_returns_404() -> None:
     assert brands == []
 
 
+def test_create_brand_rolls_back_when_conversation_create_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exception from conversation_store.create() on the create-new path
+    must not leave a listable, conversation-less orphan brand behind."""
+    from branding_team.api import main as main_mod
+
+    create_c = client.post("/clients", json={"name": "ConvCreateFails Client"})
+    client_id = create_c.json()["id"]
+
+    def _boom(*args: Any, **kwargs: Any) -> str:
+        raise RuntimeError("conversation store unavailable")
+
+    monkeypatch.setattr(main_mod.conversation_store, "create", _boom)
+
+    with pytest.raises(RuntimeError, match="conversation store unavailable"):
+        client.post(
+            f"/clients/{client_id}/brands",
+            json={
+                "company_name": "ConvCreateFailsCo",
+                "company_description": "Company whose conversation creation fails",
+                "target_audience": "teams",
+            },
+        )
+
+    # The brand created before conversation_store.create() raised must not survive.
+    brands = client.get(f"/clients/{client_id}/brands").json()
+    assert brands == []
+
+
 def test_list_clients_pagination_query_params() -> None:
     """GET /clients honors limit/offset and returns non-overlapping pages."""
     created = {
