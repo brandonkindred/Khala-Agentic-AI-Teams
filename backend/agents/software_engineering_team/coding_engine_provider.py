@@ -29,9 +29,10 @@ import time. The insert is idempotent and triggers no engine import itself.
 
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # The two-insert idiom is inlined (rather than delegating to
 # ``shared.app.paths.bootstrap_syspath``) because importing ``shared.app`` runs its
@@ -44,6 +45,17 @@ for _p in (_TEAM_DIR / "architect_agents", _TEAM_DIR):
         if _s not in sys.path:
             sys.path.insert(0, _s)
 
+# One generic, config-driven resolution point for both code-v2 language
+# surfaces (Story 3e Step 2) -- replaces a hardcoded if/else that imported
+# each team's ``*CodeV2TeamLead`` separately. Keyed on the same ``team_kind``
+# values the two teams' ``V2TeamConfig``-backed orchestrators already use.
+# Deferred import (module name + class name, not the class itself) keeps this
+# module cheap to import, matching the class's existing per-method contract.
+_TEAM_LEAD_MODULES: Dict[str, Tuple[str, str]] = {
+    "frontend": ("software_engineering_team.frontend_code_v2_team", "FrontendCodeV2TeamLead"),
+    "backend": ("software_engineering_team.backend_code_v2_team", "BackendCodeV2TeamLead"),
+}
+
 
 class SECodeEngineProvider:
     """Concrete engine provider backed by the software-engineering team's engines."""
@@ -54,13 +66,10 @@ class SECodeEngineProvider:
         Preconditions: ``team_kind`` in ``{"frontend", "backend"}``.
         Postconditions: returns a code-v2 team-lead instance built from ``llm``.
         """
-        if team_kind == "frontend":
-            from software_engineering_team.frontend_code_v2_team import FrontendCodeV2TeamLead
-
-            return FrontendCodeV2TeamLead(llm)
-        from software_engineering_team.backend_code_v2_team import BackendCodeV2TeamLead
-
-        return BackendCodeV2TeamLead(llm)
+        module_name, class_name = _TEAM_LEAD_MODULES[team_kind]
+        module = importlib.import_module(module_name)
+        team_lead_cls = getattr(module, class_name)
+        return team_lead_cls(llm)
 
     def run_build_verification(self, repo_path: Any, agent_type: str, task_id: str) -> Any:
         from software_engineering_team.quality_gate_tools import run_build_verification
