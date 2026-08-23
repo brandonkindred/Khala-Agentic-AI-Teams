@@ -169,15 +169,16 @@ AcceptanceEvidenceModel = create_model(
     __doc__=(
         "Single source of truth for the ``acceptance_evidence`` prompt's field "
         "list. Its fields are built directly from ``QAOutput.model_fields`` "
-        "(same names, types, and defaults) for the names in "
+        "(same names, types, and ``FieldInfo`` — including ``default_factory`` "
+        "for collection fields) for the names in "
         "``ACCEPTANCE_EVIDENCE_FIELD_NAMES``, so the QA agent's user prompt — "
         'which derives its "Produce structured JSON with fields: ..." text '
         "from ``AcceptanceEvidenceModel.model_fields.keys()`` — cannot drift "
         "from the real ``QAOutput`` schema, including when a field's type "
-        "changes."
+        "or default changes."
     ),
     **{
-        name: (QAOutput.model_fields[name].annotation, QAOutput.model_fields[name].default)
+        name: (QAOutput.model_fields[name].annotation, QAOutput.model_fields[name])
         for name in ACCEPTANCE_EVIDENCE_FIELD_NAMES
     },
 )

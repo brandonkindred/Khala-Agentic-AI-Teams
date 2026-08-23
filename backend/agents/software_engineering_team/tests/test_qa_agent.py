@@ -246,6 +246,19 @@ def test_acceptance_evidence_model_field_types_match_qa_output() -> None:
         assert field.annotation == QAOutput.model_fields[name].annotation
 
 
+def test_acceptance_evidence_model_instantiates_with_no_args() -> None:
+    """Collection fields (``quality_gates``, ``acceptance_trace``,
+    ``validation_evidence``) use ``default_factory`` on ``QAOutput``; the
+    derived model must preserve that so it stays optional here too, not
+    become spuriously required."""
+    instance = AcceptanceEvidenceModel()
+    assert instance.approved is True
+    assert instance.quality_gates == {}
+    assert instance.acceptance_trace == []
+    assert instance.validation_evidence == []
+    assert instance.summary == ""
+
+
 def test_acceptance_evidence_prompt_field_list_matches_model() -> None:
     """The 'Produce structured JSON with fields: ...' text names exactly the
     ``AcceptanceEvidenceModel`` fields, not a hard-coded list."""
