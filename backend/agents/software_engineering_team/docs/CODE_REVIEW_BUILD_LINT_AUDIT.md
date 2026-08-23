@@ -35,7 +35,7 @@ len(critical_or_high) == 0`, and returned as a `PhaseReviewResult`
 
 That `PhaseReviewResult` is converted into a `GateOutcome`
 (`review_cycle.py:111-128`) by each team's `_code_review_gate` adapter
-(e.g. `backend_code_v2_team/phases/execution.py:170-221`), and consumed by
+(e.g. `backend_code_v2_team/phases/_profile.py:524-567`), and consumed by
 `review_cycle.py`'s `_run_review_cycles` to drive the
 Code-Review→QA→Security retry loop (`shared/phases/execution.py`). Within
 that loop, a build or lint failure is indistinguishable from a code-review
