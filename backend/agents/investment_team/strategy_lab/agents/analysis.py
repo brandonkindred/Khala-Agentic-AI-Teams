@@ -1,11 +1,10 @@
-"""Strands Agent for post-backtest narrative analysis (draft + self-review)."""
+"""Strands Agent for post-backtest narrative analysis (single self-reviewing draft call)."""
 
 from __future__ import annotations
 
-import functools
 import logging
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import List, Optional
 
 from ...models import WINNING_THRESHOLD, BacktestResult, StrategySpec, TradeRecord
 from ._agent_runner import run_single_shot_agent
@@ -40,28 +39,16 @@ _DRAFT_TEMPLATES = {
     name: (_PROMPT_DIR / name).read_text(encoding="utf-8")
     for name in ("analysis_win.md", "analysis_lose.md")
 }
+# Combines the drafting persona (analysis_system.md) with the critical-reviewer
+# discipline that previously lived in a separate self-review call
+# (analysis_review_system.md), so a single call carries both dispositions.
 _ANALYSIS_SYSTEM_PROMPT = (
     (_PROMPT_DIR / "analysis_system.md").read_text(encoding="utf-8")
     + "\n\n"
+    + (_PROMPT_DIR / "analysis_review_system.md").read_text(encoding="utf-8")
+    + "\n\n"
     + _STOP_ORDER_SEMANTICS
 )
-
-
-@functools.lru_cache(maxsize=None)
-def _get_analysis_review_system_prompt() -> str:
-    """Build and cache the self-review system prompt (body + stop-order block).
-
-    Preconditions: ``analysis_review_system.md`` exists and is readable UTF-8
-    text when first invoked.
-    Postconditions: returns a non-empty ``str`` containing the review body and
-    the stop-order semantics text, separated by a blank line; subsequent calls
-    return the same cached composed prompt without re-reading the file.
-    Invariants: module import does not invoke this helper.
-    """
-    body = (_PROMPT_DIR / "analysis_review_system.md").read_text(encoding="utf-8")
-    if not body:
-        raise ValueError("analysis_review_system.md must be non-empty")
-    return body + "\n\n" + _STOP_ORDER_SEMANTICS
 
 
 # The self-review risk-model check (instruction "1a"). Kept as its own
@@ -89,41 +76,35 @@ _RISK_MODEL_CHECK = (
     "nominal sizing line."
 )
 
-_SELF_REVIEW_PROMPT = """\
-Perform a self-review of the draft analysis below.
-
-## Strategy facts (source of truth)
-Asset class: {asset_class}
-Hypothesis: {hypothesis}
-Signal: {signal_definition}
-Entry rules: {entry_rules}
-Exit rules: {exit_rules}
-Sizing / risk: {sizing_rules}
-
-## Aggregated metrics (source of truth)
-Annualized: {annualized_return_pct:.1f}% | Total: {total_return_pct:.1f}% | Sharpe: {sharpe_ratio:.2f}
-Max DD: {max_drawdown_pct:.1f}% | Win rate: {win_rate_pct:.1f}% | Profit factor: {profit_factor:.2f} | Vol: {volatility_pct:.1f}%
-Outcome label: {outcome_label}
-
-## Simulated trades summary (source of truth)
-{simulated_trades_section}
-
-{alignment_status_section}
-{robustness_caveats_section}## Draft analysis to verify
-{draft_narrative}
-
-## Instructions
-0. If an "Alignment status" section above marks the run as misaligned, ensure the polished narrative opens with the disclaimer verbatim and contains no causal claims about strategy design ("worked because of X", "failed because of Y"). Treat the listed alignment issues as facts; do not soften them.
-1. Check every substantive claim in the draft against the strategy, metrics, and trade evidence.
+# Trailing section spliced into the draft prompt (see ``_with_self_review_checklist``)
+# so the model self-reviews against this checklist before returning its answer,
+# instead of a separate follow-up call reviewing the draft's own output.
+_SELF_REVIEW_CHECKLIST = """\
+## Self-review checklist (apply before finalizing — do not narrate this step)
+Before returning your answer, silently verify your draft against every item below and correct any violation in place. Return only the corrected final narrative — never your intermediate reasoning or two versions.
+1. Check every substantive claim against the strategy, metrics, and trade evidence above.
 {risk_model_check}
-1b. Verdict consistency: the WINNING/LOSING label ("Outcome label" above) is fixed deterministically — WINNING iff annualized return is at or above the 8% S&P-500 benchmark, LOSING below it. Do NOT let the draft reframe a WINNING strategy as a loss (or a LOSING one as a win) on the basis of Sharpe, drawdown, win rate, or the "Robustness caveats" section. Those are honest risk caveats that sit alongside the verdict, never a substitute for it — strike any sentence that calls a winning strategy a loss or otherwise contradicts the label.
+1b. Verdict consistency: the WINNING/LOSING label (Outcome label: {outcome_label}) is fixed deterministically — WINNING iff annualized return is at or above the 8% S&P-500 benchmark, LOSING below it. Do NOT reframe a WINNING strategy as a loss (or a LOSING one as a win) on the basis of Sharpe, drawdown, win rate, or the "Robustness caveats" section. Those are honest risk caveats that sit alongside the verdict, never a substitute for it — strike any sentence that contradicts the label.
 2. Remove or rewrite anything that is unsupported, vague, or contradicts the numbers.
-3. Produce a single polished narrative (5-10 sentences) that a risk committee could rely on.
-4. In verification_notes (2-4 sentences), state what you verified and any material corrections.
+3. The final narrative must be 5-10 sentences a risk committee could rely on."""
 
-Return ONLY JSON with no markdown:
-{{"revised_narrative": "...", "verification_notes": "..."}}
-"""
+_JSON_INSTRUCTION_MARKER = "Return ONLY JSON with no markdown:"
+
+
+def _with_self_review_checklist(rendered_prompt: str, checklist: str) -> str:
+    """Splice the self-review checklist into a rendered draft prompt.
+
+    Preconditions: ``rendered_prompt`` contains exactly one occurrence of
+    :data:`_JSON_INSTRUCTION_MARKER` (guaranteed by ``analysis_win.md`` /
+    ``analysis_lose.md``, which both end with that instruction).
+    Postconditions: returns ``rendered_prompt`` with ``checklist`` inserted
+    immediately before the JSON-return instruction, separated by blank lines,
+    so the format directive stays the model's last-read instruction.
+    """
+    prefix, marker, suffix = rendered_prompt.partition(_JSON_INSTRUCTION_MARKER)
+    assert marker, "draft template must contain the JSON-return instruction marker"
+    return f"{prefix}{checklist}\n\n{marker}{suffix}"
+
 
 _MISALIGNED_DISCLAIMER = (
     "The executed trades did not faithfully implement the specification; "
@@ -132,7 +113,7 @@ _MISALIGNED_DISCLAIMER = (
 
 
 class AnalysisAgent:
-    """Generate and self-review a post-backtest narrative analysis."""
+    """Generate a self-reviewed post-backtest narrative analysis in one LLM call."""
 
     def run(
         self,
@@ -140,15 +121,13 @@ class AnalysisAgent:
         metrics: BacktestResult,
         trades: List[TradeRecord],
         rationale: str,
-        on_sub_phase: Any = None,
         is_winning: Optional[bool] = None,
         alignment_report: Optional[TradeAlignmentReport] = None,
         robustness_caveats: Optional[str] = None,
     ) -> str:
-        """Produce a polished analysis narrative via draft + self-review.
+        """Produce a polished, self-reviewed analysis narrative in a single LLM call.
 
         Args:
-            on_sub_phase: Optional callback ``(sub_phase: str) -> None`` for progress.
             is_winning: Authoritative verdict from the orchestrator. When None,
                 falls back to a simplified return-only check
                 (``annualized_return_pct >= WINNING_THRESHOLD``). This is NOT
@@ -165,16 +144,16 @@ class AnalysisAgent:
                 diagnostics never change it; they surface as caveats only (see
                 ``robustness_caveats``).
             robustness_caveats: Pre-rendered ``## Robustness caveats`` block to
-                inject into the draft + self-review prompts. When None, it is
-                derived from ``metrics`` via :func:`format_robustness_caveats`
+                inject into the draft prompt. When None, it is derived from
+                ``metrics`` via :func:`format_robustness_caveats`
                 (acceptance_reason + out-of-sample diagnostics), so the narrative
                 can cite walk-forward / DSR / regime concerns as honest caveats on
                 a winner without reframing it as a loss. Empty string when there
                 are no concerns, keeping clean-run prompts byte-identical.
             alignment_report: Latest ``TradeAlignmentReport`` from the alignment
-                loop. When ``aligned=False``, both the draft and self-review
-                prompts surface a disclaimer + the concrete alignment issues and
-                forbid causal claims about strategy design (#532). When None or
+                loop. When ``aligned=False``, the draft prompt surfaces a
+                disclaimer + the concrete alignment issues and forbids causal
+                claims about strategy design (#532). When None or
                 ``aligned=True``, the section is empty / a one-line affirmation
                 so legacy callers and clean runs are unaffected.
 
@@ -190,7 +169,10 @@ class AnalysisAgent:
             else format_robustness_caveats(metrics)
         )
 
-        # Phase 1: Draft
+        # Single self-reviewing draft call: the self-review checklist is spliced
+        # into the draft prompt as a trailing section (see
+        # ``_with_self_review_checklist``) so the model verifies its own claims
+        # while drafting rather than in a separate follow-up call.
         template_file = "analysis_win.md" if is_winning else "analysis_lose.md"
         draft_template = _DRAFT_TEMPLATES[template_file]
         system_prompt = _ANALYSIS_SYSTEM_PROMPT
@@ -210,6 +192,11 @@ class AnalysisAgent:
             alignment_status_section=alignment_section,
             robustness_caveats_section=caveats_section,
         )
+        checklist = _SELF_REVIEW_CHECKLIST.format(
+            risk_model_check=_RISK_MODEL_CHECK,
+            outcome_label="WINNING" if is_winning else "LOSING",
+        )
+        draft_prompt = _with_self_review_checklist(draft_prompt, checklist)
 
         def _on_draft_failure(exc: Exception) -> str:
             logger.exception("Draft analysis failed")
@@ -219,7 +206,7 @@ class AnalysisAgent:
         # trip is a cycle-level stop and must propagate bare rather than being
         # handed to ``on_failure`` (which would swallow it into
         # ``_fallback_narrative``). That stays correct if charging is ever
-        # enabled at these sites.
+        # enabled at this site.
         ok, draft_parsed = run_single_shot_agent(
             agent_key="strategy_analysis",
             phase="analysis_draft",
@@ -236,48 +223,6 @@ class AnalysisAgent:
 
         if not draft_narrative:
             return _fallback_narrative(spec, metrics, is_winning, alignment_report)
-
-        # Phase 2: Self-review
-        if on_sub_phase:
-            on_sub_phase("review")
-        review_prompt = _SELF_REVIEW_PROMPT.format(
-            **spec_prompt_fields(spec),
-            risk_model_check=_RISK_MODEL_CHECK,
-            annualized_return_pct=metrics.annualized_return_pct,
-            total_return_pct=metrics.total_return_pct,
-            sharpe_ratio=metrics.sharpe_ratio,
-            max_drawdown_pct=metrics.max_drawdown_pct,
-            win_rate_pct=metrics.win_rate_pct,
-            profit_factor=metrics.profit_factor,
-            volatility_pct=metrics.volatility_pct,
-            outcome_label="WINNING" if is_winning else "LOSING",
-            simulated_trades_section=trades_summary,
-            alignment_status_section=alignment_section,
-            robustness_caveats_section=caveats_section,
-            draft_narrative=draft_narrative,
-        )
-
-        review_system = _get_analysis_review_system_prompt()
-
-        def _on_review_failure(exc: Exception) -> None:
-            logger.exception("Self-review failed, using draft")
-            return None
-
-        ok, review_parsed = run_single_shot_agent(
-            agent_key="strategy_analysis",
-            phase="analysis_review",
-            system_prompt=review_system,
-            user_prompt=review_prompt,
-            charge=False,
-            # Same budget-propagation invariant as the draft call above.
-            guard_design_budget=True,
-            logger=logger,
-            on_failure=_on_review_failure,
-        )
-        if ok:
-            revised = review_parsed.get("revised_narrative", "")
-            if revised:
-                return _ensure_misalignment_disclaimer(revised, alignment_report)
 
         return _ensure_misalignment_disclaimer(draft_narrative, alignment_report)
 
