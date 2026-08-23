@@ -254,10 +254,14 @@ class FrontendCodeV2TeamLead(BaseTeamLead):
         merge_to_development defaults to True. When False, delivery prepares a
         feature branch for external review instead of merging it.
 
-        ``doc_agent`` is deprecated and ignored (see the dev-agent's
-        ``run_workflow``, which is where the deprecation warning fires once
-        this call delegates to it).
+        ``doc_agent`` is deprecated and ignored — see
+        :func:`software_engineering_team.shared.team_lead_base.warn_doc_agent_deprecated`.
+        The warning fires here, unconditionally, before setup runs (so it
+        still fires even if setup or the lint/test readiness gate fails);
+        ``doc_agent`` is not forwarded past this point.
         """
+        warn_doc_agent_deprecated(doc_agent)
+
         return self._run_setup_and_delegate(
             repo_path=repo_path,
             task=task,
@@ -270,7 +274,7 @@ class FrontendCodeV2TeamLead(BaseTeamLead):
             security_agent=security_agent,
             code_review_agent=code_review_agent,
             build_verifier=build_verifier,
-            doc_agent=doc_agent,
+            doc_agent=None,
             linting_tool_agent=linting_tool_agent,
             job_updater=job_updater,
             review_config=review_config,

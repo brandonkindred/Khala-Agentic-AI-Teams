@@ -1340,6 +1340,61 @@ class TestBackendDocAgentDeprecated:
         assert result.success is True
         assert not any(issubclass(w.category, DeprecationWarning) for w in recwarn.list)
 
+    def test_team_lead_warns_even_when_setup_fails(self, tmp_path, monkeypatch):
+        """The team-lead warns for doc_agent unconditionally, before the lint/test gate."""
+        from backend_code_v2_team import orchestrator as orch
+
+        monkeypatch.setattr(
+            orch,
+            "run_setup",
+            lambda **_kwargs: SetupResult(linting_configured=False, testing_configured=False),
+        )
+
+        with pytest.warns(DeprecationWarning, match="doc_agent"):
+            result = orch.BackendCodeV2TeamLead(MagicMock()).run_workflow(
+                repo_path=tmp_path,
+                task=self._task(),
+                doc_agent=MagicMock(),
+            )
+
+        assert result.success is False
+        assert "linting is not configured" in result.failure_reason.lower()
+
+    def test_team_lead_warns_exactly_once_when_delegation_succeeds(self, tmp_path, monkeypatch):
+        """The forwarded doc_agent=None to the dev agent must not double the warning."""
+        from backend_code_v2_team import orchestrator as orch
+        from backend_code_v2_team.models import BackendCodeV2WorkflowResult
+
+        received: dict = {}
+
+        class _DevelopmentAgent:
+            def __init__(self, _llm):
+                pass
+
+            def run_workflow(self, **kwargs):
+                received.update(kwargs)
+                return BackendCodeV2WorkflowResult(task_id="api", success=True)
+
+        monkeypatch.setattr(
+            orch,
+            "run_setup",
+            lambda **_kwargs: SetupResult(linting_configured=True, testing_configured=True),
+        )
+        monkeypatch.setattr(orch, "BackendDevelopmentAgent", _DevelopmentAgent)
+
+        with pytest.warns(DeprecationWarning, match="doc_agent") as record:
+            result = orch.BackendCodeV2TeamLead(MagicMock()).run_workflow(
+                repo_path=tmp_path,
+                task=self._task(),
+                merge_to_development=False,
+                doc_agent=MagicMock(),
+            )
+
+        assert result.success is True
+        assert received["doc_agent"] is None
+        doc_agent_warnings = [w for w in record.list if issubclass(w.category, DeprecationWarning)]
+        assert len(doc_agent_warnings) == 1
+
 
 # ---------------------------------------------------------------------------
 # Documentation self-review: team wiring around the shared helper
