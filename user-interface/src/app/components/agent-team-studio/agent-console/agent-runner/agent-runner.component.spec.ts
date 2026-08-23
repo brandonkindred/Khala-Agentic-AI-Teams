@@ -197,6 +197,26 @@ describe('AgentRunnerComponent', () => {
       component.preselectedAgentId = 'blogging.writer';
       expect(api.getAgent).not.toHaveBeenCalled();
     });
+
+    it('discards a late-arriving run response when a new agent is preselected mid-run', () => {
+      component.preselectedAgentId = 'blogging.writer';
+      const invoke$ = new Subject<HttpResponse<unknown>>();
+      api.invoke.mockReturnValue(invoke$);
+
+      component.run();
+      expect(component.running()).toBe(true);
+
+      component.preselectedAgentId = 'other.agent';
+      expect(component.running()).toBe(false);
+
+      const envelope: InvokeEnvelope = { output: { ok: true }, duration_ms: 1, trace_id: 'stale', logs_tail: [] };
+      expect(() =>
+        invoke$.next(new HttpResponse({ status: 200, body: envelope })),
+      ).not.toThrow();
+
+      expect(component.lastResponse()).toBeNull();
+      expect(component.running()).toBe(false);
+    });
   });
 
   describe('onAgentChange', () => {

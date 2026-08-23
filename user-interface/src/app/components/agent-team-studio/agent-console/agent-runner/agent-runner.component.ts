@@ -107,9 +107,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   /** Preselect an agent (wired from the Catalog drawer). */
   @Input() set preselectedAgentId(value: string | null) {
     if (value && value !== this.selectedAgentId()) {
-      this.selectedAgentId.set(value);
-      this.destructiveError.set(null);
-      this.loadAgentDetail(value);
+      this.onAgentChange(value);
     }
   }
 
