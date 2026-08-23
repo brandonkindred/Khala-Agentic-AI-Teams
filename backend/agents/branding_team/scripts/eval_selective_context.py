@@ -38,7 +38,6 @@ from typing import Optional
 from branding_team.graphs.shared import PHASE_ORDER
 from branding_team.models import BrandingMission, BrandPhase
 from branding_team.orchestrator import _PHASE_SPEC, BrandingTeamOrchestrator
-from branding_team.shared.phase_output_cache import clear_phase_output_cache
 from branding_team.tests.eval_fixtures.sample_missions import SAMPLE_MISSIONS
 from llm_service import config as _llm_config
 from shared.hitl.models import HumanReview
@@ -183,16 +182,18 @@ def run_eval(
           every phase after ``STRATEGIC_CORE`` (which never filters).
         - Writes each mission's Phase 4 and Phase 5 outputs to
           ``output_dir/<mission-slug>.json``.
-        - The shared phase-output cache (``PhaseOutputCache``, backed by
-          Redis when configured) is cleared before this call's phases run
-          and again once they finish, so no phase output produced by a live
-          provider, a different code version, or a prior invocation of this
-          script can be served as a cache hit and silently feed the token
-          counts or saved JSON -- every phase in this call genuinely
-          executes through the forced dummy client. ``phase_input_hash``
-          does not fold in provider/model/code-version, only mission and
-          filtered upstream outputs, so without this the shared cache could
-          otherwise mask a live/stale result behind a hash collision.
+        - Every phase genuinely executes through the forced dummy client for
+          every mission in this call: ``orchestrator.run`` is invoked with
+          ``_use_monolithic=True`` (its documented "testing/comparison-only
+          escape hatch"), which runs the pipeline as one graph invocation
+          and never touches ``PhaseOutputCache`` -- the shared, Redis-backed
+          (when configured) cache the production thread path memoizes
+          through. That cache's ``phase_input_hash`` omits
+          provider/model/code-version, so reusing it here (even clearing it
+          before/after) could still let a concurrent request observe a
+          dummy-produced entry, or a fail-open clear leave a stale live
+          entry in place; running fully outside it avoids both risks
+          structurally instead of racing them.
     """
     missions = list(missions) if missions is not None else SAMPLE_MISSIONS
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -200,45 +201,41 @@ def run_eval(
     orchestrator = BrandingTeamOrchestrator()
     comparisons: list[PhasePromptComparison] = []
 
-    clear_phase_output_cache()
-    try:
-        with _force_dummy_llm_provider():
-            for mission in missions:
-                result = orchestrator.run(mission=mission, human_review=HumanReview(approved=True))
+    with _force_dummy_llm_provider():
+        for mission in missions:
+            result = orchestrator.run(
+                mission=mission, human_review=HumanReview(approved=True), _use_monolithic=True
+            )
 
-                prior_outputs: dict[str, dict] = {}
-                phase_outputs = {
-                    BrandPhase.STRATEGIC_CORE: result.strategic_core,
-                    BrandPhase.NARRATIVE_MESSAGING: result.narrative_messaging,
-                    BrandPhase.VISUAL_IDENTITY: result.visual_identity,
-                    BrandPhase.CHANNEL_ACTIVATION: result.channel_activation,
-                    BrandPhase.GOVERNANCE: result.governance,
-                }
-                for phase in PHASE_ORDER:
-                    output = phase_outputs[phase]
-                    if output is None:
-                        continue
-                    if phase != BrandPhase.STRATEGIC_CORE:
-                        comparisons.append(
-                            compare_phase_prompts(mission, phase, dict(prior_outputs))
-                        )
-                    prior_outputs[phase.value] = output.model_dump(mode="json")
+            prior_outputs: dict[str, dict] = {}
+            phase_outputs = {
+                BrandPhase.STRATEGIC_CORE: result.strategic_core,
+                BrandPhase.NARRATIVE_MESSAGING: result.narrative_messaging,
+                BrandPhase.VISUAL_IDENTITY: result.visual_identity,
+                BrandPhase.CHANNEL_ACTIVATION: result.channel_activation,
+                BrandPhase.GOVERNANCE: result.governance,
+            }
+            for phase in PHASE_ORDER:
+                output = phase_outputs[phase]
+                if output is None:
+                    continue
+                if phase != BrandPhase.STRATEGIC_CORE:
+                    comparisons.append(compare_phase_prompts(mission, phase, dict(prior_outputs)))
+                prior_outputs[phase.value] = output.model_dump(mode="json")
 
-                eval_record = {
-                    "mission": mission.company_name,
-                    "channel_activation": (
-                        result.channel_activation.model_dump(mode="json")
-                        if result.channel_activation
-                        else None
-                    ),
-                    "governance": (
-                        result.governance.model_dump(mode="json") if result.governance else None
-                    ),
-                }
-                out_path = output_dir / f"{_slugify(mission.company_name)}.json"
-                out_path.write_text(json.dumps(eval_record, indent=2, default=str))
-    finally:
-        clear_phase_output_cache()
+            eval_record = {
+                "mission": mission.company_name,
+                "channel_activation": (
+                    result.channel_activation.model_dump(mode="json")
+                    if result.channel_activation
+                    else None
+                ),
+                "governance": (
+                    result.governance.model_dump(mode="json") if result.governance else None
+                ),
+            }
+            out_path = output_dir / f"{_slugify(mission.company_name)}.json"
+            out_path.write_text(json.dumps(eval_record, indent=2, default=str))
 
     return comparisons
 
