@@ -69,9 +69,13 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
     When the linking step reports a failure — a non-OK ``attach_conversation``
     result, or an ``update_brand`` that finds no row — the just-created brand is
     rolled back with ``store.delete_brand`` so that path leaves no listable,
-    conversation-less orphan. On the create-new path, any exception raised by
-    ``conversation_store.create`` or ``store.update_brand`` is likewise caught,
-    the brand is rolled back, and the exception is re-raised to the caller.
+    conversation-less orphan. On the create-new path, a failing ``update_brand``
+    (whether it raises or returns falsy) also clears the fresh conversation's
+    ``brand_id`` via ``conversation_store.set_brand(conv_id, None)`` — otherwise
+    it would keep pointing at the now-deleted brand id, which
+    ``store.attach_conversation`` treats as already attached, permanently
+    blocking that conversation from ever being attached elsewhere. Any
+    exception is re-raised to the caller after this cleanup.
 
     Preconditions:
         ``client_id`` is a non-empty path string; ``payload`` is a validated
@@ -83,10 +87,11 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
         conversation via ``store.attach_conversation``; on a non-OK result it
         deletes the just-created brand and maps the failure to HTTP status: 404
         for ``CONVERSATION_NOT_FOUND``/``BRAND_NOT_FOUND`` and 409 for
-        ``ALREADY_ATTACHED``. On the create-new path, deletes the brand and raises
+        ``ALREADY_ATTACHED``. On the create-new path, deletes the brand — and,
+        once the conversation exists, clears its ``brand_id`` too — then raises
         404 "Brand not found" if the conversation link cannot be written, or
-        deletes the brand and re-raises the original exception if
-        ``conversation_store.create``/``store.update_brand`` raises.
+        re-raises the original exception if ``conversation_store.create``/
+        ``store.update_brand`` raises.
     """
     from branding_team.api import main as _main
 
@@ -126,6 +131,7 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
             raise HTTPException(status_code=404, detail="Brand not found")
         return attached_brand
 
+    conv_id = None
     try:
         conv_id = conversation_store.create(brand_id=brand.id, mission=mission)
         updated_brand = _main.branding_store.update_brand(
@@ -135,11 +141,19 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
         # Either call failing after create_brand already committed the brand
         # row above would otherwise leave a listable, conversation-less
         # orphan — roll it back and let the caller see the original error.
+        # conversation_store.create already stamped conv_id's brand_id with
+        # the brand we're about to delete, so clear it too (when it got that
+        # far) or the conversation is left pointing at a brand id that no
+        # longer exists — unusable, since attach_conversation treats any
+        # non-null brand_id as already attached to that (now-gone) brand.
         _main.branding_store.delete_brand(client_id, brand.id)
+        if conv_id:
+            conversation_store.set_brand(conv_id, None)
         raise
 
     if not updated_brand:
         _main.branding_store.delete_brand(client_id, brand.id)
+        conversation_store.set_brand(conv_id, None)
         raise HTTPException(status_code=404, detail="Brand not found")
 
     return updated_brand

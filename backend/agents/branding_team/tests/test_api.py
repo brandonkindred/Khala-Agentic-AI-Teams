@@ -797,6 +797,59 @@ def test_create_brand_rolls_back_when_conversation_create_raises(
     assert brands == []
 
 
+def test_create_brand_clears_conversation_when_update_brand_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exception from store.update_brand() after the conversation was
+    already created must roll back the brand AND clear the conversation's
+    brand_id — otherwise the conversation is left pointing at a deleted brand
+    id, which attach_conversation treats as already attached, permanently
+    blocking that conversation from being attached elsewhere."""
+    from branding_team.api import main as main_mod
+
+    create_c = client.post("/clients", json={"name": "UpdateBrandFails Client"})
+    client_id = create_c.json()["id"]
+
+    # Capture the conversation id conversation_store.create() actually
+    # produces so we can inspect it afterward — it never reaches the caller
+    # since the request raises before a response body is built.
+    created_conv_ids = []
+    real_create = main_mod.conversation_store.create
+
+    def _capturing_create(*args: Any, **kwargs: Any) -> str:
+        conv_id = real_create(*args, **kwargs)
+        created_conv_ids.append(conv_id)
+        return conv_id
+
+    monkeypatch.setattr(main_mod.conversation_store, "create", _capturing_create)
+
+    def _boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("update_brand unavailable")
+
+    monkeypatch.setattr(main_mod.branding_store, "update_brand", _boom)
+
+    with pytest.raises(RuntimeError, match="update_brand unavailable"):
+        client.post(
+            f"/clients/{client_id}/brands",
+            json={
+                "company_name": "UpdateBrandFailsCo",
+                "company_description": "Company whose brand-conversation link write fails",
+                "target_audience": "teams",
+            },
+        )
+
+    # The brand must not survive the rolled-back request.
+    brands = client.get(f"/clients/{client_id}/brands").json()
+    assert brands == []
+
+    # The conversation it created must be unattached, not left pointing at
+    # the now-deleted brand id.
+    assert len(created_conv_ids) == 1
+    conv_resp = client.get(f"/conversations/{created_conv_ids[0]}")
+    assert conv_resp.status_code == 200
+    assert conv_resp.json()["brand_id"] is None
+
+
 def test_list_clients_pagination_query_params() -> None:
     """GET /clients honors limit/offset and returns non-overlapping pages."""
     created = {
