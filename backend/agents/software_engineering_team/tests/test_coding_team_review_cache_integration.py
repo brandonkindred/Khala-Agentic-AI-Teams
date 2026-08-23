@@ -463,11 +463,19 @@ def test_retry_failed_restores_and_benefits_from_cache(tmp_path, monkeypatch):
 
 
 def _run_via_wired(tmp_path, monkeypatch, *, pause_strategy: str, job_record: Dict[str, Any]):
-    """Drive the single seam both thread-mode (``api/coding_team_main.py``, pause_strategy=
-    "block") and Temporal-mode (``temporal/coding_team_workflow.py``'s run_pipeline_activity,
-    pause_strategy="return") call into: ``run_orchestrator_wired``. Both resolve to the same
-    ``run_coding_team_orchestrator`` call, so there is no separate restore path to diverge
-    between the two modes — this is a regression guard on that invariant."""
+    """Call ``run_orchestrator_wired`` directly with each ``pause_strategy`` value it accepts,
+    proving the shared restore/cache-consultation path inside it (and the
+    ``run_coding_team_orchestrator`` call it wraps) is invariant to that flag — i.e. there is no
+    separate restore code path per strategy value to diverge.
+
+    This does NOT by itself prove a real caller passes the value it claims to: that delegation is
+    verified separately (see ``test_run_pipeline_activity_delegates_with_restored_cache`` below,
+    and ``test_coding_team_temporal_activity.py``'s own
+    ``kwargs["pause_strategy"] == "return"`` assertions for the Temporal activity). Combined, the
+    two establish what a single "both modes" test asserting only on this helper cannot: that the
+    real Temporal entrypoint both requests ``pause_strategy="return"`` AND that value exercises
+    the exact same cache-restore behavior as ``"block"``.
+    """
     from software_engineering_team.api import coding_team_main as main_mod
     from software_engineering_team.api import orchestration as orch_wired_mod
 
@@ -488,11 +496,12 @@ def _run_via_wired(tmp_path, monkeypatch, *, pause_strategy: str, job_record: Di
 
 
 @pytest.mark.parametrize("pause_strategy", ["block", "return"])
-def test_thread_and_temporal_modes_share_restore_path(tmp_path, monkeypatch, pause_strategy):
-    """Both the thread-mode call shape (pause_strategy='block') and the Temporal activity call
-    shape (pause_strategy='return') restore and consult a matching persisted review cache
-    identically, since both funnel through the same run_orchestrator_wired -> ... -> CodingTeamSwarm
-    restore path."""
+def test_run_orchestrator_wired_restore_path_is_pause_strategy_agnostic(
+    tmp_path, monkeypatch, pause_strategy
+):
+    """run_orchestrator_wired's cache-restore/cache-consultation behavior is identical for
+    pause_strategy='block' and 'return' — there is exactly one restore path inside it, not one
+    per strategy value that could silently diverge."""
     _patch_full_swarm_run(monkeypatch, diff=_FIXED_DIFF)
     tech_lead = StubTechLead(approved=True)
     monkeypatch.setattr(orch_mod, "TechLeadAgent", lambda llm: tech_lead)
@@ -505,4 +514,40 @@ def test_thread_and_temporal_modes_share_restore_path(tmp_path, monkeypatch, pau
     )
 
     assert store.record["status"] == "completed"
-    assert tech_lead.review_calls == []  # cache hit, identical in both call shapes
+    assert tech_lead.review_calls == []  # cache hit, identical for both pause_strategy values
+
+
+def test_run_pipeline_activity_delegates_with_restored_cache(tmp_path, monkeypatch):
+    """The real Temporal entrypoint, ``run_pipeline_activity`` (invoked, not stubbed — unlike
+    ``test_coding_team_temporal_activity.py``'s delegation-shape tests, which stub
+    run_orchestrator_wired itself), runs a real CodingTeamSwarm end to end and consults a
+    persisted review-verdict cache exactly as the plain orchestrator entrypoint does — closing the
+    gap the helper-level test above cannot: proof that this real caller's
+    pause_strategy="return" request reaches and benefits from the restore path.
+    """
+    import software_engineering_team.engine_provider as ep
+    from software_engineering_team.api import coding_team_main as main_mod
+    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+
+    _patch_full_swarm_run(monkeypatch, diff=_FIXED_DIFF)
+    tech_lead = StubTechLead(approved=True)
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", lambda llm: tech_lead)
+    monkeypatch.setattr(ep, "get_engine_provider", lambda: object())
+
+    seed = _seed_snapshot_with_matching_cache(status="to_do")
+    store = _FakeJobStore({"job_id": "j1", "repo_path": str(tmp_path), **seed})
+    monkeypatch.setattr(main_mod, "create_job", lambda **kw: None)
+    monkeypatch.setattr(main_mod, "get_job", lambda jid: store.get(jid))
+    monkeypatch.setattr(main_mod, "update_job", lambda jid, **kw: store.update(**kw))
+
+    out = run_pipeline_activity(
+        {
+            "job_id": "j1",
+            "repo_path": str(tmp_path),
+            "plan_input": {"objective": "resume with cache", "repo_path": str(tmp_path)},
+        }
+    )
+
+    assert out["outcome"] == "completed"
+    assert store.record["status"] == "completed"
+    assert tech_lead.review_calls == []  # the activity's real delegation reached the cache hit
