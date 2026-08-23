@@ -3,7 +3,7 @@ import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { HttpErrorResponse, HttpResponse } from '@angular/common/http';
 import { MatDialog } from '@angular/material/dialog';
 import { MatSnackBar } from '@angular/material/snack-bar';
-import { of, throwError } from 'rxjs';
+import { Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { AgentConsoleApiService } from '../../../../services/agent-console-api.service';
 import { NotificationService } from '../../../../core/notification.service';
@@ -200,6 +200,26 @@ describe('AgentRunnerComponent', () => {
       api.getAgent.mockClear();
       component.preselectedAgentId = 'blogging.writer';
       expect(api.getAgent).not.toHaveBeenCalled();
+    });
+
+    it('discards a late-arriving run response when a new agent is preselected mid-run', () => {
+      component.preselectedAgentId = 'blogging.writer';
+      const invoke$ = new Subject<HttpResponse<unknown>>();
+      api.invoke.mockReturnValue(invoke$);
+
+      component.run();
+      expect(component.running()).toBe(true);
+
+      component.preselectedAgentId = 'other.agent';
+      expect(component.running()).toBe(false);
+
+      const envelope: InvokeEnvelope = { output: { ok: true }, duration_ms: 1, trace_id: 'stale', logs_tail: [] };
+      expect(() =>
+        invoke$.next(new HttpResponse({ status: 200, body: envelope })),
+      ).not.toThrow();
+
+      expect(component.lastResponse()).toBeNull();
+      expect(component.running()).toBe(false);
     });
   });
 
@@ -613,6 +633,25 @@ describe('AgentRunnerComponent', () => {
       component.run();
 
       expect(component.lastError()).toBe('Invocation failed.');
+    });
+
+    it('discards a late-arriving response after the agent is switched', () => {
+      const invoke$ = new Subject<HttpResponse<unknown>>();
+      api.invoke.mockReturnValue(invoke$);
+
+      component.run();
+      expect(component.running()).toBe(true);
+
+      component.onAgentChange('other.agent');
+      expect(component.running()).toBe(false);
+
+      const envelope: InvokeEnvelope = { output: { ok: true }, duration_ms: 1, trace_id: 'stale', logs_tail: [] };
+      expect(() =>
+        invoke$.next(new HttpResponse({ status: 200, body: envelope })),
+      ).not.toThrow();
+
+      expect(component.lastResponse()).toBeNull();
+      expect(component.running()).toBe(false);
     });
   });
 
