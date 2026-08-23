@@ -1,9 +1,8 @@
 """Compare full-context vs selective-context pipeline prompts and outputs.
 
 For each sample mission in ``branding_team.tests.eval_fixtures.sample_missions``,
-runs the branding pipeline once (via ``LLM_PROVIDER=dummy``, so no live LLM
-call or network access is required) to obtain real per-phase outputs, then
-builds each downstream phase's task prompt two ways:
+runs the branding pipeline once to obtain real per-phase outputs, then builds
+each downstream phase's task prompt two ways:
 
 - **selective**: using the real ``_PHASE_SPEC[phase].context_phases`` set by
   the selective-context filtering (see ``orchestrator._phase_task``).
@@ -16,38 +15,68 @@ and saves each mission's Phase 4 (channel_activation) and Phase 5
 
 Run from ``backend/`` (same directory as ``Makefile``)::
 
-    PYTHONPATH=.:agents LLM_PROVIDER=dummy python3 -m branding_team.scripts.eval_selective_context
+    PYTHONPATH=.:agents python3 -m branding_team.scripts.eval_selective_context
 
-Requires no Postgres, Temporal, or live LLM provider -- ``LLM_PROVIDER=dummy``
-routes every agent through the deterministic stub client.
+Requires no Postgres, Temporal, or live LLM provider: ``run_eval`` forces
+every agent it constructs through the deterministic dummy stub client (see
+``_force_dummy_llm_provider``), regardless of any live provider selected in
+the Postgres-backed runtime config or an inherited ``LLM_PROVIDER``
+environment value.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
-import os
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-# Every agent factory resolves a backing Strands model at construction time,
-# which raises LLMNotConfiguredError with no provider configured. Set this
-# before importing anything that constructs agents, mirroring
-# branding_team/tests/conftest.py, so the script is runnable standalone.
-os.environ.setdefault("LLM_PROVIDER", "dummy")
-
-from branding_team.graphs.shared import PHASE_ORDER  # noqa: E402
-from branding_team.models import BrandingMission, BrandPhase  # noqa: E402
-from branding_team.orchestrator import _PHASE_SPEC, BrandingTeamOrchestrator  # noqa: E402
-from branding_team.tests.eval_fixtures.sample_missions import SAMPLE_MISSIONS  # noqa: E402
-from shared.hitl.models import HumanReview  # noqa: E402
+from branding_team.graphs.shared import PHASE_ORDER
+from branding_team.models import BrandingMission, BrandPhase
+from branding_team.orchestrator import _PHASE_SPEC, BrandingTeamOrchestrator
+from branding_team.tests.eval_fixtures.sample_missions import SAMPLE_MISSIONS
+from llm_service import config as _llm_config
+from shared.hitl.models import HumanReview
 
 PHASE5_REDUCTION_TARGET_PCT = 40.0
 
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "eval_results"
+
+
+@contextlib.contextmanager
+def _force_dummy_llm_provider():
+    """Force every agent constructed inside this block through the dummy stub client.
+
+    ``resolve_provider()`` prefers a live provider selected via the
+    Postgres-backed runtime config over ``LLM_PROVIDER``, and every call site
+    (``llm_service.factory``, ``llm_service.strands_provider``) reads it as a
+    module attribute (``llm_config.resolve_provider()``), never via a
+    ``from ... import resolve_provider`` local binding -- so overriding the
+    attribute here forces every agent this script constructs through the
+    dummy stub client (no live LLM call, network access, or spend) even when
+    Postgres holds a live provider or the caller's shell already exported a
+    non-dummy ``LLM_PROVIDER`` (which a mere ``os.environ.setdefault`` would
+    not override).
+
+    Preconditions:
+        None.
+    Postconditions:
+        ``llm_service.config.resolve_provider`` is restored to its original
+        value on exit, even if the wrapped block raises -- so importing or
+        unit-testing this module never leaves the process-wide LLM provider
+        resolution permanently patched for unrelated code (e.g. other tests
+        in the same pytest session).
+    """
+    original = _llm_config.resolve_provider
+    _llm_config.resolve_provider = lambda: "dummy"
+    try:
+        yield
+    finally:
+        _llm_config.resolve_provider = original
 
 
 def _approx_token_count(text: str) -> int:
@@ -160,36 +189,39 @@ def run_eval(
     orchestrator = BrandingTeamOrchestrator()
     comparisons: list[PhasePromptComparison] = []
 
-    for mission in missions:
-        result = orchestrator.run(mission=mission, human_review=HumanReview(approved=True))
+    with _force_dummy_llm_provider():
+        for mission in missions:
+            result = orchestrator.run(mission=mission, human_review=HumanReview(approved=True))
 
-        prior_outputs: dict[str, dict] = {}
-        phase_outputs = {
-            BrandPhase.STRATEGIC_CORE: result.strategic_core,
-            BrandPhase.NARRATIVE_MESSAGING: result.narrative_messaging,
-            BrandPhase.VISUAL_IDENTITY: result.visual_identity,
-            BrandPhase.CHANNEL_ACTIVATION: result.channel_activation,
-            BrandPhase.GOVERNANCE: result.governance,
-        }
-        for phase in PHASE_ORDER:
-            output = phase_outputs[phase]
-            if output is None:
-                continue
-            if phase != BrandPhase.STRATEGIC_CORE:
-                comparisons.append(compare_phase_prompts(mission, phase, dict(prior_outputs)))
-            prior_outputs[phase.value] = output.model_dump(mode="json")
+            prior_outputs: dict[str, dict] = {}
+            phase_outputs = {
+                BrandPhase.STRATEGIC_CORE: result.strategic_core,
+                BrandPhase.NARRATIVE_MESSAGING: result.narrative_messaging,
+                BrandPhase.VISUAL_IDENTITY: result.visual_identity,
+                BrandPhase.CHANNEL_ACTIVATION: result.channel_activation,
+                BrandPhase.GOVERNANCE: result.governance,
+            }
+            for phase in PHASE_ORDER:
+                output = phase_outputs[phase]
+                if output is None:
+                    continue
+                if phase != BrandPhase.STRATEGIC_CORE:
+                    comparisons.append(compare_phase_prompts(mission, phase, dict(prior_outputs)))
+                prior_outputs[phase.value] = output.model_dump(mode="json")
 
-        eval_record = {
-            "mission": mission.company_name,
-            "channel_activation": (
-                result.channel_activation.model_dump(mode="json")
-                if result.channel_activation
-                else None
-            ),
-            "governance": result.governance.model_dump(mode="json") if result.governance else None,
-        }
-        out_path = output_dir / f"{_slugify(mission.company_name)}.json"
-        out_path.write_text(json.dumps(eval_record, indent=2, default=str))
+            eval_record = {
+                "mission": mission.company_name,
+                "channel_activation": (
+                    result.channel_activation.model_dump(mode="json")
+                    if result.channel_activation
+                    else None
+                ),
+                "governance": (
+                    result.governance.model_dump(mode="json") if result.governance else None
+                ),
+            }
+            out_path = output_dir / f"{_slugify(mission.company_name)}.json"
+            out_path.write_text(json.dumps(eval_record, indent=2, default=str))
 
     return comparisons
 
