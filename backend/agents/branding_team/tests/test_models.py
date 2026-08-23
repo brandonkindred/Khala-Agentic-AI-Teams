@@ -560,7 +560,9 @@ def test_brand_story_output_rejects_blank_boilerplate_variant() -> None:
 
 
 _ARCHETYPE = BrandArchetypeOutput(
-    archetype="The Creator", rationale="Inventive.", personality_traits=["Imaginative", "Original"]
+    archetype="The Creator",
+    rationale="Inventive.",
+    personality_traits=["Imaginative", "Original", "Expressive"],
 )
 _PITCHES = [
     ElevatorPitchOutput(tier="5-second", pitch="a"),

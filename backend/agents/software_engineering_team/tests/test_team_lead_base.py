@@ -15,6 +15,7 @@ from software_engineering_team.shared.team_lead_base import (
     apply_team_failure,
     build_team_failure_result,
     copy_development_result_fields,
+    warn_doc_agent_deprecated,
 )
 from software_engineering_team.shared.v2_models import Phase, SetupResult
 
@@ -410,6 +411,45 @@ def test_run_setup_and_delegate_happy_path_copies_fields(tmp_path):
     assert any(c.get("progress") == 2 for c in job_calls)
     assert any(c.get("progress") == 3 for c in job_calls)
     assert any(c.get("progress") == 5 for c in job_calls)
+
+
+def test_run_setup_and_delegate_forwards_doc_agent_unchanged(tmp_path):
+    """doc_agent is still forwarded to the dev agent's run_workflow (not dropped early)."""
+    lead = _make_lead()
+    task = _make_task()
+    received: dict = {}
+    sentinel_doc_agent = object()
+
+    class _DevAgent:
+        def __init__(self, _llm):
+            pass
+
+        def run_workflow(self, **kwargs):
+            received.update(kwargs)
+            inner = _fake_result_cls(task_id=task.id)
+            inner.success = True
+            return inner
+
+    lead._run_setup_and_delegate(
+        repo_path=tmp_path,
+        task=task,
+        result_cls=_fake_result_cls,
+        run_setup_fn=lambda **_k: SetupResult(linting_configured=True, testing_configured=True),
+        development_agent_cls=_DevAgent,
+        doc_agent=sentinel_doc_agent,
+    )
+
+    assert received["doc_agent"] is sentinel_doc_agent
+
+
+def test_warn_doc_agent_deprecated_warns_on_non_none():
+    with pytest.warns(DeprecationWarning, match="doc_agent"):
+        warn_doc_agent_deprecated(MagicMock())
+
+
+def test_warn_doc_agent_deprecated_no_warning_on_none(recwarn):
+    warn_doc_agent_deprecated(None)
+    assert not any(issubclass(w.category, DeprecationWarning) for w in recwarn.list)
 
 
 def test_run_setup_and_delegate_allows_missing_repo_path(tmp_path):
