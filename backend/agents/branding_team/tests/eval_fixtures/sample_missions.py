@@ -14,7 +14,7 @@ Postconditions:
 
 from __future__ import annotations
 
-from branding_team.models import BrandingMission
+from branding_team.models import BrandingMission, ColorPalette
 
 # Tech / startup, full fields — a mature brand with every optional field
 # (including visual identity) populated.
@@ -30,7 +30,23 @@ _TECH_STARTUP_FULL = BrandingMission(
     ],
     desired_voice="sharp, technical, confident",
     existing_brand_material=["pitch deck v3", "landing page copy", "investor one-pager"],
+    wiki_path="/wikis/northwind-analytics/brand",
     color_inspiration=["deep indigo", "electric cyan"],
+    color_palettes=[
+        ColorPalette(
+            name="Signal",
+            description="High-contrast indigo and cyan for a technical, trustworthy feel",
+            colors=["#1B1F3B", "#00C2D1", "#F4F4F8"],
+            sentiment="sharp and trustworthy",
+        ),
+        ColorPalette(
+            name="Pulse",
+            description="Warmer accent variant for marketing surfaces",
+            colors=["#1B1F3B", "#FF6B4A", "#F4F4F8"],
+            sentiment="energetic and confident",
+        ),
+    ],
+    selected_palette_index=0,
     visual_style="minimalist",
     typography_preference="geometric sans-serif",
     interface_density="spacious/minimalist",

@@ -32,7 +32,17 @@ def test_corpus_includes_a_minimal_mission() -> None:
 
 
 def test_corpus_includes_a_full_mission() -> None:
+    """At least one mission populates every optional BrandingMission field."""
     assert any(
-        mission.values and mission.differentiators and mission.existing_brand_material
+        mission.values
+        and mission.differentiators
+        and mission.existing_brand_material
+        and mission.wiki_path
+        and mission.color_inspiration
+        and mission.color_palettes
+        and mission.selected_palette_index is not None
+        and mission.visual_style
+        and mission.typography_preference
+        and mission.interface_density
         for mission in SAMPLE_MISSIONS
     )
