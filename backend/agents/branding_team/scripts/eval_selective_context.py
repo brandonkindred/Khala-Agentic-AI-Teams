@@ -174,11 +174,19 @@ def _run_variant(
         ``_full_context_phases``), simulating pre-selective-context behavior.
     Postconditions:
         - Returns ``(outputs, task_strings)``: ``outputs`` maps every
-          ``BrandPhase`` in ``PHASE_ORDER`` to its real (never degraded to
-          ``None``) output model; ``task_strings`` maps each phase to the
-          exact task string ``_phase_task`` built for it under this variant.
+          ``BrandPhase`` in ``PHASE_ORDER`` to its real, non-degraded output
+          model; ``task_strings`` maps each phase to the exact task string
+          ``_phase_task`` built for it under this variant.
         - ``_PHASE_SPEC`` is left unmodified on return, even if a phase
           invocation raises.
+    Raises:
+        RuntimeError: if any phase's ``run_single_phase`` call reports
+            ``degraded=True`` (its structured output could not be parsed
+            and was defaulted to a bare, field-empty ``model_cls()``
+            instead). A degraded output cannot be trusted for token-count
+            or quality comparison -- silently accepting it risks reporting
+            a false PASS/FAIL and saving a placeholder as if it were a real
+            result, so this aborts the variant loudly instead.
     """
     outputs: dict[BrandPhase, object] = {}
     task_strings: dict[BrandPhase, str] = {}
@@ -192,7 +200,14 @@ def _run_variant(
             task_strings[phase] = BrandingTeamOrchestrator._phase_task(  # noqa: SLF001
                 mission, phase, dict(prior_outputs)
             )
-            output, _degraded = orchestrator.run_single_phase(mission, phase, prior_outputs)
+            output, degraded = orchestrator.run_single_phase(mission, phase, prior_outputs)
+        if degraded:
+            variant = "full-context" if full_context else "selective"
+            raise RuntimeError(
+                f"Phase {phase.value!r} degraded to a default-constructed output for "
+                f"mission {mission.company_name!r} ({variant} variant) -- aborting eval "
+                "rather than reporting results derived from a placeholder output."
+            )
         outputs[phase] = output
         prior_outputs[phase.value] = output.model_dump(mode="json")
 
