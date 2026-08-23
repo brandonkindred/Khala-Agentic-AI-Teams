@@ -150,65 +150,60 @@ PLANNING_PHASE_ORDER = [
 ]
 
 
-def _make_pra_job_updater(job_id: str) -> Callable[..., None]:
-    """Build the job updater handed to the PRA agent.
+def _make_phase_job_updater(
+    job_id: str,
+    *,
+    subprocess_key: str,
+    completed_key: str,
+    phase_order: List[str],
+    progress_band: "tuple[int, int]",
+    phase: Optional[str] = None,
+) -> Callable[..., None]:
+    """Build the job updater handed to a phase's sub-agent (PRA, Planning, ...).
 
-    Postconditions: the returned updater rewrites ``current_phase`` into
-    ``analysis_subprocess``/``analysis_completed_phases``, rescales the agent's own
-    0-100 ``progress`` onto PROGRESS_BAND_PRODUCT_ANALYSIS (garbage progress is
-    dropped, never written), and swallows store errors (observability only).
+    Preconditions:
+        - ``subprocess_key``/``completed_key`` are non-empty strings naming the
+          phase-specific job fields to write (e.g. ``"analysis_subprocess"``/
+          ``"analysis_completed_phases"``).
+        - ``phase_order`` is a list of phase-name strings in pipeline order; an
+          empty list is valid (no phase ever completes, only the current one is set).
+        - ``progress_band`` is a ``(base, span)`` tuple valid per :func:`_scale_progress`.
+        - ``phase`` is either ``None`` (forward the caller's own ``phase`` kwarg, if
+          any, unmodified) or a job-status phase string to force on every write.
+    Postconditions:
+        - Returns an updater that pops ``current_phase`` from kwargs and rewrites
+          it into ``subprocess_key``/``completed_key`` (the latter being every
+          ``phase_order`` entry preceding ``current_phase``); rescales a ``progress``
+          kwarg onto ``progress_band`` (garbage progress is dropped, never written);
+          forces ``phase=phase`` on the ``update_job`` call when ``phase`` is not
+          ``None``; forwards all remaining kwargs untouched; and swallows store
+          errors (observability only — never raises).
     """
+    assert isinstance(subprocess_key, str) and subprocess_key, subprocess_key
+    assert isinstance(completed_key, str) and completed_key, completed_key
+    assert isinstance(phase_order, list), f"phase_order must be a list, got {type(phase_order)}"
 
     def _updater(**kwargs: Any) -> None:
         try:
-            analysis_phase = kwargs.pop("current_phase", None)
-            if analysis_phase:
-                kwargs["analysis_subprocess"] = analysis_phase
+            current_phase = kwargs.pop("current_phase", None)
+            if current_phase:
+                kwargs[subprocess_key] = current_phase
                 completed_phases = []
-                for p in PRA_PHASE_ORDER:
-                    if p == analysis_phase:
+                for p in phase_order:
+                    if p == current_phase:
                         break
                     completed_phases.append(p)
-                kwargs["analysis_completed_phases"] = completed_phases
-            # The PRA agent reports its own 0-100 progress; rescale onto this
-            # phase's band so the job bar cannot hit 100 before coding starts.
+                kwargs[completed_key] = completed_phases
+            # The sub-agent reports its own 0-100 progress; rescale onto this
+            # phase's band so the job bar is monotone across the whole run.
             if "progress" in kwargs:
-                scaled = _scale_progress(kwargs.pop("progress"), PROGRESS_BAND_PRODUCT_ANALYSIS)
+                scaled = _scale_progress(kwargs.pop("progress"), progress_band)
                 if scaled is not None:
                     kwargs["progress"] = scaled
-            update_job(job_id, phase="product_analysis", **kwargs)
-        except Exception:
-            pass
-
-    return _updater
-
-
-def _make_planning_job_updater(job_id: str) -> Callable[..., None]:
-    """Build the job updater handed to the Planning workflow.
-
-    Postconditions: mirrors :func:`_make_pra_job_updater` for the planning phase —
-    ``current_phase`` becomes ``planning_subprocess``/``planning_completed_phases``
-    and ``progress`` is rescaled onto PROGRESS_BAND_PLANNING.
-    """
-
-    def _updater(**kwargs: Any) -> None:
-        try:
-            planning_phase = kwargs.pop("current_phase", None)
-            if planning_phase:
-                kwargs["planning_subprocess"] = planning_phase
-                completed_phases = []
-                for p in PLANNING_PHASE_ORDER:
-                    if p == planning_phase:
-                        break
-                    completed_phases.append(p)
-                kwargs["planning_completed_phases"] = completed_phases
-            # Planning reports its own 0-100 progress; rescale onto this
-            # phase's band so the job bar stays monotone into the coding phase.
-            if "progress" in kwargs:
-                scaled = _scale_progress(kwargs.pop("progress"), PROGRESS_BAND_PLANNING)
-                if scaled is not None:
-                    kwargs["progress"] = scaled
-            update_job(job_id, **kwargs)
+            if phase is not None:
+                update_job(job_id, phase=phase, **kwargs)
+            else:
+                update_job(job_id, **kwargs)
         except Exception:
             pass
 
@@ -921,7 +916,14 @@ def _run_orchestrator_body(
         logger.info("Plan folder ensured at %s", plan_dir, extra={"trace_id": current_trace_id()})
 
         # ── Step 1: Product Requirements Analysis Agent (skipped on the sprint path) ──
-        _pra_job_updater = _make_pra_job_updater(job_id)
+        _pra_job_updater = _make_phase_job_updater(
+            job_id,
+            subprocess_key="analysis_subprocess",
+            completed_key="analysis_completed_phases",
+            phase_order=PRA_PHASE_ORDER,
+            progress_band=PROGRESS_BAND_PRODUCT_ANALYSIS,
+            phase="product_analysis",
+        )
         validated_spec = run_product_requirements_analysis(
             job_id,
             path,
@@ -955,7 +957,13 @@ def _run_orchestrator_body(
             adapt_planning_result,
         )
 
-        _planning_job_updater = _make_planning_job_updater(job_id)
+        _planning_job_updater = _make_phase_job_updater(
+            job_id,
+            subprocess_key="planning_subprocess",
+            completed_key="planning_completed_phases",
+            phase_order=PLANNING_PHASE_ORDER,
+            progress_band=PROGRESS_BAND_PLANNING,
+        )
 
         planning_result = run_planning_workflow(
             repo_path=str(path),

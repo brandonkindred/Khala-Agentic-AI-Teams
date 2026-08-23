@@ -530,7 +530,13 @@ def test_pra_and_planning_updaters_rescale_progress(monkeypatch):
     written: list = []
     monkeypatch.setattr(se_orch, "update_job", lambda job_id, **kw: written.append(kw))
 
-    updater = se_orch._make_planning_job_updater("j1")
+    updater = se_orch._make_phase_job_updater(
+        "j1",
+        subprocess_key="planning_subprocess",
+        completed_key="planning_completed_phases",
+        phase_order=se_orch.PLANNING_PHASE_ORDER,
+        progress_band=se_orch.PROGRESS_BAND_PLANNING,
+    )
     updater(progress=100, status_text="done")
     assert written[-1]["progress"] == 30
     assert written[-1]["status_text"] == "done"
@@ -538,6 +544,54 @@ def test_pra_and_planning_updaters_rescale_progress(monkeypatch):
     updater(progress="garbage", status_text="odd")
     assert "progress" not in written[-1]
     assert written[-1]["status_text"] == "odd"
+
+
+def test_make_phase_job_updater_edge_cases(monkeypatch):
+    """Edge cases for the shared factory: empty phase_order, garbage progress,
+    and a None phase (no forced ``phase`` kwarg on the update_job call)."""
+    import software_engineering_team.orchestrator as se_orch
+
+    written: list = []
+    monkeypatch.setattr(se_orch, "update_job", lambda job_id, **kw: written.append(kw))
+
+    # Empty phase_order: current_phase is still recorded, but completed_phases
+    # is always empty since there's nothing in the order to have completed.
+    updater = se_orch._make_phase_job_updater(
+        "j-empty",
+        subprocess_key="x_subprocess",
+        completed_key="x_completed_phases",
+        phase_order=[],
+        progress_band=(0, 15),
+    )
+    updater(current_phase="anything")
+    assert written[-1]["x_subprocess"] == "anything"
+    assert written[-1]["x_completed_phases"] == []
+    # phase=None (the default) forwards kwargs without forcing a "phase" key.
+    assert "phase" not in written[-1]
+
+    # Garbage progress is dropped, never written.
+    updater(current_phase="anything", progress="not-a-number")
+    assert "progress" not in written[-1]
+
+    # phase=<value> forces update_job's phase kwarg on every write.
+    forced_updater = se_orch._make_phase_job_updater(
+        "j-forced",
+        subprocess_key="y_subprocess",
+        completed_key="y_completed_phases",
+        phase_order=["a", "b"],
+        progress_band=(0, 15),
+        phase="some_phase",
+    )
+    forced_updater(status_text="hi")
+    assert written[-1]["phase"] == "some_phase"
+    assert written[-1]["status_text"] == "hi"
+
+    # update_job errors are swallowed (observability only, never raises).
+    def _raise(job_id, **kw):
+        raise RuntimeError("store unavailable")
+
+    monkeypatch.setattr(se_orch, "update_job", _raise)
+    forced_updater(status_text="should not raise")
 
 
 # ---------------------------------------------------------------------------
