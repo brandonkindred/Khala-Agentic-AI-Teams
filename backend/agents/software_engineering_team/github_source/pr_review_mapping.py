@@ -661,6 +661,47 @@ def build_review_body(summary: str, spec_compliance_notes: str, issue_count: int
     return f"Automated code review completed: {issue_count} {noun} reported."
 
 
+def format_systemic_findings_comment(findings: list[dict[str, Any]]) -> str:
+    """Render synthesized systemic/cross-cutting findings as one standalone comment.
+
+    Preconditions:
+        - ``findings`` is non-empty; each entry is a dict shaped like
+          ``code_review_agent.systemic_synthesis.synthesize_systemic_findings``'s
+          output: ``{"title", "description", "related_locations"}``, where
+          ``related_locations`` is a list of ``{"file_path", "description"}``.
+
+    Postconditions:
+        - Returns a markdown body headed "### Systemic / cross-cutting
+          findings", with one numbered block per entry (title as a
+          sub-heading, the description, then a bullet per related location
+          naming its ``file_path`` when present). Never raises — a missing or
+          malformed field renders as an empty string rather than failing.
+    """
+    parts: list[str] = [
+        "### Systemic / cross-cutting findings",
+        "_Synthesized from patterns across this review's findings — see the "
+        "individual comments above for each specific finding._",
+        "",
+    ]
+    for finding in findings:
+        title = str(finding.get("title", "") or "").strip()
+        description = str(finding.get("description", "") or "").strip()
+        parts.append(f"**{title}**" if title else "**Cross-cutting finding**")
+        if description:
+            parts.append(description)
+        for location in finding.get("related_locations") or []:
+            file_path = str(location.get("file_path", "") or "").strip()
+            loc_description = str(location.get("description", "") or "").strip()
+            if file_path and loc_description:
+                parts.append(f"- `{file_path}` — {loc_description}")
+            elif file_path:
+                parts.append(f"- `{file_path}`")
+            elif loc_description:
+                parts.append(f"- {loc_description}")
+        parts.append("")
+    return "\n".join(parts).strip()
+
+
 def choose_event(issues: Iterable[Any], author: str = "", reviewer: str = "") -> str:
     """Pick the GitHub review event from the findings and authorship.
 

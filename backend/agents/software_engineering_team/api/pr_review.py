@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 from shared.concurrency import parallel_map
+from shared.env import env_flag_enabled
 from software_engineering_team.activity import ActivityBridge
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.advisory_lock import advisory_lock
@@ -38,6 +39,7 @@ from software_engineering_team.github_source import (
     choose_event,
     duplicate_check_max_open_issues,
     format_issue_comment,
+    format_systemic_findings_comment,
     group_similar_findings,
     inline_comment_to_timeline_body,
     is_within_diff,
@@ -1677,6 +1679,63 @@ def _partition_review_issues(
     )
 
 
+# Default-on toggle for the systemic/cross-cutting synthesis pass: a single
+# best-effort LLM call clustering the PR's in-scope findings to surface a
+# shared root cause. See docs/ENV_VARS.md.
+_SYSTEMIC_SYNTHESIS_ENV = "CODE_REVIEW_SYSTEMIC_SYNTHESIS"
+
+# A systemic pattern is, by definition, evidenced by at least two findings.
+_MIN_FINDINGS_FOR_SYSTEMIC_SYNTHESIS = 2
+
+
+def _synthesize_systemic_findings(
+    provider: Any, partition: ReviewIssuePartition, mode: ReviewModeDecision, pr: Any
+) -> List[Dict[str, Any]]:
+    """Best-effort systemic/cross-cutting synthesis over this review's in-scope findings.
+
+    Runs after :func:`_partition_review_issues` (which already applied
+    :func:`partition_issues_by_existing_comments`) and before comment posting,
+    so it operates on the same deduped ``partition.pr_issues`` the individual
+    findings post from.
+
+    Preconditions:
+        - ``partition`` was produced by :func:`_partition_review_issues` for
+          this same review. ``mode``/``pr`` are the same objects
+          :func:`_tag_review_issues_for_scope` uses to build scope-grounding
+          context.
+    Postconditions:
+        - Returns ``[]`` immediately when :data:`_SYSTEMIC_SYNTHESIS_ENV` is
+          disabled, or when ``len(partition.pr_issues) <
+          _MIN_FINDINGS_FOR_SYSTEMIC_SYNTHESIS``  — no provider call happens
+          on either short-circuit.
+        - Otherwise returns ``provider.synthesize_systemic_findings(...)``
+          unchanged. **Never raises**: any exception from the provider call
+          (belt-and-suspenders — the provider method's own contract already
+          never raises) is caught, logged, and degrades to ``[]``.
+    """
+    if not env_flag_enabled(_SYSTEMIC_SYNTHESIS_ENV):
+        return []
+    if len(partition.pr_issues) < _MIN_FINDINGS_FOR_SYSTEMIC_SYNTHESIS:
+        return []
+    task_description = (
+        f"Review pull request #{getattr(pr, 'number', '')}: {getattr(pr, 'title', '') or ''}"
+    )
+    try:
+        return (
+            provider.synthesize_systemic_findings(
+                partition.pr_issues, _files_for_scope(mode), task_description
+            )
+            or []
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort pass, must never fail the review
+        logger.warning(
+            "PR review: systemic synthesis skipped (%s: %s)",
+            type(exc).__name__,
+            scrub_token_from_text(str(exc)),
+        )
+        return []
+
+
 class CommentPostingResult(NamedTuple):
     """Outcome of submitting one PR review's comments to GitHub."""
 
@@ -1826,6 +1885,7 @@ def _finalize_review_outcome(
     files_reviewed: int,
     partition: ReviewIssuePartition,
     posting: CommentPostingResult,
+    systemic_findings: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Compute severity metrics, assemble ``review_summary``, and write the terminal outcome.
 
@@ -1833,6 +1893,8 @@ def _finalize_review_outcome(
         - ``partition``/``posting`` come from the same review run, produced in
           ``_partition_review_issues`` → ``_post_review_comments`` order.
         - ``client`` is an open ``GitHubClient``; ``pr`` carries ``html_url``.
+        - ``systemic_findings`` is ``None`` or the list
+          :func:`_synthesize_systemic_findings` returned for this same run.
     Postconditions:
         - ``severity_counts`` buckets ``partition.pr_issues`` over the five
           recognized levels (critical/high/medium/low/info); an issue with an
@@ -1842,7 +1904,8 @@ def _finalize_review_outcome(
           the split: ``total_issues``, ``inline_comments``, ``file_comments``,
           ``comment_findings``, ``comments_failed``, ``event``,
           ``files_reviewed``, ``severity_counts``, ``addressed_issues_dropped``,
-          ``pending_issue_proposals``.
+          ``pending_issue_proposals``, ``systemic_findings`` (``None``
+          coerced to ``[]``).
         - When ``posting.comments_failed`` is truthy: posts an "incomplete"
           notice via ``_main._safe_comment``, calls :func:`_finalize_review`
           with ``JobStatus.FAILED``, and returns — no further writes happen.
@@ -1893,6 +1956,10 @@ def _finalize_review_outcome(
         # _partition_review_issues drops it before it ever reaches here --
         # every entry below is a genuinely new candidate.
         "pending_issue_proposals": partition.proposals,
+        # Cross-cutting / root-cause patterns synthesized from clusters of this
+        # review's in-scope findings (see _synthesize_systemic_findings). Also
+        # posted as its own standalone PR comment when non-empty.
+        "systemic_findings": systemic_findings or [],
     }
     if posting.comments_failed:
         # Some findings could not be posted as their own comment; the
@@ -2013,11 +2080,29 @@ def _run_pr_review_body(
                 mode.valid_by_path,
                 mode.changed_by_path,
             )
+            systemic_findings = _synthesize_systemic_findings(provider, partition, mode, pr)
+            if systemic_findings:
+                _main._safe_comment(
+                    client,
+                    owner,
+                    repo,
+                    pr_number,
+                    format_systemic_findings_comment(systemic_findings),
+                )
             posting = _post_review_comments(
                 client, owner, repo, pr_number, pr, reviewer_login, output, partition
             )
             _finalize_review_outcome(
-                client, job_id, owner, repo, pr_number, pr, mode.files_reviewed, partition, posting
+                client,
+                job_id,
+                owner,
+                repo,
+                pr_number,
+                pr,
+                mode.files_reviewed,
+                partition,
+                posting,
+                systemic_findings,
             )
     except Exception as review_exc:  # noqa: BLE001 - any failure must mark the job, never wedge it
         # The hook runs in a daemon thread; if we let an exception escape, the thread

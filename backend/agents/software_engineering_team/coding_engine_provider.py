@@ -187,3 +187,45 @@ class SECodeEngineProvider:
             llm = None
 
         return classify_scope(findings, llm=llm, input_data=input_data)
+
+    def synthesize_systemic_findings(
+        self,
+        findings: Sequence[Any],
+        changed_context: Optional[Dict[str, str]],
+        task_description: str,
+    ) -> List[Dict[str, Any]]:
+        """Synthesize cross-cutting patterns, delegating to ``systemic_synthesis``.
+
+        Preconditions: ``findings`` is a sequence of ``CodeReviewIssue``-like
+            objects. ``changed_context`` is ``None``/empty or a non-empty
+            ``{path: content}`` mapping — same shape as ``classify_issue_scope``'s.
+
+        Postconditions: returns ``systemic_synthesis.synthesize_systemic_findings(
+            findings, ...)`` unchanged — a list of ``{"title", "description",
+            "related_locations"}`` dicts, possibly empty. Resolves the
+            ``code_review_verify`` client itself, same as
+            ``classify_issue_scope``; a client-resolution failure degrades to
+            ``llm=None`` (synthesis returns ``[]``), preserving
+            ``synthesize_systemic_findings``'s never-raises guarantee at this
+            boundary too.
+        """
+        from software_engineering_team.code_review_agent.model_resolution import (
+            resolve_code_review_verify_client,
+        )
+        from software_engineering_team.code_review_agent.models import build_code_review_input
+        from software_engineering_team.code_review_agent.systemic_synthesis import (
+            synthesize_systemic_findings,
+        )
+
+        input_data = None
+        if changed_context:
+            input_data = build_code_review_input(
+                files=dict(changed_context), task_description=task_description
+            )
+
+        try:
+            llm = resolve_code_review_verify_client()
+        except Exception:  # noqa: BLE001 — never raise; synthesis treats llm=None as []
+            llm = None
+
+        return synthesize_systemic_findings(findings, llm=llm, input_data=input_data)

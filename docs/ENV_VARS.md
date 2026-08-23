@@ -1143,6 +1143,26 @@ classifier this flag used to gate (`code_review_agent/scope_classifier.py`'s
 `classify_scope`, via the `classify_issue_scope` provider method) still exists
 but currently has no caller.
 
+### CODE_REVIEW_SYSTEMIC_SYNTHESIS
+Default-on toggle for the systemic/cross-cutting findings synthesis pass. Runs
+once per review, after `partition_issues_by_existing_comments` has deduped the
+PR's in-scope findings and before comments are posted, but only when at least
+two in-scope findings (`partition.pr_issues`) remain — a systemic pattern is,
+by definition, evidenced by two or more findings. A single best-effort LLM
+call (`code_review_agent/systemic_synthesis.py`'s `synthesize_systemic_findings`,
+via the `synthesize_systemic_findings` provider method) is pre-clustered with
+the same `group_similar_findings` helper used for pre-existing-bug proposals,
+then asked to name cross-cutting/foundational root causes spanning multiple
+findings — issues in interdependent functions, or conceptually similar issues
+in different files pointing at a shared design flaw. A non-empty result is
+posted as its own standalone "Systemic / cross-cutting findings" PR
+conversation comment (separate from each finding's own comment) and persisted
+under `review_summary.systemic_findings` for the Code Review page. Fail-safe:
+a missing client, too few findings, or any failure (LLM error, malformed
+reply) degrades to an empty result and never fails the review. The unscripted
+dummy LLM harness is a no-op. Set to `false`/`0`/`no` to disable (any other
+value, or unset, leaves it enabled).
+
 ### CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS
 Default-on toggle for the architecture-consistency / cross-codebase-redundancy
 pass. This toggle enables the architecture half of the in-process coordinator's
