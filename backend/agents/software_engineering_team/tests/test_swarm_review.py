@@ -174,6 +174,40 @@ class TestDeserializeReviewCache:
         result = deserialize_review_cache(data)
         assert result == {"t": ("k2", {"approved": False})}
 
+    def test_twenty_five_valid_entries_caps_at_twenty_most_recent(self):
+        data = [
+            {"task_id": f"task-{i}", "cache_key": f"cache-key-{i}", "verdict": {"approved": True}}
+            for i in range(25)
+        ]
+        result = deserialize_review_cache(data)
+        assert len(result) == 20
+        assert set(result.keys()) == {f"task-{i}" for i in range(5, 25)}
+
+    def test_duplicate_task_id_reappearing_late_counts_as_recent_under_cap(self):
+        """A task_id that appears early, then again as the very last entry, must be treated as
+        fresh (kept) by the cap — not dropped as if it were still at its stale first position."""
+        data = (
+            [
+                {"task_id": "task-0", "cache_key": "stale", "verdict": {"approved": True}},
+            ]
+            + [
+                {
+                    "task_id": f"task-{i}",
+                    "cache_key": f"cache-key-{i}",
+                    "verdict": {"approved": True},
+                }
+                for i in range(1, 21)
+            ]
+            + [
+                {"task_id": "task-0", "cache_key": "fresh", "verdict": {"approved": False}},
+            ]
+        )
+        result = deserialize_review_cache(data)
+        assert len(result) == 20
+        assert "task-0" in result
+        assert result["task-0"] == ("fresh", {"approved": False})
+        assert "task-1" not in result  # oldest surviving-position entry evicted instead
+
     def test_nested_verdict_structures_round_trip(self):
         verdict = {
             "approved": True,

@@ -331,6 +331,34 @@ def test_cache_miss_on_changed_diff_calls_run_code_review(tmp_path, monkeypatch)
     assert tech_lead2.review_calls  # cache miss: run_code_review called for the changed diff
 
 
+def test_cache_miss_on_changed_changes_summary_calls_run_code_review(tmp_path, monkeypatch):
+    """The hit/miss discrimination also covers changes_summary independently of the diff: with the
+    branch diff held fixed, a changed changes_summary (task.changes_summary, the field
+    ``_compute_review`` folds into ``evidence`` alongside the diff — see swarm_review.py) since the
+    cached call misses the cache and calls run_code_review again."""
+    _patch_git(monkeypatch, diff="diff --git a/x b/x")
+    tech_lead1 = StubTechLead(approved=True)
+    swarm1, graph1 = _make_real_swarm(tmp_path, tech_lead1, [StubWorker("a1")])
+    graph1.add_task("t1", title="T1")
+    graph1.assign_task_to_agent("t1", "a1")
+    graph1.update_task("t1", changes_summary="did t1 v1")
+    graph1.set_task_in_review("t1")
+    swarm1._review_and_merge(lambda **kw: None)
+    exported = swarm1.export_review_cache()
+
+    tech_lead2 = StubTechLead(approved=True)
+    swarm2, graph2 = _make_real_swarm(
+        tmp_path, tech_lead2, [StubWorker("a1")], restored_review_cache=exported
+    )
+    graph2.add_task("t1", title="T1")
+    graph2.assign_task_to_agent("t1", "a1")
+    graph2.update_task("t1", changes_summary="did t1 v2")
+    graph2.set_task_in_review("t1")
+    swarm2._review_and_merge(lambda **kw: None)
+
+    assert tech_lead2.review_calls  # cache miss: run_code_review called for the changed summary
+
+
 # --------------------------------------------------------------------------- criterion 3
 
 
@@ -460,6 +488,26 @@ def test_retry_failed_restores_and_benefits_from_cache(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- criterion 6
+
+
+def test_restored_review_cache_caps_at_twenty_entries(tmp_path):
+    """A job record whose review_verdict_cache field somehow carries more than 20 entries (e.g.
+    hand-edited, migrated, or written by something other than serialize_review_cache — the normal
+    persist path already caps at 20 before it ever reaches storage) still only seeds 20 entries
+    into the live swarm cache: deserialize_review_cache enforces the same cap serialize_review_cache
+    does, so restore can never grow the cache past the size the rest of the system assumes."""
+    oversized = [
+        {"task_id": f"task-{i}", "cache_key": f"key-{i}", "verdict": {"approved": True}}
+        for i in range(25)
+    ]
+    swarm, _ = _make_real_swarm(
+        tmp_path,
+        StubTechLead(approved=True),
+        [StubWorker("a1")],
+        restored_review_cache=oversized,
+    )
+    assert len(swarm._review_verdict_cache) == 20
+    assert set(swarm._review_verdict_cache) == {f"task-{i}" for i in range(5, 25)}
 
 
 def _run_via_wired(tmp_path, monkeypatch, *, pause_strategy: str, job_record: Dict[str, Any]):

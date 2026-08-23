@@ -5056,27 +5056,36 @@ def test_single_review_exception_is_contained_and_fails_task_once(tmp_path, monk
 # --------------------------------------------------------------------------- resume / retry_failed
 
 
-def _seed_snapshot_with_failed_task() -> Dict[str, Any]:
+def _seed_snapshot_with_failed_task(*, review_verdict_cache=None) -> Dict[str, Any]:
     """Build a persisted job record (as a prior run leaves it) whose task graph has one FAILED task.
 
     The snapshot is produced from a real graph so its shape matches what ``graph.restore`` expects.
+    ``review_verdict_cache``, when given, mirrors what a real persist_sync call would have written
+    (see ``test_coding_team_review_cache_integration.py``) so resume tests can assert it reaches
+    the reconstructed swarm unchanged.
     """
     src = TaskGraphService(job_id="resume-job")
     src.add_task("t1", title="Backend task")
     src.update_task("t1", status=TaskStatus.FAILED)
     snap = src.snapshot()
-    return {
+    record: Dict[str, Any] = {
         "repo_path": "/tmp/resume-repo",
         "task_graph_snapshot": snap["tasks"],
         "agent_task_map": snap["agent_task_map"],
         "stack_specs": orch_mod._DEFAULT_STACK_SPECS,
     }
+    if review_verdict_cache is not None:
+        record["review_verdict_cache"] = review_verdict_cache
+    return record
 
 
-def _run_resume_capturing_graph(tmp_path, monkeypatch, *, retry_failed: bool):
+def _run_resume_capturing_graph(
+    tmp_path, monkeypatch, *, retry_failed: bool, review_verdict_cache=None
+):
     """Drive run_coding_team_orchestrator down the resume branch with the swarm stubbed to a no-op,
-    returning the graph it built so the test can inspect task statuses after resume handling."""
-    record = _seed_snapshot_with_failed_task()
+    returning the graph it built and the ``restored_review_cache`` kwarg the stub swarm received,
+    so tests can inspect both task statuses and cache-restore wiring after resume handling."""
+    record = _seed_snapshot_with_failed_task(review_verdict_cache=review_verdict_cache)
     record["repo_path"] = str(tmp_path)
     captured: Dict[str, Any] = {}
 
@@ -5084,8 +5093,9 @@ def _run_resume_capturing_graph(tmp_path, monkeypatch, *, retry_failed: bool):
         def export_review_cache(self):
             return []
 
-        def __init__(self, *, graph, **kwargs):
+        def __init__(self, *, graph, restored_review_cache=None, **kwargs):
             captured["graph"] = graph
+            captured["restored_review_cache"] = restored_review_cache
             self.aborted = False
 
         def run(self, *args, **kwargs):
@@ -5105,16 +5115,29 @@ def _run_resume_capturing_graph(tmp_path, monkeypatch, *, retry_failed: bool):
         engine_provider=object(),
         retry_failed=retry_failed,
     )
-    return captured["graph"]
+    return captured
 
 
 def test_resume_retry_failed_true_demotes_failed(tmp_path, monkeypatch):
     """retry_failed=True demotes a snapshot's terminal FAILED task back to TO_DO on resume."""
-    graph = _run_resume_capturing_graph(tmp_path, monkeypatch, retry_failed=True)
-    assert graph.get_task("t1").status == TaskStatus.TO_DO
+    captured = _run_resume_capturing_graph(tmp_path, monkeypatch, retry_failed=True)
+    assert captured["graph"].get_task("t1").status == TaskStatus.TO_DO
 
 
 def test_resume_default_preserves_failed(tmp_path, monkeypatch):
     """The default resume (retry_failed=False) preserves a snapshot's FAILED task as terminal."""
-    graph = _run_resume_capturing_graph(tmp_path, monkeypatch, retry_failed=False)
-    assert graph.get_task("t1").status == TaskStatus.FAILED
+    captured = _run_resume_capturing_graph(tmp_path, monkeypatch, retry_failed=False)
+    assert captured["graph"].get_task("t1").status == TaskStatus.FAILED
+
+
+def test_resume_retry_failed_threads_review_cache_from_snapshot(tmp_path, monkeypatch):
+    """retry_failed=True resume both demotes the FAILED task AND threads the snapshot's
+    review_verdict_cache field into CodingTeamSwarm(restored_review_cache=...) unchanged — the
+    retry-demotion path and the cache-restore path are wired independently and both must fire on
+    the same resume."""
+    seeded_cache = [{"task_id": "t1", "cache_key": "k1", "verdict": {"approved": True}}]
+    captured = _run_resume_capturing_graph(
+        tmp_path, monkeypatch, retry_failed=True, review_verdict_cache=seeded_cache
+    )
+    assert captured["graph"].get_task("t1").status == TaskStatus.TO_DO
+    assert captured["restored_review_cache"] == seeded_cache
