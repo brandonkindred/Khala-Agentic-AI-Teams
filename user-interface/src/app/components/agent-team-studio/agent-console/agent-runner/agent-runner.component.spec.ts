@@ -483,9 +483,34 @@ describe('AgentRunnerComponent', () => {
 
     it('tearDownSandbox marks the sandbox cold on confirm', () => {
       selectWriter();
+      component.warmSandbox();
+      expect(component.sandbox()).toEqual(warmHandle);
+
       dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
+      api.teardown.mockReturnValue(of({ agent_id: coldHandle.agent_id, status: 'cold' }));
       component.tearDownSandbox();
+
+      expect(api.teardown).toHaveBeenCalledWith(coldHandle.agent_id);
       expect(component.sandbox()).toEqual({ ...coldHandle, status: 'cold', url: null });
+    });
+
+    it('tearDownSandbox sets a fallback cold handle when sandbox is null on confirm', () => {
+      api.getSandbox.mockReturnValue(throwError(() => new Error('down')));
+      selectWriter();
+      expect(component.sandbox()).toBeNull();
+      dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
+
+      expect(() => component.tearDownSandbox()).not.toThrow();
+
+      expect(component.sandbox()).toEqual({
+        agent_id: 'blogging.writer',
+        team: '',
+        status: 'cold',
+        url: null,
+        service_name: '',
+        container_name: '',
+        host_port: 0,
+      });
     });
 
     it('tearDownSandbox surfaces an error on failure', () => {
