@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from branding_team.models import BrandPhase, NarrativeMessagingOutput, StrategicCoreOutput
+from branding_team.models import (
+    BrandPhase,
+    ChannelActivationOutput,
+    NarrativeMessagingOutput,
+    StrategicCoreOutput,
+    VisualIdentityOutput,
+)
+from branding_team.orchestrator import _PHASE_SPEC
 from branding_team.shared.memoization import phase_input_hash
 from branding_team.tests.conftest import make_mission
 
@@ -183,6 +190,82 @@ def test_context_phases_change_to_excluded_upstream_output_does_not_change_hash(
     )
 
     assert baseline == changed
+
+
+def test_phase4_output_change_does_not_invalidate_phase5_cache() -> None:
+    """Phase 5's real ``context_phases`` excludes Phase 4, so a Phase 4 edit
+    must not change Phase 5's hash (cache hit) -- the wired-up-config
+    counterpart to ``test_context_phases_excludes_unlisted_upstream_output_from_hash``."""
+    mission = make_mission()
+    context_phases = _PHASE_SPEC[BrandPhase.GOVERNANCE].context_phases
+    strategic = StrategicCoreOutput(brand_purpose="Ship calm software")
+    visual = VisualIdentityOutput(iconography_style="Geometric")
+
+    baseline = phase_input_hash(
+        BrandPhase.GOVERNANCE,
+        mission,
+        {
+            BrandPhase.STRATEGIC_CORE: strategic,
+            BrandPhase.VISUAL_IDENTITY: visual,
+            BrandPhase.CHANNEL_ACTIVATION: ChannelActivationOutput(naming_conventions=["Alpha"]),
+        },
+        context_phases=context_phases,
+    )
+    changed = phase_input_hash(
+        BrandPhase.GOVERNANCE,
+        mission,
+        {
+            BrandPhase.STRATEGIC_CORE: strategic,
+            BrandPhase.VISUAL_IDENTITY: visual,
+            BrandPhase.CHANNEL_ACTIVATION: ChannelActivationOutput(naming_conventions=["Beta"]),
+        },
+        context_phases=context_phases,
+    )
+
+    assert baseline == changed
+
+
+@pytest.mark.parametrize(
+    "downstream_phase",
+    [
+        BrandPhase.NARRATIVE_MESSAGING,
+        BrandPhase.VISUAL_IDENTITY,
+        BrandPhase.CHANNEL_ACTIVATION,
+        BrandPhase.GOVERNANCE,
+    ],
+)
+def test_phase1_output_change_invalidates_all_downstream_phase_hashes(
+    downstream_phase: BrandPhase,
+) -> None:
+    """Every downstream phase's real ``context_phases`` includes Phase 1, so a
+    Phase 1 edit must change every downstream phase's hash (cache miss)."""
+    mission = make_mission()
+    other_upstream = {
+        BrandPhase.NARRATIVE_MESSAGING: NarrativeMessagingOutput(tagline="Calm, on purpose."),
+        BrandPhase.VISUAL_IDENTITY: VisualIdentityOutput(iconography_style="Geometric"),
+    }
+    context_phases = _PHASE_SPEC[downstream_phase].context_phases
+
+    baseline = phase_input_hash(
+        downstream_phase,
+        mission,
+        {
+            BrandPhase.STRATEGIC_CORE: StrategicCoreOutput(brand_purpose="Ship calm software"),
+            **other_upstream,
+        },
+        context_phases=context_phases,
+    )
+    changed = phase_input_hash(
+        downstream_phase,
+        mission,
+        {
+            BrandPhase.STRATEGIC_CORE: StrategicCoreOutput(brand_purpose="Ship bold software"),
+            **other_upstream,
+        },
+        context_phases=context_phases,
+    )
+
+    assert baseline != changed
 
 
 def test_context_phases_change_to_included_upstream_output_changes_hash() -> None:

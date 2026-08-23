@@ -693,7 +693,9 @@ class BrandingTeamOrchestrator:
                 extractions.append((None, False))
                 continue
 
-            input_hash = phase_input_hash(phase, mission, upstream_models)
+            input_hash = phase_input_hash(
+                phase, mission, upstream_models, _PHASE_SPEC[phase].context_phases
+            )
             cached_output = cache.get(phase, input_hash)
             if cached_output is not None:
                 output, degraded = cached_output, False
