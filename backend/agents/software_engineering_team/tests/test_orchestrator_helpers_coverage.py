@@ -546,24 +546,15 @@ def test_pra_and_planning_updaters_rescale_progress(monkeypatch):
     assert written[-1]["status_text"] == "odd"
 
 
-def test_make_phase_job_updater_edge_cases(monkeypatch):
-    """Edge cases for the shared factory:
-    - empty / unmatched phase_order leaves completed_phases unwritten
-    - falsy-but-non-None current_phase is still recorded
-    - a current_phase found mid-order yields the entries preceding it
-    - garbage progress is dropped
-    - phase=None (default) does not force a ``phase`` kwarg
-    - phase=<value> forces the ``phase`` kwarg on every write, dropping any
-      caller-supplied ``phase`` kwarg rather than colliding with it
-    - update_job errors are swallowed and never raised
-    """
+def test_make_phase_job_updater_empty_phase_order_leaves_completed_unwritten(monkeypatch):
+    """With an empty phase_order, current_phase can never be found, so
+    x_subprocess is still recorded but x_completed_phases is left unwritten
+    (never becomes the whole order)."""
     import software_engineering_team.orchestrator as se_orch
 
     written: list = []
     monkeypatch.setattr(se_orch, "update_job", lambda job_id, **kw: written.append(kw))
 
-    # Empty phase_order: current_phase is never found, so x_subprocess is still
-    # recorded but x_completed_phases is left unwritten (never the whole order).
     updater = se_orch._make_phase_job_updater(
         "j-empty",
         subprocess_key="x_subprocess",
@@ -577,32 +568,93 @@ def test_make_phase_job_updater_edge_cases(monkeypatch):
     # phase=None (the default) forwards kwargs without forcing a "phase" key.
     assert "phase" not in written[-1]
 
-    # current_phase not present in a non-empty phase_order: same fallback —
-    # x_completed_phases stays unwritten rather than becoming the whole order.
-    updater_with_order = se_orch._make_phase_job_updater(
+
+def test_make_phase_job_updater_unmatched_current_phase_leaves_completed_unwritten(monkeypatch):
+    """current_phase not present in a non-empty phase_order: same fallback as
+    the empty-order case — completed_key stays unwritten rather than becoming
+    the whole order."""
+    import software_engineering_team.orchestrator as se_orch
+
+    written: list = []
+    monkeypatch.setattr(se_orch, "update_job", lambda job_id, **kw: written.append(kw))
+
+    updater = se_orch._make_phase_job_updater(
         "j-order",
         subprocess_key="z_subprocess",
         completed_key="z_completed_phases",
         phase_order=["a", "b", "c"],
         progress_band=(0, 15),
     )
-    updater_with_order(current_phase="unknown")
+    updater(current_phase="unknown")
     assert written[-1]["z_subprocess"] == "unknown"
     assert "z_completed_phases" not in written[-1]
 
-    # current_phase found mid-order: completed_phases is every entry before it.
-    updater_with_order(current_phase="b")
+
+def test_make_phase_job_updater_matched_current_phase_yields_preceding_entries(monkeypatch):
+    """A current_phase found mid-order: completed_phases is every entry
+    preceding it."""
+    import software_engineering_team.orchestrator as se_orch
+
+    written: list = []
+    monkeypatch.setattr(se_orch, "update_job", lambda job_id, **kw: written.append(kw))
+
+    updater = se_orch._make_phase_job_updater(
+        "j-order",
+        subprocess_key="z_subprocess",
+        completed_key="z_completed_phases",
+        phase_order=["a", "b", "c"],
+        progress_band=(0, 15),
+    )
+    updater(current_phase="b")
     assert written[-1]["z_completed_phases"] == ["a"]
 
-    # A falsy-but-non-None current_phase (empty string) is still recorded.
-    updater_with_order(current_phase="")
+
+def test_make_phase_job_updater_records_falsy_current_phase(monkeypatch):
+    """A falsy-but-non-None current_phase (empty string) is still recorded,
+    per the ``is not None`` check rather than a truthiness check."""
+    import software_engineering_team.orchestrator as se_orch
+
+    written: list = []
+    monkeypatch.setattr(se_orch, "update_job", lambda job_id, **kw: written.append(kw))
+
+    updater = se_orch._make_phase_job_updater(
+        "j-order",
+        subprocess_key="z_subprocess",
+        completed_key="z_completed_phases",
+        phase_order=["a", "b", "c"],
+        progress_band=(0, 15),
+    )
+    updater(current_phase="")
     assert written[-1]["z_subprocess"] == ""
 
-    # Garbage progress is dropped, never written.
+
+def test_make_phase_job_updater_drops_garbage_progress(monkeypatch):
+    """Garbage progress is dropped, never written."""
+    import software_engineering_team.orchestrator as se_orch
+
+    written: list = []
+    monkeypatch.setattr(se_orch, "update_job", lambda job_id, **kw: written.append(kw))
+
+    updater = se_orch._make_phase_job_updater(
+        "j-empty",
+        subprocess_key="x_subprocess",
+        completed_key="x_completed_phases",
+        phase_order=[],
+        progress_band=(0, 15),
+    )
     updater(current_phase="anything", progress="not-a-number")
     assert "progress" not in written[-1]
 
-    # phase=<value> forces update_job's phase kwarg on every write.
+
+def test_make_phase_job_updater_forced_phase_overrides_caller_kwarg(monkeypatch):
+    """phase=<value> forces update_job's phase kwarg on every write, and a
+    caller-supplied "phase" kwarg is dropped in favor of the forced value —
+    it must never collide with the forced phase= in the update_job() call."""
+    import software_engineering_team.orchestrator as se_orch
+
+    written: list = []
+    monkeypatch.setattr(se_orch, "update_job", lambda job_id, **kw: written.append(kw))
+
     forced_updater = se_orch._make_phase_job_updater(
         "j-forced",
         subprocess_key="y_subprocess",
@@ -615,13 +667,24 @@ def test_make_phase_job_updater_edge_cases(monkeypatch):
     assert written[-1]["phase"] == "some_phase"
     assert written[-1]["status_text"] == "hi"
 
-    # A caller-supplied "phase" kwarg is dropped in favor of the forced value —
-    # it must never collide with the forced phase= in the update_job() call.
     forced_updater(phase="caller_phase", status_text="collide")
     assert written[-1]["phase"] == "some_phase"
     assert written[-1]["status_text"] == "collide"
 
-    # update_job errors are swallowed (observability only, never raises).
+
+def test_make_phase_job_updater_swallows_store_errors(monkeypatch):
+    """update_job errors are swallowed (observability only, never raises)."""
+    import software_engineering_team.orchestrator as se_orch
+
+    forced_updater = se_orch._make_phase_job_updater(
+        "j-forced",
+        subprocess_key="y_subprocess",
+        completed_key="y_completed_phases",
+        phase_order=["a", "b"],
+        progress_band=(0, 15),
+        phase="some_phase",
+    )
+
     def _raise(job_id, **kw):
         raise RuntimeError("store unavailable")
 
