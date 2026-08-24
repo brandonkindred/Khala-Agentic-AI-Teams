@@ -913,6 +913,13 @@ class TestBackendDevelopmentAgent:
         assert "app.py" in code
         assert "print('hello')" in code
 
+    def test_read_repo_code_empty(self, tmp_path):
+        from backend_code_v2_team.orchestrator import BackendDevelopmentAgent
+
+        agent = BackendDevelopmentAgent(MagicMock())
+        code = agent._read_repo_code(tmp_path)
+        assert "No code files" in code
+
     def test_build_tool_runners(self):
         from backend_code_v2_team.orchestrator import (
             BackendDevelopmentAgent,
