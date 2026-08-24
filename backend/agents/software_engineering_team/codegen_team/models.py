@@ -4,7 +4,7 @@ Models for the codegen team (config-driven backend + frontend code generation).
 Workflow models are shared with both stacks in
 ``software_engineering_team.shared.v2_models`` and re-exported here. Only
 ``ToolAgentKind`` (the merged backend+frontend tool-agent routing registry),
-the workflow result envelope, and ``CodegenMicrotaskReviewConfig`` are
+the workflow result envelope, and ``MicrotaskReviewConfig`` are
 defined locally.
 
 ``ToolAgentKind`` used to be a distinct ``(str, Enum)`` per team solely to

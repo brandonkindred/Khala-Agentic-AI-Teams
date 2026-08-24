@@ -791,10 +791,11 @@ def _run_phase_fixes_impl(
     Common implementation behind the four phase-specific fix functions
     (``run_code_review_fixes``/``run_qa_fixes``/``run_security_fixes``/
     ``run_documentation_fixes``) a stack exposes via
-    :func:`make_phase_fix_functions`. ``tool_agents`` is accepted for
-    signature symmetry with :func:`_run_phase_fixes_with_tool_agent_impl` but
-    is not consulted here — this function never runs a tool agent's
-    ``problem_solve``.
+    :func:`make_phase_fix_functions`. ``tool_agents`` and ``repo_path`` are
+    accepted for signature symmetry with
+    :func:`_run_phase_fixes_with_tool_agent_impl` but are not consulted here —
+    this function never runs a tool agent's ``problem_solve`` and does not
+    touch the repository on disk.
 
     Preconditions: ``phase_result.issues`` is a list of review issues;
       ``models`` exposes ``ProblemSolvingResult``; ``profile`` supplies the

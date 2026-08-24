@@ -19,7 +19,7 @@ backend/
     software_engineering_team/  # Primary team — full dev pipeline; contains the codegen_team
                                 # (config-driven backend/frontend code generation), devops,
                                 # coding-team execution engine (Tech Lead + Task Graph, routed
-                                # at /api/coding-team), planning, integration, and QA sub-teams
+                                # at /api/coding-team), integration, and QA sub-teams
     planning_team/           # Client-facing discovery/PRD team (/api/planning)
     product_delivery/        # Persistent Product Delivery Loop (/api/product-delivery)
     llm_service/             # Centralized LLM client (Ollama, Claude, RunPod)

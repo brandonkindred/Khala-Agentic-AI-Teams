@@ -172,19 +172,23 @@ class StackWiring:
     at module-import time, which would defeat ``monkeypatch.setattr`` on the
     owning stack profile module (patching the module attribute afterwards
     would not change what is already stored here). Those six are instead bare
-    per-stack module-level names below (``_backend_run_setup`` /
-    ``_frontend_run_setup`` etc.), resolved via ``globals()`` at
+    per-stack module-level names below -- five (``_backend_run_setup`` /
+    ``_frontend_run_setup`` etc.) aliased directly from the stack profile
+    modules, plus ``_backend_run_deliver``/``_frontend_run_deliver``, built via
+    ``make_run_deliver`` rather than aliased from a profile (``run_deliver``
+    isn't part of either ``StackProfile``) but still a bare module-level name
+    subject to the same lookup -- resolved via ``globals()`` at
     ``run_workflow`` call time -- mirroring how each former per-team
     orchestrator module referenced its own bare ``run_setup`` etc. global
     directly, just with an explicit stack prefix now that one module serves
     both stacks. Tests must monkeypatch the bare per-stack name on *this*
     module (e.g. ``monkeypatch.setattr(orch, "_backend_run_setup", fake)``):
-    the aliases below bind the profile module's function *value* once at
-    import time, so patching the owning profile module's attribute afterward
-    (e.g. ``monkeypatch.setattr(backend_profile, "run_documentation_phase",
-    fake)``) does *not* change what ``_backend_run_documentation_phase``
-    already points to here -- only ``globals()`` lookups against this
-    module's own names stay live.
+    the profile-aliased names bind the profile module's function *value* once
+    at import time, so patching the owning profile module's attribute
+    afterward (e.g. ``monkeypatch.setattr(backend_profile,
+    "run_documentation_phase", fake)``) does *not* change what
+    ``_backend_run_documentation_phase`` already points to here -- only
+    ``globals()`` lookups against this module's own names stay live.
     """
 
     team_label: str
@@ -222,12 +226,14 @@ STACK_WIRING: Dict[Stack, StackWiring] = {
 
 # Bare per-stack module-level names for the six phase callables that must
 # stay individually monkeypatchable per stack (see StackWiring's docstring
-# above). ``run_workflow`` looks each of these up via
-# ``globals()[f"_{stack}_<name>"]`` at call time rather than reading a
-# precomputed StackWiring field, so a test's ``monkeypatch.setattr`` on the
-# bare name here is honored on the next call -- patching the owning profile
-# module's own attribute afterward is NOT honored, since these aliases bind
-# the function value once at import time.
+# above) -- five aliased directly from the stack profiles, plus run_deliver
+# (built via make_run_deliver below, not aliased from a profile).
+# ``run_workflow`` looks each of these up via ``globals()[f"_{stack}_<name>"]``
+# at call time rather than reading a precomputed StackWiring field, so a
+# test's ``monkeypatch.setattr`` on the bare name here is honored on the next
+# call -- patching the owning profile module's own attribute afterward is NOT
+# honored, since the profile-aliased names bind the function value once at
+# import time.
 _backend_run_setup = _backend_profile.run_setup
 _frontend_run_setup = _frontend_profile.run_setup
 _backend_configure_quality_tooling = _backend_profile.configure_quality_tooling
@@ -241,8 +247,15 @@ _frontend_run_documentation_phase = _frontend_profile.run_documentation_phase
 
 
 def _validate_stack(stack: str) -> None:
-    """Assert ``stack`` is a known key of :data:`STACK_CONFIGS`/:data:`STACK_WIRING`."""
-    assert stack in STACK_CONFIGS, f"stack must be one of {sorted(STACK_CONFIGS)}, got {stack!r}"
+    """Validate ``stack`` is a known key of :data:`STACK_CONFIGS`/:data:`STACK_WIRING`.
+
+    Raises ``ValueError`` (not ``assert``) since ``stack`` is external input
+    reaching this boundary from callers outside static-type enforcement (e.g.
+    ``team_kind`` strings routed through ``coding_engine_provider.py``), and
+    ``assert`` is stripped under ``python -O``/``PYTHONOPTIMIZE=1``.
+    """
+    if stack not in STACK_CONFIGS:
+        raise ValueError(f"stack must be one of {sorted(STACK_CONFIGS)}, got {stack!r}")
 
 
 class CodegenDevelopmentAgent(ConfigDrivenV2DevelopmentAgent):
@@ -419,14 +432,36 @@ class CodegenTeamLead(BaseTeamLead):
         """Run setup, verify lint/test readiness, then execute this instance's
         stack's 5-phase workflow.
 
-        merge_to_development defaults to True. When False, delivery prepares a
-        feature branch for external review instead of merging it.
+        Args:
+            repo_path: Path to the checked-out repo the workflow writes into.
+            task: The task being implemented (id/title/description/assignee).
+            architecture: Optional system architecture context passed to planning.
+            spec_content: Optional spec text passed to planning/execution prompts.
+            qa_agent: Optional pre-built QA review tool agent to reuse instead of
+                the stack's own.
+            security_agent: Same as ``qa_agent`` but for the security review pass.
+            code_review_agent: Optional pre-built production code-review agent
+                reused for the Code Review gate instead of an LLM one-shot review.
+            build_verifier: Optional callable ``(repo_path, agent_type, task_id) ->
+                (success, message)`` reused as the build gate instead of the
+                stack's default build tooling.
+            doc_agent: Deprecated and ignored — see
+                :func:`software_engineering_team.shared.team_lead_base.warn_doc_agent_deprecated`.
+                The warning fires here, unconditionally, before setup runs (so it
+                still fires even if setup or the lint/test readiness gate fails);
+                ``doc_agent`` is not forwarded past this point.
+            linting_tool_agent: Optional pre-built linting tool agent reused for
+                the lint gate instead of the stack's default.
+            job_updater: Optional callback invoked with progress/status updates
+                as the workflow advances through phases.
+            review_config: Optional ``MicrotaskReviewConfig`` overriding the
+                default per-gate retry caps.
+            merge_to_development: Defaults to True. When False, delivery prepares
+                a feature branch for external Tech Lead review instead of
+                merging it into the development branch.
 
-        ``doc_agent`` is deprecated and ignored — see
-        :func:`software_engineering_team.shared.team_lead_base.warn_doc_agent_deprecated`.
-        The warning fires here, unconditionally, before setup runs (so it
-        still fires even if setup or the lint/test readiness gate fails);
-        ``doc_agent`` is not forwarded past this point.
+        Returns:
+            A :class:`CodegenWorkflowResult` capturing every phase's outcome.
         """
         warn_doc_agent_deprecated(doc_agent)
 

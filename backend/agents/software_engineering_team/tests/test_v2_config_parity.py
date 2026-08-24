@@ -93,13 +93,22 @@ class TestBackendOrchestratorParity:
 
     def test_tool_agent_kinds_match_enum_excluding_general(self):
         """The *production* ``BACKEND_CONFIG`` singleton's registered kinds match
-        the enum -- unlike ``TestBackendParity``/``TestBackendConfigParity``
-        (whose ``_build()`` helpers construct a fresh, synthetic ``V2TeamConfig``
-        straight from the enum), this reads ``tool_agent_kinds`` off the real
-        agent/config, so it would catch ``BACKEND_CONFIG`` itself drifting from
-        the enum it's meant to mirror."""
+        backend's declared enum subset -- unlike ``TestBackendParity``/
+        ``TestBackendConfigParity`` (whose ``_build()`` helpers construct a
+        fresh, synthetic ``V2TeamConfig``), this reads ``tool_agent_kinds`` off
+        the real agent/config. Compares against ``_BACKEND_TOOL_AGENT_KINDS``
+        (an independent declaration in ``stacks/backend/profile.py``), not
+        ``STACK_CONFIGS["backend"].tool_agent_kinds`` -- ``agent.config is
+        STACK_CONFIGS["backend"]`` (see the test above), so comparing against
+        that would just be an identity check against itself and could never
+        catch ``BACKEND_CONFIG`` drifting from what it's meant to mirror."""
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            _BACKEND_TOOL_AGENT_KINDS,
+        )
+
         agent = self._make_agent()
-        assert agent.tool_agent_kinds == STACK_CONFIGS["backend"].tool_agent_kinds
+        expected = frozenset(k.value for k in _BACKEND_TOOL_AGENT_KINDS)
+        assert agent.tool_agent_kinds == expected
 
     def test_build_task_requirements_empty_base_returns_empty(self):
         """Empty base + empty clause == empty."""
@@ -289,13 +298,22 @@ class TestFrontendOrchestratorParity:
 
     def test_tool_agent_kinds_match_enum_excluding_general(self):
         """The *production* ``FRONTEND_CONFIG`` singleton's registered kinds match
-        the enum -- unlike ``TestFrontendParity``/``TestFrontendConfigParity``
-        (whose ``_build()`` helpers construct a fresh, synthetic ``V2TeamConfig``
-        straight from the enum), this reads ``tool_agent_kinds`` off the real
-        agent/config, so it would catch ``FRONTEND_CONFIG`` itself drifting from
-        the enum it's meant to mirror."""
+        frontend's declared enum subset -- unlike ``TestFrontendParity``/
+        ``TestFrontendConfigParity`` (whose ``_build()`` helpers construct a
+        fresh, synthetic ``V2TeamConfig``), this reads ``tool_agent_kinds`` off
+        the real agent/config. Compares against ``_FRONTEND_TOOL_AGENT_KINDS``
+        (an independent declaration in ``stacks/frontend/profile.py``), not
+        ``STACK_CONFIGS["frontend"].tool_agent_kinds`` -- ``agent.config is
+        STACK_CONFIGS["frontend"]`` (see the test above), so comparing against
+        that would just be an identity check against itself and could never
+        catch ``FRONTEND_CONFIG`` drifting from what it's meant to mirror."""
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
+            _FRONTEND_TOOL_AGENT_KINDS,
+        )
+
         agent = self._make_agent()
-        assert agent.tool_agent_kinds == STACK_CONFIGS["frontend"].tool_agent_kinds
+        expected = frozenset(k.value for k in _FRONTEND_TOOL_AGENT_KINDS)
+        assert agent.tool_agent_kinds == expected
 
     def test_conventions_map_has_exactly_one_key(self):
         """Frontend's conventions map contains only _default — no language-specific entries."""

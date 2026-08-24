@@ -83,13 +83,16 @@ def test_build_team_lead_routes_backend(monkeypatch) -> None:
     assert captured["stack"] == "backend"
 
 
-def test_build_team_lead_unknown_kind_raises_assertionerror() -> None:
+def test_build_team_lead_unknown_kind_raises_valueerror() -> None:
     """An unrecognised ``team_kind`` violates the documented precondition and
-    must surface as a caller bug (``AssertionError``, raised by
-    ``CodegenTeamLead``'s own ``stack`` precondition check), not silently
-    resolve to either stack -- matches this repo's DbC convention of never
-    coercing a precondition violation."""
-    with pytest.raises(AssertionError):
+    must surface as a caller bug (``ValueError``, raised by
+    ``CodegenTeamLead``'s own ``stack`` precondition check via
+    ``_validate_stack``), not silently resolve to either stack -- matches
+    this repo's DbC convention of never coercing a precondition violation.
+    ``ValueError`` rather than ``AssertionError`` since ``stack`` is external
+    input crossing a boundary from outside static-type enforcement, and
+    ``assert`` is stripped under ``python -O``."""
+    with pytest.raises(ValueError, match="stack must be one of"):
         SECodeEngineProvider().build_implementation_team_lead("mobile", "L")
 
 

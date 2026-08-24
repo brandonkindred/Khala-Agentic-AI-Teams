@@ -13,8 +13,7 @@ from typing import Any, Dict
 from unittest.mock import MagicMock
 
 from shared.dev_models.models import Task, TaskStatus, TaskType
-from software_engineering_team.codegen_team import models as be_models
-from software_engineering_team.codegen_team import models as fe_models
+from software_engineering_team.codegen_team import models as codegen_models
 from software_engineering_team.codegen_team.models import (
     Microtask,
     MicrotaskStatus,
@@ -53,7 +52,7 @@ def _pass_gate(**_kwargs: Any) -> GateOutcome:
 
 def _build_test_bindings(**overrides: Any) -> ExecutionBindings:
     kwargs: Dict[str, Any] = dict(
-        models=be_models,
+        models=codegen_models,
         profile=BE_PROFILE,
         execution_prompt="{microtask_description} {requirements} {existing_code} {architecture_context}",
         parse_files_and_summary=lambda raw: {"files": {}, "summary": raw},
@@ -198,7 +197,7 @@ class TestBuildExecutionBindingsFrontendParity:
             return {"files": {"app.tsx": "export default function App() {}"}, "summary": "done"}
 
         bindings = _build_test_bindings(
-            models=fe_models,
+            models=codegen_models,
             profile=FE_PROFILE,
             parse_files_and_summary=parse_files_and_summary,
         )

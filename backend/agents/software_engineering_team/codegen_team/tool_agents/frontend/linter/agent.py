@@ -19,6 +19,7 @@ from typing import List
 
 from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
+from software_engineering_team.codegen_team.models import ReviewIssue
 from software_engineering_team.codegen_team.stacks.frontend.profile import (
     parse_problem_solving_single_issue_template,
 )
@@ -29,7 +30,6 @@ from software_engineering_team.shared.tool_agent_base import (
     BaseReviewToolAgent,
     SingleIssueProblemSolveMixin,
 )
-from software_engineering_team.shared.v2_models import ReviewIssue
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +44,12 @@ def run_frontend_lint_and_parse(repo_path: Path) -> List[ReviewIssue]:
     """Run ``eslint . --format json`` and return one issue per reported message.
 
     Preconditions: ``repo_path`` is a ``pathlib.Path`` to an existing directory.
-    Postconditions: returns a list of :class:`ReviewIssue` (empty when no
-    frontend project is present, ESLint is unavailable, or there are no
-    findings). Never raises for a missing project or unparsable output.
+    Postconditions: the frontend project is looked up at ``repo_path`` if it
+    has a ``package.json``, otherwise at ``repo_path / "frontend"``; a repo
+    with neither is treated as having no frontend project. Returns a list of
+    :class:`ReviewIssue` (empty when no frontend project is present at either
+    location, ESLint is unavailable, or there are no findings). Never raises
+    for a missing project or unparsable output.
     """
     frontend_dir = repo_path if (repo_path / "package.json").exists() else repo_path / "frontend"
     if not (frontend_dir / "package.json").exists():
