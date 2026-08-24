@@ -125,7 +125,7 @@ sequenceDiagram
 
             CycleWF-->>BatchWF: cycle result
             BatchWF->>Finalize: finalize_cycle_record_activity
-            alt publishable winner
+            opt publishable winner
                 Finalize->>PTA: run_session(strategy)
                 PTA-->>Finalize: PaperTradingSession
             end

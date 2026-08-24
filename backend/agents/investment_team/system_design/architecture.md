@@ -278,7 +278,8 @@ tracked in [`../ARCHITECTURE_REVIEW.md`](../ARCHITECTURE_REVIEW.md) is
 complete: the old in-process daemon-thread worker (`_strategy_lab_worker`) has
 been removed, and `run_strategy_lab` / `resume_strategy_lab_run` /
 `restart_strategy_lab_run` now dispatch exclusively through
-`_dispatch_strategy_lab_run` ([`api/main.py`](../api/main.py)), which starts
+`_dispatch_strategy_lab_run` ([`strategy_lab/orchestrator_api.py`](../strategy_lab/orchestrator_api.py),
+imported into `api/main.py`), which starts
 the durable `StrategyLabBatchWorkflow` — a parent workflow that, for each
 batch, refreshes a **per-batch signal-intelligence brief** (one
 `compute_signal_brief_activity` call via `SignalIntelligenceExpert`, shared by
