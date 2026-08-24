@@ -1,6 +1,6 @@
 # Backend Code V2 Team
 
-The Backend Code V2 Team is a standalone backend development system that produces production-ready backend code through a 7-phase workflow with 10 specialized tool agents.
+The Backend Code V2 Team is a config-driven backend development system that produces production-ready backend code through a 7-phase workflow with 10 specialized tool agents. It is not an independently-coded implementation: `phases/_profile.py` composes a `StackProfile`/`V2TeamConfig` (`../shared/v2_team_config.py`) and binds the shared, generic phase implementations in `../shared/` — the same code the Frontend Code V2 Team runs, parameterized differently.
 
 ## Architecture
 
@@ -36,7 +36,7 @@ graph TB
 | Layer | Component | Responsibility |
 |-------|-----------|----------------|
 | Team Lead | `BackendCodeV2TeamLead` | Setup phase (repo init, branching), delegates to Development Agent |
-| Development Agent | `BackendDevelopmentAgent` | Executes 5-phase cycle (Planning → Execution → Review → Problem-solving → Deliver) |
+| Development Agent | `BackendDevelopmentAgent` | A `ConfigDrivenV2DevelopmentAgent` (`../shared/v2_orchestrator.py`) bound to `BACKEND_CONFIG`; executes the shared 5-phase cycle (Planning → Execution → Review → Problem-solving → Deliver) |
 
 ## Workflow Phases
 
@@ -233,12 +233,9 @@ backend_code_v2_team/
 ├── models.py              # Phase, Microtask, all result models
 ├── prompts.py             # LLM prompts for phases
 ├── phases/
-│   ├── _profile.py        # Stack profile, V2TeamConfig, and config-driven
-│   │                       # documentation/planning/output-template bindings
-│   ├── setup.py           # Repo initialization
-│   ├── execution.py       # Run microtasks via tool agents
-│   ├── review.py          # Code review, QA, security
-│   └── problem_solving.py # Fix issues
+│   ├── _profile.py        # StackProfile + V2TeamConfig (BACKEND_CONFIG) and
+│   │                       # bindings into the shared phase implementations
+│   └── problem_solving.py # Fix issues (per-team; not yet folded into shared/)
 └── tool_agents/
     ├── data_engineering/  # Database models, schemas
     ├── api_openapi/       # REST endpoints
@@ -251,6 +248,8 @@ backend_code_v2_team/
     ├── security/          # Security scanning
     └── documentation/     # Documentation
 ```
+
+The Setup, Execution, Review, Documentation, Planning, and Deliver phase implementations are shared with the Frontend Code V2 Team and live in `../shared/` (`v2_orchestrator.py`, `v2_phase_bindings.py`, `v2_execution_bindings.py`, `v2_review_bindings.py`, `phases/{setup,execution,review,documentation,planning,deliver}.py`), configured per team by `_profile.py`'s `BACKEND_CONFIG`.
 
 ## Integration with SE Team
 

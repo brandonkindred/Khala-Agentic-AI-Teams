@@ -672,7 +672,7 @@ flowchart TB
     SWTeam --> swCLI["agent_implementations/"]
     SWTeam --> swAdapter["planning_adapter.py\n(handoff → ProductRequirements)"]
     SWTeam --> swBackend["backend_agent/"]
-    SWTeam --> swBackendV2["backend_code_v2_team/\n(standalone 5-phase team,\n3 tool agents)"]
+    SWTeam --> swBackendV2["backend_code_v2_team/\n(config-driven 7-phase team,\n10 tool agents; shares its phase\nimplementations with frontend_code_v2_team\nvia shared/v2_team_config.py)"]
     SWTeam --> swFrontend["frontend_team/\n(12 agents)"]
     SWTeam --> swDevops["devops_team/\n(9 agents + 5 tool agents)"]
     SWTeam --> swQuality["quality_gates/"]
