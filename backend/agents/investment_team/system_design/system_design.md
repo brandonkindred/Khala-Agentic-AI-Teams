@@ -407,6 +407,16 @@ the verification/publication decision is documented in
 | `PaperTradingStatus` | `running`, `completed`, `failed` | [`models.py`](../models.py):367 |
 | `PaperTradingVerdict` | `ready_for_live`, `not_performant`, `requires_review` | [`models.py`](../models.py):373 |
 
+`PaperTradingStatus` (above) and `StrategyLabRecord.paper_trading_status`
+(in the class diagram) are **not** the same vocabulary despite the name and
+two overlapping values — `PaperTradingStatus` is the runtime state of an
+active `PaperTradingSession` (`running`/`completed`/`failed`), while
+`StrategyLabRecord.paper_trading_status` is a plain `Optional[str]`
+recording the *persisted cycle outcome* (`skipped`/`completed`/`failed`,
+`None` for legacy rows) — a cycle that never started paper trading has no
+`PaperTradingSession` and therefore no `running` state to report. They are
+deliberately separate fields, not one enum reused inconsistently.
+
 ## Persistence strategy (recap)
 
 Instead of owning a `shared.postgres` schema, the team pushes every artifact
