@@ -107,7 +107,7 @@ flowchart LR
   BatchWF --> SIE
   BatchWF --> CycleWF
   CycleWF --> SLO
-  CycleWF --> Finalize
+  BatchWF -->|"after awaiting the wave's<br/>child workflows"| Finalize
   Finalize --> PTA
   Finalize --> B7
   BatchWF --> EventBus

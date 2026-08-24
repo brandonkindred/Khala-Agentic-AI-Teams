@@ -30,6 +30,16 @@ discards everything except a design-phase checkpoint (see "Design-attempt
 checkpointing" in [`../strategy_lab/README.md`](../strategy_lab/README.md))
 and the attempt restarts from the top on retry.
 
+A file-reference note before diving in: `../strategy_lab/orchestrator.py`
+defines the combined `StrategyLabOrchestrator` class itself — composed from
+five mixins (see "Orchestrator composition" below) that each own one slice
+of the pipeline. Most phase-specific logic below is cited to its owning
+mixin file, but several top-level orchestration methods that don't belong to
+any single phase — `_synthesize_initial_code` (the compiled-DSL-vs-custom-code
+fork), `_run_realism_gates`, `_refine`/`_refine_or_exhaust`, `_run_alignment_audit`,
+`_apply_updates` — live directly on `orchestrator.py` itself, not on a mixin.
+Citations to `orchestrator.py` below mean that base class file specifically.
+
 ## The 4-phase contract
 
 [`../strategy_lab/phases.py`](../strategy_lab/phases.py) defines the phase
@@ -54,11 +64,13 @@ transition, but the trade-alignment loop that follows it can still commit a
 rewritten baseline (`_commit_alignment_proposal`), so the terminal
 transition's `code_hash` can legitimately differ from the one recorded at
 `CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION` — that's an accepted, alignment-
-driven rewrite, not drift. All four emission sites
-live in `orchestrator_design.py` (lines 642-649, 1960-1967, 1577-1584,
-1756-1763) — the mixin that owns the whole-attempt sequencer emits every
-transition, even though the phases themselves execute across three different
-mixins (below).
+driven rewrite, not drift. All four emission sites live in
+`orchestrator_design.py`, in phase order: `DESIGN → DESIGN_REVIEW`
+(642-649), `DESIGN_REVIEW → CODE_SYNTHESIS` (1960-1967),
+`CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION` (1577-1584), and the terminal
+`BACKTEST_AND_VERIFICATION → None` (1756-1763) — the mixin that owns the
+whole-attempt sequencer emits every transition, even though the phases
+themselves execute across three different mixins (below).
 
 ## Design ↔ review loop (DESIGN → DESIGN_REVIEW)
 
