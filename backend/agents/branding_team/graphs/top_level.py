@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from strands.multiagent.graph import Graph, GraphBuilder
+from strands.multiagent.graph import Graph
 
 from branding_team.graphs.phase1_strategic_core import build_phase1_graph
 from branding_team.graphs.phase2_narrative import build_phase2_graph
@@ -17,6 +17,7 @@ from branding_team.graphs.phase4_channel import build_phase4_graph
 from branding_team.graphs.phase5_governance import build_phase5_graph
 from branding_team.graphs.shared import phase_index
 from branding_team.models import BrandPhase
+from shared.graph import build_sequential
 
 # BrandPhase ends with COMPLETE (not a runnable pipeline stage).
 _MAX_RUNNABLE_PHASE_INDEX = len(BrandPhase) - 2
@@ -47,47 +48,32 @@ def build_branding_graph(
         graph carries the module's execution/node timeout budgets and is ready to
         invoke with the serialised ``BrandingMission`` as its task string.
     """
-    stop_idx = (
-        phase_index(target_phase) if target_phase else _MAX_RUNNABLE_PHASE_INDEX
-    )
-
-    builder = GraphBuilder()
-    builder.set_graph_id("branding_pipeline")
-    builder.set_execution_timeout(DEFAULT_EXECUTION_TIMEOUT_SECONDS)
-    builder.set_node_timeout(DEFAULT_NODE_TIMEOUT_SECONDS)
+    stop_idx = phase_index(target_phase) if target_phase else _MAX_RUNNABLE_PHASE_INDEX
 
     # ---- Phase 1: Strategic Core (always runs) ----
-    phase1 = build_phase1_graph()
-    p1_node = builder.add_node(phase1, node_id="phase1_strategic_core")
-    builder.set_entry_point("phase1_strategic_core")
-
-    last_node = p1_node
+    stages: list[tuple[str, Graph]] = [
+        ("phase1_strategic_core", build_phase1_graph()),
+    ]
 
     # ---- Phase 2: Narrative & Messaging ----
     if stop_idx >= 1:
-        phase2 = build_phase2_graph()
-        p2_node = builder.add_node(phase2, node_id="phase2_narrative")
-        builder.add_edge(last_node, p2_node)
-        last_node = p2_node
+        stages.append(("phase2_narrative", build_phase2_graph()))
 
     # ---- Phase 3: Visual & Expressive Identity ----
     if stop_idx >= 2:
-        phase3 = build_phase3_graph()
-        p3_node = builder.add_node(phase3, node_id="phase3_visual")
-        builder.add_edge(last_node, p3_node)
-        last_node = p3_node
+        stages.append(("phase3_visual", build_phase3_graph()))
 
     # ---- Phase 4: Experience & Channel Activation ----
     if stop_idx >= 3:
-        phase4 = build_phase4_graph()
-        p4_node = builder.add_node(phase4, node_id="phase4_channel")
-        builder.add_edge(last_node, p4_node)
-        last_node = p4_node
+        stages.append(("phase4_channel", build_phase4_graph()))
 
     # ---- Phase 5: Governance & Evolution ----
     if stop_idx >= 4:
-        phase5 = build_phase5_graph()
-        p5_node = builder.add_node(phase5, node_id="phase5_governance")
-        builder.add_edge(last_node, p5_node)
+        stages.append(("phase5_governance", build_phase5_graph()))
 
-    return builder.build()
+    return build_sequential(
+        stages=stages,
+        graph_id="branding_pipeline",
+        execution_timeout=DEFAULT_EXECUTION_TIMEOUT_SECONDS,
+        node_timeout=DEFAULT_NODE_TIMEOUT_SECONDS,
+    )
