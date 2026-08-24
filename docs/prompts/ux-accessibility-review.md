@@ -152,8 +152,10 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
          fails. Passing takes ONE of three, and the thresholds are part of the
          criterion, so a token control does not satisfy it:
            - the user can turn the limit off before encountering it; or
-           - the user can adjust it over a range AT LEAST TEN TIMES the default — a
-             twofold adjustment does not qualify; or
+           - the user can adjust it, BEFORE ENCOUNTERING IT, over a range AT LEAST
+             TEN TIMES the default — a twofold adjustment does not qualify, and
+             neither does a tenfold one offered only once the limit is already
+             running; or
            - the user is warned before it expires, given AT LEAST 20 SECONDS to extend
              with a simple action, and can extend AT LEAST TEN TIMES.
          The criterion's own exceptions (real-time events, essential limits, and
@@ -197,9 +199,13 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
              the author.
            - Essential — a particular presentation is essential or legally required.
        * Focus not obscured: at the AA bar this review holds to (2.4.11), a focused
-         control must not be ENTIRELY hidden by a sticky header, toolbar, or footer.
-         Partial obscuration fails only the AAA criterion (2.4.12) — report it, if at
-         all, as an enhancement, never as an AA violation.
+         control must not be ENTIRELY hidden by AUTHOR-CREATED content — a sticky
+         header, toolbar, or footer being the usual culprits. Content the USER opened
+         is carved out: if they can reveal the focused control without advancing
+         focus, such as pressing Escape to dismiss an overlay they opened, it does not
+         count as hidden, so check for that before reporting. Partial obscuration
+         fails only the AAA criterion (2.4.12) — report it, if at all, as an
+         enhancement, never as an AA violation.
        * Dragging movements (2.5.7) have a single-pointer alternative that does NOT
          itself require dragging — a second drag gesture does not satisfy this, since
          dragging is already single-pointer. Essential dragging, and behaviour set by
