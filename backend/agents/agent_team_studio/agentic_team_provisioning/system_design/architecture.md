@@ -146,7 +146,7 @@ In this service, the orchestrator is **not** a dedicated LLM agent — it is the
 |---|---|---|
 | `ProcessDesignerAgent` | `assistant/agent.py` | LLM-driven chat that emits ```agents``` / ```process``` / ```suggestions``` JSON blocks |
 | `AgenticTeamStore` | `assistant/store.py` | Authoritative persistence for teams, processes, roster, conversations, provisioning status |
-| `RosterValidator` | `roster_validation.py` | Detects gaps: `unrostered_agent`, `unused_agent`, `unstaffed_step`, `incomplete_profile`, `sparse_profile` (`roster_validation.py:48-151`) |
+| `RosterValidator` | `roster_validation.py` | Detects gaps: `unstaffed_step`, `unrostered_agent`, `unused_agent`, `missing_manifest`, `incomplete_profile`, `sparse_profile` (`roster_validation.py:23-179`) |
 | `AgentEnvProvisioner` | `agent_env_provisioning.py` | Spawns background threads calling `agent_provisioning_team.ProvisioningOrchestrator.run_workflow` (`agent_env_provisioning.py:88-129`) |
 | `PipelineRunner` | `runtime/pipeline_runner.py` | Walks a `ProcessDefinition` DAG step-by-step, pauses at `WAIT` steps, resumes on human input (`runtime/pipeline_runner.py:33-71`) |
 | `AgentBuilder` | `runtime/agent_builder.py` | Builds a `strands.Agent` from join-at-read persona fields for interactive testing and pipeline steps |

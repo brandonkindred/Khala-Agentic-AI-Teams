@@ -56,10 +56,11 @@ Each agentic team maintains a **Roster** — a named pool of agents. The roster 
 
 The roster is validated automatically to ensure the team is **fully staffed**. Validation checks:
 
-1. **Unrostered agents** — every agent referenced in a process step must exist on the roster.
-2. **Unused agents** — every rostered agent should be assigned to at least one process step.
-3. **Unstaffed steps** — every process step must have at least one assigned agent.
-4. **Incomplete profiles** — agents whose linked manifest resolves to missing skills, capabilities, tools, or expertise are flagged so coverage cannot be assumed.
+1. **Unrostered agents** (`unrostered_agent`) — every agent referenced in a process step must exist on the roster.
+2. **Unused agents** (`unused_agent`) — every rostered agent should be assigned to at least one process step.
+3. **Unstaffed steps** (`unstaffed_step`) — every process step must have at least one assigned agent.
+4. **Missing manifest** (`missing_manifest`) — a roster entry's linked manifest is not resolvable in the registry.
+5. **Incomplete / sparse profiles** — agents whose linked manifest is missing skills, tools, and/or expertise (`capabilities` is not projected from the manifest, so it is excluded from this check): `incomplete_profile` when all three are missing, `sparse_profile` when exactly two are missing.
 
 A team is considered fully staffed only when all checks pass. The validation endpoint is `GET /teams/{team_id}/roster/validation`.
 
