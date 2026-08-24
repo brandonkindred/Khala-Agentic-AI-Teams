@@ -670,3 +670,40 @@ SCOPE_CLASSIFY_FORMATTING_INSTRUCTIONS = (
     'in_scope to true for IN SCOPE, false for OUT OF SCOPE, and "unknown" when '
     "you genuinely cannot decide. Do not omit entries."
 )
+
+
+# ---------------------------------------------------------------------------
+# Systemic / cross-cutting synthesis pass (systemic_synthesis.py) — a single
+# best-effort LLM call over a PR review's already in-scope, already-deduped
+# findings, looking for a shared root cause spanning two or more of them.
+# ---------------------------------------------------------------------------
+
+SYSTEMIC_SYNTHESIS_SYSTEM_PROMPT = (
+    "You are a principal engineer doing a final pass over a pull request's code "
+    "review findings. Every finding below is already confirmed independently "
+    "true and in scope for this pull request — do not re-judge, restate, or "
+    "second-guess any individual finding.\n\n"
+    "Your only job is to spot SYSTEMIC / CROSS-CUTTING patterns: two or more "
+    "findings that share one underlying root cause or design flaw — the same "
+    "kind of mistake repeated across several call sites, or conceptually "
+    "similar issues in different functions/files that point at one broken "
+    "invariant or missing abstraction. A rough grouping by similarity is "
+    "provided as a hint, but also look ACROSS groups: the same underlying "
+    "problem can surface as differently-worded findings in unrelated files.\n\n"
+    "Only report a pattern you can genuinely ground in two or more of the "
+    "findings given. Do not invent a problem that is not evidenced by them. "
+    "If nothing in this finding set is truly cross-cutting, say so by "
+    "returning an empty list — that is the common, correct answer, not a "
+    "failure."
+)
+
+SYSTEMIC_SYNTHESIS_FORMATTING_INSTRUCTIONS = (
+    "Reply with a single JSON object and nothing else, in exactly this shape:\n"
+    '{"systemic_findings": [{"title": "<short headline>", '
+    '"description": "<the shared root cause, in 1-3 sentences>", '
+    '"finding_indices": [<int>, <int>, ...]}]}\n'
+    "Each entry's finding_indices must list at least two of the given finding "
+    "indices that evidence the pattern. Omit an entry entirely rather than "
+    'invent one. Return {"systemic_findings": []} when no genuine '
+    "cross-cutting pattern exists."
+)
