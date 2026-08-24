@@ -3996,10 +3996,17 @@ def test_spec_compliance_single_pass_failure_falls_back_to_per_chunk_notes(monke
     )
 
 
-def test_run_spec_compliance_single_pass_flag_off_skips_call() -> None:
+def test_run_spec_compliance_single_pass_flag_off_skips_call(monkeypatch) -> None:
     """``_run_spec_compliance_single_pass`` in isolation: ``spec_compliance_single_pass=False``
     returns ``None`` without ever calling ``synthesize_spec_compliance``."""
     import code_review_agent.coordinator as coord
+
+    spec_calls: list = []
+    monkeypatch.setattr(
+        coord,
+        "synthesize_spec_compliance",
+        lambda *args, **kwargs: spec_calls.append((args, kwargs)),
+    )
 
     result = coord._run_spec_compliance_single_pass(
         llm=DummyLLMClient(),
@@ -4009,6 +4016,7 @@ def test_run_spec_compliance_single_pass_flag_off_skips_call() -> None:
     )
 
     assert result is None
+    assert spec_calls == []
 
 
 def test_run_spec_compliance_single_pass_flag_on_calls_synthesis(monkeypatch) -> None:
