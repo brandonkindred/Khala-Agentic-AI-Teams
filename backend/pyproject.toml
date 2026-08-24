@@ -129,15 +129,14 @@ omit = [
     # and only meaningful with real model responses. Models/prompts and
     # pure parsers/validators stay covered via tests/test_product_*.py.
     "agents/software_engineering_team/product_requirements_analysis_agent/agent.py",
-    # software_engineering_team: v2-team review/problem-solving phases —
-    # each phase drives an LLM gating loop against the freshly written
-    # repo (lint runner, build runner, security pass, QA suite). They
-    # require a writable git workspace + real LLM and are exercised via
-    # integration runs; sub-team orchestrators/setup/planning/deliver
-    # phases remain covered by unit tests with mocked tool agents.
-    "agents/software_engineering_team/backend_code_v2_team/phases/review.py",
+    # software_engineering_team: v2-team problem-solving phase — drives an
+    # LLM gating loop against the freshly written repo (lint runner, build
+    # runner, security pass, QA suite). Requires a writable git workspace +
+    # real LLM and is exercised via integration runs; the review phase now
+    # lives in the shared, config-driven implementation (shared/phases/review.py,
+    # shared/v2_review_bindings.py) and is covered there by unit tests with
+    # mocked tool agents, same as setup/planning/deliver.
     "agents/software_engineering_team/backend_code_v2_team/phases/problem_solving.py",
-    "agents/software_engineering_team/frontend_code_v2_team/phases/review.py",
     "agents/software_engineering_team/frontend_code_v2_team/phases/problem_solving.py",
     # software_engineering_team: v2-team build specialist — wraps the
     # real `ng build`/`pytest` runners + LLM prompt repair loop, only
@@ -147,9 +146,6 @@ omit = [
     # `ruff`/`pylint` subprocess invocations on the agent-generated tree;
     # only runs against real lint binaries + a generated repo.
     "agents/software_engineering_team/linting_tool_agent/linter_runner.py",
-    # software_engineering_team: v2-team git_branch_management tool agent —
-    # shells out to real git in the agent workspace.
-    "agents/software_engineering_team/backend_code_v2_team/tool_agents/git_branch_management/agent.py",
     # software_engineering_team: v2-team orchestrators — wire setup → planning →
     # execution → review → problem-solving → deliver around live LLM + npm/git/pytest.
     # The smaller helpers and team-lead/dev-agent shell are covered via dedicated
