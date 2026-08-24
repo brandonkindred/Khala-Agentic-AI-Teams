@@ -83,10 +83,18 @@ def _build_judge_prompt(
     mission: BrandingMission,
     phase: BrandPhase,
     output: BaseModel,
-    variant_label: str,
     strategic_core: BaseModel | None,
 ) -> str:
     """Render the user prompt for one judge call.
+
+    Deliberately blind to which context variant (selective vs. full) produced
+    ``output`` and ``strategic_core``: revealing that would let the judge
+    score based on the *expected* effect of context reduction rather than
+    the output's actual quality, and a single point of integer-scale bias is
+    enough to flip a regression verdict. Callers distinguish variants for
+    their own bookkeeping (e.g. ``score_phase_output``'s ``variant_label``
+    forwarded only to LLM call telemetry); nothing variant-specific reaches
+    this prompt's text.
 
     Preconditions:
         ``output`` is the Pydantic output model instance for ``phase``.
@@ -98,10 +106,9 @@ def _build_judge_prompt(
         Returns a non-empty string embedding the mission's identifying
         fields, the generated strategic core (when supplied) so the judge
         can score coherence against what was actually generated upstream
-        (not just the raw mission brief), the phase name, the variant label
-        (for the judge's own context only -- it does not see the other
-        variant), and ``output.model_dump(mode="json")`` as pretty-printed
-        JSON.
+        (not just the raw mission brief), the phase name, and
+        ``output.model_dump(mode="json")`` as pretty-printed JSON -- with no
+        selective/full-context label anywhere in the returned text.
     """
     mission_summary = json.dumps(
         {
@@ -116,15 +123,13 @@ def _build_judge_prompt(
     strategic_core_block = ""
     if strategic_core is not None:
         strategic_core_json = json.dumps(strategic_core.model_dump(mode="json"), indent=2)
-        strategic_core_block = (
-            f"--- GENERATED STRATEGIC CORE ({variant_label} context) ---\n{strategic_core_json}\n\n"
-        )
+        strategic_core_block = f"--- GENERATED STRATEGIC CORE ---\n{strategic_core_json}\n\n"
     output_json = json.dumps(output.model_dump(mode="json"), indent=2)
     return (
         "--- MISSION ---\n"
         f"{mission_summary}\n\n"
         f"{strategic_core_block}"
-        f"--- PHASE ({phase.value}, {variant_label} context) OUTPUT ---\n"
+        f"--- PHASE ({phase.value}) OUTPUT ---\n"
         f"{output_json}\n\n"
         "--- TASK ---\n"
         "Score this phase output against the rubric in your system prompt. Score "
@@ -149,7 +154,10 @@ def score_phase_output(
         ``client`` is a ready :class:`LLMClient`. ``output`` is the real
         Pydantic output model instance produced for ``phase``. ``variant_label``
         is a short caller-chosen string (e.g. ``"selective"``/``"full"``)
-        used only for the judge's own framing, never for scoring logic.
+        forwarded only to ``complete_validated``'s ``objective`` for LLM call
+        telemetry/log attribution -- it never reaches the rendered prompt
+        text the judge sees (see ``_build_judge_prompt``), so the judge
+        cannot score based on which variant produced ``output``.
         ``strategic_core`` should be this same variant's own generated
         ``BrandPhase.STRATEGIC_CORE`` output when ``phase`` is downstream of
         it (every phase this eval judges is); omit only when judging the
@@ -163,14 +171,13 @@ def score_phase_output(
         mission=mission,
         phase=phase,
         output=output,
-        variant_label=variant_label,
         strategic_core=strategic_core,
     )
     return complete_validated(
         client,
         prompt,
         schema=PhaseQualityScore,
-        objective="score branding phase quality",
+        objective=f"score branding phase quality ({variant_label})",
         system_prompt=_JUDGE_SYSTEM_PROMPT,
         correction_attempts=1,
         structured_output_model=PhaseQualityScore,

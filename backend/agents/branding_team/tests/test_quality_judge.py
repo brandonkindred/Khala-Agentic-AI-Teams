@@ -117,7 +117,6 @@ def test_build_judge_prompt_embeds_strategic_core_when_supplied() -> None:
         mission=mission,
         phase=BrandPhase.GOVERNANCE,
         output=output,
-        variant_label="selective",
         strategic_core=strategic_core,
     )
 
@@ -138,8 +137,28 @@ def test_build_judge_prompt_omits_strategic_core_block_when_none() -> None:
         mission=mission,
         phase=BrandPhase.GOVERNANCE,
         output=output,
-        variant_label="selective",
         strategic_core=None,
     )
 
     assert "--- GENERATED STRATEGIC CORE" not in prompt
+
+
+def test_build_judge_prompt_never_reveals_variant_label() -> None:
+    """The judge must be blind to which context variant produced the output --
+    revealing "selective"/"full" would let it score on the expected effect of
+    context reduction rather than actual quality (Codex P2 finding).
+    """
+    mission = make_mission()
+    strategic_core = StrategicCoreOutput(mission_statement="Ship brand with the product.")
+    output = GovernanceOutput()
+
+    prompt = _build_judge_prompt(
+        mission=mission,
+        phase=BrandPhase.GOVERNANCE,
+        output=output,
+        strategic_core=strategic_core,
+    )
+
+    assert "selective" not in prompt.lower()
+    assert "full context" not in prompt.lower()
+    assert "full-context" not in prompt.lower()

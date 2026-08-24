@@ -26,10 +26,13 @@ from branding_team.scripts.eval_selective_context import (
     SAMPLE_MISSIONS,
     PhaseQualityComparison,
     _approx_token_count,
+    _diverges_from_full_context,
+    _first_diverging_phase,
     _full_context_phases,
     _phase_spec_context_override,
     _print_quality_report,
     _run_variant,
+    _run_variant_pair,
     _slugify,
     _write_markdown_report,
     main,
@@ -160,6 +163,92 @@ def test_run_variant_restores_phase_spec_after_full_context() -> None:
 
     for phase, spec in _PHASE_SPEC.items():
         assert spec.context_phases == originals[phase]
+
+
+def test_diverges_from_full_context_true_only_for_governance() -> None:
+    """Today only GOVERNANCE's selective context_phases differs from its full-context
+    prefix -- every other phase's selective and full task prompts are identical.
+    """
+    for phase in PHASE_ORDER:
+        if phase == BrandPhase.STRATEGIC_CORE:
+            continue
+        expected = phase == BrandPhase.GOVERNANCE
+        assert _diverges_from_full_context(phase) is expected
+
+
+def test_first_diverging_phase_is_governance() -> None:
+    """GOVERNANCE is the only (and therefore first) diverging phase today."""
+    assert _first_diverging_phase() == BrandPhase.GOVERNANCE
+
+
+def test_run_variant_pair_shares_non_diverging_phase_outputs() -> None:
+    """Every phase before the first divergence (narrative_messaging, visual_identity,
+    channel_activation, strategic_core) must be the identical shared object between
+    the selective and full-context results -- not two independently regenerated
+    outputs -- so a live run can never manufacture a false delta on those phases.
+    """
+    orchestrator = BrandingTeamOrchestrator()
+    mission = make_mission()
+    with force_dummy_llm_provider():
+        selective_outputs, selective_tasks, full_outputs, full_tasks = _run_variant_pair(
+            orchestrator, mission
+        )
+
+    fork_phase = _first_diverging_phase()
+    fork_idx = PHASE_ORDER.index(fork_phase)
+    for phase in PHASE_ORDER[:fork_idx]:
+        assert selective_outputs[phase] is full_outputs[phase]
+        assert selective_tasks[phase] == full_tasks[phase]
+
+    # The diverging phase itself must still be judged independently per variant.
+    assert selective_outputs[fork_phase] is not full_outputs[fork_phase]
+
+
+def test_run_variant_pair_governance_task_strings_match_run_variant() -> None:
+    """_run_variant_pair's GOVERNANCE task strings must match what independently
+    calling _run_variant(full_context=False/True) would build -- the shared-prefix
+    optimization must not change what's actually sent to the LLM for the phase
+    that does diverge, only avoid redundant upstream regeneration.
+    """
+    mission = make_mission()
+    with force_dummy_llm_provider():
+        pair_orchestrator = BrandingTeamOrchestrator()
+        _sel_outputs, sel_tasks, _full_outputs, full_tasks = _run_variant_pair(
+            pair_orchestrator, mission
+        )
+
+        solo_orchestrator = BrandingTeamOrchestrator()
+        _outputs_sel, solo_selective_tasks = _run_variant(
+            solo_orchestrator, mission, full_context=False
+        )
+        _outputs_full, solo_full_tasks = _run_variant(solo_orchestrator, mission, full_context=True)
+
+    assert sel_tasks[BrandPhase.GOVERNANCE] == solo_selective_tasks[BrandPhase.GOVERNANCE]
+    assert full_tasks[BrandPhase.GOVERNANCE] == solo_full_tasks[BrandPhase.GOVERNANCE]
+
+
+def test_run_variant_pair_restores_phase_spec() -> None:
+    """_PHASE_SPEC must be back to its real, selective values after _run_variant_pair
+    returns, exactly like _run_variant guarantees.
+    """
+    orchestrator = BrandingTeamOrchestrator()
+    originals = {phase: spec.context_phases for phase, spec in _PHASE_SPEC.items()}
+
+    with force_dummy_llm_provider():
+        _run_variant_pair(orchestrator, make_mission())
+
+    for phase, spec in _PHASE_SPEC.items():
+        assert spec.context_phases == originals[phase]
+
+
+def test_run_eval_live_mode_rejects_dummy_provider(tmp_path) -> None:
+    """live=True must fail fast with a clear error if LLM_PROVIDER=dummy is still
+    set in the environment, rather than silently running the dummy stub and
+    reporting a meaningless PASS (Codex P1 finding).
+    """
+    with force_dummy_llm_provider():
+        with pytest.raises(RuntimeError, match="DummyLLMClient"):
+            run_eval(missions=[make_mission()], output_dir=tmp_path, live=True)
 
 
 def test_run_eval_disambiguates_duplicate_company_name_slugs(tmp_path) -> None:

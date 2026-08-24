@@ -64,7 +64,7 @@ from branding_team.models import BrandingMission, BrandPhase
 from branding_team.orchestrator import _PHASE_SPEC, BrandingTeamOrchestrator
 from branding_team.scripts.eval_fixtures.sample_missions import SAMPLE_MISSIONS
 from branding_team.scripts.quality_judge import PhaseQualityScore, score_phase_output
-from llm_service import get_client
+from llm_service import DummyLLMClient, get_client
 from llm_service.dummy_provider import force_dummy_llm_provider
 
 PHASE5_REDUCTION_TARGET_PCT = 40.0
@@ -294,6 +294,130 @@ def _run_variant(
     return outputs, task_strings
 
 
+def _diverges_from_full_context(phase: BrandPhase) -> bool:
+    """True when *phase*'s real, selective ``context_phases`` differs from its full-context prefix.
+
+    Preconditions:
+        ``phase`` is a member of ``PHASE_ORDER``.
+    Postconditions:
+        Returns ``False`` for every phase whose selective and full-context
+        task prompts are built from the identical upstream phase set (today,
+        every phase except ``GOVERNANCE``); ``True`` only where selective-context
+        filtering actually removes an upstream phase from the prompt.
+    """
+    return _PHASE_SPEC[phase].context_phases != _full_context_phases(phase)
+
+
+def _first_diverging_phase() -> Optional[BrandPhase]:
+    """Return the first phase (in ``PHASE_ORDER``) whose context actually diverges.
+
+    Postconditions:
+        Returns the first non-``STRATEGIC_CORE`` phase for which
+        ``_diverges_from_full_context`` is ``True``, or ``None`` if no phase
+        diverges (every phase's selective and full-context prompts would be
+        identical).
+    """
+    for phase in PHASE_ORDER:
+        if phase == BrandPhase.STRATEGIC_CORE:
+            continue
+        if _diverges_from_full_context(phase):
+            return phase
+    return None
+
+
+def _run_variant_pair(
+    orchestrator: BrandingTeamOrchestrator, mission: BrandingMission
+) -> tuple[
+    dict[BrandPhase, object], dict[BrandPhase, str], dict[BrandPhase, object], dict[BrandPhase, str]
+]:
+    """Run the selective and full-context variants sharing every non-diverging phase.
+
+    Running ``_run_variant(full_context=False)`` and ``_run_variant(full_context=True)``
+    fully independently (as this eval originally did) means every phase gets
+    regenerated twice from scratch -- including phases whose selective
+    ``context_phases`` already equals their full-upstream prefix (today, every
+    phase except ``GOVERNANCE``). Under a live, stochastic LLM provider that
+    introduces two confounds this function eliminates: (1) a phase whose
+    context is identical between variants would still be compared as two
+    independent random samples of the same treatment, manufacturing a token
+    or quality delta unrelated to selective-context filtering; (2) a
+    downstream diverging phase's two variants would each build on separately,
+    randomly regenerated upstream outputs, so their comparison would conflate
+    "the effect of selective context" with "randomness between two unrelated
+    generations." Sharing every phase up to the first divergence removes both:
+    only the phase(s) whose context actually differs are ever run twice, and
+    both forks start from the identical, single upstream generation.
+
+    Preconditions:
+        None beyond ``_run_variant``'s.
+    Postconditions:
+        Returns ``(selective_outputs, selective_tasks, full_outputs, full_tasks)``
+        with the same per-phase shape ``_run_variant`` returns. For every
+        phase before the first diverging phase (see ``_first_diverging_phase``),
+        ``selective_outputs[phase] is full_outputs[phase]`` (the identical
+        object, from one shared execution) and
+        ``selective_tasks[phase] == full_tasks[phase]``. From the first
+        diverging phase onward, each variant is executed independently against
+        its own accumulated prior-outputs, exactly as ``_run_variant`` would.
+        When no phase diverges, all four return values are pairwise identical
+        to a single shared run's outputs/tasks. ``_PHASE_SPEC`` is left
+        unmodified on return, even if a phase invocation raises.
+    Raises:
+        RuntimeError: propagated from a degraded phase output, exactly as
+            ``_run_variant`` raises.
+    """
+    shared_outputs: dict[BrandPhase, object] = {}
+    shared_tasks: dict[BrandPhase, str] = {}
+    shared_prior: dict[str, dict] = {}
+
+    fork_phase = _first_diverging_phase()
+    fork_idx = PHASE_ORDER.index(fork_phase) if fork_phase is not None else len(PHASE_ORDER)
+
+    for phase in PHASE_ORDER[:fork_idx]:
+        with _phase_spec_context_override(phase, _PHASE_SPEC[phase].context_phases):
+            shared_tasks[phase] = BrandingTeamOrchestrator._phase_task(  # noqa: SLF001
+                mission, phase, dict(shared_prior)
+            )
+            output, degraded = orchestrator.run_single_phase(mission, phase, shared_prior)
+        if degraded:
+            raise RuntimeError(
+                f"Phase {phase.value!r} degraded to a default-constructed output for "
+                f"mission {mission.company_name!r} (shared prefix) -- aborting eval "
+                "rather than reporting results derived from a placeholder output."
+            )
+        shared_outputs[phase] = output
+        shared_prior[phase.value] = output.model_dump(mode="json")
+
+    selective_outputs, selective_tasks = dict(shared_outputs), dict(shared_tasks)
+    full_outputs, full_tasks = dict(shared_outputs), dict(shared_tasks)
+    selective_prior, full_prior = dict(shared_prior), dict(shared_prior)
+
+    for phase in PHASE_ORDER[fork_idx:]:
+        for full_context, outputs, tasks, prior in (
+            (False, selective_outputs, selective_tasks, selective_prior),
+            (True, full_outputs, full_tasks, full_prior),
+        ):
+            context_phases = (
+                _full_context_phases(phase) if full_context else _PHASE_SPEC[phase].context_phases
+            )
+            with _phase_spec_context_override(phase, context_phases):
+                tasks[phase] = BrandingTeamOrchestrator._phase_task(  # noqa: SLF001
+                    mission, phase, dict(prior)
+                )
+                output, degraded = orchestrator.run_single_phase(mission, phase, prior)
+            if degraded:
+                variant = "full-context" if full_context else "selective"
+                raise RuntimeError(
+                    f"Phase {phase.value!r} degraded to a default-constructed output for "
+                    f"mission {mission.company_name!r} ({variant} variant) -- aborting eval "
+                    "rather than reporting results derived from a placeholder output."
+                )
+            outputs[phase] = output
+            prior[phase.value] = output.model_dump(mode="json")
+
+    return selective_outputs, selective_tasks, full_outputs, full_tasks
+
+
 def run_eval(
     missions: Optional[list[BrandingMission]] = None,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
@@ -356,11 +480,20 @@ def run_eval(
     with llm_context:
         orchestrator = BrandingTeamOrchestrator()
         judge_client = get_client(agent_key="branding_quality_judge")
-        for mission in missions:
-            selective_outputs, selective_tasks = _run_variant(
-                orchestrator, mission, full_context=False
+        if live and isinstance(judge_client, DummyLLMClient):
+            raise RuntimeError(
+                "run_eval(live=True) resolved to DummyLLMClient: LLM_PROVIDER=dummy is set "
+                "in this environment and llm_service.get_client() treats it as a hard "
+                "override that pre-empts any configured provider list, so a --live run "
+                "would silently stay on the deterministic stub and could never report a "
+                "real quality regression. Unset LLM_PROVIDER (or set it to something other "
+                "than 'dummy') and configure a provider via /llm-config before running "
+                "with --live."
             )
-            full_outputs, full_tasks = _run_variant(orchestrator, mission, full_context=True)
+        for mission in missions:
+            selective_outputs, selective_tasks, full_outputs, full_tasks = _run_variant_pair(
+                orchestrator, mission
+            )
 
             for phase in PHASE_ORDER:
                 if phase == BrandPhase.STRATEGIC_CORE:
