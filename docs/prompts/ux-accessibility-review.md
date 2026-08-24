@@ -147,11 +147,17 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
      `backend/agents/accessibility_audit_team/wcag_criteria.py` and confirm its
      applicability conditions and exceptions hold — a compressed restatement is a
      starting point, not the standard.
-       * 2.2.1 Timing Adjustable (A) — a time limit passes if the user can turn it
-         off, adjust it, or extend it. Judge it by that mechanism, not by whether the
-         duration feels generous: a comfortable but fixed limit still fails, and a
-         short but adjustable one passes. The criterion's own exceptions (real-time
-         events, essential limits, and limits beyond twenty hours) apply.
+       * 2.2.1 Timing Adjustable (A) — judge a time limit by its mechanism, not by
+         whether the duration feels generous: a comfortable but fixed limit still
+         fails. Passing takes ONE of three, and the thresholds are part of the
+         criterion, so a token control does not satisfy it:
+           - the user can turn the limit off before encountering it; or
+           - the user can adjust it over a range AT LEAST TEN TIMES the default — a
+             twofold adjustment does not qualify; or
+           - the user is warned before it expires, given AT LEAST 20 SECONDS to extend
+             with a simple action, and can extend AT LEAST TEN TIMES.
+         The criterion's own exceptions (real-time events, essential limits, and
+         limits beyond twenty hours) apply.
        * 2.2.2 Pause, Stop, Hide (A) — covers moving, blinking, or scrolling content
          that starts automatically, lasts MORE THAN FIVE SECONDS, and is presented in
          parallel with other content; and auto-updating content that starts
@@ -341,8 +347,11 @@ Close with:
     BEHAVIOUR in THAT STATE. Both halves are required: a state the fixtures never
     render is not guarded, and neither is a behaviour the spec never asserts. A bare
     `expectNoAxeViolations` in the populated state does not cover a focus-management,
-    announcement, keyboard, reflow, target-size, or contrast defect in that state —
-    report those.
+    announcement, reflow, target-size, or contrast defect in that state, nor keyboard
+    behaviour axe cannot exercise — key sequences, focus movement and restoration,
+    traps. Report those. It DOES run axe's structural keyboard rules (positive
+    `tabindex`, unfocusable scrollable regions, and the rest of the default set minus
+    `color-contrast`), so do not re-report those in a state the spec renders.
   - Speculation that requires a running browser without labelling it as such.
   - Wholesale redesigns, restructures of the shared shell, or framework swaps.
   - Style preferences with no accessibility, comprehension, or step-count consequence.
