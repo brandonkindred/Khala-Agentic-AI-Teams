@@ -20,18 +20,21 @@ be compared against:
    changes every phase's input hash, not just the phase(s) that field
    semantically belongs to. A "Phase-1-only" mission change therefore misses
    on all five phases, exactly like a cold run -- this test asserts that
-   cascade directly (every phase's LLM calls fire again) rather than
-   asserting a partial hit that the current cache design cannot produce.
+   cascade directly (every phase's LLM calls fire again, via the same
+   ``_benchmark_helpers.run_and_assert_cold_baseline`` the cold-run baseline
+   test uses) rather than asserting a partial hit that the current cache
+   design cannot produce.
 
-Uses the shared ``_benchmark_helpers.mock_llm_latency`` harness (also used by
+Uses the shared ``_benchmark_helpers`` module (also used by
 ``test_phase2_parallelism_benchmark.py`` and
 ``test_full_pipeline_first_run_benchmark.py``) for dummy-provider forcing,
 the ``DummyLLMClient.chat`` latency/call-count injection, LLM client cache
-clearing, and an oversized default executor sized to Phase 4's nine-way
-fan-out -- see that helper's docstring for why each piece is needed. All
-three runs in this test share one harness instance, so ``harness.call_count``
-accumulates across them; each run's assertions compare against the call
-count observed just before that run, not zero.
+clearing, an oversized default executor sized to Phase 4's nine-way fan-out,
+and the cold-run constants/assertion body -- see that module's docstrings for
+why each piece is needed. All three runs in each test share one harness
+instance, so ``harness.call_count`` accumulates across them;
+``run_and_assert_cold_baseline`` and this module's own assertions compare
+against the call count observed just before each run, not zero.
 
 Marked ``@pytest.mark.bench`` per ``backend/conftest.py``'s wall-clock
 benchmark convention (skipped by default locally; the ``test-branding`` CI
@@ -47,32 +50,13 @@ import pytest
 from branding_team.models import HumanReview
 from branding_team.orchestrator import BrandingTeamOrchestrator
 from branding_team.shared.phase_output_cache import PhaseOutputCache
-from branding_team.tests._benchmark_helpers import mock_llm_latency
+from branding_team.tests._benchmark_helpers import (
+    EXECUTOR_WORKERS,
+    PER_CALL_DELAY_SECONDS,
+    mock_llm_latency,
+    run_and_assert_cold_baseline,
+)
 from branding_team.tests.conftest import make_mission
-
-_PER_CALL_DELAY_SECONDS = 1.0
-
-# Phase 4 (``brand_experience_principler`` + six ``*_guide`` channel
-# specialists + ``brand_architecture_builder`` + ``brand_in_action_illustrator``,
-# see ``graphs/phase4_channel.py``) is the widest single-phase fan-out in the
-# pipeline at 9 concurrent nodes; headroom above that keeps the injected
-# executor from ever being the bottleneck. Mirrors
-# ``test_full_pipeline_first_run_benchmark.py``.
-_MAX_PHASE_FAN_OUT = 9
-_EXECUTOR_WORKERS = _MAX_PHASE_FAN_OUT + 4
-
-# Same bounds and derivation as ``test_full_pipeline_first_run_benchmark.py``:
-# measured locally at a stable ~9.15s across repeated runs for a genuinely
-# uncached run under 1s-per-call mocked latency. Reused here for both the
-# cold run (#1) and the Phase-1-change run (#3), since #3's cascading
-# invalidation makes it behave identically to a cold run.
-_MIN_WALL_CLOCK_SECONDS = 6.0
-_MAX_WALL_CLOCK_SECONDS = 20.0
-
-# Observed, not derived from the issue's "37 agents" -- see
-# ``test_full_pipeline_first_run_benchmark.py``'s module docstring for the
-# full accounting of why this is 39, not 37 or 38.
-_EXPECTED_CALL_COUNT = 39
 
 # Task #6978's literal AC for the second (fully cached) run. A cache hit does
 # no sleeping at all, so this ceiling has generous headroom above the ~0s a
@@ -92,31 +76,11 @@ def test_second_identical_run_hits_cache_and_stays_under_seven_seconds() -> None
     cache = PhaseOutputCache()
 
     with mock_llm_latency(
-        _PER_CALL_DELAY_SECONDS,
-        min_executor_workers=_EXECUTOR_WORKERS,
+        PER_CALL_DELAY_SECONDS,
+        min_executor_workers=EXECUTOR_WORKERS,
         executor_thread_name_prefix="cached-run-benchmark",
     ) as harness:
-        start = time.monotonic()
-        orchestrator.run(mission, human_review, phase_cache=cache)
-        cold_elapsed = time.monotonic() - start
-
-        assert harness.executor_injected, (
-            "asyncio.events.new_event_loop was never called -- run_coroutine no longer "
-            "creates its loop via asyncio.run's default path, so this benchmark's injected "
-            "executor never took effect; the wall-clock results below cannot be trusted "
-            "until this coupling is fixed"
-        )
-        assert harness.call_count == _EXPECTED_CALL_COUNT, (
-            f"expected exactly {_EXPECTED_CALL_COUNT} LLM calls on the cold first run, got "
-            f"{harness.call_count} -- see test_full_pipeline_first_run_benchmark.py for the "
-            "full accounting of this count"
-        )
-        assert _MIN_WALL_CLOCK_SECONDS <= cold_elapsed <= _MAX_WALL_CLOCK_SECONDS, (
-            f"cold first run took {cold_elapsed:.2f}s, outside the expected "
-            f"[{_MIN_WALL_CLOCK_SECONDS}, {_MAX_WALL_CLOCK_SECONDS}]s window -- this run is "
-            "this test's own baseline for the cached run below, so it must itself look like "
-            "a genuine uncached run before that comparison means anything"
-        )
+        run_and_assert_cold_baseline(orchestrator, mission, human_review, cache, harness)
 
         call_count_before_cached_run = harness.call_count
         start = time.monotonic()
@@ -152,39 +116,15 @@ def test_phase_one_relevant_mission_change_cascades_to_every_phase() -> None:
     cache = PhaseOutputCache()
 
     with mock_llm_latency(
-        _PER_CALL_DELAY_SECONDS,
-        min_executor_workers=_EXECUTOR_WORKERS,
+        PER_CALL_DELAY_SECONDS,
+        min_executor_workers=EXECUTOR_WORKERS,
         executor_thread_name_prefix="partial-change-benchmark",
     ) as harness:
-        orchestrator.run(original_mission, human_review, phase_cache=cache)
-        assert harness.executor_injected, (
-            "asyncio.events.new_event_loop was never called -- run_coroutine no longer "
-            "creates its loop via asyncio.run's default path, so this benchmark's injected "
-            "executor never took effect; the wall-clock results below cannot be trusted "
-            "until this coupling is fixed"
-        )
-        assert harness.call_count == _EXPECTED_CALL_COUNT, (
-            f"expected exactly {_EXPECTED_CALL_COUNT} LLM calls on the cold first run, got "
-            f"{harness.call_count} -- see test_full_pipeline_first_run_benchmark.py for the "
-            "full accounting of this count"
-        )
-
-        call_count_before_changed_run = harness.call_count
-        start = time.monotonic()
-        orchestrator.run(changed_mission, human_review, phase_cache=cache)
-        changed_elapsed = time.monotonic() - start
-
-    calls_from_changed_run = harness.call_count - call_count_before_changed_run
-    assert calls_from_changed_run == _EXPECTED_CALL_COUNT, (
-        f"expected the Phase-1-relevant mission change to cascade to every phase, firing all "
-        f"{_EXPECTED_CALL_COUNT} LLM calls again, but only {calls_from_changed_run} fired -- "
-        "phase_input_hash hashes the entire mission for every phase (see "
-        "shared/memoization.py's docstring), so a changed mission field should miss on all "
-        "five phases, not just Phase 1"
-    )
-    assert _MIN_WALL_CLOCK_SECONDS <= changed_elapsed <= _MAX_WALL_CLOCK_SECONDS, (
-        f"Phase-1-relevant-change run took {changed_elapsed:.2f}s, outside the expected "
-        f"[{_MIN_WALL_CLOCK_SECONDS}, {_MAX_WALL_CLOCK_SECONDS}]s window -- since every phase "
-        "should miss and recompute, this run's wall-clock should look like a cold run's, "
-        "same as test_full_pipeline_first_run_benchmark.py's baseline"
-    )
+        run_and_assert_cold_baseline(orchestrator, original_mission, human_review, cache, harness)
+        # The assertion below is intentionally the same shape as the cold run
+        # above (via run_and_assert_cold_baseline): a Phase-1-relevant
+        # mission change is expected to behave exactly like a cold run,
+        # since phase_input_hash hashes the whole mission per phase (see
+        # module docstring) and so misses on every one of the five phases,
+        # not just Phase 1.
+        run_and_assert_cold_baseline(orchestrator, changed_mission, human_review, cache, harness)

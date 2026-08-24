@@ -30,6 +30,32 @@ from unittest.mock import patch
 
 from llm_service import DummyLLMClient, clear_client_cache
 
+# Per-call mocked LLM latency every wall-clock benchmark in this suite uses.
+PER_CALL_DELAY_SECONDS = 1.0
+
+# Phase 4 (``brand_experience_principler`` + six ``*_guide`` channel
+# specialists + ``brand_architecture_builder`` + ``brand_in_action_illustrator``,
+# see ``graphs/phase4_channel.py``) is the widest single-phase fan-out in the
+# pipeline at 9 concurrent nodes; headroom above that keeps a benchmark's
+# injected executor from ever being the bottleneck.
+MAX_PHASE_FAN_OUT = 9
+EXECUTOR_WORKERS = MAX_PHASE_FAN_OUT + 4
+
+# Measured locally at a stable ~9.15s across repeated runs: five phases run
+# sequentially, each contributing its own internal critical-path depth (see
+# ``test_full_pipeline_first_run_benchmark.py``'s module docstring for the
+# full reasoning). The floor guards against the mocked latency silently not
+# taking effect; the ceiling has generous slack above the observed ~9s but
+# still fails well before the ~39s a fully sequential regression would take.
+MIN_WALL_CLOCK_SECONDS = 6.0
+MAX_WALL_CLOCK_SECONDS = 20.0
+
+# The value below is the count a cold run actually observes, not the "37
+# agents" the originating issue stated on faith -- see
+# ``test_full_pipeline_first_run_benchmark.py``'s module docstring for the
+# full accounting of why this is 39, not 37 or 38.
+EXPECTED_CALL_COUNT = 39
+
 
 class MockLLMLatencyHarness:
     """Mutable state a ``mock_llm_latency`` context manager exposes to its caller.
@@ -141,3 +167,63 @@ def mock_llm_latency(
             yield harness
         finally:
             clear_client_cache()
+
+
+def run_and_assert_cold_baseline(
+    orchestrator,
+    mission,
+    human_review,
+    phase_cache,
+    harness: MockLLMLatencyHarness,
+) -> float:
+    """Run one cold (or cold-equivalent) pipeline pass and assert it matches
+    the shared first-run baseline every benchmark in this suite compares
+    against.
+
+    "Cold-equivalent" covers both a genuinely first call against an empty
+    cache and a later call whose mission change invalidates every phase's
+    cache entry (see ``test_cached_and_partial_change_benchmark.py``'s
+    Phase-1-cascade scenario) -- both cases fire the same
+    ``EXPECTED_CALL_COUNT`` calls and take the same wall-clock window, so
+    they share this one assertion body.
+
+    Preconditions:
+        - Must be called from inside a ``mock_llm_latency(...)`` block whose
+          ``min_executor_workers`` is at least ``EXECUTOR_WORKERS``.
+        - ``orchestrator`` is a ``BrandingTeamOrchestrator``; ``mission`` and
+          ``human_review`` are valid arguments to its ``run`` method;
+          ``phase_cache`` is the ``PhaseOutputCache`` this run's phases are
+          expected to entirely miss against (either empty, or warm only for
+          entries this run's input hashes won't match).
+    Postconditions:
+        - Returns the wall-clock elapsed seconds for this run.
+        - Asserts ``harness.executor_injected`` is ``True``, that exactly
+          ``EXPECTED_CALL_COUNT`` LLM calls fired during this run (measured
+          as the increase in ``harness.call_count`` across the call, not its
+          absolute value -- so this is safe to call more than once against
+          one shared harness), and that the elapsed time falls within
+          ``[MIN_WALL_CLOCK_SECONDS, MAX_WALL_CLOCK_SECONDS]``.
+    """
+    calls_before = harness.call_count
+    start = time.monotonic()
+    orchestrator.run(mission, human_review, phase_cache=phase_cache)
+    elapsed = time.monotonic() - start
+
+    assert harness.executor_injected, (
+        "asyncio.events.new_event_loop was never called -- run_coroutine no longer "
+        "creates its loop via asyncio.run's default path, so this benchmark's injected "
+        "executor never took effect; the wall-clock result below cannot be trusted "
+        "until this coupling is fixed"
+    )
+    calls_made = harness.call_count - calls_before
+    assert calls_made == EXPECTED_CALL_COUNT, (
+        f"expected exactly {EXPECTED_CALL_COUNT} LLM calls for this cold (or "
+        f"cold-equivalent) run, got {calls_made} -- see "
+        "test_full_pipeline_first_run_benchmark.py's module docstring for the full "
+        "accounting of this count"
+    )
+    assert MIN_WALL_CLOCK_SECONDS <= elapsed <= MAX_WALL_CLOCK_SECONDS, (
+        f"cold (or cold-equivalent) run took {elapsed:.2f}s, outside the expected "
+        f"[{MIN_WALL_CLOCK_SECONDS}, {MAX_WALL_CLOCK_SECONDS}]s window"
+    )
+    return elapsed
