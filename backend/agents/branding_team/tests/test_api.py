@@ -566,6 +566,50 @@ def test_post_conversation_messages_updates_state_and_returns_reply() -> None:
         assert "suggested_questions" in data
 
 
+def test_auto_create_brand_from_conversation_surfaces_atomic_attach_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_auto_create_brand_from_conversation now links through the same atomic
+    attach_conversation path as create_brand. If that link step reports a
+    non-OK result (simulated here as ALREADY_ATTACHED), the failure must
+    propagate rather than being silently swallowed — the old two-statement
+    set_brand + update_brand sequence could partially apply, whereas the
+    atomic path either fully applies or not at all."""
+    from branding_team.api import main as main_mod
+    from branding_team.store import AttachConversationResult
+
+    monkeypatch.setattr(
+        main_mod.branding_store,
+        "attach_conversation",
+        lambda *a, **k: (AttachConversationResult.ALREADY_ATTACHED, None),
+    )
+
+    with patch("branding_team.api.main.assistant_agent") as mock_agent:
+        mock_agent.respond.return_value = (
+            "Got it!",
+            make_mission(
+                company_name="AutoCreateFailCo",
+                company_description="We build software.",
+                target_audience="Developers",
+            ),
+            [],
+            False,
+        )
+        resp = client.post(
+            "/conversations",
+            json={"initial_message": "We're AutoCreateFailCo."},
+        )
+
+    # The link helper's HTTPException(409) propagates through the endpoint
+    # unmodified — FastAPI's exception middleware turns it into a real 409,
+    # not a generic 500 or a silently-swallowed failure. The brand it created
+    # just before the link attempt is still orphaned (logged above), same as
+    # create_brand's own atomic-attach failure path without an explicit
+    # caller-side rollback here — that rollback is the responsibility of
+    # whichever caller owns the brand's lifecycle, same as before this change.
+    assert resp.status_code == 409
+
+
 def test_get_conversation_returns_stored_state() -> None:
     create_resp = client.post("/conversations", json={})
     assert create_resp.status_code == 200
@@ -687,6 +731,67 @@ def test_attach_conversation_unknown_conversation_404() -> None:
     )
     resp = client.post("/conversations/unknown-conv-id/brand", json={"brand_id": brand.id})
     assert resp.status_code == 404
+
+
+def test_attach_conversation_to_brand_rejects_conversation_attached_elsewhere() -> None:
+    """POST /conversations/{id}/brand now goes through the same atomic
+    attach_conversation path as create_brand: moving a conversation that is
+    already attached to a different brand is rejected with 409 instead of the
+    old ConversationStore.set_brand one-sided move, which used to leave the
+    original brand's conversation_id pointing at a conversation that no
+    longer pointed back."""
+    workspace = branding_store.create_client("Reattach Client")
+    first_brand = branding_store.create_brand(
+        workspace.id,
+        make_mission(
+            company_name="FirstAttachCo",
+            company_description="Owns the conversation already",
+            target_audience="users",
+        ),
+    )
+    second_brand = branding_store.create_brand(
+        workspace.id,
+        make_mission(
+            company_name="SecondAttachCo",
+            company_description="Tries to steal the conversation",
+            target_audience="users",
+        ),
+    )
+    conv_id = client.post("/conversations", json={}).json()["conversation_id"]
+    first_attach = client.post(f"/conversations/{conv_id}/brand", json={"brand_id": first_brand.id})
+    assert first_attach.status_code == 200
+
+    resp = client.post(f"/conversations/{conv_id}/brand", json={"brand_id": second_brand.id})
+    assert resp.status_code == 409
+
+    # The conversation must still point at the first brand, and that brand's
+    # own conversation_id must not have gone stale.
+    reload = client.get(f"/conversations/{conv_id}")
+    assert reload.json()["brand_id"] == first_brand.id
+    first_reload = branding_store.get_brand(workspace.id, first_brand.id)
+    assert first_reload.conversation_id == conv_id
+
+
+def test_attach_conversation_to_brand_reattaching_same_brand_succeeds() -> None:
+    """Re-attaching a conversation to the brand it is already on stays a
+    no-op success (attach_conversation treats a matching brand_id as OK, not
+    ALREADY_ATTACHED)."""
+    workspace = branding_store.create_client("Reattach Same Client")
+    brand = branding_store.create_brand(
+        workspace.id,
+        make_mission(
+            company_name="ReattachSameCo",
+            company_description="Reattaches to its own brand",
+            target_audience="users",
+        ),
+    )
+    conv_id = client.post("/conversations", json={}).json()["conversation_id"]
+    first_attach = client.post(f"/conversations/{conv_id}/brand", json={"brand_id": brand.id})
+    assert first_attach.status_code == 200
+
+    resp = client.post(f"/conversations/{conv_id}/brand", json={"brand_id": brand.id})
+    assert resp.status_code == 200
+    assert resp.json()["brand_id"] == brand.id
 
 
 def test_create_brand_with_existing_conversation_id_attaches_it() -> None:

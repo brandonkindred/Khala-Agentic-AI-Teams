@@ -24,10 +24,10 @@ from fastapi import APIRouter, Body, HTTPException
 
 from branding_team.api import background as _bg
 from branding_team.api.conversation import (
-    _brand_exists,
     _conversation_to_response,
     _create_branding_conversation_impl,
     _send_branding_conversation_message_impl,
+    link_conversation_to_brand,
 )
 from branding_team.api.models import (
     AttachConversationBrandRequest,
@@ -167,26 +167,39 @@ def attach_conversation_to_brand(
     """Attach an existing conversation to an existing brand and return the
     updated state. 404 if either the brand or the conversation is unknown.
 
+    Goes through ``link_conversation_to_brand`` — the same atomic
+    ``BrandingStore.attach_conversation`` path ``create_brand`` uses — instead
+    of the one-sided ``ConversationStore.set_brand`` this endpoint used to call
+    directly. That is a deliberate behavior change (issue #7084): a conversation
+    already attached to a *different* brand is now rejected with 409 instead of
+    being silently moved, which used to leave that other brand's
+    ``conversation_id`` pointing at a conversation that no longer points back.
+    Re-attaching a conversation to the brand it is already on remains a no-op
+    success (``attach_conversation`` treats a matching ``brand_id`` as OK, not
+    ``ALREADY_ATTACHED``).
+
     Preconditions:
         ``conversation_id`` is a non-empty path string; ``payload`` is a validated
         ``AttachConversationBrandRequest`` whose ``brand_id`` is non-empty after
         stripping.
     Postconditions:
         Returns the conversation's ``ConversationStateResponse`` now pointing at
-        ``payload.brand_id``. Raises 404 "Brand not found" when the brand does not
-        exist, and 404 "Conversation not found" when the conversation is missing
-        (checked both before and during ``set_brand``).
+        ``payload.brand_id``. Raises 404 "Brand not found" when the brand does
+        not exist, 404 "Conversation not found" when the conversation is
+        missing, and 409 "Conversation is already attached to another brand"
+        when it is currently linked to a different brand.
     """
     from branding_team.api import main as _main
 
     brand_id = payload.brand_id.strip()
-    if not _brand_exists(brand_id):
+    resolved_brand = _main.branding_store.get_brand_by_id(brand_id)
+    if resolved_brand is None:
         raise HTTPException(status_code=404, detail="Brand not found")
+    client_id, _brand = resolved_brand
     state = _main.conversation_store.get_state(conversation_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    if not _main.conversation_store.set_brand(conversation_id, brand_id):
-        raise HTTPException(status_code=404, detail="Conversation not found")
+    attached_brand = link_conversation_to_brand(client_id, brand_id, conversation_id, state.mission)
     return _conversation_to_response(
-        conversation_id, brand_id, state.messages, state.mission, state.latest_output, []
+        conversation_id, attached_brand.id, state.messages, state.mission, state.latest_output, []
     )
