@@ -8,6 +8,7 @@ import {
   inject,
   signal,
 } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
@@ -15,6 +16,8 @@ import { MatMenuModule } from '@angular/material/menu';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { AgentConsoleApiService } from '../../../../services/agent-console-api.service';
+import { ConfirmDestructiveService } from '../../../../shared/confirm-destructive.service';
+import { AgentRunHistoryDestructiveActionsService } from './agent-run-history-destructive-actions.service';
 import type { RunSummary } from '../../../../models/agent-history.model';
 
 /**
@@ -35,9 +38,25 @@ import type { RunSummary } from '../../../../models/agent-history.model';
   ],
   templateUrl: './agent-run-history.component.html',
   styleUrl: './agent-run-history.component.scss',
+  providers: [ConfirmDestructiveService, AgentRunHistoryDestructiveActionsService],
 })
 export class AgentRunHistoryComponent implements OnChanges {
   private readonly api = inject(AgentConsoleApiService);
+  private readonly destructiveActions = inject(AgentRunHistoryDestructiveActionsService);
+
+  constructor() {
+    // Both subscriptions discard events tagged with a stale agentId: this
+    // component instance is reused across agentId input changes, so a delete
+    // confirmed for a prior agent can resolve after the user has switched.
+    this.destructiveActions.runDeleted$.pipe(takeUntilDestroyed()).subscribe(({ agentId, payload: runId }) => {
+      if (agentId !== this.agentId) return;
+      this.runs.update((rows) => rows.filter((r) => r.id !== runId));
+    });
+    this.destructiveActions.errors$.pipe(takeUntilDestroyed()).subscribe(({ agentId, message }) => {
+      if (agentId !== this.agentId) return;
+      this.error.set(message);
+    });
+  }
 
   @Input({ required: true }) agentId!: string | null;
   /** Highlights the currently-displayed run in the list. */
@@ -104,12 +123,11 @@ export class AgentRunHistoryComponent implements OnChanges {
 
   deleteRun(run: RunSummary, event: Event): void {
     event.stopPropagation();
-    if (!confirm(`Delete run ${run.trace_id.slice(0, 8)}? This can't be undone.`)) return;
-    this.api.deleteRun(run.id).subscribe({
-      next: () => {
-        this.runs.update((rows) => rows.filter((r) => r.id !== run.id));
-      },
-    });
+    this.destructiveActions.deleteRun(run);
+  }
+
+  isDeleting(runId: string): boolean {
+    return this.destructiveActions.isDeleting(runId);
   }
 
   emitCompare(run: RunSummary, event: Event): void {
