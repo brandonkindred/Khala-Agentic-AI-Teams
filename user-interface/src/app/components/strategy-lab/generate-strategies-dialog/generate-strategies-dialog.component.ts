@@ -12,7 +12,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { clamp } from '../../../shared/clamp.util';
-import type { AssetCategoryOption } from '../strategy-lab.component';
+import type { AssetCategoryOption } from '../asset-category-option.model';
 
 export interface GenerateStrategiesDialogData {
   batchSize: number;
@@ -31,6 +31,7 @@ export interface GenerateStrategiesDialogData {
 }
 
 export interface GenerateStrategiesDialogResult {
+  /** Postcondition: always within `[batchSizeMin, batchSizeMax]`. */
   batchSize: number;
   /** Postcondition: always within `[batchCountMin, batchCountMax()]` as of the moment the dialog closed. */
   batchCount: number;

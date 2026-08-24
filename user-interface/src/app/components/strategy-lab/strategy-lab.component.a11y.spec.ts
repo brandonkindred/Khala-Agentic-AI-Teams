@@ -26,6 +26,16 @@ function stubOf(fixture: ComponentFixture<StrategyLabComponent>): RunServiceStub
   return fixture.componentInstance.runService as unknown as RunServiceStub;
 }
 
+/**
+ * Expands the (first) result card by clicking its real disclosure button —
+ * rather than calling `toggleCard()` directly — so the OnPush view is
+ * marked dirty via Angular's normal event-dispatch path, matching real usage.
+ */
+function expandResultCard(fixture: ComponentFixture<StrategyLabComponent>): void {
+  fixture.nativeElement.querySelector<HTMLButtonElement>('.expand-chevron-btn')!.click();
+  fixture.detectChanges();
+}
+
 
 const STRATEGY: StrategySpec = {
   strategy_id: 'strat-1',
@@ -172,11 +182,7 @@ describe('StrategyLabComponent a11y — result card disclosure', () => {
 
   it('has no axe violations expanded, with aria-expanded/aria-controls wired to the region id', async () => {
     const fixture = await createFixture();
-    // Click the real disclosure button (rather than calling toggleCard()
-    // directly) so the OnPush view is marked dirty via Angular's normal
-    // event-dispatch path, matching real usage.
-    fixture.nativeElement.querySelector<HTMLButtonElement>('.expand-chevron-btn')!.click();
-    fixture.detectChanges();
+    expandResultCard(fixture);
 
     const btn: HTMLButtonElement = fixture.nativeElement.querySelector('.expand-chevron-btn');
     const region: HTMLElement = fixture.nativeElement.querySelector('.card-expanded-region');
@@ -356,11 +362,7 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
 
   it('trade-table-wrap: focusable, named, no axe violations once the ledger panel is open', async () => {
     const fixture = await createFixture(RECORD_WITH_TRADES);
-    // Click the real disclosure button (rather than calling toggleCard()
-    // directly) so the OnPush view is marked dirty via Angular's normal
-    // event-dispatch path, matching real usage.
-    fixture.nativeElement.querySelector<HTMLButtonElement>('.expand-chevron-btn')!.click();
-    fixture.detectChanges();
+    expandResultCard(fixture);
 
     const header: HTMLElement = fixture.nativeElement.querySelector('.ledger-panel mat-expansion-panel-header');
     expect(header).toBeTruthy();
@@ -387,11 +389,7 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
       ...RECORD_WITH_TRADES,
       backtest: { ...RECORD_WITH_TRADES.backtest, trades: [TRADE, LOSS_TRADE] },
     });
-    // Click the real disclosure button (rather than calling toggleCard()
-    // directly) so the OnPush view is marked dirty via Angular's normal
-    // event-dispatch path, matching real usage.
-    fixture.nativeElement.querySelector<HTMLButtonElement>('.expand-chevron-btn')!.click();
-    fixture.detectChanges();
+    expandResultCard(fixture);
     fixture.nativeElement.querySelector<HTMLElement>('.ledger-panel mat-expansion-panel-header')?.click();
     fixture.detectChanges();
 
@@ -1628,11 +1626,7 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
     const fixture = await createFixture(RECORD_WITH_GATES, {
       items: [RECORD_WITH_GATES], count: 1, winning_count: 0, losing_count: 1,
     });
-    // Click the real disclosure button (rather than calling toggleCard()
-    // directly) so the OnPush view is marked dirty via Angular's normal
-    // event-dispatch path, matching real usage.
-    fixture.nativeElement.querySelector<HTMLButtonElement>('.expand-chevron-btn')!.click();
-    fixture.detectChanges();
+    expandResultCard(fixture);
 
     const hypothesisIcon: HTMLElement = fixture.nativeElement.querySelector('.hypothesis-icon');
     const narrativeIcon: HTMLElement = fixture.nativeElement.querySelector('.narrative-icon');
@@ -1669,11 +1663,7 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
     const fixture = await createFixture(RECORD_WITH_GATES, {
       items: [RECORD_WITH_GATES], count: 1, winning_count: 0, losing_count: 1,
     });
-    // Click the real disclosure button (rather than calling toggleCard()
-    // directly) so the OnPush view is marked dirty via Angular's normal
-    // event-dispatch path, matching real usage.
-    fixture.nativeElement.querySelector<HTMLButtonElement>('.expand-chevron-btn')!.click();
-    fixture.detectChanges();
+    expandResultCard(fixture);
     const headers: HTMLElement[] = Array.from(
       fixture.nativeElement.querySelectorAll('mat-expansion-panel-header'),
     );

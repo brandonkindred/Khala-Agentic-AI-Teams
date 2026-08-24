@@ -36,7 +36,6 @@ import { describeRunStatus } from '../../services/strategy-lab-log-message';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { extractErrorDetail } from '../../shared/extract-error-detail';
 import {
-  ASSET_CLASS_ICONS,
   returnColor,
   returnColorLabel,
   getAssetClassIcon,
@@ -48,6 +47,7 @@ import {
   type GenerateStrategiesDialogData,
   type GenerateStrategiesDialogResult,
 } from './generate-strategies-dialog/generate-strategies-dialog.component';
+import { type AssetCategoryOption, buildCategoryOptions } from './asset-category-option.model';
 import { clamp } from '../../shared/clamp.util';
 import type {
   PaperTradingSession,
@@ -58,26 +58,6 @@ import type {
 
 type FilterMode = 'all' | 'winning' | 'losing';
 
-export interface AssetCategoryOption {
-  value: string;
-  label: string;
-  icon: string;
-}
-
-/** Title-case an asset-category value for display (e.g. 'stocks' → 'Stocks'). */
-function categoryLabel(value: string): string {
-  return value.length ? value.charAt(0).toUpperCase() + value.slice(1) : value;
-}
-
-/** Build selector options from category values, deriving label + Material icon. */
-function buildCategoryOptions(values: string[]): AssetCategoryOption[] {
-  return values.map((value) => ({
-    value,
-    label: categoryLabel(value),
-    icon: ASSET_CLASS_ICONS[value] ?? 'category',
-  }));
-}
-
 /**
  * Fallback asset categories, used only until `GET /strategy-lab/config` supplies
  * the authoritative list (and if that fetch ever fails). The backend is the
@@ -86,8 +66,9 @@ function buildCategoryOptions(values: string[]): AssetCategoryOption[] {
  * paint / on a config failure. Keep this list in sync with the backend's
  * `PROMPT_ASSET_CLASSES`; `options` is omitted because it is never a valid
  * ideation target. Module-level constants in this file use SCREAMING_SNAKE_CASE
- * (ASSET_CLASS_ICONS lives in `./strategy-lab.formatters`; STRATEGY_LAB_PHASES
- * lives in `./phase-stepper/phase-stepper.component`).
+ * (`AssetCategoryOption`/`buildCategoryOptions` live in
+ * `./asset-category-option.model`; STRATEGY_LAB_PHASES lives in
+ * `./phase-stepper/phase-stepper.component`).
  */
 const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOptions([
   'stocks',
@@ -493,7 +474,7 @@ export class StrategyLabComponent implements OnInit {
       },
       width: '480px',
     });
-    ref.afterClosed().subscribe((result) => {
+    ref.afterClosed().pipe(takeUntilDestroyed(this.destroyRef)).subscribe((result) => {
       if (!result) {
         return;
       }
