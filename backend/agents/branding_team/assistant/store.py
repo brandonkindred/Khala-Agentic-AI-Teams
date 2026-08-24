@@ -416,6 +416,7 @@ class BrandingConversationStore(PostgresHelperMixin):
             )
             return cur.rowcount > 0
 
+    @timed_query(store=_STORE, op="attach_locked")
     def attach_locked(
         self,
         cur: Cursor,
