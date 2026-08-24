@@ -38,7 +38,7 @@ from investment_team.strategy_lab.agents.alignment import (
 from investment_team.strategy_lab.agents.analysis import (
     _PROMPT_DIR,
     _RISK_MODEL_CHECK,
-    _SELF_REVIEW_PROMPT,
+    _SELF_REVIEW_CHECKLIST,
     _SIZING_LINE_READING,
     _format_alignment_status_section,
     format_misalignment_prefix,
@@ -302,15 +302,16 @@ def test_lose_prompt_targets_conflation_not_genuine_small_sizing() -> None:
     assert '"too little capital in play"' not in rendered
 
 
-def test_self_review_prompt_includes_sizing_as_source_fact() -> None:
-    """The self-review source-of-truth block must carry the sizing line.
-
-    The ``1a`` risk-model check asks the reviewer to confirm the deployed
-    position size, so the reviewer needs the actual sizing as ground truth —
-    otherwise it can only infer it from the (possibly mistaken) draft and
-    cannot catch a hallucinated fraction.
+def test_self_review_checklist_shares_the_draft_prompt_as_source_fact() -> None:
+    """The self-review checklist is spliced into the SAME rendered prompt as
+    the draft's "Strategy (definition under test)" section, so the ``1a``
+    risk-model check verifies against the sizing line already present in that
+    prompt rather than needing its own separate source-of-truth restatement.
     """
-    assert "Sizing / risk: {sizing_rules}" in _SELF_REVIEW_PROMPT
+    assert "Sizing / risk: {sizing_rules}" in (_PROMPT_DIR / "analysis_win.md").read_text(
+        encoding="utf-8"
+    )
+    assert "{risk_model_check}" in _SELF_REVIEW_CHECKLIST
 
 
 def test_self_review_check_preserves_accurate_low_capital_statement() -> None:
@@ -319,8 +320,6 @@ def test_self_review_check_preserves_accurate_low_capital_statement() -> None:
     deployment is genuinely small capital at risk (deployed size IS capital at
     risk under this model).
     """
-    # The 1a check is interpolated from _RISK_MODEL_CHECK into the template.
-    assert "{risk_model_check}" in _SELF_REVIEW_PROMPT
     assert "must be preserved" in _RISK_MODEL_CHECK
     assert "genuinely small deployment is small capital at risk" in _RISK_MODEL_CHECK
     # The over-broad clause that rejected the accurate equation must be gone.
@@ -710,11 +709,12 @@ def test_analysis_templates_expose_robustness_caveats_placeholder(
     )
 
 
-def test_self_review_prompt_exposes_caveats_placeholder_and_verdict_check() -> None:
-    """The self-review prompt carries the caveats placeholder and the
-    verdict-consistency instruction that forbids reframing the label."""
-    assert "{robustness_caveats_section}## Draft analysis to verify" in _SELF_REVIEW_PROMPT
-    assert "Verdict consistency" in _SELF_REVIEW_PROMPT
+def test_self_review_checklist_carries_verdict_consistency_check() -> None:
+    """The self-review checklist carries the verdict-consistency instruction
+    that forbids reframing the label. (The robustness-caveats placeholder is
+    covered by ``test_analysis_templates_expose_robustness_caveats_placeholder``
+    — the checklist shares the draft prompt that already carries it.)"""
+    assert "Verdict consistency" in _SELF_REVIEW_CHECKLIST
 
 
 def _caveat_metrics(**overrides: object) -> BacktestResult:
@@ -738,7 +738,13 @@ def _caveat_metrics(**overrides: object) -> BacktestResult:
 
 @pytest.mark.parametrize(
     "reason",
-    [None, "", "   ", "all four criteria met", "walk_forward_fallback_passed: anomaly recheck clean"],
+    [
+        None,
+        "",
+        "   ",
+        "all four criteria met",
+        "walk_forward_fallback_passed: anomaly recheck clean",
+    ],
 )
 def test_robustness_caveats_empty_on_clean_pass(reason: object) -> None:
     """A clean acceptance pass (or no recorded reason) yields no caveat block,
