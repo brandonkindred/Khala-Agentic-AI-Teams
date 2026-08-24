@@ -118,8 +118,10 @@ sequenceDiagram
 
             loop design-re-entry (bounded, on spec-implementability failure)
                 CycleWF->>Attempt: run_design_attempt_activity
-                Attempt->>LLM: design ↔ review → synthesis →<br/>refinement → alignment → analysis<br/>(see generation_pipeline.md)
-                LLM-->>Attempt: spec, code, trades, narrative
+                Attempt->>LLM: design ↔ review → (custom code synthesis,<br/>if selected) → refinement → alignment →<br/>analysis (see generation_pipeline.md)
+                LLM-->>Attempt: spec, and code/critiques/narrative<br/>from the agent stages that call it
+                Attempt->>Attempt: compile_strategy() deterministically<br/>synthesizes code for the default DSL path<br/>(no LLM call)
+                Attempt->>Attempt: execute strategy_code in the<br/>sandboxed TradingService — trade ledger<br/>is engine output, not an LLM response
                 Attempt-->>CycleWF: record | reentry | skipped
             end
 

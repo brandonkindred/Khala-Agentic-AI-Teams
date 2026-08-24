@@ -40,7 +40,11 @@ them uniformly.
 
 ## Bid vs fill — worked example
 
-Backtest config: `slippage_bps = 2`, `transaction_cost_bps = 5`.
+Backtest config: `slippage_bps = 2`, `transaction_cost_bps = 5`. Simplified for
+illustration: uses each bar's close as its reference price throughout. In
+production the reference price is order-type-dependent (see "Where it's
+produced" below) — a market order's reference price is the bar's *open*, not
+its close.
 
 Entry bar has `close = 100.00`. The simulator records:
 
@@ -81,9 +85,15 @@ The production path — both sandboxed backtests and paper trading — is
 the live event-driven fill engine driven by `TradingService`.
 [`Position`](../trading_service/engine/portfolio.py) (`trading_service/engine/portfolio.py`,
 `FillSimulator`'s own state carrier) carries `entry_bid_price` and
-`entry_order_type` from the entry bar through to the close; the exit bar's
-raw close becomes `exit_bid_price`, and slippage is applied on both sides
-symmetrically. `trade_simulator.OpenPosition` is a separate, retired-simulator
+`entry_order_type` from the entry bar through to the close. `exit_bid_price`
+is **not** simply the exit bar's raw close: `execution_model.py` derives an
+order-type-dependent reference price (the bar open for market orders;
+limit/stop/stop-limit orders use their own reference-price logic against
+that bar), and when an exit fills across multiple partial slices,
+`FillSimulator` stores `Position.weighted_avg_exit_bid_price` — the
+quantity-weighted average of those per-slice reference prices — as the final
+`exit_bid_price`. Slippage is applied on both sides symmetrically on top of
+that reference price. `trade_simulator.OpenPosition` is a separate, retired-simulator
 dataclass kept only for legacy/unit-test consumers — not the production state
 carrier. Transaction costs are charged on entry and exit notional
 separately: `(entry_notional + exit_notional) * cost_rate`.

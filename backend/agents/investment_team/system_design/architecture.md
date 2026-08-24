@@ -283,9 +283,15 @@ been removed, and `run_strategy_lab` / `resume_strategy_lab_run` /
 `_dispatch_strategy_lab_run` ([`strategy_lab/orchestrator_api.py`](../strategy_lab/orchestrator_api.py),
 imported into `api/main.py`), which starts
 the durable `StrategyLabBatchWorkflow` — a parent workflow that, for each
-batch, refreshes a **per-batch signal-intelligence brief** (one
-`compute_signal_brief_activity` call via `SignalIntelligenceExpert`, shared by
-every cycle in that batch — not recomputed per cycle) and then fans that
+*batch-workflow invocation* of a given batch, refreshes a
+**per-batch signal-intelligence brief** (one `compute_signal_brief_activity`
+call via `SignalIntelligenceExpert`, shared by every cycle started from that
+invocation — not recomputed per cycle). This is not an absolute per-batch
+guarantee across a resume: `start_cycle_offset` can land mid-batch, in which
+case the resumed invocation re-runs `compute_signal_brief_activity` (which
+reads all currently-persisted records) before starting the batch's remaining
+cycles, so a resumed batch's later cycles can see a different brief than its
+already-completed earlier cycles. The workflow then fans that
 batch's cycles out as `StrategyLabCycleWorkflow` **child workflows**,
 reproducing the old thread-mode per-wave concurrency on Temporal's
 `strategy-lab-queue`
