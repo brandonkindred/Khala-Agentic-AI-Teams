@@ -151,8 +151,6 @@ def test_qa_gate_keeps_file_context_in_user_prompt() -> None:
     elevated to a CacheBreakpoint-marked system_prompt_content segment."""
     from qa_agent import QAExpertAgent, QAInput
 
-    from llm_service import CacheBreakpoint
-
     captured_kwargs: List[dict] = []
 
     def _spy(**kwargs: Any) -> Any:
@@ -283,9 +281,12 @@ def test_qa_gate_no_file_context_for_acceptance_evidence_mode() -> None:
 def test_security_gate_keeps_file_context_in_user_prompt() -> None:
     """CybersecurityExpertAgent._build_user_prompt includes the file-context
     prefix (code under review) in the user message, not the system prompt.
-    The trusted task_description is elevated out of the user prompt to the
-    CacheBreakpoint segment (see test_security_gate_forwards_shared_prefix_
-    as_cache_breakpoint below), so it no longer appears here."""
+    The system prompt is the plain SECURITY_PROMPT persona string.
+    task_description also stays in the user message — unlike QA (which uses
+    run_structured_persona/a Strands Agent), Security's
+    run_single_shot_review path ultimately calls LLMClient.complete_json,
+    whose Claude/Ollama/RunPod/Dummy implementations don't consume a
+    system_prompt_content kwarg, so nothing is available to elevate it to."""
     from security_agent.agent import CybersecurityExpertAgent, _build_security_file_context_prefix
     from security_agent.models import SecurityInput
 
@@ -301,23 +302,22 @@ def test_security_gate_keeps_file_context_in_user_prompt() -> None:
     assert "import os" in user_prompt
     assert "os.system('ls')" in user_prompt
     assert "**Language:** python" in user_prompt
-    # The trusted task description no longer appears in the user prompt.
-    assert "review command runner" not in user_prompt
+    # The trusted task description stays in the user prompt too (no
+    # supported system_prompt_content channel for this call path).
+    assert "review command runner" in user_prompt
 
     # The file-context prefix helper returns the expected parts
     prefix_parts = _build_security_file_context_prefix(input_data)
     assert any("os.system('ls')" in part for part in prefix_parts)
 
 
-def test_security_gate_forwards_shared_prefix_as_cache_breakpoint() -> None:
-    """CybersecurityExpertAgent.run() forwards task_description as a
-    CacheBreakpoint-marked system_prompt_content segment to
-    run_single_shot_review, while the code under review stays in the
-    user prompt."""
+def test_security_gate_does_not_pass_system_prompt_content() -> None:
+    """CybersecurityExpertAgent.run() never passes system_prompt_content to
+    run_single_shot_review — that kwarg would be silently dropped by every
+    real LLMClient.complete_json implementation, so nothing should be routed
+    through it."""
     from security_agent.agent import CybersecurityExpertAgent
     from security_agent.models import SecurityInput, SecurityLLMResponse
-
-    from llm_service import CacheBreakpoint
 
     captured_kwargs: List[dict] = []
 
@@ -336,35 +336,9 @@ def test_security_gate_forwards_shared_prefix_as_cache_breakpoint() -> None:
         agent.run(input_data)
 
     assert len(captured_kwargs) == 1
-    spc = captured_kwargs[0].get("system_prompt_content")
-    assert spc is not None
-    assert len(spc) == 1
-    assert isinstance(spc[0], CacheBreakpoint)
-    assert "review command runner" in spc[0].text
-    assert "os.system" not in spc[0].text
+    assert "system_prompt_content" not in captured_kwargs[0]
+    assert "review command runner" in captured_kwargs[0]["prompt"]
     assert "os.system" in captured_kwargs[0]["prompt"]
-
-
-def test_security_gate_no_shared_prefix_when_no_trusted_metadata() -> None:
-    """When neither task_description nor architecture is set,
-    system_prompt_content stays None."""
-    from security_agent.agent import CybersecurityExpertAgent
-    from security_agent.models import SecurityInput, SecurityLLMResponse
-
-    captured_kwargs: List[dict] = []
-
-    def _spy(*args: Any, **kwargs: Any) -> Any:
-        captured_kwargs.append(kwargs)
-        return SecurityLLMResponse(vulnerabilities=[], summary="ok", remediations=[])
-
-    input_data = SecurityInput(code="x = 1", language="python")
-
-    with patch("security_agent.agent.run_single_shot_review", side_effect=_spy):
-        agent = CybersecurityExpertAgent(None)
-        agent.run(input_data)
-
-    assert len(captured_kwargs) == 1
-    assert captured_kwargs[0].get("system_prompt_content") is None
 
 
 # ---------------------------------------------------------------------------

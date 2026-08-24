@@ -158,6 +158,57 @@ def _system_prompt_content_segments(
     return segments
 
 
+def _system_prompt_is_redundant_with_content(
+    system_prompt: Optional[str], content_segments: List[Union[str, CacheBreakpoint]]
+) -> bool:
+    """True when ``system_prompt`` is exactly the text Strands' own
+    ``split_system_prompt`` would derive from ``content_segments``' source.
+
+    A real Strands ``Agent`` accepts only ONE ``system_prompt`` field
+    (``str | list[SystemContentBlock] | None``) and always derives both
+    ``system_prompt`` (a joined string) and ``system_prompt_content`` (the
+    original list) from that single value via
+    ``strands.types.content.split_system_prompt`` — ``"\\n".join(block["text"]
+    for block in system_prompt if "text" in block)`` for the string half. When
+    an ``Agent`` is built with a combined list (persona text plus trusted
+    ``CacheBreakpoint``/text segments — see
+    ``shared.system_prompt_assembly.build_system_prompt_with_content``), both
+    values ``stream()`` receives are therefore two overlapping views of the
+    *same* source, not independent content. Blindly combining them (as this
+    module did before this function existed) double-sends every block on the
+    wire — persona text and any ``CacheBreakpoint``-marked text twice each.
+
+    This detects that specific redundancy so ``stream()`` can drop the
+    duplicate leading string in that case, while leaving today's additive
+    behavior unchanged for a caller that supplies genuinely independent
+    ``system_prompt``/``system_prompt_content`` directly (no real Strands
+    ``Agent`` call does this — only direct, non-Agent ``stream()`` callers,
+    e.g. some unit tests, exercise that case).
+
+    Preconditions:
+        - ``content_segments`` is the result of
+          :func:`_system_prompt_content_segments` (may be empty).
+
+    Postconditions:
+        - Returns ``True`` only when ``system_prompt`` is not ``None`` and
+          equals the ``"\\n"``-joined text of every segment in
+          ``content_segments`` (a ``CacheBreakpoint``'s ``.text``, or the
+          segment itself for a plain string) — the exact join
+          ``split_system_prompt`` performs. Returns ``False`` otherwise,
+          including when ``system_prompt`` is ``None`` or
+          ``content_segments`` is empty (an empty join is ``""``, which a
+          real, non-empty ``system_prompt`` never equals; a ``None``
+          ``system_prompt`` is never "redundant" — there is nothing to drop).
+          Never raises.
+    """
+    if system_prompt is None:
+        return False
+    derived = "\n".join(
+        seg.text if isinstance(seg, CacheBreakpoint) else seg for seg in content_segments
+    )
+    return system_prompt == derived
+
+
 def _tool_result_content_to_text(content: List[Dict[str, Any]]) -> str:
     """Flatten Strands ``toolResult.content`` blocks into a single string payload."""
     parts: List[str] = []
@@ -510,7 +561,14 @@ class LLMClientModel(Model):
         are both accepted and merged into a single ``{"role": "system", ...}``
         message: ``system_prompt_content`` is flattened to text and appended
         after ``system_prompt`` when both are present. Either may be omitted;
-        when both are absent, no system message is emitted.
+        when both are absent, no system message is emitted. Exception: when
+        ``system_prompt`` is exactly the text Strands' own
+        ``split_system_prompt`` would derive from ``system_prompt_content``
+        (see :func:`_system_prompt_is_redundant_with_content`) — the case
+        every real Strands ``Agent`` call produces, since ``Agent`` only
+        exposes one combined ``system_prompt`` field — ``system_prompt`` is
+        redundant with ``system_prompt_content`` and is dropped rather than
+        appended a second time.
 
         A ``CacheBreakpoint`` (see ``llm_service.cache_breakpoint``) placed
         directly in ``system_prompt_content`` is preserved — not flattened —
@@ -532,10 +590,14 @@ class LLMClientModel(Model):
         client = unwrap_client(self._client)
         oai_messages = _strands_messages_to_openai(messages)
         content_segments = _system_prompt_content_segments(system_prompt_content)
+        redundant = _system_prompt_is_redundant_with_content(system_prompt, content_segments)
         if any(isinstance(seg, CacheBreakpoint) for seg in content_segments) and (
             client.supports_prompt_caching()
         ):
-            system_content: Any = ([system_prompt] if system_prompt else []) + content_segments
+            leading: List[Any] = [] if redundant else ([system_prompt] if system_prompt else [])
+            system_content: Any = leading + content_segments
+        elif redundant:
+            system_content = _flatten_system_prompt_content(system_prompt_content)
         else:
             system_content = "\n\n".join(
                 part

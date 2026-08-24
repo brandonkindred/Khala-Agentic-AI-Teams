@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from llm_service import CacheBreakpoint, LLMClient, get_strands_model
+from llm_service import LLMClient, get_strands_model
 from llm_service.strands_model import model_fingerprint, resolve_strands_model
 from shared.cache import get_shared_cache
 from shared.cache.pydantic_cache import (
@@ -156,37 +156,6 @@ def _build_security_file_context_prefix(input_data: SecurityInput) -> list[str]:
     return build_file_context_prefix(input_data.language, input_data.code)
 
 
-def _build_security_shared_review_prefix(input_data: SecurityInput) -> list[str]:
-    """Render Security's trusted, non-code shared context as a stable prefix.
-
-    Mirrors ``code_review_agent.chunk_reviewer._build_shared_review_prefix``
-    and ``qa_agent.agent._build_qa_shared_review_prefix``: only internal,
-    non-repository-controlled metadata belongs here (task description,
-    architecture overview) — never the code under review, which stays in the
-    user message (see ``_build_security_file_context_prefix``). Both fields,
-    when present, are stable across every chunk/piece of one microtask's
-    security review and across a fix->re-review retry for that microtask, so
-    this is attached to the review call's system content as a single
-    ``CacheBreakpoint``-marked segment in :meth:`CybersecurityExpertAgent.run`
-    rather than embedded in the user-turn prompt.
-
-    Preconditions:
-        - ``input_data`` is a valid ``SecurityInput``.
-
-    Postconditions:
-        - Returns the task-description line (when ``input_data.task_description``
-          is truthy) followed by the architecture-overview line (when
-          ``input_data.architecture`` is set) — in that fixed order. Returns
-          ``[]`` when both are empty/``None``. Never raises.
-    """
-    parts: list[str] = []
-    if input_data.task_description:
-        parts.append(f"**Task:** {input_data.task_description}")
-    if input_data.architecture:
-        parts.append(f"**Architecture:** {input_data.architecture.overview}")
-    return parts
-
-
 def _build_security_role_instructions(input_data: SecurityInput) -> list[str]:
     """Render the security-specific review instructions that follow the file-context prefix.
 
@@ -200,11 +169,9 @@ def _build_security_role_instructions(input_data: SecurityInput) -> list[str]:
         - ``input_data`` is a valid ``SecurityInput``.
 
     Postconditions:
-        - Returns non-empty prompt lines: the schema-hint sentence, then
-          context when present. Never raises. Does not include
-          ``task_description`` or ``architecture`` — those are rendered
-          separately by ``_build_security_shared_review_prefix`` for the
-          ``CacheBreakpoint`` system segment.
+        - Returns non-empty prompt lines: the schema-hint sentence, then the
+          task description, context, and architecture when each is present —
+          in that fixed order. Never raises.
     """
     parts = [
         "",
@@ -213,8 +180,12 @@ def _build_security_role_instructions(input_data: SecurityInput) -> list[str]:
         "remediations. Each vulnerability must include severity, "
         "category, description, location, and recommendation.",
     ]
+    if input_data.task_description:
+        parts.append(f"**Task:** {input_data.task_description}")
     if input_data.context:
         parts.append(f"**Context:** {input_data.context}")
+    if input_data.architecture:
+        parts.append(f"**Architecture:** {input_data.architecture.overview}")
     return parts
 
 
@@ -272,11 +243,6 @@ class CybersecurityExpertAgent:
 
         user_prompt = self._build_user_prompt(input_data)
 
-        system_prompt_content = None
-        shared_parts = _build_security_shared_review_prefix(input_data)
-        if shared_parts:
-            system_prompt_content = [CacheBreakpoint("\n".join(shared_parts))]
-
         try:
             response = run_single_shot_review(
                 self.llm,
@@ -286,7 +252,6 @@ class CybersecurityExpertAgent:
                 schema=SecurityLLMResponse,
                 objective="security review",
                 temperature=0.0,
-                system_prompt_content=system_prompt_content,
             )
         except Exception as exc:  # noqa: BLE001 — LLM/validation failures must not crash the run
             logger.warning("Security: structured_output failed (%s); returning fallback", exc)
@@ -328,19 +293,21 @@ class CybersecurityExpertAgent:
         The persona (``SECURITY_PROMPT``) is passed as
         ``run_single_shot_review``'s ``system_prompt``. The user prompt
         carries the code under review (see ``_build_security_file_context_prefix``)
-        followed by the per-gate role instructions — the schema hint and
-        context. The code under review is untrusted repository content and
-        must stay in the user message, not be elevated to system-level
-        instructions. The trusted, non-code task description and
-        architecture overview are instead supplied separately as a
-        ``CacheBreakpoint``-marked ``system_prompt_content`` segment to
-        ``run_single_shot_review`` (see ``_build_security_shared_review_prefix``,
-        built in :meth:`run`) — they are no longer part of this returned
-        string. The words "security" and "vulnerabilities" MUST appear
-        somewhere in the prompt because ``DummyLLMClient.complete_json``
-        pattern-matches on them (order-independent substring check) to
-        return a deterministic stub in tests — see llm_service/README.md
-        "Migration rule: keep pattern anchors in the user prompt".
+        followed by the per-gate role instructions — the schema hint, task
+        description, context, and architecture. The code under review is
+        untrusted repository content and must stay in the user message, not
+        be elevated to system-level instructions. The trusted task
+        description and architecture overview stay in the user message too
+        (not a ``CacheBreakpoint`` system segment): ``run_single_shot_review``'s
+        underlying ``LLMClient.complete_json`` implementations
+        (Claude/Ollama/RunPod/Dummy) do not consume a ``system_prompt_content``
+        kwarg — it would be silently dropped on the wire, so this content
+        must stay where every implementation actually reads it. The words
+        "security" and "vulnerabilities" MUST appear somewhere in the prompt
+        because ``DummyLLMClient.complete_json`` pattern-matches on them
+        (order-independent substring check) to return a deterministic stub
+        in tests — see llm_service/README.md "Migration rule: keep pattern
+        anchors in the user prompt".
         """
         parts = _build_security_file_context_prefix(input_data) + _build_security_role_instructions(
             input_data

@@ -491,6 +491,57 @@ def test_stream_with_no_breakpoint_is_unaffected_by_caching_capable_client() -> 
     assert call["messages"][0] == {"role": "system", "content": "lead-in\n\ntrailer"}
 
 
+def test_stream_drops_redundant_system_prompt_when_it_matches_split_content() -> None:
+    """When ``system_prompt`` exactly equals the ``"\\n"``-joined text of
+    ``system_prompt_content`` — the shape a real Strands ``Agent`` always
+    produces via ``split_system_prompt`` when constructed with a combined
+    ``system_prompt=[...]`` list — the persona/CacheBreakpoint text must be
+    sent exactly once, not duplicated as both the leading string and a
+    content segment."""
+    from llm_service.cache_breakpoint import CacheBreakpoint
+
+    client = _CachingRecordingClient({"ok": True})
+    model = LLMClientModel(client)
+    breakpoint_marker = CacheBreakpoint("shared metadata")
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            # Exactly what strands.types.content.split_system_prompt would
+            # derive from [{"text": "persona"}, CacheBreakpoint("shared metadata")].
+            system_prompt="persona\nshared metadata",
+            system_prompt_content=[{"text": "persona"}, breakpoint_marker],
+        )
+    )
+
+    call = client.chat_calls[0]
+    # Each block appears exactly once — no duplicate leading string.
+    assert call["messages"][0] == {
+        "role": "system",
+        "content": ["persona", breakpoint_marker],
+    }
+
+
+def test_stream_drops_redundant_system_prompt_without_cache_breakpoint() -> None:
+    """Same redundancy-detection, but with no CacheBreakpoint present and a
+    client that doesn't support caching — the plain-flatten branch must also
+    avoid duplicating the persona text."""
+    client = _RecordingClient({"ok": True})
+    model = LLMClientModel(client)
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            system_prompt="persona\nextra",
+            system_prompt_content=[{"text": "persona"}, {"text": "extra"}],
+        )
+    )
+
+    call = client.chat_calls[0]
+    # "persona" and "extra" appear exactly once each, not doubled.
+    assert call["messages"][0] == {"role": "system", "content": "personaextra"}
+
+
 def test_stream_propagates_team_through_to_thread() -> None:
     """The team bound on the calling task survives the ``to_thread`` hand-off.
 
