@@ -27,8 +27,18 @@ worktrees — including 2+ concurrent same-stack (e.g. ``frontend_v2-1``,
 ``frontend_v2-2``) workers — because nothing on the swarm's own build/lint
 path installs into it (no ``npm install``/``npm ci``). The one genuine
 global-environment mutation is the backend worker's dependency install
-(``pip install``), which is not per-worktree; guarding that is tracked
-separately and out of scope here.
+(``pip install``), which is not per-worktree: it installs into the shared
+interpreter's own ``site-packages``, the same target regardless of which
+worktree's ``requirements.txt`` triggered it. That is guarded, not made
+per-worktree, by ``pip_install_lock`` (``software_engineering_team.
+pip_install_lock``): an exclusive, cross-process ``fcntl.flock`` around each
+install call site serializes concurrent same-stack backend workers' install
+step so they never race on the same shared files. Trade-off: this is a single
+global serialization point (concurrent installs queue up rather than running
+in parallel), not full isolation — a per-worktree virtualenv would isolate
+installs completely, at the cost of a fresh ``pip install`` (disk + time) per
+worktree and routing every downstream ``pytest`` invocation to the matching
+interpreter, for a race that only a narrow overlap window makes possible.
 """
 
 from __future__ import annotations

@@ -9,11 +9,13 @@ call time) and feed crafted :class:`CommandResult` objects.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 from shared.command_runner import executor as cr
 from shared.command_runner.executor import CommandResult
+from software_engineering_team.shared import tool_agent_build_specialist as tabs
 from software_engineering_team.shared.tool_agent_build_specialist import (
     BuildSpecialistToolAgentBase,
     run_backend_build_and_parse,
@@ -154,7 +156,13 @@ def _passing_syntax(monkeypatch):
 
 
 def test_backend_installs_requirements_before_pytest(tmp_path: Path, monkeypatch):
-    """A requirements.txt triggers a (best-effort) pip install before pytest runs."""
+    """A requirements.txt triggers a (best-effort) pip install before pytest runs.
+
+    The install is also wrapped in the shared cross-process ``pip_install_lock``
+    (guards the shared interpreter's ``site-packages`` against concurrent
+    same-stack backend workers racing on the same install) — asserted here by
+    spying on the lock context manager rather than just on ``run_command``.
+    """
     (tmp_path / "a.py").write_text("print('ok')\n")
     (tmp_path / "requirements.txt").write_text("pytest\n")
     tests_dir = tmp_path / "tests"
@@ -168,8 +176,19 @@ def test_backend_installs_requirements_before_pytest(tmp_path: Path, monkeypatch
         "run_pytest",
         lambda p, python_exe=None: CommandResult(success=True, exit_code=0, stdout="ok", stderr=""),
     )
+    lock_calls = []
+    real_lock = tabs.pip_install_lock
+
+    @contextmanager
+    def _spy_lock():
+        lock_calls.append("entered")
+        with real_lock():
+            yield
+
+    monkeypatch.setattr(tabs, "pip_install_lock", _spy_lock)
     assert run_backend_build_and_parse(tmp_path) == []
     assert calls  # pip install was attempted
+    assert lock_calls == ["entered"]  # guarded by the shared pip install lock
 
 
 def test_backend_pip_install_failure_is_non_fatal(tmp_path: Path, monkeypatch):

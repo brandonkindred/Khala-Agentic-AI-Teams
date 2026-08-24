@@ -42,6 +42,7 @@ from strands import Agent
 from llm_service import get_strands_model
 from shared.git.git_utils import UnsafeRepoPathError, resolve_safe_repo_path
 from shared.repo_context.repo_utils import find_repo_files
+from software_engineering_team.pip_install_lock import pip_install_lock
 
 logger = logging.getLogger(__name__)
 
@@ -218,11 +219,12 @@ def _run_build_verification(
             # integration-only: shells out to `pip install`
             if req_txt.exists():  # pragma: no cover
                 try:
-                    pip_result = run_command(
-                        [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
-                        cwd=backend_dir,
-                        timeout=120,
-                    )
+                    with pip_install_lock():
+                        pip_result = run_command(
+                            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+                            cwd=backend_dir,
+                            timeout=120,
+                        )
                     if not pip_result.success:
                         logger.warning(
                             "pip install -r requirements.txt failed (non-fatal): %s",
@@ -682,11 +684,12 @@ def _try_build_fix_one_at_a_time(
                 req_txt = project_dir / "requirements.txt"
                 if req_txt.exists():
                     try:
-                        pip_result = run_command(
-                            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
-                            cwd=project_dir,
-                            timeout=120,
-                        )
+                        with pip_install_lock():
+                            pip_result = run_command(
+                                [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+                                cwd=project_dir,
+                                timeout=120,
+                            )
                         if not pip_result.success:
                             logger.warning(
                                 "Build fix: pip install -r requirements.txt failed (non-fatal): %s",

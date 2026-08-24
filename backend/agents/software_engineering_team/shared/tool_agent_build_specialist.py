@@ -34,6 +34,7 @@ import sys
 from pathlib import Path
 from typing import List
 
+from software_engineering_team.pip_install_lock import pip_install_lock
 from software_engineering_team.shared.tool_agent_base import (
     BaseReviewToolAgent,
     SingleIssueProblemSolveMixin,
@@ -107,11 +108,12 @@ def run_backend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
         req_txt = backend_dir / "requirements.txt"
         if req_txt.exists():
             try:
-                run_command(
-                    [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
-                    cwd=backend_dir,
-                    timeout=120,
-                )
+                with pip_install_lock():
+                    run_command(
+                        [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+                        cwd=backend_dir,
+                        timeout=120,
+                    )
             except Exception as e:
                 logger.warning("Build Specialist: pip install failed (non-fatal): %s", e)
         test_result = run_pytest(backend_dir, python_exe=sys.executable)
