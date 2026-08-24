@@ -59,23 +59,23 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
     """Create a brand for a client and bind it to exactly one conversation.
 
     The brand's mission is derived from ``payload`` via ``_mission_from_payload``.
-    Every successfully created brand ends up with a conversation attached, taking
-    one of two paths:
+    A conversation is resolved first — ``payload.conversation_id`` (stripped) if
+    set, otherwise a fresh, unattached one via ``conversation_store.create`` — and
+    then linked to the brand through the single atomic
+    ``store.attach_conversation`` call, so both the provided-conversation and
+    create-new cases share one linking step instead of two independently
+    maintained ones.
 
-    - ``payload.conversation_id`` set: attach that existing conversation
-      atomically via ``store.attach_conversation``.
-    - otherwise: create a fresh conversation and link it via ``store.update_brand``.
-
-    When the linking step reports a failure — a non-OK ``attach_conversation``
-    result, or an ``update_brand`` that finds no row — the just-created brand is
-    rolled back with ``store.delete_brand`` so that path leaves no listable,
-    conversation-less orphan. On the create-new path, a failing ``update_brand``
-    (whether it raises or returns falsy) also clears the fresh conversation's
-    ``brand_id`` via ``conversation_store.set_brand(conv_id, None)`` — otherwise
-    it would keep pointing at the now-deleted brand id, which
-    ``store.attach_conversation`` treats as already attached, permanently
-    blocking that conversation from ever being attached elsewhere. Any
-    exception is re-raised to the caller after this cleanup.
+    When the link step reports a failure — a non-OK ``attach_conversation``
+    result, or ``attach_conversation``/``conversation_store.create`` raising —
+    the just-created brand is rolled back with ``store.delete_brand`` so this
+    handler never leaves a listable, conversation-less orphan. Because the
+    conversation is created (or reused) unattached and only ever gains a
+    ``brand_id`` inside ``attach_conversation``'s own transaction, there is no
+    point at which a conversation is left pointing at a brand this handler is
+    about to delete — unlike patching the brand's ``conversation_id`` and the
+    conversation's ``brand_id`` as two separate writes, which would need its
+    own compensation if the second write failed.
 
     Preconditions:
         ``client_id`` is a non-empty path string; ``payload`` is a validated
@@ -83,15 +83,13 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
     Postconditions:
         Returns the created ``Brand`` with its conversation attached (HTTP 201).
         Raises 404 "Client not found" when ``client_id`` matches no client.
-        When ``payload.conversation_id`` is set (after stripping), attaches that
-        conversation via ``store.attach_conversation``; on a non-OK result it
-        deletes the just-created brand and maps the failure to HTTP status: 404
-        for ``CONVERSATION_NOT_FOUND``/``BRAND_NOT_FOUND`` and 409 for
-        ``ALREADY_ATTACHED``. On the create-new path, deletes the brand — and,
-        once the conversation exists, clears its ``brand_id`` too — then raises
-        404 "Brand not found" if the conversation link cannot be written, or
-        re-raises the original exception if ``conversation_store.create``/
-        ``store.update_brand`` raises.
+        Resolves a conversation id — ``payload.conversation_id`` (stripped) if
+        set, otherwise one freshly created unattached — deleting the brand and
+        re-raising if that creation raises. Attaches it via
+        ``store.attach_conversation``; on a non-OK result (or that call
+        raising) it deletes the just-created brand, then maps a non-OK result
+        to HTTP status: 404 for ``CONVERSATION_NOT_FOUND``/``BRAND_NOT_FOUND``
+        and 409 for ``ALREADY_ATTACHED``, or re-raises the original exception.
     """
     from branding_team.api import main as _main
 
@@ -104,59 +102,45 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
         raise HTTPException(status_code=404, detail="Client not found")
 
     conversation_store = _main.conversation_store
-    # Attach an existing conversation if provided, otherwise create a new one.
-    existing_conv_id = (payload.conversation_id or "").strip() or None
-    if existing_conv_id:
+    # Reuse the caller's conversation if provided, otherwise create a fresh,
+    # unattached one — either way, attach_conversation below performs the one
+    # atomic brand<->conversation link.
+    conversation_id = (payload.conversation_id or "").strip() or None
+    if not conversation_id:
+        try:
+            conversation_id = conversation_store.create(mission=mission)
+        except Exception:
+            _main.branding_store.delete_brand(client_id, brand.id)
+            raise
+
+    try:
         # Single-transaction attach: checks the uniqueness invariant and
         # writes both the conversation and brand rows atomically, so a
         # concurrent request can't attach the same conversation elsewhere
         # in between, and a failed brand patch can't leave the conversation
         # pointing at a brand that doesn't reference it back.
         result, attached_brand = _main.branding_store.attach_conversation(
-            client_id, brand.id, existing_conv_id, mission
-        )
-        if result is not AttachConversationResult.OK:
-            # The attach failed after create_brand already committed the brand
-            # row above — roll it back so a failed request never leaves a
-            # listable, conversation-less orphan behind.
-            _main.branding_store.delete_brand(client_id, brand.id)
-        if result is AttachConversationResult.CONVERSATION_NOT_FOUND:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        if result is AttachConversationResult.ALREADY_ATTACHED:
-            raise HTTPException(
-                status_code=409,
-                detail="Conversation is already attached to another brand",
-            )
-        if result is AttachConversationResult.BRAND_NOT_FOUND:
-            raise HTTPException(status_code=404, detail="Brand not found")
-        return attached_brand
-
-    conv_id = None
-    try:
-        conv_id = conversation_store.create(brand_id=brand.id, mission=mission)
-        updated_brand = _main.branding_store.update_brand(
-            client_id, brand.id, conversation_id=conv_id
+            client_id, brand.id, conversation_id, mission
         )
     except Exception:
-        # Either call failing after create_brand already committed the brand
-        # row above would otherwise leave a listable, conversation-less
-        # orphan — roll it back and let the caller see the original error.
-        # conversation_store.create already stamped conv_id's brand_id with
-        # the brand we're about to delete, so clear it too (when it got that
-        # far) or the conversation is left pointing at a brand id that no
-        # longer exists — unusable, since attach_conversation treats any
-        # non-null brand_id as already attached to that (now-gone) brand.
         _main.branding_store.delete_brand(client_id, brand.id)
-        if conv_id:
-            conversation_store.set_brand(conv_id, None)
         raise
 
-    if not updated_brand:
+    if result is not AttachConversationResult.OK:
+        # The attach failed after create_brand already committed the brand
+        # row above — roll it back so a failed request never leaves a
+        # listable, conversation-less orphan behind.
         _main.branding_store.delete_brand(client_id, brand.id)
-        conversation_store.set_brand(conv_id, None)
+    if result is AttachConversationResult.CONVERSATION_NOT_FOUND:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if result is AttachConversationResult.ALREADY_ATTACHED:
+        raise HTTPException(
+            status_code=409,
+            detail="Conversation is already attached to another brand",
+        )
+    if result is AttachConversationResult.BRAND_NOT_FOUND:
         raise HTTPException(status_code=404, detail="Brand not found")
-
-    return updated_brand
+    return attached_brand
 
 
 @router.get("/clients/{client_id}/brands/{brand_id}", response_model=Brand)

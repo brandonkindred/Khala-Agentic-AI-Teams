@@ -797,17 +797,17 @@ def test_create_brand_rolls_back_when_conversation_create_raises(
     assert brands == []
 
 
-def test_create_brand_clears_conversation_when_update_brand_raises(
+def test_create_brand_rolls_back_when_attach_conversation_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An exception from store.update_brand() after the conversation was
-    already created must roll back the brand AND clear the conversation's
-    brand_id — otherwise the conversation is left pointing at a deleted brand
-    id, which attach_conversation treats as already attached, permanently
-    blocking that conversation from being attached elsewhere."""
+    """An exception from store.attach_conversation() on the create-new path
+    (after the fresh, unattached conversation was already created) must roll
+    back the brand and propagate the original error — the conversation stays
+    unattached rather than pointing at a brand about to be deleted, since it
+    only ever gains a brand_id inside attach_conversation's own transaction."""
     from branding_team.api import main as main_mod
 
-    create_c = client.post("/clients", json={"name": "UpdateBrandFails Client"})
+    create_c = client.post("/clients", json={"name": "AttachConvFails Client"})
     client_id = create_c.json()["id"]
 
     # Capture the conversation id conversation_store.create() actually
@@ -824,15 +824,15 @@ def test_create_brand_clears_conversation_when_update_brand_raises(
     monkeypatch.setattr(main_mod.conversation_store, "create", _capturing_create)
 
     def _boom(*args: Any, **kwargs: Any) -> None:
-        raise RuntimeError("update_brand unavailable")
+        raise RuntimeError("attach_conversation unavailable")
 
-    monkeypatch.setattr(main_mod.branding_store, "update_brand", _boom)
+    monkeypatch.setattr(main_mod.branding_store, "attach_conversation", _boom)
 
-    with pytest.raises(RuntimeError, match="update_brand unavailable"):
+    with pytest.raises(RuntimeError, match="attach_conversation unavailable"):
         client.post(
             f"/clients/{client_id}/brands",
             json={
-                "company_name": "UpdateBrandFailsCo",
+                "company_name": "AttachConvFailsCo",
                 "company_description": "Company whose brand-conversation link write fails",
                 "target_audience": "teams",
             },
@@ -842,7 +842,7 @@ def test_create_brand_clears_conversation_when_update_brand_raises(
     brands = client.get(f"/clients/{client_id}/brands").json()
     assert brands == []
 
-    # The conversation it created must be unattached, not left pointing at
+    # The conversation it created must remain unattached, not pointing at
     # the now-deleted brand id.
     assert len(created_conv_ids) == 1
     conv_resp = client.get(f"/conversations/{created_conv_ids[0]}")
