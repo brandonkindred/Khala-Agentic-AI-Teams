@@ -73,6 +73,27 @@ class CodeEngineProvider(Protocol):
         """
         ...
 
+    def synthesize_systemic_findings(
+        self, findings: Any, changed_context: Any, task_description: str
+    ) -> Any:
+        """Best-effort synthesis of cross-cutting patterns across in-scope findings.
+
+        Preconditions: ``findings`` is a sequence of finding-like objects
+        exposing ``category``/``description`` (mirrors
+        ``systemic_synthesis.synthesize_systemic_findings``'s ``issues``).
+        ``changed_context`` is ``None`` or a ``{path: content}`` mapping of
+        current file content; currently unused by the synthesis prompt
+        itself but accepted for signature symmetry with
+        ``classify_issue_scope``.
+
+        Postconditions: returns a list of ``{"title", "description",
+        "related_locations"}`` dicts, one per identified systemic pattern;
+        never raises — client resolution/LLM/parse failures, or too few
+        findings, degrade to ``[]`` (mirrors
+        ``systemic_synthesis.synthesize_systemic_findings``).
+        """
+        ...
+
 
 _provider: Optional[CodeEngineProvider] = None
 

@@ -12,6 +12,10 @@ import {
   CodeReviewTranscriptDialogComponent,
   type CodeReviewTranscriptDialogData,
 } from '../code-review-transcript-dialog/code-review-transcript-dialog.component';
+import {
+  CodeReviewSystemicFindingsDialogComponent,
+  type CodeReviewSystemicFindingsDialogData,
+} from '../code-review-systemic-findings-dialog/code-review-systemic-findings-dialog.component';
 import type { PrReviewRecord } from '../pr-review-record.model';
 import { reviewDuration, severityEntries } from '../review-metrics';
 
@@ -107,6 +111,18 @@ export class PrReviewDetailComponent {
   }
 
   /**
+   * Count of systemic/cross-cutting findings synthesized for a review run.
+   * Absent on reviews run before this feature, or when synthesis found no
+   * genuine cross-cutting pattern — both render as 0.
+   *
+   * Preconditions: `summary` is a review summary for one of this PR's runs.
+   * Postconditions: returns a non-negative count. Pure — no side effects.
+   */
+  systemicFindingsCount(summary: CodeReviewSummary): number {
+    return summary.systemic_findings?.length ?? 0;
+  }
+
+  /**
    * Relay a Start Review click to the parent.
    *
    * Postconditions: emits `startReviewRequested` with this panel's `pull`.
@@ -132,6 +148,30 @@ export class PrReviewDetailComponent {
     this.dialog.open(CodeReviewTranscriptDialogComponent, {
       data,
       width: '800px',
+      maxWidth: '95vw',
+    });
+  }
+
+  /**
+   * Open the read-only systemic/cross-cutting findings dialog for a review run.
+   *
+   * The template only renders the triggering chip once
+   * `systemicFindingsCount(record.reviewSummary)` is non-zero, but this
+   * method itself is defensive: a missing `reviewSummary`/`systemic_findings`
+   * degrades to opening the dialog with an empty findings list rather than
+   * throwing, so it is safe to call directly too.
+   *
+   * Postconditions: opens `CodeReviewSystemicFindingsDialogComponent` with the
+   * findings already in hand (no fetch — they are persisted on the summary);
+   * this method has no return value.
+   */
+  onViewSystemicFindings(record: PrReviewRecord): void {
+    const data: CodeReviewSystemicFindingsDialogData = {
+      findings: record.reviewSummary?.systemic_findings ?? [],
+    };
+    this.dialog.open(CodeReviewSystemicFindingsDialogComponent, {
+      data,
+      width: '700px',
       maxWidth: '95vw',
     });
   }

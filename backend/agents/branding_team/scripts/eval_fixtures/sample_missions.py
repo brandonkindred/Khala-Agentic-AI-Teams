@@ -1,10 +1,16 @@
 """Sample mission corpus for selective-context eval comparison.
 
 Provides a small, diverse set of ``BrandingMission`` fixtures — varying
-industry, target audience, and brand maturity/completeness — for use by a
-future eval script that compares branding pipeline output quality with and
-without selective context filtering. This module only builds the corpus; it
-does not run the pipeline or generate golden outputs.
+industry, target audience, and brand maturity/completeness — consumed by
+``branding_team.scripts.eval_selective_context`` (which compares branding
+pipeline output quality with and without selective context filtering) and
+pinned by ``branding_team.tests.test_sample_missions``. This module only
+builds the corpus; it does not run the pipeline or generate golden outputs.
+
+Lives under ``scripts/`` rather than ``tests/`` because it is a dependency
+of production/offline tooling (the eval script), not test-only code — a
+``tests/`` package is not guaranteed to be present or importable in every
+environment that might run the script.
 
 Postconditions:
     ``SAMPLE_MISSIONS`` is a non-empty list of valid ``BrandingMission``

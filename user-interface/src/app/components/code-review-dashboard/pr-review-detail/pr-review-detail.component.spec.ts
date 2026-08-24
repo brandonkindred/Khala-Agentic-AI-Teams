@@ -3,6 +3,7 @@ import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { MatDialog } from '@angular/material/dialog';
 import { PrReviewDetailComponent } from './pr-review-detail.component';
 import { CodeReviewTranscriptDialogComponent } from '../code-review-transcript-dialog/code-review-transcript-dialog.component';
+import { CodeReviewSystemicFindingsDialogComponent } from '../code-review-systemic-findings-dialog/code-review-systemic-findings-dialog.component';
 import type { GitHubPullRequestItem } from '../../../models/integrations.model';
 import type { PrReviewRecord } from '../pr-review-record.model';
 
@@ -257,6 +258,54 @@ describe('PrReviewDetailComponent', () => {
   });
 
   // -------------------------------------------------------------------------
+  // View Systemic Findings action
+  // -------------------------------------------------------------------------
+
+  it('shows the systemic-findings chip only when the run has systemic findings', async () => {
+    const withFindings = record({
+      jobId: 'a',
+      status: 'completed',
+      reviewSummary: {
+        total_issues: 2,
+        inline_comments: 2,
+        event: 'REQUEST_CHANGES',
+        systemic_findings: [
+          { title: 't', description: 'd', related_locations: [] },
+          { title: 't2', description: 'd2', related_locations: [] },
+        ],
+      },
+    });
+    const withoutFindings = record({
+      jobId: 'b',
+      status: 'completed',
+      reviewSummary: { total_issues: 1, inline_comments: 1, event: 'COMMENT', systemic_findings: [] },
+    });
+    await setup({ reviews: [withFindings, withoutFindings] });
+    const rows = el().querySelectorAll('.cr-reviews-table tbody tr');
+    const chip = rows[0].querySelector('.cr-chip--systemic');
+    expect(chip).toBeTruthy();
+    expect(chip?.textContent).toContain('2 systemic pattern(s)');
+    expect(chip?.getAttribute('aria-label')).toBe('View systemic findings');
+    expect(rows[1].querySelector('.cr-chip--systemic')).toBeNull();
+  });
+
+  it('opens the systemic-findings dialog with the record findings on click', async () => {
+    const findings = [{ title: 't', description: 'd', related_locations: [] }];
+    const rec = record({
+      jobId: 'j9',
+      status: 'completed',
+      reviewSummary: { total_issues: 1, inline_comments: 1, event: 'COMMENT', systemic_findings: findings },
+    });
+    await setup({ reviews: [rec] });
+    const chip = el().querySelector('.cr-chip--systemic') as HTMLButtonElement;
+    chip.click();
+    expect(dialogOpen).toHaveBeenCalledWith(
+      CodeReviewSystemicFindingsDialogComponent,
+      expect.objectContaining({ data: { findings } }),
+    );
+  });
+
+  // -------------------------------------------------------------------------
   // View helpers
   // -------------------------------------------------------------------------
 
@@ -275,6 +324,32 @@ describe('PrReviewDetailComponent', () => {
       component.commentFindings({ total_issues: 3, inline_comments: 1, body_findings: 2, event: 'COMMENT' }),
     ).toBe(2);
     expect(component.commentFindings({ total_issues: 0, inline_comments: 0, event: 'COMMENT' })).toBe(0);
+  });
+
+  it('counts systemic findings, treating absent/empty as 0', async () => {
+    await setup();
+    expect(
+      component.systemicFindingsCount({
+        total_issues: 2,
+        inline_comments: 2,
+        event: 'COMMENT',
+        systemic_findings: [
+          { title: 't', description: 'd', related_locations: [] },
+          { title: 't2', description: 'd2', related_locations: [] },
+        ],
+      }),
+    ).toBe(2);
+    expect(
+      component.systemicFindingsCount({ total_issues: 0, inline_comments: 0, event: 'COMMENT' }),
+    ).toBe(0);
+    expect(
+      component.systemicFindingsCount({
+        total_issues: 0,
+        inline_comments: 0,
+        event: 'COMMENT',
+        systemic_findings: [],
+      }),
+    ).toBe(0);
   });
 
   // -------------------------------------------------------------------------
