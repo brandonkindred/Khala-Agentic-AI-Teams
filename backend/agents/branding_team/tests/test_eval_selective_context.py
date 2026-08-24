@@ -168,7 +168,9 @@ def test_run_variant_restores_phase_spec_after_full_context() -> None:
 
 def test_diverges_from_full_context_true_only_for_governance() -> None:
     """Today only GOVERNANCE's selective context_phases differs from its full-context
-    prefix -- every other phase's selective and full task prompts are identical.
+    prefix. STRATEGIC_CORE has no upstream phases at all, so it has no full-context
+    variant to diverge from and is excluded from this loop; every remaining phase's
+    selective and full task prompts are identical.
     """
     for phase in PHASE_ORDER:
         if phase == BrandPhase.STRATEGIC_CORE:
