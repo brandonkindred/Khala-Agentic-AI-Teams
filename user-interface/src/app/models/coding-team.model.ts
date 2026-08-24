@@ -172,6 +172,18 @@ export interface CodeReviewSummary {
   /** Pre-existing bugs the reviewer flagged in unchanged code, offered as
    * GitHub-issue candidates. Absent on reviews run before this feature. */
   pending_issue_proposals?: PendingIssueProposal[];
+  /** Cross-cutting / root-cause patterns synthesized from clusters of this
+   * review's in-scope findings (also posted as their own standalone PR
+   * comment). Absent on reviews run before this feature, or when synthesis
+   * found no genuine cross-cutting pattern. */
+  systemic_findings?: SystemicFinding[];
+}
+
+/** One synthesized cross-cutting/root-cause pattern spanning >= 2 findings. */
+export interface SystemicFinding {
+  title: string;
+  description: string;
+  related_locations: { file_path: string; description: string }[];
 }
 
 export interface TaskSnapshot {

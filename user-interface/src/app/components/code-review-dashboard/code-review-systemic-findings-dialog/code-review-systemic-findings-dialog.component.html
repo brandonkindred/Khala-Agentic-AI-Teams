@@ -1,0 +1,34 @@
+<h2 mat-dialog-title>Systemic / Cross-Cutting Findings</h2>
+
+<mat-dialog-content class="systemic-dialog__content">
+  @if (data.findings.length === 0) {
+    <p class="systemic-dialog__empty">No cross-cutting patterns were found in this review.</p>
+  } @else {
+    <ol class="systemic-dialog__entries">
+      @for (finding of data.findings; track $index) {
+        <li class="systemic-dialog__entry">
+          <h3 class="systemic-dialog__title">{{ finding.title }}</h3>
+          <p class="systemic-dialog__description">{{ finding.description }}</p>
+          @if (finding.related_locations.length > 0) {
+            <ul class="systemic-dialog__locations">
+              @for (loc of finding.related_locations; track $index) {
+                <li>
+                  @if (loc.file_path) {
+                    <code>{{ loc.file_path }}</code>
+                  }
+                  @if (loc.description) {
+                    <span> — {{ loc.description }}</span>
+                  }
+                </li>
+              }
+            </ul>
+          }
+        </li>
+      }
+    </ol>
+  }
+</mat-dialog-content>
+
+<mat-dialog-actions align="end">
+  <button mat-button (click)="close()">Close</button>
+</mat-dialog-actions>
