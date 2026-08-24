@@ -144,6 +144,31 @@ def test_phase45_structured_output_model_wins_over_channel_guide_prompt() -> Non
     OwnershipOutput.model_validate(j)
 
 
+def test_quality_judge_score_model_wins_over_ownership_prompt() -> None:
+    """Model-class routing must ignore Phase 5 ownership prompt anchors.
+
+    A system prompt that would text-route to OwnershipOutput must still
+    yield the PhaseQualityScore stub when that class is passed as
+    structured_output_model -- the eval script's LLM-as-judge pass shares
+    the dummy client with the branding pipeline it judges.
+    """
+    from branding_team.scripts.quality_judge import PhaseQualityScore
+
+    c = DummyLLMClient()
+    misleading_system_prompt = "Define ownership_model and decision_authority for the brand."
+    j = c.complete_json(
+        "go",
+        system_prompt=misleading_system_prompt,
+        temperature=0.0,
+        structured_output_model=PhaseQualityScore,
+    )
+    assert "strategic_coherence" in j
+    assert "completeness" in j
+    assert "brand_consistency" in j
+    assert "ownership_model" not in j
+    PhaseQualityScore.model_validate(j)
+
+
 def test_channel_guideline_model_extracts_channel_from_system_prompt() -> None:
     """ChannelGuidelineOutput model routing fills channel from the prompt."""
     from branding_team.models import ChannelGuidelineOutput

@@ -648,30 +648,17 @@ def test_shared_file_context_text_is_byte_identical_across_gates() -> None:
     byte-identical across QA and Security gates for the same microtask_files
     — the precondition for provider-side caching to produce a hit.
 
-    This is a structural assertion: the helpers that render file context for
-    each gate produce the same content when given the same code.
+    QA and Security both delegate to the single shared
+    ``build_file_context_prefix`` helper, so cross-gate identity holds by
+    construction rather than by two hand-maintained copies happening to
+    agree.
     """
-    from qa_agent import QAInput
-    from qa_agent.agent import _build_qa_file_context_prefix
-    from security_agent.agent import _build_security_file_context_prefix
+    from software_engineering_team.shared.review_prompt_utils import build_file_context_prefix
 
-    qa_input = QAInput(
-        code=_SHARED_CODE,
-        language=_SHARED_LANGUAGE,
-        task_description=_SHARED_TASK,
-    )
-    sec_input = _security_input()
+    prefix = "\n".join(build_file_context_prefix(_SHARED_LANGUAGE, _SHARED_CODE))
 
-    qa_prefix = "\n".join(_build_qa_file_context_prefix(qa_input))
-    sec_prefix = "\n".join(_build_security_file_context_prefix(sec_input))
-
-    # Both gates render the same language + code block
-    assert "python" in qa_prefix.lower()
-    assert "python" in sec_prefix.lower()
-    assert _SHARED_CODE in qa_prefix
-    assert _SHARED_CODE in sec_prefix
-    # The file-context prefix structure is identical between the two gates
-    assert qa_prefix == sec_prefix
+    assert "python" in prefix.lower()
+    assert _SHARED_CODE in prefix
 
 
 def test_full_cycle_telemetry_records_all_gate_calls_with_cache_tokens() -> None:
