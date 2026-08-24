@@ -176,7 +176,9 @@ def _render_strategic_core_block(strategic_core: BaseModel | None) -> str:
 
     Shared by :func:`_build_judge_prompt` and :func:`_build_paired_judge_prompt`.
 
-    Preconditions: none.
+    Preconditions: ``strategic_core`` is either ``None`` or a Pydantic
+    ``BaseModel`` instance whose ``model_dump(mode="json")`` returns a
+    JSON-serializable dict.
     Postconditions: returns ``""`` when ``strategic_core`` is ``None``;
     otherwise a non-empty block ending in a blank line.
     """
