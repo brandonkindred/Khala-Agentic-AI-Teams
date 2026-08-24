@@ -19,6 +19,11 @@ import math
 from typing import Any, Dict, List, NamedTuple, Optional
 
 from software_engineering_team.models import AgentStatusEntry
+from software_engineering_team.shared.env_config import env_int
+
+# Env var controlling how many implementation-worker ``agent_id``s ``derive_stack_roster`` emits
+# per stack (default 1, floored at 1 -- see docs/ENV_VARS.md).
+CODING_TEAM_WORKERS_PER_STACK_ENV = "CODING_TEAM_WORKERS_PER_STACK"
 
 # The synthetic, stable id for the Tech Lead coordinator card (never a key in agent_task_map).
 TECH_LEAD_AGENT_ID = "tech_lead"
@@ -39,47 +44,80 @@ class StackRosterEntry(NamedTuple):
 
 
 def derive_stack_roster(stacks_raw: List[Dict[str, Any]]) -> List[StackRosterEntry]:
-    """Map raw stack specs to ``(agent_id, display_name, tools_services)``, one per stack.
+    """Map raw stack specs to ``(agent_id, display_name, tools_services)`` entries, N per stack.
 
     This MUST stay faithful to how the orchestrator names implementation workers (the
     ``run_coding_team_orchestrator`` worker-build loop), because the returned ``agent_id`` is
     the exact key the orchestrator writes into ``agent_task_map``. A stack with no name falls
-    back to ``f"stack_{i}"``, and that same value is the agent id — so the two sides cannot
+    back to ``f"stack_{i}"``, and that same value seeds the agent id — so the two sides cannot
     drift, the orchestrator and this module call this single helper.
+
+    ``N`` (workers per stack) is read from ``CODING_TEAM_WORKERS_PER_STACK`` (default ``1``,
+    floored at ``1``) so a run can widen concurrency per stack without either caller changing.
 
     Preconditions:
         - ``stacks_raw`` is normally a list (possibly empty). Each entry is normally a dict that
           may carry ``name`` (str) and ``tools_services`` (list[str]); malformed/non-dict
           entries are tolerated and treated as empty.
     Postconditions:
-        - Returns one entry per input, in order. ``display_name`` is the entry's ``name`` when
-          truthy else ``f"stack_{i}"``. ``agent_id`` equals ``display_name`` unless that name was
-          already used, in which case a ``_N`` suffix makes it unique (e.g. two ``"backend"``
-          stacks yield ids ``"backend"`` and ``"backend_2"``), so distinct stacks never collide on
-          one ``agent_task_map`` key. ``tools_services`` is always a list (a copy; empty when
-          absent or malformed). A non-list ``stacks_raw`` yields an empty roster. Never raises.
+        - With ``CODING_TEAM_WORKERS_PER_STACK`` unset/``1`` (the default), returns exactly one
+          entry per input, in order, byte-identical to the single-worker-per-stack behavior:
+          ``display_name`` is the entry's ``name`` when truthy else ``f"stack_{i}"``, and
+          ``agent_id`` equals ``display_name`` unless that name was already used, in which case a
+          ``_N`` suffix makes it unique (e.g. two ``"backend"`` stacks yield ids ``"backend"`` and
+          ``"backend_2"``).
+        - With ``CODING_TEAM_WORKERS_PER_STACK`` set to ``N > 1``, each stack instead yields ``N``
+          entries sharing that stack's ``display_name``/``tools_services``, with ids suffixed
+          ``-1``..``-N`` off the stack's (already-deduplicated) base id (e.g. ``"backend_v2-1"``,
+          ``"backend_v2-2"``). The hyphen suffix is a distinct namespace from the underscore
+          dedup suffix, so the two schemes never collide with each other by construction; any
+          remaining collision (e.g. a literal stack literally named ``"backend_v2-1"``) is still
+          resolved by the same global-uniqueness dedup used for base ids.
+        - Every ``agent_id`` in the returned roster is globally unique, so distinct workers never
+          collide on one ``agent_task_map`` key. ``tools_services`` is always a list (a fresh copy
+          per entry; empty when absent or malformed). Naming is deterministic and stable across
+          repeated calls with the same input and the same env value (required for resume/retry).
+          A non-list ``stacks_raw`` yields an empty roster. Never raises.
     """
     if not isinstance(stacks_raw, list):
         return []
+    workers_per_stack = env_int(CODING_TEAM_WORKERS_PER_STACK_ENV, 1, floor=1)
     roster: List[StackRosterEntry] = []
     used_ids: set[str] = set()
+
+    def _unique(candidate: str) -> str:
+        # Make the id GLOBALLY unique so the orchestrator assigns each worker a distinct
+        # agent_task_map entry (and the UI shows distinct cards) instead of one overwriting the
+        # other. Bump the suffix until the id is free — this also covers a candidate that
+        # collides with a suffix generated for an earlier duplicate (e.g. "backend", "backend",
+        # "backend_2" -> "backend", "backend_2", "backend_2_2"), or with a worker-suffixed id
+        # generated for another stack.
+        unique_id = candidate
+        count = 1
+        while unique_id in used_ids:
+            count += 1
+            unique_id = f"{candidate}_{count}"
+        used_ids.add(unique_id)
+        return unique_id
+
     for i, entry in enumerate(stacks_raw):
         spec = entry if isinstance(entry, dict) else {}
         name = spec.get("name") or f"stack_{i}"
         tools = spec.get("tools_services")
         tools = list(tools) if isinstance(tools, list) else []
-        # Make the agent_id GLOBALLY unique so the orchestrator assigns each stack a distinct
-        # agent_task_map entry (and the UI shows distinct cards) instead of one overwriting the
-        # other. Bump the suffix until the id is free — this also covers a stack whose literal name
-        # collides with a suffix generated for an earlier duplicate (e.g. "backend", "backend",
-        # "backend_2" -> "backend", "backend_2", "backend_3"). The display name keeps the original.
-        agent_id = name
-        count = 1
-        while agent_id in used_ids:
-            count += 1
-            agent_id = f"{name}_{count}"
-        used_ids.add(agent_id)
-        roster.append(StackRosterEntry(agent_id=agent_id, display_name=name, tools_services=tools))
+        base_agent_id = _unique(name)
+        if workers_per_stack <= 1:
+            roster.append(
+                StackRosterEntry(agent_id=base_agent_id, display_name=name, tools_services=tools)
+            )
+            continue
+        for worker_num in range(1, workers_per_stack + 1):
+            worker_agent_id = _unique(f"{base_agent_id}-{worker_num}")
+            roster.append(
+                StackRosterEntry(
+                    agent_id=worker_agent_id, display_name=name, tools_services=list(tools)
+                )
+            )
     return roster
 
 

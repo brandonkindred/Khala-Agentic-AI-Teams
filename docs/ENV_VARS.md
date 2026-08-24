@@ -1998,6 +1998,18 @@ policy and approval-gate checks (`required_approvals`/`prod_approval_required` o
 package); if its text carries no explicit approval-gate language it fails Phase 1's environment-policy
 gate rather than silently proceeding, the same trade-off `run_workflow` callers already accept.
 
+### CODING_TEAM_WORKERS_PER_STACK
+Number of implementation-worker `agent_id`s `derive_stack_roster` emits per stack (default `1`,
+floored at `1`; garbage/empty → default). `derive_stack_roster`
+(`software_engineering_team/agent_status.py`) is the single source of truth for worker-id naming,
+shared by the coding-team orchestrator (which builds the actual v2 implementation workers) and the
+status endpoint's roster builder, so both stay in sync automatically. With the default `1`, naming
+is unchanged from before this knob existed: one `agent_id` per stack, equal to the stack name (with
+a `_N` suffix on a name collision). With `N > 1`, each stack instead yields `N` `agent_id`s
+suffixed `-1`..`-N` off the stack's id (e.g. `backend_v2-1`, `backend_v2-2`), all sharing that
+stack's display name and tools. Naming is deterministic and stable across repeated calls with the
+same stack specs and env value, which resume/retry correctness depends on.
+
 ---
 
 ## SE CI Gate and Git Identity
