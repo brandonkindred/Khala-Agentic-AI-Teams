@@ -1,13 +1,15 @@
 """Unit tests for the selective-context eval script's logic.
 
 Covers the token-count heuristic, the full-context-phases derivation, the
-``_phase_spec_context_override`` primitive, and ``_run_variant`` -- which
+``_phase_spec_context_override`` primitive, ``_run_variant`` -- which
 genuinely executes each phase via ``run_single_phase`` (dummy LLM, isolated
 single-node graphs, no network) so both the "selective" and "full-context"
-variants produce real per-phase output, not just prompt strings. Does not
-exercise ``run_eval`` end-to-end against every sample mission -- that's run
-manually per the script's docstring and is intentionally out of scope for
-CI, matching #6969's "Out of Scope: CI integration of eval."
+variants produce real per-phase output, not just prompt strings --
+``run_eval``'s output-file disambiguation for duplicate mission names, and
+``main``'s CLI argument parsing and mission filtering. Does not exercise
+``run_eval`` end-to-end against every sample mission -- that's run manually
+per the script's docstring and is intentionally out of scope for CI,
+matching the eval task's "Out of Scope: CI integration of eval."
 """
 
 from __future__ import annotations
