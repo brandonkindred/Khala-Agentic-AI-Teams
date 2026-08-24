@@ -18,7 +18,6 @@ import os
 from . import config as _llm_config
 from . import factory as _llm_factory
 from . import provider_store as _llm_provider_store
-from .strands_provider import _clear_strands_model_cache_for_testing
 
 
 @contextlib.contextmanager
@@ -51,6 +50,14 @@ def force_dummy_llm_provider():
     the Strands-model / LLM-client caches on entry so a warm adapter from
     before this override took effect can't leak through.
 
+    ``_clear_strands_model_cache_for_testing`` is imported lazily (inside
+    this function, not at module scope) because ``strands_provider`` imports
+    the optional ``strands-agents`` package at import time;
+    ``llm_service/__init__.py`` resolves it the same way (via a PEP 562
+    ``__getattr__``) so that importing ``llm_service`` -- or, transitively,
+    this module -- never pulls Strands into ``sys.modules`` until a Strands
+    code path actually runs.
+
     Preconditions:
         None.
     Postconditions:
@@ -59,17 +66,23 @@ def force_dummy_llm_provider():
         to their original values on exit, even if the wrapped block raises
         -- so importing or unit-testing this module never leaves
         process-wide LLM provider/config resolution permanently patched for
-        unrelated code (e.g. other tests in the same pytest session).
+        unrelated code (e.g. other tests in the same pytest session). This
+        holds even if a setup step itself raises (e.g. a cache-clear call):
+        every mutation happens inside the ``try:``, after only the
+        original-value snapshots are read, so ``finally`` always runs once
+        any mutation has.
     """
     original_runtime = _llm_config._runtime
     original_load_ordered_entries = _llm_provider_store.load_ordered_entries
     original_provider_env = os.environ.get("LLM_PROVIDER")
-    _llm_config._runtime = lambda _key: ""
-    _llm_provider_store.load_ordered_entries = lambda *args, **kwargs: []
-    os.environ["LLM_PROVIDER"] = "dummy"
-    _llm_factory.clear_client_cache()
-    _clear_strands_model_cache_for_testing()
     try:
+        from .strands_provider import _clear_strands_model_cache_for_testing
+
+        _llm_config._runtime = lambda _key: ""
+        _llm_provider_store.load_ordered_entries = lambda *args, **kwargs: []
+        os.environ["LLM_PROVIDER"] = "dummy"
+        _llm_factory.clear_client_cache()
+        _clear_strands_model_cache_for_testing()
         yield
     finally:
         _llm_config._runtime = original_runtime
@@ -79,4 +92,7 @@ def force_dummy_llm_provider():
         else:
             os.environ["LLM_PROVIDER"] = original_provider_env
         _llm_factory.clear_client_cache()
+
+        from .strands_provider import _clear_strands_model_cache_for_testing
+
         _clear_strands_model_cache_for_testing()
