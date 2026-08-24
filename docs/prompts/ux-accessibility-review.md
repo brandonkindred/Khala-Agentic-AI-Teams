@@ -241,10 +241,20 @@ D. STATE COVERAGE
    offline; API-error; and stale-data. Each is its own state, and no disposition
    covers two of them: first visit and empty differ (onboarding a new user is not the
    same as giving a returning user with zero or filtered-out results a way forward),
-   first load and refresh differ (a refresh that silently blanks already-rendered
-   content is a defect that a correct first-load spinner hides), permission-denied and
-   backend-unconfigured need different copy and different recovery, as do offline and
-   API-error.
+   and first load and refresh differ (a refresh that silently blanks already-rendered
+   content is a defect that a correct first-load spinner hides).
+   The five failure states are a PARTITION, not overlapping labels — classify each
+   observed failure into exactly one, in this order, so the same event does not appear
+   in two rows:
+     - offline — no transport at all; the request never reached a server.
+     - permission-denied — the server answered, refusing on identity or authorization
+       (401/403).
+     - backend-unconfigured — the server answered, reporting the feature is not set up
+       (missing provider, credential, or configuration) rather than refusing the user.
+     - failed — the request SUCCEEDED and the domain operation or job it started then
+       reached a terminal failed state. Work failed, not the call.
+     - API-error — the residual: any other request failure (5xx, timeout, malformed or
+       unparseable response). Reach for this only when none of the four above fits.
    Give every state exactly one disposition, and state which:
      - HANDLED — the UI is (1) rendered at all; (2) recoverable from, where the state
        represents a failure or interruption (partial, failed, stalled, stale-data,
