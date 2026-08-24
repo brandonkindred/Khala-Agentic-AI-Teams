@@ -22,9 +22,11 @@ import security_agent.agent as agent_mod
 from security_agent import CybersecurityExpertAgent
 from security_agent.models import SecurityInput, SecurityOutput
 
+import software_engineering_team.shared.review_result_cache as review_cache_mod
 from llm_service.clients.dummy import DummyLLMClient
 from shared.cache import MemoryBackend, get_shared_cache, reset_shared_cache_state
 from shared.cache import factory as factory_mod
+from shared.cache.pydantic_cache import build_model_cache_key, cache_capacity_for
 
 _CLEAN_RESPONSE: Dict[str, Any] = {
     "vulnerabilities": [],
@@ -96,7 +98,7 @@ def test_redis_unavailable_falls_back_to_memory_cache(monkeypatch: pytest.Monkey
     monkeypatch.setattr(factory_mod, "_build_redis_client", lambda: None)
     reset_shared_cache_state()
     try:
-        assert isinstance(get_shared_cache(agent_mod._review_cache_namespace()), MemoryBackend)
+        assert isinstance(get_shared_cache(agent_mod._REVIEW_CACHE._namespace()), MemoryBackend)
 
         client = _CountingClient(_CLEAN_RESPONSE)
         agent = CybersecurityExpertAgent(client)
@@ -125,10 +127,10 @@ def test_cache_backend_error_falls_open_to_correct_result(monkeypatch: pytest.Mo
         def clear(self) -> None:
             # Not exercised by run() itself; only needed so the autouse
             # conftest teardown (which calls clear_review_cache()) doesn't
-            # blow up while agent_mod.get_shared_cache is still monkeypatched.
+            # blow up while review_cache_mod.get_shared_cache is still monkeypatched.
             pass
 
-    monkeypatch.setattr(agent_mod, "get_shared_cache", lambda namespace: _RaisingCache())
+    monkeypatch.setattr(review_cache_mod, "get_shared_cache", lambda namespace: _RaisingCache())
 
     client = _CountingClient(_CLEAN_RESPONSE)
     agent = CybersecurityExpertAgent(client)
@@ -184,8 +186,8 @@ def test_fallback_result_is_never_cached(monkeypatch: pytest.MonkeyPatch) -> Non
     assert result.approved is False
     assert "Security analysis failed" in result.summary
 
-    key = agent_mod._review_cache_key(input_data, agent_mod._security_model_fingerprint(agent.llm))
-    cache = get_shared_cache(agent_mod._review_cache_namespace())
+    key = build_model_cache_key(input_data, agent_mod._security_model_fingerprint(agent.llm))
+    cache = get_shared_cache(agent_mod._REVIEW_CACHE._namespace())
     assert cache.get(key) is None
 
 
@@ -201,6 +203,30 @@ def test_cache_disabled_via_env_is_passthrough(monkeypatch: pytest.MonkeyPatch) 
     assert client.calls == 2
 
 
+def test_cache_disabled_via_env_ignores_stale_pre_existing_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-existing cache entry (e.g. written before a restart with
+    ``SECURITY_REVIEW_CACHE_SIZE=0``) must never be served once the cache is
+    disabled -- disabling the cache means every call re-invokes the model,
+    not just that new results stop being written."""
+    client = _CountingClient(_CLEAN_RESPONSE)
+    agent = CybersecurityExpertAgent(client)
+    input_data = _input()
+
+    stale = dict(_CLEAN_RESPONSE)
+    stale["summary"] = "stale cached verdict"
+    key = build_model_cache_key(input_data, agent_mod._security_model_fingerprint(agent.llm))
+    cache = get_shared_cache(agent_mod._REVIEW_CACHE._namespace())
+    cache.set(key, SecurityOutput(**stale).model_dump_json().encode(), max_entries=256)
+
+    monkeypatch.setenv("SECURITY_REVIEW_CACHE_SIZE", "0")
+    result = agent.run(input_data)
+
+    assert client.calls == 1
+    assert result.summary != "stale cached verdict"
+
+
 def test_clear_review_cache_falls_open_on_backend_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """``clear_review_cache()`` never raises, even when the backend does."""
 
@@ -208,7 +234,7 @@ def test_clear_review_cache_falls_open_on_backend_error(monkeypatch: pytest.Monk
         def clear(self) -> None:
             raise RuntimeError("boom")
 
-    monkeypatch.setattr(agent_mod, "get_shared_cache", lambda namespace: _RaisingCache())
+    monkeypatch.setattr(review_cache_mod, "get_shared_cache", lambda namespace: _RaisingCache())
 
     agent_mod.clear_review_cache()  # must not raise
 
@@ -234,11 +260,13 @@ def test_corrupt_cache_entry_treated_as_miss() -> None:
     agent = CybersecurityExpertAgent(client)
     input_data = _input()
 
-    key = agent_mod._review_cache_key(
-        input_data, agent_mod._security_model_fingerprint(agent.llm)
+    key = build_model_cache_key(input_data, agent_mod._security_model_fingerprint(agent.llm))
+    cache = get_shared_cache(agent_mod._REVIEW_CACHE._namespace())
+    cache.set(
+        key,
+        b"not valid json",
+        max_entries=cache_capacity_for("SECURITY_REVIEW_CACHE_SIZE", 256),
     )
-    cache = get_shared_cache(agent_mod._review_cache_namespace())
-    cache.set(key, b"not valid json", max_entries=agent_mod._review_cache_size())
 
     result = agent.run(input_data)
 
@@ -264,7 +292,9 @@ def test_corrupt_cache_entry_delete_failure_falls_open(monkeypatch: pytest.Monke
         def clear(self) -> None:
             pass
 
-    monkeypatch.setattr(agent_mod, "get_shared_cache", lambda namespace: _CorruptThenRaisingCache())
+    monkeypatch.setattr(
+        review_cache_mod, "get_shared_cache", lambda namespace: _CorruptThenRaisingCache()
+    )
 
     client = _CountingClient(_CLEAN_RESPONSE)
     agent = CybersecurityExpertAgent(client)

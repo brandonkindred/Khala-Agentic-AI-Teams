@@ -199,10 +199,11 @@ describe('AgentConsoleApiService', () => {
     req.flush({});
   });
 
-  it('deletes a run', () => {
+  it('deletes a run with the notify-toast suppressed', () => {
     service.deleteRun('r1').subscribe();
     const req = httpMock.expectOne(`${baseUrl}/runs/r1`);
     expect(req.request.method).toBe('DELETE');
+    expect(req.request.context.get(SKIP_ERROR_NOTIFY)).toBe(true);
     req.flush({ id: 'r1', status: 'deleted' });
   });
 

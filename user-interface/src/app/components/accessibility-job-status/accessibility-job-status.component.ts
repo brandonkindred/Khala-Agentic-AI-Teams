@@ -22,6 +22,7 @@ import {
   type AccessibilityAuditStatusResponse,
   type AuditPhase,
 } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 @Component({
   selector: 'app-accessibility-job-status',
@@ -82,7 +83,7 @@ export class AccessibilityJobStatusComponent implements OnChanges, OnDestroy {
           }
         },
         error: (err) => {
-          this.error = err?.error?.detail ?? err?.message ?? 'Failed to fetch status';
+          this.error = extractErrorDetail(err, 'Failed to fetch status');
         },
       });
   }

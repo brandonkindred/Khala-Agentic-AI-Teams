@@ -23,6 +23,7 @@ import {
   CreateProposalRequest,
   ValidateProposalResponse,
 } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 @Component({
   selector: 'app-investment-proposal',
@@ -163,7 +164,7 @@ export class InvestmentProposalComponent implements OnInit {
       },
       error: (err) => {
         this.loading = false;
-        this.error = err.error?.detail || err.message || 'Failed to create proposal';
+        this.error = extractErrorDetail(err, 'Failed to create proposal');
       },
     });
   }
@@ -185,7 +186,7 @@ export class InvestmentProposalComponent implements OnInit {
         },
         error: (err) => {
           this.validating = false;
-          this.error = err.error?.detail || err.message || 'Failed to validate proposal';
+          this.error = extractErrorDetail(err, 'Failed to validate proposal');
         },
       });
   }

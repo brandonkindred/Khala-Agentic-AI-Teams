@@ -31,6 +31,7 @@ import type {
   IssueType,
   FindingFilters,
 } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 @Component({
   selector: 'app-accessibility-findings',
@@ -117,7 +118,7 @@ export class AccessibilityFindingsComponent implements OnChanges {
         this.selection.clear();
       },
       error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to load findings';
+        this.error = extractErrorDetail(err, 'Failed to load findings');
         this.loading = false;
       },
     });

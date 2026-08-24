@@ -10,6 +10,7 @@ import { MatChipsModule } from '@angular/material/chips';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { PersonalAssistantApiService } from '../../services/personal-assistant-api.service';
 import type { Reservation } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 /**
  * Reservations component for managing restaurant/appointment reservations.
@@ -98,7 +99,7 @@ export class PaReservationsComponent implements OnInit, OnChanges {
       },
       error: (err) => {
         this.creating = false;
-        this.snackBar.open(err?.error?.detail || 'Failed to create reservation', 'Close', { duration: 3000 });
+        this.snackBar.open(extractErrorDetail(err, 'Failed to create reservation'), 'Close', { duration: 3000 });
       },
     });
   }

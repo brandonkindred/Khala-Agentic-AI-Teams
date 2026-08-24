@@ -11,6 +11,7 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { PersonaTestingApiService } from '../../../services/persona-testing-api.service';
 import { PersonaChatComponent } from '../persona-chat/persona-chat.component';
 import { pollWhile } from '../../../shared/poll-while';
+import { extractErrorDetail } from '../../../shared/extract-error-detail';
 import { isPersonaRunTerminal } from '../../../models';
 import type { PersonaTestRunDetail, PersonaDecision, RunArtifacts } from '../../../models';
 
@@ -83,7 +84,7 @@ export class PersonaTestAuditPanelComponent implements OnInit {
           }
         },
         error: (err) => {
-          this.error = err?.error?.detail ?? 'Failed to load run status';
+          this.error = extractErrorDetail(err, 'Failed to load run status');
           this.loading = false;
         },
       });

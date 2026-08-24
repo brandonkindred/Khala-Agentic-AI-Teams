@@ -126,8 +126,13 @@ def run_chunked_agent_review(
           e.g. a minified bundle) is hard-split at character boundaries so no
           over-budget string is ever sent; the agent is invoked one piece at a
           time.
-        - A finding's ``file_path`` defaults to the file actually sent when the
-          agent does not report a location, so every piece stays attributable.
+        - A finding's ``file_path`` is always the file actually sent for that
+          piece (a real key in the caller's file map), never the agent's own
+          ``file_path``/``location`` fields -- both are LLM-authored text
+          (``location`` documented as "file path, function name, or line
+          reference") the agent fills in without seeing a file header, so
+          neither is a verified path. When present and informative, they are
+          folded into ``description`` instead of being discarded.
         - A piece whose ``run_chunk`` call fails is logged and skipped; issues
           from the other pieces are still returned (one bad piece never aborts
           the whole review). Such a piece is never cached, so it is retried for
@@ -215,17 +220,27 @@ def run_chunked_agent_review(
             if cache_key is not None:
                 cache.put(cache_key, items)
         for item in items or []:
+            description = getattr(item, "description", str(item))
+            # Each call reviews one already-known file's piece, so `path` is
+            # always the real, verified key into the caller's file map --
+            # unlike the agent's own `location`/`file_path` fields, which are
+            # LLM-authored text the model fills in without ever seeing a file
+            # header (raw source only, by design -- see module docstring).
+            # Trusting either as the authoritative path reintroduces the
+            # exact bug this guards against: an exact-match downstream
+            # lookup keyed on file_path would silently miss and fall back to
+            # arbitrary files. Fold both into the description as
+            # supplementary hints instead of discarding them.
+            file_path = path
+            for hint in (getattr(item, "file_path", None), getattr(item, "location", None)):
+                if hint and hint not in file_path and hint not in description:
+                    description = f"{description} (location: {hint})"
             issues.append(
                 issue_factory(
                     source=source,
                     severity=getattr(item, "severity", default_severity),
-                    description=getattr(item, "description", str(item)),
-                    # `location` may be present but None; fall back to file_path
-                    # then to the file we sent, so file_path is always a useful
-                    # string and tail pieces stay attributable.
-                    file_path=getattr(item, "location", None)
-                    or getattr(item, "file_path", None)
-                    or path,
+                    description=description,
+                    file_path=file_path,
                     recommendation=getattr(item, "recommendation", ""),
                 )
             )

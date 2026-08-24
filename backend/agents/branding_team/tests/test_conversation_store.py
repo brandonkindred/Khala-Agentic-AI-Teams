@@ -13,7 +13,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from branding_team.assistant.store import BrandingConversationStore
+from branding_team.assistant.store import BrandingConversationStore, ConversationAttachResult
 from branding_team.models import BrandPhase, TeamOutput, WorkflowStatus
 from branding_team.postgres import SCHEMA as BRANDING_SCHEMA
 from branding_team.tests.conftest import make_mission
@@ -275,6 +275,90 @@ def test_attach_and_update_mission_rejects_empty_conversation_id_and_empty_brand
 
     # None is still accepted (attaches no brand, just updates the mission).
     assert store.attach_and_update_mission(cid, None, mission) is True
+
+
+def test_attach_locked_success_and_preserves_mission_when_omitted() -> None:
+    """attach_locked sets brand_id and, when mission is omitted, leaves the
+    conversation's current mission untouched (the read this same locked
+    transaction just performed, not a caller's pre-lock snapshot)."""
+    store = BrandingConversationStore()
+    cid = store.create(mission=_acme_mission())
+    brand_id = _brand_id("locked-ok")
+
+    with store._transaction() as cur:
+        result = store.attach_locked(cur, cid, brand_id)
+    assert result is ConversationAttachResult.OK
+    assert store.get_conversation_brand_id(cid) == brand_id
+    state = store.get_state(cid)
+    assert state is not None
+    assert state.mission.company_name == "Acme"
+
+
+def test_attach_locked_overwrites_mission_when_provided() -> None:
+    """attach_locked overwrites mission_json when a mission is passed."""
+    store = BrandingConversationStore()
+    cid = store.create(mission=_acme_mission())
+    brand_id = _brand_id("locked-mission")
+    updated = make_mission(
+        company_name="Beta",
+        company_description="Updated description",
+        target_audience="operators",
+    )
+
+    with store._transaction() as cur:
+        result = store.attach_locked(cur, cid, brand_id, updated)
+    assert result is ConversationAttachResult.OK
+    state = store.get_state(cid)
+    assert state is not None
+    assert state.mission.company_name == "Beta"
+
+
+def test_attach_locked_unknown_conversation() -> None:
+    """attach_locked reports NOT_FOUND without writing anything."""
+    store = BrandingConversationStore()
+    with store._transaction() as cur:
+        result = store.attach_locked(cur, "missing-conv", _brand_id("locked-missing"))
+    assert result is ConversationAttachResult.NOT_FOUND
+
+
+def test_attach_locked_already_attached_to_different_brand() -> None:
+    """attach_locked reports ALREADY_ATTACHED and leaves the row unchanged
+    when the conversation is attached to a different brand."""
+    store = BrandingConversationStore()
+    other_brand_id = _brand_id("locked-other")
+    target_brand_id = _brand_id("locked-target")
+    cid = store.create(brand_id=other_brand_id, mission=_acme_mission())
+
+    with store._transaction() as cur:
+        result = store.attach_locked(cur, cid, target_brand_id)
+    assert result is ConversationAttachResult.ALREADY_ATTACHED
+    assert store.get_conversation_brand_id(cid) == other_brand_id
+
+
+def test_attach_locked_reattaching_same_brand_is_ok() -> None:
+    """Re-locking a conversation to the brand it's already attached to is a
+    no-conflict success, not ALREADY_ATTACHED."""
+    store = BrandingConversationStore()
+    brand_id = _brand_id("locked-reattach")
+    cid = store.create(brand_id=brand_id, mission=_acme_mission())
+
+    with store._transaction() as cur:
+        result = store.attach_locked(cur, cid, brand_id)
+    assert result is ConversationAttachResult.OK
+
+
+def test_attach_locked_rejects_empty_ids_and_bad_mission_type() -> None:
+    store = BrandingConversationStore()
+    cid = store.create(mission=_acme_mission())
+    brand_id = _brand_id("locked-validate")
+
+    with store._transaction() as cur:
+        with pytest.raises(ValueError, match="conversation_id must be a non-empty string"):
+            store.attach_locked(cur, "", brand_id)
+        with pytest.raises(ValueError, match="brand_id must be a non-empty string"):
+            store.attach_locked(cur, cid, "")
+        with pytest.raises(ValueError, match="mission must be a BrandingMission"):
+            store.attach_locked(cur, cid, brand_id, {"company_name": "Acme"})
 
 
 def test_get_conversation_brand_id_rejects_empty_conversation_id() -> None:

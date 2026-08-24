@@ -23,6 +23,7 @@ import {
   PromotionDecisionRequest,
   PromotionStage,
 } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 @Component({
   selector: 'app-investment-promotion',
@@ -115,7 +116,7 @@ export class InvestmentPromotionComponent {
       },
       error: (err) => {
         this.loading = false;
-        this.error = err.error?.detail || err.message || 'Failed to run promotion decision';
+        this.error = extractErrorDetail(err, 'Failed to run promotion decision');
       },
     });
   }

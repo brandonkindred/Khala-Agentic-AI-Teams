@@ -43,6 +43,7 @@ import { EntryRuleEditorComponent } from './editors/entry-rule-editor.component'
 import { ExitRuleEditorComponent } from './editors/exit-rule-editor.component';
 import { SizingEditorComponent } from './editors/sizing-editor.component';
 import { integerValidator } from './editors/strategy-validators';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 const ALLOWED_EXIT_KINDS: ReadonlySet<string> = new Set(EXIT_RULE_KINDS);
 const ALLOWED_SIZING_KINDS: ReadonlySet<string> = new Set(SIZING_KINDS);
@@ -378,7 +379,7 @@ export class InvestmentStrategyComponent implements OnInit {
       },
       error: (err) => {
         this.loading = false;
-        this.error = err.error?.detail || err.message || 'Failed to create strategy';
+        this.error = extractErrorDetail(err, 'Failed to create strategy');
       },
     });
   }
@@ -397,7 +398,7 @@ export class InvestmentStrategyComponent implements OnInit {
       },
       error: (err) => {
         this.validating = false;
-        this.error = err.error?.detail || err.message || 'Failed to validate strategy';
+        this.error = extractErrorDetail(err, 'Failed to validate strategy');
       },
     });
   }

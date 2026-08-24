@@ -539,7 +539,9 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
       error: (err: HttpErrorResponse) => {
         this.running.set(false);
         if (err.status === 409) {
-          this.lastError.set(err.error?.detail ?? 'Agent not runnable in sandbox.');
+          this.lastError.set(
+            extractErrorDetail(err, 'Agent not runnable in sandbox.', { joinValidationArray: true }),
+          );
         } else if (err.status === 422 && err.error?.detail) {
           // The shim wraps user-space exceptions in a 422 with the envelope
           // as `detail`, so we can surface the output + logs inline — but only

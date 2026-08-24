@@ -25,6 +25,7 @@ import type {
   ConversationMessage,
   ConversationStateResponse,
 } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 export interface BrandingChatState {
   conversation_id: string | null;
@@ -151,7 +152,7 @@ export class BrandingChatComponent implements OnInit, OnChanges, AfterViewChecke
       error: (err) => {
         this.error = this.isUnreachableError(err)
           ? BrandingChatComponent.CONVERSATION_UNAVAILABLE_MESSAGE
-          : (err?.error?.detail ?? err?.message ?? 'Failed to start conversation');
+          : (extractErrorDetail(err, 'Failed to start conversation'));
         this.loading = false;
       },
     });
@@ -168,7 +169,7 @@ export class BrandingChatComponent implements OnInit, OnChanges, AfterViewChecke
         error: (err) => {
           this.error = this.isUnreachableError(err)
             ? BrandingChatComponent.CONVERSATION_UNAVAILABLE_MESSAGE
-            : (err?.error?.detail ?? err?.message ?? 'Failed to load conversation');
+            : (extractErrorDetail(err, 'Failed to load conversation'));
         },
       });
       return;
@@ -180,7 +181,7 @@ export class BrandingChatComponent implements OnInit, OnChanges, AfterViewChecke
       error: (err) => {
         this.error = this.isUnreachableError(err)
           ? BrandingChatComponent.CONVERSATION_UNAVAILABLE_MESSAGE
-          : (err?.error?.detail ?? err?.message ?? 'Failed to start conversation');
+          : (extractErrorDetail(err, 'Failed to start conversation'));
       },
     });
   }
@@ -203,7 +204,7 @@ export class BrandingChatComponent implements OnInit, OnChanges, AfterViewChecke
           this.loading = false;
         },
         error: (err) => {
-          this.error = err?.error?.detail ?? err?.message ?? 'Failed to send message';
+          this.error = extractErrorDetail(err, 'Failed to send message');
           this.loading = false;
         },
       });
@@ -222,7 +223,7 @@ export class BrandingChatComponent implements OnInit, OnChanges, AfterViewChecke
         this.loading = false;
       },
       error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to send message';
+        this.error = extractErrorDetail(err, 'Failed to send message');
         this.loading = false;
       },
     });
