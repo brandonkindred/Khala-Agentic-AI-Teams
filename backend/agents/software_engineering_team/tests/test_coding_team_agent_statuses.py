@@ -91,6 +91,51 @@ def test_derive_roster_copies_tools_list():
     assert src == ["Angular"]  # the roster holds a copy, not the caller's list
 
 
+def test_derive_roster_default_is_one_worker_per_stack():
+    # CODING_TEAM_WORKERS_PER_STACK unset -> identical to the pre-widening single-id-per-stack shape.
+    roster = derive_stack_roster([{"name": "backend_v2", "tools_services": ["FastAPI"]}])
+    assert roster == [("backend_v2", "backend_v2", ["FastAPI"])]
+
+
+def test_derive_roster_workers_per_stack_env_var(monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_WORKERS_PER_STACK", "3")
+    roster = derive_stack_roster([{"name": "backend_v2", "tools_services": ["FastAPI"]}])
+    assert [e.agent_id for e in roster] == ["backend_v2-1", "backend_v2-2", "backend_v2-3"]
+    assert [e.display_name for e in roster] == ["backend_v2"] * 3
+    assert [e.tools_services for e in roster] == [["FastAPI"]] * 3
+    # Each worker holds its own copy of tools_services, not a shared reference.
+    roster[0].tools_services.append("mutated")
+    assert roster[1].tools_services == ["FastAPI"]
+
+
+def test_derive_roster_workers_per_stack_multiple_stacks(monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_WORKERS_PER_STACK", "2")
+    roster = derive_stack_roster([{"name": "backend_v2"}, {"name": "frontend_v2"}])
+    ids = [e.agent_id for e in roster]
+    assert ids == ["backend_v2-1", "backend_v2-2", "frontend_v2-1", "frontend_v2-2"]
+    assert len(set(ids)) == len(ids)  # all globally unique
+
+
+def test_derive_roster_workers_per_stack_garbage_or_zero_falls_back_to_one(monkeypatch):
+    for bad_value in ("0", "-1", "garbage"):
+        monkeypatch.setenv("CODING_TEAM_WORKERS_PER_STACK", bad_value)
+        roster = derive_stack_roster([{"name": "backend_v2"}])
+        assert [e.agent_id for e in roster] == ["backend_v2"]
+
+
+def test_derive_roster_workers_per_stack_avoids_collision_with_literal_stack_name(monkeypatch):
+    # A literal stack name that matches a worker-suffixed id generated for an earlier stack must
+    # still resolve to a unique agent_id via the same global dedup used for base ids.
+    monkeypatch.setenv("CODING_TEAM_WORKERS_PER_STACK", "2")
+    roster = derive_stack_roster([{"name": "backend"}, {"name": "backend-1"}])
+    ids = [e.agent_id for e in roster]
+    # First stack ("backend") claims "backend-1"/"backend-2" as its two worker ids. The second
+    # stack's literal name ("backend-1") then collides with the first worker id, so its own base
+    # id is bumped to "backend-1_2" before it gets its two worker-suffixed ids.
+    assert ids == ["backend-1", "backend-2", "backend-1_2-1", "backend-1_2-2"]
+    assert len(set(ids)) == len(ids)
+
+
 # --------------------------------------------------------------------------- _coerce_fraction
 
 
