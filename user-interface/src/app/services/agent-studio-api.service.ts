@@ -2,7 +2,6 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
-import { SKIP_NOTIFY_OPTIONS } from '../core/error-handler.interceptor';
 import type {
   AgentDefinition,
   AgentStudioDraft,
@@ -99,7 +98,6 @@ export class AgentStudioApiService {
   deleteDraft(draftId: string): Observable<{ draft_id: string; status: string }> {
     return this.http.delete<{ draft_id: string; status: string }>(
       `${this.baseUrl}/drafts/${encodeURIComponent(draftId)}`,
-      SKIP_NOTIFY_OPTIONS,
     );
   }
 }
