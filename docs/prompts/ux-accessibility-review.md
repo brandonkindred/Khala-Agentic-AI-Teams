@@ -67,9 +67,12 @@ Out of scope (note it and move on, do not fix):
     `poll-while.ts` / `staleness.util.ts` (long-running job polling and staleness).
     "Build a custom X" when a shared X exists is itself a finding.
   - Existing `*.a11y.spec.ts` files and `user-interface/src/app/testing/a11y.ts`
-    (`expectNoAxeViolations`, with `color-contrast` disabled under jsdom). Anything
-    axe already covers for <TEAM> is regression-guarded — spend your attention on what
-    axe structurally cannot see.
+    (`expectNoAxeViolations`, with `color-contrast` disabled under jsdom). A spec
+    guards only the states its fixtures actually render: one that mounts empty
+    listings, jobs, and runs audits the empty state and nothing else, so the populated,
+    active-job, and error branches remain unaudited even for defects axe could catch.
+    Read each spec's fixtures before treating anything as covered, then spend your
+    attention on the unrendered states and on what axe structurally cannot see.
 
 ## 3. Review lenses
 
@@ -78,8 +81,13 @@ Work all five. Under each, the listed checks are the floor, not the ceiling.
 A. ACCESSIBILITY (WCAG 2.2 AA)
    - Semantics: landmark and heading structure, heading level order, lists/tables as
      real lists/tables, `role` only where native elements can't do the job.
-   - Names and descriptions: every control has an accessible name that matches its
-     visible label; icon-only buttons carry `[attr.aria-label]`; form fields are
+   - Names and descriptions: every control has an accessible name that CONTAINS its
+     visible label (2.5.3 Label in Name is a containment rule, not an equality one).
+     Supplementing the visible text with disambiguating context is correct and often
+     better — a visible "Cancel" named "Cancel <job label>" is compliant, and reporting
+     it as a mismatch is a false positive. Flag only when the visible label is absent
+     from or reordered within the accessible name, which is what actually breaks
+     speech-input users. Icon-only buttons carry `[attr.aria-label]`; form fields are
      programmatically associated with labels, hints, and errors.
    - Keyboard: every interaction reachable and operable without a pointer; no traps;
      tab order matches visual order; no positive `tabindex`; custom widgets implement
@@ -223,7 +231,9 @@ Close with:
 
 ## 8. Do not report
 
-  - Findings axe already catches and an existing `.a11y.spec.ts` already guards.
+  - Findings that an existing `.a11y.spec.ts` already guards IN THE STATE you are
+    reporting. Check the spec's fixtures first — a state it never renders is not
+    guarded, and a defect there is worth reporting even if axe could have caught it.
   - Speculation that requires a running browser without labelling it as such.
   - Wholesale redesigns, restructures of the shared shell, or framework swaps.
   - Style preferences with no accessibility, comprehension, or step-count consequence.
