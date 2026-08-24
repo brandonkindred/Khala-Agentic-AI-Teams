@@ -188,6 +188,15 @@ def attach_conversation_to_brand(
         not exist, 404 "Conversation not found" when the conversation is
         missing, and 409 "Conversation is already attached to another brand"
         when it is currently linked to a different brand.
+
+        The conversation's mission is left untouched by this endpoint — no
+        mission is passed to ``link_conversation_to_brand``, so the attach
+        transaction preserves whatever mission is currently on the row instead
+        of writing back the pre-lock ``state.mission`` snapshot taken below
+        (which a concurrent ``POST /conversations/{id}/messages`` turn could
+        have already superseded). The response is built from a fresh
+        ``get_state`` read taken after the attach commits, so it reflects the
+        committed mission rather than that snapshot.
     """
     from branding_team.api import main as _main
 
@@ -199,7 +208,13 @@ def attach_conversation_to_brand(
     state = _main.conversation_store.get_state(conversation_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    attached_brand = link_conversation_to_brand(client_id, brand_id, conversation_id, state.mission)
+    attached_brand = link_conversation_to_brand(client_id, brand_id, conversation_id)
+    refreshed = _main.conversation_store.get_state(conversation_id) or state
     return _conversation_to_response(
-        conversation_id, attached_brand.id, state.messages, state.mission, state.latest_output, []
+        conversation_id,
+        attached_brand.id,
+        refreshed.messages,
+        refreshed.mission,
+        refreshed.latest_output,
+        [],
     )

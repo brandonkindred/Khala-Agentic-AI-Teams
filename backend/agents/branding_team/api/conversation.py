@@ -139,7 +139,7 @@ def link_conversation_to_brand(
     client_id: str,
     brand_id: str,
     conversation_id: str,
-    mission: BrandingMission,
+    mission: Optional[BrandingMission] = None,
 ) -> Brand:
     """Atomically link *conversation_id* to *brand_id*, raising on any failure.
 
@@ -155,15 +155,20 @@ def link_conversation_to_brand(
 
     Preconditions:
         ``client_id``, ``brand_id`` identify an existing (client, brand) pair;
-        ``conversation_id`` identifies an existing conversation; ``mission``
-        is a validated ``BrandingMission``.
+        ``conversation_id`` identifies an existing conversation; ``mission``,
+        when provided, is a validated ``BrandingMission``.
     Postconditions:
         On success returns the updated ``Brand`` — the conversation now points
-        at ``brand_id`` and the brand's ``conversation_id`` is set. Raises
-        ``HTTPException``: 404 when the conversation or brand is missing, 409
-        when the conversation is already attached to a *different* brand, 500
-        for any unrecognized result. Never returns ``None`` — every non-OK
-        outcome raises instead.
+        at ``brand_id`` and the brand's ``conversation_id`` is set. When
+        *mission* is omitted, the conversation's stored mission is left as-is
+        (read inside the attach transaction's own lock, not a pre-lock
+        snapshot the caller took beforehand — see
+        ``BrandingStore.attach_conversation``); pass it explicitly only when
+        the caller is itself the source of truth for that mission (e.g. the
+        mission that just drove brand creation). Raises ``HTTPException``: 404
+        when the conversation or brand is missing, 409 when the conversation
+        is already attached to a *different* brand, 500 for any unrecognized
+        result. Never returns ``None`` — every non-OK outcome raises instead.
     """
     from branding_team.api import main as _main
 

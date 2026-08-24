@@ -772,6 +772,53 @@ def test_attach_conversation_to_brand_rejects_conversation_attached_elsewhere() 
     assert first_reload.conversation_id == conv_id
 
 
+def test_attach_conversation_to_brand_preserves_conversation_mission() -> None:
+    """POST /conversations/{id}/brand must not overwrite the conversation's
+    current mission with a pre-lock snapshot. Simulates the race a reviewer
+    flagged: another turn (e.g. POST /conversations/{id}/messages) commits a
+    newer mission after this endpoint's own get_state read but before the
+    atomic attach runs; the newer mission must survive."""
+    from branding_team.api import main as main_mod
+
+    workspace = branding_store.create_client("PreserveMission Client")
+    brand = branding_store.create_brand(
+        workspace.id,
+        make_mission(
+            company_name="PreserveMissionCo",
+            company_description="Company for mission-preservation test",
+            target_audience="users",
+        ),
+    )
+    conv_id = client.post("/conversations", json={}).json()["conversation_id"]
+
+    real_get_state = main_mod.conversation_store.get_state
+    raced_mission = make_mission(
+        company_name="RacedInMission",
+        company_description="Committed by a concurrent turn after our read",
+        target_audience="users",
+    )
+
+    def _get_state_then_race(cid: str):
+        state = real_get_state(cid)
+        # Simulate a concurrent POST /conversations/{id}/messages committing a
+        # newer mission between our read and the attach transaction's lock.
+        main_mod.conversation_store.update_mission(cid, raced_mission)
+        return state
+
+    main_mod.conversation_store.get_state = _get_state_then_race
+    try:
+        resp = client.post(f"/conversations/{conv_id}/brand", json={"brand_id": brand.id})
+    finally:
+        main_mod.conversation_store.get_state = real_get_state
+
+    assert resp.status_code == 200
+    # The response and the stored row both reflect the raced-in mission, not
+    # the stale snapshot taken before it landed.
+    assert resp.json()["mission"]["company_name"] == "RacedInMission"
+    reload = client.get(f"/conversations/{conv_id}")
+    assert reload.json()["mission"]["company_name"] == "RacedInMission"
+
+
 def test_attach_conversation_to_brand_reattaching_same_brand_succeeds() -> None:
     """Re-attaching a conversation to the brand it is already on stays a
     no-op success (attach_conversation treats a matching brand_id as OK, not

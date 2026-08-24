@@ -233,7 +233,11 @@ class MemoryBrandingStore:
         return updated
 
     def attach_conversation(
-        self, client_id: str, brand_id: str, conversation_id: str, mission: BrandingMission
+        self,
+        client_id: str,
+        brand_id: str,
+        conversation_id: str,
+        mission: Optional[BrandingMission] = None,
     ) -> Tuple[AttachConversationResult, Optional[Brand]]:
         conv = self._bundle.conversations.get(conversation_id)
         if conv is None:
@@ -246,7 +250,8 @@ class MemoryBrandingStore:
 
         now = _now_dt()
         conv.brand_id = brand_id
-        conv.mission = mission
+        if mission is not None:
+            conv.mission = mission
         conv.updated_at = now
         updated_brand = brand.model_copy(
             update={"conversation_id": conversation_id, "updated_at": _now_iso()}
