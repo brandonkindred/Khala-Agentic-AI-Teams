@@ -59,6 +59,7 @@ from shared.dev_models.models import SystemArchitecture
 from shared.env import env_flag_enabled
 from software_engineering_team.shared.llm import extract_json_from_response
 
+from ._prompt_utils import _render_manifest
 from .architecture_context import architecture_evidence_available, render_architecture_context
 from .chunking import _coerce_scope_tags
 from .false_positive_filter import CodebaseIndex, _build_tools, _code_fence_for
@@ -102,18 +103,6 @@ def _flatten_architecture_document(architecture: Optional[SystemArchitecture]) -
         )
         if p
     )
-
-
-def _render_manifest(paths: List[str]) -> List[str]:
-    """Render the full changed-file path list (no character truncation).
-
-    A small pass-owned duplicate of
-    ``merged_architecture_side_effect_pass._render_manifest`` -- that module
-    imports this one, so importing the reverse direction would be circular.
-
-    Postconditions: always includes the section header followed by every path.
-    """
-    return [f"**Changed files in this submission ({len(paths)}):**", *paths]
 
 
 def _build_prompt(
