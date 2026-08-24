@@ -130,6 +130,42 @@ OUTPUT contract:
 """
 
 
+def _render_mission_summary(mission: BrandingMission) -> str:
+    """Render the mission's judge-relevant identifying fields as pretty-printed JSON.
+
+    Shared by :func:`_build_judge_prompt` and :func:`_build_paired_judge_prompt`
+    so the two prompt shapes can never drift on which mission fields the judge sees.
+
+    Preconditions: ``mission`` is a valid ``BrandingMission``.
+    Postconditions: returns a non-empty JSON string.
+    """
+    return json.dumps(
+        {
+            "company_name": mission.company_name,
+            "company_description": mission.company_description,
+            "target_audience": mission.target_audience,
+            "values": mission.values,
+            "desired_voice": mission.desired_voice,
+        },
+        indent=2,
+    )
+
+
+def _render_strategic_core_block(strategic_core: BaseModel | None) -> str:
+    """Render the optional GENERATED STRATEGIC CORE prompt block.
+
+    Shared by :func:`_build_judge_prompt` and :func:`_build_paired_judge_prompt`.
+
+    Preconditions: none.
+    Postconditions: returns ``""`` when ``strategic_core`` is ``None``;
+    otherwise a non-empty block ending in a blank line.
+    """
+    if strategic_core is None:
+        return ""
+    strategic_core_json = json.dumps(strategic_core.model_dump(mode="json"), indent=2)
+    return f"--- GENERATED STRATEGIC CORE ---\n{strategic_core_json}\n\n"
+
+
 def _build_judge_prompt(
     *,
     mission: BrandingMission,
@@ -162,20 +198,8 @@ def _build_judge_prompt(
         ``output.model_dump(mode="json")`` as pretty-printed JSON -- with no
         selective/full-context label anywhere in the returned text.
     """
-    mission_summary = json.dumps(
-        {
-            "company_name": mission.company_name,
-            "company_description": mission.company_description,
-            "target_audience": mission.target_audience,
-            "values": mission.values,
-            "desired_voice": mission.desired_voice,
-        },
-        indent=2,
-    )
-    strategic_core_block = ""
-    if strategic_core is not None:
-        strategic_core_json = json.dumps(strategic_core.model_dump(mode="json"), indent=2)
-        strategic_core_block = f"--- GENERATED STRATEGIC CORE ---\n{strategic_core_json}\n\n"
+    mission_summary = _render_mission_summary(mission)
+    strategic_core_block = _render_strategic_core_block(strategic_core)
     output_json = json.dumps(output.model_dump(mode="json"), indent=2)
     return (
         "--- MISSION ---\n"
@@ -215,9 +239,11 @@ def score_phase_output(
         it (every phase this eval judges is); omit only when judging the
         strategic core phase itself.
     Postconditions:
-        Returns a validated :class:`PhaseQualityScore`. ``structured_output_model``
-        is forwarded to ``client.complete_json`` so a dummy/test double can
-        route by exact class name instead of parsing prompt text.
+        Returns a validated :class:`PhaseQualityScore`.
+
+        Note: ``structured_output_model`` is passed to ``complete_validated``
+        so a dummy/test double can route by exact class name instead of
+        parsing prompt text.
     """
     prompt = _build_judge_prompt(
         mission=mission,
@@ -258,20 +284,8 @@ def _build_paired_judge_prompt(
         anywhere -- only the neutral "OUTPUT A"/"OUTPUT B" headings, which
         carry no information about which context variant produced which.
     """
-    mission_summary = json.dumps(
-        {
-            "company_name": mission.company_name,
-            "company_description": mission.company_description,
-            "target_audience": mission.target_audience,
-            "values": mission.values,
-            "desired_voice": mission.desired_voice,
-        },
-        indent=2,
-    )
-    strategic_core_block = ""
-    if strategic_core is not None:
-        strategic_core_json = json.dumps(strategic_core.model_dump(mode="json"), indent=2)
-        strategic_core_block = f"--- GENERATED STRATEGIC CORE ---\n{strategic_core_json}\n\n"
+    mission_summary = _render_mission_summary(mission)
+    strategic_core_block = _render_strategic_core_block(strategic_core)
     output_a_json = json.dumps(output_a.model_dump(mode="json"), indent=2)
     output_b_json = json.dumps(output_b.model_dump(mode="json"), indent=2)
     return (
@@ -323,7 +337,8 @@ def score_phase_output_pair(
         judging the strategic core phase itself.
     Postconditions:
         Returns a validated :class:`PairedPhaseQualityScore`.
-        ``structured_output_model`` is forwarded to ``client.complete_json``
+
+        Note: ``structured_output_model`` is passed to ``complete_validated``
         so a dummy/test double can route by exact class name instead of
         parsing prompt text.
     """

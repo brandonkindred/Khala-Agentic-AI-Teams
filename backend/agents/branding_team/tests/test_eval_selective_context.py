@@ -278,7 +278,10 @@ def test_run_eval_default_dummy_mode_has_no_quality_regressions(tmp_path) -> Non
     assert quality_comparisons
     assert all(c.regressions() == [] for c in quality_comparisons)
     phases = {c.phase for c in quality_comparisons}
-    assert phases == {BrandPhase.CHANNEL_ACTIVATION, BrandPhase.GOVERNANCE}
+    # _JUDGED_PHASES (not divergence) is the single source of truth for which
+    # phases run_eval judges at all -- both are judged regardless of whether
+    # their context actually diverges (see the two tests below for that).
+    assert phases == set(eval_ctx._JUDGED_PHASES)
 
 
 def test_run_eval_judges_shared_phase_output_only_once(tmp_path) -> None:
@@ -287,6 +290,10 @@ def test_run_eval_judges_shared_phase_output_only_once(tmp_path) -> None:
     judge on it exactly once (never twice) and never route it through the paired
     judge call at all.
     """
+    # CHANNEL_ACTIVATION is asserted directly (not derived from
+    # _first_diverging_phase()) because this test's whole point is pinning
+    # down *which* judged phase is non-diverging today; if that ever changes,
+    # this assertion should fail loudly rather than silently track the change.
     with patch(
         "branding_team.scripts.eval_selective_context.score_phase_output",
         wraps=eval_ctx.score_phase_output,
@@ -303,6 +310,10 @@ def test_run_eval_judges_diverging_phase_with_single_paired_call(tmp_path) -> No
     separate score_phase_output calls -- so both are judged by the same
     provider/model response.
     """
+    # GOVERNANCE is asserted directly for the same reason as the shared-phase
+    # test above: it mirrors test_first_diverging_phase_is_governance(), which
+    # documents today's divergence point, so a mismatch here signals a real
+    # behavior change rather than a stale assumption.
     with patch(
         "branding_team.scripts.eval_selective_context.score_phase_output_pair",
         wraps=eval_ctx.score_phase_output_pair,
@@ -408,6 +419,20 @@ def test_phase_quality_comparison_flags_multiple_regressed_dimensions() -> None:
         full=_quality_score(strategic_coherence=5, completeness=5, brand_consistency=5),
     )
     assert comparison.regressions() == ["strategic_coherence", "completeness"]
+
+
+def test_phase_quality_comparison_delta_rejects_invalid_dimension() -> None:
+    """delta() must raise ValueError for a dimension outside _QUALITY_DIMENSIONS
+    rather than an unclear AttributeError from getattr.
+    """
+    comparison = PhaseQualityComparison(
+        mission_name="Acme",
+        phase=BrandPhase.GOVERNANCE,
+        selective=_quality_score(),
+        full=_quality_score(),
+    )
+    with pytest.raises(ValueError, match="Invalid dimension"):
+        comparison.delta("not_a_real_dimension")
 
 
 def test_print_quality_report_handles_empty_list(capsys) -> None:

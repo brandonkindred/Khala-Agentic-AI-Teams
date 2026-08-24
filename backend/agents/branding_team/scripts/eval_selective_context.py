@@ -209,11 +209,18 @@ class PhaseQualityComparison:
         """Return ``full``'s score minus ``selective``'s score for *dimension*.
 
         Preconditions:
-            ``dimension`` is one of :data:`_QUALITY_DIMENSIONS`.
+            ``dimension`` is one of :data:`_QUALITY_DIMENSIONS`; raises
+            ``ValueError`` otherwise.
         Postconditions:
             Returns a positive value when the selective variant scored lower
-            than the full-context variant on that dimension.
+            than the full-context variant on that dimension, ``0`` when the
+            scores are equal, and a negative value when the selective variant
+            scored higher.
         """
+        if dimension not in _QUALITY_DIMENSIONS:
+            raise ValueError(
+                f"Invalid dimension {dimension!r}; must be one of {_QUALITY_DIMENSIONS}"
+            )
         return getattr(self.full, dimension) - getattr(self.selective, dimension)
 
     def regressions(self) -> list[str]:
