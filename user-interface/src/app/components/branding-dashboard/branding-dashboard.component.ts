@@ -15,6 +15,7 @@ import { BrandingApiService } from '../../services/branding-api.service';
 import { BrandActivityService } from '../../services/brand-activity.service';
 import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-spinner.component';
 import { ErrorMessageComponent } from '../../shared/error-message/error-message.component';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
 import { BrandingChatComponent } from '../branding-chat/branding-chat.component';
 import { BrandPreviewComponent } from '../brand-preview/brand-preview.component';
@@ -245,7 +246,7 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
           },
           error: (err) => {
             this.snackBar.open(
-              `Brand "${brand.name}" created. Run failed: ${err?.error?.detail ?? err?.message}`,
+              `Brand "${brand.name}" created. Run failed: ${extractErrorDetail(err, '')}`,
               'Dismiss',
               { duration: 8000 }
             );
@@ -253,7 +254,7 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
         });
       },
       error: (err) => {
-        this.saveToAgencyError = err?.error?.detail ?? err?.message ?? 'Failed to create brand';
+        this.saveToAgencyError = extractErrorDetail(err, 'Failed to create brand');
       },
     });
   }
@@ -291,13 +292,13 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
                   this.loading = false;
                 },
                 error: (err) => {
-                  this.clientLoadError = err?.error?.detail ?? err?.message ?? 'Failed to load workspace';
+                  this.clientLoadError = extractErrorDetail(err, 'Failed to load workspace');
                   this.loading = false;
                 },
               });
             },
             error: (err) => {
-              this.clientLoadError = err?.error?.detail ?? err?.message ?? 'Failed to create workspace';
+              this.clientLoadError = extractErrorDetail(err, 'Failed to create workspace');
               this.loading = false;
             },
           });
@@ -316,7 +317,7 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
         }
       },
       error: (err) => {
-        this.clientLoadError = err?.error?.detail ?? err?.message ?? 'Failed to load workspace';
+        this.clientLoadError = extractErrorDetail(err, 'Failed to load workspace');
         this.loading = false;
       },
     });
@@ -332,7 +333,7 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
         }
       },
       error: (err) => {
-        this.clientLoadError = err?.error?.detail ?? err?.message ?? 'Failed to load workspace';
+        this.clientLoadError = extractErrorDetail(err, 'Failed to load workspace');
       },
     });
   }
@@ -462,7 +463,7 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
         },
         error: (err) => {
           this.snackBar.open(
-            err?.error?.detail ?? err?.message ?? 'Failed to update brand',
+            extractErrorDetail(err, 'Failed to update brand'),
             'Dismiss',
             { duration: 5000 },
           );
@@ -562,7 +563,7 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
         this.loadClients();
       },
       error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to add workspace';
+        this.error = extractErrorDetail(err, 'Failed to add workspace');
         this.brandFormBusy = false;
       },
     });
@@ -599,7 +600,7 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
         );
       },
       error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to create brand';
+        this.error = extractErrorDetail(err, 'Failed to create brand');
         this.brandFormBusy = false;
       },
     });
@@ -710,9 +711,7 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
   }
 
   private finishActivityWithError(activityId: string, err: unknown, fallback: string): void {
-    const message = (err as { error?: { detail?: string }; message?: string })?.error?.detail
-      ?? (err as { message?: string })?.message
-      ?? fallback;
+    const message = extractErrorDetail(err, fallback);
     this.activityStore.update(activityId, {
       status: 'failed',
       error: message,
