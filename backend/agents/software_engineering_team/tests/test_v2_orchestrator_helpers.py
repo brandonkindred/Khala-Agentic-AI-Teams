@@ -8,6 +8,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from software_engineering_team.backend_code_v2_team.orchestrator import BackendDevelopmentAgent
+
 
 def test_be_build_tool_agents():
     from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
@@ -22,19 +24,11 @@ def test_be_build_tool_agents():
 
 
 def test_be_development_agent_init():
-    from software_engineering_team.backend_code_v2_team.orchestrator import (
-        BackendDevelopmentAgent,
-    )
-
     a = BackendDevelopmentAgent(llm_client=MagicMock())
     assert a.llm is not None
 
 
 def test_be_development_agent_build_tool_runners():
-    from software_engineering_team.backend_code_v2_team.orchestrator import (
-        BackendDevelopmentAgent,
-    )
-
     a = BackendDevelopmentAgent(llm_client=MagicMock())
 
     class _WithRun:
@@ -61,10 +55,6 @@ def test_be_development_agent_build_tool_runners():
 
 
 def test_be_development_agent_read_repo_code(tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.orchestrator import (
-        BackendDevelopmentAgent,
-    )
-
     (tmp_path / "x.py").write_text("print('x')")
     (tmp_path / "y.txt").write_text("plain")
     (tmp_path / "node_modules").mkdir()
@@ -77,10 +67,6 @@ def test_be_development_agent_read_repo_code(tmp_path: Path):
 
 
 def test_be_development_agent_read_repo_code_empty(tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.orchestrator import (
-        BackendDevelopmentAgent,
-    )
-
     agent = BackendDevelopmentAgent(MagicMock())
     out = agent._read_repo_code(tmp_path)
     assert "No code files" in out
@@ -90,10 +76,6 @@ def test_be_development_agent_read_repo_code_max_chars(tmp_path: Path):
     """The max_chars budget truncates at a whole-file boundary: a file whose
     chunk would push the running total past max_chars is excluded, so the output
     is bounded by max_chars and never contains a partial file or the tail."""
-    from software_engineering_team.backend_code_v2_team.orchestrator import (
-        BackendDevelopmentAgent,
-    )
-
     # 20 files of 400 chars each (chunk ~413 incl. the ``--- fN.py ---`` header).
     # With max_chars=1000 only f0 and f1 fit (413 + 413 = 826 <= 1000); f2 would
     # push the running total to 1239 > 1000, so the walk stops at a file boundary.
@@ -173,10 +155,6 @@ def test_fe_development_agent_init():
 
 
 def _be_dev_agent():
-    from software_engineering_team.backend_code_v2_team.orchestrator import (
-        BackendDevelopmentAgent,
-    )
-
     return BackendDevelopmentAgent(llm_client=MagicMock())
 
 
@@ -310,18 +288,10 @@ def test_fe_detect_tooling_rejects_placeholder_and_unparseable(tmp_path: Path):
 
 
 def test_be_detect_tooling_nothing_configured(tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.orchestrator import (
-        BackendDevelopmentAgent,
-    )
-
     assert BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path) == (False, False)
 
 
 def test_be_detect_tooling_ruff_toml_and_pytest_ini(tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.orchestrator import (
-        BackendDevelopmentAgent,
-    )
-
     (tmp_path / "ruff.toml").write_text("")
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
@@ -331,10 +301,6 @@ def test_be_detect_tooling_ruff_toml_and_pytest_ini(tmp_path: Path):
 
 def test_be_detect_tooling_pyproject_blocks(tmp_path: Path):
     """A pyproject.toml carrying [tool.ruff] + [tool.pytest] blocks satisfies both."""
-    from software_engineering_team.backend_code_v2_team.orchestrator import (
-        BackendDevelopmentAgent,
-    )
-
     (tmp_path / "tests").mkdir()
     (tmp_path / "pyproject.toml").write_text(
         "[tool.ruff]\nline-length = 120\n[tool.pytest.ini_options]\n"
@@ -345,20 +311,12 @@ def test_be_detect_tooling_pyproject_blocks(tmp_path: Path):
 
 def test_be_detect_tooling_tests_dir_required_for_test(tmp_path: Path):
     """Lint alone (ruff.toml) without a tests dir reports lint=True, test=False."""
-    from software_engineering_team.backend_code_v2_team.orchestrator import (
-        BackendDevelopmentAgent,
-    )
-
     (tmp_path / "ruff.toml").write_text("")
     has_lint, has_test = BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
     assert has_lint and not has_test
 
 
 def test_be_detect_tooling_flake8_satisfies_lint(tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.orchestrator import (
-        BackendDevelopmentAgent,
-    )
-
     (tmp_path / ".flake8").write_text("[flake8]")
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
@@ -370,10 +328,6 @@ def test_be_detect_tooling_setup_cfg_flake8_section_satisfies_lint(tmp_path: Pat
     """A ``[flake8]`` section in ``setup.cfg`` counts as lint config — a common
     flake8 location the file-name-only ``.flake8`` probe would miss (false
     negative)."""
-    from software_engineering_team.backend_code_v2_team.orchestrator import (
-        BackendDevelopmentAgent,
-    )
-
     (tmp_path / "setup.cfg").write_text("[metadata]\nname=app\n\n[flake8]\nmax-line-length=100\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
@@ -384,10 +338,6 @@ def test_be_detect_tooling_setup_cfg_flake8_section_satisfies_lint(tmp_path: Pat
 def test_be_detect_tooling_setup_cfg_without_flake8_section_is_not_lint(tmp_path: Path):
     """A ``setup.cfg`` with no ``[flake8]`` section does not satisfy lint — the
     probe keys off the section header, not the file's mere presence."""
-    from software_engineering_team.backend_code_v2_team.orchestrator import (
-        BackendDevelopmentAgent,
-    )
-
     (tmp_path / "setup.cfg").write_text("[metadata]\nname=app\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
@@ -399,10 +349,6 @@ def test_be_detect_tooling_ignores_commented_out_section_headers(tmp_path: Path)
     """A section header inside a comment (``# [tool.ruff]``) is not treated as
     real config — the line-anchored probe skips comment lines, so a
     commented-out block no longer produces a false positive."""
-    from software_engineering_team.backend_code_v2_team.orchestrator import (
-        BackendDevelopmentAgent,
-    )
-
     (tmp_path / "pyproject.toml").write_text(
         '# [tool.ruff] commented out\n#   [flake8] also commented\n[tool.poetry]\nname = "app"\n'
     )
@@ -416,10 +362,6 @@ def test_be_detect_tooling_ignores_commented_out_section_headers(tmp_path: Path)
 def test_be_detect_tooling_matches_indented_section_header(tmp_path: Path):
     """A section header with leading whitespace still matches — stripping the
     line before the prefix check keeps real (lightly indented) config working."""
-    from software_engineering_team.backend_code_v2_team.orchestrator import (
-        BackendDevelopmentAgent,
-    )
-
     (tmp_path / "pyproject.toml").write_text("  [tool.ruff]\n  line-length = 120\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
@@ -447,10 +389,6 @@ def test_be_detect_tooling_toml_multiline_string_header_not_a_false_positive(tmp
     ``pyproject.toml`` (not a real table) must NOT satisfy the lint pre-flight —
     the ``toml_has_section`` parse sees it is a string, not a table, closing the
     multi-line-string false positive the line-anchored text scan would hit."""
-    from software_engineering_team.backend_code_v2_team.orchestrator import (
-        BackendDevelopmentAgent,
-    )
-
     (tmp_path / "pyproject.toml").write_text(
         '[tool.poetry]\nname = "app"\ndescription = """\n[tool.ruff]\n"""\n'
     )
