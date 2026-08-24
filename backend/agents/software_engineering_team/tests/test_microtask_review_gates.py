@@ -199,7 +199,9 @@ class TestFrontendMicrotaskReviewFailedError:
 
 class TestFrontendReviewDependencies:
     def test_review_deps_defaults(self):
-        from software_engineering_team.codegen_team.stacks.frontend.profile import ReviewDependencies
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
+            ReviewDependencies,
+        )
 
         deps = ReviewDependencies()
         assert deps.build_verifier is None
@@ -208,8 +210,9 @@ class TestFrontendReviewDependencies:
         assert deps.tool_agent_cache is None
 
     def test_review_deps_with_agents(self):
-        from software_engineering_team.codegen_team.stacks.frontend.profile import ReviewDependencies
-
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
+            ReviewDependencies,
+        )
         from software_engineering_team.shared.agent_review import AgentReviewCache
 
         mock_qa = MagicMock()
@@ -224,7 +227,9 @@ class TestFrontendReviewDependencies:
 class TestFrontendRunMicrotaskReview:
     def test_run_microtask_review_passes_when_no_issues(self, tmp_path):
         from software_engineering_team.codegen_team.models import Microtask
-        from software_engineering_team.codegen_team.stacks.frontend.profile import run_microtask_review
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
+            run_microtask_review,
+        )
 
         task = _create_test_task("frontend")
         mt = Microtask(id="mt-1", title="Test Microtask")
@@ -256,7 +261,9 @@ class TestFrontendRunMicrotaskReview:
 
     def test_run_microtask_review_fails_with_critical_issue(self, tmp_path):
         from software_engineering_team.codegen_team.models import Microtask
-        from software_engineering_team.codegen_team.stacks.frontend.profile import run_microtask_review
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
+            run_microtask_review,
+        )
 
         task = _create_test_task("frontend")
         mt = Microtask(id="mt-1", title="Test Microtask")
@@ -300,8 +307,9 @@ class TestFrontendAgentReviewCache:
         """A second run_microtask_review call with byte-identical files reuses
         the QA/security verdicts instead of calling the agents again."""
         from software_engineering_team.codegen_team.models import Microtask
-        from software_engineering_team.codegen_team.stacks.frontend.profile import run_microtask_review
-
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
+            run_microtask_review,
+        )
         from software_engineering_team.shared.agent_review import AgentReviewCache
 
         task = _create_test_task("frontend")
@@ -334,7 +342,9 @@ class TestFrontendAgentReviewCache:
     def test_run_microtask_review_without_cache_calls_agents_every_time(self, tmp_path):
         """Omitting ``cache`` (the default) is unchanged: every call re-invokes the agents."""
         from software_engineering_team.codegen_team.models import Microtask
-        from software_engineering_team.codegen_team.stacks.frontend.profile import run_microtask_review
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
+            run_microtask_review,
+        )
 
         task = _create_test_task("frontend")
         mt = Microtask(id="mt-1", title="Test Microtask")
@@ -364,7 +374,9 @@ class TestFrontendAgentReviewCache:
 class TestFrontendRunProblemSolvingForMicrotask:
     def test_problem_solving_with_no_issues_returns_resolved(self):
         from software_engineering_team.codegen_team.models import Microtask, ReviewResult
-        from software_engineering_team.codegen_team.stacks.frontend.problem_solving import run_problem_solving_for_microtask
+        from software_engineering_team.codegen_team.stacks.frontend.problem_solving import (
+            run_problem_solving_for_microtask,
+        )
 
         mock_llm = MagicMock()
         mt = Microtask(id="mt-1")
@@ -527,7 +539,10 @@ class TestFrontendQaSecurityGateToolAgentScoping:
 
     def test_qa_gate_invokes_only_testing_qa_tool_agent(self, tmp_path):
         from software_engineering_team.codegen_team.models import Microtask, ToolAgentKind
-        from software_engineering_team.codegen_team.stacks.frontend.profile import ReviewDependencies, _qa_gate
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
+            ReviewDependencies,
+            _qa_gate,
+        )
 
         qa_tool_agent = _FakeToolAgent()
         security_tool_agent = _FakeToolAgent()
@@ -555,7 +570,10 @@ class TestFrontendQaSecurityGateToolAgentScoping:
 
     def test_security_gate_invokes_only_security_tool_agent(self, tmp_path):
         from software_engineering_team.codegen_team.models import Microtask, ToolAgentKind
-        from software_engineering_team.codegen_team.stacks.frontend.profile import ReviewDependencies, _security_gate
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
+            ReviewDependencies,
+            _security_gate,
+        )
 
         qa_tool_agent = _FakeToolAgent()
         security_tool_agent = _FakeToolAgent()
@@ -684,7 +702,6 @@ class TestFrontendQaSecurityCombinedPhaseSignal:
             ReviewDependencies,
             run_execution_with_review_gates,
         )
-
         from software_engineering_team.shared.phases.execution import GateOutcome
 
         class _NonDummyLLM:
@@ -785,7 +802,9 @@ class TestBackendRunMicrotaskReview:
         and produce a passed review with no build failures and no issues.
         """
         from software_engineering_team.codegen_team.models import Microtask
-        from software_engineering_team.codegen_team.stacks.backend.profile import run_microtask_review
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            run_microtask_review,
+        )
 
         task = _create_test_task("backend")
         mt = Microtask(id="mt-1", title="Test Microtask")
@@ -817,7 +836,6 @@ class TestBackendAgentReviewCache:
             run_qa_testing_phase,
             run_security_testing_phase,
         )
-
         from software_engineering_team.shared.agent_review import AgentReviewCache
 
         task = _create_test_task("backend")
@@ -845,7 +863,9 @@ class TestBackendAgentReviewCache:
     def test_qa_testing_phase_without_cache_calls_agent_every_time(self, tmp_path):
         """Omitting ``cache`` (the default) is unchanged: every call re-invokes the agent."""
         from software_engineering_team.codegen_team.models import Microtask
-        from software_engineering_team.codegen_team.stacks.backend.profile import run_qa_testing_phase
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            run_qa_testing_phase,
+        )
 
         task = _create_test_task("backend")
         mt = Microtask(id="mt-1", title="Test Microtask")
@@ -862,8 +882,9 @@ class TestBackendAgentReviewCache:
     def test_qa_testing_phase_recomputes_for_changed_file_content(self, tmp_path):
         """A changed file misses the cache, so the agent is called again."""
         from software_engineering_team.codegen_team.models import Microtask
-        from software_engineering_team.codegen_team.stacks.backend.profile import run_qa_testing_phase
-
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            run_qa_testing_phase,
+        )
         from software_engineering_team.shared.agent_review import AgentReviewCache
 
         task = _create_test_task("backend")
@@ -905,8 +926,10 @@ class TestBackendQaSecurityGateToolAgentScoping:
     def test_qa_gate_never_calls_scope_tool_agents_by_kind(self, tmp_path, monkeypatch):
         import software_engineering_team.codegen_team.stacks.backend.profile as backend_profile
         from software_engineering_team.codegen_team.models import Microtask, ToolAgentKind
-        from software_engineering_team.codegen_team.stacks.backend.profile import ReviewDependencies, _qa_gate
-
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            ReviewDependencies,
+            _qa_gate,
+        )
         from software_engineering_team.shared import v2_execution_bindings
 
         calls = []
@@ -944,8 +967,10 @@ class TestBackendQaSecurityGateToolAgentScoping:
     def test_security_gate_never_calls_scope_tool_agents_by_kind(self, tmp_path, monkeypatch):
         import software_engineering_team.codegen_team.stacks.backend.profile as backend_profile
         from software_engineering_team.codegen_team.models import Microtask, ToolAgentKind
-        from software_engineering_team.codegen_team.stacks.backend.profile import ReviewDependencies, _security_gate
-
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            ReviewDependencies,
+            _security_gate,
+        )
         from software_engineering_team.shared import v2_execution_bindings
 
         calls = []
@@ -979,7 +1004,10 @@ class TestBackendQaSecurityGateToolAgentScoping:
         ``testing_qa`` internally, so the outcome matches frontend's explicit
         ``scope_tool_agents_by_kind`` narrowing even though the mechanism differs."""
         from software_engineering_team.codegen_team.models import Microtask, ToolAgentKind
-        from software_engineering_team.codegen_team.stacks.backend.profile import ReviewDependencies, _qa_gate
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            ReviewDependencies,
+            _qa_gate,
+        )
 
         qa_tool_agent = _FakeToolAgent()
         security_tool_agent = _FakeToolAgent()
@@ -1007,7 +1035,10 @@ class TestBackendQaSecurityGateToolAgentScoping:
 
     def test_security_gate_invokes_only_security_tool_agent_via_self_scoping(self, tmp_path):
         from software_engineering_team.codegen_team.models import Microtask, ToolAgentKind
-        from software_engineering_team.codegen_team.stacks.backend.profile import ReviewDependencies, _security_gate
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            ReviewDependencies,
+            _security_gate,
+        )
 
         qa_tool_agent = _FakeToolAgent()
         security_tool_agent = _FakeToolAgent()
@@ -1042,7 +1073,9 @@ class TestBackendRunProblemSolvingForMicrotask:
         need to invoke the LLM and should return a resolved result.
         """
         from software_engineering_team.codegen_team.models import Microtask, ReviewResult
-        from software_engineering_team.codegen_team.stacks.backend.problem_solving import run_problem_solving_for_microtask
+        from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
+            run_problem_solving_for_microtask,
+        )
 
         mock_llm = MagicMock()
         mt = Microtask(id="mt-1")
@@ -1157,7 +1190,6 @@ class TestBackendRunExecutionWithReviewGates:
             ReviewDependencies,
             run_execution_with_review_gates,
         )
-
         from software_engineering_team.shared.phases import dbc_phase
         from software_engineering_team.technical_writers.dbc_comments_agent.models import (
             DbcCommentsOutput,
@@ -1233,7 +1265,10 @@ class TestBackendRunExecutionWithReviewGates:
         """Kill switch on MicrotaskReviewConfig must reach run_code_review_phase."""
         from software_engineering_team.codegen_team.models import Microtask
         from software_engineering_team.codegen_team.stacks.backend import profile as profile_mod
-        from software_engineering_team.codegen_team.stacks.backend.profile import ReviewDependencies, _code_review_gate
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            ReviewDependencies,
+            _code_review_gate,
+        )
 
         seen: list = []
 
@@ -1279,7 +1314,6 @@ class TestBackendRunExecutionWithReviewGates:
             ReviewDependencies,
             run_execution_with_review_gates,
         )
-
         from software_engineering_team.shared.phases.execution import GateOutcome
 
         seen: list = []
@@ -1353,12 +1387,13 @@ class TestBackendRunExecutionWithReviewGates:
         enable_llm_review_grounding is still accepted (call-signature
         compatibility) but no longer changes the outcome: True and False now
         behave identically."""
-        from software_engineering_team.codegen_team.models import Microtask
-        from software_engineering_team.codegen_team.stacks.backend.profile import run_code_review_phase
-
         from software_engineering_team.code_review_agent.models import (
             CodeReviewIssue,
             CodeReviewOutput,
+        )
+        from software_engineering_team.codegen_team.models import Microtask
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            run_code_review_phase,
         )
         from software_engineering_team.shared import v2_review_bindings as review_mod
 

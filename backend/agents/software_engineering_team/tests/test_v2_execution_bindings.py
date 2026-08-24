@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 
 from shared.dev_models.models import Task, TaskStatus, TaskType
 from software_engineering_team.codegen_team import models as be_models
+from software_engineering_team.codegen_team import models as fe_models
 from software_engineering_team.codegen_team.models import (
     Microtask,
     MicrotaskStatus,
@@ -21,7 +22,6 @@ from software_engineering_team.codegen_team.models import (
     ToolAgentKind,
 )
 from software_engineering_team.codegen_team.stacks.backend.profile import PROFILE as BE_PROFILE
-from software_engineering_team.codegen_team import models as fe_models
 from software_engineering_team.codegen_team.stacks.frontend.profile import PROFILE as FE_PROFILE
 from software_engineering_team.shared.phases.execution import GateOutcome
 from software_engineering_team.shared.v2_execution_bindings import (

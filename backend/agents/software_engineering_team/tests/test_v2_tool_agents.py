@@ -287,37 +287,56 @@ def test_linter_tool_agent_constructs() -> None:
     assert result is not None
 
 
-def test_auth_tool_agent_constructs() -> None:
-    from software_engineering_team.codegen_team.tool_agents.frontend.auth.agent import (
-        AuthToolAgent,
+class _GoodFileGeneratorAgent:
+    """Fake Strands ``Agent`` returning a parseable ``## FILE ## / ## SUMMARY ##`` template."""
+
+    def __init__(self, **kwargs):
+        pass
+
+    def __call__(self, prompt):
+        return (
+            "## FILE generated.ts ##\nexport const x = 1;\n"
+            "## SUMMARY ##\ndone\n## END SUMMARY ##"
+        )
+
+
+def test_auth_tool_agent_constructs(monkeypatch) -> None:
+    """Real (non-stub) FileGeneratorToolAgent: execute() drives an LLM call and
+    parses its template output, so it needs a stubbed Agent, not a bare
+    ``_model = None`` (that path is only for the static-lifecycle stubs)."""
+    from software_engineering_team.codegen_team.tool_agents.frontend.auth import (
+        agent as mod,
     )
 
-    agent = AuthToolAgent.__new__(AuthToolAgent)
-    agent._model = None
-    agent.llm = None
+    monkeypatch.setattr(mod, "Agent", _GoodFileGeneratorAgent)
+    agent = mod.AuthToolAgent.__new__(mod.AuthToolAgent)
+    agent._model = object()
     result = agent.execute(_tool_input())
     assert result is not None
+    assert "generated.ts" in result.files
 
 
-def test_api_openapi_tool_agent_constructs() -> None:
-    from software_engineering_team.codegen_team.tool_agents.frontend.api_openapi.agent import (
-        ApiOpenApiToolAgent,
+def test_api_openapi_tool_agent_constructs(monkeypatch) -> None:
+    from software_engineering_team.codegen_team.tool_agents.frontend.api_openapi import (
+        agent as mod,
     )
 
-    agent = ApiOpenApiToolAgent.__new__(ApiOpenApiToolAgent)
-    agent._model = None
-    agent.llm = None
+    monkeypatch.setattr(mod, "Agent", _GoodFileGeneratorAgent)
+    agent = mod.ApiOpenApiToolAgent.__new__(mod.ApiOpenApiToolAgent)
+    agent._model = object()
     result = agent.execute(_tool_input())
     assert result is not None
+    assert "generated.ts" in result.files
 
 
-def test_state_management_tool_agent_constructs() -> None:
-    from software_engineering_team.codegen_team.tool_agents.frontend.state_management.agent import (
-        StateManagementToolAgent,
+def test_state_management_tool_agent_constructs(monkeypatch) -> None:
+    from software_engineering_team.codegen_team.tool_agents.frontend.state_management import (
+        agent as mod,
     )
 
-    agent = StateManagementToolAgent.__new__(StateManagementToolAgent)
-    agent._model = None
-    agent.llm = None
+    monkeypatch.setattr(mod, "Agent", _GoodFileGeneratorAgent)
+    agent = mod.StateManagementToolAgent.__new__(mod.StateManagementToolAgent)
+    agent._model = object()
     result = agent.execute(_tool_input())
     assert result is not None
+    assert "generated.ts" in result.files

@@ -297,7 +297,10 @@ class TestSetupPhase:
         it. Without that, pre-flight (and later quality gates) fail on a
         config-less branch.
         """
-        from software_engineering_team.codegen_team.stacks.backend.profile import configure_quality_tooling, run_setup
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            configure_quality_tooling,
+            run_setup,
+        )
 
         init_repo_with_existing_development(tmp_path)
         subprocess.run(
@@ -346,7 +349,9 @@ class TestSetupPhaseHooks:
     """
 
     def test_ensure_linting_configured_detects_existing_ruff_toml(self, tmp_path):
-        from software_engineering_team.codegen_team.stacks.backend.profile import _ensure_linting_configured
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            _ensure_linting_configured,
+        )
 
         (tmp_path / "ruff.toml").write_text("", encoding="utf-8")
         written: set = set()
@@ -354,7 +359,9 @@ class TestSetupPhaseHooks:
         assert written == set()
 
     def test_ensure_linting_configured_detects_existing_flake8_file(self, tmp_path):
-        from software_engineering_team.codegen_team.stacks.backend.profile import _ensure_linting_configured
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            _ensure_linting_configured,
+        )
 
         (tmp_path / ".flake8").write_text("", encoding="utf-8")
         written: set = set()
@@ -362,7 +369,9 @@ class TestSetupPhaseHooks:
         assert written == set()
 
     def test_ensure_linting_configured_detects_setup_cfg_flake8_section(self, tmp_path):
-        from software_engineering_team.codegen_team.stacks.backend.profile import _ensure_linting_configured
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            _ensure_linting_configured,
+        )
 
         (tmp_path / "setup.cfg").write_text("[flake8]\nmax-line-length = 120\n", encoding="utf-8")
         written: set = set()
@@ -372,7 +381,9 @@ class TestSetupPhaseHooks:
     def test_ensure_linting_configured_handles_unreadable_pyproject(self, tmp_path, monkeypatch):
         """A pyproject.toml that raises on its first (existing-config probe)
         read must not raise; setup falls through to appending ruff config."""
-        from software_engineering_team.codegen_team.stacks.backend.profile import _ensure_linting_configured
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            _ensure_linting_configured,
+        )
 
         (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
         original_read_text = Path.read_text
@@ -390,7 +401,9 @@ class TestSetupPhaseHooks:
         assert "[tool.ruff]" in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
 
     def test_ensure_linting_configured_handles_unreadable_setup_cfg(self, tmp_path):
-        from software_engineering_team.codegen_team.stacks.backend.profile import _ensure_linting_configured
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            _ensure_linting_configured,
+        )
 
         (tmp_path / "setup.cfg").mkdir()
         written: set = set()
@@ -401,7 +414,9 @@ class TestSetupPhaseHooks:
         """A pyproject.toml that raises on its first (existing-config probe)
         read must not raise while probing for a pytest config; setup falls
         through to creating one."""
-        from software_engineering_team.codegen_team.stacks.backend.profile import _ensure_testing_configured
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            _ensure_testing_configured,
+        )
 
         (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
         original_read_text = Path.read_text
@@ -422,7 +437,9 @@ class TestSetupPhaseHooks:
     def test_ensure_testing_configured_writes_pytest_ini_without_pyproject(self, tmp_path):
         """When no pyproject.toml exists at all, testing config falls back to
         a standalone pytest.ini."""
-        from software_engineering_team.codegen_team.stacks.backend.profile import _ensure_testing_configured
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            _ensure_testing_configured,
+        )
 
         written: set = set()
         assert _ensure_testing_configured(tmp_path, written) is True
@@ -437,9 +454,8 @@ class TestSetupPhaseHooks:
 
 class TestPlanningPhase:
     def test_language_detection_python(self, tmp_path):
-        from software_engineering_team.codegen_team.stacks.backend.profile import _detect_language
-
         from shared.dev_models.models import Task, TaskStatus, TaskType
+        from software_engineering_team.codegen_team.stacks.backend.profile import _detect_language
 
         (tmp_path / "requirements.txt").write_text("flask")
         task = Task(
@@ -452,9 +468,8 @@ class TestPlanningPhase:
         assert _detect_language(tmp_path, task) == "python"
 
     def test_language_detection_java(self, tmp_path):
-        from software_engineering_team.codegen_team.stacks.backend.profile import _detect_language
-
         from shared.dev_models.models import Task, TaskStatus, TaskType
+        from software_engineering_team.codegen_team.stacks.backend.profile import _detect_language
 
         (tmp_path / "pom.xml").write_text("<project/>")
         task = Task(
@@ -467,9 +482,8 @@ class TestPlanningPhase:
         assert _detect_language(tmp_path, task) == "java"
 
     def test_language_detection_from_description(self, tmp_path):
-        from software_engineering_team.codegen_team.stacks.backend.profile import _detect_language
-
         from shared.dev_models.models import Task, TaskStatus, TaskType
+        from software_engineering_team.codegen_team.stacks.backend.profile import _detect_language
 
         task = Task(
             id="t1",
@@ -481,7 +495,9 @@ class TestPlanningPhase:
         assert _detect_language(tmp_path, task) == "java"
 
     def test_parse_planning_output(self):
-        from software_engineering_team.codegen_team.stacks.backend.profile import _parse_planning_output
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            _parse_planning_output,
+        )
 
         raw = {
             "microtasks": [
@@ -508,9 +524,8 @@ class TestPlanningPhase:
         assert result.microtasks[1].depends_on == ["mt-1"]
 
     def test_run_planning_fallback(self, tmp_path):
-        from software_engineering_team.codegen_team.stacks.backend.profile import run_planning
-
         from shared.dev_models.models import Task, TaskStatus, TaskType
+        from software_engineering_team.codegen_team.stacks.backend.profile import run_planning
 
         mock_llm = _TextStubClient(
             "## MICROTASKS ##\n## END MICROTASKS ##\n"
@@ -536,9 +551,8 @@ class TestPlanningPhase:
 
 class TestExecutionPhase:
     def test_run_execution_with_tool_runners(self, tmp_path):
-        from software_engineering_team.codegen_team.stacks.backend.profile import run_execution
-
         from shared.dev_models.models import Task, TaskStatus, TaskType
+        from software_engineering_team.codegen_team.stacks.backend.profile import run_execution
 
         mock_llm = MagicMock()
         task = Task(
@@ -571,9 +585,8 @@ class TestExecutionPhase:
         assert result.microtasks[0].status == MicrotaskStatus.COMPLETED
 
     def test_run_execution_general_fallback(self, tmp_path):
-        from software_engineering_team.codegen_team.stacks.backend.profile import run_execution
-
         from shared.dev_models.models import Task, TaskStatus, TaskType
+        from software_engineering_team.codegen_team.stacks.backend.profile import run_execution
 
         mock_llm = _TextStubClient(
             "## FILE app.py ##\nprint('hello')\n## SUMMARY ##\ndone\n## END SUMMARY ##"
@@ -628,9 +641,8 @@ class _CriticalCodeReviewStubClient(DummyLLMClient):
 
 class TestReviewPhase:
     def test_review_passes_no_issues(self, tmp_path):
-        from software_engineering_team.codegen_team.stacks.backend.profile import run_review
-
         from shared.dev_models.models import Task, TaskStatus, TaskType
+        from software_engineering_team.codegen_team.stacks.backend.profile import run_review
 
         # A bare DummyLLMClient's built-in "senior code reviewer" branch already
         # returns {"approved": True, "issues": []} for the coordinator's chunk-review
@@ -651,9 +663,8 @@ class TestReviewPhase:
         assert result.build_ok
 
     def test_review_fails_on_critical_issues(self, tmp_path):
-        from software_engineering_team.codegen_team.stacks.backend.profile import run_review
-
         from shared.dev_models.models import Task, TaskStatus, TaskType
+        from software_engineering_team.codegen_team.stacks.backend.profile import run_review
 
         mock_llm = _CriticalCodeReviewStubClient()
         task = Task(
@@ -677,9 +688,10 @@ class TestReviewPhase:
 
 class TestProblemSolvingPhase:
     def test_no_actionable_issues(self):
-        from software_engineering_team.codegen_team.stacks.backend.problem_solving import run_problem_solving
-
         from shared.dev_models.models import Task, TaskStatus, TaskType
+        from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
+            run_problem_solving,
+        )
 
         mock_llm = MagicMock()
         task = Task(
@@ -701,9 +713,10 @@ class TestProblemSolvingPhase:
         assert result.resolved
 
     def test_applies_fixes(self):
-        from software_engineering_team.codegen_team.stacks.backend.problem_solving import run_problem_solving
-
         from shared.dev_models.models import Task, TaskStatus, TaskType
+        from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
+            run_problem_solving,
+        )
 
         mock_llm = _TextStubClient(
             "## FILE a.py ##\nfixed_code()\n"
@@ -738,7 +751,9 @@ class TestProblemSolvingPhase:
 
 class TestToolAgents:
     def test_data_engineering_agent(self):
-        from software_engineering_team.codegen_team.tool_agents.backend.data_engineering import DataEngineeringToolAgent
+        from software_engineering_team.codegen_team.tool_agents.backend.data_engineering import (
+            DataEngineeringToolAgent,
+        )
 
         mock_llm = _TextStubClient(
             "## FILE models.py ##\nclass User: pass\n## SUMMARY ##\nschema done\n## END SUMMARY ##"
@@ -751,7 +766,9 @@ class TestToolAgents:
         assert "models.py" in out.files
 
     def test_api_openapi_agent(self):
-        from software_engineering_team.codegen_team.tool_agents.backend.api_openapi import ApiOpenApiToolAgent
+        from software_engineering_team.codegen_team.tool_agents.backend.api_openapi import (
+            ApiOpenApiToolAgent,
+        )
 
         mock_llm = _TextStubClient(
             "## FILE routes.py ##\nroute()\n## SUMMARY ##\napi done\n## END SUMMARY ##"
@@ -847,7 +864,9 @@ class TestToolAgents:
         assert "Merged" in out.summary
 
     def test_build_specialist_stub(self):
-        from software_engineering_team.codegen_team.tool_agents.backend.build_specialist import BuildSpecialistAdapterAgent
+        from software_engineering_team.codegen_team.tool_agents.backend.build_specialist import (
+            BuildSpecialistAdapterAgent,
+        )
 
         agent = BuildSpecialistAdapterAgent()
         inp = ToolAgentInput(microtask=Microtask(id="mt-1", description="build"), language="python")
@@ -862,8 +881,12 @@ class TestToolAgents:
 
     def test_tool_agents_have_plan_review_problem_solve_deliver(self):
         """Tool agents participate in all phases: plan, execute, review, problem_solve, deliver."""
-        from software_engineering_team.codegen_team.tool_agents.backend.build_specialist import BuildSpecialistAdapterAgent
-        from software_engineering_team.codegen_team.tool_agents.backend.data_engineering import DataEngineeringToolAgent
+        from software_engineering_team.codegen_team.tool_agents.backend.build_specialist import (
+            BuildSpecialistAdapterAgent,
+        )
+        from software_engineering_team.codegen_team.tool_agents.backend.data_engineering import (
+            DataEngineeringToolAgent,
+        )
 
         mock_llm = MagicMock()
         data_eng = DataEngineeringToolAgent(mock_llm)
@@ -884,7 +907,9 @@ class TestToolAgents:
 
     def test_data_engineering_execute_via_run(self):
         """run() delegates to execute() for backward compatibility."""
-        from software_engineering_team.codegen_team.tool_agents.backend.data_engineering import DataEngineeringToolAgent
+        from software_engineering_team.codegen_team.tool_agents.backend.data_engineering import (
+            DataEngineeringToolAgent,
+        )
 
         mock_llm = _TextStubClient("## FILE x.py ##\ncode\n## SUMMARY ##\ndone\n## END SUMMARY ##")
         agent = DataEngineeringToolAgent(mock_llm)
@@ -979,9 +1004,8 @@ class TestCodegenDevelopmentAgent:
 class TestCodegenTeamLead:
     def test_team_lead_runs_setup_then_delegates(self, tmp_path):
         """CodegenTeamLead reports a concrete setup-readiness failure."""
-        from software_engineering_team.codegen_team.orchestrator import CodegenTeamLead
-
         from shared.dev_models.models import Task, TaskStatus, TaskType
+        from software_engineering_team.codegen_team.orchestrator import CodegenTeamLead
 
         mock_llm = MagicMock()
         planning_response = (
@@ -1009,6 +1033,7 @@ class TestCodegenTeamLead:
 
     def test_team_lead_propagates_development_handoff_fields(self, tmp_path, monkeypatch):
         """Team-lead result preserves the inner development handoff fields."""
+        from shared.dev_models.models import Task, TaskStatus, TaskType
         from software_engineering_team.codegen_team import orchestrator as orch
         from software_engineering_team.codegen_team.models import (
             CodegenWorkflowResult,
@@ -1017,8 +1042,6 @@ class TestCodegenTeamLead:
             Phase,
             SetupResult,
         )
-
-        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         deliver = DeliverResult(
             branch_name="feature/api",
@@ -1084,6 +1107,7 @@ class TestCodegenTeamLead:
 class TestCodegenDevelopmentAgentBranchReuse:
     def test_existing_feature_branch_is_reused_without_recreation(self, tmp_path, monkeypatch):
         """Revision workflows keep the reviewed branch instead of recreating it from development."""
+        from shared.dev_models.models import Task, TaskStatus, TaskType
         from software_engineering_team.codegen_team import orchestrator as orch
         from software_engineering_team.codegen_team.models import (
             DeliverResult,
@@ -1091,8 +1115,6 @@ class TestCodegenDevelopmentAgentBranchReuse:
             ExecutionResult,
             PlanningResult,
         )
-
-        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         (tmp_path / "pyproject.toml").write_text("[tool.ruff]\n[tool.pytest.ini_options]\n")
         (tmp_path / "tests").mkdir()
@@ -1187,6 +1209,7 @@ class TestCodegenDevelopmentAgentBranchReuse:
 
     def test_job_updater_failure_is_debug_logged_not_raised(self, tmp_path, monkeypatch):
         """A broken job_updater callback must not crash the workflow, and is logged at DEBUG."""
+        from shared.dev_models.models import Task, TaskStatus, TaskType
         from software_engineering_team.codegen_team import orchestrator as orch
         from software_engineering_team.codegen_team.models import (
             DeliverResult,
@@ -1194,8 +1217,6 @@ class TestCodegenDevelopmentAgentBranchReuse:
             ExecutionResult,
             PlanningResult,
         )
-
-        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         (tmp_path / "pyproject.toml").write_text("[tool.ruff]\n[tool.pytest.ini_options]\n")
         (tmp_path / "tests").mkdir()
@@ -1482,8 +1503,12 @@ class TestDocumentationSelfReviewWiring:
 
     def test_wraps_shared_helper_with_team_prompt_parser_and_result(self):
         from software_engineering_team.codegen_team.models import DocumentationSelfReviewResult
-        from software_engineering_team.codegen_team.stacks.backend.profile import run_documentation_self_review
-        from software_engineering_team.codegen_team.stacks.backend.prompts import DOCUMENTATION_SELF_REVIEW_PROMPT
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            run_documentation_self_review,
+        )
+        from software_engineering_team.codegen_team.stacks.backend.prompts import (
+            DOCUMENTATION_SELF_REVIEW_PROMPT,
+        )
 
         client = _RecordingDocClient(_DOC_REVIEW_RESPONSE)
         result = run_documentation_self_review(
@@ -1512,7 +1537,6 @@ class TestDbCSelfReviewWiring:
 
     def test_gate_config_wires_dbc_self_review(self):
         from software_engineering_team.codegen_team.stacks.backend.profile import GATE_CONFIG
-
         from software_engineering_team.shared.phases.dbc_phase import run_dbc_comments_review
 
         # Identity, not just truthiness: the shared loop and its tests rely on this

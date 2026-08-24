@@ -158,11 +158,11 @@ def test_migrated_constants_match_service_output() -> None:
     from software_engineering_team.codegen_team.stacks.backend.prompts import (
         SECURITY_TOOL_AGENT_REVIEW_PROMPT as backend_prompt,
     )
-    from software_engineering_team.devops_team.devsecops_review_agent.prompts import (
-        DEVSECOPS_REVIEW_PROMPT,
-    )
     from software_engineering_team.codegen_team.stacks.frontend.prompts import (
         SECURITY_TOOL_AGENT_REVIEW_PROMPT as frontend_prompt,
+    )
+    from software_engineering_team.devops_team.devsecops_review_agent.prompts import (
+        DEVSECOPS_REVIEW_PROMPT,
     )
 
     assert backend_prompt == build_review_prompt(SecurityProfile.CODE, focus=CODE_BACKEND_FOCUS)

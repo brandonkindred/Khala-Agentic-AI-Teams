@@ -281,8 +281,8 @@ def test_run_llm_review_real_coordinator_propagates_unavailable_when_all_chunks_
     ``CodeReviewUnavailableError`` through the real pipeline -- the
     real-coordinator counterpart to the existing mocked
     ``test_run_llm_review_propagates_coordinator_unavailable``."""
-    from software_engineering_team.codegen_team.stacks.backend.profile import _run_llm_review
     from software_engineering_team.code_review_agent.models import CodeReviewUnavailableError
+    from software_engineering_team.codegen_team.stacks.backend.profile import _run_llm_review
 
     client = _AlwaysFail()
 

@@ -1,23 +1,22 @@
 """
 Parity tests for the config-driven backend and frontend v2 orchestrators.
 
-Proves that ``BackendDevelopmentAgent`` and ``FrontendDevelopmentAgent`` — now
-re-expressed as thin ``ConfigDrivenV2DevelopmentAgent`` subclasses over
-``V2TeamConfig`` — behave identically to their pre-change implementations for
-representative runs. The config/property axes (default_language,
-conventions_for, extra_review_clause, build_task_requirements) against each
-team's *real* values are already proven by ``test_v2_team_config.py``
-(``TestBackendParity``/``TestFrontendParity``) and
+Proves that ``CodegenDevelopmentAgent`` — a thin ``ConfigDrivenV2DevelopmentAgent``
+subclass over ``V2TeamConfig``, parametrized by ``stack`` — behaves identically to
+the pre-merge per-team implementations for representative runs, for both stacks.
+The config/property axes (default_language, conventions_for, extra_review_clause,
+build_task_requirements) against each stack's *real* values are already proven by
+``test_v2_team_config.py`` (``TestBackendParity``/``TestFrontendParity``) and
 ``test_v2_config_orchestrator.py`` (``TestBackendConfigParity``/
-``TestFrontendConfigParity``) -- this module doesn't re-assert them. It
-instead exercises what's unique to the real production classes:
+``TestFrontendConfigParity``) -- this module doesn't re-assert them. It instead
+exercises what's unique to the real production class:
 
-- That each agent is wired to its module-level config singleton
+- That each stack is wired to its module-level config singleton
   (``BACKEND_CONFIG``/``FRONTEND_CONFIG``), not a copy
 - ``tool_agent_kinds`` read through that real singleton against the enum --
-  the other files' parity classes build a synthetic ``V2TeamConfig``
-  straight from the enum, so only this catches ``BACKEND_CONFIG``/
-  ``FRONTEND_CONFIG`` themselves drifting from it
+  the other files' parity classes build a synthetic ``V2TeamConfig`` straight
+  from the enum, so only this catches ``BACKEND_CONFIG``/``FRONTEND_CONFIG``
+  themselves drifting from it
 - The real tool-agent registry actually constructs (via
   ``_build_and_validate_tool_agents``)
 - The frontend accessibility-verification note's content and exact
@@ -25,7 +24,7 @@ instead exercises what's unique to the real production classes:
 - Full pipeline run via ``run_workflow`` verifying config values flow to
   deliver -- ``run_workflow`` is a thin public wrapper that immediately
   delegates to ``_run_development_workflow``
-- Cross-team divergence: the two teams' real configs differ only on the
+- Cross-team divergence: the two stacks' real configs differ only on the
   declared axes
 """
 
@@ -38,6 +37,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from shared.dev_models.models import Task, TaskStatus, TaskType
+from software_engineering_team.codegen_team.orchestrator import STACK_CONFIGS
 from software_engineering_team.shared.v2_orchestrator import ConfigDrivenV2DevelopmentAgent
 from software_engineering_team.shared.v2_team_config import V2TeamConfig
 
@@ -47,8 +47,9 @@ from software_engineering_team.shared.v2_team_config import V2TeamConfig
 
 
 class TestBackendOrchestratorParity:
-    """Prove ``BackendDevelopmentAgent`` (now a ``ConfigDrivenV2DevelopmentAgent``
-    subclass) behaves identically to the pre-change hand-wired implementation.
+    """Prove the backend stack of ``CodegenDevelopmentAgent`` (a
+    ``ConfigDrivenV2DevelopmentAgent`` subclass) behaves identically to the
+    pre-merge hand-wired implementation.
 
     Focuses on what's unique to the *real* production class: that it is
     wired to the module-level ``BACKEND_CONFIG`` singleton, its tool-agent
@@ -66,23 +67,23 @@ class TestBackendOrchestratorParity:
 
     def _make_agent(self):
         from software_engineering_team.codegen_team.orchestrator import (
-            BackendDevelopmentAgent,
+            CodegenDevelopmentAgent,
         )
 
-        return BackendDevelopmentAgent(MagicMock())
+        return CodegenDevelopmentAgent(MagicMock(), "backend")
 
     def test_is_config_driven_subclass(self):
-        """BackendDevelopmentAgent subclasses ConfigDrivenV2DevelopmentAgent."""
+        """The backend CodegenDevelopmentAgent subclasses ConfigDrivenV2DevelopmentAgent."""
         agent = self._make_agent()
         assert isinstance(agent, ConfigDrivenV2DevelopmentAgent)
 
     def test_config_is_the_module_level_backend_config(self):
         """The agent's config is the canonical BACKEND_CONFIG instance.
 
-        ``BACKEND_CONFIG`` has no public alias (unlike ``PROFILE``, which
-        ``BackendDevelopmentAgent`` re-exposes for exactly this reason), so
-        this is a deliberate, singular reach into the team's private
-        ``phases._profile`` module -- matching the pattern established in
+        ``BACKEND_CONFIG`` has no public alias (unlike ``PROFILE``, exposed
+        via ``STACK_CONFIGS["backend"].stack_profile`` for exactly this
+        reason), so this is a deliberate, singular reach into the stack's
+        private ``profile`` module -- matching the pattern established in
         ``test_v2_config_orchestrator.py``.
         """
         from software_engineering_team.codegen_team.stacks.backend.profile import BACKEND_CONFIG
@@ -97,13 +98,8 @@ class TestBackendOrchestratorParity:
         straight from the enum), this reads ``tool_agent_kinds`` off the real
         agent/config, so it would catch ``BACKEND_CONFIG`` itself drifting from
         the enum it's meant to mirror."""
-        from software_engineering_team.codegen_team.models import ToolAgentKind
-
         agent = self._make_agent()
-        expected = frozenset(
-            k.value for k in ToolAgentKind if k is not ToolAgentKind.GENERAL
-        )
-        assert agent.tool_agent_kinds == expected
+        assert agent.tool_agent_kinds == STACK_CONFIGS["backend"].tool_agent_kinds
 
     def test_build_task_requirements_empty_base_returns_empty(self):
         """Empty base + empty clause == empty."""
@@ -111,13 +107,9 @@ class TestBackendOrchestratorParity:
         assert agent.build_task_requirements("") == ""
 
     def test_stack_profile_is_the_real_profile_object(self):
-        """The config's stack_profile is the team's canonical PROFILE, not a copy."""
-        from software_engineering_team.codegen_team.orchestrator import (
-            BackendDevelopmentAgent,
-        )
-
+        """The config's stack_profile is the stack's canonical PROFILE, not a copy."""
         agent = self._make_agent()
-        assert agent._stack_profile() is BackendDevelopmentAgent.PROFILE
+        assert agent._stack_profile() is STACK_CONFIGS["backend"].stack_profile
 
     def test_build_verify_label_from_profile(self):
         """build_verify_label resolves through the config's stack_profile."""
@@ -149,12 +141,13 @@ class TestBackendOrchestratorParity:
         assert built_kinds == agent.tool_agent_kinds
 
     def test_run_workflow_full_pipeline_parity(self, tmp_path: Path, monkeypatch):
-        """A representative mocked run through BackendDevelopmentAgent.run_workflow
-        succeeds, verifying the config-driven base resolves and passes the correct
-        build_verify_label and lint_agent_type to the deliver phase. ``run_workflow``
-        is a thin public wrapper that immediately delegates to
-        ``_run_development_workflow``, so exercising it here also exercises that
-        seam end-to-end."""
+        """A representative mocked run through the backend
+        CodegenDevelopmentAgent.run_workflow succeeds, verifying the
+        config-driven base resolves and passes the correct build_verify_label
+        and lint_agent_type to the deliver phase. ``run_workflow`` is a thin
+        public wrapper that immediately delegates to
+        ``_run_development_workflow``, so exercising it here also exercises
+        that seam end-to-end."""
         from software_engineering_team.codegen_team import orchestrator as orch
         from software_engineering_team.codegen_team.models import (
             DeliverResult,
@@ -189,23 +182,23 @@ class TestBackendOrchestratorParity:
 
         monkeypatch.setattr(orch, "checkout_branch", lambda *_a, **_kw: (True, "checked out"))
         monkeypatch.setattr(
-            orch.BackendDevelopmentAgent,
+            orch.CodegenDevelopmentAgent,
             "_build_and_validate_tool_agents",
             lambda _self, _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: _GitAgent()},
         )
         monkeypatch.setattr(
-            orch.BackendDevelopmentAgent, "_read_repo_code", lambda _self, _p: "repo code"
+            orch.CodegenDevelopmentAgent, "_read_repo_code", lambda _self, _p: "repo code"
         )
         monkeypatch.setattr(
             orch,
-            "run_planning",
+            "_backend_run_planning",
             lambda **_kw: PlanningResult(
                 microtasks=[Microtask(id="mt-1")], summary="planned"
             ),
         )
         monkeypatch.setattr(
             orch,
-            "run_execution_with_review_gates",
+            "_backend_run_execution_with_review_gates",
             lambda **_kw: ExecutionResult(
                 files={"app.py": "print('ok')\n"},
                 microtasks=[Microtask(id="mt-1", status=MicrotaskStatus.COMPLETED)],
@@ -220,7 +213,7 @@ class TestBackendOrchestratorParity:
             "run_documentation_phase",
             lambda **_kw: DocumentationPhaseResult(summary="docs"),
         )
-        monkeypatch.setattr(orch, "run_deliver", _run_deliver)
+        monkeypatch.setattr(orch, "_backend_run_deliver", _run_deliver)
 
         task = Task(
             id="t-be",
@@ -249,8 +242,9 @@ class TestBackendOrchestratorParity:
 
 
 class TestFrontendOrchestratorParity:
-    """Prove ``FrontendDevelopmentAgent`` (now a ``ConfigDrivenV2DevelopmentAgent``
-    subclass) behaves identically to the pre-change hand-wired implementation.
+    """Prove the frontend stack of ``CodegenDevelopmentAgent`` (a
+    ``ConfigDrivenV2DevelopmentAgent`` subclass) behaves identically to the
+    pre-merge hand-wired implementation.
 
     Focuses on what's unique to the *real* production class: that it is
     wired to the module-level ``FRONTEND_CONFIG`` singleton, its tool-agent
@@ -269,23 +263,23 @@ class TestFrontendOrchestratorParity:
 
     def _make_agent(self):
         from software_engineering_team.codegen_team.orchestrator import (
-            FrontendDevelopmentAgent,
+            CodegenDevelopmentAgent,
         )
 
-        return FrontendDevelopmentAgent(MagicMock())
+        return CodegenDevelopmentAgent(MagicMock(), "frontend")
 
     def test_is_config_driven_subclass(self):
-        """FrontendDevelopmentAgent subclasses ConfigDrivenV2DevelopmentAgent."""
+        """The frontend CodegenDevelopmentAgent subclasses ConfigDrivenV2DevelopmentAgent."""
         agent = self._make_agent()
         assert isinstance(agent, ConfigDrivenV2DevelopmentAgent)
 
     def test_config_is_the_module_level_frontend_config(self):
         """The agent's config is the canonical FRONTEND_CONFIG instance.
 
-        ``FRONTEND_CONFIG`` has no public alias (unlike ``PROFILE``, which
-        ``FrontendDevelopmentAgent`` re-exposes for exactly this reason), so
-        this is a deliberate, singular reach into the team's private
-        ``phases._profile`` module -- matching the pattern established in
+        ``FRONTEND_CONFIG`` has no public alias (unlike ``PROFILE``, exposed
+        via ``STACK_CONFIGS["frontend"].stack_profile`` for exactly this
+        reason), so this is a deliberate, singular reach into the stack's
+        private ``profile`` module -- matching the pattern established in
         ``test_v2_config_orchestrator.py``.
         """
         from software_engineering_team.codegen_team.stacks.frontend.profile import FRONTEND_CONFIG
@@ -300,13 +294,8 @@ class TestFrontendOrchestratorParity:
         straight from the enum), this reads ``tool_agent_kinds`` off the real
         agent/config, so it would catch ``FRONTEND_CONFIG`` itself drifting from
         the enum it's meant to mirror."""
-        from software_engineering_team.codegen_team.models import ToolAgentKind
-
         agent = self._make_agent()
-        expected = frozenset(
-            k.value for k in ToolAgentKind if k is not ToolAgentKind.GENERAL
-        )
-        assert agent.tool_agent_kinds == expected
+        assert agent.tool_agent_kinds == STACK_CONFIGS["frontend"].tool_agent_kinds
 
     def test_conventions_map_has_exactly_one_key(self):
         """Frontend's conventions map contains only _default — no language-specific entries."""
@@ -334,13 +323,9 @@ class TestFrontendOrchestratorParity:
         assert result == agent.extra_review_clause
 
     def test_stack_profile_is_the_real_profile_object(self):
-        """The config's stack_profile is the team's canonical PROFILE, not a copy."""
-        from software_engineering_team.codegen_team.orchestrator import (
-            FrontendDevelopmentAgent,
-        )
-
+        """The config's stack_profile is the stack's canonical PROFILE, not a copy."""
         agent = self._make_agent()
-        assert agent._stack_profile() is FrontendDevelopmentAgent.PROFILE
+        assert agent._stack_profile() is STACK_CONFIGS["frontend"].stack_profile
 
     def test_build_verify_label_from_profile(self):
         """build_verify_label resolves through the config's stack_profile."""
@@ -372,12 +357,13 @@ class TestFrontendOrchestratorParity:
         assert built_kinds == agent.tool_agent_kinds
 
     def test_run_workflow_full_pipeline_parity(self, tmp_path: Path, monkeypatch):
-        """A representative mocked run through FrontendDevelopmentAgent.run_workflow
-        succeeds, verifying the config-driven base resolves and passes the correct
-        build_verify_label and lint_agent_type to the deliver phase. ``run_workflow``
-        is a thin public wrapper that immediately delegates to
-        ``_run_development_workflow``, so exercising it here also exercises that
-        seam end-to-end."""
+        """A representative mocked run through the frontend
+        CodegenDevelopmentAgent.run_workflow succeeds, verifying the
+        config-driven base resolves and passes the correct build_verify_label
+        and lint_agent_type to the deliver phase. ``run_workflow`` is a thin
+        public wrapper that immediately delegates to
+        ``_run_development_workflow``, so exercising it here also exercises
+        that seam end-to-end."""
         from software_engineering_team.codegen_team import orchestrator as orch
         from software_engineering_team.codegen_team.models import (
             DeliverResult,
@@ -412,23 +398,23 @@ class TestFrontendOrchestratorParity:
 
         monkeypatch.setattr(orch, "checkout_branch", lambda *_a, **_kw: (True, "checked out"))
         monkeypatch.setattr(
-            orch.FrontendDevelopmentAgent,
+            orch.CodegenDevelopmentAgent,
             "_build_and_validate_tool_agents",
             lambda _self, _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: _GitAgent()},
         )
         monkeypatch.setattr(
-            orch.FrontendDevelopmentAgent, "_read_repo_code", lambda _self, _p: "repo code"
+            orch.CodegenDevelopmentAgent, "_read_repo_code", lambda _self, _p: "repo code"
         )
         monkeypatch.setattr(
             orch,
-            "run_planning",
+            "_frontend_run_planning",
             lambda **_kw: PlanningResult(
                 microtasks=[Microtask(id="mt-1")], summary="planned"
             ),
         )
         monkeypatch.setattr(
             orch,
-            "run_execution_with_review_gates",
+            "_frontend_run_execution_with_review_gates",
             lambda **_kw: ExecutionResult(
                 files={"src/app.component.ts": "export class AppComponent {}\n"},
                 microtasks=[Microtask(id="mt-1", status=MicrotaskStatus.COMPLETED)],
@@ -443,7 +429,7 @@ class TestFrontendOrchestratorParity:
             "run_documentation_phase",
             lambda **_kw: DocumentationPhaseResult(summary="docs"),
         )
-        monkeypatch.setattr(orch, "run_deliver", _run_deliver)
+        monkeypatch.setattr(orch, "_frontend_run_deliver", _run_deliver)
 
         task = Task(
             id="t-fe",
@@ -477,9 +463,10 @@ class TestCrossTeamConfigDivergence:
     and agree on structural properties.
 
     Needs the whole ``V2TeamConfig`` object (not just ``stack_profile``,
-    which ``PROFILE`` covers), so it reaches into each team's private
-    ``phases._profile`` module for ``BACKEND_CONFIG``/``FRONTEND_CONFIG`` --
-    neither has a public alias, the same deliberate exception documented on
+    which ``STACK_CONFIGS[...].stack_profile`` covers), so it reaches into
+    each stack's private ``profile`` module for ``BACKEND_CONFIG``/
+    ``FRONTEND_CONFIG`` -- neither has a public alias, the same deliberate
+    exception documented on
     ``TestBackendOrchestratorParity``/``TestFrontendOrchestratorParity`` above.
     """
 

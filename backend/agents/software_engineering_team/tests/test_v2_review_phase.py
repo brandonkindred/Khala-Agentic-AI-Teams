@@ -68,8 +68,8 @@ def _stub_coordinator(monkeypatch, *, approved: bool = True, issues=None) -> Non
 def test_run_llm_review_calls_coordinator_with_skip_tail_passes(monkeypatch):
     """The fallback calls the shared coordinator directly, in lightweight mode
     (no tail passes), threading task/files through to CodeReviewInput."""
-    from software_engineering_team.codegen_team.stacks.backend.profile import _run_llm_review
     from software_engineering_team.code_review_agent.models import CodeReviewOutput
+    from software_engineering_team.codegen_team.stacks.backend.profile import _run_llm_review
     from software_engineering_team.shared import v2_review_bindings as review_mod
 
     captured: dict = {}
@@ -97,8 +97,8 @@ def test_run_llm_review_defaults_language_to_profile_default(monkeypatch):
     than leaving it unset and falling back to ``CodeReviewInput``'s own
     "typescript" default -- backend code reviewed under the wrong language
     label would misdirect the LLM's language-specific checks."""
-    from software_engineering_team.codegen_team.stacks.backend.profile import _run_llm_review
     from software_engineering_team.code_review_agent.models import CodeReviewOutput
+    from software_engineering_team.codegen_team.stacks.backend.profile import _run_llm_review
     from software_engineering_team.shared import v2_review_bindings as review_mod
 
     captured: dict = {}
@@ -118,8 +118,8 @@ def test_run_llm_review_forwards_explicit_language(monkeypatch):
     """An explicit ``language`` argument reaches ``CodeReviewInput`` verbatim,
     matching the external ``code_review_agent`` path's handling in
     ``shared.v2_review._code_review_step``."""
-    from software_engineering_team.codegen_team.stacks.backend.profile import _run_llm_review
     from software_engineering_team.code_review_agent.models import CodeReviewOutput
+    from software_engineering_team.codegen_team.stacks.backend.profile import _run_llm_review
     from software_engineering_team.shared import v2_review_bindings as review_mod
 
     captured: dict = {}
@@ -141,8 +141,8 @@ def test_run_llm_review_forwards_review_context(monkeypatch):
     only the external agent path received this context, so a deployment
     relying on the fallback never saw it despite callers passing review_context."""
     from shared.dev_models.models import ReviewContext, SystemArchitecture
-    from software_engineering_team.codegen_team.stacks.backend.profile import _run_llm_review
     from software_engineering_team.code_review_agent.models import CodeReviewOutput
+    from software_engineering_team.codegen_team.stacks.backend.profile import _run_llm_review
     from software_engineering_team.shared import v2_review_bindings as review_mod
 
     captured: dict = {}
@@ -175,11 +175,11 @@ def test_run_llm_review_translates_issues_to_review_issue(monkeypatch):
     lightweight coordinator has no grounding pass to report a pre-filter count
     for; reporting a fabricated int would make review_cycle.py's grounding
     circuit breaker see a false "0% rejected" instead of "no data")."""
-    from software_engineering_team.codegen_team.stacks.backend.profile import _run_llm_review
     from software_engineering_team.code_review_agent.models import (
         CodeReviewIssue,
         CodeReviewOutput,
     )
+    from software_engineering_team.codegen_team.stacks.backend.profile import _run_llm_review
     from software_engineering_team.shared import v2_review_bindings as review_mod
 
     monkeypatch.setattr(
@@ -215,8 +215,8 @@ def test_run_llm_review_raw_issue_count_is_none_on_clean_pass(monkeypatch):
     """raw_issue_count stays None even when the coordinator finds nothing --
     it must never default back to 0, which grounding_rejection_ratio would
     also treat as "no ratio available" today but could stop doing so."""
-    from software_engineering_team.codegen_team.stacks.backend.profile import _run_llm_review
     from software_engineering_team.code_review_agent.models import CodeReviewOutput
+    from software_engineering_team.codegen_team.stacks.backend.profile import _run_llm_review
     from software_engineering_team.shared import v2_review_bindings as review_mod
 
     monkeypatch.setattr(
@@ -235,8 +235,8 @@ def test_run_llm_review_propagates_coordinator_unavailable(monkeypatch):
     """A total coordinator failure (no chunk reviewable) is not swallowed here --
     it propagates so the caller's containment produces the fail-closed synthetic
     issue instead of a silent clean pass."""
-    from software_engineering_team.codegen_team.stacks.backend.profile import _run_llm_review
     from software_engineering_team.code_review_agent.models import CodeReviewUnavailableError
+    from software_engineering_team.codegen_team.stacks.backend.profile import _run_llm_review
     from software_engineering_team.shared import v2_review_bindings as review_mod
 
     def _raise(llm, input_data, *a, **kw):
@@ -785,8 +785,8 @@ def test_run_review_forwards_architecture_and_spec_content(monkeypatch, tmp_path
 
 def test_run_review_code_review_agent_raises_falls_back_to_llm(monkeypatch, tmp_path: Path):
     """If code_review_agent fails, we still call LLM fallback."""
-    from software_engineering_team.codegen_team.stacks.backend.profile import run_review
     from software_engineering_team.code_review_agent.models import CodeReviewIssue
+    from software_engineering_team.codegen_team.stacks.backend.profile import run_review
 
     _stub_coordinator(
         monkeypatch,

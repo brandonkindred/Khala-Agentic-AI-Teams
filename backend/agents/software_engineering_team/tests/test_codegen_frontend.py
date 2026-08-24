@@ -265,7 +265,10 @@ class TestSetupPhase:
         lacks the eslint/vitest config until the dev-agent calls
         configure_quality_tooling on it.
         """
-        from software_engineering_team.codegen_team.stacks.frontend.profile import configure_quality_tooling, run_setup
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
+            configure_quality_tooling,
+            run_setup,
+        )
 
         init_repo_with_existing_development(tmp_path)
         subprocess.run(
@@ -312,7 +315,9 @@ class TestSetupPhaseHooks:
     """
 
     def test_ensure_linting_configured_creates_config_for_angular_project(self, tmp_path):
-        from software_engineering_team.codegen_team.stacks.frontend.profile import _ensure_linting_configured
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
+            _ensure_linting_configured,
+        )
 
         (tmp_path / "angular.json").write_text("{}", encoding="utf-8")
         written: set = set()
@@ -323,7 +328,9 @@ class TestSetupPhaseHooks:
     def test_ensure_linting_configured_angular_config_already_present(self, tmp_path):
         """An Angular project whose eslint.config.js already exists must not
         be overwritten (and must not be reported as newly written)."""
-        from software_engineering_team.codegen_team.stacks.frontend.profile import _ensure_linting_configured
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
+            _ensure_linting_configured,
+        )
 
         (tmp_path / "angular.json").write_text("{}", encoding="utf-8")
         (tmp_path / "eslint.config.js").write_text("// existing\n", encoding="utf-8")
@@ -335,7 +342,9 @@ class TestSetupPhaseHooks:
     def test_ensure_testing_configured_malformed_package_json(self, tmp_path):
         """A malformed package.json must not raise while probing for an
         existing test script; setup falls through to creating vitest config."""
-        from software_engineering_team.codegen_team.stacks.frontend.profile import _ensure_testing_configured
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
+            _ensure_testing_configured,
+        )
 
         (tmp_path / "package.json").write_text("{not valid json", encoding="utf-8")
         written: set = set()
@@ -343,7 +352,9 @@ class TestSetupPhaseHooks:
         assert (tmp_path / "vitest.config.ts").exists()
 
     def test_ensure_testing_configured_creates_config_for_angular_project(self, tmp_path):
-        from software_engineering_team.codegen_team.stacks.frontend.profile import _ensure_testing_configured
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
+            _ensure_testing_configured,
+        )
 
         (tmp_path / "angular.json").write_text("{}", encoding="utf-8")
         written: set = set()
@@ -356,7 +367,9 @@ class TestSetupPhaseHooks:
     def test_ensure_package_script_handles_unreadable_package_json(self, tmp_path):
         """An unreadable package.json must not raise; the script is simply
         not added and no write is reported."""
-        from software_engineering_team.codegen_team.stacks.frontend.profile import _ensure_package_script
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
+            _ensure_package_script,
+        )
 
         # A directory named package.json makes read_text raise IsADirectoryError.
         (tmp_path / "package.json").mkdir()
@@ -365,9 +378,8 @@ class TestSetupPhaseHooks:
 
 class TestPlanningPhase:
     def test_language_detection_angular(self, tmp_path):
-        from software_engineering_team.codegen_team.stacks.frontend.profile import _detect_language
-
         from shared.dev_models.models import Task, TaskStatus, TaskType
+        from software_engineering_team.codegen_team.stacks.frontend.profile import _detect_language
 
         (tmp_path / "angular.json").write_text("{}")
         task = Task(
@@ -380,9 +392,8 @@ class TestPlanningPhase:
         assert _detect_language(tmp_path, task) == "angular"
 
     def test_language_detection_from_description(self, tmp_path):
-        from software_engineering_team.codegen_team.stacks.frontend.profile import _detect_language
-
         from shared.dev_models.models import Task, TaskStatus, TaskType
+        from software_engineering_team.codegen_team.stacks.frontend.profile import _detect_language
 
         task = Task(
             id="t1",
@@ -394,7 +405,9 @@ class TestPlanningPhase:
         assert _detect_language(tmp_path, task) == "react"
 
     def test_parse_planning_output(self):
-        from software_engineering_team.codegen_team.stacks.frontend.profile import _parse_planning_output
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
+            _parse_planning_output,
+        )
 
         raw = {
             "microtasks": [
@@ -422,9 +435,8 @@ class TestPlanningPhase:
         assert result.language == "angular"
 
     def test_run_planning_fallback(self, tmp_path):
-        from software_engineering_team.codegen_team.stacks.frontend.profile import run_planning
-
         from shared.dev_models.models import Task, TaskStatus, TaskType
+        from software_engineering_team.codegen_team.stacks.frontend.profile import run_planning
 
         mock_llm = _TextStubClient(
             "## MICROTASKS ##\n## END MICROTASKS ##\n"
@@ -503,7 +515,9 @@ class TestToolAgents:
         assert isinstance(msg, str)
 
     def test_build_specialist_stub(self):
-        from software_engineering_team.codegen_team.tool_agents.frontend.build_specialist import BuildSpecialistAdapterAgent
+        from software_engineering_team.codegen_team.tool_agents.frontend.build_specialist import (
+            BuildSpecialistAdapterAgent,
+        )
 
         agent = BuildSpecialistAdapterAgent()
         out = agent.execute(ToolAgentInput(microtask=Microtask(id="mt-1"), repo_path="/tmp"))
@@ -517,6 +531,7 @@ class TestToolAgents:
 class TestCodegenDevelopmentAgentBranchReuse:
     def test_existing_feature_branch_is_reused_without_recreation(self, tmp_path, monkeypatch):
         """Revision workflows keep the reviewed branch instead of recreating it from development."""
+        from shared.dev_models.models import Task, TaskStatus, TaskType
         from software_engineering_team.codegen_team import orchestrator as orch
         from software_engineering_team.codegen_team.models import (
             DeliverResult,
@@ -524,8 +539,6 @@ class TestCodegenDevelopmentAgentBranchReuse:
             ExecutionResult,
             PlanningResult,
         )
-
-        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         (tmp_path / "eslint.config.js").write_text("export default [];\n")
         (tmp_path / "package.json").write_text('{"scripts":{"test":"vitest run"}}\n')
@@ -620,6 +633,7 @@ class TestCodegenDevelopmentAgentBranchReuse:
 
     def test_job_updater_failure_is_debug_logged_not_raised(self, tmp_path, monkeypatch):
         """A broken job_updater callback must not crash the workflow, and is logged at DEBUG."""
+        from shared.dev_models.models import Task, TaskStatus, TaskType
         from software_engineering_team.codegen_team import orchestrator as orch
         from software_engineering_team.codegen_team.models import (
             DeliverResult,
@@ -627,8 +641,6 @@ class TestCodegenDevelopmentAgentBranchReuse:
             ExecutionResult,
             PlanningResult,
         )
-
-        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         (tmp_path / "eslint.config.js").write_text("export default [];\n")
         (tmp_path / "package.json").write_text('{"scripts":{"test":"vitest run"}}\n')
@@ -870,8 +882,9 @@ class TestCodegenDevelopmentAgent:
     def test_build_tool_runners(self):
         from software_engineering_team.codegen_team.models import ToolAgentKind
         from software_engineering_team.codegen_team.orchestrator import CodegenDevelopmentAgent
-        from software_engineering_team.codegen_team.tool_agents.frontend.state_management import StateManagementToolAgent
-
+        from software_engineering_team.codegen_team.tool_agents.frontend.state_management import (
+            StateManagementToolAgent,
+        )
         from software_engineering_team.shared.tool_agent_git_branch import (
             GitBranchManagementToolAgent,
         )
@@ -889,16 +902,15 @@ class TestCodegenDevelopmentAgent:
 class TestCodegenTeamLead:
     def test_team_lead_propagates_development_handoff_fields(self, tmp_path, monkeypatch):
         """Team-lead result preserves the inner development handoff fields."""
+        from shared.dev_models.models import Task, TaskStatus, TaskType
         from software_engineering_team.codegen_team import orchestrator as orch
         from software_engineering_team.codegen_team.models import (
+            CodegenWorkflowResult,
             DeliverResult,
             DocumentationPhaseResult,
-            CodegenWorkflowResult,
             Phase,
             SetupResult,
         )
-
-        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         deliver = DeliverResult(
             branch_name="feature/ui",
@@ -1010,8 +1022,12 @@ class TestDocumentationSelfReviewWiring:
 
     def test_wraps_shared_helper_with_team_prompt_parser_and_result(self):
         from software_engineering_team.codegen_team.models import DocumentationSelfReviewResult
-        from software_engineering_team.codegen_team.stacks.frontend.profile import run_documentation_self_review
-        from software_engineering_team.codegen_team.stacks.frontend.prompts import DOCUMENTATION_SELF_REVIEW_PROMPT
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
+            run_documentation_self_review,
+        )
+        from software_engineering_team.codegen_team.stacks.frontend.prompts import (
+            DOCUMENTATION_SELF_REVIEW_PROMPT,
+        )
 
         client = _RecordingDocClient(_DOC_REVIEW_RESPONSE)
         result = run_documentation_self_review(
@@ -1044,7 +1060,6 @@ class TestDbCSelfReviewWiring:
 
     def test_gate_config_wires_dbc_self_review(self):
         from software_engineering_team.codegen_team.stacks.frontend.profile import GATE_CONFIG
-
         from software_engineering_team.shared.phases.dbc_phase import run_dbc_comments_review
 
         # Identity, not just truthiness: the shared loop and its tests rely on this
@@ -1064,7 +1079,6 @@ class TestDbCSelfReviewWiring:
         from types import SimpleNamespace
 
         from software_engineering_team.codegen_team.stacks.frontend.profile import GATE_CONFIG
-
         from software_engineering_team.shared.phases import dbc_phase
         from software_engineering_team.shared.phases.dbc_phase import _run_dbc_self_review
         from software_engineering_team.shared.phases.execution import ReviewDependencies

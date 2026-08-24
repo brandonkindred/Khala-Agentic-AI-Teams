@@ -2,7 +2,7 @@
 
 Contract-first sub-orchestration for building AI agent systems from a spec.
 
-This team mirrors the **backend_code_v2_team** lifecycle style (phase-based orchestration + domain tool agents) while targeting agent-system delivery artifacts instead of application code.
+This team mirrors the **codegen_team** lifecycle style (phase-based orchestration + domain tool agents) while targeting agent-system delivery artifacts instead of application code.
 
 ## Workflow phases
 

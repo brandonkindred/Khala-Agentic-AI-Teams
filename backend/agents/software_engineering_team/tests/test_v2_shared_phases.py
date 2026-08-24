@@ -1183,7 +1183,7 @@ def test_fix_issues_one_at_a_time_impl_survives_parse_failure(caplog):
 # prompt output is an acceptance criterion of that refactor, so this test locks
 # the six constants against silent drift. If you INTENTIONALLY change a template
 # or builder, regenerate a digest with:
-#     python -c "import hashlib; from software_engineering_team.<team>_code_v2_team \
+#     python -c "import hashlib; from software_engineering_team.codegen_team.stacks.<team> \
 #         import prompts as p; print(hashlib.sha256(p.<NAME>.encode()).hexdigest())"
 _EXPECTED_PROMPT_DIGESTS = {
     (
@@ -1223,7 +1223,7 @@ def test_prompt_constants_are_byte_stable(team: str, name: str):
     import hashlib
     import importlib
 
-    prompts = importlib.import_module(f"software_engineering_team.{team}_code_v2_team.prompts")
+    prompts = importlib.import_module(f"software_engineering_team.codegen_team.stacks.{team}.prompts")
     actual = hashlib.sha256(getattr(prompts, name).encode("utf-8")).hexdigest()
     assert actual == _EXPECTED_PROMPT_DIGESTS[(team, name)], (
         f"{team} {name} changed; if intentional, update its digest in _EXPECTED_PROMPT_DIGESTS."
