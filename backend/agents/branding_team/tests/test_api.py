@@ -767,6 +767,120 @@ def test_create_brand_with_unknown_conversation_id_returns_404() -> None:
     assert brands == []
 
 
+def test_create_brand_rolls_back_when_conversation_create_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exception from conversation_store.create() on the create-new path
+    must not leave a listable, conversation-less orphan brand behind."""
+    from branding_team.api import main as main_mod
+
+    create_c = client.post("/clients", json={"name": "ConvCreateFails Client"})
+    client_id = create_c.json()["id"]
+
+    def _boom(*args: Any, **kwargs: Any) -> str:
+        raise RuntimeError("conversation store unavailable")
+
+    monkeypatch.setattr(main_mod.conversation_store, "create", _boom)
+
+    with pytest.raises(RuntimeError, match="conversation store unavailable"):
+        client.post(
+            f"/clients/{client_id}/brands",
+            json={
+                "company_name": "ConvCreateFailsCo",
+                "company_description": "Company whose conversation creation fails",
+                "target_audience": "teams",
+            },
+        )
+
+    # The brand created before conversation_store.create() raised must not survive.
+    brands = client.get(f"/clients/{client_id}/brands").json()
+    assert brands == []
+
+
+def test_create_brand_rejects_unrecognized_attach_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An attach_conversation result that isn't OK or one of the three known
+    failure members must still roll back the brand and raise — never fall
+    through to returning a brand that was just deleted."""
+    from branding_team.api import main as main_mod
+
+    create_c = client.post("/clients", json={"name": "UnrecognizedAttach Client"})
+    client_id = create_c.json()["id"]
+
+    def _unrecognized(*args: Any, **kwargs: Any) -> tuple:
+        return object(), None
+
+    monkeypatch.setattr(main_mod.branding_store, "attach_conversation", _unrecognized)
+
+    resp = client.post(
+        f"/clients/{client_id}/brands",
+        json={
+            "company_name": "UnrecognizedAttachCo",
+            "company_description": "Company whose attach result is unrecognized",
+            "target_audience": "teams",
+        },
+    )
+    assert resp.status_code == 500
+
+    # The brand must not survive as a listable, conversation-less orphan.
+    brands = client.get(f"/clients/{client_id}/brands").json()
+    assert brands == []
+
+
+def test_create_brand_rolls_back_when_attach_conversation_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exception from store.attach_conversation() on the create-new path
+    (after the fresh, unattached conversation was already created) must roll
+    back the brand and propagate the original error — the conversation stays
+    unattached rather than pointing at a brand about to be deleted, since it
+    only ever gains a brand_id inside attach_conversation's own transaction."""
+    from branding_team.api import main as main_mod
+
+    create_c = client.post("/clients", json={"name": "AttachConvFails Client"})
+    client_id = create_c.json()["id"]
+
+    # Capture the conversation id conversation_store.create() actually
+    # produces so we can inspect it afterward — it never reaches the caller
+    # since the request raises before a response body is built.
+    created_conv_ids = []
+    real_create = main_mod.conversation_store.create
+
+    def _capturing_create(*args: Any, **kwargs: Any) -> str:
+        conv_id = real_create(*args, **kwargs)
+        created_conv_ids.append(conv_id)
+        return conv_id
+
+    monkeypatch.setattr(main_mod.conversation_store, "create", _capturing_create)
+
+    def _boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("attach_conversation unavailable")
+
+    monkeypatch.setattr(main_mod.branding_store, "attach_conversation", _boom)
+
+    with pytest.raises(RuntimeError, match="attach_conversation unavailable"):
+        client.post(
+            f"/clients/{client_id}/brands",
+            json={
+                "company_name": "AttachConvFailsCo",
+                "company_description": "Company whose brand-conversation link write fails",
+                "target_audience": "teams",
+            },
+        )
+
+    # The brand must not survive the rolled-back request.
+    brands = client.get(f"/clients/{client_id}/brands").json()
+    assert brands == []
+
+    # The conversation it created must remain unattached, not pointing at
+    # the now-deleted brand id.
+    assert len(created_conv_ids) == 1
+    conv_resp = client.get(f"/conversations/{created_conv_ids[0]}")
+    assert conv_resp.status_code == 200
+    assert conv_resp.json()["brand_id"] is None
+
+
 def test_list_clients_pagination_query_params() -> None:
     """GET /clients honors limit/offset and returns non-overlapping pages."""
     created = {

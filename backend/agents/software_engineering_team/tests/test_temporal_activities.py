@@ -771,14 +771,27 @@ def test_temporal_pra_and_planning_updaters_are_the_shared_band_factories(monkey
 
     # The factories are what the activities now bind; assert their band behavior
     # end-to-end through the same entry points the activities import.
-    pra = se_orch._make_pra_job_updater("j-t")
+    pra = se_orch._make_phase_job_updater(
+        "j-t",
+        subprocess_key="analysis_subprocess",
+        completed_key="analysis_completed_phases",
+        phase_order=se_orch.PRA_PHASE_ORDER,
+        progress_band=se_orch.PROGRESS_BAND_PRODUCT_ANALYSIS,
+        phase="product_analysis",
+    )
     pra(progress=100)
     assert (
         written[-1]["progress"]
         == se_orch.PROGRESS_BAND_PRODUCT_ANALYSIS[0] + (se_orch.PROGRESS_BAND_PRODUCT_ANALYSIS[1])
     )
 
-    planning = se_orch._make_planning_job_updater("j-t")
+    planning = se_orch._make_phase_job_updater(
+        "j-t",
+        subprocess_key="planning_subprocess",
+        completed_key="planning_completed_phases",
+        phase_order=se_orch.PLANNING_PHASE_ORDER,
+        progress_band=se_orch.PROGRESS_BAND_PLANNING,
+    )
     planning(progress=100)
     base, span = se_orch.PROGRESS_BAND_PLANNING
     assert written[-1]["progress"] == base + span
