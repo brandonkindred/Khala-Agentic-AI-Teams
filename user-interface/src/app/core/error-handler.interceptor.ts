@@ -8,8 +8,9 @@ import {
 import { inject } from '@angular/core';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { catchError, throwError } from 'rxjs';
+import { extractErrorDetail } from '../shared/extract-error-detail';
 
-export { extractErrorDetail } from '../shared/extract-error-detail';
+export { extractErrorDetail };
 
 /**
  * Set on a request's `HttpContext` to suppress the global error toast for that
@@ -101,20 +102,19 @@ function formatErrorMessage(err: unknown): string {
   }
 }
 
+// Passed as extractErrorDetail's fallback so we can tell "no usable detail" apart from a
+// real message; { error: err.error } (no top-level `message`) keeps extractErrorDetail from
+// ever resolving through its own err.message branch, so it only reports detail/no-detail and
+// each function below still runs its own original fallback chain.
+const NO_DETAIL = ' __NO_DETAIL__ ';
+
 function formatValidationError(err: HttpErrorResponse): string | null {
-  const detail = err.error?.detail;
-  if (typeof detail === 'string') return detail;
-  if (Array.isArray(detail)) {
-    const msgs = detail
-      .map((d: { msg?: string }) => d.msg)
-      .filter(Boolean);
-    return msgs.length > 0 ? msgs.join('; ') : null;
-  }
-  return null;
+  const result = extractErrorDetail({ error: err.error }, NO_DETAIL, { joinValidationArray: true });
+  return result === NO_DETAIL ? null : result;
 }
 
 function formatServerError(err: HttpErrorResponse): string {
-  const detail = err.error?.detail;
-  if (typeof detail === 'string') return detail;
+  const detail = extractErrorDetail({ error: err.error }, NO_DETAIL);
+  if (detail !== NO_DETAIL) return detail;
   return err.error?.message ?? err.message ?? err.statusText ?? 'Unknown error';
 }
