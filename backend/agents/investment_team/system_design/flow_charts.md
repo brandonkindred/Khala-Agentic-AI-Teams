@@ -96,6 +96,7 @@ sequenceDiagram
     participant PTA as PaperTradingAgent
     participant LLM as LLM Service
     participant Store as _PersistentDict
+    participant RunStore as investment_strategy_lab_runs<br/>(direct JobServiceClient)
     participant Bus as job_event_bus
 
     Client->>API: POST /strategy-lab/run (L1251)
@@ -142,7 +143,7 @@ sequenceDiagram
         end
     end
 
-    BatchWF->>Store: mark run complete
+    BatchWF->>RunStore: persist_run_state_activity<br/>(mark run complete)
     BatchWF->>Bus: publish_run_event_activity (run_complete)
     Bus-->>Client: SSE event (close)
 ```

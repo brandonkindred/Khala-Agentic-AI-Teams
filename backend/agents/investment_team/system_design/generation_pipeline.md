@@ -56,14 +56,21 @@ Each transition emits a `PhaseTransition` event (`phases.py`:148-184) carrying
 `phases.py`:96-109). This is a drift-detection mechanism: both hashes are
 **boundary snapshots** taken at the moment their transition fires, not a
 value pinned for the rest of the attempt. `spec_hash` is frozen post-design
-apart from one carve-out: `hash_spec` includes `risk_limits`, and the
-refinement loop that runs before the `CODE_SYNTHESIS →
+apart from two carve-outs, both of which land between `DESIGN_REVIEW →
+CODE_SYNTHESIS` and the following transition: `hash_spec` includes
+`risk_limits`, and the refinement loop that runs before the `CODE_SYNTHESIS →
 BACKTEST_AND_VERIFICATION` transition may accept a tighten-only `risk_limits`
-update (`_apply_updates`) — so that transition's `spec_hash` can legitimately
-differ from the one recorded at `DESIGN_REVIEW → CODE_SYNTHESIS`. From there
-the value is stable through the terminal transition, since the
-trade-alignment loop's own `_apply_updates` call never carries `risk_limits`
-updates. `code_hash` is unchanged from `CODE_SYNTHESIS →
+update (`_apply_updates`); separately, `_synthesize_initial_code`
+(`orchestrator.py`:810) tries `compile_strategy(spec)` first and, on a
+`CompilerError` the mechanical-repair pre-flight didn't already catch, flips
+`spec.requires_custom_code` to `True` before falling back to
+`CodeSynthesisAgent` — and `hash_spec` excludes only `strategy_code`, not
+`requires_custom_code`. Either carve-out means that next transition's
+`spec_hash` can legitimately differ from the one recorded at
+`DESIGN_REVIEW → CODE_SYNTHESIS`. From there the value is stable through the
+terminal transition, since the trade-alignment loop's own `_apply_updates`
+call never carries `risk_limits` updates (and `requires_custom_code` isn't
+touched again after synthesis). `code_hash` is unchanged from `CODE_SYNTHESIS →
 BACKTEST_AND_VERIFICATION` through the refinement loop that precedes that
 transition, but the trade-alignment loop that follows it can still commit a
 rewritten baseline (`_commit_alignment_proposal`), so the terminal
@@ -367,7 +374,8 @@ flowchart TB
     subgraph attempt["run_design_attempt_activity — one Temporal activity"]
         direction TB
         D[DesignAgent] --> RG1{SpecReadinessGate<br/>phase=design}
-        RG1 --> DR[DesignReviewAgent]
+        RG1 -->|readiness-clean| DR[DesignReviewAgent]
+        RG1 -->|readiness-critical:<br/>reviewer skipped| D
         DR -->|ready| CS
         DR -->|not ready| D
         CS{compile_strategy<br/>succeeds?}
