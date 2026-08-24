@@ -115,8 +115,8 @@ flowchart LR
   L3 --> B7
   L4 --> BatchWF
   L5 --> BatchWF
-  L6 --> BatchWF
-  L7 --> BatchWF
+  L6 --> B7
+  L7 --> B7
   L8 --> EventBus
   L9 --> B7
   L10 --> B7

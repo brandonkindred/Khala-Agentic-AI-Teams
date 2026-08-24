@@ -253,7 +253,7 @@ with the phase that invokes it:
 
 | Gate / file | Phase | Purpose |
 |---|---|---|
-| `strategy_validator.py`: `StrategySpecValidator` | pre-synthesis | Deterministic field-level validation of `StrategySpec` |
+| `strategy_validator.py`: `StrategySpecValidator` | design (hypothesis/rules check feeding `DesignReviewAgent` when a round is deterministically ready) and pre-synthesis | Deterministic field-level validation of `StrategySpec` |
 | `spec_readiness.py`: `SpecReadinessGate` | design, re-checked at synthesis round 0 | The implementability gate that decides design-loop readiness (sizing coherence, timeframe validity, DSL completeness) |
 | `code_safety.py` (+ `code_safety_ast.py`): `CodeSafetyChecker` | synthesis, and verification (alignment-proposal re-check) | AST + regex safety scan of generated strategy Python |
 | `code_conformance/gate.py` (+ `ast_helpers.py`): `CodeConformanceGate` | synthesis | Deterministic spec→code conformance, incl. custom-code faithfulness checks |
@@ -263,7 +263,7 @@ with the phase that invokes it:
 | `alignment_checks.py`: `DeterministicAlignmentChecker` | trade-alignment loop | The seven per-rule trade-alignment checks described above |
 | `acceptance_gate.py`: `AcceptanceGate` | verification | Composite walk-forward acceptance (deflated Sharpe, IS/OOS degradation) |
 | `exit_rule_conformance.py`: `ExitRuleConformanceGate` | verification | Deterministic conformance of engine-enforced exits to `spec.exit_rules` |
-| `target_symbol_coverage.py`: `TargetSymbolCoverageGate` | verification | Backtest universe matches the requested target symbols |
+| `target_symbol_coverage.py`: `TargetSymbolCoverageGate` | synthesis (`check_fetch`/`check_trades`, critical failures fail the run closed before verification) and verification (`check_breadth`, softer check) | Backtest universe matches the requested target symbols |
 | `cost_stress_realism.py`: `CostStressRealismGate` | verification | Realism under cost-stress multipliers |
 | `realism/liquidity_realism.py`: `LiquidityRealismGate` | verification | Liquidity realism (fill participation vs volume) |
 | `realism/regime_coverage.py`: `RegimeCoverageGate` | verification | Coverage across market regimes |
