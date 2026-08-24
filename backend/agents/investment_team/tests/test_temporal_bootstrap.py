@@ -105,6 +105,64 @@ def test_advisory_workflows_and_activities_are_registered() -> None:
     assert ADVISORY_WORKFLOW_ID_PREFIX == "investment-adv-"
 
 
+def test_workflows_register_in_temporalio_sandbox() -> None:
+    """Ground truth for sandbox safety across all three investment task queues.
+
+    ``start_investment_temporal_worker_thread`` boots three ``Worker``s —
+    this package's ``WORKFLOWS`` (``investment-queue``) and
+    ``ADVISORY_WORKFLOWS`` (``investment-advisory-queue``), plus
+    ``investment_team.strategy_lab.temporal.WORKFLOWS``
+    (``strategy-lab-queue``). Each ``Worker`` calls
+    ``SandboxedWorkflowRunner.prepare_workflow`` on every workflow class in its
+    list at boot (``temporalio/worker/_workflow.py``), which re-imports the
+    workflow's defining module *and every ancestor package* inside the
+    sandbox's restricted namespace — for any of these workflows that means
+    this package's root ``__init__`` and everything it eagerly imports
+    (``agents.py``, ``orchestrator.py``, ``models.py``, and the
+    ``strategy_lab`` DSL/indicator modules ``models.py`` pulls in). A
+    module-level side effect anywhere in that shared chain — an eager
+    ``os.getenv``/``threading.Lock()``, or a C-extension import such as
+    ``numpy``/``pandas`` that isn't in ``_build_workflow_runner``'s
+    passthrough list — aborts registration with
+    ``RestrictedWorkflowAccessError`` or ``ImportError: cannot load module
+    more than once per process``. ``shared.temporal.worker.start_team_worker``
+    catches that and only logs it ("Temporal worker failed for
+    team=investment"), so without this test the failure surfaces as a
+    production container whose Temporal worker silently never starts, not as
+    a CI failure.
+
+    This registers every workflow for real against the actual
+    ``SandboxedWorkflowRunner`` used at boot — no live Temporal server is
+    needed, since ``prepare_workflow`` only exercises the sandboxed *import*,
+    not an actual workflow run. Mirrors ``sales_team``'s
+    ``test_workflow_registers_in_temporalio_sandbox``, extended to cover all
+    three of this team's queues in one pass since they share the same
+    package-level import chain.
+    """
+    import asyncio
+
+    import temporalio.workflow as _wf
+
+    from shared.temporal.worker import _build_workflow_runner
+
+    _purge("investment_team.temporal")
+    _purge("investment_team.strategy_lab.temporal")
+    from investment_team.strategy_lab.temporal import WORKFLOWS as STRATEGY_LAB_WORKFLOWS
+    from investment_team.temporal import ADVISORY_WORKFLOWS, WORKFLOWS
+
+    all_workflows = list(WORKFLOWS) + list(ADVISORY_WORKFLOWS) + list(STRATEGY_LAB_WORKFLOWS)
+    assert all_workflows, "expected at least one workflow class to validate"
+
+    async def _prepare() -> None:
+        runner = _build_workflow_runner()
+        for wfc in all_workflows:
+            runner.prepare_workflow(_wf._Definition.must_from_class(wfc))
+
+    # No RestrictedWorkflowAccessError / ImportError => every workflow's
+    # defining-module import chain loaded cleanly in the sandbox.
+    asyncio.run(_prepare())
+
+
 def test_importing_temporal_package_does_not_call_start_team_worker() -> None:
     """Loading the package (or its submodules) must NOT spin up a worker."""
     import shared.temporal
