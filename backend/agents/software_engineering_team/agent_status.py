@@ -90,7 +90,7 @@ def derive_stack_roster(stacks_raw: List[Dict[str, Any]]) -> List[StackRosterEnt
         # agent_task_map entry (and the UI shows distinct cards) instead of one overwriting the
         # other. Bump the suffix until the id is free — this also covers a candidate that
         # collides with a suffix generated for an earlier duplicate (e.g. "backend", "backend",
-        # "backend_2" -> "backend", "backend_2", "backend_3"), or with a worker-suffixed id
+        # "backend_2" -> "backend", "backend_2", "backend_2_2"), or with a worker-suffixed id
         # generated for another stack.
         unique_id = candidate
         count = 1
