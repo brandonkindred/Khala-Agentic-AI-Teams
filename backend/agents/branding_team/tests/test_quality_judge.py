@@ -15,6 +15,7 @@ from branding_team.models import (
     ChannelActivationOutput,
     GovernanceOutput,
     StrategicCoreOutput,
+    VisualIdentityOutput,
 )
 from branding_team.scripts.quality_judge import (
     PairedPhaseQualityScore,
@@ -112,8 +113,8 @@ def test_score_phase_output_dummy_client_is_deterministic() -> None:
     assert first == second
 
 
-def test_build_judge_prompt_embeds_strategic_core_when_supplied() -> None:
-    """The generated strategic core must appear in the prompt so the judge can
+def test_build_judge_prompt_embeds_reference_outputs_when_supplied() -> None:
+    """Every supplied reference output must appear in the prompt so the judge can
     score coherence against what was actually generated upstream, not just the
     raw mission brief -- the P1 fix this eval PR applies.
     """
@@ -125,18 +126,44 @@ def test_build_judge_prompt_embeds_strategic_core_when_supplied() -> None:
         mission=mission,
         phase=BrandPhase.GOVERNANCE,
         output=output,
-        strategic_core=strategic_core,
+        reference_outputs={BrandPhase.STRATEGIC_CORE: strategic_core},
     )
 
     assert "GENERATED STRATEGIC CORE" in prompt
     assert "Ship brand with the product." in prompt
 
 
-def test_build_judge_prompt_omits_strategic_core_block_when_none() -> None:
-    """No GENERATED STRATEGIC CORE section header is rendered when strategic_core
-    is None (e.g. when judging the strategic core phase itself, which has no
-    upstream strategic core to compare against) -- only the fixed reminder in
-    the TASK section mentions the phrase in that case.
+def test_build_judge_prompt_embeds_all_upstream_phases_not_just_strategic_core() -> None:
+    """The judge must see every upstream reference output supplied (visual
+    identity, narrative messaging, etc.), not only the strategic core --
+    otherwise it can't catch a candidate contradicting upstream guidance that
+    was excluded from its own generation context by selective-context
+    filtering.
+    """
+    mission = make_mission()
+    strategic_core = StrategicCoreOutput(mission_statement="Ship brand with the product.")
+    visual_identity = VisualIdentityOutput()
+    output = GovernanceOutput()
+
+    prompt = _build_judge_prompt(
+        mission=mission,
+        phase=BrandPhase.GOVERNANCE,
+        output=output,
+        reference_outputs={
+            BrandPhase.STRATEGIC_CORE: strategic_core,
+            BrandPhase.VISUAL_IDENTITY: visual_identity,
+        },
+    )
+
+    assert "GENERATED STRATEGIC CORE" in prompt
+    assert "GENERATED VISUAL IDENTITY" in prompt
+
+
+def test_build_judge_prompt_omits_reference_block_when_empty() -> None:
+    """No GENERATED reference section header is rendered when reference_outputs
+    is empty (e.g. when judging the first phase, which has no upstream
+    reference at all) -- only the fixed reminder in the TASK section mentions
+    the word "GENERATED" in that case.
     """
     mission = make_mission()
     output = GovernanceOutput()
@@ -145,10 +172,10 @@ def test_build_judge_prompt_omits_strategic_core_block_when_none() -> None:
         mission=mission,
         phase=BrandPhase.GOVERNANCE,
         output=output,
-        strategic_core=None,
+        reference_outputs={},
     )
 
-    assert "--- GENERATED STRATEGIC CORE" not in prompt
+    assert "--- GENERATED" not in prompt
 
 
 def test_build_judge_prompt_never_reveals_variant_label() -> None:
@@ -164,7 +191,7 @@ def test_build_judge_prompt_never_reveals_variant_label() -> None:
         mission=mission,
         phase=BrandPhase.GOVERNANCE,
         output=output,
-        strategic_core=strategic_core,
+        reference_outputs={BrandPhase.STRATEGIC_CORE: strategic_core},
     )
 
     assert "selective" not in prompt.lower()
@@ -211,7 +238,7 @@ def test_build_paired_judge_prompt_never_reveals_variant_label() -> None:
         phase=BrandPhase.GOVERNANCE,
         output_a=output_a,
         output_b=output_b,
-        strategic_core=strategic_core,
+        reference_outputs={BrandPhase.STRATEGIC_CORE: strategic_core},
     )
 
     assert "OUTPUT A" in prompt
@@ -221,10 +248,11 @@ def test_build_paired_judge_prompt_never_reveals_variant_label() -> None:
     assert "full-context" not in prompt.lower()
 
 
-def test_build_paired_judge_prompt_embeds_strategic_core_once() -> None:
-    """The shared strategic core must appear exactly once, not duplicated per output."""
+def test_build_paired_judge_prompt_embeds_each_reference_output_once() -> None:
+    """Each shared reference output must appear exactly once, not duplicated per candidate."""
     mission = make_mission()
     strategic_core = StrategicCoreOutput(mission_statement="Ship brand with the product.")
+    visual_identity = VisualIdentityOutput()
     output_a = GovernanceOutput()
     output_b = GovernanceOutput()
 
@@ -233,7 +261,11 @@ def test_build_paired_judge_prompt_embeds_strategic_core_once() -> None:
         phase=BrandPhase.GOVERNANCE,
         output_a=output_a,
         output_b=output_b,
-        strategic_core=strategic_core,
+        reference_outputs={
+            BrandPhase.STRATEGIC_CORE: strategic_core,
+            BrandPhase.VISUAL_IDENTITY: visual_identity,
+        },
     )
 
     assert prompt.count("--- GENERATED STRATEGIC CORE") == 1
+    assert prompt.count("--- GENERATED VISUAL IDENTITY") == 1

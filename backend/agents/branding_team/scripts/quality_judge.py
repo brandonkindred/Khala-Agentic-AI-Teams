@@ -73,28 +73,29 @@ OUTPUT contract:
 class PhaseQualityScore(BaseModel):
     """LLM-as-judge score for one phase output on three 1-5 dimensions.
 
-    Dimensions are typed ``float`` (not ``int``) even though a single judge
-    call always returns an integer 1-5 rating per the rubric: this same
-    model doubles as the container for an *averaged* score --
-    ``eval_selective_context._average_phase_quality_score`` combines two
-    real per-call scores (e.g. 3 and 4) into a genuine half-point value
-    (3.5), which an int-typed field would silently round away before the
-    0.5-point regression threshold ever saw it.
+    This is also the live structured-output schema handed to the provider
+    (``structured_output_model=PhaseQualityScore``), so dimensions are kept
+    strictly ``int``: the rubric asks for a 1-5 integer rating, and a
+    ``float`` field here would let a real provider's JSON response silently
+    supply a value like ``3.5`` for a single call, which is not a valid
+    single-judge rating under the rubric. ``eval_selective_context``'s
+    averaging of two raw calls into a genuine half-point value happens in a
+    separate, float-typed container -- see
+    ``eval_selective_context.ComparisonScore`` -- never in this model.
 
     Preconditions:
         None -- constructed only via ``model_validate``/``model_validate_json``
-        against a judge LLM's structured reply, or via
-        ``_average_phase_quality_score``.
+        against a judge LLM's structured reply.
     Postconditions:
         Each of ``strategic_coherence``, ``completeness``, and
-        ``brand_consistency`` is a number in ``[1, 5]`` inclusive;
+        ``brand_consistency`` is an integer in ``[1, 5]`` inclusive;
         construction with a value outside that range raises
         ``pydantic.ValidationError``. ``rationale`` may be empty.
     """
 
-    strategic_coherence: float = Field(ge=1, le=5)
-    completeness: float = Field(ge=1, le=5)
-    brand_consistency: float = Field(ge=1, le=5)
+    strategic_coherence: int = Field(ge=1, le=5)
+    completeness: int = Field(ge=1, le=5)
+    brand_consistency: int = Field(ge=1, le=5)
     rationale: str = ""
 
 
@@ -171,21 +172,37 @@ def _render_mission_summary(mission: BrandingMission) -> str:
     )
 
 
-def _render_strategic_core_block(strategic_core: BaseModel | None) -> str:
-    """Render the optional GENERATED STRATEGIC CORE prompt block.
+def _render_reference_outputs_block(reference_outputs: dict[BrandPhase, BaseModel]) -> str:
+    """Render every canonical upstream phase output as a labeled reference block.
 
     Shared by :func:`_build_judge_prompt` and :func:`_build_paired_judge_prompt`.
+    Includes every upstream phase the caller supplies -- not just the
+    strategic core -- so the judge can catch a candidate contradicting
+    upstream guidance (narrative messaging, visual identity, channel
+    activation, etc.) even when that guidance was excluded from the
+    candidate's own *generation* context by selective-context filtering.
+    Scoring against the full upstream picture, independent of what each
+    candidate was generated from, is what makes "did selective context lose
+    something important" a question the judge can actually answer.
 
-    Preconditions: ``strategic_core`` is either ``None`` or a Pydantic
-    ``BaseModel`` instance whose ``model_dump(mode="json")`` returns a
-    JSON-serializable dict.
-    Postconditions: returns ``""`` when ``strategic_core`` is ``None``;
-    otherwise a non-empty block ending in a blank line.
+    Preconditions:
+        ``reference_outputs`` maps each included ``BrandPhase`` to the
+        Pydantic ``BaseModel`` instance generated for it (in the order the
+        caller wants them rendered); every value's ``model_dump(mode="json")``
+        must return a JSON-serializable dict.
+    Postconditions:
+        Returns ``""`` when ``reference_outputs`` is empty; otherwise one
+        block per entry (each ending in a blank line), headed
+        ``--- GENERATED <PHASE NAME> ---`` with the phase's enum value
+        upper-cased and underscores replaced by spaces (e.g.
+        ``BrandPhase.STRATEGIC_CORE`` renders as ``GENERATED STRATEGIC CORE``).
     """
-    if strategic_core is None:
-        return ""
-    strategic_core_json = json.dumps(strategic_core.model_dump(mode="json"), indent=2)
-    return f"--- GENERATED STRATEGIC CORE ---\n{strategic_core_json}\n\n"
+    blocks = []
+    for phase, output in reference_outputs.items():
+        label = phase.value.replace("_", " ").upper()
+        output_json = json.dumps(output.model_dump(mode="json"), indent=2)
+        blocks.append(f"--- GENERATED {label} ---\n{output_json}\n\n")
+    return "".join(blocks)
 
 
 def _build_judge_prompt(
@@ -193,47 +210,51 @@ def _build_judge_prompt(
     mission: BrandingMission,
     phase: BrandPhase,
     output: BaseModel,
-    strategic_core: BaseModel | None,
+    reference_outputs: dict[BrandPhase, BaseModel],
 ) -> str:
     """Render the user prompt for one judge call.
 
     Deliberately blind to which context variant (selective vs. full) produced
-    ``output`` and ``strategic_core``: revealing that would let the judge
-    score based on the *expected* effect of context reduction rather than
-    the output's actual quality, and a single point of integer-scale bias is
-    enough to flip a regression verdict. Callers distinguish variants for
-    their own bookkeeping (e.g. ``score_phase_output``'s ``variant_label``
-    forwarded only to LLM call telemetry); nothing variant-specific reaches
-    this prompt's text.
+    ``output`` (or which upstream phases fed its own generation): revealing
+    that would let the judge score based on the *expected* effect of context
+    reduction rather than the output's actual quality, and a single point of
+    integer-scale bias is enough to flip a regression verdict. Callers
+    distinguish variants for their own bookkeeping (e.g. ``score_phase_output``'s
+    ``variant_label`` forwarded only to LLM call telemetry); nothing
+    variant-specific reaches this prompt's text.
 
     Preconditions:
         ``output`` is the Pydantic output model instance for ``phase``.
-        ``strategic_core`` is the ``StrategicCoreOutput``-shaped model this
-        variant's own pipeline run generated for ``BrandPhase.STRATEGIC_CORE``
-        (``None`` only when judging the strategic core phase itself, which
-        has no upstream strategic core to compare against).
+        ``reference_outputs`` maps every upstream phase the judge should see
+        as reference context to that phase's canonical generated output
+        (typically every phase preceding ``phase`` in ``PHASE_ORDER``,
+        regardless of what ``output``'s own generation context included --
+        see :func:`_render_reference_outputs_block`); empty only when judging
+        the first phase, which has no upstream reference at all.
     Postconditions:
         Returns a non-empty string embedding the mission's identifying
-        fields, the generated strategic core (when supplied) so the judge
-        can score coherence against what was actually generated upstream
-        (not just the raw mission brief), the phase name, and
-        ``output.model_dump(mode="json")`` as pretty-printed JSON -- with no
-        selective/full-context label anywhere in the returned text.
+        fields, every supplied reference output (so the judge can score
+        coherence/completeness against the full upstream picture, not just
+        the raw mission brief or whatever ``output`` itself was generated
+        from), the phase name, and ``output.model_dump(mode="json")`` as
+        pretty-printed JSON -- with no selective/full-context label anywhere
+        in the returned text.
     """
     mission_summary = _render_mission_summary(mission)
-    strategic_core_block = _render_strategic_core_block(strategic_core)
+    reference_block = _render_reference_outputs_block(reference_outputs)
     output_json = json.dumps(output.model_dump(mode="json"), indent=2)
     return (
         "--- MISSION ---\n"
         f"{mission_summary}\n\n"
-        f"{strategic_core_block}"
+        f"{reference_block}"
         f"--- PHASE ({phase.value}) OUTPUT ---\n"
         f"{output_json}\n\n"
         "--- TASK ---\n"
         "Score this phase output against the rubric in your system prompt. Score "
-        "strategic_coherence against the GENERATED STRATEGIC CORE above (when supplied), "
-        "not just the raw mission brief -- that is the actual upstream strategy this "
-        "phase's output must stay consistent with."
+        "strategic_coherence and brand_consistency against the GENERATED reference "
+        "blocks above (when supplied), not just the raw mission brief -- those are "
+        "the actual upstream outputs this phase's output must stay consistent with, "
+        "regardless of which of them fed its own generation."
     )
 
 
@@ -244,7 +265,7 @@ def score_phase_output(
     phase: BrandPhase,
     output: BaseModel,
     variant_label: str,
-    strategic_core: BaseModel | None = None,
+    reference_outputs: dict[BrandPhase, BaseModel] | None = None,
 ) -> PhaseQualityScore:
     """Score ``output`` (one phase, one context variant) via LLM-as-judge.
 
@@ -256,10 +277,10 @@ def score_phase_output(
         telemetry/log attribution -- it never reaches the rendered prompt
         text the judge sees (see ``_build_judge_prompt``), so the judge
         cannot score based on which variant produced ``output``.
-        ``strategic_core`` should be this same variant's own generated
-        ``BrandPhase.STRATEGIC_CORE`` output when ``phase`` is downstream of
-        it (every phase this eval judges is); omit only when judging the
-        strategic core phase itself.
+        ``reference_outputs`` should map every phase preceding ``phase`` to
+        its canonical generated output (every phase this eval judges has at
+        least ``STRATEGIC_CORE`` upstream); omit/empty only when judging the
+        first phase itself.
     Postconditions:
         Returns a validated :class:`PhaseQualityScore`.
 
@@ -271,7 +292,7 @@ def score_phase_output(
         mission=mission,
         phase=phase,
         output=output,
-        strategic_core=strategic_core,
+        reference_outputs=reference_outputs or {},
     )
     return complete_validated(
         client,
@@ -290,39 +311,41 @@ def _build_paired_judge_prompt(
     phase: BrandPhase,
     output_a: BaseModel,
     output_b: BaseModel,
-    strategic_core: BaseModel | None,
+    reference_outputs: dict[BrandPhase, BaseModel],
 ) -> str:
     """Render the user prompt for one paired judge call scoring two outputs.
 
     Preconditions:
         ``output_a``/``output_b`` are the two Pydantic output model instances
-        for ``phase`` under comparison. ``strategic_core`` is shared between
-        both (every phase this eval judges has a shared, non-diverging
-        ``STRATEGIC_CORE`` upstream of it -- see
-        ``eval_selective_context._first_diverging_phase``), so only one copy
-        is ever rendered.
+        for ``phase`` under comparison. ``reference_outputs`` maps every
+        upstream phase the judge should see as reference context to its
+        canonical generated output -- shared between both candidates (every
+        phase this eval judges has a shared, non-diverging upstream prefix
+        -- see ``eval_selective_context._first_diverging_phase``), so only
+        one copy of each is ever rendered.
     Postconditions:
         Returns a non-empty string with no selective/full-context labeling
         anywhere -- only the neutral "OUTPUT A"/"OUTPUT B" headings, which
         carry no information about which context variant produced which.
     """
     mission_summary = _render_mission_summary(mission)
-    strategic_core_block = _render_strategic_core_block(strategic_core)
+    reference_block = _render_reference_outputs_block(reference_outputs)
     output_a_json = json.dumps(output_a.model_dump(mode="json"), indent=2)
     output_b_json = json.dumps(output_b.model_dump(mode="json"), indent=2)
     return (
         "--- MISSION ---\n"
         f"{mission_summary}\n\n"
-        f"{strategic_core_block}"
+        f"{reference_block}"
         f"--- PHASE ({phase.value}) OUTPUT A ---\n"
         f"{output_a_json}\n\n"
         f"--- PHASE ({phase.value}) OUTPUT B ---\n"
         f"{output_b_json}\n\n"
         "--- TASK ---\n"
         "Score OUTPUT A and OUTPUT B independently against the rubric in your system "
-        "prompt. Score strategic_coherence against the GENERATED STRATEGIC CORE above "
-        "(when supplied), not just the raw mission brief -- that is the actual upstream "
-        "strategy each output must stay consistent with."
+        "prompt. Score strategic_coherence and brand_consistency against the GENERATED "
+        "reference blocks above (when supplied), not just the raw mission brief -- "
+        "those are the actual upstream outputs each output must stay consistent with, "
+        "regardless of which of them fed its own generation."
     )
 
 
@@ -333,7 +356,7 @@ def score_phase_output_pair(
     phase: BrandPhase,
     output_a: BaseModel,
     output_b: BaseModel,
-    strategic_core: BaseModel | None = None,
+    reference_outputs: dict[BrandPhase, BaseModel] | None = None,
 ) -> PairedPhaseQualityScore:
     """Score two candidate outputs for the same phase in a single judge call.
 
@@ -353,10 +376,9 @@ def score_phase_output_pair(
     Preconditions:
         ``client`` is a ready :class:`LLMClient`. ``output_a``/``output_b``
         are the real Pydantic output model instances produced for ``phase``.
-        ``strategic_core`` should be the shared, non-diverging generated
-        ``BrandPhase.STRATEGIC_CORE`` output (see
-        ``eval_selective_context._first_diverging_phase``); omit only when
-        judging the strategic core phase itself.
+        ``reference_outputs`` should map every phase preceding ``phase`` to
+        its shared, non-diverging canonical generated output; omit/empty
+        only when judging the first phase itself.
     Postconditions:
         Returns a validated :class:`PairedPhaseQualityScore`.
 
@@ -369,7 +391,7 @@ def score_phase_output_pair(
         phase=phase,
         output_a=output_a,
         output_b=output_b,
-        strategic_core=strategic_core,
+        reference_outputs=reference_outputs or {},
     )
     return complete_validated(
         client,

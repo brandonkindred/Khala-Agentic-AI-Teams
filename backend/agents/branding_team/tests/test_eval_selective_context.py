@@ -390,6 +390,12 @@ def _quality_score(**overrides) -> PhaseQualityScore:
     return PhaseQualityScore(**values)
 
 
+def _comparison_score(**overrides) -> eval_ctx.ComparisonScore:
+    values = {"strategic_coherence": 5, "completeness": 5, "brand_consistency": 5, "rationale": ""}
+    values.update(overrides)
+    return eval_ctx.ComparisonScore(**values)
+
+
 def test_average_phase_quality_score_averages_each_dimension() -> None:
     """_average_phase_quality_score must average each dimension independently,
     not just one field.
@@ -428,8 +434,8 @@ def test_phase_quality_comparison_detects_regression_hidden_by_rounding() -> Non
     comparison = PhaseQualityComparison(
         mission_name="Acme",
         phase=BrandPhase.GOVERNANCE,
-        selective=_quality_score(strategic_coherence=3.5),
-        full=_quality_score(strategic_coherence=4.5),
+        selective=_comparison_score(strategic_coherence=3.5),
+        full=_comparison_score(strategic_coherence=4.5),
     )
     assert comparison.delta("strategic_coherence") == 1.0
     assert comparison.regressions() == ["strategic_coherence"]
@@ -441,8 +447,8 @@ def test_phase_quality_comparison_no_regression_when_scores_are_equal() -> None:
     comparison = PhaseQualityComparison(
         mission_name="Acme",
         phase=BrandPhase.GOVERNANCE,
-        selective=_quality_score(strategic_coherence=4),
-        full=_quality_score(strategic_coherence=4),
+        selective=_comparison_score(strategic_coherence=4),
+        full=_comparison_score(strategic_coherence=4),
     )
     assert comparison.regressions() == []
 
@@ -454,8 +460,8 @@ def test_phase_quality_comparison_flags_regression_past_threshold() -> None:
     comparison = PhaseQualityComparison(
         mission_name="Acme",
         phase=BrandPhase.GOVERNANCE,
-        selective=_quality_score(strategic_coherence=3),
-        full=_quality_score(strategic_coherence=5),
+        selective=_comparison_score(strategic_coherence=3),
+        full=_comparison_score(strategic_coherence=5),
     )
     assert comparison.regressions() == ["strategic_coherence"]
 
@@ -465,8 +471,8 @@ def test_phase_quality_comparison_flags_multiple_regressed_dimensions() -> None:
     comparison = PhaseQualityComparison(
         mission_name="Acme",
         phase=BrandPhase.CHANNEL_ACTIVATION,
-        selective=_quality_score(strategic_coherence=2, completeness=2, brand_consistency=5),
-        full=_quality_score(strategic_coherence=5, completeness=5, brand_consistency=5),
+        selective=_comparison_score(strategic_coherence=2, completeness=2, brand_consistency=5),
+        full=_comparison_score(strategic_coherence=5, completeness=5, brand_consistency=5),
     )
     assert comparison.regressions() == ["strategic_coherence", "completeness"]
 
@@ -486,8 +492,8 @@ def test_phase_quality_comparison_delta_rejects_invalid_dimension() -> None:
     comparison = PhaseQualityComparison(
         mission_name="Acme",
         phase=BrandPhase.GOVERNANCE,
-        selective=_quality_score(),
-        full=_quality_score(),
+        selective=_comparison_score(),
+        full=_comparison_score(),
     )
     with pytest.raises(ValueError, match="Invalid dimension"):
         comparison.delta("not_a_real_dimension")

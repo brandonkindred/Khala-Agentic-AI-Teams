@@ -188,7 +188,40 @@ _QUALITY_DIMENSIONS: tuple[str, ...] = (
 )
 
 
-def _average_phase_quality_score(a: PhaseQualityScore, b: PhaseQualityScore) -> PhaseQualityScore:
+@dataclass
+class ComparisonScore:
+    """A quality score used for regression comparison -- may average two real
+    per-call :class:`~branding_team.scripts.quality_judge.PhaseQualityScore`
+    ratings, so dimensions are ``float``, not the strict integer 1-5 scale a
+    single judge call returns. Deliberately a plain dataclass, not a Pydantic
+    model reused from ``quality_judge``: ``PhaseQualityScore`` is also the
+    live structured-output schema handed to the provider, and keeping it
+    strictly ``int`` stops a real provider response from silently supplying
+    an invalid single-call rating like ``3.5``.
+    """
+
+    strategic_coherence: float
+    completeness: float
+    brand_consistency: float
+    rationale: str = ""
+
+
+def _to_comparison_score(score: PhaseQualityScore) -> ComparisonScore:
+    """Wrap a single raw judge score in a :class:`ComparisonScore` for direct reuse.
+
+    Preconditions: ``score`` is a valid :class:`PhaseQualityScore`.
+    Postconditions: returns a :class:`ComparisonScore` with the identical
+    (lossless int-to-float) dimension values and rationale.
+    """
+    return ComparisonScore(
+        strategic_coherence=score.strategic_coherence,
+        completeness=score.completeness,
+        brand_consistency=score.brand_consistency,
+        rationale=score.rationale,
+    )
+
+
+def _average_phase_quality_score(a: PhaseQualityScore, b: PhaseQualityScore) -> ComparisonScore:
     """Average two independent judge scores for the same candidate, dimension by dimension.
 
     Used to cancel positional bias in the paired judge call: scoring the same
@@ -198,16 +231,18 @@ def _average_phase_quality_score(a: PhaseQualityScore, b: PhaseQualityScore) -> 
     bias unpredictably across comparisons instead of eliminating it.
 
     Preconditions: ``a`` and ``b`` are both valid :class:`PhaseQualityScore` instances.
-    Postconditions: returns a new :class:`PhaseQualityScore` whose each dimension
+    Postconditions: returns a new :class:`ComparisonScore` whose each dimension
     is the exact, unrounded ``(a + b) / 2`` -- still within ``[1, 5]`` since both
-    inputs are. Deliberately NOT rounded to the nearest integer: two per-call
-    scores of 3 and 4 average to a genuine 3.5, and rounding that away before
+    inputs are. Deliberately NOT rounded to the nearest integer, and deliberately
+    NOT a :class:`PhaseQualityScore` (which is strictly ``int``-typed): two
+    per-call scores of 3 and 4 average to a genuine 3.5, and rounding that away
+    (or being forced back into an int field) before
     ``PhaseQualityComparison.delta``/``regressions`` compare it against the
     ``QUALITY_REGRESSION_THRESHOLD_PTS`` (0.5) threshold could hide a real
     one-point regression (both sides round to the same integer) or manufacture
     a false one (a true 0.5-point gap rounds to a full point either way).
     """
-    return PhaseQualityScore(
+    return ComparisonScore(
         strategic_coherence=(a.strategic_coherence + b.strategic_coherence) / 2,
         completeness=(a.completeness + b.completeness) / 2,
         brand_consistency=(a.brand_consistency + b.brand_consistency) / 2,
@@ -238,8 +273,8 @@ class PhaseQualityComparison:
 
     mission_name: str
     phase: BrandPhase
-    selective: PhaseQualityScore
-    full: PhaseQualityScore
+    selective: ComparisonScore
+    full: ComparisonScore
 
     def delta(self, dimension: str) -> float:
         """Return ``full``'s score minus ``selective``'s score for *dimension*.
@@ -571,6 +606,19 @@ def run_eval(
                 )
 
             for phase in _JUDGED_PHASES:
+                # Every phase preceding `phase` is shared/non-diverging for the
+                # judge's reference context -- even the diverging phase itself
+                # only diverges in what fed its own *generation*, not in the
+                # canonical upstream outputs available for judging (see
+                # _first_diverging_phase). Give the judge the FULL upstream
+                # picture regardless of which of these a candidate's own
+                # generation context actually included, so it can catch a
+                # selective-context output contradicting upstream guidance
+                # (e.g. narrative/channel) that its own generation never saw.
+                reference_outputs = {
+                    upstream: selective_outputs[upstream]
+                    for upstream in _full_context_phases(phase)
+                }
                 if selective_outputs[phase] is full_outputs[phase]:
                     # _run_variant_pair shares this phase's output object between
                     # variants (its context_phases doesn't diverge) -- judging it a
@@ -584,19 +632,17 @@ def run_eval(
                         phase=phase,
                         output=selective_outputs[phase],
                         variant_label="shared",
-                        strategic_core=selective_outputs[BrandPhase.STRATEGIC_CORE],
+                        reference_outputs=reference_outputs,
                     )
-                    selective_score, full_score = score, score
+                    selective_score = full_score = _to_comparison_score(score)
                 else:
-                    # STRATEGIC_CORE is always shared/non-diverging (see
-                    # _first_diverging_phase), so both variants' strategic core is
-                    # the identical object here -- one copy suffices. Scoring both
-                    # candidates in a single call also guarantees they're judged by
-                    # the same underlying provider/model: two separate calls under a
-                    # live, multi-provider FailoverLLMClient are not guaranteed to
-                    # land on the same provider (a 429 between calls can hand the
-                    # second off elsewhere), which would let a change in *judge*
-                    # masquerade as a change in *output quality*.
+                    # Scoring both candidates in a single call also guarantees
+                    # they're judged by the same underlying provider/model: two
+                    # separate calls under a live, multi-provider
+                    # FailoverLLMClient are not guaranteed to land on the same
+                    # provider (a 429 between calls can hand the second off
+                    # elsewhere), which would let a change in *judge* masquerade
+                    # as a change in *output quality*.
                     #
                     # Evaluated under BOTH A/B orderings and averaged: a single
                     # randomized draw only redistributes a judge's positional bias
@@ -605,14 +651,13 @@ def run_eval(
                     # still land selective-in-B and take the full bias as a false
                     # deficit. Scoring each candidate once as A and once as B and
                     # averaging removes the bias regardless of its direction or size.
-                    strategic_core = selective_outputs[BrandPhase.STRATEGIC_CORE]
                     forward = score_phase_output_pair(
                         judge_client,
                         mission=mission,
                         phase=phase,
                         output_a=selective_outputs[phase],
                         output_b=full_outputs[phase],
-                        strategic_core=strategic_core,
+                        reference_outputs=reference_outputs,
                     )
                     reverse = score_phase_output_pair(
                         judge_client,
@@ -620,7 +665,7 @@ def run_eval(
                         phase=phase,
                         output_a=full_outputs[phase],
                         output_b=selective_outputs[phase],
-                        strategic_core=strategic_core,
+                        reference_outputs=reference_outputs,
                     )
                     selective_score = _average_phase_quality_score(
                         forward.output_a, reverse.output_b
