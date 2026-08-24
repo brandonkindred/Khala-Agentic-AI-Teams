@@ -124,10 +124,20 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
      layout is actually necessary before reporting horizontal scroll: a wide data table
      scrolling inside its own container is compliant, a paragraph doing so is not.
      Text-spacing overrides don't break layout.
-   - Motion and timing, at the A/AA bar this review holds to: moving, blinking,
-     scrolling, or auto-updating content can be paused, stopped, or hidden (2.2.2);
-     nothing flashes more than three times a second (2.3.1); and nothing auto-advances
-     or auto-dismisses faster than a user can read it. Honouring
+   - Motion and timing, at the A/AA bar this review holds to, and only where the
+     criterion actually applies:
+       * 2.2.2 covers moving, blinking, or scrolling content that starts
+         automatically, lasts MORE THAN FIVE SECONDS, and is presented in parallel
+         with other content; and auto-updating content that starts automatically and
+         is presented in parallel. Only then is a pause, stop, or hide mechanism
+         required, and essential movement is excepted. A short transition, or a
+         progress display that is the only thing on screen, is not a 2.2.2 failure.
+       * 2.3.1 is satisfied EITHER by flashing no more than three times in any one
+         second OR by staying below the general-flash and red-flash thresholds — a
+         faster but sub-threshold effect is compliant, so check the threshold before
+         reporting.
+       * Nothing auto-advances or auto-dismisses faster than a user can read it.
+     Honouring
      `prefers-reduced-motion` is 2.3.3, which is AAA — worth recommending as an
      enhancement on a decorative entrance animation, but never reported as an AA
      failure merely because the media query is absent.
@@ -141,7 +151,10 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
          control must not be ENTIRELY hidden by a sticky header, toolbar, or footer.
          Partial obscuration fails only the AAA criterion (2.4.12) — report it, if at
          all, as an enhancement, never as an AA violation.
-       * Dragging movements have a single-pointer alternative.
+       * Dragging movements (2.5.7) have a single-pointer alternative that does NOT
+         itself require dragging — a second drag gesture does not satisfy this, since
+         dragging is already single-pointer. Essential dragging, and behaviour set by
+         the user agent and not modified by the author, are excepted.
        * Redundant entry, and consistent help placement.
 
 B. INTERACTION COST
@@ -192,9 +205,14 @@ D. STATE COVERAGE
      - MISSING — a finding. Cite the branch in the template or component that proves
        it is missing.
      - NOT APPLICABLE — the page does not own this state. Evidence is required, not
-       assertion: name the code that hands the state elsewhere (a landing page that
-       redirects to a dashboard as soon as work exists owns neither the populated nor
-       the long-running state). An unevidenced N/A is itself a gap.
+       assertion, and either form counts: name the code that hands the state elsewhere
+       (a landing page redirecting to a dashboard as soon as work exists owns neither
+       the populated nor the long-running state), OR show from the page's operations
+       and branches that nothing there can enter the state at all (a viewer whose only
+       call is a single fetch with success and error branches has no long-running or
+       stalled state to own — there is no handoff to point at, and demanding one would
+       force exactly the fabricated finding forbidden below). An N/A asserted without
+       either form of evidence is itself a gap.
    Never manufacture a finding to fill a state the page does not own — a page with
    fewer owned states is not a page with more defects.
 
@@ -228,6 +246,11 @@ Open with:
   - **Top 5** — up to five, one line each, highest leverage first. Fewer is correct
     when fewer survive verification, and none is a valid result; never pad this list
     by duplicating or inventing findings to reach five.
+  - **State dispositions** — one table per routed page, a row per state, covering all
+    fourteen from §3D. Columns: state | HANDLED / MISSING / N/A | evidence (the
+    `file:line` for a handled branch, the missing branch, or the N/A justification).
+    This is the audit the definition of done requires; a page whose table omits a
+    state is not finished. Each MISSING row is also a finding below.
 
 Then every finding, in ranked order:
 
