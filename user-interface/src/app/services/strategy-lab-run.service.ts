@@ -4,6 +4,7 @@ import { InvestmentApiService } from './investment-api.service';
 import { reduce as reduceStrategyLabRun } from './strategy-lab-run.reducer';
 import { isPaperTradingStatusTerminal } from '../models';
 import type { PaperTradingSession, StrategyLabRunStatus, StrategyLabStreamEvent } from '../models';
+import { extractErrorDetail } from '../shared/extract-error-detail';
 
 /**
  * Owns SSE connect/disconnect for a run's status stream, active-run
@@ -302,7 +303,7 @@ export class StrategyLabRunService implements OnDestroy {
         error: (err) => {
           this._paperTradingLabRecordId.set(null);
           this.paperTradingPollSubs.delete(labRecordId);
-          this._errors.next(err?.error?.detail || err?.message || 'Paper trading polling failed.');
+          this._errors.next(extractErrorDetail(err, 'Paper trading polling failed.'));
         },
       });
     this.paperTradingPollSubs.set(labRecordId, sub);

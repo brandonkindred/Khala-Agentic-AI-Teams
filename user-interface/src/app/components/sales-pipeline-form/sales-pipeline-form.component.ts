@@ -12,6 +12,7 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { SalesApiService } from '../../services/sales-api.service';
 import type { SalesPipelineRequest, IdealCustomerProfile, PipelineStage } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 const PIPELINE_STAGES: { value: PipelineStage; label: string }[] = [
   { value: 'prospecting', label: 'Prospecting — Identify leads' },
@@ -167,7 +168,7 @@ export class SalesPipelineFormComponent implements OnChanges {
       },
       error: (err) => {
         this.loading = false;
-        this.error = err?.error?.detail ?? err?.message ?? 'Pipeline failed to start.';
+        this.error = extractErrorDetail(err, 'Pipeline failed to start.');
       },
     });
   }

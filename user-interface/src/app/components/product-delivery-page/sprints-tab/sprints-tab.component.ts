@@ -19,6 +19,7 @@ import type {
   Sprint,
   SprintPlanResult,
 } from '../../../models/product-delivery.model';
+import { extractErrorDetail } from '../../../shared/extract-error-detail';
 
 const ACTIVE_STATUSES = new Set(['draft', 'proposed', 'planning']);
 
@@ -68,7 +69,7 @@ export class SprintsTabComponent implements OnInit {
         }
       },
       error: (err) => {
-        this.error.set(err?.error?.detail ?? err?.message ?? 'Failed to load products.');
+        this.error.set(extractErrorDetail(err, 'Failed to load products.'));
         this.loadingProducts.set(false);
       },
     });
@@ -93,7 +94,7 @@ export class SprintsTabComponent implements OnInit {
       error: (err) => {
         this.sprints.set([]);
         this.loadingSprints.set(false);
-        this.error.set(err?.error?.detail ?? err?.message ?? 'Failed to load sprints.');
+        this.error.set(extractErrorDetail(err, 'Failed to load sprints.'));
       },
     });
   }
@@ -114,7 +115,7 @@ export class SprintsTabComponent implements OnInit {
       },
       error: (err) => {
         this.planningId.set(null);
-        this.error.set(err?.error?.detail ?? err?.message ?? 'Failed to plan sprint.');
+        this.error.set(extractErrorDetail(err, 'Failed to plan sprint.'));
       },
     });
   }

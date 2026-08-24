@@ -25,6 +25,7 @@ import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-
 import { Router } from '@angular/router';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { MarkdownRendererService } from '../../shared/markdown-renderer.service';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 import type {
   BlogJobListItem,
   BlogJobStatusResponse,
@@ -204,7 +205,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
         });
       },
       error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to cancel job';
+        this.error = extractErrorDetail(err, 'Failed to cancel job');
       },
     });
   }
@@ -219,7 +220,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
         this.triggerJobsRefresh();
       },
       error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to delete job';
+        this.error = extractErrorDetail(err, 'Failed to delete job');
       },
     });
   }
@@ -317,7 +318,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
         }
       },
       error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to delete draft';
+        this.error = extractErrorDetail(err, 'Failed to delete draft');
       },
     });
   }
@@ -349,7 +350,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
   cancelJobFromList(jobId: string): void {
     this.api.cancelJob(jobId).subscribe({
       next: () => { this.triggerJobsRefresh(); },
-      error: (err) => { this.error = err?.error?.detail ?? err?.message ?? 'Failed to cancel job'; },
+      error: (err) => { this.error = extractErrorDetail(err, 'Failed to cancel job'); },
     });
   }
 
@@ -360,7 +361,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
         if (this.selectedBlogJob?.job_id === jobId) this.clearSelection();
         this.triggerJobsRefresh();
       },
-      error: (err) => { this.error = err?.error?.detail ?? err?.message ?? 'Failed to delete job'; },
+      error: (err) => { this.error = extractErrorDetail(err, 'Failed to delete job'); },
     });
   }
 
@@ -528,7 +529,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
       error: (err) => {
         this._artifactsLoadPending = false;
         if (this.selectedBlogJob?.job_id === jobId) {
-          this.artifactsError = err?.error?.detail ?? err?.message ?? 'Failed to load artifacts';
+          this.artifactsError = extractErrorDetail(err, 'Failed to load artifacts');
           this.artifactsLoading = false;
         }
       },
@@ -596,7 +597,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
         this.viewArtifactLoading = false;
       },
       error: (err) => {
-        this.viewArtifactError = err?.error?.detail ?? err?.message ?? 'Failed to load artifact';
+        this.viewArtifactError = extractErrorDetail(err, 'Failed to load artifact');
         this.viewArtifactLoading = false;
       },
     });
@@ -644,7 +645,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
         this.triggerJobsRefresh();
       },
       error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to approve job';
+        this.error = extractErrorDetail(err, 'Failed to approve job');
       },
     });
   }
@@ -658,7 +659,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
         this.triggerJobsRefresh();
       },
       error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to unapprove job';
+        this.error = extractErrorDetail(err, 'Failed to unapprove job');
       },
     });
   }
@@ -698,7 +699,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
         this.titleRatingSubmitting = false;
       },
       error: (err) => {
-        this.collaborationError = err?.error?.detail ?? err?.message ?? 'Failed to submit title rating';
+        this.collaborationError = extractErrorDetail(err, 'Failed to submit title rating');
         this.titleRatingSubmitting = false;
       },
     });
@@ -717,7 +718,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
         this.titleRatingSubmitting = false;
       },
       error: (err) => {
-        this.collaborationError = err?.error?.detail ?? err?.message ?? 'Failed to submit title rating';
+        this.collaborationError = extractErrorDetail(err, 'Failed to submit title rating');
         this.titleRatingSubmitting = false;
       },
     });
@@ -740,7 +741,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
         this.storySubmitting = false;
       },
       error: (err) => {
-        this.collaborationError = err?.error?.detail ?? err?.message ?? 'Failed to submit story response';
+        this.collaborationError = extractErrorDetail(err, 'Failed to submit story response');
         this.storySubmitting = false;
       },
     });
@@ -760,7 +761,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
         this.storySubmitting = false;
       },
       error: (err) => {
-        this.collaborationError = err?.error?.detail ?? err?.message ?? 'Failed to skip story gap';
+        this.collaborationError = extractErrorDetail(err, 'Failed to skip story gap');
         this.storySubmitting = false;
       },
     });
@@ -806,7 +807,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
         this.qaSubmitting = false;
       },
       error: (err) => {
-        this.collaborationError = err?.error?.detail ?? err?.message ?? 'Failed to submit answers';
+        this.collaborationError = extractErrorDetail(err, 'Failed to submit answers');
         this.qaSubmitting = false;
       },
     });
@@ -833,7 +834,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
         this.draftFeedbackSubmitting = false;
       },
       error: (err) => {
-        this.collaborationError = err?.error?.detail ?? err?.message ?? 'Failed to submit draft feedback';
+        this.collaborationError = extractErrorDetail(err, 'Failed to submit draft feedback');
         this.draftFeedbackSubmitting = false;
       },
     });

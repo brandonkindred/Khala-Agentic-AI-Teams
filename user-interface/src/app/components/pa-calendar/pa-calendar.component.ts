@@ -10,6 +10,7 @@ import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatChipsModule } from '@angular/material/chips';
 import { PersonalAssistantApiService } from '../../services/personal-assistant-api.service';
 import type { CalendarEvent, EventFromTextResponse } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 /**
  * Calendar component for viewing events and creating them with natural language.
@@ -67,7 +68,7 @@ export class PaCalendarComponent {
       },
       error: (err) => {
         this.loading = false;
-        this.snackBar.open(err?.error?.detail || 'Failed to parse event', 'Close', { duration: 3000 });
+        this.snackBar.open(extractErrorDetail(err, 'Failed to parse event'), 'Close', { duration: 3000 });
       },
     });
   }
@@ -106,7 +107,7 @@ export class PaCalendarComponent {
       },
       error: (err) => {
         this.loading = false;
-        this.snackBar.open(err?.error?.detail || 'Failed to create events', 'Close', { duration: 3000 });
+        this.snackBar.open(extractErrorDetail(err, 'Failed to create events'), 'Close', { duration: 3000 });
       },
     });
   }
