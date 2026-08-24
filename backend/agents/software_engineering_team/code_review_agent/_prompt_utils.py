@@ -110,3 +110,17 @@ def _cap_context_field(text: str) -> str:
         ``_CONTEXT_FIELD_TRUNCATION_MARKER``. Never raises.
     """
     return _truncate_with_marker(text, _CONTEXT_FIELD_CHARS, _CONTEXT_FIELD_TRUNCATION_MARKER)
+
+
+def _render_manifest(paths: List[str]) -> List[str]:
+    """Render the full changed-file path list (no character truncation).
+
+    Shared by the architecture-consistency, side-effect-impact, and merged
+    architecture/side-effect passes so the changed-file manifest has one
+    source of truth instead of a pass-owned copy in each module.
+
+    Preconditions: ``paths`` is a list of file-path strings.
+    Postconditions: always includes the section header followed by every
+        path, in order. Never raises.
+    """
+    return [f"**Changed files in this submission ({len(paths)}):**", *paths]
