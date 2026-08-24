@@ -86,10 +86,21 @@
             </td>
             <td>
               @if (rec.reviewSummary; as s) {
+                @let systemicCount = systemicFindingsCount(s);
                 <span class="cr-findings">
                   <span class="cr-chip">{{ s.total_issues }} finding(s)</span>
                   <span class="cr-chip">{{ s.inline_comments }} inline</span>
                   <span class="cr-chip">{{ commentFindings(s) }} comments</span>
+                  @if (systemicCount > 0) {
+                    <button
+                      type="button"
+                      class="cr-chip cr-chip--systemic"
+                      (click)="onViewSystemicFindings(rec)"
+                      aria-label="View systemic findings"
+                    >
+                      {{ systemicCount }} systemic pattern(s)
+                    </button>
+                  }
                 </span>
               } @else {
                 —
