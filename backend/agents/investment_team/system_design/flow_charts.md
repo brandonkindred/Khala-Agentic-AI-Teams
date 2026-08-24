@@ -78,28 +78,28 @@ sequenceDiagram
 ## 2. Strategy Lab batch run flow
 
 The long-running flow kicked off by `POST /strategy-lab/run`. The API returns
-immediately with a `run_id`; the worker thread runs the per-cycle loop and
-publishes SSE events that the UI subscribes to.
+immediately with a `run_id`; a durable Temporal workflow runs the batch/cycle
+loop and best-effort-publishes SSE events that the UI subscribes to. Strategy
+Lab is **Temporal-only** — there is no thread-mode fallback (see
+[`architecture.md`](./architecture.md)§7).
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Client
     participant API as api/main.py
-    participant Worker as _strategy_lab_worker<br/>(daemon thread)
-    participant MLDP as FreeTierMarketDataProvider
+    participant BatchWF as StrategyLabBatchWorkflow
+    participant CycleWF as StrategyLabCycleWorkflow<br/>(child, per cycle)
     participant SIE as SignalIntelligenceExpert
-    participant SIA as StrategyIdeationAgent
-    participant BTA as BacktestingAgent
-    participant MDS as MarketDataService
+    participant Attempt as run_design_attempt_activity<br/>(runs the WHOLE per-attempt pipeline)
+    participant Finalize as finalize_cycle_record_activity
+    participant PTA as PaperTradingAgent
     participant LLM as LLM Service
     participant Store as _PersistentDict
     participant Bus as job_event_bus
 
     Client->>API: POST /strategy-lab/run (L1251)
-    API->>API: allocate run_id, init state
-    API->>Store: _active_runs[run_id] persisted
-    API->>Worker: spawn thread(_strategy_lab_worker, L1083)
+    API->>BatchWF: start_workflow (503 if Temporal unreachable)
     API-->>Client: StrategyLabRunStartResponse (run_id)
 
     opt Real-time subscription
@@ -107,63 +107,60 @@ sequenceDiagram
         API->>Bus: subscribe(run_id)
     end
 
-    Worker->>MLDP: fetch_context()<br/>(Frankfurter + FRED + CoinGecko)
-    MLDP-->>Worker: MarketLabContext
-    Worker->>Store: load prior StrategyLabRecords
+    loop for each batch
+        BatchWF->>SIE: compute_signal_brief_activity<br/>(once per batch; sees priors from batches 1..N-1)
+        SIE->>LLM: complete_json
+        LLM-->>SIE: SignalIntelligenceBriefV1
+        SIE-->>BatchWF: brief
 
-    loop for each cycle in batch
-        alt Signal expert enabled
-            Worker->>SIE: produce_signal_brief(priors, context)
-            SIE->>LLM: complete_json(temp=0.58)
-            LLM-->>SIE: SignalIntelligenceBriefV1
-            SIE-->>Worker: brief
+        loop wave of cycles (bounded parallelism)
+            BatchWF->>CycleWF: start_child_workflow(cycle_input incl. brief)
+
+            loop design-re-entry (bounded, on spec-implementability failure)
+                CycleWF->>Attempt: run_design_attempt_activity
+                Attempt->>LLM: design ↔ review → synthesis →<br/>refinement → alignment → analysis<br/>(see generation_pipeline.md)
+                LLM-->>Attempt: spec, code, trades, narrative
+                Attempt-->>CycleWF: record | reentry | skipped
+            end
+
+            CycleWF-->>BatchWF: cycle result
+            BatchWF->>Finalize: finalize_cycle_record_activity
+            alt publishable winner
+                Finalize->>PTA: run_session(strategy)
+                PTA-->>Finalize: PaperTradingSession
+            end
+            Finalize->>Store: persist StrategyLabRecord
+            BatchWF->>Bus: publish_run_event_activity (best-effort)
+            Bus-->>Client: SSE event
         end
-
-        Worker->>SIA: ideate_strategy(brief, priors)
-        SIA->>LLM: complete_json(temp=0.85)
-        LLM-->>SIA: StrategySpec (creative)
-        SIA-->>Worker: strategy
-
-        Worker->>BTA: run_backtest(strategy, config)
-        BTA->>MDS: fetch OHLCV per symbol
-        MDS-->>BTA: bars
-        loop per qualifying bar
-            BTA->>LLM: complete_json(temp=0.2)
-            LLM-->>BTA: enter/exit/hold decision
-        end
-        BTA-->>Worker: BacktestResult + trades
-
-        Worker->>SIA: _analyze_strategy(win/lose)
-        SIA->>LLM: complete_json(temp=0.35)
-        LLM-->>SIA: draft narrative
-        Worker->>SIA: _self_review_analysis(draft)
-        SIA->>LLM: complete_json(temp=0.15)
-        LLM-->>SIA: validated narrative
-        SIA-->>Worker: narrative
-
-        Worker->>Store: persist StrategyLabRecord
-        Worker->>Bus: publish(run_id, cycle_complete event)
-        Bus-->>Client: SSE event
     end
 
-    Worker->>Store: mark run complete
-    Worker->>Bus: publish(run_id, run_complete)
+    BatchWF->>Store: mark run complete
+    BatchWF->>Bus: publish_run_event_activity (run_complete)
     Bus-->>Client: SSE event (close)
 ```
 
 **Key notes**
 
-- The per-bar LLM call inside `BacktestingAgent.run_backtest` is expensive —
-  it's the CRITICAL-1 issue in
-  [`../ARCHITECTURE_REVIEW.md`](../ARCHITECTURE_REVIEW.md). The long-term plan
-  is rule compilation + batched Tier-2 evaluation.
-- Worker state lives in both an in-memory `_active_runs` dict **and** the
-  `_PersistentDict` bucket so restarts can reload in-flight runs via
-  `_load_run_from_job_service`.
-- `STRATEGY_LAB_SIGNAL_EXPERT_ENABLED` toggles the signal-expert step off for
-  A/B comparison or cost control.
+- `run_design_attempt_activity` runs the *entire* per-attempt pipeline
+  (design ↔ review, code synthesis, refinement, trade alignment,
+  verification, analysis, and record assembly) as a **single** Temporal
+  activity — durability applies at attempt granularity, not per inner phase.
+  See [`generation_pipeline.md`](./generation_pipeline.md) for what actually
+  happens inside it, including the quality-gates catalog.
+- There is no per-bar LLM call anywhere in this flow: the prior LLM-per-bar
+  backtest path has been fully removed (`api/main.py::_run_real_data_backtest`
+  now raises if a strategy has no compiled/synthesized `strategy_code`).
+  Backtests execute deterministically through the sandboxed engine
+  (`trading_service/`), the same execution path Strategy Lab and paper
+  trading both use.
+- `_active_runs` is an in-memory read cache kept in sync with the durable
+  job-service record via `_reconcile_run_progress`, called by every read
+  surface — so a restart or a stale cache never desyncs progress counters.
+- `STRATEGY_LAB_SIGNAL_EXPERT_ENABLED` toggles the per-batch signal-expert
+  step off for A/B comparison or cost control.
 - Polling clients can use `GET /strategy-lab/runs/{run_id}/status` (L1534)
-  instead of SSE.
+  instead of SSE — both surfaces read the same reconciled data.
 
 ---
 

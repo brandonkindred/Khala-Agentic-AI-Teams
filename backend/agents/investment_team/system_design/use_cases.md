@@ -139,7 +139,7 @@ flowchart LR
 |---|---|---|---|
 | Create strategy spec | `POST /strategies` | — | `investment_strategies` |
 | Validate strategy | `POST /strategies/{id}/validate` | `ValidationAgent.checklist_failures` ([`agents.py`](../agents.py):106) | `investment_validations` |
-| Run backtest | `POST /backtests` | `BacktestingAgent.run_backtest` | `investment_backtests` |
+| Run backtest | `POST /backtests` | `_run_real_data_backtest` — sandboxed execution of `strategy.strategy_code`; the legacy LLM-per-bar path has been removed | `investment_backtests` |
 | List backtests | `GET /backtests` | — (read-only) | `investment_backtests` |
 | Decide promotion | `POST /promotions/decide` | `InvestmentTeamOrchestrator.promotion_decision` → `PromotionGateAgent.decide` ([`orchestrator.py`](../orchestrator.py):92, [`agents.py`](../agents.py):131) | audit log + escalation queue on reject/revise |
 | View workflow status | `GET /workflow/status` | `InvestmentTeamOrchestrator` | — |
@@ -150,7 +150,7 @@ flowchart LR
 
 | Use case | Endpoint | Agent(s) | Persists to |
 |---|---|---|---|
-| Run strategy lab batch | `POST /strategy-lab/run` | `StrategyLabBatchWorkflow` → `SignalIntelligenceExpert` → `StrategyIdeationAgent` → `BacktestingAgent` | `investment_strategy_lab_records` |
+| Run strategy lab batch | `POST /strategy-lab/run` | `StrategyLabBatchWorkflow` → `SignalIntelligenceExpert` (once/batch) → `StrategyLabCycleWorkflow` → `run_design_attempt_activity` (`DesignAgent`/`DesignReviewAgent`/`CodeSynthesisAgent`/`RefinementAgent`/`TradeAlignmentAgent`/`AnalysisAgent` + quality gates — see [`generation_pipeline.md`](./generation_pipeline.md)) → `finalize_cycle_record_activity` (`PaperTradingAgent`) | `investment_strategy_lab_records` |
 | Stream run progress | `GET /strategy-lab/runs/{id}/stream` | `job_event_bus` subscription | — |
 | Poll run status | `GET /strategy-lab/runs/{id}/status` | `_active_runs` + `_load_run_from_job_service` | — |
 | Resume paused run | `POST /strategy-lab/runs/{id}/resume` | `StrategyLabBatchWorkflow` | `investment_strategy_lab_records` |

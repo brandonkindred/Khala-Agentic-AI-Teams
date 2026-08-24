@@ -36,12 +36,23 @@ flowchart TB
       IC[InvestmentCommitteeAgent<br/>L303-407]
     end
 
-    subgraph lab_agents[Strategy Lab Agents — agents/]
-      SIE[SignalIntelligenceExpert<br/>signal_intelligence_agent.py]
-      SIA[StrategyIdeationAgent<br/>strategy_ideation_agent.py]
-      BTA[BacktestingAgent<br/>backtesting_agent.py]
-      PTA[PaperTradingAgent<br/>paper_trading_agent.py]
-      TSE[TradeSimulationEngine<br/>trade_simulator.py]
+    subgraph lab_agents[Strategy Lab Pipeline Agents — strategy_lab/agents/]
+      DA[DesignAgent]
+      DRA[DesignReviewAgent]
+      CSA[CodeSynthesisAgent]
+      RFA[RefinementAgent]
+      TAA[TradeAlignmentAgent]
+      ANA[AnalysisAgent]
+      ZTRA[ZeroTradeRepairAgent]
+    end
+
+    subgraph lab_gates[Quality Gates — strategy_lab/quality_gates/]
+      QG[SpecReadinessGate · CodeSafetyChecker<br/>CodeConformanceGate · PredicateConformanceGate<br/>PredicateReachabilityProbe · BacktestAnomalyDetector<br/>AcceptanceGate · ExitRuleConformanceGate<br/>5 realism gates · DeterministicAlignmentChecker<br/>ConvergenceTracker · StrategySpecValidator]
+    end
+
+    subgraph batch_agents[Batch-level Agents — investment_team/]
+      SIE[SignalIntelligenceExpert<br/>signal_intelligence_agent.py<br/>runs once per BATCH, not per cycle]
+      PTA[PaperTradingAgent<br/>paper_trading_agent.py<br/>runs post-cycle, never inside orchestrator.py]
     end
 
     subgraph orch[Orchestration — orchestrator.py]
@@ -50,8 +61,10 @@ flowchart TB
     end
 
     subgraph worker[Strategy Lab Dispatch — Temporal-only]
-      Worker[_dispatch_strategy_lab_run<br/>api/main.py — StrategyLabBatchWorkflow<br/>+ child StrategyLabCycleWorkflow per cycle]
-      Cycle[strategy_lab/temporal/activities.py<br/>fine-grained per-side-effect activities]
+      BatchWF[StrategyLabBatchWorkflow<br/>strategy_lab/temporal/workflows.py<br/>wave/batch fan-out, 1 signal-brief call per batch]
+      CycleWF[StrategyLabCycleWorkflow<br/>child workflow per cycle<br/>outer design-re-entry loop only]
+      DesignAttempt["run_design_attempt_activity<br/>runs StrategyLabOrchestrator._run_design_attempt VERBATIM:<br/>design+review → synthesis → refinement/alignment →<br/>verification/analysis → record assembly — all in ONE activity"]
+      Finalize[finalize_cycle_record_activity<br/>signal-brief attach + paper-trade + persist]
       EventBus[job_event_bus.py<br/>SSE fan-out + job-service reconciliation]
     end
 
@@ -99,14 +112,20 @@ flowchart TB
   SharedEP --> PGate
   SharedEP --> ORCH
 
-  LabEP --> Worker
-  Worker --> Cycle
-  Cycle --> SIE
-  Cycle --> SIA
-  Cycle --> BTA
-  BTA --> TSE
-  LabEP --> PTA
-  PTA --> TSE
+  LabEP --> BatchWF
+  BatchWF --> SIE
+  BatchWF --> CycleWF
+  CycleWF --> DesignAttempt
+  DesignAttempt --> DA
+  DesignAttempt --> DRA
+  DesignAttempt --> CSA
+  DesignAttempt --> RFA
+  DesignAttempt --> TAA
+  DesignAttempt --> ANA
+  DesignAttempt --> ZTRA
+  DesignAttempt --> QG
+  CycleWF --> Finalize
+  Finalize --> PTA
 
   ORCH --> PG
   ORCH --> PGate
@@ -120,12 +139,16 @@ flowchart TB
   FA --> LLM
   IC --> LLM
   SIE --> LLM
-  SIA --> LLM
-  BTA --> LLM
+  DA --> LLM
+  DRA --> LLM
+  CSA --> LLM
+  RFA --> LLM
+  TAA --> LLM
+  ANA --> LLM
   PTA --> LLM
 
   SIE --> MLDP
-  BTA --> MDS
+  DesignAttempt --> MDS
   PTA --> MDS
 
   MDS --> YF
@@ -139,11 +162,14 @@ flowchart TB
   AdvisorEP --> PDict
   LabEP --> PDict
   SharedEP --> PDict
-  Worker --> PDict
+  BatchWF --> PDict
+  DesignAttempt -->|"design-attempt checkpoint<br/>(ADR-012)"| PDict
+  Finalize --> PDict
   PDict --> Buckets
   Buckets --> JS
 
-  Worker --> EventBus
+  BatchWF --> EventBus
+  DesignAttempt -.->|"publish_run_event_activity<br/>(best-effort)"| EventBus
   EventBus -->|"SSE /strategy-lab/runs/{id}/stream"| UI
 ```
 
@@ -247,20 +273,42 @@ data query the `jobs` table directly (see
 
 ### 7. Temporal-only dispatch (thread-based worker retired)
 
-A strategy-lab run is a long-running, multi-cycle loop (signal → ideation →
-backtest → analysis → self-review). The Phase 3 migration tracked in
-[`../ARCHITECTURE_REVIEW.md`](../ARCHITECTURE_REVIEW.md) is complete: the old
-in-process daemon-thread worker (`_strategy_lab_worker`) has been removed, and
-`run_strategy_lab` / `resume_strategy_lab_run` / `restart_strategy_lab_run` now
-dispatch exclusively through `_dispatch_strategy_lab_run`
-([`api/main.py`](../api/main.py)), which starts the durable
-`StrategyLabBatchWorkflow` — a parent workflow that fans each batch's cycles
-out as `StrategyLabCycleWorkflow` **child workflows**, reproducing the old
-thread-mode per-wave concurrency on Temporal's `strategy-lab-queue`
+A strategy-lab run is a long-running, multi-cycle loop. The Phase 3 migration
+tracked in [`../ARCHITECTURE_REVIEW.md`](../ARCHITECTURE_REVIEW.md) is
+complete: the old in-process daemon-thread worker (`_strategy_lab_worker`) has
+been removed, and `run_strategy_lab` / `resume_strategy_lab_run` /
+`restart_strategy_lab_run` now dispatch exclusively through
+`_dispatch_strategy_lab_run` ([`api/main.py`](../api/main.py)), which starts
+the durable `StrategyLabBatchWorkflow` — a parent workflow that, for each
+batch, refreshes a **per-batch signal-intelligence brief** (one
+`compute_signal_brief_activity` call via `SignalIntelligenceExpert`, shared by
+every cycle in that batch — not recomputed per cycle) and then fans that
+batch's cycles out as `StrategyLabCycleWorkflow` **child workflows**,
+reproducing the old thread-mode per-wave concurrency on Temporal's
+`strategy-lab-queue`
 ([`strategy_lab/temporal/workflows.py`](../strategy_lab/temporal/workflows.py)).
-Each cycle's side effects (LLM calls, backtests, market-data fetches,
-job-service writes) run as fine-grained activities in
-[`strategy_lab/temporal/activities.py`](../strategy_lab/temporal/activities.py).
+
+`StrategyLabCycleWorkflow` itself only durability-wraps the *outer*
+design-re-entry loop (retry a spec-implementability failure into a fresh
+design attempt, up to `MAX_DESIGN_REENTRIES` times). The entire *inner*
+per-attempt pipeline — design ↔ review, code synthesis, refinement, trade
+alignment, verification, analysis, and record assembly — runs unmodified
+inside a **single** activity, `run_design_attempt_activity`
+([`strategy_lab/temporal/activities.py`](../strategy_lab/temporal/activities.py)),
+which is a thin wrapper around `StrategyLabOrchestrator._run_design_attempt`.
+Temporal durability therefore applies at the *attempt* granularity, not at
+each internal phase; an ADR-012 checkpoint taken at the design/synthesis
+boundary inside that same activity lets a crash-and-retry resume past a
+completed design phase instead of re-paying for it (see
+[`../strategy_lab/README.md`](../strategy_lab/README.md#design-attempt-checkpointing)).
+Once a cycle produces a record, `finalize_cycle_record_activity` runs the
+post-`run_cycle` tail — attaching the batch's signal brief and running
+`PaperTradingAgent` for publishable winners — delegating to the same
+`_finalize_strategy_lab_cycle_record` helper the (now-removed) thread-mode
+path used. See
+[`generation_pipeline.md`](./generation_pipeline.md) for the full inner-loop
+mechanics: the design ↔ review loop, the compiled-DSL-vs-custom-code fork, the
+refinement/alignment loops, and the ~20-gate quality-gates catalog.
 
 There is **no in-process fallback**: `_require_temporal()` raises `HTTPException(503)`
 for these endpoints when `TEMPORAL_ADDRESS` is unset / no worker is connected.
@@ -310,7 +358,44 @@ prompt-side data shape without destabilizing the backtester.
 Every agent takes an `LLMClient` from `backend/agents/llm_service/` and calls
 `.complete_json(...)`. Provider (Ollama vs Claude), base URL, and model are
 selected by `LLM_PROVIDER`, `LLM_BASE_URL`, and `LLM_MODEL` — the same
-environment variables used by every other Khala team.
+environment variables used by every other Khala team. Strategy Lab's own
+agents route through an additional shared fault-tolerance envelope on top of
+this (`strategy_lab/agents/_llm_envelope.py` — per-call timeout, retries,
+backoff, total wall-time budget); see
+[`../strategy_lab/README.md`](../strategy_lab/README.md) for that layer.
+
+### 11. The per-attempt pipeline is a 5-mixin, 4-phase state machine
+
+`StrategyLabOrchestrator` (`strategy_lab/orchestrator.py`) is deliberately
+**not** a Strands `Agent` — the flow must not be skippable, so it's plain
+Python control flow that calls into agents and gates, never an LLM deciding
+what to call next. The class is composed from five mixins, each owning one
+slice of the pipeline and resolved via MRO on the final class:
+
+| Mixin | Owns |
+|---|---|
+| `DesignMixin` (`orchestrator_design.py`) | The DESIGN ↔ DESIGN_REVIEW loop and the whole-attempt sequencer (`_run_design_attempt`) |
+| `SynthesisMixin` (`orchestrator_synthesis.py`) | Pre-synthesis validation and the bounded code-refinement loop |
+| `AlignmentMixin` (`orchestrator_alignment.py`) | The post-backtest trade-alignment audit/fix loop |
+| `VerificationMixin` (`orchestrator_verification.py`) | Walk-forward acceptance, exit-rule conformance, realism gates, publication veto |
+| `RecordAssemblyMixin` (`orchestrator_record_assembly.py`) | Building the final `StrategyLabRecord`, happy-path or short-circuit |
+
+`_orchestrator_helpers.py` is the dependency-free base every mixin builds on
+— shared outcome dataclasses and the copy-on-entry/commit-on-completion
+`_DriftCollector` that isolates one design attempt's spec/code drift from the
+next. This split is a straight, behavior-preserving relocation of a former
+~3500-line god-class; see
+[`../strategy_lab/MIXIN_BOUNDARIES.md`](../strategy_lab/MIXIN_BOUNDARIES.md)
+for the full boundary rationale and
+[`../strategy_lab/RETRY_STATE_ISOLATION.md`](../strategy_lab/RETRY_STATE_ISOLATION.md)
+for how the drift collector composes with attempt-to-attempt retry isolation.
+Each attempt moves through four phases tracked by `strategy_lab/phases.py`
+(`DESIGN → DESIGN_REVIEW → CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION`), with
+every transition carrying SHA-256 hashes of the spec and code so drift across
+a phase boundary is detectable. Full mechanics — the design↔review loop,
+mechanical-repair pre-flight, compiled-DSL-vs-custom-code fork, refinement and
+alignment loops, and the ~20-gate `quality_gates/` catalog — are documented in
+[`generation_pipeline.md`](./generation_pipeline.md), not repeated here.
 
 ## Environment variables consumed by this team
 
@@ -324,6 +409,13 @@ environment variables used by every other Khala team.
 | `STRATEGY_LAB_SIGNAL_EXPERT_ENABLED` | Toggles the signal-intelligence step |
 | `LLM_PROVIDER` / `LLM_BASE_URL` / `LLM_MODEL` | Shared LLM client config |
 | `POSTGRES_HOST` (+ friends) | Enables job-service persistence (required for non-trivial use) |
+
+This table covers only the batch-level / market-data vars read directly by
+`api/main.py` and `market_data_service.py`. The much larger `STRATEGY_LAB_*`
+surface tuning the design/review loop, code synthesis, refinement, alignment,
+and the LLM fault-tolerance envelope is documented exhaustively — and kept
+current — in [`../strategy_lab/README.md`](../strategy_lab/README.md#environment-variables),
+the canonical home for those knobs.
 
 ## Known issues & roadmap
 

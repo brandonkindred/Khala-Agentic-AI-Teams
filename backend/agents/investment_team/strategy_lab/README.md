@@ -16,6 +16,16 @@ reference below is the canonical home for those knobs (CLAUDE.md and `docs/ENV_V
 point here). All numeric vars parse defensively: garbage → documented default,
 out-of-range → clamped to the documented floor/ceiling unless noted.
 
+**Architecture, system design, and how the pipeline actually generates a strategy** are
+documented separately, not here: see
+[`../system_design/architecture.md`](../system_design/architecture.md) for the container-level
+view of how this package fits into the Investment Team and the platform, and
+[`../system_design/generation_pipeline.md`](../system_design/generation_pipeline.md) for the
+full inner-loop mechanics summarized above (design ↔ review, code synthesis, refinement,
+trade-alignment, the quality-gates catalog, and the Temporal activity mapping). This README
+stays focused on Temporal dispatch semantics, design-attempt checkpointing, and the
+environment-variable reference.
+
 ## Temporal dispatch
 
 Strategy Lab is **Temporal-only**: it requires `TEMPORAL_ADDRESS` and a connected worker

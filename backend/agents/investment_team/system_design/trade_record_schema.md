@@ -1,8 +1,13 @@
 # Trade Record Schema
 
 A `TradeRecord` ([`models.py`](../models.py)) represents one simulated
-round-trip (entry → exit) produced by `TradeSimulationEngine`. The same
-schema applies to **both** backtest trades (stored in
+round-trip (entry → exit). The legacy `TradeSimulationEngine` bar-by-bar
+evaluator that used to produce these has been retired — strategy code now
+runs exclusively through the event-driven `trading_service/` engine
+(`FillSimulator`, [`trading_service/engine/fill_simulator.py`](../trading_service/engine/fill_simulator.py)),
+and Strategy-Lab-generated trades are converted into `TradeRecord`s by
+[`strategy_lab/executor/trade_builder.py::build_trade_records`](../strategy_lab/executor/trade_builder.py).
+The same schema applies to **both** backtest trades (stored in
 `BacktestRecord.trades`) and paper-trading trades (stored in
 `PaperTradingSession.trades`), so downstream analysis tooling can treat
 them uniformly.
@@ -69,7 +74,12 @@ equal the fill prices. New analysis code should prefer the explicit
 
 ## Where it's produced
 
-See [`trade_simulator.py::TradeSimulationEngine._close_position`](../trade_simulator.py).
-`OpenPosition` carries `entry_bid_price` and `entry_order_type` from
-the entry bar through to the close; the exit bar's raw close becomes
-`exit_bid_price`, and slippage is applied on both sides symmetrically.
+See [`trading_service/engine/fill_simulator.py::FillSimulator`](../trading_service/engine/fill_simulator.py),
+the live event-driven fill engine, and
+[`strategy_lab/executor/trade_builder.py::build_trade_records`](../strategy_lab/executor/trade_builder.py),
+which applies the same slippage/cost math post-hoc when converting a
+Strategy-Lab-generated strategy's raw trade dicts into `TradeRecord`s.
+`OpenPosition` (`trade_simulator.py`) carries `entry_bid_price` and
+`entry_order_type` from the entry bar through to the close; the exit bar's
+raw close becomes `exit_bid_price`, and slippage is applied on both sides
+symmetrically.

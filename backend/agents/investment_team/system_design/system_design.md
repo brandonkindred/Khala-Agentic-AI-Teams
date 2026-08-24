@@ -60,12 +60,11 @@ flowchart LR
     VA[ValidationAgent]
     PGate[PromotionGateAgent]
     IC[InvestmentCommitteeAgent]
-    SIE[SignalIntelligenceExpert]
-    SIA[StrategyIdeationAgent]
-    BTA[BacktestingAgent]
-    PTA[PaperTradingAgent]
+    SIE[SignalIntelligenceExpert<br/>once per batch]
+    SLO["StrategyLabOrchestrator<br/>4-phase pipeline — see architecture.md §11<br/>and generation_pipeline.md"]
+    PTA[PaperTradingAgent<br/>post-cycle]
     ORCH[InvestmentTeamOrchestrator]
-    Worker[_strategy_lab_worker]
+    BatchWF[StrategyLabBatchWorkflow<br/>Temporal-only]
     EventBus[job_event_bus]
   end
 
@@ -102,18 +101,17 @@ flowchart LR
   S6 --> ORCH
   S7 --> ORCH
 
-  L1 --> Worker
-  Worker --> SIE
-  Worker --> SIA
-  Worker --> BTA
-  Worker --> B7
-  Worker --> EventBus
+  L1 --> BatchWF
+  BatchWF --> SIE
+  BatchWF --> SLO
+  SLO --> B7
+  BatchWF --> EventBus
   L2 --> B7
   L3 --> B7
-  L4 --> Worker
-  L5 --> Worker
-  L6 --> Worker
-  L7 --> Worker
+  L4 --> BatchWF
+  L5 --> BatchWF
+  L6 --> BatchWF
+  L7 --> BatchWF
   L8 --> EventBus
   L9 --> B7
   L10 --> B7
@@ -202,14 +200,21 @@ classDiagram
     }
     class StrategySpec {
       +strategy_id: str
+      +authored_by: str
       +asset_class: str
       +hypothesis: str
       +signal_definition: str
-      +entry_rules: str
-      +exit_rules: str
-      +sizing_rules: str
-      +risk_limits: dict
+      +timeframe: "1m|5m|15m|1h|1d"
+      +entry_rules: List~EntryRule~
+      +exit_rules: List~ExitRule~
+      +sizing: SizingRule
+      +target_symbols: List~str~
+      +risk_limits: RiskLimits
       +speculative: bool
+      +requires_custom_code: bool
+      +strategy_code?: str
+      +expectancy_forecast?: ExpectancyForecast
+      +audit: AuditContext
     }
     class ValidationReport {
       +strategy_id: str
@@ -248,8 +253,49 @@ classDiagram
       +strategy: StrategySpec
       +backtest: BacktestRecord
       +is_winning: bool
-      +narrative: str
-      +signal_brief: dict
+      +is_publishable: bool
+      +publishability_skip_reason?: str
+      +strategy_rationale: str
+      +analysis_narrative: str
+      +design_rounds: int
+      +refinement_rounds: int
+      +spec_implementability_phase_backs: int
+      +critiques: List~dict~
+      +quality_gate_results: List~dict~
+      +signal_intelligence_brief?: dict
+      +spec_history: List~SpecRevision~
+      +code_history: List~CodeRevision~
+      +gate_timeline: List~GateEvent~
+      +rule_implementation_map: List~RuleImplementationMap~
+      +loop_telemetry: dict
+      +paper_trading_session_id?: str
+      +paper_trading_status?: "skipped|completed|failed"
+      +paper_trading_skipped_reason?: str
+      +paper_trading_verdict?: PaperTradingVerdict
+      +ran_on_non_conforming_code: bool
+    }
+    class SpecRevision {
+      +phase: str
+      +agent: str
+      +before_hash: str
+      +after_hash: str
+      +diff: str
+      +reason: str
+      +gate_failures: List~str~
+    }
+    class CodeRevision {
+      +phase: str
+      +agent: str
+      +before_hash: str
+      +after_hash: str
+      +diff: str
+      +reason: str
+      +gate_failures: List~str~
+    }
+    class GateEvent {
+      +phase: str
+      +gate: str
+      +result: str
     }
     class PromotionDecision {
       +strategy_id: str
@@ -323,7 +369,21 @@ classDiagram
     CollectedProfileData ..> InvestmentProfile : builds
     StrategySpec --> PaperTradingSession : simulated in
     PaperTradingSession --> PaperTradingComparison
+    StrategyLabRecord o-- SpecRevision : spec_history
+    StrategyLabRecord o-- CodeRevision : code_history
+    StrategyLabRecord o-- GateEvent : gate_timeline
 ```
+
+`BacktestResult` carries substantially more than the core metrics shown above
+in the current model — walk-forward/deflated-Sharpe fields
+(`deflated_sharpe`, `sharpe_ci_low/high`, `is_sharpe`, `oos_sharpe`,
+`is_oos_degradation_pct`, `oos_trade_count`, `n_trials_when_accepted`,
+`acceptance_reason`, `regime_results`, `fold_results`), a `coverage_report`
+(zero/low-trade diagnostics from `coverage_probe/`), and
+`execution_diagnostics`. These aren't drawn above to keep the diagram
+readable; the full field list is in `models.py`:939-1003, and their role in
+the verification/publication decision is documented in
+[`generation_pipeline.md`](./generation_pipeline.md).
 
 ### Enums
 
