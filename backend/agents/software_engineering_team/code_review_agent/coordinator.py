@@ -103,6 +103,7 @@ from typing import List, NamedTuple, Optional, Tuple
 from llm_service import LLMClient, compact_text
 from llm_service.interface import observer_turn_started_monotonic
 from shared.cache import get_shared_cache
+from shared.cache.pydantic_cache import get_cached_model
 from shared.env import env_flag_enabled
 from shared.env_config import env_bool
 from software_engineering_team.shared.context_sizing import (
@@ -672,15 +673,19 @@ def _lookup_submission_cache(
         - Otherwise returns ``(submission_key, cached)`` where
           ``submission_key`` is always the computed fingerprint, regardless of
           hit or miss, so the caller can reuse it for a later cache write.
-        - ``cached`` is ``None`` on any miss: no entry, an unreadable /
-          schema-skewed entry (evicted via ``cache.delete`` before returning),
-          or an entry that is not a fully-clean approval (``approved`` is
-          False or ``not_reviewed_ranges`` is non-empty -- also evicted, since
-          a hit there would skip re-review of ranges previously degraded /
-          unreviewed, the same gate the write side applies). ``cached`` is the
-          fresh deserialize of the stored output only for a clean, approved,
-          fully-reviewed hit -- independent of the stored bytes, so the caller
-          may mutate it freely without corrupting the stored entry.
+        - The get/validate/corrupt-entry-delete policy is delegated to
+          ``shared.cache.pydantic_cache.get_cached_model`` (the same shared
+          primitive ``qa_agent``, ``security_agent``, and ``ReviewResultCache``
+          use): a raw miss or an unreadable/schema-skewed entry (evicted
+          before returning) both yield ``cached is None``. On top of that,
+          ``cached`` is further reset to ``None`` (and the entry evicted) when
+          it is not a fully-clean approval (``approved`` is False or
+          ``not_reviewed_ranges`` is non-empty -- a hit there would skip
+          re-review of ranges previously degraded/unreviewed, the same gate
+          the write side applies). ``cached`` is the fresh deserialize of the
+          stored output only for a clean, approved, fully-reviewed hit --
+          independent of the stored bytes, so the caller may mutate it freely
+          without corrupting the stored entry.
         - Fail-open throughout: any cache backend error (get/delete) or
           deserialize error is logged and treated as a miss rather than
           raising into the review.
@@ -697,38 +702,7 @@ def _lookup_submission_cache(
         combine_similarity_threshold,
     )
     cache = get_shared_cache(_submission_cache_namespace())
-    # shared.cache is fail-open, but keep an explicit local guard so a
-    # misbehaving backend / unexpected raise never aborts the review.
-    try:
-        raw = cache.get(submission_key)
-    except Exception:
-        logger.warning(
-            "CodeReviewCoordinator: submission cache get failed; treating as miss",
-            exc_info=True,
-        )
-        raw = None
-
-    cached: Optional[CodeReviewOutput] = None
-    if raw is not None:
-        # Fresh deserialize — independent of the stored entry (same guarantee
-        # as the former under-lock model_copy). Unreadable / schema-skewed
-        # Redis entries fail open to a miss so a deploy never aborts a review.
-        try:
-            cached = CodeReviewOutput.model_validate_json(raw)
-        except Exception:
-            logger.warning(
-                "CodeReviewCoordinator: corrupt submission cache entry for %s; treating as miss",
-                submission_key,
-                exc_info=True,
-            )
-            try:
-                cache.delete(submission_key)
-            except Exception:
-                logger.warning(
-                    "CodeReviewCoordinator: submission cache delete failed after corrupt entry",
-                    exc_info=True,
-                )
-            cached = None
+    cached = get_cached_model("CodeReviewCoordinator", cache, submission_key, CodeReviewOutput)
 
     if cached is not None:
         # Only fully-clean approved verdicts are eligible: a hit with

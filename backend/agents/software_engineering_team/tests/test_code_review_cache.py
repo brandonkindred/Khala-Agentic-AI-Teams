@@ -1565,6 +1565,25 @@ def test_lookup_submission_cache_bypassed_for_repo_reader() -> None:
     assert cached is None
 
 
+def test_lookup_submission_cache_empty_miss_returns_key() -> None:
+    """A plain miss (no entry at all) still returns the computed key, unlike
+    the disabled/repo_reader-bypass paths above which return ``(None, None)``
+    -- the caller needs the key regardless of hit/miss for a later write."""
+    kwargs = _lookup_kwargs()
+    expected_key = coord._submission_fingerprint(
+        kwargs["input_data"],
+        kwargs["model_fingerprint"],
+        kwargs["spec_compliance_single_pass"],
+        kwargs["mutation_analysis_enabled"],
+        kwargs["side_effect_consolidation_enabled"],
+        kwargs["combine_similarity_threshold"],
+    )
+
+    key, cached = coord._lookup_submission_cache(**kwargs)
+    assert key == expected_key
+    assert cached is None
+
+
 def test_lookup_submission_cache_clean_approved_hit() -> None:
     """A clean approved entry under the computed fingerprint is served as a hit."""
     from shared.cache import get_shared_cache
@@ -1612,7 +1631,8 @@ def test_lookup_submission_cache_corrupt_entry_evicted() -> None:
 
 
 def test_lookup_submission_cache_unclean_entry_evicted() -> None:
-    """A non-approved or partially-reviewed entry is treated as a miss and evicted."""
+    """A partially-reviewed (``not_reviewed_ranges``) entry is treated as a
+    miss and evicted, even though ``approved`` is True."""
     from shared.cache import get_shared_cache
 
     kwargs = _lookup_kwargs()
@@ -1632,6 +1652,31 @@ def test_lookup_submission_cache_unclean_entry_evicted() -> None:
         not_reviewed_ranges=["src/a.py:1-10"],
     )
     cache.set(expected_key, partial.model_dump_json().encode("utf-8"), max_entries=8)
+
+    key, cached = coord._lookup_submission_cache(**kwargs)
+    assert key == expected_key
+    assert cached is None
+    assert cache.get(expected_key) is None  # evicted
+
+
+def test_lookup_submission_cache_non_approved_entry_evicted() -> None:
+    """A non-approved entry is treated as a miss and evicted, even with no
+    ``not_reviewed_ranges`` -- the complementary half of "not a clean
+    approval" from ``test_lookup_submission_cache_unclean_entry_evicted``."""
+    from shared.cache import get_shared_cache
+
+    kwargs = _lookup_kwargs()
+    expected_key = coord._submission_fingerprint(
+        kwargs["input_data"],
+        kwargs["model_fingerprint"],
+        kwargs["spec_compliance_single_pass"],
+        kwargs["mutation_analysis_enabled"],
+        kwargs["side_effect_consolidation_enabled"],
+        kwargs["combine_similarity_threshold"],
+    )
+    cache = get_shared_cache(coord._submission_cache_namespace())
+    rejected = CodeReviewOutput.model_validate(_REJECTED)
+    cache.set(expected_key, rejected.model_dump_json().encode("utf-8"), max_entries=8)
 
     key, cached = coord._lookup_submission_cache(**kwargs)
     assert key == expected_key
