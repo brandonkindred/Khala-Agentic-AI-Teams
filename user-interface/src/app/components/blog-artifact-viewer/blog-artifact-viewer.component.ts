@@ -9,6 +9,7 @@ import { MarkdownRendererService } from '../../shared/markdown-renderer.service'
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { artifactLabel } from '../blogging-dashboard/blogging-dashboard.component';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 @Component({
   selector: 'app-blog-artifact-viewer',
@@ -48,7 +49,7 @@ export class BlogArtifactViewerComponent implements OnInit {
           this.updateTitle();
         },
         error: (err) => {
-          this.error = err?.error?.detail ?? err?.message ?? 'Failed to load artifact';
+          this.error = extractErrorDetail(err, 'Failed to load artifact');
           this.loading = false;
           this.updateTitle();
         },
