@@ -11,6 +11,7 @@ import { MatExpansionModule } from '@angular/material/expansion';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { PersonalAssistantApiService } from '../../services/personal-assistant-api.service';
 import type { GeneratedDocument } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 /**
  * Documents component for generating process docs, checklists, SOPs, etc.
@@ -104,7 +105,7 @@ export class PaDocumentsComponent implements OnInit, OnChanges {
         },
         error: (err) => {
           this.generating = false;
-          this.snackBar.open(err?.error?.detail || 'Failed to generate document', 'Close', {
+          this.snackBar.open(extractErrorDetail(err, 'Failed to generate document'), 'Close', {
             duration: 3000,
           });
         },

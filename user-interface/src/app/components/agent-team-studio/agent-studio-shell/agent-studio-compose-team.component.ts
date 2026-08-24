@@ -23,6 +23,7 @@ import { AgentStudioStateService } from '../../../services/agent-studio-state.se
 import { AgentStudioSlideOutComponent } from './agent-studio-slide-out/agent-studio-slide-out.component';
 import { ProcessDesignerChatComponent } from '../../process-designer-chat/process-designer-chat.component';
 import { ErrorMessageComponent } from '../../../shared/error-message/error-message.component';
+import { extractErrorDetail } from '../../../shared/extract-error-detail';
 import { STAGE_INDEX } from '../../../models/agent-studio.model';
 import type {
   AgenticTeam,
@@ -166,7 +167,7 @@ export class AgentStudioComposeTeamComponent implements OnInit {
       },
       error: (err) => {
         this.teamsLoading.set(false);
-        this.teamsError.set(err?.error?.detail ?? 'Failed to load teams');
+        this.teamsError.set(extractErrorDetail(err, 'Failed to load teams'));
       },
       });
   }
@@ -297,7 +298,7 @@ export class AgentStudioComposeTeamComponent implements OnInit {
         },
         error: (err) => {
           this.creating.set(false);
-          this.createError.set(err?.error?.detail ?? 'Failed to create team');
+          this.createError.set(extractErrorDetail(err, 'Failed to create team'));
         },
       });
   }

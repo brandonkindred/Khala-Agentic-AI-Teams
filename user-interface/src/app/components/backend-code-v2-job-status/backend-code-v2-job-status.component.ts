@@ -6,6 +6,7 @@ import { MatChipsModule } from '@angular/material/chips';
 import { MatIconModule } from '@angular/material/icon';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import type { BackendCodeV2StatusResponse } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 @Component({
   selector: 'app-backend-code-v2-job-status',
@@ -57,7 +58,7 @@ export class BackendCodeV2JobStatusComponent implements OnInit, OnDestroy {
         }
       },
       error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to fetch status';
+        this.error = extractErrorDetail(err, 'Failed to fetch status');
       },
     });
   }

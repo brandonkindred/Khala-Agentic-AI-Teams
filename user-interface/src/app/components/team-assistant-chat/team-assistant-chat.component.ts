@@ -21,6 +21,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { TeamAssistantApiService } from '../../services/team-assistant-api.service';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 import type {
   TeamAssistantMessage,
   TeamAssistantConversationState,
@@ -145,7 +146,7 @@ export class TeamAssistantChatComponent implements OnInit, OnChanges, AfterViewC
             ? `Still missing: ${(detail.missing ?? []).join(', ')}`
             : detail.message ?? JSON.stringify(detail);
         } else {
-          this.error = detail ?? err?.message ?? 'Failed to launch workflow';
+          this.error = extractErrorDetail(err, 'Failed to launch workflow');
         }
       },
     });
@@ -167,7 +168,7 @@ export class TeamAssistantChatComponent implements OnInit, OnChanges, AfterViewC
         this.loading = false;
       },
       error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to reset conversation';
+        this.error = extractErrorDetail(err, 'Failed to reset conversation');
         this.loading = false;
       },
     });
@@ -251,7 +252,7 @@ export class TeamAssistantChatComponent implements OnInit, OnChanges, AfterViewC
         this.loading = false;
       },
       error: err => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to load conversation';
+        this.error = extractErrorDetail(err, 'Failed to load conversation');
         this.loading = false;
       },
     });
@@ -274,7 +275,7 @@ export class TeamAssistantChatComponent implements OnInit, OnChanges, AfterViewC
         this.lastAssistantAnnouncement = `${this.teamName} replied`;
       },
       error: err => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to send message';
+        this.error = extractErrorDetail(err, 'Failed to send message');
         this.loading = false;
         this.lastAssistantAnnouncement = '';
       },

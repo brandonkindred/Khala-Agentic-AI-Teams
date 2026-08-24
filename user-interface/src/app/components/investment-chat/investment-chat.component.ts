@@ -20,6 +20,7 @@ import { MatChipsModule } from '@angular/material/chips';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { InvestmentApiService } from '../../services/investment-api.service';
 import type { AdvisorChatMessage, IPS } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 @Component({
   selector: 'app-investment-chat',
@@ -123,7 +124,7 @@ What would you like to work on today?`,
       error: (err) => {
         this.messages.push({
           role: 'assistant',
-          content: `Sorry, I couldn't finalize the profile: ${err?.error?.detail || err?.message || 'Unknown error'}`,
+          content: `Sorry, I couldn't finalize the profile: ${extractErrorDetail(err, 'Unknown error')}`,
           timestamp: new Date().toISOString(),
         });
         this.loading = false;
@@ -187,7 +188,7 @@ What would you like to work on today?`,
   private handleError(err: { error?: { detail?: string }; message?: string }): void {
     this.messages.push({
       role: 'assistant',
-      content: `Sorry, something went wrong: ${err?.error?.detail || err?.message || 'Unknown error'}`,
+      content: `Sorry, something went wrong: ${extractErrorDetail(err, 'Unknown error')}`,
       timestamp: new Date().toISOString(),
     });
     this.loading = false;
