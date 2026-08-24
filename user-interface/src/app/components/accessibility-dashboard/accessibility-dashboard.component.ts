@@ -20,6 +20,7 @@ import type {
   HealthResponse,
   RetestRequest,
 } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 type DashboardTab = 'create' | 'status' | 'findings' | 'report' | 'design-system';
 
@@ -157,7 +158,7 @@ export class AccessibilityDashboardComponent implements OnInit, OnDestroy {
         this.activeTab = 'status';
       },
       error: (err) => {
-        this.retestError = err?.error?.detail ?? err?.message ?? 'Retest failed';
+        this.retestError = extractErrorDetail(err, 'Retest failed');
         this.retestLoading = false;
       },
     });

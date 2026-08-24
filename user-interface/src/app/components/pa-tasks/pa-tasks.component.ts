@@ -12,6 +12,7 @@ import { MatExpansionModule } from '@angular/material/expansion';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { PersonalAssistantApiService } from '../../services/personal-assistant-api.service';
 import type { TaskList, TaskItem } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 /**
  * Tasks component for managing task lists with natural language input.
@@ -96,7 +97,7 @@ export class PaTasksComponent implements OnInit, OnChanges {
       },
       error: (err) => {
         this.addingTasks = false;
-        this.snackBar.open(err?.error?.detail || 'Failed to add tasks', 'Close', { duration: 3000 });
+        this.snackBar.open(extractErrorDetail(err, 'Failed to add tasks'), 'Close', { duration: 3000 });
       },
     });
   }

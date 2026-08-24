@@ -8,6 +8,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { CommonModule } from '@angular/common';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import type { RunTeamResponse } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 @Component({
   selector: 'app-run-team-form',
@@ -55,7 +56,7 @@ export class RunTeamFormComponent {
       next: (res) => { this.isSubmitting.set(false); this.submitRequest.emit(res); },
       error: (err) => {
         this.isSubmitting.set(false);
-        const d = err?.error?.detail ?? err?.message ?? 'Upload failed';
+        const d = extractErrorDetail(err, 'Upload failed');
         this.uploadError.set(typeof d === 'string' ? d : JSON.stringify(d));
       },
     });

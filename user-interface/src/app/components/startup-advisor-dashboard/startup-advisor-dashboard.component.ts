@@ -23,6 +23,7 @@ import {
   type StartupAdvisorMessage,
   type StartupAdvisorArtifact,
 } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 type InteractionMode = 'chat' | 'form';
 
@@ -127,7 +128,7 @@ export class StartupAdvisorDashboardComponent implements OnInit, AfterViewChecke
       error: (err) => {
         this.error = err?.status === 0 || err?.status === 404
           ? 'Could not connect to the Startup Advisor service. Check that the backend is running.'
-          : (err?.error?.detail ?? err?.message ?? 'Failed to load conversation.');
+          : (extractErrorDetail(err, 'Failed to load conversation.'));
         this.loading = false;
       },
     });
@@ -170,7 +171,7 @@ export class StartupAdvisorDashboardComponent implements OnInit, AfterViewChecke
         this.loading = false;
       },
       error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to send message.';
+        this.error = extractErrorDetail(err, 'Failed to send message.');
         this.loading = false;
       },
     });
@@ -203,7 +204,7 @@ export class StartupAdvisorDashboardComponent implements OnInit, AfterViewChecke
         this.snackBar.open('Profile updated', 'OK', { duration: 2500 });
       },
       error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to update profile.';
+        this.error = extractErrorDetail(err, 'Failed to update profile.');
         this.savingProfile = false;
       },
     });
@@ -246,7 +247,7 @@ export class StartupAdvisorDashboardComponent implements OnInit, AfterViewChecke
         this.syncProfileFormFromContext();
       },
       error: (err) => {
-        this.snackBar.open(err?.error?.detail ?? 'Failed to update field.', 'OK', { duration: 3000 });
+        this.snackBar.open(extractErrorDetail(err, 'Failed to update field.'), 'OK', { duration: 3000 });
       },
     });
   }

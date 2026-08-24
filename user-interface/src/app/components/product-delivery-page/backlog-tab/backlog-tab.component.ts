@@ -28,6 +28,7 @@ import type {
   Story,
   StoryNode,
 } from '../../../models/product-delivery.model';
+import { extractErrorDetail } from '../../../shared/extract-error-detail';
 
 /**
  * Backlog tab — product picker + nested Initiative → Epic → Story tree
@@ -92,7 +93,7 @@ export class BacklogTabComponent implements OnInit {
         }
       },
       error: (err) => {
-        this.error.set(err?.error?.detail ?? err?.message ?? 'Failed to load products.');
+        this.error.set(extractErrorDetail(err, 'Failed to load products.'));
         this.loadingProducts.set(false);
       },
     });
@@ -115,7 +116,7 @@ export class BacklogTabComponent implements OnInit {
       },
       error: (err) => {
         this.backlog.set(null);
-        this.error.set(err?.error?.detail ?? err?.message ?? 'Failed to load backlog.');
+        this.error.set(extractErrorDetail(err, 'Failed to load backlog.'));
         this.loadingBacklog.set(false);
       },
     });
@@ -188,17 +189,17 @@ export class BacklogTabComponent implements OnInit {
             .subscribe({
               next: () => finish(),
               error: (err) =>
-                rollback(err?.error?.detail ?? err?.message ?? 'Failed to update scores.'),
+                rollback(extractErrorDetail(err, 'Failed to update scores.')),
             });
         },
         error: (err) =>
-          rollback(err?.error?.detail ?? err?.message ?? 'Failed to update status.'),
+          rollback(extractErrorDetail(err, 'Failed to update status.')),
       });
     } else if (statusChanged) {
       this.api.patchStoryStatus(story.id, { status: next.status }).subscribe({
         next: () => finish(),
         error: (err) =>
-          rollback(err?.error?.detail ?? err?.message ?? 'Failed to update status.'),
+          rollback(extractErrorDetail(err, 'Failed to update status.')),
       });
     } else if (scoresChanged) {
       this.api
@@ -209,7 +210,7 @@ export class BacklogTabComponent implements OnInit {
         .subscribe({
           next: () => finish(),
           error: (err) =>
-            rollback(err?.error?.detail ?? err?.message ?? 'Failed to update scores.'),
+            rollback(extractErrorDetail(err, 'Failed to update scores.')),
         });
     } else {
       finish();

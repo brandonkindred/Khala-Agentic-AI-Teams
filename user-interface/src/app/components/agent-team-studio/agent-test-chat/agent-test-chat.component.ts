@@ -22,6 +22,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatSelectModule } from '@angular/material/select';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
+import { extractErrorDetail } from '../../../shared/extract-error-detail';
 import type {
   AgenticTeam,
   AgenticTeamAgent,
@@ -248,7 +249,7 @@ export class AgentTestChatComponent implements OnInit, OnChanges, AfterViewCheck
         this.loading.set(false);
       },
       error: (err) => {
-        this.error.set(err?.error?.detail ?? 'Failed to send message');
+        this.error.set(extractErrorDetail(err, 'Failed to send message'));
         this.loading.set(false);
       },
     });

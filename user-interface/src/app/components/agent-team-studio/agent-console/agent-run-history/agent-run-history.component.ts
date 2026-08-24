@@ -17,6 +17,7 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { AgentConsoleApiService } from '../../../../services/agent-console-api.service';
 import { ConfirmDestructiveService } from '../../../../shared/confirm-destructive.service';
+import { extractErrorDetail } from '../../../../shared/extract-error-detail';
 import { AgentRunHistoryDestructiveActionsService } from './agent-run-history-destructive-actions.service';
 import type { RunSummary } from '../../../../models/agent-history.model';
 
@@ -98,7 +99,7 @@ export class AgentRunHistoryComponent implements OnChanges {
         if (err?.status === 503) {
           this.storageUnavailable.set(true);
         } else {
-          this.error.set(err?.error?.detail ?? err?.message ?? 'Failed to load history');
+          this.error.set(extractErrorDetail(err, 'Failed to load history'));
         }
       },
     });

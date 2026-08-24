@@ -22,6 +22,7 @@ import {
   QUEUE_NAMES,
   WorkflowMode,
 } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 @Component({
   selector: 'app-investment-workflow',
@@ -117,7 +118,7 @@ export class InvestmentWorkflowComponent implements OnInit, OnDestroy {
           this.loadQueues();
         },
         error: (err) => {
-          this.error = err.error?.detail || err.message || 'Failed to load workflow status';
+          this.error = extractErrorDetail(err, 'Failed to load workflow status');
           this.loading = false;
         },
       });
@@ -143,7 +144,7 @@ export class InvestmentWorkflowComponent implements OnInit, OnDestroy {
         this.loadQueues();
       },
       error: (err) => {
-        this.error = err.error?.detail || err.message || 'Failed to refresh';
+        this.error = extractErrorDetail(err, 'Failed to refresh');
         this.loading = false;
       },
     });
