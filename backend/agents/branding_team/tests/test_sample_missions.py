@@ -1,7 +1,7 @@
 """Unit tests pinning the sample mission eval corpus.
 
 Preconditions:
-    - ``branding_team.tests.eval_fixtures.sample_missions`` is importable.
+    - ``branding_team.scripts.eval_fixtures.sample_missions`` is importable.
 Postconditions:
     - Assertions guard against accidental corpus shrinkage, type drift, or
       loss of industry/completeness diversity.
@@ -10,7 +10,7 @@ Postconditions:
 from __future__ import annotations
 
 from branding_team.models import BrandingMission
-from branding_team.tests.eval_fixtures.sample_missions import SAMPLE_MISSIONS
+from branding_team.scripts.eval_fixtures.sample_missions import SAMPLE_MISSIONS
 
 
 def test_corpus_has_at_least_three_missions() -> None:
