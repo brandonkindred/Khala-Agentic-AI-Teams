@@ -46,8 +46,15 @@ Each transition emits a `PhaseTransition` event (`phases.py`:148-184) carrying
 `phases.py`:96-109). This is a drift-detection mechanism: `spec_hash` must
 stay stable from `DESIGN_REVIEW → CODE_SYNTHESIS` onward within an attempt
 (the spec is frozen post-design, aside from a tighten-only `risk_limits`
-carve-out during refinement), and `code_hash` must stay stable from
-`CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION` onward. All four emission sites
+carve-out during refinement). Each hash is a **boundary snapshot** taken at
+the moment its transition fires, not a value pinned for the rest of the
+attempt: `code_hash` is unchanged from `CODE_SYNTHESIS →
+BACKTEST_AND_VERIFICATION` through the refinement loop that precedes that
+transition, but the trade-alignment loop that follows it can still commit a
+rewritten baseline (`_commit_alignment_proposal`), so the terminal
+transition's `code_hash` can legitimately differ from the one recorded at
+`CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION` — that's an accepted, alignment-
+driven rewrite, not drift. All four emission sites
 live in `orchestrator_design.py` (lines 642-649, 1960-1967, 1577-1584,
 1756-1763) — the mixin that owns the whole-attempt sequencer emits every
 transition, even though the phases themselves execute across three different

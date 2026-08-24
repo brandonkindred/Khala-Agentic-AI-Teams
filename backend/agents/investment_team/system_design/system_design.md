@@ -61,7 +61,9 @@ flowchart LR
     PGate[PromotionGateAgent]
     IC[InvestmentCommitteeAgent]
     SIE[SignalIntelligenceExpert<br/>once per batch]
+    CycleWF[StrategyLabCycleWorkflow<br/>per-cycle child workflow]
     SLO["StrategyLabOrchestrator<br/>4-phase pipeline — see architecture.md §11<br/>and generation_pipeline.md"]
+    Finalize[finalize_cycle_record_activity<br/>paper-trade + persist]
     PTA[PaperTradingAgent<br/>post-cycle]
     ORCH[InvestmentTeamOrchestrator]
     BatchWF[StrategyLabBatchWorkflow<br/>Temporal-only]
@@ -92,7 +94,7 @@ flowchart LR
 
   S1 --> B4
   S2 --> VA --> B5
-  S3 --> BTA --> B6
+  S3 --> B6
   S4 --> B6
   S5 --> ORCH --> PGate
   PGate -.reads.-> B2
@@ -103,8 +105,11 @@ flowchart LR
 
   L1 --> BatchWF
   BatchWF --> SIE
-  BatchWF --> SLO
-  SLO --> B7
+  BatchWF --> CycleWF
+  CycleWF --> SLO
+  CycleWF --> Finalize
+  Finalize --> PTA
+  Finalize --> B7
   BatchWF --> EventBus
   L2 --> B7
   L3 --> B7
@@ -294,8 +299,11 @@ classDiagram
     }
     class GateEvent {
       +phase: str
-      +gate: str
-      +result: str
+      +gate_name: str
+      +passed: bool
+      +severity: "info|warning|critical"
+      +details: str
+      +timestamp: str
     }
     class PromotionDecision {
       +strategy_id: str

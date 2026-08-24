@@ -52,11 +52,13 @@ Exit bar has `close = 105.00`. The simulator records:
 - `exit_bid_price = 105.00`
 - `exit_fill_price = 105.00 × (1 − 2/10_000) = 104.979`
 
-With `shares = 10`:
+With `shares = 10` (using `FillSimulator`'s actual formula — entry and exit
+notional charged separately, not a flat notional doubled):
 
 - `gross_pnl = 10 × (104.979 − 100.02) = 49.59`
-- `tx_cost = 100.02 × 10 × (5/10_000) × 2 = 1.0002`
-- `net_pnl = 49.59 − 1.00 ≈ 48.59`
+- `entry_notional = 100.02 × 10 = 1000.20`; `exit_notional = 104.979 × 10 = 1049.79`
+- `tx_cost = (1000.20 + 1049.79) × (5/10_000) ≈ 1.02`
+- `net_pnl = 49.59 − 1.02 ≈ 48.57`
 
 ## Backward compatibility
 
