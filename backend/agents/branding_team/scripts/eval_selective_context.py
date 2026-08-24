@@ -516,14 +516,23 @@ def run_eval(
                     variant_label="selective",
                     strategic_core=selective_outputs[BrandPhase.STRATEGIC_CORE],
                 )
-                full_score = score_phase_output(
-                    judge_client,
-                    mission=mission,
-                    phase=phase,
-                    output=full_outputs[phase],
-                    variant_label="full",
-                    strategic_core=full_outputs[BrandPhase.STRATEGIC_CORE],
-                )
+                if selective_outputs[phase] is full_outputs[phase]:
+                    # _run_variant_pair shares this phase's output object between
+                    # variants (its context_phases doesn't diverge) -- judging it a
+                    # second time would score identical content via a second real
+                    # LLM call, which can itself return a different integer score
+                    # and manufacture a false regression despite zero actual
+                    # treatment difference. Reuse the one score already computed.
+                    full_score = selective_score
+                else:
+                    full_score = score_phase_output(
+                        judge_client,
+                        mission=mission,
+                        phase=phase,
+                        output=full_outputs[phase],
+                        variant_label="full",
+                        strategic_core=full_outputs[BrandPhase.STRATEGIC_CORE],
+                    )
                 quality_comparisons.append(
                     PhaseQualityComparison(
                         mission_name=mission.company_name,

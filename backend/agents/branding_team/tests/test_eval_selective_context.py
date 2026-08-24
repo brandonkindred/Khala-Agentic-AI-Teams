@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
+import branding_team.scripts.eval_selective_context as eval_ctx
 from branding_team.graphs.shared import PHASE_ORDER
 from branding_team.models import BrandPhase
 from branding_team.orchestrator import _PHASE_SPEC, BrandingTeamOrchestrator
@@ -278,6 +279,23 @@ def test_run_eval_default_dummy_mode_has_no_quality_regressions(tmp_path) -> Non
     assert all(c.regressions() == [] for c in quality_comparisons)
     phases = {c.phase for c in quality_comparisons}
     assert phases == {BrandPhase.CHANNEL_ACTIVATION, BrandPhase.GOVERNANCE}
+
+
+def test_run_eval_judges_shared_phase_output_only_once(tmp_path) -> None:
+    """CHANNEL_ACTIVATION's context doesn't diverge between variants, so its output
+    is the identical shared object in both -- run_eval must call the judge on it
+    only once and reuse that score for both sides, rather than scoring the exact
+    same content via two separate (real) LLM calls that could disagree.
+    """
+    with patch(
+        "branding_team.scripts.eval_selective_context.score_phase_output",
+        wraps=eval_ctx.score_phase_output,
+    ) as mock_score:
+        run_eval(missions=[make_mission()], output_dir=tmp_path)
+
+    judged_phases = [call.kwargs["phase"] for call in mock_score.call_args_list]
+    assert judged_phases.count(BrandPhase.CHANNEL_ACTIVATION) == 1
+    assert judged_phases.count(BrandPhase.GOVERNANCE) == 2
 
 
 def test_run_eval_writes_markdown_report(tmp_path) -> None:
