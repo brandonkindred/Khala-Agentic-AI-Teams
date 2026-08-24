@@ -38,6 +38,7 @@ from shared.cache.pydantic_cache import (
     set_cached_model,
 )
 from software_engineering_team.shared.persona_agent_base import run_structured_persona
+from software_engineering_team.shared.review_prompt_utils import build_file_context_prefix
 from software_engineering_team.shared.security_service import derive_approved
 
 from .models import AcceptanceEvidenceModel, QAInput, QAOutput
@@ -150,13 +151,7 @@ def _build_qa_file_context_prefix(input_data: QAInput) -> list[str]:
         - Returns non-empty prompt lines: the language line, then the code
           fence around ``input_data.code``. Never raises or transforms the code.
     """
-    return [
-        f"**Language:** {input_data.language}",
-        "**Code to review:**",
-        "```",
-        input_data.code,
-        "```",
-    ]
+    return build_file_context_prefix(input_data.language, input_data.code)
 
 
 def _build_qa_role_instructions(input_data: QAInput) -> list[str]:
