@@ -97,9 +97,15 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
      scrolling or clipped controls; text-spacing overrides don't break layout.
    - Motion and timing: animation respects `prefers-reduced-motion`; nothing
      auto-advances or auto-dismisses faster than a user can read it.
-   - WCAG 2.2 additions specifically: target size (24×24 minimum), focus not obscured
-     by sticky headers/toolbars, dragging movements have a single-pointer alternative,
-     redundant entry, and consistent help placement.
+   - WCAG 2.2 additions specifically:
+       * Target size (2.5.8) is a size-OR-spacing rule, not a flat floor: a target
+         passes at 24×24 CSS px or with sufficient spacing, and the inline, essential,
+         equivalent, and user-agent-control exceptions apply. Do not report a small but
+         well-separated or inline target as a violation — check spacing and exceptions
+         before flagging, and say which one you checked.
+       * Focus not obscured by sticky headers, toolbars, or footers.
+       * Dragging movements have a single-pointer alternative.
+       * Redundant entry, and consistent help placement.
 
 B. INTERACTION COST
    - Count the clicks, keystrokes, page transitions, and decisions in the primary task.
@@ -127,10 +133,18 @@ C. CLARITY AND INFORMATION ARCHITECTURE
 D. STATE COVERAGE
    For each page, walk all of: first visit / empty, loading (first load vs refresh),
    partial, populated, long-running, stalled, failed, permission-denied or
-   backend-unconfigured, offline or API-error, and stale-data. For each, confirm the UI
-   is (1) rendered at all, (2) announced to assistive tech, (3) recoverable from.
-   A missing state is a finding — cite the branch in the template or component that
-   proves it is missing.
+   backend-unconfigured, offline or API-error, and stale-data.
+   Give every state exactly one disposition, and state which:
+     - HANDLED — the UI is (1) rendered at all, (2) announced to assistive tech, and
+       (3) recoverable from.
+     - MISSING — a finding. Cite the branch in the template or component that proves
+       it is missing.
+     - NOT APPLICABLE — the page does not own this state. Evidence is required, not
+       assertion: name the code that hands the state elsewhere (a landing page that
+       redirects to a dashboard as soon as work exists owns neither the populated nor
+       the long-running state). An unevidenced N/A is itself a gap.
+   Never manufacture a finding to fill a state the page does not own — a page with
+   fewer owned states is not a page with more defects.
 
 E. CONSISTENCY WITH THE DESIGN SYSTEM
    - Hardcoded colors, spacing, radii, or font sizes where a `--kh-*` token exists.
@@ -217,8 +231,9 @@ Close with:
 
 ## 9. Definition of done
 
-You are finished when: every routed <TEAM> page has been walked through all ten states
-in §3D; every finding cites a file and line or is explicitly marked as needing a
+You are finished when: every routed <TEAM> page carries a stated disposition —
+handled, missing, or evidenced not-applicable — for all ten states in §3D; every
+finding cites a file and line or is explicitly marked as needing a
 browser; every recommendation names a token, primitive, or attribute rather than
 describing an intention; and the top 5 are ordered such that shipping only those
 removes the largest share of user pain.
