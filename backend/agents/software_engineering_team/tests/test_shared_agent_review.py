@@ -256,6 +256,71 @@ def test_file_path_defaults_to_sent_file_when_agent_gives_none():
     assert issues[0].file_path == "svc.py"
 
 
+def test_file_path_prefers_real_path_over_free_text_location():
+    """A free-text `location` (e.g. a function name, not a path) must never
+    override a valid `file_path` -- it's folded into the description
+    instead, so a downstream exact-match lookup still resolves the real
+    file rather than silently missing and falling back to arbitrary files."""
+
+    class _BugWithFreeTextLocation:
+        severity = "high"
+        description = "SQL injection"
+        location = "the login() function"
+        file_path = "auth/login.py"
+        recommendation = "use parameterized queries"
+
+    def run_chunk(code: str):
+        return [_BugWithFreeTextLocation()]
+
+    issues = run_chunked_agent_review(
+        run_chunk=run_chunk,
+        files={"auth/login.py": "def login():\n    pass"},
+        source="qa",
+        default_severity="medium",
+        label="QA agent",
+        task_id="t1",
+        issue_factory=_Issue,
+        max_chars=MAX,
+        warn_threshold=20,
+    )
+
+    assert len(issues) == 1
+    assert issues[0].file_path == "auth/login.py"
+    assert "the login() function" in issues[0].description
+
+
+def test_file_path_falls_back_to_sent_path_when_item_has_only_free_text_location():
+    """SecurityVulnerability only ever carries `location`, never `file_path`.
+    A free-text `location` there must resolve to the file actually sent
+    (`path`), not the free text -- mirroring the security-agent shape where
+    no `file_path` attribute exists on the item at all."""
+
+    class _VulnWithFreeTextLocation:
+        severity = "high"
+        description = "XSS"
+        location = "the render() function"
+        recommendation = "sanitize"
+
+    def run_chunk(code: str):
+        return [_VulnWithFreeTextLocation()]
+
+    issues = run_chunked_agent_review(
+        run_chunk=run_chunk,
+        files={"x.ts": "const f = () => 1;"},
+        source="security",
+        default_severity="high",
+        label="Security agent",
+        task_id="t1",
+        issue_factory=_Issue,
+        max_chars=MAX,
+        warn_threshold=20,
+    )
+
+    assert len(issues) == 1
+    assert issues[0].file_path == "x.ts"
+    assert "the render() function" in issues[0].description
+
+
 def test_run_qa_agent_builds_qa_input_and_extracts_bugs():
     """run_qa_agent feeds raw code to the QA agent and maps bugs_found to issues."""
     codes: list[str] = []
@@ -383,7 +448,8 @@ def test_cache_hit_skips_run_chunk_for_identical_piece():
 
     assert calls["n"] == 1  # only the first call actually invoked the agent
     assert len(first) == len(second) == 1
-    assert first[0].description == second[0].description == "real bug"
+    assert first[0].description == second[0].description
+    assert first[0].description.startswith("real bug")
 
 
 def test_cache_misses_on_changed_content():
@@ -466,7 +532,7 @@ def test_cache_write_does_not_exhaust_a_generator_run_chunk_result():
     )
 
     assert len(issues) == 1  # the generator's item must still reach the issue list
-    assert issues[0].description == "real bug"
+    assert issues[0].description.startswith("real bug")
 
 
 def test_unchanged_second_file_stays_cached_only_changed_one_is_rereviewed():
@@ -534,7 +600,7 @@ def test_failed_piece_is_not_cached_and_is_retried():
     assert calls["n"] == 2  # the failed first call was not cached, so it retried
     # The only piece failed -> a synthetic "review incomplete" issue, not a false-clean [].
     assert len(first) == 1 and first[0].severity == "critical"
-    assert len(second) == 1 and second[0].description == "real bug"  # the retry succeeded
+    assert len(second) == 1 and second[0].description.startswith("real bug")  # the retry succeeded
 
 
 def test_failing_cache_miss_among_cache_hits_still_appends_synthetic_issue():
@@ -582,8 +648,10 @@ def test_failing_cache_miss_among_cache_hits_still_appends_synthetic_issue():
     # not a bare cache replay that silently omits the fact that b.py was never
     # actually reviewed this round.
     assert len(second) == 2
-    cached = [i for i in second if i.description == "real bug"]
-    synthetic = [i for i in second if i.severity == "critical" and i.description != "real bug"]
+    cached = [i for i in second if i.description.startswith("real bug")]
+    synthetic = [
+        i for i in second if i.severity == "critical" and not i.description.startswith("real bug")
+    ]
     assert len(cached) == 1
     assert len(synthetic) == 1
 
@@ -711,7 +779,7 @@ def test_qa_agent_fallback_is_not_cached_and_is_retried():
 
     second = run_qa_agent(**kwargs)
     assert calls["n"] == 2  # not served from cache -- retried for real
-    assert len(second) == 1 and second[0].description == "real bug"
+    assert len(second) == 1 and second[0].description.startswith("real bug")
 
 
 def test_qa_agent_genuine_rejection_with_findings_is_still_cached():

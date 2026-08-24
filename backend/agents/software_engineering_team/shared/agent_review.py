@@ -126,8 +126,12 @@ def run_chunked_agent_review(
           e.g. a minified bundle) is hard-split at character boundaries so no
           over-budget string is ever sent; the agent is invoked one piece at a
           time.
-        - A finding's ``file_path`` defaults to the file actually sent when the
-          agent does not report a location, so every piece stays attributable.
+        - A finding's ``file_path`` is the agent's own ``file_path`` field when
+          present, else the file actually sent, so every piece stays
+          attributable to a real key in the caller's file map. ``location``
+          (free text -- "file path, function name, or line reference") is
+          never used as ``file_path``; when present it is folded into
+          ``description`` instead.
         - A piece whose ``run_chunk`` call fails is logged and skipped; issues
           from the other pieces are still returned (one bad piece never aborts
           the whole review). Such a piece is never cached, so it is retried for
@@ -215,17 +219,25 @@ def run_chunked_agent_review(
             if cache_key is not None:
                 cache.put(cache_key, items)
         for item in items or []:
+            description = getattr(item, "description", str(item))
+            # `file_path` (when the agent's model declares it) is a verified
+            # real path; `path` is the exact file we sent, always a real key
+            # into the caller's file map. `location` is free text ("file
+            # path, function name, or line reference") and must never
+            # override either -- an exact-match downstream lookup keyed on
+            # file_path would silently miss and fall back to arbitrary
+            # files. Fold `location` into the description instead, so its
+            # hint isn't discarded, just no longer treated as authoritative.
+            file_path = getattr(item, "file_path", None) or path
+            location = getattr(item, "location", None)
+            if location and location not in file_path and location not in description:
+                description = f"{description} (location: {location})"
             issues.append(
                 issue_factory(
                     source=source,
                     severity=getattr(item, "severity", default_severity),
-                    description=getattr(item, "description", str(item)),
-                    # `location` may be present but None; fall back to file_path
-                    # then to the file we sent, so file_path is always a useful
-                    # string and tail pieces stay attributable.
-                    file_path=getattr(item, "location", None)
-                    or getattr(item, "file_path", None)
-                    or path,
+                    description=description,
+                    file_path=file_path,
                     recommendation=getattr(item, "recommendation", ""),
                 )
             )
