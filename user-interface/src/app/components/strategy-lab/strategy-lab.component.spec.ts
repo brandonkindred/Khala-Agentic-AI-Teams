@@ -850,6 +850,7 @@ describe('StrategyLabComponent — openGenerateStrategiesDialog', () => {
       batchSize: 15,
       batchCount: 4,
       selectedCategories: ['crypto'],
+      categoriesTouched: true,
     });
 
     component.openGenerateStrategiesDialog();
@@ -874,6 +875,36 @@ describe('StrategyLabComponent — openGenerateStrategiesDialog', () => {
     expect(apiSpy.runStrategyLab).not.toHaveBeenCalled();
   });
 
+  it('preserves the current category selection when the dialog result was untouched, even on a partial overlap with a stale snapshot', () => {
+    // The dialog was seeded with all 3 current categories selected (the
+    // untouched default). While it was open, a config fetch added a new
+    // category and applyCategoryConfig() (untouched -> select-all) put the
+    // parent's live selection at all 4. The dialog itself never learned
+    // about the new category, so its returned selection is still the stale
+    // 3 — but since the user never edited the toggles, that stale snapshot
+    // must NOT overwrite the parent's already-correct live selection.
+    component.categoryOptions.set([
+      { value: 'stocks', label: 'Stocks', icon: 'show_chart' },
+      { value: 'crypto', label: 'Crypto', icon: 'currency_bitcoin' },
+      { value: 'forex', label: 'Forex', icon: 'currency_exchange' },
+      { value: 'futures', label: 'Futures', icon: 'candlestick_chart' },
+    ]);
+    component.selectedCategories.set(['stocks', 'crypto', 'forex', 'futures']);
+    afterClosedResult = of({
+      batchSize: 5,
+      batchCount: 1,
+      selectedCategories: ['stocks', 'crypto', 'forex'], // stale — missing 'futures'
+      categoriesTouched: false,
+    });
+
+    component.openGenerateStrategiesDialog();
+
+    expect(component.selectedCategories()).toEqual(['stocks', 'crypto', 'forex', 'futures']);
+    expect(apiSpy.runStrategyLab).toHaveBeenCalledWith(
+      expect.objectContaining({ allowed_asset_classes: undefined }), // all selected -> no constraint
+    );
+  });
+
   it('intersects the dialog result with categories that changed while it was open, keeping the overlap', () => {
     // Simulate a config fetch resolving (after the dialog was seeded) that
     // narrows the authoritative category list.
@@ -885,6 +916,7 @@ describe('StrategyLabComponent — openGenerateStrategiesDialog', () => {
       batchSize: 5,
       batchCount: 1,
       selectedCategories: ['stocks', 'crypto'], // 'stocks' no longer exists
+      categoriesTouched: true,
     });
 
     component.openGenerateStrategiesDialog();
@@ -904,6 +936,7 @@ describe('StrategyLabComponent — openGenerateStrategiesDialog', () => {
       batchSize: 5,
       batchCount: 1,
       selectedCategories: ['stocks'], // no longer a valid category at all
+      categoriesTouched: true,
     });
 
     component.openGenerateStrategiesDialog();
@@ -924,6 +957,7 @@ describe('StrategyLabComponent — openGenerateStrategiesDialog', () => {
       batchSize: 5,
       batchCount: 20, // valid against the dialog's stale snapshot, not the new max
       selectedCategories: ['stocks', 'crypto'],
+      categoriesTouched: true,
     });
 
     component.openGenerateStrategiesDialog();
@@ -939,6 +973,7 @@ describe('StrategyLabComponent — openGenerateStrategiesDialog', () => {
       batchSize: 5,
       batchCount: 1,
       selectedCategories: ['stocks'],
+      categoriesTouched: true,
     });
     // A run started elsewhere (another tab, or a reconnect) while the dialog
     // was open — the dialog's own snapshot never learned about it.

@@ -28,6 +28,14 @@ export interface GenerateStrategiesDialogResult {
   batchSize: number;
   batchCount: number;
   selectedCategories: string[];
+  /**
+   * Whether the user actually edited the category toggles in this dialog.
+   * When false, `selectedCategories` is just the seeded snapshot — the
+   * caller should prefer its own current selection (which may have been
+   * refreshed by a config update while the dialog was open) over this stale
+   * copy rather than reconciling it as if it were a deliberate choice.
+   */
+  categoriesTouched: boolean;
 }
 
 /**
@@ -67,6 +75,8 @@ export class GenerateStrategiesDialogComponent {
   batchSize = this.data.batchSize;
   batchCount = this.data.batchCount;
   readonly selectedCategories = signal<string[]>(this.data.selectedCategories);
+  /** Set once the user touches the category toggles — see `GenerateStrategiesDialogResult.categoriesTouched`. */
+  private categoriesTouched = false;
 
   /** A run requires at least one selected category. */
   get categoriesValid(): boolean {
@@ -75,6 +85,7 @@ export class GenerateStrategiesDialogComponent {
 
   onCategoriesChanged(values: string[]): void {
     this.selectedCategories.set(values);
+    this.categoriesTouched = true;
   }
 
   /**
@@ -115,6 +126,7 @@ export class GenerateStrategiesDialogComponent {
       batchSize,
       batchCount,
       selectedCategories: this.selectedCategories(),
+      categoriesTouched: this.categoriesTouched,
     });
   }
 

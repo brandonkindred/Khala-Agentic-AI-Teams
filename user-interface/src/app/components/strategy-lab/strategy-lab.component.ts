@@ -508,14 +508,23 @@ export class StrategyLabComponent implements OnInit {
       // applied here (and the label the user just confirmed) can't silently
       // diverge from what runNewStrategy() would otherwise re-clamp.
       this.batchCount = this.clamp(result.batchCount, this.BATCH_COUNT_MIN, this.BATCH_COUNT_MAX());
-      // categoryOptions() may likewise have been refreshed while the dialog
-      // was open — intersect against the CURRENT options (falling back to
-      // all, same as applyCategoryConfig's own reconciliation) so a run can
-      // never be constrained to a selection the backend no longer recognizes.
-      const currentOptionValues = this.categoryOptions().map((c) => c.value);
-      const reconciled = currentOptionValues.filter((v) => result.selectedCategories.includes(v));
-      this.selectedCategories.set(reconciled.length ? reconciled : currentOptionValues);
-      this.userAdjustedCategories = true;
+      // If the user never touched the category toggles, `result.selectedCategories`
+      // is just the dialog's seeded snapshot — prefer this component's own
+      // current selection (already kept correct by applyCategoryConfig, including
+      // any category a config fetch added or removed while the dialog was open)
+      // rather than reconciling a stale copy, which — on a partial overlap —
+      // would silently exclude a newly added category the untouched selection
+      // should still include.
+      if (result.categoriesTouched) {
+        // categoryOptions() may have been refreshed while the dialog was open —
+        // intersect against the CURRENT options (falling back to all, same as
+        // applyCategoryConfig's own reconciliation) so a run can never be
+        // constrained to a selection the backend no longer recognizes.
+        const currentOptionValues = this.categoryOptions().map((c) => c.value);
+        const reconciled = currentOptionValues.filter((v) => result.selectedCategories.includes(v));
+        this.selectedCategories.set(reconciled.length ? reconciled : currentOptionValues);
+        this.userAdjustedCategories = true;
+      }
       this.runNewStrategy();
     });
   }

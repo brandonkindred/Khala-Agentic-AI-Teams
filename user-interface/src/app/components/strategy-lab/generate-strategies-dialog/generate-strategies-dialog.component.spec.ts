@@ -98,7 +98,7 @@ describe('GenerateStrategiesDialogComponent', () => {
     expect(component.runButtonLabel()).toBe('Run 5 × 3 = 15 strategies');
   });
 
-  it('submit closes the dialog with the current configuration', async () => {
+  it('submit closes the dialog with the current configuration and categoriesTouched=true when categories were edited', async () => {
     await createFixture();
     component.batchSize = 8;
     component.batchCount = 2;
@@ -110,6 +110,21 @@ describe('GenerateStrategiesDialogComponent', () => {
       batchSize: 8,
       batchCount: 2,
       selectedCategories: ['crypto'],
+      categoriesTouched: true,
+    });
+  });
+
+  it('submit reports categoriesTouched=false when the category toggles were never touched', async () => {
+    await createFixture();
+    component.batchSize = 8;
+
+    component.submit();
+
+    expect(ref.close).toHaveBeenCalledWith({
+      batchSize: 8,
+      batchCount: 1,
+      selectedCategories: ['stocks', 'crypto'],
+      categoriesTouched: false,
     });
   });
 
@@ -127,6 +142,7 @@ describe('GenerateStrategiesDialogComponent', () => {
       batchSize: DATA.batchSizeMax,
       batchCount: DATA.batchCountMin,
       selectedCategories: ['stocks', 'crypto'],
+      categoriesTouched: false,
     });
   });
 
