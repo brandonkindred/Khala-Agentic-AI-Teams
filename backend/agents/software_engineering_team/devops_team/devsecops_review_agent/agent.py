@@ -49,6 +49,15 @@ class DevSecOpsReviewAgent:
     fail-open and gated by ``DEVOPS_DEVSECOPS_CACHE_SIZE``.
     """
 
+    # Public aliases for the module-level ``_REVIEW_CACHE``'s configuration,
+    # preserved for any external inspector of this previously-public contract
+    # (mirrors ``DevOpsSingleShotAgent`` subclasses' ``CACHE_NAMESPACE`` etc.).
+    # The cache itself is the single ``_REVIEW_CACHE`` instance; these are
+    # read-only literals, not independent state.
+    CACHE_NAMESPACE = "devops:devsecops:v1"
+    CACHE_ENV_VAR = "DEVOPS_DEVSECOPS_CACHE_SIZE"
+    CACHE_DEFAULT_SIZE = DEFAULT_REVIEW_CACHE_SIZE
+
     def __init__(self, llm_client: LLMClient) -> None:
         """Store the review client and resolve its Strands model.
 
