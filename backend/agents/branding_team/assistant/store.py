@@ -13,9 +13,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, List, Optional
 from uuid import uuid4
 
+from psycopg import Cursor
 from psycopg.types.json import Json
 
 from shared.postgres import PostgresHelperMixin
@@ -31,6 +33,14 @@ from ..models import (
 logger = logging.getLogger(__name__)
 
 _STORE = "branding_conversations"
+
+
+class ConversationAttachResult(str, Enum):
+    """Outcome of :meth:`BrandingConversationStore.attach_locked`'s conversation-row write."""
+
+    OK = "ok"
+    NOT_FOUND = "not_found"
+    ALREADY_ATTACHED = "already_attached"
 
 
 def _default_mission() -> BrandingMission:
@@ -405,6 +415,81 @@ class BrandingConversationStore(PostgresHelperMixin):
                 (brand_id, Json(mission.model_dump(mode="json")), ts, conversation_id),
             )
             return cur.rowcount > 0
+
+    @timed_query(store=_STORE, op="attach_locked")
+    def attach_locked(
+        self,
+        cur: Cursor,
+        conversation_id: str,
+        brand_id: str,
+        mission: Optional[BrandingMission] = None,
+    ) -> ConversationAttachResult:
+        """Lock, validate, and update a conversation row for a brand attach.
+
+        Cursor-aware variant of :meth:`attach_and_update_mission`: runs on
+        *cur*, a cursor the caller already opened (e.g. via its own
+        ``self._transaction()``), instead of opening a transaction of its
+        own. This lets a caller such as ``BrandingStore.attach_conversation``
+        combine this conversation-row write with its own brand-row patch in
+        one atomic transaction, while this store remains the single owner of
+        ``branding_conversations`` writes.
+
+        Locks the conversation row (``FOR UPDATE``) before checking whether it
+        is already attached to a different brand, closing the race a
+        check-then-write across separate statements would leave open.
+
+        Preconditions:
+            ``conversation_id`` and ``brand_id`` are non-empty strings;
+            ``mission``, when provided, is a valid :class:`BrandingMission`.
+            *cur* belongs to a transaction the caller will commit or roll
+            back — this method neither commits nor rolls back.
+        Postconditions:
+            Returns :attr:`ConversationAttachResult.NOT_FOUND` when no such
+            conversation exists (no write performed).
+
+            Returns :attr:`ConversationAttachResult.ALREADY_ATTACHED` when the
+            conversation is currently attached to a different brand (no write
+            performed).
+
+            Otherwise updates the conversation's ``brand_id`` to *brand_id*
+            and returns :attr:`ConversationAttachResult.OK`. When *mission* is
+            provided, ``mission_json`` is overwritten with it. When *mission*
+            is omitted (``None``), ``mission_json`` is left as whatever this
+            same locked read just observed — never a snapshot the caller took
+            before acquiring the lock, so a mission update racing this call
+            (e.g. a concurrent chat turn) is never silently rolled back.
+        Raises:
+            ValueError: if ``conversation_id`` or ``brand_id`` is empty, or
+                ``mission`` is provided but not a :class:`BrandingMission`.
+        """
+        if not conversation_id:
+            raise ValueError("conversation_id must be a non-empty string")
+        if not brand_id:
+            raise ValueError("brand_id must be a non-empty string")
+        if mission is not None and not isinstance(mission, BrandingMission):
+            raise ValueError("mission must be a BrandingMission")
+        cur.execute(
+            "SELECT brand_id, mission_json FROM branding_conversations "
+            "WHERE conversation_id = %s FOR UPDATE",
+            (conversation_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return ConversationAttachResult.NOT_FOUND
+        current_brand_id = row["brand_id"]
+        if current_brand_id and str(current_brand_id) != brand_id:
+            return ConversationAttachResult.ALREADY_ATTACHED
+
+        ts = datetime.now(tz=timezone.utc)
+        mission_payload = (
+            mission.model_dump(mode="json") if mission is not None else row["mission_json"]
+        )
+        cur.execute(
+            "UPDATE branding_conversations SET brand_id = %s, mission_json = %s, updated_at = %s "
+            "WHERE conversation_id = %s",
+            (brand_id, Json(mission_payload), ts, conversation_id),
+        )
+        return ConversationAttachResult.OK
 
     @timed_query(store=_STORE, op="get_by_brand_id")
     def get_by_brand_id(

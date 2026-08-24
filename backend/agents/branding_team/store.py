@@ -32,6 +32,7 @@ from shared.postgres import PostgresHelperMixin
 from shared.postgres.metrics import timed_query
 from user_profile import ArtifactType, record_association_safe, remove_association_safe
 
+from .assistant.store import BrandingConversationStore, ConversationAttachResult
 from .models import (
     Brand,
     BrandingMission,
@@ -494,29 +495,14 @@ class BrandingStore(PostgresHelperMixin):
             raise ValueError("conversation_id must be a non-empty string")
         if mission is not None and not isinstance(mission, BrandingMission):
             raise ValueError("mission must be a BrandingMission")
+        conv_store = BrandingConversationStore()
         try:
             with self._transaction() as cur:
-                cur.execute(
-                    "SELECT brand_id, mission_json FROM branding_conversations "
-                    "WHERE conversation_id = %s FOR UPDATE",
-                    (conversation_id,),
-                )
-                row = cur.fetchone()
-                if row is None:
+                conv_result = conv_store.attach_locked(cur, conversation_id, brand_id, mission)
+                if conv_result is ConversationAttachResult.NOT_FOUND:
                     raise _AttachAbort(AttachConversationResult.CONVERSATION_NOT_FOUND)
-                current_brand_id = row["brand_id"]
-                if current_brand_id and str(current_brand_id) != brand_id:
+                if conv_result is ConversationAttachResult.ALREADY_ATTACHED:
                     raise _AttachAbort(AttachConversationResult.ALREADY_ATTACHED)
-
-                ts = datetime.now(tz=timezone.utc)
-                mission_payload = (
-                    mission.model_dump(mode="json") if mission is not None else row["mission_json"]
-                )
-                cur.execute(
-                    "UPDATE branding_conversations SET brand_id = %s, mission_json = %s, updated_at = %s "
-                    "WHERE conversation_id = %s",
-                    (brand_id, Json(mission_payload), ts, conversation_id),
-                )
 
                 patch = {"conversation_id": conversation_id, "updated_at": _now_iso()}
                 brand = _apply_brand_patch(cur, brand_id, client_id, patch)
