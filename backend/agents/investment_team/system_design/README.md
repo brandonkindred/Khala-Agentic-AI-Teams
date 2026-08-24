@@ -75,7 +75,7 @@ with implementation detail for individual Strategy Lab capabilities:
 | Orchestrator per-attempt pipeline (5-mixin composition) | [`strategy_lab/orchestrator.py`](../strategy_lab/orchestrator.py) + `strategy_lab/orchestrator_{design,synthesis,alignment,verification,record_assembly}.py` |
 | Quality gates (readiness, safety, conformance, acceptance, realism, alignment) | [`strategy_lab/quality_gates/`](../strategy_lab/quality_gates/) — full catalog in [`generation_pipeline.md`](./generation_pipeline.md) |
 | Deterministic DSL-to-code compiler | [`strategy_lab/synthesis/compiler.py`](../strategy_lab/synthesis/compiler.py)`::compile_strategy` |
-| Engine-side predicate dispatch, streaming indicators, trade-record building | [`strategy_lab/executor/`](../strategy_lab/executor/) |
+| Streaming indicator evaluation for synthesis-time checks; legacy/test-only `TradeRecord` converter (`trade_builder.py`, not on the production path) | [`strategy_lab/executor/`](../strategy_lab/executor/) |
 | Factor/genome DSL and compiler | [`strategy_lab/factors/`](../strategy_lab/factors/) |
 | Canonical streaming indicator implementations | [`strategy_lab/indicators/`](../strategy_lab/indicators/) |
 | Zero/low-trade backtest diagnostics (static + runtime AST probing) | [`strategy_lab/coverage_probe/`](../strategy_lab/coverage_probe/) |
@@ -88,7 +88,7 @@ with implementation detail for individual Strategy Lab capabilities:
 | Multi-provider OHLCV fetcher | [`market_data_service.py`](../market_data_service.py) |
 | Strategy Lab market snapshot (Frankfurter / FRED / yfinance) | [`market_lab_data/free_tier.py`](../market_lab_data/free_tier.py) |
 | Streaming provider registry (Binance / Coinbase / Alpaca / OANDA + paid) | [`trading_service/providers/`](../trading_service/providers/) |
-| Mode-agnostic trading engine + fill simulator | [`trading_service/service.py`](../trading_service/service.py), [`trading_service/engine/`](../trading_service/engine/) |
+| Mode-agnostic trading engine — production predicate dispatch (`_EngineEntryDispatcher`/`_EngineExitDispatcher`) + `FillSimulator`, the actual production `TradeRecord` builder | [`trading_service/service.py`](../trading_service/service.py), [`trading_service/engine/`](../trading_service/engine/) |
 | QuantConnect / TradingView browser automation | [`tool_agents/web_interfaces/coordinator.py`](../tool_agents/web_interfaces/coordinator.py) |
 | Catalog of core + specialist desk agents | [`agent_catalog.py`](../agent_catalog.py) |
 | Unified-API mount point | [`backend/unified_api/config.py`](../../../unified_api/config.py) |

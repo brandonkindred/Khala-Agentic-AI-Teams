@@ -71,6 +71,7 @@ flowchart TB
     subgraph persistence[Persistence]
       PDict[_PersistentDict<br/>dict-like wrapper<br/>api/main.py L85]
       Buckets[(_profiles, _proposals,<br/>_strategies, _validations,<br/>_backtests, _strategy_lab_records,<br/>_paper_trading_sessions,<br/>_advisor_sessions)]
+      RunStore[(investment_strategy_lab_runs<br/>run-state store — direct JobServiceClient,<br/>bypasses _PersistentDict)]
     end
 
     subgraph tools[Tool Agents]
@@ -164,11 +165,12 @@ flowchart TB
   AdvisorEP --> PDict
   LabEP --> PDict
   SharedEP --> PDict
-  BatchWF --> PDict
-  DesignAttempt -->|"design-attempt checkpoint<br/>(ADR-012)"| PDict
+  BatchWF -->|"progress writes<br/>(persist_run_state_activity)"| RunStore
+  DesignAttempt -->|"design-attempt checkpoint<br/>(ADR-012)"| RunStore
   Finalize --> PDict
   PDict --> Buckets
   Buckets --> JS
+  RunStore --> JS
 
   BatchWF -.->|"publish_run_event_activity<br/>(skipped/finalized/terminal events)"| EventBus
   DesignAttempt -.->|"direct job_event_bus.publish<br/>(in-process, best-effort progress)"| EventBus

@@ -114,7 +114,9 @@ sequenceDiagram
         SIE-->>BatchWF: brief
 
         loop wave of cycles (bounded parallelism)
-            BatchWF->>CycleWF: start_child_workflow(cycle_input incl. brief)
+            loop start every cycle in the wave, before awaiting any
+                BatchWF->>CycleWF: start_child_workflow(cycle_input incl. brief)
+            end
 
             loop design-re-entry (bounded, on spec-implementability failure)
                 CycleWF->>Attempt: run_design_attempt_activity
@@ -125,15 +127,18 @@ sequenceDiagram
                 Attempt-->>CycleWF: record | reentry | skipped
             end
 
-            CycleWF-->>BatchWF: cycle result
-            BatchWF->>Finalize: finalize_cycle_record_activity
-            opt publishable winner
-                Finalize->>PTA: run_session(strategy)
-                PTA-->>Finalize: PaperTradingSession
+            CycleWF-->>BatchWF: cycle result (per child)
+            Note over BatchWF,CycleWF: asyncio.gather() barrier — every child in the<br/>wave settles before any of them is finalized
+            loop finalize each settled cycle, in cycle-index order
+                BatchWF->>Finalize: finalize_cycle_record_activity
+                opt publishable winner
+                    Finalize->>PTA: run_session(strategy)
+                    PTA-->>Finalize: PaperTradingSession
+                end
+                Finalize->>Store: persist StrategyLabRecord
+                BatchWF->>Bus: publish_run_event_activity (best-effort)
+                Bus-->>Client: SSE event
             end
-            Finalize->>Store: persist StrategyLabRecord
-            BatchWF->>Bus: publish_run_event_activity (best-effort)
-            Bus-->>Client: SSE event
         end
     end
 

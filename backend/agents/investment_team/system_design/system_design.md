@@ -405,13 +405,15 @@ the verification/publication decision is documented in
 | `GateResult` | `pass`, `fail`, `warn` | [`models.py`](../models.py):70 |
 | `AdvisorTopic` | `greeting`, `risk`, `horizon`, `income`, `net_worth`, `savings`, `tax`, `liquidity`, `goals`, `preferences`, `constraints`, `review` | [`models.py`](../models.py):24 |
 | `AdvisorSessionStatus` | `active`, `completed`, `abandoned` | [`models.py`](../models.py):18 |
-| `PaperTradingStatus` | `running`, `completed`, `failed` | [`models.py`](../models.py):367 |
-| `PaperTradingVerdict` | `ready_for_live`, `not_performant`, `requires_review` | [`models.py`](../models.py):373 |
+| `PaperTradingStatus` | `running`, `completed`, `failed` (legacy), plus live-mode `opening`, `warming_up`, `live` | [`models.py`](../models.py):1198 |
+| `PaperTradingVerdict` | `ready_for_live`, `not_performant` | [`models.py`](../models.py):1210 |
 
 `PaperTradingStatus` (above) and `StrategyLabRecord.paper_trading_status`
 (in the class diagram) are **not** the same vocabulary despite the name and
 two overlapping values — `PaperTradingStatus` is the runtime state of an
-active `PaperTradingSession` (`running`/`completed`/`failed`), while
+active `PaperTradingSession` (the legacy `running`/`completed`/`failed`
+trio, plus `opening`/`warming_up`/`live` once live-streaming paper trading
+starts), while
 `StrategyLabRecord.paper_trading_status` is a plain `Optional[str]`
 recording the *persisted cycle outcome* (`skipped`/`completed`/`failed`,
 `None` for legacy rows) — a cycle that never started paper trading has no
