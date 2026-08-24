@@ -248,7 +248,7 @@ On agent crash, the Repair Agent analyzes the traceback and applies fixes. If th
 
 ## 5b. Backend-Code-V2 Team Workflow
 
-The **backend-code-v2** agent team is a config-driven backend development team that operates independently from `BackendExpertAgent`. It uses a **three-layer architecture**: a Backend Tech Lead Agent runs Setup then delegates to a Backend Development Agent, which runs the remaining phases (7 total) and consults **tool agents in every phase**. No code from `backend_agent/` is imported or reused.
+The **backend-code-v2** agent team is a config-driven backend development team that operates independently from `BackendExpertAgent`. It uses a **three-layer architecture**: a Backend Tech Lead Agent runs Setup then delegates to a Backend Development Agent, which runs the remaining 6 phases (7 total including Setup) and consults **tool agents in every phase**. No code from `backend_agent/` is imported or reused.
 
 ```mermaid
 flowchart TB
@@ -267,8 +267,9 @@ flowchart TB
         DAExecution["Execution\n(delegate to tool agents)"]
         DAReview["Review\n(build, lint, coverage, UAT)"]
         DAProblemSolving["Problem-solving\n(root-cause, fix loop)"]
+        DADocumentation["Documentation\n(docstrings/README/API docs)"]
         DADeliver["Deliver\n(commit to branch)"]
-        DAPlanning --> DAExecution --> DAReview --> DAProblemSolving --> DADeliver
+        DAPlanning --> DAExecution --> DAReview --> DAProblemSolving --> DADocumentation --> DADeliver
     end
 
     subgraph toolGrid ["Tool Agents (participate in all phases)"]
