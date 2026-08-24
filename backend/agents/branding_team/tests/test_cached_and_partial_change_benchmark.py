@@ -100,6 +100,12 @@ def test_second_identical_run_hits_cache_and_stays_under_seven_seconds() -> None
         orchestrator.run(mission, human_review, phase_cache=cache)
         cold_elapsed = time.monotonic() - start
 
+        assert harness.executor_injected, (
+            "asyncio.events.new_event_loop was never called -- run_coroutine no longer "
+            "creates its loop via asyncio.run's default path, so this benchmark's injected "
+            "executor never took effect; the wall-clock results below cannot be trusted "
+            "until this coupling is fixed"
+        )
         assert harness.call_count == _EXPECTED_CALL_COUNT, (
             f"expected exactly {_EXPECTED_CALL_COUNT} LLM calls on the cold first run, got "
             f"{harness.call_count} -- see test_full_pipeline_first_run_benchmark.py for the "
@@ -151,6 +157,12 @@ def test_phase_one_relevant_mission_change_cascades_to_every_phase() -> None:
         executor_thread_name_prefix="partial-change-benchmark",
     ) as harness:
         orchestrator.run(original_mission, human_review, phase_cache=cache)
+        assert harness.executor_injected, (
+            "asyncio.events.new_event_loop was never called -- run_coroutine no longer "
+            "creates its loop via asyncio.run's default path, so this benchmark's injected "
+            "executor never took effect; the wall-clock results below cannot be trusted "
+            "until this coupling is fixed"
+        )
         assert harness.call_count == _EXPECTED_CALL_COUNT, (
             f"expected exactly {_EXPECTED_CALL_COUNT} LLM calls on the cold first run, got "
             f"{harness.call_count} -- see test_full_pipeline_first_run_benchmark.py for the "
