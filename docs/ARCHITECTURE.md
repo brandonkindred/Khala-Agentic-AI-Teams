@@ -276,8 +276,9 @@ flowchart TB
         DataEng["DataEng"]
         Auth["Auth"]
         ApiOA["API/OpenAPI"]
-        CICD["CI/CD"]
-        Container["Container"]
+        Testing["Testing/QA"]
+        Security["Security"]
+        Documentation["Documentation"]
         GitBranch["Git branch mgmt"]
         BuildSpec["Build Specialist"]
     end
@@ -288,7 +289,7 @@ flowchart TB
 
 - **Layer 1 — Backend Tech Lead Agent**: Runs the **Setup** phase (git init if needed, README with project title, rename master→main, create `development` branch), then delegates the 5-phase development cycle to the Backend Development Agent.
 - **Layer 2 — Backend Development Agent**: Owns Planning (microtask decomposition, language detection), Execution (tool agents + LLM fallback), Review (build, lint, QA, security, code review), Problem-solving (fix loop), and Deliver (feature branch, commit, merge to `development`). The review/fix loop runs up to 5 iterations.
-- **Layer 3 — Tool agents**: Data Engineering, API/OpenAPI, Auth, CI/CD, Containerization, **Git branch management**, and **Build Specialist** agents each implement `plan()`, `execute()`, `review()`, `problem_solve()`, and `deliver()`, so they participate in every phase. The **Git branch management** agent creates a feature branch off `development` at the start of Execution, commits changes after each iteration ("commit along the way"), and in Deliver merges the feature branch back into `development`. The **Build Specialist** (stub) is intended to assist when the project doesn't build; it can be wired to the existing build verifier or a dedicated build-fix flow.
+- **Layer 3 — Tool agents**: Data Engineering, API/OpenAPI, Auth, Testing/QA, Security, Documentation, **Git branch management**, and **Build Specialist** agents each implement `plan()`, `execute()`, `review()`, `problem_solve()`, and `deliver()`, so they participate in every phase. The **Git branch management** agent creates a feature branch off `development` at the start of Execution, commits changes after each iteration ("commit along the way"), and in Deliver merges the feature branch back into `development`. The **Build Specialist** (stub) is intended to assist when the project doesn't build; it can be wired to the existing build verifier or a dedicated build-fix flow.
 
 The team supports both Python and Java (auto-detected). Quality gate agents (QA, Security, Code Review) are passed in by the main orchestrator and invoked during Review.
 
@@ -304,7 +305,7 @@ The **frontend-code-v2** agent team is a standalone, experimental frontend devel
 
 - **Layer 1 — Frontend Tech Lead Agent**: Runs **Setup** (git init if needed, README, development branch), then delegates the 5-phase cycle to the Frontend Development Agent.
 - **Layer 2 — Frontend Development Agent**: Planning (microtask decomposition; stack inferred as Angular/React/TypeScript/JavaScript), Execution (tool agents + LLM fallback), Review (build, lint, QA, security, code review), Problem-solving (fix loop), Deliver (feature branch, commit, merge to `development`). Review/fix loop runs up to 5 iterations.
-- **Layer 3 — Tool agents**: State Management, Auth, API/OpenAPI, CI/CD, Containerization, Documentation, Testing/QA, Security, **Git branch management**, UI Design, Branding/Theme, UX/Usability, Accessibility, **Build Specialist**, Linter. Each participates in plan, execute, review, problem_solve, and deliver. Git branch management creates a feature branch off `development`, commits along the way, and merges in Deliver.
+- **Layer 3 — Tool agents**: State Management, Auth, API/OpenAPI, Architecture, Documentation, Testing/QA, Security, **Git branch management**, UI Design, Branding/Theme, UX/Usability, Accessibility, Performance, **Build Specialist**, Linter. Each participates in plan, execute, review, problem_solve, and deliver. Git branch management creates a feature branch off `development`, commits along the way, and merges in Deliver.
 
 **API endpoints:**
 - `POST /frontend-code-v2/run` — Submit a task and repo path; starts Setup then the 6-phase workflow (setup + 5-phase cycle) in a background thread.
@@ -672,7 +673,7 @@ flowchart TB
     SWTeam --> swCLI["agent_implementations/"]
     SWTeam --> swAdapter["planning_adapter.py\n(handoff → ProductRequirements)"]
     SWTeam --> swBackend["backend_agent/"]
-    SWTeam --> swBackendV2["backend_code_v2_team/\n(config-driven 7-phase team,\n10 tool agents; shares its phase\nimplementations with frontend_code_v2_team\nvia shared/v2_team_config.py)"]
+    SWTeam --> swBackendV2["backend_code_v2_team/\n(config-driven 7-phase team,\n8 tool agents; shares its phase\nimplementations with frontend_code_v2_team\nvia shared/v2_team_config.py)"]
     SWTeam --> swFrontend["frontend_team/\n(12 agents)"]
     SWTeam --> swDevops["devops_team/\n(9 agents + 5 tool agents)"]
     SWTeam --> swQuality["quality_gates/"]

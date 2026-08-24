@@ -1,6 +1,6 @@
 # Backend Code V2 Team
 
-The Backend Code V2 Team is a config-driven backend development system that produces production-ready backend code through a 7-phase workflow with 10 specialized tool agents. It is not an independently-coded implementation: `phases/_profile.py` composes a `StackProfile`/`V2TeamConfig` (`../shared/v2_team_config.py`) and binds the shared, generic phase implementations in `../shared/` — the same code the Frontend Code V2 Team runs, parameterized differently.
+The Backend Code V2 Team is a config-driven backend development system that produces production-ready backend code through a 7-phase workflow with 8 specialized tool agents. It is not an independently-coded implementation: `phases/_profile.py` composes a `StackProfile`/`V2TeamConfig` (`../shared/v2_team_config.py`) and binds the shared, generic phase implementations in `../shared/` — the same code the Frontend Code V2 Team runs, parameterized differently.
 
 ## Architecture
 
@@ -18,8 +18,6 @@ graph TB
         DE[Data Engineering]
         API[API/OpenAPI]
         AUTH[Auth]
-        CICD[CI/CD]
-        CONT[Containerization]
         GIT[Git Branch Mgmt]
         BUILD[Build Specialist]
         TEST[Testing/QA]
@@ -28,7 +26,7 @@ graph TB
     end
     
     BTL --> BDA
-    BDA --> DE & API & AUTH & CICD & CONT & GIT & BUILD & TEST & SEC & DOC
+    BDA --> DE & API & AUTH & GIT & BUILD & TEST & SEC & DOC
 ```
 
 ### Two-Layer Structure
@@ -74,8 +72,6 @@ The Review → Problem Solving → Execution cycle repeats up to 5 times until r
 | **Data Engineering** | Database models, schemas, data integrity | Schema validation |
 | **API/OpenAPI** | REST endpoints, OpenAPI specs | API contract review |
 | **Auth** | Authentication, authorization, JWT/OAuth | Security review |
-| **CI/CD** | Pipeline config (GitHub Actions, etc.) | Pipeline validation |
-| **Containerization** | Dockerfile, docker-compose | Container best practices |
 | **Git Branch Management** | Branch creation, commits, merges | - |
 | **Build Specialist** | Build scripts, dependency management | Build verification |
 | **Testing/QA** | Unit tests, integration tests | Test coverage review |
@@ -240,14 +236,13 @@ backend_code_v2_team/
     ├── data_engineering/  # Database models, schemas
     ├── api_openapi/       # REST endpoints
     ├── auth/              # Authentication
-    ├── cicd/              # CI/CD pipelines
-    ├── containerization/  # Docker
-    ├── git_branch_management/  # Git operations
     ├── build_specialist/  # Build scripts
     ├── testing_qa/        # Tests
     ├── security/          # Security scanning
     └── documentation/     # Documentation
 ```
+
+The eighth tool agent, Git Branch Management, is shared with the Frontend Code V2 Team and lives at `../shared/tool_agent_git_branch.py` rather than under `tool_agents/` here.
 
 The Setup, Execution, Review, Documentation, Planning, and Deliver phase implementations are shared with the Frontend Code V2 Team and live in `../shared/` (`v2_orchestrator.py`, `v2_phase_bindings.py`, `v2_execution_bindings.py`, `v2_review_bindings.py`, `phases/{setup,execution,review,documentation,planning,deliver}.py`), configured per team by `_profile.py`'s `BACKEND_CONFIG`.
 

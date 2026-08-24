@@ -1,6 +1,6 @@
 # Frontend Code V2 Team
 
-The Frontend Code V2 Team is a config-driven frontend development system that produces production-ready UI code through a 7-phase workflow with 17 specialized tool agents. It is not an independently-coded implementation: `phases/_profile.py` composes a `StackProfile`/`V2TeamConfig` (`../shared/v2_team_config.py`) and binds the shared, generic phase implementations in `../shared/` — the same code the Backend Code V2 Team runs, parameterized differently (including the `extra_review_clause` that adds frontend's accessibility review step).
+The Frontend Code V2 Team is a config-driven frontend development system that produces production-ready UI code through a 7-phase workflow with 15 specialized tool agents. It is not an independently-coded implementation: `phases/_profile.py` composes a `StackProfile`/`V2TeamConfig` (`../shared/v2_team_config.py`) and binds the shared, generic phase implementations in `../shared/` — the same code the Backend Code V2 Team runs, parameterized differently (including the `extra_review_clause` that adds frontend's accessibility review step).
 
 ## Architecture
 
@@ -14,7 +14,7 @@ graph TB
         FDA[FrontendDevelopmentAgent]
     end
     
-    subgraph TA [Tool Agents - 17 Total]
+    subgraph TA [Tool Agents - 15 Total]
         subgraph Core [Core Agents]
             SM[State Management]
             API[API/OpenAPI]
@@ -38,8 +38,6 @@ graph TB
         
         subgraph DevOps [DevOps Agents]
             BUILD[Build Specialist]
-            CICD[CI/CD]
-            CONT[Containerization]
             GIT[Git Branch Mgmt]
             DOC[Documentation]
         end
@@ -85,7 +83,7 @@ stateDiagram-v2
 
 The Review → Problem Solving → Execution cycle repeats up to 5 times until review passes.
 
-## Tool Agents (17 Total)
+## Tool Agents (15 Total)
 
 ### Core Development
 
@@ -119,8 +117,6 @@ The Review → Problem Solving → Execution cycle repeats up to 5 times until r
 | Agent | Tasks | Review Focus |
 |-------|-------|--------------|
 | **Build Specialist** | Webpack/Vite config, build optimization | Build performance |
-| **CI/CD** | GitHub Actions, deployment pipelines | Pipeline reliability |
-| **Containerization** | Dockerfile, nginx config | Container best practices |
 | **Git Branch Management** | Branch creation, commits, merges | - |
 | **Documentation** | Component docs, README, Storybook stories | Doc completeness |
 
@@ -272,11 +268,10 @@ frontend_code_v2_team/
     ├── performance/       # Performance optimization
     ├── linter/            # Code linting
     ├── build_specialist/  # Build configuration
-    ├── cicd/              # CI/CD pipelines
-    ├── containerization/  # Docker
-    ├── git_branch_management/  # Git operations
     └── documentation/     # Documentation
 ```
+
+The fifteenth tool agent, Git Branch Management, is shared with the Backend Code V2 Team and lives at `../shared/tool_agent_git_branch.py` rather than under `tool_agents/` here.
 
 The Setup, Execution, Review, Documentation, Planning, and Deliver phase implementations are shared with the Backend Code V2 Team and live in `../shared/` (`v2_orchestrator.py`, `v2_phase_bindings.py`, `v2_execution_bindings.py`, `v2_review_bindings.py`, `phases/{setup,execution,review,documentation,planning,deliver}.py`), configured per team by `_profile.py`'s `FRONTEND_CONFIG`.
 
