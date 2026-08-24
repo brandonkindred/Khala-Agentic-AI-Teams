@@ -120,7 +120,10 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
          equivalent, and user-agent-control exceptions apply. Do not report a small but
          well-separated or inline target as a violation — check spacing and exceptions
          before flagging, and say which one you checked.
-       * Focus not obscured by sticky headers, toolbars, or footers.
+       * Focus not obscured: at the AA bar this review holds to (2.4.11), a focused
+         control must not be ENTIRELY hidden by a sticky header, toolbar, or footer.
+         Partial obscuration fails only the AAA criterion (2.4.12) — report it, if at
+         all, as an enhancement, never as an AA violation.
        * Dragging movements have a single-pointer alternative.
        * Redundant entry, and consistent help placement.
 
@@ -156,9 +159,13 @@ D. STATE COVERAGE
    different copy and different recovery, as do offline and API-error — so a
    disposition covering one never covers the other.
    Give every state exactly one disposition, and state which:
-     - HANDLED — the UI is (1) rendered at all, (2) recoverable from, and (3) where the
-       state arrives dynamically — without navigation or focus movement — announced to
-       assistive tech. An initially rendered state needs correct semantics, not a live
+     - HANDLED — the UI is (1) rendered at all; (2) recoverable from, where the state
+       represents a failure or interruption (missing, failed, stalled, stale,
+       permission-denied, backend-unconfigured, offline, API-error) — a stated way
+       forward rather than a dead end. A successful state has nothing to recover from,
+       so do not withhold HANDLED from a correct populated or empty view on this
+       ground; and (3) where the state arrives dynamically — without navigation or
+       focus movement — announced to assistive tech. An initially rendered state needs correct semantics, not a live
        region: the house standard reserves `aria-live` for dynamic content and status
        changes, so neither report a compliant initial render as missing an announcement
        nor recommend adding one.
