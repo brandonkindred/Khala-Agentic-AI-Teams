@@ -209,6 +209,43 @@ def _system_prompt_is_redundant_with_content(
     return system_prompt == derived
 
 
+def _join_system_segments_with_newline(segments: List[Any]) -> List[Any]:
+    """Insert a plain ``"\\n"`` separator between adjacent system-content segments.
+
+    Anthropic's ``system`` parameter, when it is a list of text blocks (the
+    shape a ``CacheBreakpoint``-marked ``system_content`` list renders into —
+    see ``clients.claude._render_anthropic_system``), is concatenated on the
+    wire with **no inserted boundary** between blocks — unlike the
+    plain-string join paths elsewhere in this module (Strands'
+    ``split_system_prompt``, and ``_flatten_system_prompt_content``), which
+    both use ``"\\n"``. Without this, a persona segment immediately followed
+    by a ``CacheBreakpoint``-marked segment runs together on the wire with no
+    whitespace (e.g. ``"...bugs_found).**Task:** review the login flow"``).
+
+    Preconditions:
+        - ``segments`` is a list whose items are strings and/or
+          ``CacheBreakpoint`` instances (typically ``leading + content_segments``
+          from :meth:`LLMClientModel.stream`).
+
+    Postconditions:
+        - Returns a new list with a bare ``"\\n"`` string inserted between
+          every pair of adjacent input items — never before the first or
+          after the last. Returns a shallow copy of ``segments`` unchanged
+          when it has 0 or 1 items (nothing to separate). Never mutates a
+          ``CacheBreakpoint``'s own ``.text`` — the ``"\\n"`` is always a
+          separate list entry, which renders as its own Anthropic text block
+          with no ``cache_control``, so it never breaks the cache boundary on
+          an adjacent marked segment. Never raises.
+    """
+    if len(segments) <= 1:
+        return list(segments)
+    joined: List[Any] = [segments[0]]
+    for seg in segments[1:]:
+        joined.append("\n")
+        joined.append(seg)
+    return joined
+
+
 def _tool_result_content_to_text(content: List[Dict[str, Any]]) -> str:
     """Flatten Strands ``toolResult.content`` blocks into a single string payload."""
     parts: List[str] = []
@@ -595,7 +632,7 @@ class LLMClientModel(Model):
             client.supports_prompt_caching()
         ):
             leading: List[Any] = [] if redundant else ([system_prompt] if system_prompt else [])
-            system_content: Any = leading + content_segments
+            system_content: Any = _join_system_segments_with_newline(leading + content_segments)
         elif redundant:
             # By definition of "redundant", system_prompt IS exactly the
             # "\n"-joined text of content_segments already — reuse it

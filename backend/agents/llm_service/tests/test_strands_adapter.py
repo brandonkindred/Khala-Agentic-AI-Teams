@@ -424,7 +424,9 @@ class _CachingRecordingClient(_RecordingClient):
 def test_stream_preserves_cache_breakpoint_when_client_supports_caching() -> None:
     """A CacheBreakpoint in system_prompt_content survives intact — not
     flattened to text — as a segment in the system message's content list,
-    when the backing client opts into prompt caching."""
+    when the backing client opts into prompt caching. Adjacent segments are
+    separated by a bare "\\n" entry (Anthropic concatenates list-form system
+    blocks with no inserted boundary, so this module must insert one)."""
     from llm_service.cache_breakpoint import CacheBreakpoint
 
     client = _CachingRecordingClient({"ok": True})
@@ -442,7 +444,7 @@ def test_stream_preserves_cache_breakpoint_when_client_supports_caching() -> Non
     call = client.chat_calls[0]
     assert call["messages"][0] == {
         "role": "system",
-        "content": ["lead-in", breakpoint_marker, "trailer"],
+        "content": ["lead-in", "\n", breakpoint_marker, "\n", "trailer"],
     }
 
 
@@ -497,7 +499,9 @@ def test_stream_drops_redundant_system_prompt_when_it_matches_split_content() ->
     produces via ``split_system_prompt`` when constructed with a combined
     ``system_prompt=[...]`` list — the persona/CacheBreakpoint text must be
     sent exactly once, not duplicated as both the leading string and a
-    content segment."""
+    content segment. The two remaining segments still get a "\\n" separator
+    between them (Anthropic concatenates list-form system blocks with no
+    inserted boundary)."""
     from llm_service.cache_breakpoint import CacheBreakpoint
 
     client = _CachingRecordingClient({"ok": True})
@@ -518,7 +522,32 @@ def test_stream_drops_redundant_system_prompt_when_it_matches_split_content() ->
     # Each block appears exactly once — no duplicate leading string.
     assert call["messages"][0] == {
         "role": "system",
-        "content": ["persona", breakpoint_marker],
+        "content": ["persona", "\n", breakpoint_marker],
+    }
+
+
+def test_stream_separates_multiple_adjacent_segments_with_newlines() -> None:
+    """With 3+ system-content segments, every adjacent pair gets its own
+    "\\n" separator — no block's text is silently glued to its neighbor's."""
+    from llm_service.cache_breakpoint import CacheBreakpoint
+
+    client = _CachingRecordingClient({"ok": True})
+    model = LLMClientModel(client)
+    bp1 = CacheBreakpoint("first breakpoint")
+    bp2 = CacheBreakpoint("second breakpoint")
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            system_prompt="lead-in",
+            system_prompt_content=[bp1, {"text": "middle"}, bp2],
+        )
+    )
+
+    call = client.chat_calls[0]
+    assert call["messages"][0] == {
+        "role": "system",
+        "content": ["lead-in", "\n", bp1, "\n", "middle", "\n", bp2],
     }
 
 
