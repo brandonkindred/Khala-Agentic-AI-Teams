@@ -37,8 +37,31 @@ export class AgentRunHistoryDestructiveActionsService {
     (msg) => this._errors.next(msg),
   );
 
-  /** Run id currently being deleted (disables actions on that row). */
-  readonly deletingRunId = signal<string | null>(null);
+  /**
+   * Run ids currently being deleted (disables actions on those rows). A set
+   * rather than a single id so that confirming two deletes back-to-back —
+   * possible now that the Material confirm dialog is async, unlike the
+   * blocking native `confirm()` this replaced — doesn't have the second
+   * delete's completion clear the first delete's still-in-flight state.
+   */
+  private readonly _deletingRunIds = signal<ReadonlySet<string>>(new Set());
+  readonly deletingRunIds = this._deletingRunIds.asReadonly();
+
+  isDeleting(runId: string): boolean {
+    return this._deletingRunIds().has(runId);
+  }
+
+  private addDeletingRunId(runId: string): void {
+    this._deletingRunIds.update((ids) => new Set(ids).add(runId));
+  }
+
+  private removeDeletingRunId(runId: string): void {
+    this._deletingRunIds.update((ids) => {
+      const next = new Set(ids);
+      next.delete(runId);
+      return next;
+    });
+  }
 
   /** Emits the deleted run's id after a successful delete. */
   private readonly _runDeleted = new Subject<string>();
@@ -48,9 +71,9 @@ export class AgentRunHistoryDestructiveActionsService {
    * Deletes a run after user confirmation.
    *
    * Preconditions: `run.id` and `run.trace_id` are non-empty.
-   * Postconditions: on completion (success or failure) `deletingRunId` is
-   *   reset to `null`. On success, emits `run.id` through `runDeleted$` and
-   *   shows a success toast. On failure, emits an error message through
+   * Postconditions: on completion (success or failure) `run.id` is removed
+   *   from `deletingRunIds`. On success, emits `run.id` through `runDeleted$`
+   *   and shows a success toast. On failure, emits an error message through
    *   `errors$` and no toast is shown.
    */
   deleteRun(run: RunSummary): void {
@@ -67,8 +90,8 @@ export class AgentRunHistoryDestructiveActionsService {
         errorFallback: 'Failed to delete run.',
       },
       'Run deleted.',
-      () => this.deletingRunId.set(run.id),
-      () => this.deletingRunId.set(null),
+      () => this.addDeletingRunId(run.id),
+      () => this.removeDeletingRunId(run.id),
     );
   }
 }

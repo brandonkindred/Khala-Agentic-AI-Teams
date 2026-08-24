@@ -1,7 +1,7 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { MatDialog } from '@angular/material/dialog';
-import { of } from 'rxjs';
+import { Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { AgentConsoleApiService } from '../../../../services/agent-console-api.service';
 import { NotificationService } from '../../../../core/notification.service';
@@ -90,5 +90,30 @@ describe('AgentRunHistoryComponent', () => {
 
     expect(apiMock.deleteRun).not.toHaveBeenCalled();
     expect(component.runs().map((r) => r.id)).toEqual(['run-a', 'run-b']);
+  });
+
+  it('disables only the row being deleted while its delete is in flight', () => {
+    const response$ = new Subject<{ id: string; status: string }>();
+    apiMock.deleteRun.mockReturnValue(response$.asObservable());
+
+    component.deleteRun(runA, { stopPropagation: vi.fn() } as unknown as Event);
+
+    expect(component.isDeleting('run-a')).toBe(true);
+    expect(component.isDeleting('run-b')).toBe(false);
+
+    response$.next({ id: 'run-a', status: 'deleted' });
+    response$.complete();
+
+    expect(component.isDeleting('run-a')).toBe(false);
+  });
+
+  it('surfaces a delete failure through the error banner', () => {
+    apiMock.deleteRun.mockReturnValue(throwError(() => ({ error: { detail: 'boom' } })));
+
+    component.deleteRun(runA, { stopPropagation: vi.fn() } as unknown as Event);
+
+    expect(component.error()).toBe('boom');
+    expect(component.runs().map((r) => r.id)).toEqual(['run-a', 'run-b']);
+    expect(notifyMock.saved).not.toHaveBeenCalled();
   });
 });

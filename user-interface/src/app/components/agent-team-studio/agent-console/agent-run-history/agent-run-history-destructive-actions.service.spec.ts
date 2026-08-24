@@ -22,6 +22,11 @@ describe('AgentRunHistoryDestructiveActionsService', () => {
     trace_id: 'abcdef1234567890',
   } as unknown as RunSummary;
 
+  const otherRun = {
+    id: 'run-2',
+    trace_id: 'fedcba9876543210',
+  } as unknown as RunSummary;
+
   beforeEach(() => {
     confirmResult = true;
     apiSpy = { deleteRun: vi.fn().mockReturnValue(of({ id: 'run-1', status: 'deleted' })) };
@@ -64,7 +69,7 @@ describe('AgentRunHistoryDestructiveActionsService', () => {
       expect(apiSpy.deleteRun).toHaveBeenCalledWith('run-1');
       expect(deleted).toEqual(['run-1']);
       expect(notifySpy.saved).toHaveBeenCalledWith('Run deleted.');
-      expect(service.deletingRunId()).toBeNull();
+      expect(service.isDeleting('run-1')).toBe(false);
     });
 
     it('does not delete when the dialog is cancelled', () => {
@@ -77,11 +82,11 @@ describe('AgentRunHistoryDestructiveActionsService', () => {
       expect(notifySpy.saved).not.toHaveBeenCalled();
     });
 
-    it('sets deletingRunId during the API call and clears it on success', () => {
+    it('sets isDeleting during the API call and clears it on success', () => {
       confirmResult = true;
       apiSpy.deleteRun.mockReturnValue(
         new Observable((subscriber) => {
-          expect(service.deletingRunId()).toBe('run-1');
+          expect(service.isDeleting('run-1')).toBe(true);
           subscriber.next({ id: 'run-1', status: 'deleted' });
           subscriber.complete();
         }),
@@ -89,7 +94,7 @@ describe('AgentRunHistoryDestructiveActionsService', () => {
 
       service.deleteRun(run);
 
-      expect(service.deletingRunId()).toBeNull();
+      expect(service.isDeleting('run-1')).toBe(false);
     });
 
     it('surfaces an error on errors$ and skips the toast when delete fails after confirm', () => {
@@ -104,7 +109,7 @@ describe('AgentRunHistoryDestructiveActionsService', () => {
 
       expect(messages).toEqual([null, 'boom']);
       expect(deleted).toEqual([]);
-      expect(service.deletingRunId()).toBeNull();
+      expect(service.isDeleting('run-1')).toBe(false);
       expect(notifySpy.saved).not.toHaveBeenCalled();
     });
 
@@ -125,6 +130,28 @@ describe('AgentRunHistoryDestructiveActionsService', () => {
       closed$.complete();
       service.deleteRun(run);
       expect(dialogSpy.open).toHaveBeenCalledTimes(2);
+    });
+
+    it('tracks each in-flight run independently so one finishing does not clear another', () => {
+      // Two distinct runs confirmed back-to-back — each opens its own dialog
+      // (the re-entrancy guard only blocks a *second* concurrent dialog, and
+      // by the time run-2's delete is confirmed, run-1's dialog has already
+      // closed), so both API calls can be genuinely in flight at once.
+      const runOneResponse$ = new Subject<{ id: string; status: string }>();
+      apiSpy.deleteRun.mockImplementation((id: string) =>
+        id === 'run-1' ? runOneResponse$.asObservable() : of({ id: 'run-2', status: 'deleted' }),
+      );
+
+      service.deleteRun(run);
+      service.deleteRun(otherRun);
+
+      expect(service.isDeleting('run-1')).toBe(true);
+      expect(service.isDeleting('run-2')).toBe(false);
+
+      runOneResponse$.next({ id: 'run-1', status: 'deleted' });
+      runOneResponse$.complete();
+
+      expect(service.isDeleting('run-1')).toBe(false);
     });
   });
 });

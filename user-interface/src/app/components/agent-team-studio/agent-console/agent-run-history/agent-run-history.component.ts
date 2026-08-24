@@ -44,13 +44,11 @@ export class AgentRunHistoryComponent implements OnChanges {
   private readonly api = inject(AgentConsoleApiService);
   private readonly destructiveActions = inject(AgentRunHistoryDestructiveActionsService);
 
-  /** Run id currently being deleted (disables the row's menu while in flight). */
-  readonly deletingRunId = this.destructiveActions.deletingRunId;
-
   constructor() {
     this.destructiveActions.runDeleted$
       .pipe(takeUntilDestroyed())
       .subscribe((runId) => this.runs.update((rows) => rows.filter((r) => r.id !== runId)));
+    this.destructiveActions.errors$.pipe(takeUntilDestroyed()).subscribe((message) => this.error.set(message));
   }
 
   @Input({ required: true }) agentId!: string | null;
@@ -119,6 +117,10 @@ export class AgentRunHistoryComponent implements OnChanges {
   deleteRun(run: RunSummary, event: Event): void {
     event.stopPropagation();
     this.destructiveActions.deleteRun(run);
+  }
+
+  isDeleting(runId: string): boolean {
+    return this.destructiveActions.isDeleting(runId);
   }
 
   emitCompare(run: RunSummary, event: Event): void {
