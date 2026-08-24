@@ -21,13 +21,13 @@
       <input
         matInput
         type="number"
-        [ngModel]="batchCount"
+        [ngModel]="batchCount()"
         (ngModelChange)="onBatchCountChange($event)"
         [min]="BATCH_COUNT_MIN"
-        [max]="BATCH_COUNT_MAX"
+        [max]="BATCH_COUNT_MAX()"
         aria-label="Number of batches"
       />
-      <mat-hint>{{ BATCH_COUNT_MIN }}–{{ BATCH_COUNT_MAX }}; each new batch learns from prior batches</mat-hint>
+      <mat-hint>{{ BATCH_COUNT_MIN }}–{{ BATCH_COUNT_MAX() }}; each new batch learns from prior batches</mat-hint>
     </mat-form-field>
   </div>
 

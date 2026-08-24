@@ -1,4 +1,4 @@
-import { Component, inject, signal } from '@angular/core';
+import { Component, Signal, effect, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import {
@@ -11,6 +11,7 @@ import { MatInputModule } from '@angular/material/input';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
+import { clamp } from '../../../shared/clamp.util';
 import type { AssetCategoryOption } from '../strategy-lab.component';
 
 export interface GenerateStrategiesDialogData {
@@ -19,13 +20,19 @@ export interface GenerateStrategiesDialogData {
   batchSizeMin: number;
   batchSizeMax: number;
   batchCountMin: number;
-  batchCountMax: number;
+  /**
+   * The parent's own `BATCH_COUNT_MAX` signal — passed by reference, not
+   * read at open time, so this dialog stays synchronized if a config fetch
+   * resolves (changing the operator-configured limit) while it's still open.
+   */
+  batchCountMax: Signal<number>;
   categoryOptions: AssetCategoryOption[];
   selectedCategories: string[];
 }
 
 export interface GenerateStrategiesDialogResult {
   batchSize: number;
+  /** Postcondition: always within `[batchCountMin, batchCountMax()]` as of the moment the dialog closed. */
   batchCount: number;
   selectedCategories: string[];
   /**
@@ -69,14 +76,30 @@ export class GenerateStrategiesDialogComponent {
   readonly BATCH_SIZE_MIN = this.data.batchSizeMin;
   readonly BATCH_SIZE_MAX = this.data.batchSizeMax;
   readonly BATCH_COUNT_MIN = this.data.batchCountMin;
+  /** Live — reads the parent's own signal, so it tracks a config-driven change while this dialog is open. */
   readonly BATCH_COUNT_MAX = this.data.batchCountMax;
   readonly categoryOptions = this.data.categoryOptions;
 
-  batchSize = this.data.batchSize;
-  batchCount = this.data.batchCount;
+  // Clamped immediately at construction (not just on the next edit) so a
+  // caller-supplied out-of-bounds value is never displayed unclamped.
+  batchSize = clamp(this.data.batchSize, this.BATCH_SIZE_MIN, this.BATCH_SIZE_MAX);
+  readonly batchCount = signal(clamp(this.data.batchCount, this.BATCH_COUNT_MIN, this.BATCH_COUNT_MAX()));
+
   readonly selectedCategories = signal<string[]>(this.data.selectedCategories);
   /** Set once the user touches the category toggles — see `GenerateStrategiesDialogResult.categoriesTouched`. */
   private categoriesTouched = false;
+
+  /**
+   * Keeps `batchCount` inside `[BATCH_COUNT_MIN, BATCH_COUNT_MAX()]` even
+   * when `BATCH_COUNT_MAX()` shrinks while this dialog is open (a config
+   * fetch resolving with a lower operator-configured limit) — without this,
+   * the confirmation label could keep showing a count the run would
+   * silently reduce after the dialog closes.
+   */
+  private readonly syncBatchCountToMax = effect(() => {
+    const max = this.BATCH_COUNT_MAX();
+    this.batchCount.update((v) => clamp(v, this.BATCH_COUNT_MIN, max));
+  });
 
   /** A run requires at least one selected category. */
   get categoriesValid(): boolean {
@@ -95,18 +118,19 @@ export class GenerateStrategiesDialogComponent {
    * arrows, not a typed or pasted value.
    */
   onBatchSizeChange(value: number): void {
-    this.batchSize = this.clamp(value, this.BATCH_SIZE_MIN, this.BATCH_SIZE_MAX);
+    this.batchSize = clamp(value, this.BATCH_SIZE_MIN, this.BATCH_SIZE_MAX);
   }
 
   onBatchCountChange(value: number): void {
-    this.batchCount = this.clamp(value, this.BATCH_COUNT_MIN, this.BATCH_COUNT_MAX);
+    this.batchCount.set(clamp(value, this.BATCH_COUNT_MIN, this.BATCH_COUNT_MAX()));
   }
 
   /** Label for the submit button — adapts to single- vs multi-batch mode. */
   runButtonLabel(): string {
-    if (this.batchCount > 1) {
-      const total = this.batchSize * this.batchCount;
-      return `Run ${this.batchSize} × ${this.batchCount} = ${total} strategies`;
+    const batchCount = this.batchCount();
+    if (batchCount > 1) {
+      const total = this.batchSize * batchCount;
+      return `Run ${this.batchSize} × ${batchCount} = ${total} strategies`;
     }
     return `Run ${this.batchSize} strateg${this.batchSize === 1 ? 'y' : 'ies'}`;
   }
@@ -115,24 +139,19 @@ export class GenerateStrategiesDialogComponent {
     if (!this.categoriesValid) {
       return;
     }
-    // The native input [min]/[max] only constrain the spinner arrows, not
-    // typed/pasted values — clamp here so the value actually sent (and the
-    // label the user just confirmed) can never diverge from what
-    // runNewStrategy() would otherwise silently re-clamp after the dialog
-    // has already closed.
-    const batchSize = this.clamp(this.batchSize, this.BATCH_SIZE_MIN, this.BATCH_SIZE_MAX);
-    const batchCount = this.clamp(this.batchCount, this.BATCH_COUNT_MIN, this.BATCH_COUNT_MAX);
+    // batchSize/batchCount are already kept clamped continuously (construction,
+    // every edit via onBatchSizeChange/onBatchCountChange, and — for batchCount —
+    // every BATCH_COUNT_MAX() change via the effect above); this is a final
+    // defensive clamp so the value closed with is correct even if something
+    // mutated the fields directly, bypassing those paths.
+    const batchSize = clamp(this.batchSize, this.BATCH_SIZE_MIN, this.BATCH_SIZE_MAX);
+    const batchCount = clamp(this.batchCount(), this.BATCH_COUNT_MIN, this.BATCH_COUNT_MAX());
     this.ref.close({
       batchSize,
       batchCount,
       selectedCategories: this.selectedCategories(),
       categoriesTouched: this.categoriesTouched,
     });
-  }
-
-  private clamp(value: number, min: number, max: number): number {
-    const n = Number.isFinite(value) ? Math.floor(value) : min;
-    return Math.max(min, Math.min(max, n));
   }
 
   cancel(): void {

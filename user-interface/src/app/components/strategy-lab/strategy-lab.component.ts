@@ -45,8 +45,10 @@ import { PhaseStepperComponent, phaseLabel } from './phase-stepper/phase-stepper
 import { StrategyCardComponent } from './strategy-card/strategy-card.component';
 import {
   GenerateStrategiesDialogComponent,
+  type GenerateStrategiesDialogData,
   type GenerateStrategiesDialogResult,
 } from './generate-strategies-dialog/generate-strategies-dialog.component';
+import { clamp } from '../../shared/clamp.util';
 import type {
   PaperTradingSession,
   StrategyLabRecord,
@@ -473,7 +475,7 @@ export class StrategyLabComponent implements OnInit {
   openGenerateStrategiesDialog(): void {
     const ref = this.dialog.open<
       GenerateStrategiesDialogComponent,
-      unknown,
+      GenerateStrategiesDialogData,
       GenerateStrategiesDialogResult
     >(GenerateStrategiesDialogComponent, {
       data: {
@@ -482,7 +484,10 @@ export class StrategyLabComponent implements OnInit {
         batchSizeMin: this.BATCH_SIZE_MIN,
         batchSizeMax: this.BATCH_SIZE_MAX,
         batchCountMin: this.BATCH_COUNT_MIN,
-        batchCountMax: this.BATCH_COUNT_MAX(),
+        // Passed by reference (not invoked) so the dialog stays synchronized
+        // if a config fetch changes the operator-configured max while it's
+        // still open — see GenerateStrategiesDialogData.batchCountMax.
+        batchCountMax: this.BATCH_COUNT_MAX,
         categoryOptions: this.categoryOptions(),
         selectedCategories: this.selectedCategories(),
       },
@@ -502,12 +507,12 @@ export class StrategyLabComponent implements OnInit {
         return;
       }
       this.batchSize = result.batchSize;
-      // BATCH_COUNT_MAX() may have been refreshed by a config fetch that
-      // resolved while the dialog was open, after the dialog was seeded with
-      // the old bound — reconcile against the CURRENT max so the value
-      // applied here (and the label the user just confirmed) can't silently
-      // diverge from what runNewStrategy() would otherwise re-clamp.
-      this.batchCount = this.clamp(result.batchCount, this.BATCH_COUNT_MIN, this.BATCH_COUNT_MAX());
+      // result.batchCount is already clamped to BATCH_COUNT_MIN/MAX() as of
+      // the moment the dialog closed (see GenerateStrategiesDialogResult's
+      // postcondition) — the dialog stays live-synchronized to this
+      // component's own BATCH_COUNT_MAX signal for exactly this reason, so
+      // no further clamping is needed here.
+      this.batchCount = result.batchCount;
       // If the user never touched the category toggles, `result.selectedCategories`
       // is just the dialog's seeded snapshot — prefer this component's own
       // current selection (already kept correct by applyCategoryConfig, including
@@ -561,8 +566,8 @@ export class StrategyLabComponent implements OnInit {
       return;
     }
 
-    const batchSize = this.clamp(this.batchSize, this.BATCH_SIZE_MIN, this.BATCH_SIZE_MAX);
-    const batchCount = this.clamp(this.batchCount, this.BATCH_COUNT_MIN, this.BATCH_COUNT_MAX());
+    const batchSize = clamp(this.batchSize, this.BATCH_SIZE_MIN, this.BATCH_SIZE_MAX);
+    const batchCount = clamp(this.batchCount, this.BATCH_COUNT_MIN, this.BATCH_COUNT_MAX());
     // Reflect any clamping back into the form so the user sees what was sent.
     this.batchSize = batchSize;
     this.batchCount = batchCount;
@@ -613,11 +618,6 @@ export class StrategyLabComponent implements OnInit {
         this.error.set(extractErrorDetail(err, 'Strategy run failed.'));
       },
     });
-  }
-
-  private clamp(value: number, min: number, max: number): number {
-    const n = Number.isFinite(value) ? Math.floor(value) : min;
-    return Math.max(min, Math.min(max, n));
   }
 
   /** Label for the run button — adapts to single- vs multi-batch mode. */

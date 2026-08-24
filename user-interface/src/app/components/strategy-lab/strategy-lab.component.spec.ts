@@ -838,7 +838,7 @@ describe('StrategyLabComponent — openGenerateStrategiesDialog', () => {
         batchSizeMin: component.BATCH_SIZE_MIN,
         batchSizeMax: component.BATCH_SIZE_MAX,
         batchCountMin: component.BATCH_COUNT_MIN,
-        batchCountMax: component.BATCH_COUNT_MAX(),
+        batchCountMax: component.BATCH_COUNT_MAX,
         categoryOptions: component.categoryOptions(),
         selectedCategories: component.selectedCategories(),
       }),
