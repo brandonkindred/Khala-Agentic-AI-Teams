@@ -4027,14 +4027,15 @@ def test_run_spec_compliance_single_pass_flag_on_calls_synthesis(monkeypatch) ->
     spec_calls: list = []
 
     def _spec_spy(*args, **kwargs):
-        spec_calls.append(kwargs)
+        spec_calls.append((args, kwargs))
         return "SPEC_GAP_MARKER: missing validation."
 
     monkeypatch.setattr(coord, "synthesize_spec_compliance", _spec_spy)
 
+    dummy_llm = DummyLLMClient()
     input_data = CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t")
     result = coord._run_spec_compliance_single_pass(
-        llm=DummyLLMClient(),
+        llm=dummy_llm,
         input_data=input_data,
         deduped=[issue],
         spec_compliance_single_pass=True,
@@ -4042,8 +4043,10 @@ def test_run_spec_compliance_single_pass_flag_on_calls_synthesis(monkeypatch) ->
 
     assert result == "SPEC_GAP_MARKER: missing validation."
     assert len(spec_calls) == 1
-    assert spec_calls[0]["input_data"] is input_data
-    assert spec_calls[0]["issues"] == [issue]
+    call_args, call_kwargs = spec_calls[0]
+    assert call_args == (dummy_llm,), "llm must be forwarded to synthesize_spec_compliance"
+    assert call_kwargs["input_data"] is input_data
+    assert call_kwargs["issues"] == [issue]
 
 
 def test_run_spec_compliance_single_pass_failure_returns_none(monkeypatch) -> None:
