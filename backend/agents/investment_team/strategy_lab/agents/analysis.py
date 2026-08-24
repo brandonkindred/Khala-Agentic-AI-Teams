@@ -84,7 +84,7 @@ _SELF_REVIEW_CHECKLIST = """\
 Before returning your answer, silently verify your draft against every item below and correct any violation in place. Return only the corrected final narrative — never your intermediate reasoning or two versions.
 1. Check every substantive claim against the strategy, metrics, and trade evidence above.
 {risk_model_check}
-1b. Verdict consistency: the WINNING/LOSING label (Outcome label: {outcome_label}) is fixed deterministically — WINNING iff annualized return is at or above the 8% S&P-500 benchmark, LOSING below it. Do NOT reframe a WINNING strategy as a loss (or a LOSING one as a win) on the basis of Sharpe, drawdown, win rate, or the "Robustness caveats" section. Those are honest risk caveats that sit alongside the verdict, never a substitute for it — strike any sentence that contradicts the label.
+1b. Verdict consistency: the WINNING/LOSING label (Outcome label: {outcome_label}) is fixed deterministically — WINNING iff annualized return is at or above the {winning_threshold:.0f}% S&P-500 benchmark, LOSING below it. Do NOT reframe a WINNING strategy as a loss (or a LOSING one as a win) on the basis of Sharpe, drawdown, win rate, or the "Robustness caveats" section. Those are honest risk caveats that sit alongside the verdict, never a substitute for it — strike any sentence that contradicts the label.
 2. Remove or rewrite anything that is unsupported, vague, or contradicts the numbers.
 3. The final narrative must be 5-10 sentences a risk committee could rely on."""
 
@@ -195,6 +195,7 @@ class AnalysisAgent:
         checklist = _SELF_REVIEW_CHECKLIST.format(
             risk_model_check=_RISK_MODEL_CHECK,
             outcome_label="WINNING" if is_winning else "LOSING",
+            winning_threshold=WINNING_THRESHOLD,
         )
         draft_prompt = _with_self_review_checklist(draft_prompt, checklist)
 
