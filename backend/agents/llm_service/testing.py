@@ -1,0 +1,82 @@
+"""Shared helper for forcing every LLM resolution path onto the dummy provider.
+
+Extracted from two call sites that independently converged on the identical
+fix: ``branding_team/tests/test_agents.py``'s ``force_dummy_llm`` pytest
+fixture and ``branding_team/scripts/eval_selective_context.py``'s eval
+script. Both needed to guarantee no live LLM call or Postgres round-trip
+happens under a forced dummy provider, even when ``POSTGRES_HOST`` is set
+and holds a live provider selection. Kept here (not in ``branding_team``)
+since the fix is entirely about ``llm_service`` internals and is equally
+useful to any other team's tests or offline tooling.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import os
+
+from . import config as _llm_config
+from . import factory as _llm_factory
+from . import provider_store as _llm_provider_store
+from .strands_provider import _clear_strands_model_cache_for_testing
+
+
+@contextlib.contextmanager
+def force_dummy_llm_provider():
+    """Force every agent constructed inside this block through the dummy stub client.
+
+    Every ``resolve_*`` function in ``llm_service.config`` (provider, model,
+    base URL, API keys) funnels through the single ``_runtime(key)``
+    chokepoint, which -- when ``POSTGRES_HOST`` is set -- round-trips
+    Postgres via ``runtime_config.get_runtime`` (including a
+    ``CREATE TABLE IF NOT EXISTS`` the first time). Setting ``LLM_PROVIDER``
+    alone, or even overriding ``resolve_provider`` itself, is not enough:
+    ``resolve_model_for_provider`` falls through to ``resolve_model`` for
+    every non-Claude provider (dummy included), which calls ``_runtime``
+    for the Ollama model key unconditionally, regardless of the active
+    provider. Blanking ``_runtime`` itself is the only chokepoint that
+    actually stops every one of these resolvers from touching Postgres.
+
+    With ``_runtime`` blanked, ``resolve_provider()`` falls through to the
+    ``LLM_PROVIDER`` env var, so that is also pinned to ``"dummy"`` here
+    (restored on exit) rather than relying on a caller's ``os.environ``
+    state, which a mere ``os.environ.setdefault`` would not override if
+    already set to something else.
+
+    Separately, ``get_strands_model`` (``llm_service/strands_provider.py``)
+    unconditionally calls ``provider_store.list_fingerprint()`` -- regardless
+    of the resolved provider -- to fold the provider list's structural
+    fingerprint into the Strands model cache key; that also round-trips
+    Postgres when configured. Blank ``load_ordered_entries`` too, and clear
+    the Strands-model / LLM-client caches on entry so a warm adapter from
+    before this override took effect can't leak through.
+
+    Preconditions:
+        None.
+    Postconditions:
+        ``llm_service.config._runtime``, ``LLM_PROVIDER``, and
+        ``llm_service.provider_store.load_ordered_entries`` are all restored
+        to their original values on exit, even if the wrapped block raises
+        -- so importing or unit-testing this module never leaves
+        process-wide LLM provider/config resolution permanently patched for
+        unrelated code (e.g. other tests in the same pytest session).
+    """
+    original_runtime = _llm_config._runtime
+    original_load_ordered_entries = _llm_provider_store.load_ordered_entries
+    original_provider_env = os.environ.get("LLM_PROVIDER")
+    _llm_config._runtime = lambda _key: ""
+    _llm_provider_store.load_ordered_entries = lambda *args, **kwargs: []
+    os.environ["LLM_PROVIDER"] = "dummy"
+    _llm_factory.clear_client_cache()
+    _clear_strands_model_cache_for_testing()
+    try:
+        yield
+    finally:
+        _llm_config._runtime = original_runtime
+        _llm_provider_store.load_ordered_entries = original_load_ordered_entries
+        if original_provider_env is None:
+            os.environ.pop("LLM_PROVIDER", None)
+        else:
+            os.environ["LLM_PROVIDER"] = original_provider_env
+        _llm_factory.clear_client_cache()
+        _clear_strands_model_cache_for_testing()

@@ -977,7 +977,7 @@ _PHASE_SPOT_CHECK_IDS: tuple[str, ...] = tuple(
 
 
 @pytest.fixture
-def force_dummy_llm(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def force_dummy_llm() -> Iterator[None]:
     """Pin this test to DummyLLMClient even when a live provider is configured.
 
     ``conftest`` uses ``setdefault``, so an explicit ``LLM_PROVIDER`` survives
@@ -986,37 +986,27 @@ def force_dummy_llm(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     ``LLM_PROVIDER=dummy``. Combined with the Strands model cache in
     ``llm_service.strands_provider``, that would let this unmarked spot-check
     hit a live provider (and then the ``real_llm`` parametrization would hit
-    it again). Blank the runtime lookup so the dummy env wins, stub the
-    provider-list read so Strands model construction does not round-trip
-    Postgres for a fingerprint, and drop cached models so
-    ``pytest -m 'not real_llm'`` stays offline.
+    it again). Delegates to ``llm_service.testing.force_dummy_llm_provider``
+    (shared with ``branding_team/scripts/eval_selective_context.py``, which
+    needs the identical offline guarantee), which blanks the runtime lookup
+    so the dummy env wins, stubs the provider-list read so Strands model
+    construction does not round-trip Postgres for a fingerprint, and drops
+    cached models so ``pytest -m 'not real_llm'`` stays offline.
 
     Preconditions:
-        ``monkeypatch`` is pytest's env-patch fixture.
+        None.
     Postconditions:
         For the duration of the test, ``_runtime`` returns a blank string,
         ``load_ordered_entries`` returns an empty list, ``LLM_PROVIDER`` is
         ``dummy``, and the LLM-client / Strands-model caches have been
-        cleared. Caches are cleared again on teardown so a later ``real_llm``
-        test can resolve the caller's provider.
+        cleared. Everything is restored and caches are cleared again on
+        teardown so a later ``real_llm`` test can resolve the caller's
+        provider.
     """
-    from llm_service import config as llm_config
-    from llm_service import factory as llm_factory
-    from llm_service import provider_store as llm_provider_store
-    from llm_service.strands_provider import _clear_strands_model_cache_for_testing
+    from llm_service.testing import force_dummy_llm_provider
 
-    monkeypatch.setenv("LLM_PROVIDER", "dummy")
-    # Runtime UI config outranks the env var in resolve_provider(); a blank
-    # lookup makes the dummy env win even when Postgres has a live provider.
-    monkeypatch.setattr(llm_config, "_runtime", lambda _key: "")
-    # get_strands_model always fingerprints the provider list, even for dummy.
-    # An empty list keeps that path offline when POSTGRES_HOST is set.
-    monkeypatch.setattr(llm_provider_store, "load_ordered_entries", lambda *a, **k: [])
-    llm_factory.clear_client_cache()
-    _clear_strands_model_cache_for_testing()
-    yield
-    _clear_strands_model_cache_for_testing()
-    llm_factory.clear_client_cache()
+    with force_dummy_llm_provider():
+        yield
 
 
 @pytest.mark.parametrize(

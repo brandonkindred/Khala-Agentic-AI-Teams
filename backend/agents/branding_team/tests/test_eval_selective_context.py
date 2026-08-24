@@ -14,16 +14,17 @@ from __future__ import annotations
 
 import pytest
 
+from branding_team.graphs.shared import PHASE_ORDER
 from branding_team.models import BrandPhase
 from branding_team.orchestrator import _PHASE_SPEC, BrandingTeamOrchestrator
 from branding_team.scripts.eval_selective_context import (
     _approx_token_count,
-    _force_dummy_llm_provider,
     _full_context_phases,
     _phase_spec_context_override,
     _run_variant,
 )
 from branding_team.tests.conftest import make_mission
+from llm_service.testing import force_dummy_llm_provider
 
 
 def test_approx_token_count_empty_string() -> None:
@@ -69,7 +70,7 @@ def test_run_variant_selective_excludes_channel_activation_context() -> None:
     the acceptance criterion #6965 exists to enforce.
     """
     orchestrator = BrandingTeamOrchestrator()
-    with _force_dummy_llm_provider():
+    with force_dummy_llm_provider():
         _outputs, task_strings = _run_variant(orchestrator, make_mission(), full_context=False)
 
     governance_task = task_strings[BrandPhase.GOVERNANCE]
@@ -81,7 +82,7 @@ def test_run_variant_selective_excludes_channel_activation_context() -> None:
 
 def test_run_variant_full_context_includes_all_upstream() -> None:
     orchestrator = BrandingTeamOrchestrator()
-    with _force_dummy_llm_provider():
+    with force_dummy_llm_provider():
         _outputs, task_strings = _run_variant(orchestrator, make_mission(), full_context=True)
 
     governance_task = task_strings[BrandPhase.GOVERNANCE]
@@ -94,7 +95,7 @@ def test_run_variant_full_context_includes_all_upstream() -> None:
 def test_run_variant_full_context_task_is_never_shorter() -> None:
     orchestrator = BrandingTeamOrchestrator()
     mission = make_mission()
-    with _force_dummy_llm_provider():
+    with force_dummy_llm_provider():
         _selective_outputs, selective_tasks = _run_variant(
             orchestrator, mission, full_context=False
         )
@@ -105,10 +106,8 @@ def test_run_variant_full_context_task_is_never_shorter() -> None:
 
 def test_run_variant_returns_real_output_for_every_phase() -> None:
     orchestrator = BrandingTeamOrchestrator()
-    with _force_dummy_llm_provider():
+    with force_dummy_llm_provider():
         outputs, _task_strings = _run_variant(orchestrator, make_mission(), full_context=False)
-
-    from branding_team.graphs.shared import PHASE_ORDER
 
     assert set(outputs.keys()) == set(PHASE_ORDER)
     assert all(output is not None for output in outputs.values())
@@ -118,7 +117,7 @@ def test_run_variant_restores_phase_spec_after_full_context() -> None:
     orchestrator = BrandingTeamOrchestrator()
     originals = {phase: spec.context_phases for phase, spec in _PHASE_SPEC.items()}
 
-    with _force_dummy_llm_provider():
+    with force_dummy_llm_provider():
         _run_variant(orchestrator, make_mission(), full_context=True)
 
     for phase, spec in _PHASE_SPEC.items():
