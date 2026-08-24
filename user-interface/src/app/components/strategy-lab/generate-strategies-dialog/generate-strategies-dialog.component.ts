@@ -77,6 +77,20 @@ export class GenerateStrategiesDialogComponent {
     this.selectedCategories.set(values);
   }
 
+  /**
+   * Clamp on every edit (not just at submit time) so `runButtonLabel()` —
+   * and the input itself — never display a value the run would silently
+   * reduce; the native [min]/[max] attributes only constrain the spinner
+   * arrows, not a typed or pasted value.
+   */
+  onBatchSizeChange(value: number): void {
+    this.batchSize = this.clamp(value, this.BATCH_SIZE_MIN, this.BATCH_SIZE_MAX);
+  }
+
+  onBatchCountChange(value: number): void {
+    this.batchCount = this.clamp(value, this.BATCH_COUNT_MIN, this.BATCH_COUNT_MAX);
+  }
+
   /** Label for the submit button — adapts to single- vs multi-batch mode. */
   runButtonLabel(): string {
     if (this.batchCount > 1) {

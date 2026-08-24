@@ -915,4 +915,40 @@ describe('StrategyLabComponent — openGenerateStrategiesDialog', () => {
       expect.objectContaining({ allowed_asset_classes: undefined }),
     );
   });
+
+  it('reconciles the dialog batch count against a batch-count max refreshed while the dialog was open', () => {
+    // Simulate a config fetch resolving (after the dialog was seeded with
+    // the fallback max of 100) that lowers the operator-configured max.
+    component.BATCH_COUNT_MAX.set(3);
+    afterClosedResult = of({
+      batchSize: 5,
+      batchCount: 20, // valid against the dialog's stale snapshot, not the new max
+      selectedCategories: ['stocks', 'crypto'],
+    });
+
+    component.openGenerateStrategiesDialog();
+
+    expect(component.batchCount).toBe(3);
+    expect(apiSpy.runStrategyLab).toHaveBeenCalledWith(
+      expect.objectContaining({ batch_count: 3 }),
+    );
+  });
+
+  it('surfaces an error and does not start a run when a run becomes active while the dialog is open', () => {
+    afterClosedResult = of({
+      batchSize: 5,
+      batchCount: 1,
+      selectedCategories: ['stocks'],
+    });
+    // A run started elsewhere (another tab, or a reconnect) while the dialog
+    // was open — the dialog's own snapshot never learned about it.
+    runService.running.set(true);
+    component.batchSize = 10;
+
+    component.openGenerateStrategiesDialog();
+
+    expect(component.error()).toContain('already in progress');
+    expect(component.batchSize).toBe(10); // left untouched, not overwritten with the dropped result
+    expect(apiSpy.runStrategyLab).not.toHaveBeenCalled();
+  });
 });

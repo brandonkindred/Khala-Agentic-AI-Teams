@@ -7,7 +7,8 @@
       <input
         matInput
         type="number"
-        [(ngModel)]="batchSize"
+        [ngModel]="batchSize"
+        (ngModelChange)="onBatchSizeChange($event)"
         [min]="BATCH_SIZE_MIN"
         [max]="BATCH_SIZE_MAX"
         aria-label="Strategies per batch"
@@ -20,7 +21,8 @@
       <input
         matInput
         type="number"
-        [(ngModel)]="batchCount"
+        [ngModel]="batchCount"
+        (ngModelChange)="onBatchCountChange($event)"
         [min]="BATCH_COUNT_MIN"
         [max]="BATCH_COUNT_MAX"
         aria-label="Number of batches"

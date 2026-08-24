@@ -76,6 +76,19 @@ describe('GenerateStrategiesDialogComponent', () => {
     expect(submitBtn?.disabled).toBe(true);
   });
 
+  it('onBatchSizeChange clamps out-of-range input immediately, so the label never shows a value the run would reduce', async () => {
+    await createFixture();
+    component.onBatchSizeChange(999);
+    expect(component.batchSize).toBe(DATA.batchSizeMax);
+    expect(component.runButtonLabel()).toContain(`${DATA.batchSizeMax}`);
+  });
+
+  it('onBatchCountChange clamps out-of-range input immediately', async () => {
+    await createFixture();
+    component.onBatchCountChange(-5);
+    expect(component.batchCount).toBe(DATA.batchCountMin);
+  });
+
   it('runButtonLabel adapts to single- vs multi-batch mode', async () => {
     await createFixture();
     expect(component.runButtonLabel()).toBe('Run 10 strategies');

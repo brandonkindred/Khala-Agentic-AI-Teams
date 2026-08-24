@@ -492,13 +492,26 @@ export class StrategyLabComponent implements OnInit {
       if (!result) {
         return;
       }
+      // A run can start elsewhere (another tab, or checkForActiveRun's
+      // reconnect polling) while this dialog was open, without the dialog's
+      // own snapshot ever finding out. runNewStrategy()'s re-entrancy guard
+      // would otherwise silently drop the user's just-confirmed
+      // configuration — surface it instead of doing nothing.
+      if (this.running()) {
+        this.error.set('A strategy run is already in progress — try again once it finishes.');
+        return;
+      }
       this.batchSize = result.batchSize;
-      this.batchCount = result.batchCount;
-      // categoryOptions() may have been refreshed by a config fetch that
-      // resolved while the dialog was open, after the dialog was seeded —
-      // intersect against the CURRENT options (falling back to all, same as
-      // applyCategoryConfig's own reconciliation) so a run can never be
-      // constrained to a selection the backend no longer recognizes.
+      // BATCH_COUNT_MAX() may have been refreshed by a config fetch that
+      // resolved while the dialog was open, after the dialog was seeded with
+      // the old bound — reconcile against the CURRENT max so the value
+      // applied here (and the label the user just confirmed) can't silently
+      // diverge from what runNewStrategy() would otherwise re-clamp.
+      this.batchCount = this.clamp(result.batchCount, this.BATCH_COUNT_MIN, this.BATCH_COUNT_MAX());
+      // categoryOptions() may likewise have been refreshed while the dialog
+      // was open — intersect against the CURRENT options (falling back to
+      // all, same as applyCategoryConfig's own reconciliation) so a run can
+      // never be constrained to a selection the backend no longer recognizes.
       const currentOptionValues = this.categoryOptions().map((c) => c.value);
       const reconciled = currentOptionValues.filter((v) => result.selectedCategories.includes(v));
       this.selectedCategories.set(reconciled.length ? reconciled : currentOptionValues);
