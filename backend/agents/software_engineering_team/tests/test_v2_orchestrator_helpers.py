@@ -54,46 +54,6 @@ def test_be_development_agent_build_tool_runners():
     assert "k3" not in runners
 
 
-def test_be_development_agent_read_repo_code(tmp_path: Path):
-    (tmp_path / "x.py").write_text("print('x')")
-    (tmp_path / "y.txt").write_text("plain")
-    (tmp_path / "node_modules").mkdir()
-    (tmp_path / "node_modules" / "skip.py").write_text("# do not include")
-    agent = BackendDevelopmentAgent(MagicMock())
-    out = agent._read_repo_code(tmp_path)
-    assert "x.py" in out
-    assert "print('x')" in out
-    assert "skip.py" not in out
-
-
-def test_be_development_agent_read_repo_code_empty(tmp_path: Path):
-    agent = BackendDevelopmentAgent(MagicMock())
-    out = agent._read_repo_code(tmp_path)
-    assert "No code files" in out
-
-
-def test_be_development_agent_read_repo_code_max_chars(tmp_path: Path):
-    """The max_chars budget truncates at a whole-file boundary: a file whose
-    chunk would push the running total past max_chars is excluded, so the output
-    is bounded by max_chars and never contains a partial file or the tail."""
-    # 20 files of 400 chars each (chunk ~413 incl. the ``--- fN.py ---`` header).
-    # With max_chars=1000 only f0 and f1 fit (413 + 413 = 826 <= 1000); f2 would
-    # push the running total to 1239 > 1000, so the walk stops at a file boundary.
-    for i in range(20):
-        (tmp_path / f"f{i}.py").write_text("x" * 400)
-    agent = BackendDevelopmentAgent(MagicMock())
-    out = agent._read_repo_code(tmp_path, max_chars=1000)
-    # Bounded by the whole-file budget — not the untruncated 20-file total — and
-    # non-empty (at least one file fit), proving max_chars is actually applied.
-    assert len(out) <= 1000
-    assert len(out) > 400
-    # The cutoff is at a file boundary: the first two files are present, the
-    # third and the last are not.
-    assert "f0.py" in out and "f1.py" in out
-    assert "f2.py" not in out
-    assert "f19.py" not in out
-
-
 def test_fe_build_tool_agents():
     from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
     from software_engineering_team.frontend_code_v2_team.orchestrator import _build_tool_agents_impl

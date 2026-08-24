@@ -443,14 +443,20 @@ describe('AgentRunnerComponent', () => {
 
   describe('sandbox lifecycle', () => {
     it('seeds sandbox status via the initial poll', () => {
+      vi.useFakeTimers();
       selectWriter();
+      vi.advanceTimersByTime(0);
       expect(component.sandbox()).toEqual(coldHandle);
+      vi.useRealTimers();
     });
 
-    it('sets sandbox to null when the initial poll fails', () => {
+    it('leaves sandbox status untouched when the initial poll fails (continues polling)', () => {
+      vi.useFakeTimers();
       api.getSandbox.mockReturnValue(throwError(() => new Error('down')));
       selectWriter();
+      vi.advanceTimersByTime(0);
       expect(component.sandbox()).toBeNull();
+      vi.useRealTimers();
     });
 
     it('re-polls sandbox status every 5 seconds', () => {
@@ -458,6 +464,7 @@ describe('AgentRunnerComponent', () => {
       api.getSandbox.mockReturnValueOnce(of(coldHandle)).mockReturnValue(of(warmHandle));
 
       selectWriter();
+      vi.advanceTimersByTime(0);
       expect(component.sandbox()).toEqual(coldHandle);
 
       vi.advanceTimersByTime(5000);
@@ -470,6 +477,7 @@ describe('AgentRunnerComponent', () => {
     it('stops polling the sandbox after destroy', () => {
       vi.useFakeTimers();
       selectWriter();
+      vi.advanceTimersByTime(0);
       expect(api.getSandbox).toHaveBeenCalledTimes(1);
 
       fixture.destroy();
