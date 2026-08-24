@@ -248,7 +248,7 @@ On agent crash, the Repair Agent analyzes the traceback and applies fixes. If th
 
 ## 5b. Backend-Code-V2 Team Workflow
 
-The **backend-code-v2** agent team is a config-driven backend development team that operates independently from `BackendExpertAgent`. It uses a **three-layer architecture**: a Backend Tech Lead Agent runs Setup then delegates to a Backend Development Agent, which runs the remaining phases (7 total) and consults **tool agents in every phase**. No code from `backend_agent/` is imported or reused.
+The **backend-code-v2** agent team is a config-driven backend development team that operates independently from `BackendExpertAgent`. It uses a **three-layer architecture**: a Backend Tech Lead Agent runs Setup then delegates to a Backend Development Agent, which runs the remaining 6 phases (7 total including Setup) and consults **tool agents in every phase**. No code from `backend_agent/` is imported or reused.
 
 ```mermaid
 flowchart TB
@@ -267,8 +267,9 @@ flowchart TB
         DAExecution["Execution\n(delegate to tool agents)"]
         DAReview["Review\n(build, lint, coverage, UAT)"]
         DAProblemSolving["Problem-solving\n(root-cause, fix loop)"]
+        DADocumentation["Documentation\n(docstrings/README/API docs)"]
         DADeliver["Deliver\n(commit to branch)"]
-        DAPlanning --> DAExecution --> DAReview --> DAProblemSolving --> DADeliver
+        DAPlanning --> DAExecution --> DAReview --> DAProblemSolving --> DADocumentation --> DADeliver
     end
 
     subgraph toolGrid ["Tool Agents (participate in all phases)"]
@@ -301,7 +302,7 @@ The team supports both Python and Java (auto-detected). Quality gate agents (QA,
 
 ## 5c. Frontend-Code-V2 Team Workflow
 
-The **frontend-code-v2** agent team is a config-driven frontend development team that does **not** import or reuse any code from `frontend_team/` or `feature_agent/`. It mirrors the backend-code-v2 **three-layer architecture**: a Frontend Tech Lead Agent runs Setup then delegates to a Frontend Development Agent, which runs the remaining phases (7 total) and consults **tool agents in every phase**.
+The **frontend-code-v2** agent team is a config-driven frontend development team that does **not** import or reuse any code from `frontend_team/` or `feature_agent/`. It mirrors the backend-code-v2 **three-layer architecture**: a Frontend Tech Lead Agent runs Setup then delegates to a Frontend Development Agent, which runs the remaining 6 phases (7 total including Setup) and consults **tool agents in every phase**.
 
 - **Layer 1 — Frontend Tech Lead Agent**: Runs **Setup** (git init if needed, README, development branch), then delegates the remaining 6-phase cycle to the Frontend Development Agent.
 - **Layer 2 — Frontend Development Agent**: Planning (microtask decomposition; stack inferred as Angular/React/TypeScript/JavaScript), Execution (tool agents + LLM fallback), Review (build, lint, QA, security, code review), Documentation (component docs, Storybook, README updates, self-review loop), Deliver (feature branch, commit, merge to `development`), with Review looping back to Execution via Problem-solving (fix loop) when issues are found. Review/fix loop runs up to 5 iterations.
