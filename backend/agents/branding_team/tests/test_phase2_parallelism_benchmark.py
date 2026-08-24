@@ -24,31 +24,33 @@ Every specialist's mocked LLM call reaches this barrier via
 lazily created the first time it's needed, sized by a CPU-count heuristic
 that is itself version-dependent (``os.cpu_count()`` pre-3.13,
 ``os.process_cpu_count()`` on 3.13+). Rather than chase that sizing hook
-across Python versions, this test installs an explicit oversized default
+across Python versions, ``_benchmark_helpers.mock_llm_latency`` (shared with
+every other benchmark in this suite) installs an explicit oversized default
 executor directly on the event loop ``run_coroutine`` creates (by patching
 ``asyncio.events.new_event_loop``, the primitive ``asyncio.run`` itself calls
-to create that loop), guaranteeing enough workers for the barrier regardless
-of the runner's real core count or Python version. This is hidden coupling to
-``run_coroutine``'s internal use of ``asyncio.run`` -- if it is ever
-refactored to drive coroutines a different way (e.g. reusing an existing
-loop), this patch would silently stop taking effect and the barrier could
-then deadlock on a low-CPU runner for a reason unrelated to Phase 2 itself.
-The ``executor_injected`` assertion below exists specifically to catch that:
-it fails loudly, distinct from a barrier timeout, if the patched factory is
-never invoked.
+to create that loop) when given ``min_executor_workers``, guaranteeing enough
+workers for the barrier regardless of the runner's real core count or Python
+version. This is hidden coupling to ``run_coroutine``'s internal use of
+``asyncio.run`` -- if it is ever refactored to drive coroutines a different
+way (e.g. reusing an existing loop), this patch would silently stop taking
+effect and the barrier could then deadlock on a low-CPU runner for a reason
+unrelated to Phase 2 itself. The ``executor_injected`` assertion below exists
+specifically to catch that: it fails loudly, distinct from a barrier timeout,
+if the patched factory is never invoked.
 
-This also forces the dummy provider and clears the LLM client/Strands model
-caches for the run. ``llm_service.config.resolve_provider()`` -- the sole
-gate both ``factory.get_client()`` and ``strands_provider.get_strands_model()``
-call -- resolves runtime config (Postgres, set via the ``/llm-config`` UI)
-*ahead of* the ``LLM_PROVIDER`` env var, so merely setting the env var isn't
-enough when a provider is persisted there; patching ``resolve_provider``
-itself is the one interception point that holds regardless of env var or
-runtime config. Without this, a developer or CI job with a different
-provider already configured would silently build real provider clients
-instead of ``DummyLLMClient`` -- the ``chat`` patch below would then never be
-hit, and this benchmark would either fail on missing credentials or, worse,
-send six real LLM requests instead of measuring the mocked latency.
+The same shared helper also forces the dummy provider and clears the LLM
+client/Strands model caches for the run. ``llm_service.config
+.resolve_provider()`` -- the sole gate both ``factory.get_client()`` and
+``strands_provider.get_strands_model()`` call -- resolves runtime config
+(Postgres, set via the ``/llm-config`` UI) *ahead of* the ``LLM_PROVIDER`` env
+var, so merely setting the env var isn't enough when a provider is persisted
+there; patching ``resolve_provider`` itself is the one interception point
+that holds regardless of env var or runtime config. Without this, a
+developer or CI job with a different provider already configured would
+silently build real provider clients instead of ``DummyLLMClient`` -- the
+mocked ``chat`` would then never be hit, and this benchmark would either fail
+on missing credentials or, worse, send six real LLM requests instead of
+measuring the mocked latency.
 
 Marked ``@pytest.mark.bench`` per ``backend/conftest.py``'s wall-clock
 benchmark convention (sleep-based timing tests stay out of the default unit
@@ -59,19 +61,16 @@ it just doesn't tax the fast default ``pytest`` suite teams run locally.
 
 from __future__ import annotations
 
-import asyncio
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import patch
 
 import pytest
 
 from branding_team.graphs.phase2_narrative import build_phase2_graph
 from branding_team.graphs.shared import serialize_mission
 from branding_team.shared.coro_runner import run_coroutine
+from branding_team.tests._benchmark_helpers import mock_llm_latency
 from branding_team.tests.conftest import make_mission
-from llm_service import DummyLLMClient, clear_client_cache
 
 _NUM_SPECIALISTS = 6
 _PER_CALL_DELAY_SECONDS = 1.0
@@ -83,31 +82,6 @@ _PER_CALL_DELAY_SECONDS = 1.0
 _BARRIER_TIMEOUT_SECONDS = 10.0
 _MAX_WALL_CLOCK_SECONDS = 8.0
 _EXECUTOR_WORKERS = _NUM_SPECIALISTS + 2  # headroom above what the barrier needs
-
-# Captured before the test below ever patches ``asyncio.events.new_event_loop``,
-# so the replacement can still create a real loop instead of recursing into itself.
-_real_new_event_loop = asyncio.events.new_event_loop
-
-
-def _new_event_loop_with_generous_executor() -> asyncio.AbstractEventLoop:
-    """Create a real event loop, pre-sized with a default executor that always
-    clears ``_NUM_SPECIALISTS`` workers.
-
-    Postconditions:
-        Returns a fresh, unstarted event loop (via the real, pre-patch
-        ``asyncio.events.new_event_loop``) whose default executor is a
-        ``ThreadPoolExecutor`` with ``_EXECUTOR_WORKERS`` threads --
-        independent of ``os.cpu_count()``/``os.process_cpu_count()``, so the
-        loop's ``asyncio.to_thread`` offloads (what every mocked ``chat()``
-        call rides) can never be capped below what the barrier requires.
-        ``asyncio.run``'s own cleanup (``shutdown_default_executor``) still
-        shuts this executor down when the loop closes.
-    """
-    loop = _real_new_event_loop()
-    loop.set_default_executor(
-        ThreadPoolExecutor(max_workers=_EXECUTOR_WORKERS, thread_name_prefix="phase2-benchmark")
-    )
-    return loop
 
 
 @pytest.mark.bench
@@ -127,14 +101,8 @@ def test_phase2_specialists_execute_in_parallel_under_mocked_llm_latency() -> No
     parallelism epic's latency claim as a durable CI guard.
     """
     barrier = threading.Barrier(_NUM_SPECIALISTS, timeout=_BARRIER_TIMEOUT_SECONDS)
-    original_chat = DummyLLMClient.chat
-    call_count_lock = threading.Lock()
-    call_count = 0
 
-    def slow_chat(self: DummyLLMClient, messages, **kwargs):
-        nonlocal call_count
-        with call_count_lock:
-            call_count += 1
+    def wait_for_barrier() -> None:
         try:
             barrier.wait()
         except threading.BrokenBarrierError as exc:
@@ -144,16 +112,6 @@ def test_phase2_specialists_execute_in_parallel_under_mocked_llm_latency() -> No
                 "a sequential edge (or fan-in) was (re)introduced, serializing the "
                 "fan-out this benchmark guards against"
             ) from exc
-        time.sleep(_PER_CALL_DELAY_SECONDS)
-        return original_chat(self, messages, **kwargs)
-
-    executor_injected = False
-
-    def tracking_new_event_loop() -> asyncio.AbstractEventLoop:
-        nonlocal executor_injected
-        loop = _new_event_loop_with_generous_executor()
-        executor_injected = True
-        return loop
 
     mission = make_mission()
     task = (
@@ -161,29 +119,26 @@ def test_phase2_specialists_execute_in_parallel_under_mocked_llm_latency() -> No
         f"Branding Mission:\n{serialize_mission(mission)}"
     )
 
-    with (
-        patch("llm_service.config.resolve_provider", return_value="dummy"),
-        patch("asyncio.events.new_event_loop", side_effect=tracking_new_event_loop),
-        patch.object(DummyLLMClient, "chat", slow_chat),
-    ):
-        clear_client_cache()
-        try:
-            start = time.monotonic()
-            run_coroutine(build_phase2_graph().invoke_async(task))
-            elapsed = time.monotonic() - start
-        finally:
-            clear_client_cache()
+    with mock_llm_latency(
+        _PER_CALL_DELAY_SECONDS,
+        min_executor_workers=_EXECUTOR_WORKERS,
+        executor_thread_name_prefix="phase2-benchmark",
+        on_call=wait_for_barrier,
+    ) as harness:
+        start = time.monotonic()
+        run_coroutine(build_phase2_graph().invoke_async(task))
+        elapsed = time.monotonic() - start
 
-    assert executor_injected, (
+    assert harness.executor_injected, (
         "asyncio.events.new_event_loop was never called -- run_coroutine no longer "
         "creates its loop via asyncio.run's default path, so this benchmark's "
         "injected executor never took effect; the barrier/wall-clock results above "
         "cannot be trusted until this coupling is fixed"
     )
-    assert call_count == _NUM_SPECIALISTS, (
+    assert harness.call_count == _NUM_SPECIALISTS, (
         f"expected exactly {_NUM_SPECIALISTS} LLM calls (one per Phase 2 specialist), "
-        f"got {call_count} -- a specialist retried, or the graph's specialist count "
-        "changed; this is a different failure than serialization, fix the count "
+        f"got {harness.call_count} -- a specialist retried, or the graph's specialist "
+        "count changed; this is a different failure than serialization, fix the count "
         "mismatch before trusting the wall-clock assertion below"
     )
     assert elapsed <= _MAX_WALL_CLOCK_SECONDS, (

@@ -22,11 +22,16 @@ fan-out collapsing back into a sequential chain (inflating that phase's
 critical-path depth back to its full call count) pushes wall-clock past the
 ceiling, loose enough to absorb normal jitter on a shared runner.
 
-Only ``llm_service.config.resolve_provider`` and ``DummyLLMClient.chat`` are
-patched (see that module's docstring for why patching the env var alone is
-insufficient when a provider is Postgres-persisted); ``clear_client_cache()``
-is called before and after so no cached client from an earlier test or a
-different provider leaks in.
+Uses the shared ``_benchmark_helpers.mock_llm_latency`` harness (also used by
+``test_phase2_parallelism_benchmark.py``) for dummy-provider forcing, the
+``DummyLLMClient.chat`` latency/call-count injection, and LLM client cache
+clearing -- see that helper's docstring for why each piece is needed. This
+benchmark also passes ``min_executor_workers`` sized to Phase 4's nine-way
+fan-out (the widest single-phase concurrency in the pipeline, see
+``graphs/phase4_channel.py``), so the default asyncio executor can never be
+undersized on a low-CPU CI runner and falsely serialize a phase's fan-out --
+the same false-positive risk ``test_phase2_parallelism_benchmark.py``'s
+module docstring describes in detail.
 
 Marked ``@pytest.mark.bench`` per ``backend/conftest.py``'s wall-clock
 benchmark convention (skipped by default locally; the ``test-branding`` CI
@@ -35,19 +40,25 @@ job un-skips it via its ``-m bench`` marker expression).
 
 from __future__ import annotations
 
-import threading
 import time
-from unittest.mock import patch
 
 import pytest
 
 from branding_team.models import HumanReview
 from branding_team.orchestrator import BrandingTeamOrchestrator
 from branding_team.shared.phase_output_cache import PhaseOutputCache
+from branding_team.tests._benchmark_helpers import mock_llm_latency
 from branding_team.tests.conftest import make_mission
-from llm_service import DummyLLMClient, clear_client_cache
 
 _PER_CALL_DELAY_SECONDS = 1.0
+
+# Phase 4 (``brand_experience_principler`` + six ``*_guide`` channel
+# specialists + ``brand_architecture_builder`` + ``brand_in_action_illustrator``,
+# see ``graphs/phase4_channel.py``) is the widest single-phase fan-out in the
+# pipeline at 9 concurrent nodes; headroom above that keeps the injected
+# executor from ever being the bottleneck.
+_MAX_PHASE_FAN_OUT = 9
+_EXECUTOR_WORKERS = _MAX_PHASE_FAN_OUT + 4
 
 # Measured locally at a stable ~9.15s across repeated runs: five phases run
 # sequentially, each contributing its own internal critical-path depth (1
@@ -88,37 +99,29 @@ def test_full_pipeline_first_run_executes_every_agent_within_expected_wall_clock
     hits" baseline Story #6959's phase-cache benchmark will compare its
     second (fully cached) run against.
     """
-    original_chat = DummyLLMClient.chat
-    call_count_lock = threading.Lock()
-    call_count = 0
-
-    def slow_chat(self: DummyLLMClient, messages, **kwargs):
-        nonlocal call_count
-        with call_count_lock:
-            call_count += 1
-        time.sleep(_PER_CALL_DELAY_SECONDS)
-        return original_chat(self, messages, **kwargs)
-
     orchestrator = BrandingTeamOrchestrator()
     mission = make_mission()
     human_review = HumanReview(approved=False)
 
-    with (
-        patch("llm_service.config.resolve_provider", return_value="dummy"),
-        patch.object(DummyLLMClient, "chat", slow_chat),
-    ):
-        clear_client_cache()
-        try:
-            start = time.monotonic()
-            orchestrator.run(mission, human_review, phase_cache=PhaseOutputCache())
-            elapsed = time.monotonic() - start
-        finally:
-            clear_client_cache()
+    with mock_llm_latency(
+        _PER_CALL_DELAY_SECONDS,
+        min_executor_workers=_EXECUTOR_WORKERS,
+        executor_thread_name_prefix="full-pipeline-benchmark",
+    ) as harness:
+        start = time.monotonic()
+        orchestrator.run(mission, human_review, phase_cache=PhaseOutputCache())
+        elapsed = time.monotonic() - start
 
-    assert call_count == _EXPECTED_CALL_COUNT, (
+    assert harness.executor_injected, (
+        "asyncio.events.new_event_loop was never called -- run_coroutine no longer "
+        "creates its loop via asyncio.run's default path, so this benchmark's "
+        "injected executor never took effect; the wall-clock result below cannot be "
+        "trusted until this coupling is fixed"
+    )
+    assert harness.call_count == _EXPECTED_CALL_COUNT, (
         f"expected exactly {_EXPECTED_CALL_COUNT} LLM calls across all five phases of a "
-        f"first (uncached) run, got {call_count} -- a phase gained/lost a specialist, or "
-        "a cache hit skipped a phase that should have run fresh"
+        f"first (uncached) run, got {harness.call_count} -- a phase gained/lost a "
+        "specialist, or a cache hit skipped a phase that should have run fresh"
     )
     assert elapsed >= _MIN_WALL_CLOCK_SECONDS, (
         f"first run completed in {elapsed:.2f}s, under the {_MIN_WALL_CLOCK_SECONDS}s floor "
