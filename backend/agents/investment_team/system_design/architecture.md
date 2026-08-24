@@ -124,7 +124,8 @@ flowchart TB
   DesignAttempt --> ANA
   DesignAttempt --> ZTRA
   DesignAttempt --> QG
-  CycleWF --> Finalize
+  CycleWF -->|"assembled record"| BatchWF
+  BatchWF -->|"after awaiting the wave's child workflows"| Finalize
   Finalize --> PTA
 
   ORCH --> PG
@@ -168,8 +169,8 @@ flowchart TB
   PDict --> Buckets
   Buckets --> JS
 
-  BatchWF --> EventBus
-  DesignAttempt -.->|"publish_run_event_activity<br/>(best-effort)"| EventBus
+  BatchWF -.->|"publish_run_event_activity<br/>(skipped/finalized/terminal events)"| EventBus
+  DesignAttempt -.->|"direct job_event_bus.publish<br/>(in-process, best-effort progress)"| EventBus
   EventBus -->|"SSE /strategy-lab/runs/{id}/stream"| UI
 ```
 
