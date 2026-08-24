@@ -142,21 +142,31 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
      scrolling inside its own container is compliant, a paragraph doing so is not.
      Text-spacing overrides don't break layout.
    - Motion and timing, at the A/AA bar this review holds to, and only where the
-     criterion actually applies:
-       * 2.2.2 covers moving, blinking, or scrolling content that starts
-         automatically, lasts MORE THAN FIVE SECONDS, and is presented in parallel
-         with other content; and auto-updating content that starts automatically and
-         is presented in parallel. Only then is a mechanism required, and the two
-         branches accept different ones: pause, stop, or hide for moving/blinking/
-         scrolling content; pause, stop, hide, OR a control over the update frequency
-         for auto-updating content — so a feed whose refresh interval the user can
-         change is compliant. Essential movement is excepted. A short transition, or a
-         progress display that is the only thing on screen, is not a 2.2.2 failure.
+     criterion actually applies. These summaries are compressed; before reporting any
+     motion or timing finding, re-read the criterion in
+     `backend/agents/accessibility_audit_team/wcag_criteria.py` and confirm its
+     applicability conditions and exceptions hold — a compressed restatement is a
+     starting point, not the standard.
+       * 2.2.1 Timing Adjustable (A) — a time limit passes if the user can turn it
+         off, adjust it, or extend it. Judge it by that mechanism, not by whether the
+         duration feels generous: a comfortable but fixed limit still fails, and a
+         short but adjustable one passes. The criterion's own exceptions (real-time
+         events, essential limits, and limits beyond twenty hours) apply.
+       * 2.2.2 Pause, Stop, Hide (A) — covers moving, blinking, or scrolling content
+         that starts automatically, lasts MORE THAN FIVE SECONDS, and is presented in
+         parallel with other content; and auto-updating content that starts
+         automatically and is presented in parallel. Only then is a mechanism
+         required, and the two branches accept different ones: pause, stop, or hide
+         for moving/blinking/scrolling content; pause, stop, hide, OR a control over
+         the update frequency for auto-updating content — so a feed whose refresh
+         interval the user can change is compliant. BOTH branches are excepted where
+         the movement or the auto-updating is part of an activity in which it is
+         essential. A short transition, or a progress display that is the only thing
+         on screen, is not a 2.2.2 failure.
        * 2.3.1 is satisfied EITHER by flashing no more than three times in any one
          second OR by staying below the general-flash and red-flash thresholds — a
          faster but sub-threshold effect is compliant, so check the threshold before
          reporting.
-       * Nothing auto-advances or auto-dismisses faster than a user can read it.
      Honouring
      `prefers-reduced-motion` is 2.3.3, which is AAA — worth recommending as an
      enhancement on a decorative entrance animation, but never reported as an AA
