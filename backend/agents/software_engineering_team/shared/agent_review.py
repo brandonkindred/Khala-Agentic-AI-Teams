@@ -126,12 +126,13 @@ def run_chunked_agent_review(
           e.g. a minified bundle) is hard-split at character boundaries so no
           over-budget string is ever sent; the agent is invoked one piece at a
           time.
-        - A finding's ``file_path`` is the agent's own ``file_path`` field when
-          present, else the file actually sent, so every piece stays
-          attributable to a real key in the caller's file map. ``location``
-          (free text -- "file path, function name, or line reference") is
-          never used as ``file_path``; when present it is folded into
-          ``description`` instead.
+        - A finding's ``file_path`` is always the file actually sent for that
+          piece (a real key in the caller's file map), never the agent's own
+          ``file_path``/``location`` fields -- both are LLM-authored text
+          (``location`` documented as "file path, function name, or line
+          reference") the agent fills in without seeing a file header, so
+          neither is a verified path. When present and informative, they are
+          folded into ``description`` instead of being discarded.
         - A piece whose ``run_chunk`` call fails is logged and skipped; issues
           from the other pieces are still returned (one bad piece never aborts
           the whole review). Such a piece is never cached, so it is retried for
@@ -220,18 +221,20 @@ def run_chunked_agent_review(
                 cache.put(cache_key, items)
         for item in items or []:
             description = getattr(item, "description", str(item))
-            # `file_path` (when the agent's model declares it) is a verified
-            # real path; `path` is the exact file we sent, always a real key
-            # into the caller's file map. `location` is free text ("file
-            # path, function name, or line reference") and must never
-            # override either -- an exact-match downstream lookup keyed on
-            # file_path would silently miss and fall back to arbitrary
-            # files. Fold `location` into the description instead, so its
-            # hint isn't discarded, just no longer treated as authoritative.
-            file_path = getattr(item, "file_path", None) or path
-            location = getattr(item, "location", None)
-            if location and location not in file_path and location not in description:
-                description = f"{description} (location: {location})"
+            # Each call reviews one already-known file's piece, so `path` is
+            # always the real, verified key into the caller's file map --
+            # unlike the agent's own `location`/`file_path` fields, which are
+            # LLM-authored text the model fills in without ever seeing a file
+            # header (raw source only, by design -- see module docstring).
+            # Trusting either as the authoritative path reintroduces the
+            # exact bug this guards against: an exact-match downstream
+            # lookup keyed on file_path would silently miss and fall back to
+            # arbitrary files. Fold both into the description as
+            # supplementary hints instead of discarding them.
+            file_path = path
+            for hint in (getattr(item, "file_path", None), getattr(item, "location", None)):
+                if hint and hint not in file_path and hint not in description:
+                    description = f"{description} (location: {hint})"
             issues.append(
                 issue_factory(
                     source=source,

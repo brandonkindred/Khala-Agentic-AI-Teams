@@ -258,7 +258,7 @@ def test_file_path_defaults_to_sent_file_when_agent_gives_none():
 
 def test_file_path_prefers_real_path_over_free_text_location():
     """A free-text `location` (e.g. a function name, not a path) must never
-    override a valid `file_path` -- it's folded into the description
+    override the file actually sent -- it's folded into the description
     instead, so a downstream exact-match lookup still resolves the real
     file rather than silently missing and falling back to arbitrary files."""
 
@@ -287,6 +287,40 @@ def test_file_path_prefers_real_path_over_free_text_location():
     assert len(issues) == 1
     assert issues[0].file_path == "auth/login.py"
     assert "the login() function" in issues[0].description
+
+
+def test_file_path_ignores_agents_own_file_path_field_uses_sent_path():
+    """`item.file_path` is itself LLM-authored text -- the agent never sees a
+    file header (raw source only), so a value that disagrees with the file
+    actually sent is presumed hallucinated/mis-formatted, not authoritative.
+    Trusting it would reintroduce the same exact-match-lookup-miss bug this
+    guards against, just via a different field name."""
+
+    class _BugWithWrongFilePath:
+        severity = "high"
+        description = "SQL injection"
+        location = ""
+        file_path = "some/other/file.py"  # disagrees with the file actually sent
+        recommendation = ""
+
+    def run_chunk(code: str):
+        return [_BugWithWrongFilePath()]
+
+    issues = run_chunked_agent_review(
+        run_chunk=run_chunk,
+        files={"auth/login.py": "def login():\n    pass"},
+        source="qa",
+        default_severity="medium",
+        label="QA agent",
+        task_id="t1",
+        issue_factory=_Issue,
+        max_chars=MAX,
+        warn_threshold=20,
+    )
+
+    assert len(issues) == 1
+    assert issues[0].file_path == "auth/login.py"
+    assert "some/other/file.py" in issues[0].description
 
 
 def test_file_path_falls_back_to_sent_path_when_item_has_only_free_text_location():
