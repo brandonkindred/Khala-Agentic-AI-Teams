@@ -62,11 +62,11 @@ Out of scope (note it and move on, do not fix):
   - `user-interface/src/app/shared/` — existing primitives to reuse before inventing
     anything: `dashboard-shell`, `empty-state`, `error-message`, `inline-banner`,
     `loading-spinner`, `stall-warning`, `confirm-dialog` / `confirm-destructive.service`,
-    `breadcrumb`, plus the helpers `destructive-action.helper.ts` (`DestructiveActionHelper`
-    — the confirm → re-entrancy guard → API call → error/toast orchestration behind the
-    agent-runner, strategy-lab, load-draft, and run-history destructive actions; the
-    current target for any hand-rolled destructive flow), `defer-focus.ts` (move focus
-    after a re-render),
+    `breadcrumb`, plus the helpers `destructive-action.helper.ts`
+    (`DestructiveActionHelper` — the confirm → re-entrancy guard → API call →
+    error/toast orchestration behind the agent-runner, strategy-lab, load-draft, and
+    run-history destructive actions; the target for any hand-rolled destructive flow),
+    `defer-focus.ts` (move focus after a re-render),
     `result-count-announcement.ts` (live-region text for filtered lists), and
     `poll-while.ts` / `staleness.util.ts` (long-running job polling and staleness).
     "Build a custom X" when a shared X exists is itself a finding.
@@ -151,24 +151,27 @@ C. CLARITY AND INFORMATION ARCHITECTURE
      sensible defaults for sort and filter, stable ordering across polls.
 
 D. STATE COVERAGE
-   For each page, walk all of: first visit / empty; first load; refresh; partial;
+   For each page, walk all of: first visit; empty; first load; refresh; partial;
    populated; long-running; stalled; failed; permission-denied; backend-unconfigured;
-   offline; API-error; and stale-data. Each is its own state: first load and refresh
-   differ (a refresh that silently blanks already-rendered content is a defect that a
-   correct first-load spinner hides), permission-denied and backend-unconfigured need
-   different copy and different recovery, as do offline and API-error — so a
-   disposition covering one never covers the other.
+   offline; API-error; and stale-data. Each is its own state, and no disposition
+   covers two of them: first visit and empty differ (onboarding a new user is not the
+   same as giving a returning user with zero or filtered-out results a way forward),
+   first load and refresh differ (a refresh that silently blanks already-rendered
+   content is a defect that a correct first-load spinner hides), permission-denied and
+   backend-unconfigured need different copy and different recovery, as do offline and
+   API-error.
    Give every state exactly one disposition, and state which:
      - HANDLED — the UI is (1) rendered at all; (2) recoverable from, where the state
-       represents a failure or interruption (missing, failed, stalled, stale,
+       represents a failure or interruption (partial, failed, stalled, stale-data,
        permission-denied, backend-unconfigured, offline, API-error) — a stated way
-       forward rather than a dead end. A successful state has nothing to recover from,
-       so do not withhold HANDLED from a correct populated or empty view on this
-       ground; and (3) where the state arrives dynamically — without navigation or
-       focus movement — announced to assistive tech. An initially rendered state needs correct semantics, not a live
-       region: the house standard reserves `aria-live` for dynamic content and status
-       changes, so neither report a compliant initial render as missing an announcement
-       nor recommend adding one.
+       forward rather than a dead end, so partial results after an interrupted request
+       do not earn HANDLED merely by rendering. A successful state has nothing to
+       recover from, so do not withhold HANDLED from a correct populated or empty view
+       on this ground; and (3) where the state arrives dynamically — without navigation
+       or focus movement — announced to assistive tech. An initially rendered state
+       needs correct semantics, not a live region: the house standard reserves
+       `aria-live` for dynamic content and status changes, so neither report a
+       compliant initial render as missing an announcement nor recommend adding one.
      - MISSING — a finding. Cite the branch in the template or component that proves
        it is missing.
      - NOT APPLICABLE — the page does not own this state. Evidence is required, not
@@ -271,7 +274,7 @@ Close with:
 ## 9. Definition of done
 
 You are finished when: every routed <TEAM> page carries a stated disposition —
-handled, missing, or evidenced not-applicable — for all thirteen states in §3D; every
+handled, missing, or evidenced not-applicable — for all fourteen states in §3D; every
 finding cites a file and line or is explicitly marked as needing a
 browser; every recommendation names a concrete mechanism — an element, attribute,
 token, shared primitive, copy change, or component-logic change — rather than
