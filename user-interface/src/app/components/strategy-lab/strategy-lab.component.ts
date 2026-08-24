@@ -13,11 +13,9 @@ import {
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule, DecimalPipe } from '@angular/common';
-import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
-import { MatFormFieldModule } from '@angular/material/form-field';
-import { MatInputModule } from '@angular/material/input';
+import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatChipsModule } from '@angular/material/chips';
@@ -38,13 +36,19 @@ import { describeRunStatus } from '../../services/strategy-lab-log-message';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { extractErrorDetail } from '../../shared/extract-error-detail';
 import {
-  ASSET_CLASS_ICONS,
   returnColor,
   returnColorLabel,
   getAssetClassIcon,
 } from './strategy-lab.formatters';
 import { PhaseStepperComponent, phaseLabel } from './phase-stepper/phase-stepper.component';
 import { StrategyCardComponent } from './strategy-card/strategy-card.component';
+import {
+  GenerateStrategiesDialogComponent,
+  type GenerateStrategiesDialogData,
+  type GenerateStrategiesDialogResult,
+} from './generate-strategies-dialog/generate-strategies-dialog.component';
+import { type AssetCategoryOption, buildCategoryOptions } from './asset-category-option.model';
+import { clamp } from '../../shared/clamp.util';
 import type {
   PaperTradingSession,
   StrategyLabRecord,
@@ -54,26 +58,6 @@ import type {
 
 type FilterMode = 'all' | 'winning' | 'losing';
 
-interface AssetCategoryOption {
-  value: string;
-  label: string;
-  icon: string;
-}
-
-/** Title-case an asset-category value for display (e.g. 'stocks' → 'Stocks'). */
-function categoryLabel(value: string): string {
-  return value.length ? value.charAt(0).toUpperCase() + value.slice(1) : value;
-}
-
-/** Build selector options from category values, deriving label + Material icon. */
-function buildCategoryOptions(values: string[]): AssetCategoryOption[] {
-  return values.map((value) => ({
-    value,
-    label: categoryLabel(value),
-    icon: ASSET_CLASS_ICONS[value] ?? 'category',
-  }));
-}
-
 /**
  * Fallback asset categories, used only until `GET /strategy-lab/config` supplies
  * the authoritative list (and if that fetch ever fails). The backend is the
@@ -82,8 +66,9 @@ function buildCategoryOptions(values: string[]): AssetCategoryOption[] {
  * paint / on a config failure. Keep this list in sync with the backend's
  * `PROMPT_ASSET_CLASSES`; `options` is omitted because it is never a valid
  * ideation target. Module-level constants in this file use SCREAMING_SNAKE_CASE
- * (ASSET_CLASS_ICONS lives in `./strategy-lab.formatters`; STRATEGY_LAB_PHASES
- * lives in `./phase-stepper/phase-stepper.component`).
+ * (`AssetCategoryOption`/`buildCategoryOptions` live in
+ * `./asset-category-option.model`; STRATEGY_LAB_PHASES lives in
+ * `./phase-stepper/phase-stepper.component`).
  */
 const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOptions([
   'stocks',
@@ -107,11 +92,9 @@ const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOpti
   imports: [
     CommonModule,
     DecimalPipe,
-    FormsModule,
     MatButtonModule,
     MatIconModule,
-    MatFormFieldModule,
-    MatInputModule,
+    MatDialogModule,
     MatProgressSpinnerModule,
     MatProgressBarModule,
     MatChipsModule,
@@ -138,6 +121,7 @@ export class StrategyLabComponent implements OnInit {
   private readonly api = inject(InvestmentApiService);
   private readonly integrations = inject(IntegrationsApiService);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly dialog = inject(MatDialog);
   /** Owns SSE/polling/active-run tracking and per-record paper-trading polling. */
   readonly runService = inject(StrategyLabRunService);
   /** Owns activity-log bookkeeping and the completion/error/warning banners driven by runService.events$. */
@@ -463,6 +447,84 @@ export class StrategyLabComponent implements OnInit {
   }
 
   /**
+   * Opens the "Generate strategies" modal, seeded with the current batch
+   * size/count and category selection. If the user submits, applies the
+   * returned configuration and immediately starts a run via
+   * `runNewStrategy()`; a cancelled dialog (result `undefined`) leaves the
+   * current configuration and run state untouched.
+   */
+  openGenerateStrategiesDialog(): void {
+    const ref = this.dialog.open<
+      GenerateStrategiesDialogComponent,
+      GenerateStrategiesDialogData,
+      GenerateStrategiesDialogResult
+    >(GenerateStrategiesDialogComponent, {
+      data: {
+        batchSize: this.batchSize,
+        batchCount: this.batchCount,
+        batchSizeMin: this.BATCH_SIZE_MIN,
+        batchSizeMax: this.BATCH_SIZE_MAX,
+        batchCountMin: this.BATCH_COUNT_MIN,
+        // Passed by reference (not invoked) so the dialog stays synchronized
+        // if a config fetch changes the operator-configured max while it's
+        // still open — see GenerateStrategiesDialogData.batchCountMax.
+        batchCountMax: this.BATCH_COUNT_MAX,
+        categoryOptions: this.categoryOptions(),
+        selectedCategories: this.selectedCategories(),
+      },
+      width: '480px',
+    });
+    ref.afterClosed().pipe(takeUntilDestroyed(this.destroyRef)).subscribe((result) => {
+      if (!result) {
+        return;
+      }
+      // A run can start elsewhere (another tab, or checkForActiveRun's
+      // reconnect polling) while this dialog was open, without the dialog's
+      // own snapshot ever finding out. runNewStrategy()'s re-entrancy guard
+      // would otherwise silently drop the user's just-confirmed
+      // configuration — surface it instead of doing nothing.
+      if (this.running()) {
+        this.error.set('A strategy run is already in progress — try again once it finishes.');
+        return;
+      }
+      this.batchSize = result.batchSize;
+      // result.batchCount is already clamped to BATCH_COUNT_MIN/MAX() as of
+      // the moment the dialog closed (see GenerateStrategiesDialogResult's
+      // postcondition) — the dialog stays live-synchronized to this
+      // component's own BATCH_COUNT_MAX signal for exactly this reason, so
+      // no further clamping is needed here.
+      this.batchCount = result.batchCount;
+      // If the user never touched the category toggles, `result.selectedCategories`
+      // is just the dialog's seeded snapshot — prefer this component's own
+      // current selection (already kept correct by applyCategoryConfig, including
+      // any category a config fetch added or removed while the dialog was open)
+      // rather than reconciling a stale copy, which — on a partial overlap —
+      // would silently exclude a newly added category the untouched selection
+      // should still include.
+      if (result.categoriesTouched) {
+        // categoryOptions() may have been refreshed while the dialog was open —
+        // intersect against the CURRENT options so a run can never be
+        // constrained to a selection the backend no longer recognizes.
+        const currentOptionValues = this.categoryOptions().map((c) => c.value);
+        const reconciled = currentOptionValues.filter((v) => result.selectedCategories.includes(v));
+        if (!reconciled.length) {
+          // None of the user's explicitly chosen categories still exist —
+          // broadening to "every current category" would silently launch an
+          // unconstrained run the user never asked for. Ask them to
+          // reselect instead of guessing on their behalf.
+          this.error.set(
+            'The categories you selected are no longer available. Reopen "Generate strategies" to choose again.',
+          );
+          return;
+        }
+        this.selectedCategories.set(reconciled);
+        this.userAdjustedCategories = true;
+      }
+      this.runNewStrategy();
+    });
+  }
+
+  /**
    * Start a new Strategy Lab run with the current form configuration.
    *
    * Preconditions: no run is already in progress (`running()` is false — a
@@ -494,8 +556,8 @@ export class StrategyLabComponent implements OnInit {
       return;
     }
 
-    const batchSize = this.clamp(this.batchSize, this.BATCH_SIZE_MIN, this.BATCH_SIZE_MAX);
-    const batchCount = this.clamp(this.batchCount, this.BATCH_COUNT_MIN, this.BATCH_COUNT_MAX());
+    const batchSize = clamp(this.batchSize, this.BATCH_SIZE_MIN, this.BATCH_SIZE_MAX);
+    const batchCount = clamp(this.batchCount, this.BATCH_COUNT_MIN, this.BATCH_COUNT_MAX());
     // Reflect any clamping back into the form so the user sees what was sent.
     this.batchSize = batchSize;
     this.batchCount = batchCount;
@@ -546,11 +608,6 @@ export class StrategyLabComponent implements OnInit {
         this.error.set(extractErrorDetail(err, 'Strategy run failed.'));
       },
     });
-  }
-
-  private clamp(value: number, min: number, max: number): number {
-    const n = Number.isFinite(value) ? Math.floor(value) : min;
-    return Math.max(min, Math.min(max, n));
   }
 
   /** Label for the run button — adapts to single- vs multi-batch mode. */
