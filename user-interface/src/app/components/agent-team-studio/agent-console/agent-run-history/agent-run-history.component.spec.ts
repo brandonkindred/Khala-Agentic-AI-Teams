@@ -44,9 +44,9 @@ describe('AgentRunHistoryComponent', () => {
       providers: [
         { provide: AgentConsoleApiService, useValue: apiMock },
         { provide: NotificationService, useValue: notifyMock },
+        { provide: MatDialog, useValue: { open: dialogOpen } },
       ],
     }).compileComponents();
-    TestBed.overrideProvider(MatDialog, { useValue: { open: dialogOpen } });
 
     fixture = TestBed.createComponent(AgentRunHistoryComponent);
     component = fixture.componentInstance;
