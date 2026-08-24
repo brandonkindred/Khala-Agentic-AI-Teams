@@ -36,6 +36,7 @@ from software_engineering_team.shared.llm import extract_json_from_response
 
 from . import architecture_consistency_pass as arch_pass
 from . import side_effect_impact_pass as side_pass
+from ._prompt_utils import _render_manifest
 from .architecture_context import (
     architecture_document_text,
     architecture_evidence_available,
@@ -588,11 +589,3 @@ def _build_prompt(
             "when you find nothing."
         )
     return "\n".join(parts)
-
-
-def _render_manifest(paths: List[str]) -> List[str]:
-    """Render the full changed-file path list (no character truncation).
-
-    Postconditions: always includes the section header followed by every path.
-    """
-    return [f"**Changed files in this submission ({len(paths)}):**", *paths]

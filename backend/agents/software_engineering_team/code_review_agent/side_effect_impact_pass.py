@@ -72,6 +72,7 @@ from llm_service import LLMClient
 from shared.env import env_flag_enabled
 from software_engineering_team.shared.llm import extract_json_from_response
 
+from ._prompt_utils import _render_manifest
 from .chunking import _coerce_scope_tags
 from .false_positive_filter import CodebaseIndex, _build_tools, _code_fence_for, _make_call_tracker
 from .models import CodeReviewInput, CodeReviewIssue, coerce_line, is_no_op_suggestion
@@ -315,18 +316,6 @@ def _build_side_effect_tools(index: CodebaseIndex, *, track_call=None) -> list:
 def build_side_effect_tools(index: CodebaseIndex, *, track_call=None) -> list:
     """Public wrapper for :func:`_build_side_effect_tools`."""
     return _build_side_effect_tools(index, track_call=track_call)
-
-
-def _render_manifest(paths: List[str]) -> List[str]:
-    """Render the full changed-file path list (no character truncation).
-
-    A small pass-owned duplicate of
-    ``merged_architecture_side_effect_pass._render_manifest`` -- that module
-    imports this one, so importing the reverse direction would be circular.
-
-    Postconditions: always includes the section header followed by every path.
-    """
-    return [f"**Changed files in this submission ({len(paths)}):**", *paths]
 
 
 def _build_prompt(
