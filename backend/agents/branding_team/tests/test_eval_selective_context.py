@@ -24,7 +24,7 @@ from branding_team.scripts.eval_selective_context import (
     _run_variant,
 )
 from branding_team.tests.conftest import make_mission
-from llm_service.testing import force_dummy_llm_provider
+from llm_service.dummy_provider import force_dummy_llm_provider
 
 
 def test_approx_token_count_empty_string() -> None:

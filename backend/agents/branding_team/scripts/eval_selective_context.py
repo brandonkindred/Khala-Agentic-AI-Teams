@@ -1,6 +1,6 @@
 """Compare full-context vs selective-context pipeline prompts and outputs.
 
-For each sample mission in ``branding_team.tests.eval_fixtures.sample_missions``,
+For each sample mission in ``branding_team.scripts.eval_fixtures.sample_missions``,
 runs the branding pipeline once to obtain real per-phase outputs, then builds
 each downstream phase's task prompt two ways:
 
@@ -19,7 +19,7 @@ Run from ``backend/`` (same directory as ``Makefile``)::
 
 Requires no Postgres, Temporal, or live LLM provider: ``run_eval`` forces
 every agent it constructs through the deterministic dummy stub client (see
-``llm_service.testing.force_dummy_llm_provider``), regardless of any live
+``llm_service.dummy_provider.force_dummy_llm_provider``), regardless of any live
 provider selected in the Postgres-backed runtime config or an inherited
 ``LLM_PROVIDER`` environment value.
 """
@@ -38,8 +38,8 @@ from typing import Optional
 from branding_team.graphs.shared import PHASE_ORDER
 from branding_team.models import BrandingMission, BrandPhase
 from branding_team.orchestrator import _PHASE_SPEC, BrandingTeamOrchestrator
-from branding_team.tests.eval_fixtures.sample_missions import SAMPLE_MISSIONS
-from llm_service.testing import force_dummy_llm_provider
+from branding_team.scripts.eval_fixtures.sample_missions import SAMPLE_MISSIONS
+from llm_service.dummy_provider import force_dummy_llm_provider
 
 PHASE5_REDUCTION_TARGET_PCT = 40.0
 
@@ -287,7 +287,7 @@ def run_eval(
                 },
             }
             out_path = output_dir / f"{_slugify(mission.company_name)}.json"
-            out_path.write_text(json.dumps(eval_record, indent=2, default=str))
+            out_path.write_text(json.dumps(eval_record, indent=2), encoding="utf-8")
 
     return comparisons
 
@@ -301,10 +301,12 @@ def _print_report(comparisons: list[PhasePromptComparison]) -> None:
         governance phase -- not expected in normal use, but handled).
     Postconditions:
         Prints one table row per comparison, then either "No GOVERNANCE
-        (Phase 5) comparisons collected." (if none exist) or the average
-        Phase 5 reduction percentage across missions and a PASS/FAIL verdict
-        against ``PHASE5_REDUCTION_TARGET_PCT``. Writes to stdout only;
-        returns nothing.
+        (Phase 5) comparisons collected." (if none exist) or the arithmetic
+        mean of each GOVERNANCE comparison's ``reduction_pct`` (not the
+        reduction between the missions' average token counts, which would
+        weight missions differently) and a PASS/FAIL verdict against
+        ``PHASE5_REDUCTION_TARGET_PCT``. Writes to stdout only; returns
+        nothing.
     """
     print(f"\n{'Mission':<32}{'Phase':<22}{'Selective':>12}{'Full':>10}{'Reduction':>12}")
     print("-" * 88)
@@ -319,9 +321,7 @@ def _print_report(comparisons: list[PhasePromptComparison]) -> None:
         print("\nNo GOVERNANCE (Phase 5) comparisons collected.")
         return
 
-    avg_selective = sum(c.selective_tokens for c in governance) / len(governance)
-    avg_full = sum(c.full_tokens for c in governance) / len(governance)
-    avg_reduction = 100.0 * (avg_full - avg_selective) / avg_full if avg_full else 0.0
+    avg_reduction = sum(c.reduction_pct for c in governance) / len(governance)
 
     print("-" * 88)
     print(

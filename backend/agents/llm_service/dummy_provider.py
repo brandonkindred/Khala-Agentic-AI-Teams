@@ -5,15 +5,22 @@ fix: ``branding_team/tests/test_agents.py``'s ``force_dummy_llm`` pytest
 fixture and ``branding_team/scripts/eval_selective_context.py``'s eval
 script. Both needed to guarantee no live LLM call or Postgres round-trip
 happens under a forced dummy provider, even when ``POSTGRES_HOST`` is set
-and holds a live provider selection. Kept here (not in ``branding_team``)
-since the fix is entirely about ``llm_service`` internals and is equally
-useful to any other team's tests or offline tooling.
+and holds a live provider selection.
+
+Deliberately not named/placed as ``llm_service/testing.py``: this repo's
+``testing.py`` modules (``agent_cognition/testing.py``,
+``agent_platform/studio/testing.py``, ``shared/postgres/testing.py``) are an
+established convention for test-doubles-only code that production code must
+never import. ``force_dummy_llm_provider`` is imported by the eval script
+above, which is offline/dev tooling, not test code, so it lives in its own
+module instead of overloading that convention.
 """
 
 from __future__ import annotations
 
 import contextlib
 import os
+from typing import Callable, Optional
 
 from . import config as _llm_config
 from . import factory as _llm_factory
@@ -56,7 +63,12 @@ def force_dummy_llm_provider():
     ``llm_service/__init__.py`` resolves it the same way (via a PEP 562
     ``__getattr__``) so that importing ``llm_service`` -- or, transitively,
     this module -- never pulls Strands into ``sys.modules`` until a Strands
-    code path actually runs.
+    code path actually runs. The imported function is captured once and
+    reused for the ``finally`` clear rather than re-imported there: a
+    caller without the optional ``strands-agents`` package installed would
+    otherwise see the ``finally``'s repeated import raise its own
+    ``ImportError`` and mask whatever exception (if any) propagated out of
+    the ``try`` block.
 
     Preconditions:
         None.
@@ -75,14 +87,15 @@ def force_dummy_llm_provider():
     original_runtime = _llm_config._runtime
     original_load_ordered_entries = _llm_provider_store.load_ordered_entries
     original_provider_env = os.environ.get("LLM_PROVIDER")
+    clear_strands_cache: Optional[Callable[[], None]] = None
     try:
-        from .strands_provider import _clear_strands_model_cache_for_testing
+        from .strands_provider import _clear_strands_model_cache_for_testing as clear_strands_cache
 
         _llm_config._runtime = lambda _key: ""
         _llm_provider_store.load_ordered_entries = lambda *args, **kwargs: []
         os.environ["LLM_PROVIDER"] = "dummy"
         _llm_factory.clear_client_cache()
-        _clear_strands_model_cache_for_testing()
+        clear_strands_cache()
         yield
     finally:
         _llm_config._runtime = original_runtime
@@ -92,7 +105,5 @@ def force_dummy_llm_provider():
         else:
             os.environ["LLM_PROVIDER"] = original_provider_env
         _llm_factory.clear_client_cache()
-
-        from .strands_provider import _clear_strands_model_cache_for_testing
-
-        _clear_strands_model_cache_for_testing()
+        if clear_strands_cache is not None:
+            clear_strands_cache()

@@ -986,7 +986,7 @@ def force_dummy_llm() -> Iterator[None]:
     ``LLM_PROVIDER=dummy``. Combined with the Strands model cache in
     ``llm_service.strands_provider``, that would let this unmarked spot-check
     hit a live provider (and then the ``real_llm`` parametrization would hit
-    it again). Delegates to ``llm_service.testing.force_dummy_llm_provider``
+    it again). Delegates to ``llm_service.dummy_provider.force_dummy_llm_provider``
     (shared with ``branding_team/scripts/eval_selective_context.py``, which
     needs the identical offline guarantee), which blanks the runtime lookup
     so the dummy env wins, stubs the provider-list read so Strands model
@@ -1003,7 +1003,7 @@ def force_dummy_llm() -> Iterator[None]:
         teardown so a later ``real_llm`` test can resolve the caller's
         provider.
     """
-    from llm_service.testing import force_dummy_llm_provider
+    from llm_service.dummy_provider import force_dummy_llm_provider
 
     with force_dummy_llm_provider():
         yield
