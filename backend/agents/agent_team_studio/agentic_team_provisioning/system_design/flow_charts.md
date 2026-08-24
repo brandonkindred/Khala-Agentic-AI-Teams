@@ -37,7 +37,7 @@ sequenceDiagram
     UI-->>EndUser: chat reply + refreshed roster + process diagram
 ```
 
-Source: [`api/main.py:389-424`](../api/main.py), [`assistant/agent.py`](../assistant/agent.py), [`assistant/store.py`](../assistant/store.py), [`agent_env_provisioning.py:53-85`](../agent_env_provisioning.py).
+Source: [`api/services/conversations.py:47-157`](../api/services/conversations.py) (`create_conversation`, `send_message`), [`assistant/agent.py`](../assistant/agent.py), [`assistant/store.py`](../assistant/store.py), [`agent_env_provisioning.py:53-85`](../agent_env_provisioning.py).
 
 ## 2. Sequence — Agent environment provisioning bridge (animates UC4)
 
@@ -173,7 +173,7 @@ Source: [`roster_validation.py:23-151`](../roster_validation.py).
 ```mermaid
 flowchart TD
     Start["POST /teams/{id}/test-pipeline/runs"]
-    Start --> Locate["Locate ProcessDefinition in team.processes<br/>(api/main.py:858-877)"]
+    Start --> Locate["Locate ProcessDefinition in team.processes<br/>(api/services/testing.py:398-453 — start_pipeline_run)"]
     Locate --> Create["_test_store.create_pipeline_run<br/>(status=RUNNING, initial_input)"]
     Create --> Spawn["PipelineRunner.start_run<br/>→ daemon thread: pipeline-{run_id[:16]}"]
     Spawn --> Execute["_execute(run_id, team_agents, process, resume_event)"]
@@ -222,7 +222,7 @@ flowchart TD
 
 If any of these semantics are needed, they must be added to `PipelineRunner._execute`. The author of a new test should treat the current runner as **"walk the DAG topologically and run one agent per step; pause on WAIT; record decisions as strings."**
 
-Source: [`runtime/pipeline_runner.py:73-293`](../runtime/pipeline_runner.py) (especially `_execute` at line 73, `_handle_action_step` at line 132, `_handle_wait_step` at line 171, `_handle_decision_step` at line 209, `_topological_sort` at line 254), [`api/main.py:858-933`](../api/main.py), `StepType` in [`models.py:24-32`](../models.py), `PipelineRunStatus` in [`models.py:57-64`](../models.py).
+Source: [`runtime/pipeline_runner.py:73-293`](../runtime/pipeline_runner.py) (especially `_execute` at line 73, `_handle_action_step` at line 132, `_handle_wait_step` at line 171, `_handle_decision_step` at line 209, `_topological_sort` at line 254), [`api/services/testing.py:398-453`](../api/services/testing.py) (`start_pipeline_run`), `StepType` in [`models.py:24-32`](../models.py), `PipelineRunStatus` in [`models.py:57-64`](../models.py).
 
 ## 7. State — `PipelineRunStatus`
 
@@ -244,7 +244,7 @@ Source: [`models.py:57-64`](../models.py), [`runtime/pipeline_runner.py:58-71`](
 
 ## 8. State — `TeamMode` (advisory metadata only)
 
-> `TeamMode` is **metadata**, not a server-side gate. `PUT /teams/{id}/mode` (`api/main.py:670-677`) writes the mode via `_test_store.set_team_mode`, but **none** of the test-chat or test-pipeline handlers read it — `create_test_chat_session` (`:694`), `send_test_chat_message` (`:760`), and `start_pipeline_run` (`:858`) only check team/session/agent existence. A team in `DEVELOPMENT` mode can still accept test-chat sessions and pipeline runs; a team in `TESTING` mode still accepts design-mode conversation endpoints. Mode is a **UI hint**, not a security boundary.
+> `TeamMode` is **metadata**, not a server-side gate. `PUT /teams/{id}/mode` (`api/services/testing.py:40-58` — `set_team_mode`) writes the mode via `_test_store.set_team_mode`, but **none** of the test-chat or test-pipeline handlers read it — `create_test_chat_session` (`api/services/testing.py:76`), `send_test_chat_message` (`:208`), and `start_pipeline_run` (`:398`) only check team/session/agent existence. A team in `DEVELOPMENT` mode can still accept test-chat sessions and pipeline runs; a team in `TESTING` mode still accepts design-mode conversation endpoints. Mode is a **UI hint**, not a security boundary.
 
 ```mermaid
 stateDiagram-v2
@@ -260,7 +260,7 @@ stateDiagram-v2
     end note
 ```
 
-Source: [`models.py:43-47`](../models.py), [`api/main.py:670-677`](../api/main.py); absence of mode checks in `api/main.py:694, 760, 858`.
+Source: [`models.py:43-47`](../models.py), [`api/services/testing.py:40-58`](../api/services/testing.py) (`set_team_mode`); absence of mode checks in `api/services/testing.py:76, 208, 398`.
 
 ---
 

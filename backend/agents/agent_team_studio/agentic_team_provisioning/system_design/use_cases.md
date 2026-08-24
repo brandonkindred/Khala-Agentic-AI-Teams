@@ -73,9 +73,9 @@ The left-to-right ribbon (`Actor → UI → API Layer → Agentic Team → File 
 | **API Layer category** | `User Requests` |
 | **Preconditions** | A team exists (`POST /teams`); the LLM service is reachable. |
 | **Trigger** | User sends a chat message describing the team they want. |
-| **Main flow** | 1. `POST /conversations` or `POST /conversations/{id}/messages` (`api/main.py:351-424`); 2. `AgenticTeamStore.get_messages` loads history; 3. `ProcessDesignerAgent.respond` calls the LLM with the system prompt; 4. `_save_agents_from_llm` persists the ```agents``` block to `team_agents`; 5. `_store.save_process` persists the ```process``` block; 6. `_after_process_saved` triggers `schedule_provision_step_agents`; 7. response returns `ConversationStateResponse` with `messages`, `current_process`, `suggested_questions`. |
+| **Main flow** | 1. `POST /conversations` or `POST /conversations/{id}/messages` (`api/routes/conversations.py:20-29` → `api/services/conversations.py:47-157`); 2. `AgenticTeamStore.get_messages` loads history; 3. `ProcessDesignerAgent.respond` calls the LLM with the system prompt; 4. `_save_agents_from_llm` persists the ```agents``` block to `team_agents`; 5. `_store.save_process` persists the ```process``` block; 6. `_after_process_saved` triggers `schedule_provision_step_agents`; 7. response returns `ConversationStateResponse` with `messages`, `current_process`, `suggested_questions`. |
 | **Postconditions** | Roster and/or process updated; background provisioning scheduled; UI refreshes Team Roster and process diagram. |
-| **Relevant files** | `api/main.py:351-424`, `assistant/agent.py`, `assistant/store.py`, `agent_env_provisioning.py` |
+| **Relevant files** | `api/routes/conversations.py`, `api/services/conversations.py:47-157`, `assistant/agent.py`, `assistant/store.py`, `agent_env_provisioning.py` |
 
 ### UC2 — Validate roster / detect staffing gaps
 
@@ -85,10 +85,10 @@ The left-to-right ribbon (`Actor → UI → API Layer → Agentic Team → File 
 | **API Layer category** | `Team / Job Status` |
 | **Preconditions** | Team has at least one roster agent or process. |
 | **Trigger** | `GET /teams/{team_id}/roster/validation`. |
-| **Main flow** | 1. Route fetches the team (`api/main.py:211-219`); 2. `roster_validation.validate_roster` iterates `team.processes`, calling `_check_process`, `_check_unused_agents`, `_check_roster_depth` (`roster_validation.py:23-151`); 3. Returns `RosterValidationResult` with `is_fully_staffed`, `gaps`, `summary`. |
+| **Main flow** | 1. Route fetches the team (`api/routes/teams.py:66-68` → `api/services/teams.py:189-210` — `validate_team_roster`); 2. `roster_validation.validate_roster` iterates `team.processes`, calling `_check_process`, `_check_unused_agents`, `_check_roster_depth` (`roster_validation.py:23-151`); 3. Returns `RosterValidationResult` with `is_fully_staffed`, `gaps`, `summary`. |
 | **Gap categories** | `unstaffed_step`, `unrostered_agent`, `unused_agent`, `incomplete_profile`, `sparse_profile` |
 | **Postconditions** | UI surfaces gap badges; team is "fully staffed" only when `len(gaps) == 0`. |
-| **Relevant files** | `api/main.py:211-219`, `roster_validation.py`, `models.py:295-316` |
+| **Relevant files** | `api/routes/teams.py:66-68`, `api/services/teams.py:189-210`, `roster_validation.py`, `models.py:295-316` |
 
 ### UC3 — Define or edit a process DAG (visual or chat)
 
@@ -156,12 +156,12 @@ The left-to-right ribbon (`Actor → UI → API Layer → Agentic Team → File 
 |---|---|
 | **Primary actor** | End user (designer, tester) |
 | **API Layer category** | `Testing Chat` (new, grouped with the original 5 under `API Layer`) |
-| **Preconditions** | Team exists; the target agent exists in the team roster (`_find_agent_in_roster`, `api/main.py:685-691`). `TeamMode` is **not** checked server-side — see note below. |
+| **Preconditions** | Team exists; the target agent exists in the team roster (`_find_agent_in_roster`, `api/services/testing.py:59-75`). `TeamMode` is **not** checked server-side — see note below. |
 | **Trigger** | `POST /teams/{team_id}/test-chat/sessions/{session_id}/messages`. |
 | **Main flow** | 1. `get_chat_session` verifies the session belongs to the team; 2. `_find_agent_in_roster` locates the roster entry; 3. `_test_store.create_chat_message` stores the user message; 4. Full history is concatenated to build context; 5. `build_agent` (`runtime/agent_builder.py`) produces a `strands.Agent`; 6. `call_agent` invokes the LLM; 7. Assistant response stored with `create_chat_message`; 8. Optionally rated via `PUT .../messages/{message_id}/rating`. |
 | **Postconditions** | Messages persisted; quality scores aggregated at `GET /teams/{team_id}/test-chat/quality-scores`. |
-| **Note on `TeamMode`** | `PUT /teams/{team_id}/mode` (`api/main.py:670-677`) records the mode as advisory metadata but the test-chat handlers (`:694`, `:760`) do **not** read it. A team in `DEVELOPMENT` mode can still accept test-chat sessions. Treat mode as a UI hint, not a server-enforced gate. |
-| **Relevant files** | `api/main.py:694-851`, `runtime/agent_builder.py`, `testing/store.py` |
+| **Note on `TeamMode`** | `PUT /teams/{team_id}/mode` (`api/services/testing.py:40-58`) records the mode as advisory metadata but the test-chat handlers (`api/services/testing.py:76`, `:208`) do **not** read it. A team in `DEVELOPMENT` mode can still accept test-chat sessions. Treat mode as a UI hint, not a server-enforced gate. |
+| **Relevant files** | `api/routes/testing.py`, `api/services/testing.py:40-340`, `runtime/agent_builder.py`, `testing/store.py` |
 
 ### UC9 — End-to-end pipeline test run with WAIT-step human input (new)
 
@@ -169,12 +169,12 @@ The left-to-right ribbon (`Actor → UI → API Layer → Agentic Team → File 
 |---|---|
 | **Primary actor** | End user |
 | **API Layer category** | `Pipeline Runs` (new) |
-| **Preconditions** | A `ProcessDefinition` exists on the team. `TeamMode` is not checked — `start_pipeline_run` (`api/main.py:858`) only validates team and process existence. |
+| **Preconditions** | A `ProcessDefinition` exists on the team. `TeamMode` is not checked — `start_pipeline_run` (`api/services/testing.py:398`) only validates team and process existence. |
 | **Trigger** | `POST /teams/{team_id}/test-pipeline/runs` with `process_id` and `initial_input`. |
 | **Main flow** | 1. Route locates the process; 2. `_test_store.create_pipeline_run` persists a `TestPipelineRun` in `RUNNING`; 3. `PipelineRunner.start_run` spawns `pipeline-{run_id[:16]}` daemon thread; 4. Thread topologically sorts `process.steps` once (`runtime/pipeline_runner.py:254-293`) and iterates the resulting list linearly; 5. For each step, the runner specializes **only** `WAIT` (blocks on a `threading.Event`) and `DECISION` (runs the agent and records the decision string); every other `StepType` — `ACTION`, `PARALLEL_SPLIT`, `PARALLEL_JOIN`, `SUBPROCESS` — falls through to `_handle_action_step` and runs the first assigned agent as a plain action (see `runtime/pipeline_runner.py:90-115`); 6. On `WAIT`, status becomes `WAITING_FOR_INPUT`; 7. User calls `POST /teams/{team_id}/test-pipeline/runs/{run_id}/input`; `submit_human_input` sets the event; 8. Run finishes → `COMPLETED` / `FAILED` / `CANCELLED`. |
 | **Postconditions** | `test_pipeline_runs` row with per-step `PipelineStepResult` entries. |
 | **Note on step semantics** | The runner does **not** fan out `PARALLEL_SPLIT`, synchronize `PARALLEL_JOIN`, branch on `DECISION` results, or recurse into `SUBPROCESS`. When designing a test pipeline, assume a linear topologically-sorted walk with WAIT-pause. See `flow_charts.md` §6 "Unimplemented semantics". |
-| **Relevant files** | `api/main.py:858-933`, `runtime/pipeline_runner.py`, `testing/store.py`, `models.py:414-427` |
+| **Relevant files** | `api/routes/testing.py:139-184`, `api/services/testing.py:341-576`, `runtime/pipeline_runner.py`, `testing/store.py`, `models.py:414-427` |
 
 ## 3. Priority matrix
 

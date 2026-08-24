@@ -12,8 +12,10 @@
 
 ```mermaid
 graph LR
-    main["api/main.py<br/>(app-assembly hub: factory + include_router; /health only)"]
-    routes["api/routes/*<br/>(teams, conversations, testing, processes, jobs, questions, assets, forms)"]
+    main["api/main.py<br/>(app-assembly hub: factory + include_router only, no endpoints)"]
+    state["api/state.py<br/>(shared singletons + cross-route helpers)"]
+    lifecycle["api/lifecycle.py<br/>(ASGI startup hook)"]
+    routes["api/routes/*<br/>(teams, conversations, testing, processes, jobs, questions, assets, forms, health)"]
     services["api/services/*<br/>(matching business-logic modules, dereference main's singletons at call time)"]
 
     %% Orchestrator internals
@@ -37,14 +39,18 @@ graph LR
     jsc["job_service_client"]
     apt["agent_provisioning_team"]
 
-    main --> store
-    main --> agent
-    main --> test_store
-    main --> runner
+    main --> state
+    main --> lifecycle
     main --> pg
     main --> shared_obs
     main --> shared_pg
     main --> routes
+    state --> store
+    state --> agent
+    state --> test_store
+    state --> runner
+    state --> infra
+    lifecycle -.->|dereferences main.initialize_service at call time| main
     routes --> services
     services -.->|dereference main's singletons at call time| main
     services --> agent
@@ -76,7 +82,7 @@ graph LR
 
     classDef orchestrator fill:#fff4e5,stroke:#e8710a
     classDef external fill:#f1f3f4,stroke:#5f6368,stroke-dasharray: 3 3
-    class main,routes,services,agent,store,runner,builder,roster,envprov,infra,models,test_store,pg,tmp orchestrator
+    class main,state,lifecycle,routes,services,agent,store,runner,builder,roster,envprov,infra,models,test_store,pg,tmp orchestrator
     class llm,shared_pg,shared_tmp,shared_obs,jsc,apt external
 ```
 
@@ -84,9 +90,11 @@ graph LR
 
 | File | Lines | Purpose |
 |---|---|---|
-| [`../api/main.py`](../api/main.py) | ~440 | App-assembly hub: builds the app, owns module-level singletons (`_store`, `_agent`, `_test_store`, `_pipeline_runner`) and cross-domain collaborators, mounts every extracted router via `include_router`; only the `/health` liveness probe is still defined here; retroactive `provision_team` on startup (`api/main.py:108-113`) |
-| [`../api/routes/`](../api/routes/) | ~530 total | Thin `APIRouter`s, one per domain (`teams`, `conversations`, `testing`, `processes`, `jobs`, `questions`, `assets`, `forms`); each handler is a one-line delegate into the matching `api/services/*` function |
-| [`../api/services/`](../api/services/) | ~1,840 total | Domain business logic extracted from the former monolithic `api/main.py`; each function reads its collaborators (`_store`, `_get_infra_or_404`, …) off `api.main` at call time so `monkeypatch.setattr(main, …)` in tests is honored |
+| [`../api/main.py`](../api/main.py) | ~140 | Pure app-assembly hub: builds the app via `shared.app.create_team_app`, re-imports every singleton/helper from `api/state.py` for backward-compatible `from …api.main import X` / `monkeypatch.setattr(main, …)` access, then mounts all nine extracted routers via `include_router`; defines zero endpoints itself |
+| [`../api/state.py`](../api/state.py) | ~410 | Shared mutable globals (`_store`, `_agent`, `_test_store`, `_pipeline_runner`) and the cross-domain helpers routes/services call through `main` at call time (roster enrichment, conversation-turn persistence, infra/team lookups); `initialize_service` — retroactive `provision_team`/manifest registration + orphaned-run reaping — runs from the `_startup` hook, not at import time (`api/state.py:90-150`) |
+| [`../api/lifecycle.py`](../api/lifecycle.py) | ~50 | The ASGI `on_startup` hook (`_startup`) passed to `create_team_app`: starts the Temporal worker backstop, then calls `main.initialize_service()` |
+| [`../api/routes/`](../api/routes/) | ~545 total | Thin `APIRouter`s, one per domain (`teams`, `conversations`, `testing`, `processes`, `jobs`, `questions`, `assets`, `forms`, `health`); each handler is a one-line delegate into the matching `api/services/*` function |
+| [`../api/services/`](../api/services/) | ~1,780 total | Domain business logic extracted from the former monolithic `api/main.py`; each function reads its collaborators (`_store`, `_get_infra_or_404`, …) off `api.main` at call time so `monkeypatch.setattr(main, …)` in tests is honored |
 | [`../models.py`](../models.py) | ~460 | Pydantic enums + models: `TriggerType`, `StepType`, `ProcessStatus`, `TeamMode`, `MessageRating`, `PipelineRunStatus`, `AgenticTeam`, `AgenticTeamAgent`, `ProcessDefinition`, `ProcessStep`, `RosterValidationResult`, `ConversationStateResponse`, `TestPipelineRun`, … |
 | [`../assistant/store.py`](../assistant/store.py) | ~440 | Shared SQLite store; conversation + team + process + roster + agent-env provisions |
 | [`../assistant/agent.py`](../assistant/agent.py) | ~364 | `ProcessDesignerAgent` — system prompt, LLM call, JSON block parser |
@@ -101,7 +109,7 @@ graph LR
 
 ## 2. Persistence — ER diagram
 
-Both backends share the same logical schema. The shared SQLite instance at `$AGENT_CACHE/agentic_team_provisioning.db` is authoritative when `POSTGRES_HOST` is unset; otherwise Postgres (JSONB columns) registered via `shared.postgres.register_team_schemas(AGENTIC_POSTGRES_SCHEMA)` in the FastAPI lifespan (`api/main.py:77-92`) takes over.
+Both backends share the same logical schema. The shared SQLite instance at `$AGENT_CACHE/agentic_team_provisioning.db` is authoritative when `POSTGRES_HOST` is unset; otherwise Postgres (JSONB columns) registered via `shared.postgres.register_team_schemas(AGENTIC_POSTGRES_SCHEMA)` in the FastAPI lifespan (`shared/app/factory.py`, invoked because `api/main.py` passes `postgres_schema=AGENTIC_POSTGRES_SCHEMA` to `create_team_app`) takes over.
 
 ```mermaid
 erDiagram
@@ -296,4 +304,4 @@ result = orch.run_workflow(
 )
 ```
 
-On completion it calls `store.mark_agent_env_provision_finished(..., success=..., error_message=...)`, updating the `agent_env_provisions` row consumed by `GET /teams/{team_id}/agent-environments` (`api/main.py:464-471`).
+On completion it calls `store.mark_agent_env_provision_finished(..., success=..., error_message=...)`, updating the `agent_env_provisions` row consumed by `GET /teams/{team_id}/agent-environments` (`api/routes/processes.py:55-58`, delegating to `api/services/processes.py:187`).

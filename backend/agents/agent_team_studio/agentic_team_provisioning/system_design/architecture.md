@@ -30,7 +30,7 @@ graph TB
     end
 
     %% ---- Orchestrator Agent (middle) — new decomposition ----
-    subgraph OrchestratorAgent["Orchestrator Agent — the service itself, api/main.py"]
+    subgraph OrchestratorAgent["Orchestrator Agent — the service itself (api/routes, api/services, api/state, api/lifecycle)"]
         direction TB
         PDA["ProcessDesignerAgent<br/>(assistant/agent.py — LLM chat)"]
         RosterValidator["RosterValidator<br/>(roster_validation.py)"]
@@ -127,7 +127,7 @@ graph TB
 | `API Layer` subgraph | **Kept** — same top-of-diagram placement |
 | `Job Status`, `Questions for User`, `User Requests / Chat` | **Kept verbatim** (original 3 categories) |
 | `Assets`, `Form Information` | **Added** — present in the interactions PNG but missing from the internal PNG |
-| `Testing Chat`, `Pipeline Runs`, `Team Mode Toggle` | **Added** — testing-mode endpoints from `api/main.py:670-933` |
+| `Testing Chat`, `Pipeline Runs`, `Team Mode Toggle` | **Added** — testing-mode endpoints from `api/routes/testing.py` / `api/services/testing.py` |
 | `Orchestrator Agent` | **Kept** as middle subgraph; **decomposed** into its 8 concrete internals |
 | `Agents` pool (`Agent 1 … Agent N`) | **Kept verbatim** |
 | `Processes` pool (`Process 1 … Process N`) | **Kept verbatim** |
@@ -140,7 +140,7 @@ The normative contract ([`../AGENTIC_TEAM_ARCHITECTURE.md:32-39`](../AGENTIC_TEA
 
 > The Orchestrator Agent is the central coordinator inside every agentic team. […] The orchestrator is the **single point of control** for the team. No agent or process runs without the orchestrator's knowledge.
 
-In this service, the orchestrator is **not** a dedicated LLM agent — it is the FastAPI application in [`api/main.py`](../api/main.py) plus its collaborating modules. Every external call enters through a route, the route delegates to one of the internals, and all persistence, validation, and downstream dispatch happens inside that route handler.
+In this service, the orchestrator is **not** a dedicated LLM agent — it is the FastAPI application assembled by [`api/main.py`](../api/main.py) (factory + `include_router` only) together with [`api/routes/`](../api/routes/), [`api/services/`](../api/services/), [`api/state.py`](../api/state.py), and [`api/lifecycle.py`](../api/lifecycle.py). Every external call enters through a route, the route delegates to the matching service function, and all persistence, validation, and downstream dispatch happens inside that service (dereferencing shared singletons off `api.main` at call time).
 
 | Orchestrator internal | File | Role |
 |---|---|---|
@@ -187,7 +187,7 @@ The Unified API security gateway sits in front of all routes (see `backend/unifi
 
 ```mermaid
 flowchart LR
-    Req["Incoming request"] --> Route["FastAPI route<br/>(api/main.py)"]
+    Req["Incoming request"] --> Route["FastAPI route<br/>(api/routes/*)"]
     Route -->|default| Thread["Python thread<br/>(PipelineRunner / AgentEnvProvisioner)"]
     Route -->|TEMPORAL_ADDRESS set| Workflow["AgenticTeamProvisioningWorkflow<br/>(temporal/__init__.py:22-30)"]
     Workflow --> Activity["run_pipeline_activity<br/>(2h start_to_close_timeout)"]
@@ -204,8 +204,8 @@ flowchart LR
 
 | Shared module | Usage |
 |---|---|
-| `shared.observability` (`init_otel`, `instrument_fastapi_app`) | OpenTelemetry spans on every route (`api/main.py:70-99`) |
-| `shared.postgres` (`register_team_schemas`, `close_pool`) | Registers `AGENTIC_POSTGRES_SCHEMA` in the FastAPI lifespan (`api/main.py:77-92`) — no-op when `POSTGRES_HOST` unset |
+| `shared.observability` (`init_otel`, `instrument_fastapi_app`) | OpenTelemetry spans on every route, wired by `shared.app.create_team_app` (called from `api/main.py`) |
+| `shared.postgres` (`register_team_schemas`, `close_pool`) | Registers `AGENTIC_POSTGRES_SCHEMA` in the FastAPI lifespan built by `shared.app.create_team_app` (`api/main.py` passes the schema in; registration itself lives in `shared/app/factory.py`) — no-op when `POSTGRES_HOST` unset |
 | `shared.temporal` (`is_temporal_enabled`, `start_team_worker`) | Per-team worker bootstrap on module import (`temporal/__init__.py:36-44`) |
 | `job_service_client` (`JobServiceClient`) | Per-team job lifecycle and pending question tracking via `infrastructure.py` |
 | `llm_service.get_client()` | Single LLM client consumed by both `ProcessDesignerAgent` (chat) and `AgentBuilder` (test chat + starter prompts) |
