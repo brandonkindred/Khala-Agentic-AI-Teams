@@ -79,12 +79,12 @@ with implementation detail for individual Strategy Lab capabilities:
 | Factor/genome DSL and compiler | [`strategy_lab/factors/`](../strategy_lab/factors/) |
 | Canonical streaming indicator implementations | [`strategy_lab/indicators/`](../strategy_lab/indicators/) |
 | Zero/low-trade backtest diagnostics (static + runtime AST probing) | [`strategy_lab/coverage_probe/`](../strategy_lab/coverage_probe/) |
-| Investment Team orchestrator (Advisor track) state machine, 6 queues, promotion entry point | [`orchestrator.py`](../orchestrator.py) (133 lines) |
-| Pydantic domain models (profile, IPS, strategy, backtest, promotion, advisor, paper trading) | [`models.py`](../models.py) (477 lines) |
+| Investment Team orchestrator (Advisor track) state machine, 6 queues, promotion entry point | [`orchestrator.py`](../orchestrator.py) |
+| Pydantic domain models (profile, IPS, strategy, backtest, promotion, advisor, paper trading) | [`models.py`](../models.py) |
 | Strategy Lab batch/cycle workflows | [`strategy_lab/temporal/workflows.py`](../strategy_lab/temporal/workflows.py) `StrategyLabBatchWorkflow` / `StrategyLabCycleWorkflow` |
 | Strategy Lab durable activities (per-attempt pipeline, signal brief, finalize/paper-trade) | [`strategy_lab/temporal/activities.py`](../strategy_lab/temporal/activities.py) — table in [`generation_pipeline.md`](./generation_pipeline.md) |
 | SSE fan-out for run progress | [`api/job_event_bus.py`](../api/job_event_bus.py) |
-| Persistence wrapper over Khala job service | [`api/main.py`](../api/main.py) `_PersistentDict` (line 85) |
+| Persistence wrapper over Khala job service | [`api/main.py`](../api/main.py) — search for `class _PersistentDict` |
 | Multi-provider OHLCV fetcher | [`market_data_service.py`](../market_data_service.py) |
 | Strategy Lab market snapshot (Frankfurter / FRED / yfinance) | [`market_lab_data/free_tier.py`](../market_lab_data/free_tier.py) |
 | Streaming provider registry (Binance / Coinbase / Alpaca / OANDA + paid) | [`trading_service/providers/`](../trading_service/providers/) |

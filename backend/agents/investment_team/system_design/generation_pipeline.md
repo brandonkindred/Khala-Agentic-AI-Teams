@@ -104,7 +104,7 @@ DesignAgent.run/.revise → SpecReadinessGate (phase="design") → DesignReviewA
   to compile cleanly — `STRATEGY_LAB_DEMOTE_COMPILABLE_CUSTOM_CODE`). Only
   after mechanical repair exhausts its fixed scope does a critical fall
   through to `DesignAgent.revise`.
-- **`SpecReadinessGate`** (`quality_gates/spec_readiness.py`) is the
+- **`SpecReadinessGate`** (`../strategy_lab/quality_gates/spec_readiness.py`) is the
   deterministic implementability check — sizing-coherence math, timeframe
   validity, DSL completeness — invoked at `phase="design"`
   (`orchestrator_design.py`:918) and re-checked at synthesis round 0.
@@ -121,10 +121,10 @@ DesignAgent.run/.revise → SpecReadinessGate (phase="design") → DesignReviewA
   The ledger also flags *regressions* — an issue resolved earlier that
   reappears — as an explicit "do not reintroduce" notice fed back into the
   next revision.
-- Across cycles, a `ConvergenceTracker` (`quality_gates/convergence_tracker.py`)
+- Across cycles, a `ConvergenceTracker` (`../strategy_lab/quality_gates/convergence_tracker.py`)
   supplies stall/diversity/failure directives that get folded into the design
   prompt, and (when enabled) a once-per-cycle market-regime summary
-  (`market_regime.py`, `STRATEGY_LAB_REGIME_SUMMARY_ENABLED`) helps the
+  (`../strategy_lab/market_regime.py`, `STRATEGY_LAB_REGIME_SUMMARY_ENABLED`) helps the
   designer pick a setup archetype that fits current conditions.
 
 Every numeric cap above is `STRATEGY_LAB_*`-tunable; the exhaustive reference
@@ -193,7 +193,7 @@ that diagnosis.
 Owned by `AlignmentMixin` (`orchestrator_alignment.py`), after the strategy
 has produced a real trade ledger. Each round:
 
-1. **`DeterministicAlignmentChecker`** (`quality_gates/alignment_checks.py`)
+1. **`DeterministicAlignmentChecker`** (`../strategy_lab/quality_gates/alignment_checks.py`)
    evaluates the trade ledger against the structured `StrategySpec` across
    six per-rule checks: universe, side, sizing (±1%), stop-loss compliance,
    take-profit compliance, and entry-signal correlation. A near-miss on the
@@ -217,11 +217,11 @@ the mechanism, that doc keeps the wire-level summary.
 
 Owned by `VerificationMixin` (`orchestrator_verification.py`):
 
-- **Walk-forward acceptance** — `AcceptanceGate.check` (`quality_gates/acceptance_gate.py`)
+- **Walk-forward acceptance** — `AcceptanceGate.check` (`../strategy_lab/quality_gates/acceptance_gate.py`)
   evaluates deflated Sharpe, in-sample→out-of-sample degradation, and
   minimum OOS trade count across the backtest's walk-forward folds.
 - **Exit-rule conformance** — `ExitRuleConformanceGate`
-  (`quality_gates/exit_rule_conformance.py`) deterministically checks that
+  (`../strategy_lab/quality_gates/exit_rule_conformance.py`) deterministically checks that
   engine-enforced exits actually matched `spec.exit_rules`.
 - **Realism gates** run in fixed order (`orchestrator.py:685-749`,
   `_run_realism_gates`): `TargetSymbolCoverageGate` (backtest universe
@@ -230,7 +230,7 @@ Owned by `VerificationMixin` (`orchestrator_verification.py`):
 
 The **winner label** is a simple deterministic threshold —
 `is_winning = execution_succeeded and trades and annualized_return_pct >= 8.0`
-(`WINNING_THRESHOLD`, `models.py`:30) — independent of every gate above. The
+(`WINNING_THRESHOLD`, `../models.py`:30) — independent of every gate above. The
 **publishable gate** is what actually decides paper-trading eligibility:
 `is_publishable = is_winning and realism_passed and trades_aligned and
 exit_rule_conformance_passed and not lookahead_violation`. Both the exact
@@ -364,7 +364,7 @@ flowchart TB
         BT --> AL{DeterministicAlignmentChecker}
         AL -->|misaligned| TAA[TradeAlignmentAgent<br/>propose_code_fix]
         TAA --> BT
-        AL -->|aligned| VER[AcceptanceGate · ExitRuleConformanceGate ·<br/>5 realism gates]
+        AL -->|aligned| VER[AcceptanceGate · ExitRuleConformanceGate ·<br/>6 realism gates]
         VER --> AN[AnalysisAgent]
         AN --> REC[RecordAssemblyMixin<br/>→ StrategyLabRecord]
     end
