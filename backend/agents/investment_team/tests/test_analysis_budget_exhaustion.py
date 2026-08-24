@@ -1,7 +1,7 @@
 """Regression: ``AnalysisAgent`` must not swallow ``DesignBudgetExhausted``.
 
-Analysis draft/review call sites use ``charge=False`` today, so they do not
-trip the per-cycle budget themselves. They still pass
+The analysis draft call site uses ``charge=False`` today, so it does not
+trip the per-cycle budget itself. It still passes
 ``guard_design_budget=True`` so that if a budget trip reaches the single-shot
 driver (or charging is later enabled), the exception propagates bare instead
 of being handed to ``on_failure`` and turned into ``_fallback_narrative``.
@@ -81,30 +81,6 @@ def test_draft_budget_exhaustion_propagates(monkeypatch: pytest.MonkeyPatch) -> 
         AnalysisAgent().run(**_run_kwargs())
 
     assert exc_info.value is trip
-
-
-def test_review_budget_exhaustion_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A ``DesignBudgetExhausted`` raised during the self-review call must
-    likewise propagate — the review ``on_failure`` path must not swallow it
-    into a silent "use draft" fallback."""
-    trip = DesignBudgetExhausted(limit=5, calls_made=5)
-    call_count = {"n": 0}
-
-    def _draft_ok_then_budget(*_a: Any, **_k: Any) -> Any:
-        call_count["n"] += 1
-        if call_count["n"] == 1:
-            return {"draft_narrative": "draft body"}
-        raise trip
-
-    monkeypatch.setattr(agent_runner_module, "run_structured_agent", _draft_ok_then_budget)
-    monkeypatch.setattr(agent_runner_module, "Agent", lambda **_k: object())
-    monkeypatch.setattr(agent_runner_module, "get_strands_model", lambda *_a, **_k: None)
-
-    with pytest.raises(DesignBudgetExhausted) as exc_info:
-        AnalysisAgent().run(**_run_kwargs())
-
-    assert exc_info.value is trip
-    assert call_count["n"] == 2
 
 
 def test_non_budget_draft_failure_still_falls_back(
