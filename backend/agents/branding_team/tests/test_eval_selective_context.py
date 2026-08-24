@@ -13,7 +13,6 @@ CI, matching #6969's "Out of Scope: CI integration of eval."
 from __future__ import annotations
 
 import pytest
-
 from branding_team.graphs.shared import PHASE_ORDER
 from branding_team.models import BrandPhase
 from branding_team.orchestrator import _PHASE_SPEC, BrandingTeamOrchestrator
@@ -93,6 +92,10 @@ def test_run_variant_full_context_includes_all_upstream() -> None:
 
 
 def test_run_variant_full_context_task_is_never_shorter() -> None:
+    """For every phase, the full-context task string is never shorter than the
+    selective one -- full-context only ever adds upstream phase output back in,
+    never removes any content the selective variant already included.
+    """
     orchestrator = BrandingTeamOrchestrator()
     mission = make_mission()
     with force_dummy_llm_provider():
@@ -101,7 +104,8 @@ def test_run_variant_full_context_task_is_never_shorter() -> None:
         )
         _full_outputs, full_tasks = _run_variant(orchestrator, mission, full_context=True)
 
-    assert len(full_tasks[BrandPhase.GOVERNANCE]) >= len(selective_tasks[BrandPhase.GOVERNANCE])
+    for phase in PHASE_ORDER:
+        assert len(full_tasks[phase]) >= len(selective_tasks[phase])
 
 
 def test_run_variant_returns_real_output_for_every_phase() -> None:

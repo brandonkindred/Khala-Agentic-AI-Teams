@@ -35,11 +35,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from llm_service.dummy_provider import force_dummy_llm_provider
+
 from branding_team.graphs.shared import PHASE_ORDER
 from branding_team.models import BrandingMission, BrandPhase
 from branding_team.orchestrator import _PHASE_SPEC, BrandingTeamOrchestrator
 from branding_team.scripts.eval_fixtures.sample_missions import SAMPLE_MISSIONS
-from llm_service.dummy_provider import force_dummy_llm_provider
 
 PHASE5_REDUCTION_TARGET_PCT = 40.0
 
@@ -249,10 +250,10 @@ def run_eval(
     missions = list(missions) if missions is not None else SAMPLE_MISSIONS
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    orchestrator = BrandingTeamOrchestrator()
     comparisons: list[PhasePromptComparison] = []
 
     with force_dummy_llm_provider():
+        orchestrator = BrandingTeamOrchestrator()
         for mission in missions:
             selective_outputs, selective_tasks = _run_variant(
                 orchestrator, mission, full_context=False

@@ -11,6 +11,7 @@ wrapped block raises, and including the "was originally unset" case for
 
 from __future__ import annotations
 
+import builtins
 import os
 
 import pytest
@@ -80,3 +81,35 @@ def test_restores_llm_provider_env_on_exception_when_originally_unset(
             raise RuntimeError("boom")
 
     assert "LLM_PROVIDER" not in os.environ
+
+
+def test_still_forces_dummy_provider_when_strands_provider_is_unimportable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The optional ``strands-agents`` import must never block the core patches.
+
+    Simulates an environment without the optional ``strands-agents`` package
+    by making ``import llm_service.strands_provider`` raise ``ImportError``:
+    the context manager must still force the dummy provider, and must still
+    restore every patch on exit -- proving the Strands cache-clear import is
+    decoupled from (and cannot abort) the core ``_runtime``/
+    ``load_ordered_entries``/``LLM_PROVIDER`` patches.
+    """
+    original_runtime = llm_config._runtime
+    original_load_ordered_entries = llm_provider_store.load_ordered_entries
+    real_import = builtins.__import__
+
+    def _fake_import(name, *args, **kwargs):
+        if name == "strands_provider":
+            raise ImportError("simulated: strands-agents not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _fake_import)
+
+    with force_dummy_llm_provider():
+        assert os.environ.get("LLM_PROVIDER") == "dummy"
+        assert llm_config._runtime("any-key") == ""
+        assert llm_provider_store.load_ordered_entries() == []
+
+    assert llm_config._runtime is original_runtime
+    assert llm_provider_store.load_ordered_entries is original_load_ordered_entries

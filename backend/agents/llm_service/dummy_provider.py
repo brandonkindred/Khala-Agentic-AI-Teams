@@ -63,12 +63,13 @@ def force_dummy_llm_provider():
     ``llm_service/__init__.py`` resolves it the same way (via a PEP 562
     ``__getattr__``) so that importing ``llm_service`` -- or, transitively,
     this module -- never pulls Strands into ``sys.modules`` until a Strands
-    code path actually runs. The imported function is captured once and
-    reused for the ``finally`` clear rather than re-imported there: a
-    caller without the optional ``strands-agents`` package installed would
-    otherwise see the ``finally``'s repeated import raise its own
-    ``ImportError`` and mask whatever exception (if any) propagated out of
-    the ``try`` block.
+    code path actually runs. That import is attempted in its own
+    ``try/except ImportError``, separate from the core patches below: when
+    ``strands-agents`` is not installed, ``clear_strands_cache`` is simply
+    left ``None`` (skipped, both here and in ``finally``) rather than
+    letting the ``ImportError`` propagate and abort before the ``_runtime``/
+    ``load_ordered_entries``/``LLM_PROVIDER`` patches -- which have nothing
+    to do with Strands and must always apply -- ever run.
 
     Preconditions:
         None.
@@ -82,7 +83,9 @@ def force_dummy_llm_provider():
         holds even if a setup step itself raises (e.g. a cache-clear call):
         every mutation happens inside the ``try:``, after only the
         original-value snapshots are read, so ``finally`` always runs once
-        any mutation has.
+        any mutation has. This also holds when the optional ``strands-agents``
+        package is not installed: the core patches apply unconditionally
+        regardless of whether that import succeeds.
     """
     original_runtime = _llm_config._runtime
     original_load_ordered_entries = _llm_provider_store.load_ordered_entries
@@ -90,12 +93,15 @@ def force_dummy_llm_provider():
     clear_strands_cache: Optional[Callable[[], None]] = None
     try:
         from .strands_provider import _clear_strands_model_cache_for_testing as clear_strands_cache
-
+    except ImportError:
+        clear_strands_cache = None
+    try:
         _llm_config._runtime = lambda _key: ""
         _llm_provider_store.load_ordered_entries = lambda *args, **kwargs: []
         os.environ["LLM_PROVIDER"] = "dummy"
         _llm_factory.clear_client_cache()
-        clear_strands_cache()
+        if clear_strands_cache is not None:
+            clear_strands_cache()
         yield
     finally:
         _llm_config._runtime = original_runtime
