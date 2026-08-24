@@ -34,8 +34,9 @@ from branding_team.api.models import (
 )
 from branding_team.api.state import _mission_has_brand_name, _mission_has_minimal_required_fields
 from branding_team.assistant.store import _default_mission, _StoredMessage
-from branding_team.models import BrandingMission, HumanReview, TeamOutput
+from branding_team.models import Brand, BrandingMission, HumanReview, TeamOutput
 from branding_team.shared.phase_output_cache import PhaseOutputCache
+from branding_team.store import AttachConversationResult
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +133,62 @@ def _brand_exists(brand_id: str) -> bool:
     from branding_team.api import main as _main
 
     return _main.branding_store.brand_exists(brand_id)
+
+
+def link_conversation_to_brand(
+    client_id: str,
+    brand_id: str,
+    conversation_id: str,
+    mission: Optional[BrandingMission] = None,
+) -> Brand:
+    """Atomically link *conversation_id* to *brand_id*, raising on any failure.
+
+    Single choke point for the three call sites that establish a brand<->
+    conversation link — ``create_brand`` (``api.routes.brands``),
+    ``attach_conversation_to_brand`` (``api.routes.conversations``), and
+    ``_auto_create_brand_from_conversation`` below. All three now share the
+    same atomicity guarantee via ``BrandingStore.attach_conversation`` (a
+    single transaction that checks the uniqueness invariant and writes both
+    rows together) instead of each maintaining its own consistency story —
+    two of which used to call ``ConversationStore.set_brand`` directly and
+    leave the counterpart row unpatched on failure.
+
+    Preconditions:
+        ``client_id``, ``brand_id`` identify an existing (client, brand) pair;
+        ``conversation_id`` identifies an existing conversation; ``mission``,
+        when provided, is a validated ``BrandingMission``.
+    Postconditions:
+        On success returns the updated ``Brand`` — the conversation now points
+        at ``brand_id`` and the brand's ``conversation_id`` is set. When
+        *mission* is omitted, the conversation's stored mission is left as-is
+        (read inside the attach transaction's own lock, not a pre-lock
+        snapshot the caller took beforehand — see
+        ``BrandingStore.attach_conversation``); pass it explicitly only when
+        the caller is itself the source of truth for that mission (e.g. the
+        mission that just drove brand creation). Raises ``HTTPException``: 404
+        when the conversation or brand is missing, 409 when the conversation
+        is already attached to a *different* brand, 500 for any unrecognized
+        result. Never returns ``None`` — every non-OK outcome raises instead.
+    """
+    from branding_team.api import main as _main
+
+    result, brand = _main.branding_store.attach_conversation(
+        client_id, brand_id, conversation_id, mission
+    )
+    if result is AttachConversationResult.OK:
+        return brand
+    if result is AttachConversationResult.CONVERSATION_NOT_FOUND:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if result is AttachConversationResult.ALREADY_ATTACHED:
+        raise HTTPException(
+            status_code=409,
+            detail="Conversation is already attached to another brand",
+        )
+    if result is AttachConversationResult.BRAND_NOT_FOUND:
+        raise HTTPException(status_code=404, detail="Brand not found")
+    # Defensive: every known AttachConversationResult member is handled
+    # above, so this only fires if the enum ever grows a new member.
+    raise HTTPException(status_code=500, detail="Unexpected attach result")
 
 
 def _local_message(role: str, content: str) -> _StoredMessage:
@@ -320,17 +377,17 @@ def _auto_create_brand_from_conversation(
         first version. Returns the new brand id, or None if creation failed.
 
     Note:
-        The steps run as independent statements (each store call takes its own
-        ``shared.postgres`` connection), so this sequence is NOT atomic: if a
-        later step raises, the brand may already exist while the conversation
-        link or first version is missing. Acceptable for the single-user
-        assistant flow today; making it transactional requires cross-store
-        connection sharing and is tracked as a follow-up.
+        The conversation<->brand link itself is atomic (``link_conversation_to_brand``,
+        wrapping ``BrandingStore.attach_conversation``). Appending the first
+        version is still a separate statement, so the sequence as a whole is
+        NOT fully atomic: if that final step raises, the brand exists and is
+        already linked to the conversation, just without its first version.
+        Acceptable for the single-user assistant flow today; folding the
+        version append into the same transaction is tracked as a follow-up.
     """
     from branding_team.api import main as _main
 
     branding_store = _main.branding_store
-    conversation_store = _main.conversation_store
     client_id = _ensure_default_client()
     brand = branding_store.create_brand(
         client_id=client_id,
@@ -340,21 +397,11 @@ def _auto_create_brand_from_conversation(
     if not brand:
         return None
     # The brand now exists. If any linkage step below fails, the brand is
-    # orphaned (created but not attached). Log a warning that names the brand so
-    # the inconsistency is recoverable, then re-raise — the steps are not atomic
-    # (see the Note above), so we surface the failure rather than hide it.
+    # orphaned (created but not attached, or attached but missing its first
+    # version). Log a warning that names the brand so the inconsistency is
+    # recoverable, then re-raise — surface the failure rather than hide it.
     try:
-        if not conversation_store.set_brand(conversation_id, brand.id):
-            raise RuntimeError(
-                f"conversation {conversation_id} vanished before brand {brand.id} attach"
-            )
-        if (
-            branding_store.update_brand(client_id, brand.id, conversation_id=conversation_id)
-            is None
-        ):
-            raise RuntimeError(
-                f"brand {brand.id} vanished before conversation {conversation_id} link"
-            )
+        link_conversation_to_brand(client_id, brand.id, conversation_id, mission)
         if output and branding_store.append_brand_version(client_id, brand.id, output) is None:
             raise RuntimeError(
                 f"brand {brand.id} vanished before appending first version from "
