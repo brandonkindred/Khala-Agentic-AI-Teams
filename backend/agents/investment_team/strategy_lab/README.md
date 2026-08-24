@@ -52,11 +52,11 @@ monitor worker liveness (e.g. Temporal Web's task-queue pollers view), not rely 
 
 One design attempt (`run_design_attempt_activity`) can run up to `_DESIGN_ATTEMPT_TIMEOUT` (2
 hours) before it produces a record. `use_budget(budget)` wraps the *entire* `_run_design_attempt`
-call — design+review, refinement, trade-alignment, and zero-trade repair (`RefinementAgent`,
-`TradeAlignmentAgent`, and `ZeroTradeRepairAgent` all route through
-`run_single_shot_agent(..., charge=True)`, drawing on whatever budget `use_budget` has made
-active) all draw against one shared
-`STRATEGY_LAB_DESIGN_MAX_LLM_CALLS` ceiling (120 at the documented default, spanning all
+call — design+review, refinement, trade-alignment, and zero-trade repair all draw against
+one shared `STRATEGY_LAB_DESIGN_MAX_LLM_CALLS` ceiling. `RefinementAgent`,
+`TradeAlignmentAgent`, and `ZeroTradeRepairAgent` each route through
+`run_single_shot_agent(..., charge=True)` against whichever budget `use_budget` has made
+active for that call. The ceiling is 120 at the documented default (spanning all
 re-entries — see that variable's own entry below for the distinct, larger 540-call figure it
 exists to cap: the *uncapped* worst-case multiplicative demand computed by
 `worst_case_design_llm_calls()`, which only models the design/review portion). The ceiling
