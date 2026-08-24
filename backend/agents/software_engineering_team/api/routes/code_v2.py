@@ -202,11 +202,32 @@ def get_backend_code_v2_status(job_id: str) -> BackendCodeV2StatusResponse:
     response_model=CodegenRunResponse,
     summary="Run codegen agent team (backend or frontend)",
     description="Submit a task, repo path, and stack ('backend' or 'frontend'). Dispatches the "
-    "codegen team's 5-phase workflow to Temporal. Returns job_id immediately. Poll "
+    "codegen team's 7-phase workflow to Temporal. Returns job_id immediately. Poll "
     "GET /code-v2/status/{job_id} for progress.",
 )
 def run_codegen(request: CodegenRunRequest) -> CodegenRunResponse:
-    """Start the codegen team on a task for the requested stack."""
+    """Start the codegen team on a task for the requested stack.
+
+    Dispatches the same Temporal activity the standalone `/backend-code-v2/run`
+    and `/frontend-code-v2/run` routes use, selected by `request.stack` instead
+    of a fixed stack per route.
+
+    Preconditions:
+        `request.repo_path` names an existing directory. `request.stack` is
+        `"backend"` or `"frontend"` (enforced by `CodegenRunRequest`'s field
+        type, so an invalid value fails FastAPI's request validation before
+        this function runs).
+    Postconditions:
+        A job is created and persisted (`job_type` is `"{stack}_code_v2"`),
+        a Temporal workflow is dispatched for it, and a job-heartbeat thread
+        is started. Returns immediately with `status="running"`; call
+        `GET /code-v2/status/{job_id}` to poll progress.
+    Raises:
+        HTTPException(400) when `repo_path` does not exist or is not a
+        directory (checked before any job is created). HTTPException(503)
+        when dispatching the Temporal workflow fails — the job is marked
+        failed first so status polling reflects the error.
+    """
     repo = Path(request.repo_path)
     if not repo.is_dir():
         raise HTTPException(
@@ -261,7 +282,16 @@ def run_codegen(request: CodegenRunRequest) -> CodegenRunResponse:
     description="Returns what is done, what is in progress, and overall completion percentage.",
 )
 def get_codegen_status(job_id: str) -> CodegenStatusResponse:
-    """Get the status of a codegen job."""
+    """Get the status of a codegen job started via `POST /code-v2/run`.
+
+    Preconditions:
+        `job_id` is a job id previously returned by `run_codegen`.
+    Postconditions:
+        Returns the job's current status, stack, phase/microtask progress,
+        and (once available) its summary or error.
+    Raises:
+        HTTPException(404) when no job with `job_id` exists.
+    """
     data = get_job(job_id)
     if not data:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
