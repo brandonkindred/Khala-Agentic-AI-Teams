@@ -25,6 +25,7 @@ from shared.cache.pydantic_cache import (
     get_cached_model,
     set_cached_model,
 )
+from software_engineering_team.shared.review_prompt_utils import build_file_context_prefix
 from software_engineering_team.shared.security_service import derive_approved
 from software_engineering_team.shared.single_shot_review import run_single_shot_review
 
@@ -152,13 +153,7 @@ def _build_security_file_context_prefix(input_data: SecurityInput) -> list[str]:
         - Returns non-empty prompt lines: the language line, then the code
           fence around ``input_data.code``. Never raises or transforms the code.
     """
-    return [
-        f"**Language:** {input_data.language}",
-        "**Code to review:**",
-        "```",
-        input_data.code,
-        "```",
-    ]
+    return build_file_context_prefix(input_data.language, input_data.code)
 
 
 def _build_security_role_instructions(input_data: SecurityInput) -> list[str]:
