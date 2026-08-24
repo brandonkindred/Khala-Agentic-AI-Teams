@@ -1033,7 +1033,7 @@ def _phase2_nested_node_result() -> MagicMock:
         BrandArchetypeOutput(
             archetype="The Creator",
             rationale="Inventive.",
-            personality_traits=["Imaginative", "Original"],
+            personality_traits=["Imaginative", "Original", "Expressive"],
         )
     ]
     _pitches = [

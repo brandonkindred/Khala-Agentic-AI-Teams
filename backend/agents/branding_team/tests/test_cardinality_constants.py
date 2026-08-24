@@ -93,6 +93,14 @@ _RANGE_CASES: list[tuple[str, type[BaseModel], str, int, int, Callable[[], Agent
         make_archetype_analyst,
     ),
     (
+        "personality_traits",
+        m.BrandArchetypeOutput,
+        "personality_traits",
+        m.PERSONALITY_TRAITS_MIN,
+        m.PERSONALITY_TRAITS_MAX,
+        make_archetype_analyst,
+    ),
+    (
         "messaging_framework",
         m.MessagingFrameworkOutput,
         "messaging_framework",

@@ -124,6 +124,69 @@ def test_check_anomalies_cached_skips_repeat_call_for_unchanged_metrics_and_trad
     assert calls["n"] == 2, "a changed ledger must re-invoke check()"
 
 
+def test_check_anomalies_cached_same_phase_hit_returns_cached_list_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a cache hit's requested ``phase`` already matches the cached
+    ``phase``, no ``model_copy`` is performed — the returned list shares
+    object identity with the cache (the zero-cost path this issue adds)."""
+    orch = StrategyLabOrchestrator()
+    calls, check = _counting_clean_check()
+    monkeypatch.setattr(orch.anomaly_detector, "check", check)
+
+    trades = _trade_records()
+    config = _config()
+    metrics = compute_metrics(trades, config.initial_capital, config.start_date, config.end_date)
+
+    gates_first = orch._check_anomalies_cached(
+        metrics,
+        trades,
+        dsr_aware=False,
+        diagnostics=None,
+        coverage_report=None,
+        market_data=_market_data(),
+        phase="synthesis",
+    )
+    assert calls["n"] == 1
+    assert gates_first[0].phase == "synthesis"
+
+    trades_again = _trade_records()
+    metrics_again = compute_metrics(
+        trades_again, config.initial_capital, config.start_date, config.end_date
+    )
+    gates_second = orch._check_anomalies_cached(
+        metrics_again,
+        trades_again,
+        dsr_aware=False,
+        diagnostics=None,
+        coverage_report=None,
+        market_data=_market_data(),
+        phase="synthesis",
+    )
+    assert calls["n"] == 1, "unchanged (metrics, trades) must not re-invoke check()"
+    assert gates_second is orch._last_anomaly_check[1], (
+        "same-phase hit must return the cached list itself, not a copy"
+    )
+
+    # A third same-phase, same-signature call hits the identical cached list
+    # again — confirming this is a stable identity return, not incidental.
+    trades_third = _trade_records()
+    metrics_third = compute_metrics(
+        trades_third, config.initial_capital, config.start_date, config.end_date
+    )
+    gates_third = orch._check_anomalies_cached(
+        metrics_third,
+        trades_third,
+        dsr_aware=False,
+        diagnostics=None,
+        coverage_report=None,
+        market_data=_market_data(),
+        phase="synthesis",
+    )
+    assert calls["n"] == 1
+    assert gates_third is gates_second
+
+
 def test_anomaly_check_shared_across_synthesis_and_alignment_evaluation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
