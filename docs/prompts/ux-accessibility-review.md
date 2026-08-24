@@ -183,7 +183,10 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
          these before flagging, and say which one you checked — naming an exception is
          not the same as meeting it:
            - Spacing — undersized targets positioned so a 24 px circle centred on each
-             does not intersect another target's circle.
+             intersects NEITHER another target (its actual bounding box, which is how
+             a full-size neighbour counts) NOR the circle around another undersized
+             target. Checking circle-to-circle alone wrongly exempts a small control
+             sitting against a full-size one.
            - Inline — the target sits IN A SENTENCE, or its size is constrained by the
              line-height of surrounding non-target text. A control merely styled
              inline does not qualify: a compact toolbar action still owes 24×24 or the
@@ -365,9 +368,14 @@ Close with:
     `expectNoAxeViolations` in the populated state does not cover a focus-management,
     announcement, reflow, target-size, or contrast defect in that state, nor keyboard
     behaviour axe cannot exercise — key sequences, focus movement and restoration,
-    traps. Report those. It DOES run axe's structural keyboard rules (positive
-    `tabindex`, unfocusable scrollable regions, and the rest of the default set minus
-    `color-contrast`), so do not re-report those in a state the spec renders.
+    traps. Report those. It DOES run axe's DOM-only rules — positive `tabindex` and
+    the rest of the default set that depends on attributes and structure alone — so do
+    not re-report those in a state the spec renders. But rules needing rendered
+    geometry do not fire under jsdom, which implements no layout: `color-contrast` is
+    disabled outright for that reason, and `scrollable-region-focusable` silently
+    matches nothing because `scrollHeight` and `clientHeight` are both 0, yielding
+    neither a violation nor an incomplete. An unfocusable scrollable region is
+    therefore NOT guarded by a jsdom spec — treat it as manual/source review.
   - Speculation that requires a running browser without labelling it as such.
   - Wholesale redesigns, restructures of the shared shell, or framework swaps.
   - Style preferences with no accessibility, comprehension, or step-count consequence.
