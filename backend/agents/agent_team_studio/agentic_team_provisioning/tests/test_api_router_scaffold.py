@@ -145,6 +145,7 @@ def test_main_exposes_mounted_router_markers() -> None:
         assets,
         conversations,
         forms,
+        health,
         jobs,
         processes,
         questions,
@@ -160,6 +161,7 @@ def test_main_exposes_mounted_router_markers() -> None:
     assert main_mod._questions_router is questions.router
     assert main_mod._assets_router is assets.router
     assert main_mod._forms_router is forms.router
+    assert main_mod._health_router is health.router
     paths = {getattr(r, "path", None) for r in main_mod.app.routes if isinstance(r, APIRoute)}
     assert "/health" in paths
 
