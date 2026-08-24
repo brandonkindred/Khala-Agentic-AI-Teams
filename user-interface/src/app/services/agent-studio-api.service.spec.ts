@@ -4,6 +4,7 @@ import {
   HttpTestingController,
 } from '@angular/common/http/testing';
 import { AgentStudioApiService } from './agent-studio-api.service';
+import { SKIP_ERROR_NOTIFY } from '../core/error-handler.interceptor';
 import { environment } from '../../environments/environment';
 
 describe('AgentStudioApiService', () => {
@@ -136,10 +137,11 @@ describe('AgentStudioApiService', () => {
     req.flush({ draft_id: 'd1', name: 'New Name', updated_at: '2026-01-01T00:00:03Z' });
   });
 
-  it('deletes a draft', () => {
+  it('deletes a draft with the notify-toast suppressed', () => {
     service.deleteDraft('d1').subscribe();
     const req = httpMock.expectOne(`${baseUrl}/drafts/d1`);
     expect(req.request.method).toBe('DELETE');
+    expect(req.request.context.get(SKIP_ERROR_NOTIFY)).toBe(true);
     req.flush({ draft_id: 'd1', status: 'deleted' });
   });
 });
