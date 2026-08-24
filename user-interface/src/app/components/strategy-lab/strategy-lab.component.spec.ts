@@ -767,3 +767,110 @@ describe('StrategyLabComponent — pure helpers and remaining error paths', () =
     expect(component.error()).toBe('worker unavailable');
   });
 });
+
+describe('StrategyLabComponent — openGenerateStrategiesDialog', () => {
+  let component: StrategyLabComponent;
+  let runService: RunServiceStub;
+  let apiSpy: {
+    runStrategyLab: ReturnType<typeof vi.fn>;
+    streamRunStatus: ReturnType<typeof vi.fn>;
+    getStrategyLabConfig: ReturnType<typeof vi.fn>;
+    getStrategyLabResults: ReturnType<typeof vi.fn>;
+    getPaperTradingResults: ReturnType<typeof vi.fn>;
+    getActiveRuns: ReturnType<typeof vi.fn>;
+  };
+  let dialogOpenSpy: ReturnType<typeof vi.fn>;
+  let afterClosedResult: ReturnType<typeof of>;
+
+  beforeEach(async () => {
+    runService = createRunServiceStub();
+    afterClosedResult = of(undefined);
+    apiSpy = {
+      runStrategyLab: vi.fn().mockReturnValue(
+        of({ run_id: 'run-1', status: 'running', total_cycles: 10, message: 'started' }),
+      ),
+      streamRunStatus: vi.fn().mockReturnValue(NEVER),
+      getStrategyLabConfig: vi.fn().mockReturnValue(
+        of({ batch_count_min: 1, batch_count_max: 100, asset_categories: [] }),
+      ),
+      getStrategyLabResults: vi.fn().mockReturnValue(
+        of({ items: [], count: 0, winning_count: 0, losing_count: 0 }),
+      ),
+      getPaperTradingResults: vi.fn().mockReturnValue(of({ items: [] })),
+      getActiveRuns: vi.fn().mockReturnValue(of({ runs: [] })),
+    };
+    dialogOpenSpy = vi.fn(() => ({ afterClosed: () => afterClosedResult }));
+
+    await TestBed.configureTestingModule({
+      imports: [StrategyLabComponent, NoopAnimationsModule],
+      providers: [
+        provideRouter([]),
+        { provide: InvestmentApiService, useValue: apiSpy },
+        {
+          provide: IntegrationsApiService,
+          useValue: {
+            getTradingViewConfig: vi.fn().mockReturnValue(
+              of({ enabled: false, mcp_server_url: '', tool_name: 'get_ohlcv', auth_token_configured: false }),
+            ),
+          },
+        },
+      ],
+    })
+      .overrideProvider(MatDialog, { useValue: { open: dialogOpenSpy } })
+      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride(runService))
+      .compileComponents();
+
+    component = TestBed.createComponent(StrategyLabComponent).componentInstance;
+  });
+
+  it('opens the dialog seeded with the current batch/category configuration', () => {
+    component.batchSize = 7;
+    component.batchCount = 2;
+
+    component.openGenerateStrategiesDialog();
+
+    expect(dialogOpenSpy).toHaveBeenCalledTimes(1);
+    const [, config] = dialogOpenSpy.mock.calls[0];
+    expect(config.data).toEqual(
+      expect.objectContaining({
+        batchSize: 7,
+        batchCount: 2,
+        batchSizeMin: component.BATCH_SIZE_MIN,
+        batchSizeMax: component.BATCH_SIZE_MAX,
+        batchCountMin: component.BATCH_COUNT_MIN,
+        batchCountMax: component.BATCH_COUNT_MAX(),
+        categoryOptions: component.categoryOptions(),
+        selectedCategories: component.selectedCategories(),
+      }),
+    );
+  });
+
+  it('applies the dialog result and starts a run when the user submits', () => {
+    afterClosedResult = of({
+      batchSize: 15,
+      batchCount: 4,
+      selectedCategories: ['crypto'],
+    });
+
+    component.openGenerateStrategiesDialog();
+
+    expect(component.batchSize).toBe(15);
+    expect(component.batchCount).toBe(4);
+    expect(component.selectedCategories()).toEqual(['crypto']);
+    expect(apiSpy.runStrategyLab).toHaveBeenCalledWith(
+      expect.objectContaining({ batch_size: 15, batch_count: 4 }),
+    );
+  });
+
+  it('leaves configuration and run state untouched when the dialog is cancelled', () => {
+    afterClosedResult = of(undefined);
+    component.batchSize = 10;
+    component.batchCount = 1;
+
+    component.openGenerateStrategiesDialog();
+
+    expect(component.batchSize).toBe(10);
+    expect(component.batchCount).toBe(1);
+    expect(apiSpy.runStrategyLab).not.toHaveBeenCalled();
+  });
+});

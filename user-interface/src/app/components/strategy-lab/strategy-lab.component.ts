@@ -13,11 +13,9 @@ import {
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule, DecimalPipe } from '@angular/common';
-import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
-import { MatFormFieldModule } from '@angular/material/form-field';
-import { MatInputModule } from '@angular/material/input';
+import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatChipsModule } from '@angular/material/chips';
@@ -45,6 +43,10 @@ import {
 } from './strategy-lab.formatters';
 import { PhaseStepperComponent, phaseLabel } from './phase-stepper/phase-stepper.component';
 import { StrategyCardComponent } from './strategy-card/strategy-card.component';
+import {
+  GenerateStrategiesDialogComponent,
+  type GenerateStrategiesDialogResult,
+} from './generate-strategies-dialog/generate-strategies-dialog.component';
 import type {
   PaperTradingSession,
   StrategyLabRecord,
@@ -54,7 +56,7 @@ import type {
 
 type FilterMode = 'all' | 'winning' | 'losing';
 
-interface AssetCategoryOption {
+export interface AssetCategoryOption {
   value: string;
   label: string;
   icon: string;
@@ -107,11 +109,9 @@ const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOpti
   imports: [
     CommonModule,
     DecimalPipe,
-    FormsModule,
     MatButtonModule,
     MatIconModule,
-    MatFormFieldModule,
-    MatInputModule,
+    MatDialogModule,
     MatProgressSpinnerModule,
     MatProgressBarModule,
     MatChipsModule,
@@ -138,6 +138,7 @@ export class StrategyLabComponent implements OnInit {
   private readonly api = inject(InvestmentApiService);
   private readonly integrations = inject(IntegrationsApiService);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly dialog = inject(MatDialog);
   /** Owns SSE/polling/active-run tracking and per-record paper-trading polling. */
   readonly runService = inject(StrategyLabRunService);
   /** Owns activity-log bookkeeping and the completion/error/warning banners driven by runService.events$. */
@@ -459,6 +460,43 @@ export class StrategyLabComponent implements OnInit {
         this.error.set(extractErrorDetail(err, 'Failed to load results.'));
         this.loading.set(false);
       },
+    });
+  }
+
+  /**
+   * Opens the "Generate strategies" modal, seeded with the current batch
+   * size/count and category selection. If the user submits, applies the
+   * returned configuration and immediately starts a run via
+   * `runNewStrategy()`; a cancelled dialog (result `undefined`) leaves the
+   * current configuration and run state untouched.
+   */
+  openGenerateStrategiesDialog(): void {
+    const ref = this.dialog.open<
+      GenerateStrategiesDialogComponent,
+      unknown,
+      GenerateStrategiesDialogResult
+    >(GenerateStrategiesDialogComponent, {
+      data: {
+        batchSize: this.batchSize,
+        batchCount: this.batchCount,
+        batchSizeMin: this.BATCH_SIZE_MIN,
+        batchSizeMax: this.BATCH_SIZE_MAX,
+        batchCountMin: this.BATCH_COUNT_MIN,
+        batchCountMax: this.BATCH_COUNT_MAX(),
+        categoryOptions: this.categoryOptions(),
+        selectedCategories: this.selectedCategories(),
+      },
+      width: '480px',
+    });
+    ref.afterClosed().subscribe((result) => {
+      if (!result) {
+        return;
+      }
+      this.batchSize = result.batchSize;
+      this.batchCount = result.batchCount;
+      this.selectedCategories.set(result.selectedCategories);
+      this.userAdjustedCategories = true;
+      this.runNewStrategy();
     });
   }
 

@@ -172,7 +172,10 @@ describe('StrategyLabComponent a11y — result card disclosure', () => {
 
   it('has no axe violations expanded, with aria-expanded/aria-controls wired to the region id', async () => {
     const fixture = await createFixture();
-    fixture.componentInstance.toggleCard('rec-1');
+    // Click the real disclosure button (rather than calling toggleCard()
+    // directly) so the OnPush view is marked dirty via Angular's normal
+    // event-dispatch path, matching real usage.
+    fixture.nativeElement.querySelector<HTMLButtonElement>('.expand-chevron-btn')!.click();
     fixture.detectChanges();
 
     const btn: HTMLButtonElement = fixture.nativeElement.querySelector('.expand-chevron-btn');
@@ -353,7 +356,10 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
 
   it('trade-table-wrap: focusable, named, no axe violations once the ledger panel is open', async () => {
     const fixture = await createFixture(RECORD_WITH_TRADES);
-    fixture.componentInstance.toggleCard('rec-1');
+    // Click the real disclosure button (rather than calling toggleCard()
+    // directly) so the OnPush view is marked dirty via Angular's normal
+    // event-dispatch path, matching real usage.
+    fixture.nativeElement.querySelector<HTMLButtonElement>('.expand-chevron-btn')!.click();
     fixture.detectChanges();
 
     const header: HTMLElement = fixture.nativeElement.querySelector('.ledger-panel mat-expansion-panel-header');
@@ -381,7 +387,10 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
       ...RECORD_WITH_TRADES,
       backtest: { ...RECORD_WITH_TRADES.backtest, trades: [TRADE, LOSS_TRADE] },
     });
-    fixture.componentInstance.toggleCard('rec-1');
+    // Click the real disclosure button (rather than calling toggleCard()
+    // directly) so the OnPush view is marked dirty via Angular's normal
+    // event-dispatch path, matching real usage.
+    fixture.nativeElement.querySelector<HTMLButtonElement>('.expand-chevron-btn')!.click();
     fixture.detectChanges();
     fixture.nativeElement.querySelector<HTMLElement>('.ledger-panel mat-expansion-panel-header')?.click();
     fixture.detectChanges();
@@ -1541,18 +1550,19 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
     return fixture;
   }
 
-  it('header, data-source notice, category row, and summary/filter icons are aria-hidden', async () => {
+  it('header, data-source notice, and summary/filter icons are aria-hidden', async () => {
     const fixture = await createFixture();
 
     // TradingView not configured by default (integrationsSpy above), so the
-    // ds-notice banner renders without any extra setup.
+    // ds-notice banner renders without any extra setup. The category-row's
+    // icons now live inside GenerateStrategiesDialogComponent (see its own
+    // spec) — they're no longer part of this page's template.
     const decorative = [
       '.lab-title mat-icon',
       '.clear-all-btn mat-icon',
-      '.run-btn mat-icon',
+      '.generate-btn mat-icon',
       '.ds-notice__icon',
       '.ds-notice__cta mat-icon',
-      '.category-label mat-icon',
       '.summary-chip.winning mat-icon',
       '.summary-chip.losing mat-icon',
       '.summary-chip.rate mat-icon',
@@ -1561,14 +1571,6 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
       const el: HTMLElement | null = fixture.nativeElement.querySelector(selector);
       expect(el, `expected ${selector} to be present`).toBeTruthy();
       expect(el!.getAttribute('aria-hidden'), `expected ${selector} to be aria-hidden`).toBe('true');
-    }
-
-    const categoryIcons: HTMLElement[] = Array.from(
-      fixture.nativeElement.querySelectorAll('.category-toggle-group mat-icon'),
-    );
-    expect(categoryIcons.length).toBeGreaterThan(0);
-    for (const icon of categoryIcons) {
-      expect(icon.getAttribute('aria-hidden')).toBe('true');
     }
 
     const filterIcons: HTMLElement[] = Array.from(fixture.nativeElement.querySelectorAll('.filter-row mat-icon'));
@@ -1626,7 +1628,10 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
     const fixture = await createFixture(RECORD_WITH_GATES, {
       items: [RECORD_WITH_GATES], count: 1, winning_count: 0, losing_count: 1,
     });
-    fixture.componentInstance.toggleCard('rec-1');
+    // Click the real disclosure button (rather than calling toggleCard()
+    // directly) so the OnPush view is marked dirty via Angular's normal
+    // event-dispatch path, matching real usage.
+    fixture.nativeElement.querySelector<HTMLButtonElement>('.expand-chevron-btn')!.click();
     fixture.detectChanges();
 
     const hypothesisIcon: HTMLElement = fixture.nativeElement.querySelector('.hypothesis-icon');
@@ -1664,7 +1669,10 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
     const fixture = await createFixture(RECORD_WITH_GATES, {
       items: [RECORD_WITH_GATES], count: 1, winning_count: 0, losing_count: 1,
     });
-    fixture.componentInstance.toggleCard('rec-1');
+    // Click the real disclosure button (rather than calling toggleCard()
+    // directly) so the OnPush view is marked dirty via Angular's normal
+    // event-dispatch path, matching real usage.
+    fixture.nativeElement.querySelector<HTMLButtonElement>('.expand-chevron-btn')!.click();
     fixture.detectChanges();
     const headers: HTMLElement[] = Array.from(
       fixture.nativeElement.querySelectorAll('mat-expansion-panel-header'),

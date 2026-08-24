@@ -1,0 +1,70 @@
+<h2 mat-dialog-title>Generate strategies</h2>
+
+<mat-dialog-content class="generate-strategies-dialog__content">
+  <div class="generate-strategies-dialog__batch-row">
+    <mat-form-field appearance="outline" class="batch-input">
+      <mat-label>Strategies / batch</mat-label>
+      <input
+        matInput
+        type="number"
+        [(ngModel)]="batchSize"
+        [min]="BATCH_SIZE_MIN"
+        [max]="BATCH_SIZE_MAX"
+        aria-label="Strategies per batch"
+        cdkFocusInitial
+      />
+      <mat-hint>{{ BATCH_SIZE_MIN }}–{{ BATCH_SIZE_MAX }}</mat-hint>
+    </mat-form-field>
+    <mat-form-field appearance="outline" class="batch-input">
+      <mat-label>Batches</mat-label>
+      <input
+        matInput
+        type="number"
+        [(ngModel)]="batchCount"
+        [min]="BATCH_COUNT_MIN"
+        [max]="BATCH_COUNT_MAX"
+        aria-label="Number of batches"
+      />
+      <mat-hint>{{ BATCH_COUNT_MIN }}–{{ BATCH_COUNT_MAX }}; each new batch learns from prior batches</mat-hint>
+    </mat-form-field>
+  </div>
+
+  <div class="generate-strategies-dialog__category-row">
+    <div class="category-label">
+      <mat-icon aria-hidden="true">category</mat-icon>
+      <span>Categories</span>
+    </div>
+    <mat-button-toggle-group
+      multiple
+      [ngModel]="selectedCategories()"
+      (ngModelChange)="onCategoriesChanged($event)"
+      class="category-toggle-group"
+      aria-label="Asset categories to generate strategies for"
+      aria-describedby="generate-strategies-category-hint"
+    >
+      @for (cat of categoryOptions; track cat.value) {
+        <mat-button-toggle [value]="cat.value">
+          <mat-icon aria-hidden="true">{{ cat.icon }}</mat-icon>
+          <span>{{ cat.label }}</span>
+        </mat-button-toggle>
+      }
+    </mat-button-toggle-group>
+    @if (!categoriesValid) {
+      <span id="generate-strategies-category-hint" class="category-hint category-hint--error">Select at least one category.</span>
+    } @else {
+      <span id="generate-strategies-category-hint" class="category-hint">Strategies are generated only for the selected categories.</span>
+    }
+  </div>
+</mat-dialog-content>
+
+<mat-dialog-actions align="end">
+  <button mat-button (click)="cancel()">Cancel</button>
+  <button
+    mat-flat-button
+    color="primary"
+    (click)="submit()"
+    [disabled]="!categoriesValid"
+  >
+    {{ runButtonLabel() }}
+  </button>
+</mat-dialog-actions>
