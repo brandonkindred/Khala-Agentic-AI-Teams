@@ -904,14 +904,21 @@ class TestToolAgents:
 
 class TestBackendDevelopmentAgent:
     def test_read_repo_code(self, tmp_path):
+        """Integration check that the production BACKEND_CONFIG/PROFILE actually
+        excludes node_modules -- the synthetic config tests in
+        test_v2_config_orchestrator.py only prove that an arbitrary configured
+        exclusion is honored, not that node_modules is one of them."""
         from backend_code_v2_team.orchestrator import BackendDevelopmentAgent
 
         (tmp_path / "app.py").write_text("print('hello')")
         (tmp_path / "readme.md").write_text("# Readme")
+        (tmp_path / "node_modules").mkdir()
+        (tmp_path / "node_modules" / "skip.py").write_text("# do not include")
         agent = BackendDevelopmentAgent(MagicMock())
         code = agent._read_repo_code(tmp_path)
         assert "app.py" in code
         assert "print('hello')" in code
+        assert "skip.py" not in code
 
     def test_read_repo_code_empty(self, tmp_path):
         from backend_code_v2_team.orchestrator import BackendDevelopmentAgent
