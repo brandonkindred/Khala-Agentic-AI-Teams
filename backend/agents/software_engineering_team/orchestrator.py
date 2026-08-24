@@ -588,74 +588,31 @@ def _get_agents() -> Mapping[str, Any]:
     project-planning / domain-planning agents are not used in the main flow
     (``clarification_store`` may still use Spec Intake elsewhere).
 
-    Audit (kept honest here so future readers do not assume the dict is fully
-    consumed): the two production callers of ``_get_agents`` — the thread-mode
-    orchestrator below and ``temporal/activities.py`` — read only
-    ``agents["architecture"]`` from the returned mapping. Per-task
-    backend/frontend work is delegated to the coding-team / code-v2 sub-teams,
-    which construct their own tool agents via ``_build_tool_agents`` rather than
-    reading them from this mapping. The remaining entries are retained because
-    the integration tests in ``test_backend_code_v2_integration.py`` and
-    ``test_frontend_code_v2_integration.py`` pin the presence of the v2 team
-    leads, and this function is the canonical fleet factory for the thread-mode
-    pipeline.
+    This registry holds only ``architecture`` — the single role the two
+    production callers read: the thread-mode orchestrator below and
+    ``temporal/activities.py`` both read only ``agents["architecture"]``.
+    Per-task backend/frontend/devops work is built independently by
+    ``coding_team_orchestrator.py`` via
+    ``worker_factory._build_implementation_worker``, which never reads this
+    mapping.
 
-    Returns a lazy mapping (:class:`_LazyAgentRegistry`): each role's agent is
+    Returns a lazy mapping (:class:`_LazyAgentRegistry`): the role's agent is
     constructed on first subscript and then cached; membership tests and
-    iteration never construct. Since only ``architecture`` is read in
-    production, the other roles cost nothing unless a caller asks for them —
-    which avoids eagerly paying ``get_client`` (and the ``devops`` sub-agent
-    fan-out) on every call.
+    iteration never construct.
 
     Postconditions:
         - Returns a ``Mapping[str, Any]`` over the SE role names; ``result[key]``
           lazily builds and caches the corresponding agent.
     """
-    from agent_repair_team import RepairExpertAgent
-    from software_engineering_team.accessibility_agent import AccessibilityExpertAgent
     from software_engineering_team.architect_agents.architecture_expert import (
         ArchitectureExpertAgent,
-    )
-    from software_engineering_team.build_fix_specialist import BuildFixSpecialistAgent
-    from software_engineering_team.devops_team import DevOpsTeamLeadAgent
-    from software_engineering_team.git_setup_agent import GitSetupAgent
-    from software_engineering_team.integration_team import IntegrationAgent
-    from software_engineering_team.linting_tool_agent import LintingToolAgent
-    from software_engineering_team.technical_writers.documentation_agent import (
-        DocumentationAgent,
     )
 
     return _LazyAgentRegistry(
         {
             "architecture": lambda: ArchitectureExpertAgent(get_client("architecture")),
-            "integration": lambda: IntegrationAgent(get_client("integration")),
-            "devops": lambda: DevOpsTeamLeadAgent(get_client("devops")),
-            "backend": _lazy_init_backend_code_v2_team,
-            "frontend_code_v2": _lazy_init_frontend_code_v2_team,
-            "accessibility": lambda: AccessibilityExpertAgent(get_client("accessibility")),
-            "documentation": lambda: DocumentationAgent(get_client("documentation")),
-            "git_setup": GitSetupAgent,
-            "repair": lambda: RepairExpertAgent(get_client("repair")),
-            "linting_tool_agent": lambda: LintingToolAgent(get_client("linting_tool_agent")),
-            "build_fix_specialist": lambda: BuildFixSpecialistAgent(
-                get_client("build_fix_specialist")
-            ),
         }
     )
-
-
-def _lazy_init_backend_code_v2_team():
-    """Instantiate the backend team lead (backend_code_v2_team; lazy import)."""
-    from software_engineering_team.backend_code_v2_team import BackendCodeV2TeamLead
-
-    return BackendCodeV2TeamLead(get_client("backend"))
-
-
-def _lazy_init_frontend_code_v2_team():
-    """Instantiate the frontend team lead (frontend_code_v2_team; lazy import)."""
-    from software_engineering_team.frontend_code_v2_team import FrontendCodeV2TeamLead
-
-    return FrontendCodeV2TeamLead(get_client("frontend"))
 
 
 MAX_REVIEW_ITERATIONS = 15
