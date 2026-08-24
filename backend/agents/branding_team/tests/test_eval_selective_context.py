@@ -13,6 +13,7 @@ CI, matching #6969's "Out of Scope: CI integration of eval."
 from __future__ import annotations
 
 import pytest
+
 from branding_team.graphs.shared import PHASE_ORDER
 from branding_team.models import BrandPhase
 from branding_team.orchestrator import _PHASE_SPEC, BrandingTeamOrchestrator
