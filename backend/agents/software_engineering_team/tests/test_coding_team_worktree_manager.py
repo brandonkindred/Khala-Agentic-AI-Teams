@@ -8,11 +8,16 @@ than asserting a mocked subprocess call was built.
 from __future__ import annotations
 
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
 
-from shared.git.git_utils import DEVELOPMENT_BRANCH, initialize_new_repo
+from shared.git.git_utils import DEVELOPMENT_BRANCH, initialize_new_repo, remove_worktree
+from software_engineering_team.agent_status import (
+    CODING_TEAM_WORKERS_PER_STACK_ENV,
+    derive_stack_roster,
+)
 from software_engineering_team.worktree_manager import (
     WorktreeManager,
     WorktreePrepareError,
@@ -362,3 +367,138 @@ def test_node_modules_symlink_failure_does_not_fail_prepare(repo: Path, monkeypa
 
     wt_path = manager.path_for("frontend_v2")
     assert not (wt_path / "node_modules").exists()
+
+
+# --- N same-stack workers (widened roster: e.g. "backend_v2-1", "backend_v2-2") ---
+
+
+def test_prepare_creates_isolated_worktrees_for_same_stack_agent_ids(repo: Path) -> None:
+    """A widened same-stack roster (three backend_v2 workers) gets three distinct,
+    mutually-isolated worktrees — allocation/isolation was never actually gated on
+    stack kind, only on agent_id uniqueness."""
+    same_stack_ids = ["backend_v2-1", "backend_v2-2", "backend_v2-3"]
+    manager = WorktreeManager(repo, same_stack_ids)
+    manager.prepare()
+
+    paths = {aid: manager.path_for(aid) for aid in same_stack_ids}
+    assert len(set(paths.values())) == 3  # all distinct
+    for aid, path in paths.items():
+        assert path.exists() and (path / ".git").exists()
+        (path / f"{aid}-only.txt").write_text(aid, encoding="utf-8")
+
+    for aid, path in paths.items():
+        for other_aid, other_path in paths.items():
+            if other_aid == aid:
+                continue
+            assert not (other_path / f"{aid}-only.txt").exists()
+        assert not (repo / f"{aid}-only.txt").exists()
+
+
+def test_node_modules_symlink_independent_across_same_stack_worktrees(repo: Path) -> None:
+    """2+ concurrent same-stack frontend worktrees each get their own independent
+    symlink into the one shared, repo-level node_modules — genuinely shared content
+    (not copied), and removing one worktree never disturbs a sibling's symlink or the
+    shared directory itself."""
+    (repo / "package.json").write_text("{}", encoding="utf-8")
+    node_modules = repo / "node_modules"
+    node_modules.mkdir()
+    marker = node_modules / "shared-pkg" / "index.js"
+    marker.parent.mkdir()
+    marker.write_text("original", encoding="utf-8")
+
+    same_stack_ids = ["frontend_v2-1", "frontend_v2-2"]
+    manager = WorktreeManager(repo, same_stack_ids)
+    manager.prepare()
+
+    links = {aid: manager.path_for(aid) / "node_modules" for aid in same_stack_ids}
+    for link in links.values():
+        assert link.is_symlink()
+
+    # Genuinely shared, not per-worktree copies: a write through one worktree's
+    # symlink is visible through the other's and at the repo-root source.
+    (links["frontend_v2-1"] / "shared-pkg" / "index.js").write_text("changed", encoding="utf-8")
+    assert (links["frontend_v2-2"] / "shared-pkg" / "index.js").read_text(
+        encoding="utf-8"
+    ) == "changed"
+    assert marker.read_text(encoding="utf-8") == "changed"
+
+    # Removing one same-stack worktree must not affect its sibling's symlink or the
+    # shared node_modules directory both point at.
+    ok, msg = remove_worktree(repo, manager.path_for("frontend_v2-1"), force=True)
+    assert ok, msg
+
+    assert links["frontend_v2-2"].is_symlink()
+    assert (links["frontend_v2-2"] / "shared-pkg" / "index.js").read_text(
+        encoding="utf-8"
+    ) == "changed"
+    assert marker.read_text(encoding="utf-8") == "changed"
+
+
+def test_cleanup_prunes_only_finished_worker_not_same_stack_sibling(repo: Path) -> None:
+    """A WorktreeManager scoped to one same-stack worker's cleanup() must never remove
+    a sibling same-stack worker's worktree — pruning is per-agent, never cross-worker,
+    even when both share a stack kind and are managed independently."""
+    finished = WorktreeManager(repo, ["backend_v2-1"])
+    finished.prepare()
+    finished_path = finished.path_for("backend_v2-1")
+
+    still_running = WorktreeManager(repo, ["backend_v2-2"])
+    still_running.prepare()
+    running_path = still_running.path_for("backend_v2-2")
+
+    finished.cleanup()
+
+    assert not finished_path.exists()
+    assert running_path.exists() and (running_path / ".git").exists()
+
+
+def test_prepare_and_use_two_same_stack_worktrees_from_concurrent_threads(repo: Path) -> None:
+    """After prepare() completes, two same-stack workers can concurrently use their
+    already-prepared worktrees (path_for is documented as a pure, lock-free lookup)
+    without any cross-worker file leakage."""
+    same_stack_ids = ["backend_v2-1", "backend_v2-2"]
+    manager = WorktreeManager(repo, same_stack_ids)
+    manager.prepare()
+
+    errors: list[BaseException] = []
+
+    def _worker(agent_id: str) -> None:
+        try:
+            path = manager.path_for(agent_id)
+            for i in range(20):
+                (path / f"{agent_id}-{i}.txt").write_text(agent_id, encoding="utf-8")
+        except BaseException as exc:  # noqa: BLE001 - surfaced via `errors` below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_worker, args=(aid,)) for aid in same_stack_ids]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    path1, path2 = manager.path_for("backend_v2-1"), manager.path_for("backend_v2-2")
+    for i in range(20):
+        assert (path1 / f"backend_v2-1-{i}.txt").exists()
+        assert not (path1 / f"backend_v2-2-{i}.txt").exists()
+        assert (path2 / f"backend_v2-2-{i}.txt").exists()
+        assert not (path2 / f"backend_v2-1-{i}.txt").exists()
+
+
+def test_derive_stack_roster_ids_produce_isolated_worktrees(repo: Path, monkeypatch) -> None:
+    """The real production naming scheme (derive_stack_roster under
+    CODING_TEAM_WORKERS_PER_STACK=N) feeds straight into WorktreeManager without
+    drift: both widened-roster agent_ids are safe path components that resolve to
+    distinct, isolated worktrees."""
+    monkeypatch.setenv(CODING_TEAM_WORKERS_PER_STACK_ENV, "2")
+    roster = derive_stack_roster([{"name": "backend_v2"}])
+    agent_ids = [entry.agent_id for entry in roster]
+    assert agent_ids == ["backend_v2-1", "backend_v2-2"]
+
+    manager = WorktreeManager(repo, agent_ids)
+    manager.prepare()
+
+    path1, path2 = manager.path_for("backend_v2-1"), manager.path_for("backend_v2-2")
+    assert path1 != path2
+    assert path1.exists() and (path1 / ".git").exists()
+    assert path2.exists() and (path2 / ".git").exists()
