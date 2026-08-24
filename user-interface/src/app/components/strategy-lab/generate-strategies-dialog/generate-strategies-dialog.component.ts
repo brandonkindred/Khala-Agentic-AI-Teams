@@ -90,11 +90,23 @@ export class GenerateStrategiesDialogComponent {
     if (!this.categoriesValid) {
       return;
     }
+    // The native input [min]/[max] only constrain the spinner arrows, not
+    // typed/pasted values — clamp here so the value actually sent (and the
+    // label the user just confirmed) can never diverge from what
+    // runNewStrategy() would otherwise silently re-clamp after the dialog
+    // has already closed.
+    const batchSize = this.clamp(this.batchSize, this.BATCH_SIZE_MIN, this.BATCH_SIZE_MAX);
+    const batchCount = this.clamp(this.batchCount, this.BATCH_COUNT_MIN, this.BATCH_COUNT_MAX);
     this.ref.close({
-      batchSize: this.batchSize,
-      batchCount: this.batchCount,
+      batchSize,
+      batchCount,
       selectedCategories: this.selectedCategories(),
     });
+  }
+
+  private clamp(value: number, min: number, max: number): number {
+    const n = Number.isFinite(value) ? Math.floor(value) : min;
+    return Math.max(min, Math.min(max, n));
   }
 
   cancel(): void {

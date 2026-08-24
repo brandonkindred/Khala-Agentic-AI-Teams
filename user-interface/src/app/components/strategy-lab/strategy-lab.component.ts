@@ -494,7 +494,14 @@ export class StrategyLabComponent implements OnInit {
       }
       this.batchSize = result.batchSize;
       this.batchCount = result.batchCount;
-      this.selectedCategories.set(result.selectedCategories);
+      // categoryOptions() may have been refreshed by a config fetch that
+      // resolved while the dialog was open, after the dialog was seeded —
+      // intersect against the CURRENT options (falling back to all, same as
+      // applyCategoryConfig's own reconciliation) so a run can never be
+      // constrained to a selection the backend no longer recognizes.
+      const currentOptionValues = this.categoryOptions().map((c) => c.value);
+      const reconciled = currentOptionValues.filter((v) => result.selectedCategories.includes(v));
+      this.selectedCategories.set(reconciled.length ? reconciled : currentOptionValues);
       this.userAdjustedCategories = true;
       this.runNewStrategy();
     });

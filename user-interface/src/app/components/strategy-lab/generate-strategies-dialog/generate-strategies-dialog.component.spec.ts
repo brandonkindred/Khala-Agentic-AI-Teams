@@ -100,6 +100,23 @@ describe('GenerateStrategiesDialogComponent', () => {
     });
   });
 
+  it('submit clamps a typed/pasted value outside the min/max bounds before closing', async () => {
+    // Native [min]/[max] on <input type="number"> only constrain the spinner
+    // arrows, not a typed or pasted value — submit() must clamp explicitly so
+    // the confirmed label and the value sent can never diverge.
+    await createFixture();
+    component.batchSize = 999;
+    component.batchCount = -5;
+
+    component.submit();
+
+    expect(ref.close).toHaveBeenCalledWith({
+      batchSize: DATA.batchSizeMax,
+      batchCount: DATA.batchCountMin,
+      selectedCategories: ['stocks', 'crypto'],
+    });
+  });
+
   it('submit is a no-op when no category is selected', async () => {
     await createFixture();
     component.onCategoriesChanged([]);

@@ -873,4 +873,46 @@ describe('StrategyLabComponent — openGenerateStrategiesDialog', () => {
     expect(component.batchCount).toBe(1);
     expect(apiSpy.runStrategyLab).not.toHaveBeenCalled();
   });
+
+  it('intersects the dialog result with categories that changed while it was open, keeping the overlap', () => {
+    // Simulate a config fetch resolving (after the dialog was seeded) that
+    // narrows the authoritative category list.
+    component.categoryOptions.set([
+      { value: 'crypto', label: 'Crypto', icon: 'currency_bitcoin' },
+      { value: 'forex', label: 'Forex', icon: 'currency_exchange' },
+    ]);
+    afterClosedResult = of({
+      batchSize: 5,
+      batchCount: 1,
+      selectedCategories: ['stocks', 'crypto'], // 'stocks' no longer exists
+    });
+
+    component.openGenerateStrategiesDialog();
+
+    expect(component.selectedCategories()).toEqual(['crypto']);
+    expect(apiSpy.runStrategyLab).toHaveBeenCalledWith(
+      expect.objectContaining({ allowed_asset_classes: ['crypto'] }),
+    );
+  });
+
+  it('falls back to every current category when the dialog result has no overlap with the refreshed config', () => {
+    component.categoryOptions.set([
+      { value: 'crypto', label: 'Crypto', icon: 'currency_bitcoin' },
+      { value: 'forex', label: 'Forex', icon: 'currency_exchange' },
+    ]);
+    afterClosedResult = of({
+      batchSize: 5,
+      batchCount: 1,
+      selectedCategories: ['stocks'], // no longer a valid category at all
+    });
+
+    component.openGenerateStrategiesDialog();
+
+    // Falls back to "every current category" (no constraint) rather than
+    // posting an empty allowed_asset_classes, which the backend rejects.
+    expect(component.selectedCategories()).toEqual(['crypto', 'forex']);
+    expect(apiSpy.runStrategyLab).toHaveBeenCalledWith(
+      expect.objectContaining({ allowed_asset_classes: undefined }),
+    );
+  });
 });
