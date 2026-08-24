@@ -643,6 +643,7 @@ def _lookup_submission_cache(
     side_effect_consolidation_enabled: bool,
     combine_similarity_threshold: float,
     repo_reader: Optional[RepoReader],
+    submission_capacity: int,
 ) -> Tuple[Optional[str], Optional[CodeReviewOutput]]:
     """Read the submission-level short-circuit cache (see module docstring).
 
@@ -657,10 +658,15 @@ def _lookup_submission_cache(
           ``run_coordinator`` resolved once for this run (they, together with
           ``input_data``, form the fingerprint that must agree with the one
           used on the write side for a later cache write in the same run).
+        - ``submission_capacity`` is the single ``_submission_cache_size()``
+          value ``run_coordinator`` resolved once for this run -- passed in
+          rather than re-read here so a same-run env change can never make
+          this lookup's enabled/disabled decision disagree with the write
+          side's ``max_entries=submission_capacity``.
 
     Postconditions:
         - Returns ``(None, None)`` when the submission cache is disabled
-          (``_submission_cache_size() <= 0``) or ``repo_reader`` is given (a
+          (``submission_capacity <= 0``) or ``repo_reader`` is given (a
           verdict that reads the rest of the repository cannot be safely
           reproduced from an input-only cache key) -- the lookup never runs.
         - Otherwise returns ``(submission_key, cached)`` where
@@ -679,7 +685,6 @@ def _lookup_submission_cache(
           deserialize error is logged and treated as a miss rather than
           raising into the review.
     """
-    submission_capacity = _submission_cache_size()
     if submission_capacity <= 0 or repo_reader is not None:
         return None, None
 
@@ -935,6 +940,7 @@ def run_coordinator(
         side_effect_consolidation_enabled=side_effect_consolidation_enabled,
         combine_similarity_threshold=combine_similarity_threshold,
         repo_reader=repo_reader,
+        submission_capacity=submission_capacity,
     )
     if cached is not None:
         logger.info("CodeReviewCoordinator: submission cache hit; skipping review (approved)")

@@ -1533,6 +1533,7 @@ def _lookup_kwargs(**overrides: Any) -> Dict[str, Any]:
         "side_effect_consolidation_enabled": False,
         "combine_similarity_threshold": 0.5,
         "repo_reader": None,
+        "submission_capacity": 8,
     }
     kwargs.update(overrides)
     return kwargs
@@ -1541,16 +1542,18 @@ def _lookup_kwargs(**overrides: Any) -> Dict[str, Any]:
 def test_lookup_submission_cache_disabled_returns_no_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Capacity 0 short-circuits the lookup to ``(None, None)`` before any
-    fingerprint or cache access — proven by never calling ``_submission_fingerprint``."""
-    monkeypatch.setenv("CODE_REVIEW_SUBMISSION_CACHE_SIZE", "0")
+    """Capacity <= 0 short-circuits the lookup to ``(None, None)`` before any
+    fingerprint or cache access — proven by never calling ``_submission_fingerprint``.
+    ``submission_capacity`` is passed in directly (not re-read from the env) so this
+    exercises the same disabled path ``run_coordinator`` reaches from its own resolved
+    capacity."""
     monkeypatch.setattr(
         coord,
         "_submission_fingerprint",
         lambda *_a, **_k: pytest.fail("fingerprint must not be computed when disabled"),
     )
 
-    key, cached = coord._lookup_submission_cache(**_lookup_kwargs())
+    key, cached = coord._lookup_submission_cache(**_lookup_kwargs(submission_capacity=0))
     assert key is None
     assert cached is None
 
