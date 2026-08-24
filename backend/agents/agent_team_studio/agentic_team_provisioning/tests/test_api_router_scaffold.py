@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 from fastapi import APIRouter, HTTPException
-from fastapi.routing import APIRoute
 
 from agent_team_studio.agentic_team_provisioning.models import (
     CreateConversationRequest,
@@ -65,20 +64,34 @@ _EXTRACTED_ROUTE_KEYS: frozenset[tuple[str, str]] = frozenset(
 
 
 def _app_route_keys(app) -> set[tuple[str, str]]:
-    """Collect (METHOD, path) pairs registered on a FastAPI app.
+    """Collect (METHOD, path) pairs actually dispatchable on a FastAPI app.
 
-    Preconditions: ``app`` is a FastAPI application with ``app.routes`` populated.
-    Postconditions: returns one (method, path) entry per APIRoute method; non-API
-        routes (Mount, WebSocket) are omitted.
+    ``app.routes`` no longer holds flattened ``APIRoute`` instances directly:
+    ``include_router`` now registers an opaque ``_IncludedRouter`` wrapper that
+    only expands lazily at request-dispatch time, so introspecting ``app.routes``
+    directly under-counts mounted routers. ``app.openapi()`` performs that same
+    expansion to build the schema, so it is the public source of truth for what
+    is actually mounted.
+
+    Preconditions: ``app`` is a FastAPI application whose module import has
+        finished (all ``include_router`` calls have run).
+    Postconditions: returns one (method, path) entry per operation across every
+        mounted router, HEAD/OPTIONS excluded. Non-operation keys a path-item
+        object may carry per the OpenAPI spec (``parameters``, ``summary``,
+        ``description``, ``servers``, ``$ref``, vendor ``x-*`` extensions) are
+        never mistaken for HTTP methods.
     """
+    # OpenAPI Path Item Object keys: fixed HTTP-method fields plus a handful of
+    # non-operation fields (parameters/summary/description/servers/$ref) that
+    # would otherwise be misread as bogus HTTP methods.
+    _HTTP_METHODS = {"GET", "PUT", "POST", "DELETE", "OPTIONS", "HEAD", "PATCH", "TRACE"}
     keys: set[tuple[str, str]] = set()
-    for route in app.routes:
-        if not isinstance(route, APIRoute):
-            continue
-        for method in route.methods or ():
-            if method in {"HEAD", "OPTIONS"}:
+    for path, operations in app.openapi()["paths"].items():
+        for method in operations:
+            method_upper = method.upper()
+            if method_upper not in _HTTP_METHODS or method_upper in {"HEAD", "OPTIONS"}:
                 continue
-            keys.add((method, route.path))
+            keys.add((method_upper, path))
     return keys
 
 
@@ -162,7 +175,7 @@ def test_main_exposes_mounted_router_markers() -> None:
     assert main_mod._assets_router is assets.router
     assert main_mod._forms_router is forms.router
     assert main_mod._health_router is health.router
-    paths = {getattr(r, "path", None) for r in main_mod.app.routes if isinstance(r, APIRoute)}
+    paths = {path for _method, path in _app_route_keys(main_mod.app)}
     assert "/health" in paths
 
 
