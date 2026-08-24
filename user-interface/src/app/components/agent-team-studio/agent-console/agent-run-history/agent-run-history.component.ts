@@ -45,10 +45,17 @@ export class AgentRunHistoryComponent implements OnChanges {
   private readonly destructiveActions = inject(AgentRunHistoryDestructiveActionsService);
 
   constructor() {
-    this.destructiveActions.runDeleted$
-      .pipe(takeUntilDestroyed())
-      .subscribe((runId) => this.runs.update((rows) => rows.filter((r) => r.id !== runId)));
-    this.destructiveActions.errors$.pipe(takeUntilDestroyed()).subscribe((message) => this.error.set(message));
+    // Both subscriptions discard events tagged with a stale agentId: this
+    // component instance is reused across agentId input changes, so a delete
+    // confirmed for a prior agent can resolve after the user has switched.
+    this.destructiveActions.runDeleted$.pipe(takeUntilDestroyed()).subscribe(({ agentId, payload: runId }) => {
+      if (agentId !== this.agentId) return;
+      this.runs.update((rows) => rows.filter((r) => r.id !== runId));
+    });
+    this.destructiveActions.errors$.pipe(takeUntilDestroyed()).subscribe(({ agentId, message }) => {
+      if (agentId !== this.agentId) return;
+      this.error.set(message);
+    });
   }
 
   @Input({ required: true }) agentId!: string | null;

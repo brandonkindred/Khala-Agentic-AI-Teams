@@ -19,11 +19,13 @@ describe('AgentRunHistoryDestructiveActionsService', () => {
 
   const run = {
     id: 'run-1',
+    agent_id: 'blogging.writer',
     trace_id: 'abcdef1234567890',
   } as unknown as RunSummary;
 
   const otherRun = {
     id: 'run-2',
+    agent_id: 'blogging.writer',
     trace_id: 'fedcba9876543210',
   } as unknown as RunSummary;
 
@@ -54,8 +56,8 @@ describe('AgentRunHistoryDestructiveActionsService', () => {
   describe('deleteRun', () => {
     it('opens a danger confirm dialog and deletes when confirmed', () => {
       confirmResult = true;
-      const deleted: string[] = [];
-      service.runDeleted$.subscribe((id) => deleted.push(id));
+      const deleted: { agentId: string; payload: string }[] = [];
+      service.runDeleted$.subscribe((e) => deleted.push(e));
 
       service.deleteRun(run);
 
@@ -67,7 +69,7 @@ describe('AgentRunHistoryDestructiveActionsService', () => {
         variant: 'danger',
       });
       expect(apiSpy.deleteRun).toHaveBeenCalledWith('run-1');
-      expect(deleted).toEqual(['run-1']);
+      expect(deleted).toEqual([{ agentId: 'blogging.writer', payload: 'run-1' }]);
       expect(notifySpy.saved).toHaveBeenCalledWith('Run deleted.');
       expect(service.isDeleting('run-1')).toBe(false);
     });
@@ -97,17 +99,20 @@ describe('AgentRunHistoryDestructiveActionsService', () => {
       expect(service.isDeleting('run-1')).toBe(false);
     });
 
-    it('surfaces an error on errors$ and skips the toast when delete fails after confirm', () => {
+    it('surfaces an error on errors$ tagged with the agent and skips the toast when delete fails after confirm', () => {
       confirmResult = true;
       apiSpy.deleteRun.mockReturnValueOnce(throwError(() => ({ error: { detail: 'boom' } })));
-      const messages: (string | null)[] = [];
+      const messages: { agentId: string; message: string | null }[] = [];
       service.errors$.subscribe((m) => messages.push(m));
-      const deleted: string[] = [];
-      service.runDeleted$.subscribe((id) => deleted.push(id));
+      const deleted: { agentId: string; payload: string }[] = [];
+      service.runDeleted$.subscribe((e) => deleted.push(e));
 
       service.deleteRun(run);
 
-      expect(messages).toEqual([null, 'boom']);
+      expect(messages).toEqual([
+        { agentId: 'blogging.writer', message: null },
+        { agentId: 'blogging.writer', message: 'boom' },
+      ]);
       expect(deleted).toEqual([]);
       expect(service.isDeleting('run-1')).toBe(false);
       expect(notifySpy.saved).not.toHaveBeenCalled();
@@ -152,6 +157,21 @@ describe('AgentRunHistoryDestructiveActionsService', () => {
       runOneResponse$.complete();
 
       expect(service.isDeleting('run-1')).toBe(false);
+    });
+
+    it('tags emissions with the run’s own agent_id, not a shared/global agent', () => {
+      const runForAgentB = { ...otherRun, agent_id: 'blogging.editor' } as unknown as RunSummary;
+      apiSpy.deleteRun.mockReturnValue(of({ id: 'run-2', status: 'deleted' }));
+      const deleted: { agentId: string; payload: string }[] = [];
+      service.runDeleted$.subscribe((e) => deleted.push(e));
+
+      service.deleteRun(run); // agent_id: blogging.writer
+      service.deleteRun(runForAgentB); // agent_id: blogging.editor
+
+      expect(deleted).toEqual([
+        { agentId: 'blogging.writer', payload: 'run-1' },
+        { agentId: 'blogging.editor', payload: 'run-2' },
+      ]);
     });
   });
 });

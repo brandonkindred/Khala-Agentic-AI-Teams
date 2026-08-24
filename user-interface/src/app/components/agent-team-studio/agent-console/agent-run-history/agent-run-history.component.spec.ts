@@ -116,4 +116,22 @@ describe('AgentRunHistoryComponent', () => {
     expect(component.runs().map((r) => r.id)).toEqual(['run-a', 'run-b']);
     expect(notifyMock.saved).not.toHaveBeenCalled();
   });
+
+  it('ignores a delete outcome that resolves after the user switched to a different agent', () => {
+    // Same component instance is reused across agentId input changes, so a
+    // delete confirmed for the prior agent can resolve after the switch.
+    const response$ = new Subject<{ id: string; status: string }>();
+    apiMock.deleteRun.mockReturnValue(response$.asObservable());
+    component.deleteRun(runA, { stopPropagation: vi.fn() } as unknown as Event);
+
+    apiMock.listRuns.mockReturnValue(of([]));
+    fixture.componentRef.setInput('agentId', 'blogging.editor');
+    fixture.detectChanges();
+    expect(component.runs()).toEqual([]);
+
+    response$.error({ error: { detail: 'stale failure' } });
+
+    expect(component.error()).toBeNull();
+    expect(component.runs()).toEqual([]);
+  });
 });
