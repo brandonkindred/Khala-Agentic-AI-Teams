@@ -775,16 +775,11 @@ class StrategyLabOrchestrator(
         if execution_succeeded and trades:
             emit("analyzing", {"sub_phase": "draft"})
             try:
-
-                def _on_analysis_sub(sub: str) -> None:
-                    emit("analyzing", {"sub_phase": sub})
-
                 narrative = self.analysis_agent.run(
                     spec,
                     metrics,
                     trades,
                     rationale,
-                    on_sub_phase=_on_analysis_sub,
                     is_winning=is_winning,
                     alignment_report=alignment_report,
                 )
