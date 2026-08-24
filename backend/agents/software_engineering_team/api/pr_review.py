@@ -1725,7 +1725,7 @@ def _synthesize_systemic_findings(
     if len(partition.pr_issues) < _MIN_FINDINGS_FOR_SYSTEMIC_SYNTHESIS:
         return []
     task_description = (
-        f"Review pull request #{getattr(pr, 'number', '')}: {getattr(pr, 'title', '') or ''}"
+        f"Review pull request #{getattr(pr, 'number', '') or ''}: {getattr(pr, 'title', '') or ''}"
     )
     try:
         return (

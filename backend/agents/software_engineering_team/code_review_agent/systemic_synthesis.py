@@ -9,11 +9,22 @@ pattern connecting them.
 
 This module is the single best-effort LLM pass that draws that connection.
 :func:`synthesize_systemic_findings` takes the PR's already in-scope,
-already-deduped findings, pre-clusters them with
-``github_source.issue_proposals.group_similar_findings`` (as a hint, not a
-hard filter — the whole point is also catching conceptually-similar findings
-that land in *different* clusters), and makes one ``complete_json`` call
-asking the model to name genuinely cross-cutting patterns.
+already-deduped findings, pre-clusters them with a local same-category/
+Jaccard-similarity grouping (as a hint, not a hard filter — the whole point
+is also catching conceptually-similar findings that land in *different*
+clusters), and makes one ``complete_json`` call asking the model to name
+genuinely cross-cutting patterns.
+
+The clustering algorithm (:func:`_group_similar_findings`) is a deliberate
+third copy of the same tokenizer/Jaccard metric
+``github_source.issue_proposals.group_similar_findings`` and
+``finding_combination.py`` each already implement — see
+:mod:`finding_combination`'s module docstring for the rationale this mirrors:
+``code_review_agent`` is the generic review-engine package and
+``github_source`` is the PR-specific package; the two are otherwise fully
+decoupled, and inverting that for a small pure function is not worth the
+coupling. The same reasoning applies to ``scrub_token_from_text`` (a two-line
+regex substitution), copied locally as :func:`_scrub_token_from_text`.
 
 The pass is **fail-safe by design**: a missing client, too few findings, or
 any failure (LLM error, malformed reply) degrades to an empty list. Never
@@ -23,10 +34,10 @@ raises.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Optional, Sequence
 
 from llm_service.interface import LLMClient
-from software_engineering_team.github_source import group_similar_findings, scrub_token_from_text
 from software_engineering_team.shared.single_shot_review import run_single_shot_review
 
 from ._llm_client_utils import is_unscripted_dummy
@@ -49,19 +60,108 @@ MIN_FINDINGS_FOR_SYNTHESIS = 2
 # review itself, and every individual finding's own comment, is unaffected).
 _MAX_FINDINGS_IN_PROMPT = 40
 
+# --- Local clustering (mirrors github_source.issue_proposals /
+# finding_combination's identical tokenizer/Jaccard metric — see module
+# docstring for why this is a deliberate third copy, not a cross-package
+# import). --------------------------------------------------------------
+
+_SIMILARITY_THRESHOLD = 0.6
+
+_QUOTED_RE = re.compile(r"`[^`]*`|\"[^\"]*\"|'[^']*'")
+_DIGITS_RE = re.compile(r"\b\d+\b")
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _tokenize_for_similarity(text: str) -> frozenset[str]:
+    """Reduce a finding description to a comparable bag of words.
+
+    Postconditions:
+        - Returns the set of word tokens in ``text``, lowercased, with
+          backtick/quoted spans and standalone digit runs dropped first (so
+          "bare import `os`" and "bare import `sys`" tokenize identically).
+          Empty for blank/punctuation-only input. Pure; never raises.
+    """
+    normalized = _QUOTED_RE.sub(" ", text.lower())
+    normalized = _DIGITS_RE.sub(" ", normalized)
+    return frozenset(_WORD_RE.findall(normalized))
+
+
+def _jaccard_similarity(a: frozenset[str], b: frozenset[str]) -> float:
+    """Postconditions: returns ``|a & b| / |a | b|``, or 0.0 when both are empty."""
+    union = a | b
+    if not union:
+        return 0.0
+    return len(a & b) / len(union)
+
+
+def _group_similar_findings(
+    issues: Sequence[CodeReviewIssue], threshold: float = _SIMILARITY_THRESHOLD
+) -> List[List[CodeReviewIssue]]:
+    """Cluster findings that describe the same underlying issue.
+
+    Preconditions: ``threshold`` is a Jaccard similarity in ``[0, 1]``.
+    Postconditions:
+        - Returns a list of non-empty groups partitioning ``issues``; both
+          group order and within-group order match ``issues``' input order.
+        - Two findings are only ever grouped together when they share the
+          same ``category`` (case-insensitive) AND the Jaccard similarity of
+          their tokenized descriptions against the group's first (founding)
+          member is ``>= threshold``. Never raises.
+    """
+    groups: List[List[CodeReviewIssue]] = []
+    representatives: List[tuple[str, frozenset[str]]] = []
+    for issue in issues:
+        category = str(issue.category or "general").strip().lower()
+        tokens = _tokenize_for_similarity(str(issue.description or ""))
+        placed = False
+        for group, (rep_category, rep_tokens) in zip(groups, representatives):
+            if category != rep_category:
+                continue
+            if _jaccard_similarity(tokens, rep_tokens) >= threshold:
+                group.append(issue)
+                placed = True
+                break
+        if not placed:
+            groups.append([issue])
+            representatives.append((category, tokens))
+    return groups
+
+
+# --- Local token scrubbing (mirrors github_source.client.scrub_token_from_text
+# — same rationale as the clustering copy above). ------------------------
+
+_TOKEN_URL_RE = re.compile(r"https?://[^/\s@]+@", re.IGNORECASE)
+
+
+def _scrub_token_from_text(msg: str) -> str:
+    """Best-effort redact ``https://user:token@host/...`` style remote URLs.
+
+    Postconditions: returns ``msg`` unchanged when it contains no such URL,
+    otherwise with every match replaced by ``https://***@``. Never raises.
+    """
+    if not msg:
+        return msg
+    return _TOKEN_URL_RE.sub("https://***@", msg)
+
 
 def _build_synthesis_prompt(issues: Sequence[CodeReviewIssue]) -> str:
     """Build the user prompt: every finding indexed, tagged with its cluster id.
+
+    Called only from inside :func:`synthesize_systemic_findings`'s
+    ``try``/``except`` block, which is what makes the overall pass never
+    raise — this helper itself has no exception handling and can propagate
+    (e.g. from :func:`_group_similar_findings` or ``_render_finding_block``
+    on unexpected input).
 
     Preconditions: ``issues`` is non-empty.
     Postconditions:
         - Renders each finding via ``_render_finding_block`` (index, severity,
           category, location, description, suggestion), preceded by a
-          ``group: g<N>`` line from :func:`group_similar_findings` clustering
+          ``group: g<N>`` line from :func:`_group_similar_findings` clustering
           over ``issues`` — a hint the model may use, not a hard boundary.
-        - Ends with the strict-JSON formatting instructions. Never raises.
+        - Ends with the strict-JSON formatting instructions.
     """
-    groups = group_similar_findings(list(issues))
+    groups = _group_similar_findings(list(issues))
     group_of_id: Dict[int, int] = {}
     for group_idx, group in enumerate(groups):
         for finding in group:
@@ -90,7 +190,7 @@ def _location_for(issue: CodeReviewIssue) -> Dict[str, Any]:
     """
     return {
         "file_path": str(issue.file_path or ""),
-        "description": scrub_token_from_text(str(issue.description or "")),
+        "description": _scrub_token_from_text(str(issue.description or "")),
     }
 
 
@@ -144,8 +244,8 @@ def _parse_systemic_findings(
             continue
         results.append(
             {
-                "title": scrub_token_from_text(title),
-                "description": scrub_token_from_text(description),
+                "title": _scrub_token_from_text(title),
+                "description": _scrub_token_from_text(description),
                 "related_locations": locations,
             }
         )
