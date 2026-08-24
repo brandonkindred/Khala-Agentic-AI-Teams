@@ -10,11 +10,19 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from branding_team.models import BrandPhase, GovernanceOutput, StrategicCoreOutput
+from branding_team.models import (
+    BrandPhase,
+    ChannelActivationOutput,
+    GovernanceOutput,
+    StrategicCoreOutput,
+)
 from branding_team.scripts.quality_judge import (
+    PairedPhaseQualityScore,
     PhaseQualityScore,
     _build_judge_prompt,
+    _build_paired_judge_prompt,
     score_phase_output,
+    score_phase_output_pair,
 )
 from branding_team.tests.conftest import make_mission
 from llm_service import get_client
@@ -162,3 +170,70 @@ def test_build_judge_prompt_never_reveals_variant_label() -> None:
     assert "selective" not in prompt.lower()
     assert "full context" not in prompt.lower()
     assert "full-context" not in prompt.lower()
+
+
+def test_score_phase_output_pair_returns_valid_scores_under_dummy_client() -> None:
+    """score_phase_output_pair against the forced dummy client returns a validated
+    PairedPhaseQualityScore, mirroring how run_eval calls it for a diverging phase.
+    """
+    mission = make_mission()
+    output_a = ChannelActivationOutput()
+    output_b = ChannelActivationOutput()
+
+    with force_dummy_llm_provider():
+        client = get_client()
+        paired = score_phase_output_pair(
+            client,
+            mission=mission,
+            phase=BrandPhase.CHANNEL_ACTIVATION,
+            output_a=output_a,
+            output_b=output_b,
+        )
+
+    assert isinstance(paired, PairedPhaseQualityScore)
+    for score in (paired.output_a, paired.output_b):
+        assert 1 <= score.strategic_coherence <= 5
+        assert 1 <= score.completeness <= 5
+        assert 1 <= score.brand_consistency <= 5
+
+
+def test_build_paired_judge_prompt_never_reveals_variant_label() -> None:
+    """The paired prompt must use neutral A/B labels only -- never selective/full --
+    so a single judge call can't score based on which context variant is which.
+    """
+    mission = make_mission()
+    strategic_core = StrategicCoreOutput(mission_statement="Ship brand with the product.")
+    output_a = GovernanceOutput()
+    output_b = GovernanceOutput()
+
+    prompt = _build_paired_judge_prompt(
+        mission=mission,
+        phase=BrandPhase.GOVERNANCE,
+        output_a=output_a,
+        output_b=output_b,
+        strategic_core=strategic_core,
+    )
+
+    assert "OUTPUT A" in prompt
+    assert "OUTPUT B" in prompt
+    assert "selective" not in prompt.lower()
+    assert "full context" not in prompt.lower()
+    assert "full-context" not in prompt.lower()
+
+
+def test_build_paired_judge_prompt_embeds_strategic_core_once() -> None:
+    """The shared strategic core must appear exactly once, not duplicated per output."""
+    mission = make_mission()
+    strategic_core = StrategicCoreOutput(mission_statement="Ship brand with the product.")
+    output_a = GovernanceOutput()
+    output_b = GovernanceOutput()
+
+    prompt = _build_paired_judge_prompt(
+        mission=mission,
+        phase=BrandPhase.GOVERNANCE,
+        output_a=output_a,
+        output_b=output_b,
+        strategic_core=strategic_core,
+    )
+
+    assert prompt.count("--- GENERATED STRATEGIC CORE") == 1

@@ -78,6 +78,58 @@ class PhaseQualityScore(BaseModel):
     rationale: str = ""
 
 
+class PairedPhaseQualityScore(BaseModel):
+    """LLM-as-judge scores for two candidate outputs, from a single judge call.
+
+    Preconditions:
+        Same as :class:`PhaseQualityScore`, applied independently to each field.
+    Postconditions:
+        ``output_a`` and ``output_b`` are each a valid :class:`PhaseQualityScore`.
+    """
+
+    output_a: PhaseQualityScore
+    output_b: PhaseQualityScore
+
+
+_PAIRED_JUDGE_SYSTEM_PROMPT = """\
+You are an independent Brand Strategy Reviewer. You did NOT write either output \
+under review. OUTPUT A and OUTPUT B are two independently produced candidates \
+for the same phase and mission -- score EACH one independently and on its own \
+merits, on three dimensions, each on a 1-5 integer scale (1 = poor, 3 = \
+adequate, 5 = excellent). Do not assume either is better because of its letter \
+or position; do not score them relative to each other.
+
+1. strategic_coherence -- how internally consistent and logically connected \
+   the output is with the mission's strategic core (purpose, mission, \
+   vision, positioning, target audience) and with its own stated fields. \
+   Contradictions, non-sequiturs, or content that ignores the mission's \
+   stated strategy score low.
+
+2. completeness -- how fully the output covers what its schema's fields ask \
+   for: no empty/placeholder sections, no fields left thin relative to \
+   their sibling fields, no obviously missing coverage a brand phase of \
+   this kind should include.
+
+3. brand_consistency -- how well the output's tone, terminology, and \
+   substance align with the mission's stated company description, target \
+   audience, values, and desired voice supplied in the prompt. Generic, \
+   boilerplate, or off-audience content scores low.
+
+OUTPUT contract:
+ - Output a SINGLE JSON object matching this schema:
+   {
+     "output_a": {
+       "strategic_coherence": <1-5 integer>,
+       "completeness": <1-5 integer>,
+       "brand_consistency": <1-5 integer>,
+       "rationale": "<short justification covering all three scores>"
+     },
+     "output_b": {<same shape, scored independently>}
+   }
+ - Return JSON only. No markdown fences. No prose outside the object.
+"""
+
+
 def _build_judge_prompt(
     *,
     mission: BrandingMission,
@@ -184,8 +236,119 @@ def score_phase_output(
     )
 
 
+def _build_paired_judge_prompt(
+    *,
+    mission: BrandingMission,
+    phase: BrandPhase,
+    output_a: BaseModel,
+    output_b: BaseModel,
+    strategic_core: BaseModel | None,
+) -> str:
+    """Render the user prompt for one paired judge call scoring two outputs.
+
+    Preconditions:
+        ``output_a``/``output_b`` are the two Pydantic output model instances
+        for ``phase`` under comparison. ``strategic_core`` is shared between
+        both (every phase this eval judges has a shared, non-diverging
+        ``STRATEGIC_CORE`` upstream of it -- see
+        ``eval_selective_context._first_diverging_phase``), so only one copy
+        is ever rendered.
+    Postconditions:
+        Returns a non-empty string with no selective/full-context labeling
+        anywhere -- only the neutral "OUTPUT A"/"OUTPUT B" headings, which
+        carry no information about which context variant produced which.
+    """
+    mission_summary = json.dumps(
+        {
+            "company_name": mission.company_name,
+            "company_description": mission.company_description,
+            "target_audience": mission.target_audience,
+            "values": mission.values,
+            "desired_voice": mission.desired_voice,
+        },
+        indent=2,
+    )
+    strategic_core_block = ""
+    if strategic_core is not None:
+        strategic_core_json = json.dumps(strategic_core.model_dump(mode="json"), indent=2)
+        strategic_core_block = f"--- GENERATED STRATEGIC CORE ---\n{strategic_core_json}\n\n"
+    output_a_json = json.dumps(output_a.model_dump(mode="json"), indent=2)
+    output_b_json = json.dumps(output_b.model_dump(mode="json"), indent=2)
+    return (
+        "--- MISSION ---\n"
+        f"{mission_summary}\n\n"
+        f"{strategic_core_block}"
+        f"--- PHASE ({phase.value}) OUTPUT A ---\n"
+        f"{output_a_json}\n\n"
+        f"--- PHASE ({phase.value}) OUTPUT B ---\n"
+        f"{output_b_json}\n\n"
+        "--- TASK ---\n"
+        "Score OUTPUT A and OUTPUT B independently against the rubric in your system "
+        "prompt. Score strategic_coherence against the GENERATED STRATEGIC CORE above "
+        "(when supplied), not just the raw mission brief -- that is the actual upstream "
+        "strategy each output must stay consistent with."
+    )
+
+
+def score_phase_output_pair(
+    client: LLMClient,
+    *,
+    mission: BrandingMission,
+    phase: BrandPhase,
+    output_a: BaseModel,
+    output_b: BaseModel,
+    strategic_core: BaseModel | None = None,
+) -> PairedPhaseQualityScore:
+    """Score two candidate outputs for the same phase in a single judge call.
+
+    Scoring both outputs in one LLM call -- rather than two separate
+    ``score_phase_output`` calls -- guarantees they are judged by the
+    identical underlying model/provider response. Under a live,
+    multi-provider ``FailoverLLMClient``, two separate calls are not
+    guaranteed to hit the same provider: a 429 between them can hand the
+    second call off to a different provider with a different scoring
+    calibration, so an apparent quality delta could reflect a change in
+    *judge* rather than a change in *output quality*. A single call has no
+    such window. Also used to keep the judge blind to which output is which
+    (see :func:`_build_paired_judge_prompt`): callers assign ``output_a``/
+    ``output_b`` for their own bookkeeping, but neither label reveals a
+    selective/full-context distinction to the judge.
+
+    Preconditions:
+        ``client`` is a ready :class:`LLMClient`. ``output_a``/``output_b``
+        are the real Pydantic output model instances produced for ``phase``.
+        ``strategic_core`` should be the shared, non-diverging generated
+        ``BrandPhase.STRATEGIC_CORE`` output (see
+        ``eval_selective_context._first_diverging_phase``); omit only when
+        judging the strategic core phase itself.
+    Postconditions:
+        Returns a validated :class:`PairedPhaseQualityScore`.
+        ``structured_output_model`` is forwarded to ``client.complete_json``
+        so a dummy/test double can route by exact class name instead of
+        parsing prompt text.
+    """
+    prompt = _build_paired_judge_prompt(
+        mission=mission,
+        phase=phase,
+        output_a=output_a,
+        output_b=output_b,
+        strategic_core=strategic_core,
+    )
+    return complete_validated(
+        client,
+        prompt,
+        schema=PairedPhaseQualityScore,
+        objective="score branding phase quality (paired)",
+        system_prompt=_PAIRED_JUDGE_SYSTEM_PROMPT,
+        correction_attempts=1,
+        structured_output_model=PairedPhaseQualityScore,
+    )
+
+
 __all__ = [
     "JUDGE_RUBRIC_VERSION",
+    "PairedPhaseQualityScore",
     "PhaseQualityScore",
     "score_phase_output",
+    "score_phase_output_pair",
 ]

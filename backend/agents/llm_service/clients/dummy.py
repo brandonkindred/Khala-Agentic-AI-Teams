@@ -1056,7 +1056,9 @@ def _branding_phase5_structured_output_stub(model_name: str) -> Optional[Dict[st
     return None
 
 
-_QUALITY_JUDGE_STRUCTURED_OUTPUT_MODEL_NAMES: frozenset[str] = frozenset({"PhaseQualityScore"})
+_QUALITY_JUDGE_STRUCTURED_OUTPUT_MODEL_NAMES: frozenset[str] = frozenset(
+    {"PhaseQualityScore", "PairedPhaseQualityScore"}
+)
 
 
 def _quality_judge_score_stub() -> Dict[str, Any]:
@@ -1080,14 +1082,28 @@ def _quality_judge_score_stub() -> Dict[str, Any]:
     }
 
 
+def _quality_judge_paired_score_stub() -> Dict[str, Any]:
+    """Return the ``PairedPhaseQualityScore`` dummy payload for the eval LLM-as-judge.
+
+    Preconditions: none.
+    Postconditions: returns a fresh dict matching ``PairedPhaseQualityScore``'s
+    field set, with both ``output_a``/``output_b`` set to
+    :func:`_quality_judge_score_stub`'s payload.
+    """
+    return {
+        "output_a": _quality_judge_score_stub(),
+        "output_b": _quality_judge_score_stub(),
+    }
+
+
 def _branding_structured_output_stub_by_model_name(
     model_name: str, system_lowered: str = ""
 ) -> Optional[Dict[str, Any]]:
     """Resolve a branding stub by structured-output model class name.
 
     Tries Phase 2, then Phase 4, then Phase 5, then the eval LLM-as-judge
-    score model. Shared by ``complete_json``, ``chat``, and ``stream`` so all
-    three keep one precedence order.
+    score model(s). Shared by ``complete_json``, ``chat``, and ``stream`` so
+    all three keep one precedence order.
 
     Preconditions:
         ``model_name`` is a string; ``system_lowered`` is already lowercased
@@ -1105,6 +1121,8 @@ def _branding_structured_output_stub_by_model_name(
     stub = _branding_phase5_structured_output_stub(model_name)
     if stub is not None:
         return stub
+    if model_name == "PairedPhaseQualityScore":
+        return _quality_judge_paired_score_stub()
     if model_name in _QUALITY_JUDGE_STRUCTURED_OUTPUT_MODEL_NAMES:
         return _quality_judge_score_stub()
     return None

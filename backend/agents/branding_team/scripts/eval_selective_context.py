@@ -63,7 +63,11 @@ from branding_team.graphs.shared import PHASE_ORDER
 from branding_team.models import BrandingMission, BrandPhase
 from branding_team.orchestrator import _PHASE_SPEC, BrandingTeamOrchestrator
 from branding_team.scripts.eval_fixtures.sample_missions import SAMPLE_MISSIONS
-from branding_team.scripts.quality_judge import PhaseQualityScore, score_phase_output
+from branding_team.scripts.quality_judge import (
+    PhaseQualityScore,
+    score_phase_output,
+    score_phase_output_pair,
+)
 from llm_service import DummyLLMClient, get_client
 from llm_service.dummy_provider import force_dummy_llm_provider
 
@@ -508,31 +512,41 @@ def run_eval(
                 )
 
             for phase in _JUDGED_PHASES:
-                selective_score = score_phase_output(
-                    judge_client,
-                    mission=mission,
-                    phase=phase,
-                    output=selective_outputs[phase],
-                    variant_label="selective",
-                    strategic_core=selective_outputs[BrandPhase.STRATEGIC_CORE],
-                )
                 if selective_outputs[phase] is full_outputs[phase]:
                     # _run_variant_pair shares this phase's output object between
                     # variants (its context_phases doesn't diverge) -- judging it a
                     # second time would score identical content via a second real
                     # LLM call, which can itself return a different integer score
                     # and manufacture a false regression despite zero actual
-                    # treatment difference. Reuse the one score already computed.
-                    full_score = selective_score
-                else:
-                    full_score = score_phase_output(
+                    # treatment difference. Score it once and reuse for both sides.
+                    score = score_phase_output(
                         judge_client,
                         mission=mission,
                         phase=phase,
-                        output=full_outputs[phase],
-                        variant_label="full",
-                        strategic_core=full_outputs[BrandPhase.STRATEGIC_CORE],
+                        output=selective_outputs[phase],
+                        variant_label="shared",
+                        strategic_core=selective_outputs[BrandPhase.STRATEGIC_CORE],
                     )
+                    selective_score, full_score = score, score
+                else:
+                    # STRATEGIC_CORE is always shared/non-diverging (see
+                    # _first_diverging_phase), so both variants' strategic core is
+                    # the identical object here -- one copy suffices. Scoring both
+                    # candidates in a single call also guarantees they're judged by
+                    # the same underlying provider/model: two separate calls under a
+                    # live, multi-provider FailoverLLMClient are not guaranteed to
+                    # land on the same provider (a 429 between calls can hand the
+                    # second off elsewhere), which would let a change in *judge*
+                    # masquerade as a change in *output quality*.
+                    paired = score_phase_output_pair(
+                        judge_client,
+                        mission=mission,
+                        phase=phase,
+                        output_a=selective_outputs[phase],
+                        output_b=full_outputs[phase],
+                        strategic_core=selective_outputs[BrandPhase.STRATEGIC_CORE],
+                    )
+                    selective_score, full_score = paired.output_a, paired.output_b
                 quality_comparisons.append(
                     PhaseQualityComparison(
                         mission_name=mission.company_name,
