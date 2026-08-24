@@ -12,6 +12,7 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSelectModule } from '@angular/material/select';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { AgentConsoleApiService } from '../../../../services/agent-console-api.service';
+import { extractErrorDetail } from '../../../../shared/extract-error-detail';
 import type {
   DiffResult,
   DiffSide,
@@ -85,7 +86,7 @@ export class AgentDiffDialogComponent implements OnInit {
         });
       },
       error: (err) => {
-        this.candidateError.set(err?.error?.detail ?? err?.message ?? 'Failed to load candidates');
+        this.candidateError.set(extractErrorDetail(err, 'Failed to load candidates'));
         this.loadingCandidates.set(false);
       },
     });
@@ -105,7 +106,7 @@ export class AgentDiffDialogComponent implements OnInit {
         this.diffing.set(false);
       },
       error: (err) => {
-        this.diffError.set(err?.error?.detail ?? err?.message ?? 'Diff failed');
+        this.diffError.set(extractErrorDetail(err, 'Diff failed'));
         this.diffing.set(false);
       },
     });
