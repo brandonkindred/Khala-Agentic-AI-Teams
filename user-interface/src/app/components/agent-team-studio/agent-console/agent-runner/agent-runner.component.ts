@@ -28,7 +28,7 @@ import { MatSelectModule } from '@angular/material/select';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
-import { Subscription, timer } from 'rxjs';
+import { Subscription } from 'rxjs';
 import { AgentConsoleApiService } from '../../../../services/agent-console-api.service';
 import { AgentRunnerDestructiveActionsService } from '../../../../services/agent-runner-destructive-actions.service';
 import { ConfirmDestructiveService } from '../../../../shared/confirm-destructive.service';
@@ -49,6 +49,7 @@ import { AgentRunHistoryComponent } from '../agent-run-history/agent-run-history
 import { AgentSchemaFormComponent } from '../agent-schema-form/agent-schema-form.component';
 import { InlineBannerComponent } from '../../../../shared/inline-banner/inline-banner.component';
 import { extractErrorDetail } from '../../../../shared/extract-error-detail';
+import { pollWhile } from '../../../../shared/poll-while';
 import {
   AgentDiffDialogComponent,
   type AgentDiffDialogData,
@@ -446,19 +447,14 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
 
   private startSandboxPolling(agentId: string): void {
     this.sandboxPollSub?.unsubscribe();
-    const initialSub = this.api.getSandbox(agentId).subscribe({
-      next: (handle) => this.sandbox.set(handle),
-      error: () => this.sandbox.set(null),
-    });
-    const pollSub = timer(5000, 5000).subscribe(() => {
-      this.api.getSandbox(agentId).subscribe({
-        next: (handle) => this.sandbox.set(handle),
-        error: () => this.sandbox.set(null),
-      });
-    });
-    this.sandboxPollSub = new Subscription();
-    this.sandboxPollSub.add(initialSub);
-    this.sandboxPollSub.add(pollSub);
+    // Sandbox status has no terminal state to poll toward — `isDone` never
+    // fires, so this polls indefinitely until `sandboxPollSub` is
+    // unsubscribed (agent switch or component destroy).
+    this.sandboxPollSub = pollWhile(() => this.api.getSandbox(agentId), () => false, {
+      intervalMs: 5000,
+    })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((handle) => this.sandbox.set(handle));
   }
 
   /**
