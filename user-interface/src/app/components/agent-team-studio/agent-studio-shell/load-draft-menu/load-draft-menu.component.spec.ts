@@ -1,11 +1,12 @@
 import { TestBed } from '@angular/core/testing';
 import { OverlayContainer } from '@angular/cdk/overlay';
-import { MatDialog } from '@angular/material/dialog';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { NEVER, Subject, of, throwError } from 'rxjs';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { LoadDraftMenuComponent } from './load-draft-menu.component';
 import { AgentStudioFacade } from '../../../../services/agent-studio.facade';
+import { ConfirmDestructiveService } from '../../../../shared/confirm-destructive.service';
+import { NotificationService } from '../../../../core/notification.service';
 import type { AgentStudioDraftSummary } from '../../../../models/agent-studio.model';
 
 const summary = (id: string, name: string): AgentStudioDraftSummary => ({
@@ -17,14 +18,26 @@ const summary = (id: string, name: string): AgentStudioDraftSummary => ({
 function configure(
   listDrafts = vi.fn().mockReturnValue(of([])),
   deleteDraft = vi.fn().mockReturnValue(of({ draft_id: 'd-1', status: 'deleted' })),
+  confirmFn = vi.fn().mockReturnValue(of(false)),
 ) {
   const facade = { listDrafts, deleteDraft };
+  const notify = { saved: vi.fn() };
   TestBed.configureTestingModule({
     imports: [LoadDraftMenuComponent, NoopAnimationsModule],
-    providers: [{ provide: AgentStudioFacade, useValue: facade }],
+    providers: [
+      { provide: AgentStudioFacade, useValue: facade },
+      { provide: NotificationService, useValue: notify },
+    ],
+  });
+  // LoadDraftMenuComponent declares ConfirmDestructiveService as its own
+  // component-level provider, which shadows a module-level TestBed provider
+  // for injections resolved inside the component — override the component's
+  // own provider set instead.
+  TestBed.overrideComponent(LoadDraftMenuComponent, {
+    set: { providers: [{ provide: ConfirmDestructiveService, useValue: { confirm: confirmFn } }] },
   });
   const fixture = TestBed.createComponent(LoadDraftMenuComponent);
-  return { fixture, facade };
+  return { fixture, facade, notify, confirmFn };
 }
 
 describe('LoadDraftMenuComponent', () => {
@@ -180,18 +193,8 @@ describe('LoadDraftMenuComponent', () => {
   });
 
   describe('delete', () => {
-    let openSpy: ReturnType<typeof vi.spyOn>;
-
-    beforeEach(() => {
-      openSpy = vi.spyOn(MatDialog.prototype, 'open');
-    });
-    afterEach(() => {
-      openSpy.mockRestore();
-    });
-
     it('confirmDelete cancel does not call deleteDraft or emit draftDeleted', () => {
-      openSpy.mockReturnValue({ afterClosed: () => of(false) } as unknown as ReturnType<MatDialog['open']>);
-      const { fixture, facade } = configure();
+      const { fixture, facade } = configure(undefined, undefined, vi.fn().mockReturnValue(of(false)));
       const spy = vi.fn();
       fixture.componentInstance.draftDeleted.subscribe(spy);
       fixture.componentInstance.confirmDelete(summary('d-1', 'A'));
@@ -199,12 +202,26 @@ describe('LoadDraftMenuComponent', () => {
       expect(spy).not.toHaveBeenCalled();
     });
 
-    it('confirmDelete confirm deletes, drops the row, and emits draftDeleted', () => {
-      openSpy.mockReturnValue({ afterClosed: () => of(true) } as unknown as ReturnType<MatDialog['open']>);
+    it('confirmDelete passes the danger dialog data to ConfirmDestructiveService', () => {
+      const { fixture, confirmFn } = configure(undefined, undefined, vi.fn().mockReturnValue(of(false)));
+      fixture.componentInstance.confirmDelete(summary('d-1', 'My Draft'));
+      expect(confirmFn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Delete this draft?',
+          message: expect.stringContaining('My Draft'),
+          confirmLabel: 'Delete',
+          cancelLabel: 'Keep draft',
+          variant: 'danger',
+        }),
+      );
+    });
+
+    it('confirmDelete confirm deletes, drops the row, emits draftDeleted, and shows a success toast', () => {
       const deleteDraft = vi.fn().mockReturnValue(of({ draft_id: 'd-1', status: 'deleted' }));
-      const { fixture } = configure(
+      const { fixture, notify } = configure(
         vi.fn().mockReturnValue(of([summary('d-1', 'A'), summary('d-2', 'B')])),
         deleteDraft,
+        vi.fn().mockReturnValue(of(true)),
       );
       fixture.componentInstance.onOpened();
       const spy = vi.fn();
@@ -213,10 +230,10 @@ describe('LoadDraftMenuComponent', () => {
       expect(deleteDraft).toHaveBeenCalledWith('d-1');
       expect(fixture.componentInstance.drafts().map((d) => d.draft_id)).toEqual(['d-2']);
       expect(spy).toHaveBeenCalledWith('d-1');
+      expect(notify.saved).toHaveBeenCalledWith('Draft deleted.');
     });
 
     it('confirmDelete recomputes the Show-older offset from the remaining rows', () => {
-      openSpy.mockReturnValue({ afterClosed: () => of(true) } as unknown as ReturnType<MatDialog['open']>);
       const fullPage = Array.from({ length: 10 }, (_, i) => summary(`d-${i}`, `n${i}`));
       const listDrafts = vi
         .fn()
@@ -225,6 +242,7 @@ describe('LoadDraftMenuComponent', () => {
       const { fixture, facade } = configure(
         listDrafts,
         vi.fn().mockReturnValue(of({ draft_id: 'd-0', status: 'deleted' })),
+        vi.fn().mockReturnValue(of(true)),
       );
       fixture.componentInstance.onOpened();
       fixture.componentInstance.confirmDelete(summary('d-0', 'n0'));
@@ -237,7 +255,6 @@ describe('LoadDraftMenuComponent', () => {
     });
 
     it('confirmDelete discards an in-flight Show-older page and refetches from the new offset', () => {
-      openSpy.mockReturnValue({ afterClosed: () => of(true) } as unknown as ReturnType<MatDialog['open']>);
       const fullPage = Array.from({ length: 10 }, (_, i) => summary(`d-${i}`, `n${i}`));
       const stalePage = new Subject<AgentStudioDraftSummary[]>();
       const listDrafts = vi
@@ -248,6 +265,7 @@ describe('LoadDraftMenuComponent', () => {
       const { fixture, facade } = configure(
         listDrafts,
         vi.fn().mockReturnValue(of({ draft_id: 'd-0', status: 'deleted' })),
+        vi.fn().mockReturnValue(of(true)),
       );
       fixture.componentInstance.onOpened();
       fixture.componentInstance.loadMore();
@@ -262,7 +280,6 @@ describe('LoadDraftMenuComponent', () => {
     });
 
     it('confirmDelete discards a stale in-flight Show-older page error after refetching', () => {
-      openSpy.mockReturnValue({ afterClosed: () => of(true) } as unknown as ReturnType<MatDialog['open']>);
       const fullPage = Array.from({ length: 10 }, (_, i) => summary(`d-${i}`, `n${i}`));
       const stalePage = new Subject<AgentStudioDraftSummary[]>();
       const listDrafts = vi
@@ -273,6 +290,7 @@ describe('LoadDraftMenuComponent', () => {
       const { fixture, facade } = configure(
         listDrafts,
         vi.fn().mockReturnValue(of({ draft_id: 'd-0', status: 'deleted' })),
+        vi.fn().mockReturnValue(of(true)),
       );
       fixture.componentInstance.onOpened();
       fixture.componentInstance.loadMore();
@@ -289,9 +307,12 @@ describe('LoadDraftMenuComponent', () => {
     });
 
     it('confirmDelete API failure leaves the row and does not emit draftDeleted (the global HTTP toast surfaces the error, not local error())', () => {
-      openSpy.mockReturnValue({ afterClosed: () => of(true) } as unknown as ReturnType<MatDialog['open']>);
       const deleteDraft = vi.fn().mockReturnValue(throwError(() => ({ error: { detail: 'nope' } })));
-      const { fixture } = configure(vi.fn().mockReturnValue(of([summary('d-1', 'A')])), deleteDraft);
+      const { fixture, notify } = configure(
+        vi.fn().mockReturnValue(of([summary('d-1', 'A')])),
+        deleteDraft,
+        vi.fn().mockReturnValue(of(true)),
+      );
       fixture.componentInstance.onOpened();
       const spy = vi.fn();
       fixture.componentInstance.draftDeleted.subscribe(spy);
@@ -300,11 +321,11 @@ describe('LoadDraftMenuComponent', () => {
       expect(fixture.componentInstance.drafts()).toEqual([summary('d-1', 'A')]);
       expect(fixture.componentInstance.isDeleting('d-1')).toBe(false);
       expect(spy).not.toHaveBeenCalled();
+      expect(notify.saved).not.toHaveBeenCalled();
     });
 
     it('confirmDelete does not emit draftSelected', () => {
-      openSpy.mockReturnValue({ afterClosed: () => of(false) } as unknown as ReturnType<MatDialog['open']>);
-      const { fixture, facade } = configure();
+      const { fixture, facade } = configure(undefined, undefined, vi.fn().mockReturnValue(of(false)));
       const selected = vi.fn();
       fixture.componentInstance.draftSelected.subscribe(selected);
       fixture.componentInstance.confirmDelete(summary('d-1', 'A'));
@@ -315,8 +336,11 @@ describe('LoadDraftMenuComponent', () => {
     it('confirmDelete of an id already deleting is a no-op', () => {
       const pending = new Subject<{ draft_id: string; status: string }>();
       const deleteDraft = vi.fn().mockReturnValue(pending.asObservable());
-      openSpy.mockReturnValue({ afterClosed: () => of(true) } as unknown as ReturnType<MatDialog['open']>);
-      const { fixture } = configure(vi.fn().mockReturnValue(of([summary('d-1', 'A')])), deleteDraft);
+      const { fixture } = configure(
+        vi.fn().mockReturnValue(of([summary('d-1', 'A')])),
+        deleteDraft,
+        vi.fn().mockReturnValue(of(true)),
+      );
       fixture.componentInstance.onOpened();
       fixture.componentInstance.confirmDelete(summary('d-1', 'A'));
       fixture.componentInstance.confirmDelete(summary('d-1', 'A'));
@@ -330,10 +354,10 @@ describe('LoadDraftMenuComponent', () => {
         .fn()
         .mockReturnValueOnce(first.asObservable())
         .mockReturnValueOnce(of({ draft_id: 'd-2', status: 'deleted' }));
-      openSpy.mockReturnValue({ afterClosed: () => of(true) } as unknown as ReturnType<MatDialog['open']>);
       const { fixture } = configure(
         vi.fn().mockReturnValue(of([summary('d-1', 'A'), summary('d-2', 'B')])),
         deleteDraft,
+        vi.fn().mockReturnValue(of(true)),
       );
       fixture.componentInstance.onOpened();
       fixture.componentInstance.confirmDelete(summary('d-1', 'A'));
