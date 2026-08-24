@@ -53,12 +53,17 @@ Each transition emits a `PhaseTransition` event (`phases.py`:148-184) carrying
 `from_phase`, `to_phase`, a 64-char SHA-256 `spec_hash` (`hash_spec`,
 `phases.py`:64-93 — canonical-JSON of the spec, deliberately excluding
 `strategy_code`) and a 64-char SHA-256 `code_hash` (`hash_code`,
-`phases.py`:96-109). This is a drift-detection mechanism: `spec_hash` must
-stay stable from `DESIGN_REVIEW → CODE_SYNTHESIS` onward within an attempt
-(the spec is frozen post-design, aside from a tighten-only `risk_limits`
-carve-out during refinement). Each hash is a **boundary snapshot** taken at
-the moment its transition fires, not a value pinned for the rest of the
-attempt: `code_hash` is unchanged from `CODE_SYNTHESIS →
+`phases.py`:96-109). This is a drift-detection mechanism: both hashes are
+**boundary snapshots** taken at the moment their transition fires, not a
+value pinned for the rest of the attempt. `spec_hash` is frozen post-design
+apart from one carve-out: `hash_spec` includes `risk_limits`, and the
+refinement loop that runs before the `CODE_SYNTHESIS →
+BACKTEST_AND_VERIFICATION` transition may accept a tighten-only `risk_limits`
+update (`_apply_updates`) — so that transition's `spec_hash` can legitimately
+differ from the one recorded at `DESIGN_REVIEW → CODE_SYNTHESIS`. From there
+the value is stable through the terminal transition, since the
+trade-alignment loop's own `_apply_updates` call never carries `risk_limits`
+updates. `code_hash` is unchanged from `CODE_SYNTHESIS →
 BACKTEST_AND_VERIFICATION` through the refinement loop that precedes that
 transition, but the trade-alignment loop that follows it can still commit a
 rewritten baseline (`_commit_alignment_proposal`), so the terminal

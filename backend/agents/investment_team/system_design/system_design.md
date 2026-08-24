@@ -79,6 +79,7 @@ flowchart LR
     B6[(investment_backtests)]
     B7[(investment_strategy_lab_records)]
     B8[(investment_paper_trading_sessions)]
+    B9[(investment_strategy_lab_runs<br/>run-state store)]
   end
 
   E1 --> FA --> B1
@@ -115,8 +116,8 @@ flowchart LR
   L3 --> B7
   L4 --> BatchWF
   L5 --> BatchWF
-  L6 --> B7
-  L7 --> B7
+  L6 --> B9
+  L7 --> B9
   L8 --> EventBus
   L9 --> B7
   L10 --> B7
