@@ -180,7 +180,8 @@ def _make_phase_job_updater(
           ``progress`` kwarg onto ``progress_band`` (garbage progress is dropped,
           never written); forces ``phase=phase`` on the ``update_job`` call when
           ``phase`` is not ``None``; forwards all remaining kwargs untouched; and
-          swallows store errors (observability only — never raises).
+          swallows all exceptions raised during the update (observability-only
+          updater — never raises).
     """
     assert isinstance(subprocess_key, str) and subprocess_key, subprocess_key
     assert isinstance(completed_key, str) and completed_key, completed_key
