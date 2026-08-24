@@ -80,6 +80,10 @@ Out of scope (note it and move on, do not fix):
     error/toast orchestration behind the agent-runner, strategy-lab, load-draft, and
     run-history destructive actions; the target for any hand-rolled destructive flow),
     `defer-focus.ts` (move focus after a re-render),
+    `extract-error-detail.ts` (`extractErrorDetail` — the repo-wide way to pull a
+    human-readable message out of an HTTP error for an inline error field, used by
+    ~70 call sites; recommend it rather than hand-rolled `err?.error?.detail ?? …`
+    chains when proposing error copy),
     `result-count-announcement.ts` (live-region text for filtered lists), and
     `poll-while.ts` / `staleness.util.ts` (long-running job polling and staleness).
     "Build a custom X" when a shared X exists is itself a finding.
