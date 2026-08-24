@@ -11,15 +11,14 @@ import {
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { DatePipe } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
-import { MatDialog } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatMenuModule } from '@angular/material/menu';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { extractErrorDetail } from '../../../../shared/extract-error-detail';
-import {
-  ConfirmDialogComponent,
-  type ConfirmDialogData,
-} from '../../../../shared/confirm-dialog/confirm-dialog.component';
+import type { ConfirmDialogData } from '../../../../shared/confirm-dialog/confirm-dialog.component';
+import { ConfirmDestructiveService } from '../../../../shared/confirm-destructive.service';
+import { DestructiveActionHelper } from '../../../../shared/destructive-action.helper';
+import { NotificationService } from '../../../../core/notification.service';
 import { AgentStudioFacade } from '../../../../services/agent-studio.facade';
 import type { AgentStudioDraftSummary } from '../../../../models/agent-studio.model';
 
@@ -39,13 +38,19 @@ const PAGE_SIZE = 10;
   standalone: true,
   imports: [DatePipe, MatButtonModule, MatIconModule, MatMenuModule, MatProgressSpinnerModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  providers: [ConfirmDestructiveService],
   templateUrl: './load-draft-menu.component.html',
   styleUrl: './load-draft-menu.component.scss',
 })
 export class LoadDraftMenuComponent {
   private readonly facade = inject(AgentStudioFacade);
-  private readonly dialog = inject(MatDialog);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly helper = new DestructiveActionHelper(
+    inject(ConfirmDestructiveService),
+    inject(NotificationService),
+    this.destroyRef,
+    () => undefined, // errors are swallowed here; the global HTTP toast already surfaces them
+  );
 
   /** Disables the trigger while the shell is mid-hydration from a prior selection. */
   @Input() busy = false;
@@ -136,57 +141,47 @@ export class LoadDraftMenuComponent {
    */
   confirmDelete(draft: AgentStudioDraftSummary): void {
     if (this.isDeleting(draft.draft_id)) return;
-    const data: ConfirmDialogData = {
+    const dialogData: ConfirmDialogData = {
       title: 'Delete this draft?',
       message: `"${draft.name}" will be permanently deleted. This cannot be undone.`,
       confirmLabel: 'Delete',
       cancelLabel: 'Keep draft',
       variant: 'danger',
     };
-    this.dialog
-      .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(ConfirmDialogComponent, { data })
-      .afterClosed()
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((confirmed) => {
-        if (confirmed !== true) return;
-        this.deletingIds.update((ids) => new Set(ids).add(draft.draft_id));
-        this.facade
-          .deleteDraft(draft.draft_id)
-          .pipe(takeUntilDestroyed(this.destroyRef))
-          .subscribe({
-            next: () => {
-              this.drafts.update((rows) => rows.filter((row) => row.draft_id !== draft.draft_id));
-              this.deletingIds.update((ids) => {
-                const next = new Set(ids);
-                next.delete(draft.draft_id);
-                return next;
-              });
-              this.nextOffset = this.drafts().length;
-              const refetch = this.loading();
-              // Invalidate any in-flight "Show older" fetch: its offset was
-              // computed against the pre-delete list, so its response would
-              // append a skipped/duplicated boundary row. Bumping the token
-              // makes fetchPage discard that stale response on arrival.
-              this.openToken += 1;
-              if (refetch) {
-                this.fetchPage(this.openToken);
-              }
-              this.draftDeleted.emit(draft.draft_id);
-            },
-            error: () => {
-              this.deletingIds.update((ids) => {
-                const next = new Set(ids);
-                next.delete(draft.draft_id);
-                return next;
-              });
-              // The Delete click already closed this menu (Material closes
-              // the whole chain on any mat-menu-item click), so `error()` —
-              // rendered only inside this component's own template — would
-              // never reach the user. The global HTTP interceptor toasts
-              // instead; do not also set local error state here.
-            },
-          });
-      });
+    this.helper.execute(
+      {
+        dialogData,
+        apiCall: () => this.facade.deleteDraft(draft.draft_id),
+        onSuccess: () => {
+          this.drafts.update((rows) => rows.filter((row) => row.draft_id !== draft.draft_id));
+          this.nextOffset = this.drafts().length;
+          const refetch = this.loading();
+          // Invalidate any in-flight "Show older" fetch: its offset was
+          // computed against the pre-delete list, so its response would
+          // append a skipped/duplicated boundary row. Bumping the token
+          // makes fetchPage discard that stale response on arrival.
+          this.openToken += 1;
+          if (refetch) {
+            this.fetchPage(this.openToken);
+          }
+          this.draftDeleted.emit(draft.draft_id);
+        },
+        // The Delete click already closed this menu (Material closes the
+        // whole chain on any mat-menu-item click), so `error()` — rendered
+        // only inside this component's own template — would never reach the
+        // user. The global HTTP interceptor toasts instead; the default
+        // `onError` no-op leaves no local error state to set.
+        errorFallback: 'Failed to delete draft.',
+      },
+      'Draft deleted.',
+      () => this.deletingIds.update((ids) => new Set(ids).add(draft.draft_id)),
+      () =>
+        this.deletingIds.update((ids) => {
+          const next = new Set(ids);
+          next.delete(draft.draft_id);
+          return next;
+        }),
+    );
   }
 
   private fetchPage(token: number): void {
