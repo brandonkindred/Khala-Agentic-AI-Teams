@@ -266,7 +266,7 @@ flowchart TD
     Q1 -->|no| SQLite["Use local SQLite<br/>$AGENT_CACHE/agentic_team_provisioning.db"]
 
     Start --> Q2{"TEMPORAL_ADDRESS set<br/>and is_temporal_enabled()?"}
-    Q2 -->|yes| T["start_team_worker('agentic_team_provisioning', …)<br/>task_queue='agentic_team_provisioning-queue'<br/>workflow=AgenticPipelineWorkflow"]
+    Q2 -->|yes| T["start_agentic_team_provisioning_temporal_worker_thread()<br/>(temporal/worker.py, wraps shared.temporal.start_team_worker)<br/>task_queue='agentic_team_provisioning-queue'<br/>workflow=AgenticPipelineWorkflow"]
     Q2 -->|no| Thread["Daemon threads for PipelineRunner<br/>and AgentEnvProvisioner"]
 
     Start --> Q3{"AGENTIC_TEAM_AGENT_PROVISIONING_ENABLED<br/>!= false?"}

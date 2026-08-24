@@ -156,8 +156,8 @@ flowchart TD
     LoopDepth --> ResolvePersona{"resolve_persona(a.manifest_id)<br/>raises LookupError?"}
     ResolvePersona -->|yes| GapMissingManifest["gap: missing_manifest"]
     ResolvePersona -->|no| CountMissing{"missing = [f for f in<br/>(skills, tools, expertise) if empty]<br/>(capabilities never checked)"}
-    CountMissing -->|"len(missing) == 3"| GapIncomplete["gap: incomplete_profile"]
-    CountMissing -->|"len(missing) >= 2"| GapSparse["gap: sparse_profile"]
+    CountMissing -->|"len(missing) == 3<br/>(checked first)"| GapIncomplete["gap: incomplete_profile"]
+    CountMissing -->|"else, len(missing) == 2"| GapSparse["gap: sparse_profile"]
     GapMissingManifest --> LoopDepth
     LoopDepth -->|done| Aggregate["is_fully_staffed = len(gaps) == 0<br/>summary = _build_summary(...)"]
     Aggregate --> Result["RosterValidationResult(is_fully_staffed, agent_count, process_count, gaps, summary)"]
