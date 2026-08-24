@@ -22,23 +22,15 @@ output contract).
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional
+from typing import Dict
 
 from strands import Agent
 
 from llm_service import get_strands_model
 from llm_service.strands_model import model_fingerprint, resolve_strands_model
-from shared.cache import get_shared_cache
-from shared.cache.pydantic_cache import (
-    build_model_cache_key,
-    cache_capacity_for,
-    cache_namespace_for,
-    clear_cache_namespace,
-    get_cached_model,
-    set_cached_model,
-)
 from software_engineering_team.shared.persona_agent_base import run_structured_persona
 from software_engineering_team.shared.review_prompt_utils import build_file_context_prefix
+from software_engineering_team.shared.review_result_cache import ReviewResultCache
 from software_engineering_team.shared.security_service import derive_approved
 
 from .models import AcceptanceEvidenceModel, QAInput, QAOutput
@@ -61,33 +53,17 @@ _CACHE_LABEL = "QA"
 # chunk-level *policy*: every genuine outcome is cached regardless of
 # ``approved`` (see ``run()``'s ``is_fallback`` guard below), since this is a
 # single atomic call with no reduce phase to short-circuit. The shared
-# policy itself lives in ``shared.cache.pydantic_cache``, imported above
-# (also used by security_agent's analogous cache, every devops_team
-# single-shot agent, and branding_team's PhaseOutputCache); this module
-# supplies only its own namespace stem, env var, capacity default, and
-# output model.
-# Backed by shared.cache (Redis, falls open to an in-process store). Base
-# stem; ``_review_cache_namespace()`` appends build id.
+# ``ReviewResultCache`` (also used by security_agent's analogous cache)
+# supplies the get/put/clear policy; this module supplies only its own
+# namespace stem, env var, capacity default, and output model.
 DEFAULT_REVIEW_CACHE_SIZE = 256  # QA_REVIEW_CACHE_SIZE, floor 0
-_REVIEW_CACHE_NAMESPACE = "qa:review:v1"
-
-
-def _review_cache_namespace() -> str:
-    """Shared-cache namespace for QA review results (includes build id)."""
-    return cache_namespace_for(_REVIEW_CACHE_NAMESPACE)
-
-
-def _review_cache_size() -> int:
-    """Resolve the review cache capacity from the environment.
-
-    Postconditions:
-        - Returns ``QA_REVIEW_CACHE_SIZE`` parsed as an int, clamped to a
-          floor of 0: an unset or unparseable value falls back to
-          ``DEFAULT_REVIEW_CACHE_SIZE``, a negative value clamps to 0. An
-          explicit or clamped-to 0 disables the cache — every ``run()`` call
-          re-invokes the model, matching pre-cache behavior.
-    """
-    return cache_capacity_for("QA_REVIEW_CACHE_SIZE", DEFAULT_REVIEW_CACHE_SIZE)
+_REVIEW_CACHE: ReviewResultCache[QAOutput] = ReviewResultCache(
+    namespace_stem="qa:review:v1",
+    env_var="QA_REVIEW_CACHE_SIZE",
+    default_capacity=DEFAULT_REVIEW_CACHE_SIZE,
+    label=_CACHE_LABEL,
+    output_model=QAOutput,
+)
 
 
 def clear_review_cache() -> None:
@@ -104,35 +80,7 @@ def clear_review_cache() -> None:
           forcing a cold review. Intended for tests and for callers that
           must force a cold review.
     """
-    clear_cache_namespace(_CACHE_LABEL, lambda: get_shared_cache(_review_cache_namespace()))
-
-
-def _review_cache_key(input_data: QAInput, model_fp: str) -> str:
-    """Hash of the whole QA input plus the resolved review model.
-
-    The qa_agent analogue of ``code_review_agent.mapping._submission_
-    fingerprint`` (same key design, per the caching contract this module
-    implements): keys the entire ``QAInput`` — code, language, task
-    description, architecture, build errors, request mode, acceptance
-    criteria, tool results — so any reviewed-file byte change naturally
-    busts the key with no explicit invalidation logic. ``QAInput`` carries no
-    per-invocation id field (no ``job_id``/``task_id``/``microtask_id``), so
-    nothing needs to be excluded before hashing.
-
-    Preconditions:
-        - ``input_data`` is a valid ``QAInput``.
-        - ``model_fp`` is the value returned by
-          ``llm_service.strands_model.model_fingerprint(resolved_model)``,
-          where ``resolved_model`` is the Strands model this
-          ``QAExpertAgent`` instance uses for the review (its ``self._model``
-          — this is a free function, so there is no ``self`` here).
-
-    Postconditions:
-        - Returns a hex digest that changes whenever any input field or the
-          resolved model changes, and is stable (``sort_keys``) across calls
-          in a process, so a byte-identical resubmission is recognized.
-    """
-    return build_model_cache_key(input_data, model_fp)
+    _REVIEW_CACHE.clear()
 
 
 def _build_qa_file_context_prefix(input_data: QAInput) -> list[str]:
@@ -244,18 +192,14 @@ class QAExpertAgent:
             mode,
         )
 
-        capacity = _review_cache_size()
-        cache_key: Optional[str] = None
-        if capacity > 0:
-            cache_key = _review_cache_key(input_data, model_fingerprint(self._model))
-            cache = get_shared_cache(_review_cache_namespace())
-            cached_result = get_cached_model(_CACHE_LABEL, cache, cache_key, QAOutput)
-            if cached_result is not None:
-                logger.info(
-                    "QA: review cache hit; skipping LLM call (approved=%s)",
-                    cached_result.approved,
-                )
-                return cached_result
+        model_fp = model_fingerprint(self._model)
+        cached_result = _REVIEW_CACHE.get(input_data, model_fp)
+        if cached_result is not None:
+            logger.info(
+                "QA: review cache hit; skipping LLM call (approved=%s)",
+                cached_result.approved,
+            )
+            return cached_result
 
         user_prompt = self._build_user_prompt(input_data)
 
@@ -327,9 +271,8 @@ class QAExpertAgent:
             result.approved,
         )
 
-        if cache_key is not None and not is_fallback:
-            cache = get_shared_cache(_review_cache_namespace())
-            set_cached_model(_CACHE_LABEL, cache, cache_key, result, capacity=capacity)
+        if not is_fallback:
+            _REVIEW_CACHE.put(input_data, model_fp, result)
 
         return result
 

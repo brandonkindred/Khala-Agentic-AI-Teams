@@ -16,16 +16,8 @@ from typing import Optional
 
 from llm_service import LLMClient, get_strands_model
 from llm_service.strands_model import model_fingerprint, resolve_strands_model
-from shared.cache import get_shared_cache
-from shared.cache.pydantic_cache import (
-    build_model_cache_key,
-    cache_capacity_for,
-    cache_namespace_for,
-    clear_cache_namespace,
-    get_cached_model,
-    set_cached_model,
-)
 from software_engineering_team.shared.review_prompt_utils import build_file_context_prefix
+from software_engineering_team.shared.review_result_cache import ReviewResultCache
 from software_engineering_team.shared.security_service import derive_approved
 from software_engineering_team.shared.single_shot_review import run_single_shot_review
 
@@ -42,31 +34,17 @@ _CACHE_LABEL = "Security"
 # the LLM call entirely. Mirrors qa_agent's review cache exactly (same
 # whole-input key *shape*, same "cache every genuine outcome regardless of
 # approved" *policy*, since this is a single atomic call with no reduce
-# phase to short-circuit) — the shared policy itself lives in
-# ``shared.cache.pydantic_cache``, imported above; this module supplies only
-# its own namespace stem, env var, capacity default, and output model.
-# Backed by shared.cache (Redis, falls open to an in-process store). Base
-# stem; ``_review_cache_namespace()`` appends build id.
+# phase to short-circuit) — the shared ``ReviewResultCache`` supplies the
+# get/put/clear policy; this module supplies only its own namespace stem,
+# env var, capacity default, and output model.
 DEFAULT_REVIEW_CACHE_SIZE = 256  # SECURITY_REVIEW_CACHE_SIZE, floor 0
-_REVIEW_CACHE_NAMESPACE = "security:review:v1"
-
-
-def _review_cache_namespace() -> str:
-    """Shared-cache namespace for security review results (includes build id)."""
-    return cache_namespace_for(_REVIEW_CACHE_NAMESPACE)
-
-
-def _review_cache_size() -> int:
-    """Resolve the review cache capacity from the environment.
-
-    Postconditions:
-        - Returns ``SECURITY_REVIEW_CACHE_SIZE`` parsed as an int, clamped to
-          a floor of 0: an unset or unparseable value falls back to
-          ``DEFAULT_REVIEW_CACHE_SIZE``, a negative value clamps to 0. An
-          explicit or clamped-to 0 disables the cache — every ``run()`` call
-          re-invokes the model, matching pre-cache behavior.
-    """
-    return cache_capacity_for("SECURITY_REVIEW_CACHE_SIZE", DEFAULT_REVIEW_CACHE_SIZE)
+_REVIEW_CACHE: ReviewResultCache[SecurityOutput] = ReviewResultCache(
+    namespace_stem="security:review:v1",
+    env_var="SECURITY_REVIEW_CACHE_SIZE",
+    default_capacity=DEFAULT_REVIEW_CACHE_SIZE,
+    label=_CACHE_LABEL,
+    output_model=SecurityOutput,
+)
 
 
 def clear_review_cache() -> None:
@@ -83,7 +61,7 @@ def clear_review_cache() -> None:
           forcing a cold review. Intended for tests and for callers that
           must force a cold review.
     """
-    clear_cache_namespace(_CACHE_LABEL, lambda: get_shared_cache(_review_cache_namespace()))
+    _REVIEW_CACHE.clear()
 
 
 def _security_model_fingerprint(llm: Optional[LLMClient]) -> str:
@@ -115,29 +93,6 @@ def _security_model_fingerprint(llm: Optional[LLMClient]) -> str:
         )
         return type(llm).__name__
     return model_fingerprint(model)
-
-
-def _review_cache_key(input_data: SecurityInput, model_fp: str) -> str:
-    """Hash of the whole security input plus the resolved review model.
-
-    Keys the entire ``SecurityInput`` — code, language, task description,
-    architecture, context — so any reviewed-file byte change naturally
-    busts the key with no explicit invalidation logic. ``SecurityInput``
-    carries no per-invocation id field, so nothing needs to be excluded
-    before hashing.
-
-    Preconditions:
-        - ``input_data`` is a valid ``SecurityInput``.
-        - ``model_fp`` is the value returned by
-          ``_security_model_fingerprint(self.llm)`` for this
-          ``CybersecurityExpertAgent`` instance.
-
-    Postconditions:
-        - Returns a hex digest that changes whenever any input field or the
-          resolved model changes, and is stable (``sort_keys``) across calls
-          in a process, so a byte-identical resubmission is recognized.
-    """
-    return build_model_cache_key(input_data, model_fp)
 
 
 def _build_security_file_context_prefix(input_data: SecurityInput) -> list[str]:
@@ -228,18 +183,14 @@ class CybersecurityExpertAgent:
         """
         logger.info("Security: reviewing %s chars of code", len(input_data.code or ""))
 
-        capacity = _review_cache_size()
-        cache_key: Optional[str] = None
-        if capacity > 0:
-            cache_key = _review_cache_key(input_data, _security_model_fingerprint(self.llm))
-            cache = get_shared_cache(_review_cache_namespace())
-            cached_result = get_cached_model(_CACHE_LABEL, cache, cache_key, SecurityOutput)
-            if cached_result is not None:
-                logger.info(
-                    "Security: review cache hit; skipping LLM call (approved=%s)",
-                    cached_result.approved,
-                )
-                return cached_result
+        model_fp = _security_model_fingerprint(self.llm)
+        cached_result = _REVIEW_CACHE.get(input_data, model_fp)
+        if cached_result is not None:
+            logger.info(
+                "Security: review cache hit; skipping LLM call (approved=%s)",
+                cached_result.approved,
+            )
+            return cached_result
 
         user_prompt = self._build_user_prompt(input_data)
 
@@ -280,9 +231,7 @@ class CybersecurityExpertAgent:
             result.approved,
         )
 
-        if cache_key is not None:
-            cache = get_shared_cache(_review_cache_namespace())
-            set_cached_model(_CACHE_LABEL, cache, cache_key, result, capacity=capacity)
+        _REVIEW_CACHE.put(input_data, model_fp, result)
 
         return result
 

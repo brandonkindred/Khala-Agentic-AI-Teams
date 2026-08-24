@@ -24,10 +24,12 @@ import qa_agent.agent as agent_mod
 from qa_agent import QAExpertAgent, QAInput
 from qa_agent.models import QAOutput
 
+import software_engineering_team.shared.review_result_cache as review_cache_mod
 from llm_service.clients.dummy import DummyLLMClient
 from llm_service.strands_model import model_fingerprint
 from shared.cache import MemoryBackend, get_shared_cache, reset_shared_cache_state
 from shared.cache import factory as factory_mod
+from shared.cache.pydantic_cache import build_model_cache_key
 
 _CLEAN_RESPONSE: Dict[str, Any] = {
     "bugs_found": [],
@@ -104,7 +106,7 @@ def test_redis_unavailable_falls_back_to_memory_cache(monkeypatch: pytest.Monkey
     monkeypatch.setattr(factory_mod, "_build_redis_client", lambda: None)
     reset_shared_cache_state()
     try:
-        assert isinstance(get_shared_cache(agent_mod._review_cache_namespace()), MemoryBackend)
+        assert isinstance(get_shared_cache(agent_mod._REVIEW_CACHE._namespace()), MemoryBackend)
 
         client = _CountingClient(_CLEAN_RESPONSE)
         agent = QAExpertAgent(client)
@@ -133,10 +135,10 @@ def test_cache_backend_error_falls_open_to_correct_result(monkeypatch: pytest.Mo
         def clear(self) -> None:
             # Not exercised by run() itself; only needed so the autouse
             # conftest teardown (which calls clear_review_cache()) doesn't
-            # blow up while agent_mod.get_shared_cache is still monkeypatched.
+            # blow up while review_cache_mod.get_shared_cache is still monkeypatched.
             pass
 
-    monkeypatch.setattr(agent_mod, "get_shared_cache", lambda namespace: _RaisingCache())
+    monkeypatch.setattr(review_cache_mod, "get_shared_cache", lambda namespace: _RaisingCache())
 
     client = _CountingClient(_CLEAN_RESPONSE)
     agent = QAExpertAgent(client)
@@ -184,8 +186,8 @@ def test_fallback_result_is_never_cached(monkeypatch: pytest.MonkeyPatch) -> Non
     result = agent.run(input_data)
     assert result.approved is False
 
-    key = agent_mod._review_cache_key(input_data, model_fingerprint(agent._model))
-    cache = get_shared_cache(agent_mod._review_cache_namespace())
+    key = build_model_cache_key(input_data, model_fingerprint(agent._model))
+    cache = get_shared_cache(agent_mod._REVIEW_CACHE._namespace())
     assert cache.get(key) is None
 
 
