@@ -139,12 +139,19 @@ C. CLARITY AND INFORMATION ARCHITECTURE
      sensible defaults for sort and filter, stable ordering across polls.
 
 D. STATE COVERAGE
-   For each page, walk all of: first visit / empty, loading (first load vs refresh),
-   partial, populated, long-running, stalled, failed, permission-denied or
-   backend-unconfigured, offline or API-error, and stale-data.
+   For each page, walk all of: first visit / empty; loading (first load vs refresh);
+   partial; populated; long-running; stalled; failed; permission-denied;
+   backend-unconfigured; offline; API-error; and stale-data. Each is its own state:
+   permission-denied and backend-unconfigured need different copy and different
+   recovery, as do offline and API-error, so a disposition covering one never covers
+   the other.
    Give every state exactly one disposition, and state which:
-     - HANDLED — the UI is (1) rendered at all, (2) announced to assistive tech, and
-       (3) recoverable from.
+     - HANDLED — the UI is (1) rendered at all, (2) recoverable from, and (3) where the
+       state arrives dynamically — without navigation or focus movement — announced to
+       assistive tech. An initially rendered state needs correct semantics, not a live
+       region: the house standard reserves `aria-live` for dynamic content and status
+       changes, so neither report a compliant initial render as missing an announcement
+       nor recommend adding one.
      - MISSING — a finding. Cite the branch in the template or component that proves
        it is missing.
      - NOT APPLICABLE — the page does not own this state. Evidence is required, not
@@ -242,7 +249,7 @@ Close with:
 ## 9. Definition of done
 
 You are finished when: every routed <TEAM> page carries a stated disposition —
-handled, missing, or evidenced not-applicable — for all ten states in §3D; every
+handled, missing, or evidenced not-applicable — for all twelve states in §3D; every
 finding cites a file and line or is explicitly marked as needing a
 browser; every recommendation names a token, primitive, or attribute rather than
 describing an intention; and the top 5 are ordered such that shipping only those
