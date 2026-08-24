@@ -2204,6 +2204,143 @@ class TestReviewEndpointExistingComments:
         assert gh.list_review_comments_calls == 0
 
 
+class TestSystemicFindingsSynthesis:
+    """End-to-end wiring for the systemic/cross-cutting synthesis pass (issue
+    #6363): a best-effort provider call, gated on >= 2 in-scope findings and
+    the CODE_REVIEW_SYSTEMIC_SYNTHESIS flag, posted as its own standalone
+    comment and persisted on review_summary.systemic_findings. Default
+    fixture output is two in-scope findings on a.py (see _FakeOutput above),
+    so the gate is open by default in these tests.
+    """
+
+    def _install_provider(
+        self, monkeypatch: pytest.MonkeyPatch, review_app, synthesize: Any
+    ) -> None:
+        import software_engineering_team.engine_provider as engine_provider
+
+        class _Provider:
+            def run_pr_code_review(self, **_kw: Any) -> Any:
+                out = review_app["github"]["agent_output"]
+                if isinstance(out, Exception):
+                    raise out
+                return out
+
+            def synthesize_systemic_findings(
+                self, findings: Any, changed_context: Any, task_description: str
+            ) -> Any:
+                return synthesize(findings, changed_context, task_description)
+
+        monkeypatch.setattr(engine_provider, "_provider", _Provider())
+
+    def test_posts_standalone_comment_and_persists_summary(
+        self, monkeypatch: pytest.MonkeyPatch, review_app
+    ) -> None:
+        result = [
+            {
+                "title": "Shared root cause",
+                "description": "Both findings stem from the same missing check.",
+                "related_locations": [
+                    {"file_path": "a.py", "description": "desc"},
+                    {"file_path": "a.py", "description": "desc"},
+                ],
+            }
+        ]
+        calls: list[Any] = []
+        self._install_provider(monkeypatch, review_app, lambda *a: (calls.append(a), result)[1])
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["review_summary"]["systemic_findings"] == result
+        assert len(calls) == 1
+        assert len(calls[0][0]) == 2  # both in-scope findings offered to synthesis
+        systemic_comments = [b for _n, b in gh.comments if "Systemic / cross-cutting findings" in b]
+        assert len(systemic_comments) == 1
+        assert "Shared root cause" in systemic_comments[0]
+
+    def test_no_pattern_found_posts_no_comment(
+        self, monkeypatch: pytest.MonkeyPatch, review_app
+    ) -> None:
+        self._install_provider(monkeypatch, review_app, lambda *a: [])
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["review_summary"]["systemic_findings"] == []
+        assert not any("Systemic / cross-cutting findings" in b for _n, b in gh.comments)
+
+    def test_disabled_by_env_flag_skips_synthesis_and_comment(
+        self, monkeypatch: pytest.MonkeyPatch, review_app
+    ) -> None:
+        monkeypatch.setenv("CODE_REVIEW_SYSTEMIC_SYNTHESIS", "false")
+        calls: list[Any] = []
+        self._install_provider(monkeypatch, review_app, lambda *a: (calls.append(a), [])[1])
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["review_summary"]["systemic_findings"] == []
+        assert calls == []  # the provider is never even called when disabled
+        assert not any("Systemic / cross-cutting findings" in b for _n, b in gh.comments)
+
+    def test_single_in_scope_finding_skips_synthesis(
+        self, monkeypatch: pytest.MonkeyPatch, review_app
+    ) -> None:
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[_FakeReviewIssue("high", line=2)]
+        )
+        calls: list[Any] = []
+        self._install_provider(monkeypatch, review_app, lambda *a: (calls.append(a), [])[1])
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["review_summary"]["systemic_findings"] == []
+        assert calls == []  # a single finding cannot be "cross-cutting"
+
+    def test_provider_raising_never_fails_the_review(
+        self, monkeypatch: pytest.MonkeyPatch, review_app
+    ) -> None:
+        def _boom(*_a: Any) -> Any:
+            raise RuntimeError("synthesis blew up")
+
+        self._install_provider(monkeypatch, review_app, _boom)
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["review_summary"]["systemic_findings"] == []
+
+    def test_main_review_submission_failure_never_orphans_the_systemic_comment(
+        self, monkeypatch: pytest.MonkeyPatch, review_app
+    ) -> None:
+        """The systemic comment posts only after _post_review_comments succeeds.
+
+        If it posted first and the main review submission then hit an
+        untolerated (non-API) error, the job would fail but the systemic
+        comment would already be on the PR, referencing findings whose own
+        comments never landed -- and a retried review would post a second
+        copy on top of it. Simulating that failure here must leave zero
+        standalone comments posted at all.
+        """
+        result = [{"title": "t", "description": "d", "related_locations": []}]
+        self._install_provider(monkeypatch, review_app, lambda *a: result)
+        review_app["github"]["client"].review_exc = RuntimeError("kaboom")
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert not any("Systemic / cross-cutting findings" in b for _n, b in gh.comments)
+
+
 class TestReviewPersistence:
     """The review flow records a code_review_runs row on start and keeps it in
     lockstep with job state. These tests capture the store calls (the real store
@@ -3719,9 +3856,7 @@ class TestDiffGroundedContractMatrix:
         assert summary["pending_issue_proposals"] == []
         # Verify it landed as a line-anchored review comment on line 2.
         assert len(gh.submitted_reviews) >= 1
-        all_comments = [
-            c for rev in gh.submitted_reviews for c in rev.get("comments", [])
-        ]
+        all_comments = [c for rev in gh.submitted_reviews for c in rev.get("comments", [])]
         assert any(
             c.get("line") == 2
             and c.get("side") == "RIGHT"
@@ -3807,9 +3942,7 @@ class TestDiffGroundedContractMatrix:
         # Never posted as any kind of PR comment.
         assert summary["total_issues"] == 0
         assert all("null deref in legacy code" not in body for _n, body in gh.comments)
-        assert all(
-            "null deref in legacy code" not in c.get("body", "") for c in gh.review_comments
-        )
+        assert all("null deref in legacy code" not in c.get("body", "") for c in gh.review_comments)
         for rev in gh.submitted_reviews:
             for c in rev.get("comments", []):
                 assert "null deref in legacy code" not in c.get("body", "")
@@ -3842,12 +3975,8 @@ class TestDiffGroundedContractMatrix:
         # Never routed to a proposal.
         assert summary["pending_issue_proposals"] == []
         # Verify inline comment exists.
-        all_comments = [
-            c for rev in gh.submitted_reviews for c in rev.get("comments", [])
-        ]
-        assert any(
-            "mistagged defect on added line" in c.get("body", "") for c in all_comments
-        )
+        all_comments = [c for rev in gh.submitted_reviews for c in rev.get("comments", [])]
+        assert any("mistagged defect on added line" in c.get("body", "") for c in all_comments)
 
     def test_off_diff_untagged_finding_routes_to_proposal(self, review_app) -> None:
         """Variant of cell 4: an off-diff finding with NO pre_existing tag at
@@ -3894,9 +4023,7 @@ class TestDiffGroundedContractMatrix:
         assert summary["inline_comments"] == 1
         assert summary["pending_issue_proposals"] == []
         # Verify it landed as a line-anchored inline comment on line 1.
-        all_comments = [
-            c for rev in gh.submitted_reviews for c in rev.get("comments", [])
-        ]
+        all_comments = [c for rev in gh.submitted_reviews for c in rev.get("comments", [])]
         assert any(
             c.get("line") == 1
             and c.get("side") == "RIGHT"
