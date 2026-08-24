@@ -525,7 +525,11 @@ def test_stream_drops_redundant_system_prompt_when_it_matches_split_content() ->
 def test_stream_drops_redundant_system_prompt_without_cache_breakpoint() -> None:
     """Same redundancy-detection, but with no CacheBreakpoint present and a
     client that doesn't support caching — the plain-flatten branch must also
-    avoid duplicating the persona text."""
+    avoid duplicating the persona text, and must preserve the "\\n" separator
+    between blocks (reusing system_prompt rather than re-flattening
+    system_prompt_content with _flatten_system_prompt_content's
+    separator-less join, which would run blocks together with no
+    boundary)."""
     client = _RecordingClient({"ok": True})
     model = LLMClientModel(client)
 
@@ -538,8 +542,9 @@ def test_stream_drops_redundant_system_prompt_without_cache_breakpoint() -> None
     )
 
     call = client.chat_calls[0]
-    # "persona" and "extra" appear exactly once each, not doubled.
-    assert call["messages"][0] == {"role": "system", "content": "personaextra"}
+    # "persona" and "extra" appear exactly once each, not doubled, and stay
+    # separated by the newline system_prompt already carried.
+    assert call["messages"][0] == {"role": "system", "content": "persona\nextra"}
 
 
 def test_stream_propagates_team_through_to_thread() -> None:

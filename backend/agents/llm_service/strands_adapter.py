@@ -597,7 +597,12 @@ class LLMClientModel(Model):
             leading: List[Any] = [] if redundant else ([system_prompt] if system_prompt else [])
             system_content: Any = leading + content_segments
         elif redundant:
-            system_content = _flatten_system_prompt_content(system_prompt_content)
+            # By definition of "redundant", system_prompt IS exactly the
+            # "\n"-joined text of content_segments already — reuse it
+            # directly rather than re-flattening system_prompt_content with
+            # _flatten_system_prompt_content's separator-less join (""),
+            # which would run adjacent blocks together with no boundary.
+            system_content = system_prompt
         else:
             system_content = "\n\n".join(
                 part
