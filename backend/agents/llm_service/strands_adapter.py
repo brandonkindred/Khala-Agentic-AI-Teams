@@ -201,7 +201,7 @@ def _system_prompt_is_redundant_with_content(
           ``system_prompt`` is never "redundant" — there is nothing to drop).
           Never raises.
     """
-    if system_prompt is None:
+    if system_prompt is None or not content_segments:
         return False
     derived = "\n".join(
         seg.text if isinstance(seg, CacheBreakpoint) else seg for seg in content_segments

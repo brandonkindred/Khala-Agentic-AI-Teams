@@ -5,9 +5,14 @@ Asserts that:
   Agent's system_prompt (for trusted metadata like spec/architecture).
 - Untrusted file context (code under review) stays in the user message for
   QA and Security gates — never elevated to system-level instructions.
-- QA/Security's trusted, non-code shared context (task description,
-  architecture overview) IS elevated to a ``CacheBreakpoint``-marked
-  ``system_prompt_content`` segment.
+- QA's trusted, non-code shared context (task description, architecture
+  overview) IS elevated to a ``CacheBreakpoint``-marked ``system_prompt_content``
+  segment, via ``run_structured_persona``/a Strands ``Agent``.
+- Security's trusted context (task description, architecture overview)
+  stays in the user prompt instead: ``run_single_shot_review``'s
+  ``LLMClient.complete_json`` path doesn't consume ``system_prompt_content``
+  on any real client (Claude/Ollama/RunPod/Dummy), so there is no channel to
+  elevate it to.
 - Code Review's ``_build_shared_review_prefix`` produces stable breakpoint text
   from trusted spec/architecture metadata.
 - The same breakpoint text is produced on repeated calls (stability).
