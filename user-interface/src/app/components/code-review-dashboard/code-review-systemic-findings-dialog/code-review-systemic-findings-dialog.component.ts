@@ -26,6 +26,11 @@ export class CodeReviewSystemicFindingsDialogComponent {
   readonly data = inject<CodeReviewSystemicFindingsDialogData>(MAT_DIALOG_DATA);
   readonly ref = inject<MatDialogRef<CodeReviewSystemicFindingsDialogComponent>>(MatDialogRef);
 
+  /**
+   * Closes the dialog.
+   *
+   * Side effect: dismisses the dialog via the injected `MatDialogRef`.
+   */
   close(): void {
     this.ref.close();
   }
