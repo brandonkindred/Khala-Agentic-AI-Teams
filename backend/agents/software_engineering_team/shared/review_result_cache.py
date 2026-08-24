@@ -120,6 +120,23 @@ class ReviewResultCache(Generic[TOutput]):
     def _namespace(self) -> str:
         return cache_namespace_for(self._namespace_stem)
 
+    def capacity(self) -> int:
+        """Resolve this cache's current capacity from the environment.
+
+        Preconditions:
+            - None.
+        Postconditions:
+            - Returns ``cache_capacity_for(env_var, default_capacity)``,
+              resolved fresh on this call (not cached on ``self``), so a
+              caller that wants ``get``/``put`` fused into a single
+              disabled-means-never-read-or-write policy (the convention every
+              pre-``ReviewResultCache`` per-agent wrapper used) can gate its
+              own ``get`` call on ``capacity() > 0`` before calling it --
+              see the class docstring's note on why ``get`` itself does not
+              fuse that gate in.
+        """
+        return cache_capacity_for(self._env_var, self._default_capacity)
+
     def get(self, input_data: BaseModel, model_fp: str) -> Optional[TOutput]:
         """Look up the cached result for ``input_data``/``model_fp``.
 
