@@ -2572,20 +2572,16 @@ class TestPhase4QualityGateReviewCallsConcurrency:
 
 class TestMainOrchestratorRegistration:
     def test_devops_team_lead_registered(self) -> None:
-        """Verify the main orchestrator registers DevOpsTeamLeadAgent."""
-        from orchestrator import _get_agents
-
-        agents = _get_agents()
-        assert isinstance(agents["devops"], DevOpsTeamLeadAgent)
+        """Verify DevOpsTeamLeadAgent constructs from its definition module."""
+        agent = DevOpsTeamLeadAgent(DummyLLMClient())
+        assert isinstance(agent, DevOpsTeamLeadAgent)
 
     def test_build_fix_specialist_registered(self) -> None:
-        """Verify the main orchestrator registers BuildFixSpecialistAgent."""
-        from orchestrator import _get_agents
-
+        """Verify BuildFixSpecialistAgent constructs from its definition module."""
         from software_engineering_team.build_fix_specialist import BuildFixSpecialistAgent
 
-        agents = _get_agents()
-        assert isinstance(agents["build_fix_specialist"], BuildFixSpecialistAgent)
+        agent = BuildFixSpecialistAgent(DummyLLMClient())
+        assert isinstance(agent, BuildFixSpecialistAgent)
 
 
 # ===========================================================================

@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Optional
 from unittest.mock import MagicMock
 
+import pytest
+
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
@@ -1233,6 +1235,165 @@ class TestBackendDevelopmentAgentBranchReuse:
         assert mock_debug.called
         logged = " ".join(str(arg) for call in mock_debug.call_args_list for arg in call[0])
         assert "job_updater failed" in logged
+
+
+class TestBackendDocAgentDeprecated:
+    """doc_agent is accepted for backward compatibility but never forwarded downstream."""
+
+    def _patch_success(self, monkeypatch, orch, doc_phase):
+        from backend_code_v2_team.models import (
+            DeliverResult,
+            DocumentationPhaseResult,
+            ExecutionResult,
+            PlanningResult,
+        )
+
+        class _GitAgent:
+            def create_feature_branch(self, *_args, **_kwargs):
+                return True, "feature/api"
+
+            def commit_current_changes(self, *_args, **_kwargs):
+                return True, "committed"
+
+        monkeypatch.setattr(orch, "checkout_branch", lambda *_a, **_kw: (True, "checked out"))
+        monkeypatch.setattr(
+            orch.BackendDevelopmentAgent,
+            "_build_and_validate_tool_agents",
+            lambda _self, _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: _GitAgent()},
+        )
+        monkeypatch.setattr(
+            orch.BackendDevelopmentAgent, "_read_repo_code", lambda _self, _repo_path: ""
+        )
+        monkeypatch.setattr(
+            orch,
+            "run_planning",
+            lambda **_kwargs: PlanningResult(microtasks=[Microtask(id="mt-1")], summary="planned"),
+        )
+        monkeypatch.setattr(
+            orch,
+            "run_execution_with_review_gates",
+            lambda **_kwargs: ExecutionResult(
+                files={"app.py": "print('ok')\n"},
+                microtasks=[Microtask(id="mt-1", status=MicrotaskStatus.COMPLETED)],
+                summary="implemented",
+            ),
+        )
+        monkeypatch.setattr(
+            doc_phase,
+            "run_documentation_phase",
+            lambda **_kwargs: DocumentationPhaseResult(summary="docs"),
+        )
+        monkeypatch.setattr(
+            orch,
+            "run_deliver",
+            lambda **kwargs: DeliverResult(
+                branch_name=kwargs["feature_branch_name"], branch_ready=True, summary="ready"
+            ),
+        )
+
+    def _task(self):
+        from shared.dev_models.models import Task, TaskStatus, TaskType
+
+        return Task(
+            id="api",
+            type=TaskType.BACKEND,
+            assignee="backend-code-v2",
+            status=TaskStatus.PENDING,
+            title="API",
+            description="Build API",
+        )
+
+    def test_dev_agent_warns_when_doc_agent_passed(self, tmp_path, monkeypatch):
+        from backend_code_v2_team import orchestrator as orch
+        from backend_code_v2_team.phases import _profile as doc_phase
+
+        (tmp_path / "pyproject.toml").write_text("[tool.ruff]\n[tool.pytest.ini_options]\n")
+        (tmp_path / "tests").mkdir()
+
+        self._patch_success(monkeypatch, orch, doc_phase)
+
+        with pytest.warns(DeprecationWarning, match="doc_agent"):
+            result = orch.BackendDevelopmentAgent(MagicMock()).run_workflow(
+                repo_path=tmp_path,
+                task=self._task(),
+                merge_to_development=False,
+                doc_agent=MagicMock(),
+            )
+
+        assert result.success is True
+
+    def test_dev_agent_no_warning_when_doc_agent_omitted(self, tmp_path, monkeypatch, recwarn):
+        from backend_code_v2_team import orchestrator as orch
+        from backend_code_v2_team.phases import _profile as doc_phase
+
+        (tmp_path / "pyproject.toml").write_text("[tool.ruff]\n[tool.pytest.ini_options]\n")
+        (tmp_path / "tests").mkdir()
+
+        self._patch_success(monkeypatch, orch, doc_phase)
+
+        result = orch.BackendDevelopmentAgent(MagicMock()).run_workflow(
+            repo_path=tmp_path,
+            task=self._task(),
+            merge_to_development=False,
+        )
+
+        assert result.success is True
+        assert not any(issubclass(w.category, DeprecationWarning) for w in recwarn.list)
+
+    def test_team_lead_warns_even_when_setup_fails(self, tmp_path, monkeypatch):
+        """The team-lead warns for doc_agent unconditionally, before the lint/test gate."""
+        from backend_code_v2_team import orchestrator as orch
+
+        monkeypatch.setattr(
+            orch,
+            "run_setup",
+            lambda **_kwargs: SetupResult(linting_configured=False, testing_configured=False),
+        )
+
+        with pytest.warns(DeprecationWarning, match="doc_agent"):
+            result = orch.BackendCodeV2TeamLead(MagicMock()).run_workflow(
+                repo_path=tmp_path,
+                task=self._task(),
+                doc_agent=MagicMock(),
+            )
+
+        assert result.success is False
+        assert "linting is not configured" in result.failure_reason.lower()
+
+    def test_team_lead_warns_exactly_once_when_delegation_succeeds(self, tmp_path, monkeypatch):
+        """The forwarded doc_agent=None to the dev agent must not double the warning."""
+        from backend_code_v2_team import orchestrator as orch
+        from backend_code_v2_team.models import BackendCodeV2WorkflowResult
+
+        received: dict = {}
+
+        class _DevelopmentAgent:
+            def __init__(self, _llm):
+                pass
+
+            def run_workflow(self, **kwargs):
+                received.update(kwargs)
+                return BackendCodeV2WorkflowResult(task_id="api", success=True)
+
+        monkeypatch.setattr(
+            orch,
+            "run_setup",
+            lambda **_kwargs: SetupResult(linting_configured=True, testing_configured=True),
+        )
+        monkeypatch.setattr(orch, "BackendDevelopmentAgent", _DevelopmentAgent)
+
+        with pytest.warns(DeprecationWarning, match="doc_agent") as record:
+            result = orch.BackendCodeV2TeamLead(MagicMock()).run_workflow(
+                repo_path=tmp_path,
+                task=self._task(),
+                merge_to_development=False,
+                doc_agent=MagicMock(),
+            )
+
+        assert result.success is True
+        assert received["doc_agent"] is None
+        doc_agent_warnings = [w for w in record.list if issubclass(w.category, DeprecationWarning)]
+        assert len(doc_agent_warnings) == 1
 
 
 # ---------------------------------------------------------------------------

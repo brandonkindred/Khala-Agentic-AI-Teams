@@ -80,6 +80,8 @@ BOILERPLATE_VARIANTS_COUNT = 3
 ELEVATOR_PITCHES_COUNT = 3
 BRAND_ARCHETYPES_MIN = 1
 BRAND_ARCHETYPES_MAX = 2
+PERSONALITY_TRAITS_MIN = 3
+PERSONALITY_TRAITS_MAX = 5
 MESSAGING_PILLARS_MIN = 3
 MESSAGING_PILLARS_MAX = 4
 PERSONA_PROFILES_MIN = 2
@@ -612,7 +614,10 @@ BrandArchetypeOutput = _derive_strict_variant(
     + _STRICT_TWIN_DOC_SUFFIX,
     archetype=(str, Field(min_length=1)),
     rationale=(str, Field(min_length=1)),
-    personality_traits=(List[NonEmptyStr], Field(min_length=1)),
+    personality_traits=(
+        List[NonEmptyStr],
+        Field(min_length=PERSONALITY_TRAITS_MIN, max_length=PERSONALITY_TRAITS_MAX),
+    ),
 )
 
 
