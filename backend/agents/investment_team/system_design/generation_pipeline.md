@@ -2,7 +2,7 @@
 
 This is the "how it all works together" deep dive: what actually happens
 **inside** a single Strategy Lab design attempt, from a bare cycle request to
-a persisted `StrategyLabRecord`. It complements, rather than duplicates,
+an assembled `StrategyLabRecord`. It complements, rather than duplicates,
 [`strategy_lab_pipeline.md`](./strategy_lab_pipeline.md), which documents the
 *outer*, SSE-facing cycle phases a UI client sees
 (`ideating → fetching_data → backtest → aligning → analyzing →
@@ -12,17 +12,23 @@ loop) and "backtest" (synthesis, refinement, verification) — and is the
 companion to [`architecture.md`](./architecture.md)'s container view and §11
 (orchestrator composition).
 
-Everything below happens inside **one Temporal activity**,
-`run_design_attempt_activity`
+Everything below through "Record assembly" happens inside **one Temporal
+activity**, `run_design_attempt_activity`
 ([`../strategy_lab/temporal/activities.py`](../strategy_lab/temporal/activities.py):935),
 a thin wrapper around
 `StrategyLabOrchestrator._run_design_attempt`
 ([`../strategy_lab/orchestrator_design.py`](../strategy_lab/orchestrator_design.py):1209-1452).
-Temporal's durability boundary is the *design attempt*, not any phase inside
-it — a worker crash mid-attempt discards everything except a design-phase
-checkpoint (see "Design-attempt checkpointing" in
-[`../strategy_lab/README.md`](../strategy_lab/README.md)) and the attempt
-restarts from the top on retry.
+That activity's own scope ends at record assembly: it returns the assembled
+`StrategyLabRecord` (JSON-dumped) to the calling `StrategyLabCycleWorkflow`
+as `{"kind": "record", "record": ...}` — it does **not** persist that record
+or run paper trading itself. Both of those happen one step later, in
+`finalize_cycle_record_activity` (see "Batch / Temporal activity mapping"
+below), which is the actual durable-write and paper-trading boundary.
+Temporal's durability boundary for everything *inside* this document is the
+*design attempt* itself, not any phase inside it — a worker crash mid-attempt
+discards everything except a design-phase checkpoint (see "Design-attempt
+checkpointing" in [`../strategy_lab/README.md`](../strategy_lab/README.md))
+and the attempt restarts from the top on retry.
 
 ## The 4-phase contract
 
@@ -60,9 +66,13 @@ DesignAgent.run/.revise → SpecReadinessGate (phase="design") → DesignReviewA
   internal **self-review** pass (`STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED`,
   default on): a second LLM call audits prose ↔ predicate completeness and
   risk-math coherence, self-revises up to
-  `STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS` times, and re-audits the
-  revision before returning — so a self-revision that introduces a fresh
-  contradiction never reaches the external reviewer.
+  `STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS` times, and re-audits each
+  revision before returning — so a *successful* self-revision that
+  introduced a fresh contradiction gets caught before the external reviewer
+  ever sees it. This is best-effort, not a hard guarantee: if the final
+  self-revision call or its re-audit itself fails, `_with_self_review`
+  returns the current spec unchanged and explicitly defers the residual
+  issue to the external `DesignReviewAgent` loop, which stays authoritative.
 - **Mechanical-repair pre-flight** (`../strategy_lab/mechanical_repair.py`,
   gated by `STRATEGY_LAB_MECHANICAL_REPAIR_ENABLED`) runs before *every*
   review round, regardless of the readiness verdict — fully-determined,
@@ -114,7 +124,7 @@ per spec:
   structured `entry_rules`/`exit_rules`/`sizing` DSL into a thin `on_bar`
   shim. All entry/exit decisions are made **engine-side** by
   `_EngineEntryDispatcher`/`_EngineExitDispatcher`
-  (`../strategy_lab/executor/predicate_evaluator.py`), so the compiled path
+  (`../trading_service/service.py`), so the compiled path
   cannot drift from the spec the way hand-authored code can — it's "faithful
   by construction." Output is byte-identical for a given spec (a SHA-256
   content hash is embedded in the header; no `datetime.now()`/`uuid`/`id()`).

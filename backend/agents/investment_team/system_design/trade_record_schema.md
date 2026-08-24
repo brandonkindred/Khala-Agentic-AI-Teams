@@ -5,9 +5,9 @@ round-trip (entry → exit). The legacy `TradeSimulationEngine` bar-by-bar
 evaluator that used to produce these has been retired — strategy code now
 runs exclusively through the event-driven `trading_service/` engine
 (`FillSimulator`, [`trading_service/engine/fill_simulator.py`](../trading_service/engine/fill_simulator.py)),
-and Strategy-Lab-generated trades are converted into `TradeRecord`s by
-[`strategy_lab/executor/trade_builder.py::build_trade_records`](../strategy_lab/executor/trade_builder.py).
-The same schema applies to **both** backtest trades (stored in
+which builds the finalized `TradeRecord`s directly; `TradingService` running
+that engine is the actual production path for both backtests and paper
+trading. The same schema applies to **both** backtest trades (stored in
 `BacktestRecord.trades`) and paper-trading trades (stored in
 `PaperTradingSession.trades`), so downstream analysis tooling can treat
 them uniformly.
@@ -74,12 +74,20 @@ equal the fill prices. New analysis code should prefer the explicit
 
 ## Where it's produced
 
-See [`trading_service/engine/fill_simulator.py::FillSimulator`](../trading_service/engine/fill_simulator.py),
-the live event-driven fill engine, and
-[`strategy_lab/executor/trade_builder.py::build_trade_records`](../strategy_lab/executor/trade_builder.py),
-which applies the same slippage/cost math post-hoc when converting a
-Strategy-Lab-generated strategy's raw trade dicts into `TradeRecord`s.
+The production path — both sandboxed backtests and paper trading — is
+[`trading_service/engine/fill_simulator.py::FillSimulator`](../trading_service/engine/fill_simulator.py),
+the live event-driven fill engine driven by `TradingService`.
 `OpenPosition` (`trade_simulator.py`) carries `entry_bid_price` and
 `entry_order_type` from the entry bar through to the close; the exit bar's
 raw close becomes `exit_bid_price`, and slippage is applied on both sides
-symmetrically.
+symmetrically. Transaction costs are charged on entry and exit notional
+separately: `(entry_notional + exit_notional) * cost_rate`.
+
+[`strategy_lab/executor/trade_builder.py::build_trade_records`](../strategy_lab/executor/trade_builder.py)
+is a separate, older raw-trade-dict-to-`TradeRecord` converter with only one
+remaining test caller — it is **not** part of the current production
+execution path (`trading_service/modes/sandbox_compat.py`'s own docstring
+notes `FillSimulator` makes it unnecessary there), and its cost math is not
+equivalent to `FillSimulator`'s: it charges a flat `position_value * cost_mult
+* 2` rather than summing entry and exit notional separately. Don't treat it
+as a parity reference for either the execution path or the cost formula.
