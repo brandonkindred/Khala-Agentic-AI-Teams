@@ -106,17 +106,22 @@ def run_backend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
     tests_dir = backend_dir / "tests"
     if tests_dir.exists() and any(tests_dir.rglob("test_*.py")):
         req_txt = backend_dir / "requirements.txt"
-        if req_txt.exists():
-            try:
-                with pip_install_lock():
+        # Held across both the install and the pytest run: pytest imports whatever
+        # is in site-packages at collection time, so releasing the lock between
+        # install and pytest would let a second worker's install mutate those same
+        # packages mid-collection — reintroducing the race this lock exists to
+        # prevent.
+        with pip_install_lock():
+            if req_txt.exists():
+                try:
                     run_command(
                         [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
                         cwd=backend_dir,
                         timeout=120,
                     )
-            except Exception as e:
-                logger.warning("Build Specialist: pip install failed (non-fatal): %s", e)
-        test_result = run_pytest(backend_dir, python_exe=sys.executable)
+                except Exception as e:
+                    logger.warning("Build Specialist: pip install failed (non-fatal): %s", e)
+            test_result = run_pytest(backend_dir, python_exe=sys.executable)
         if not test_result.success:
             failures = test_result.parsed_failures("pytest")
             for f in failures:

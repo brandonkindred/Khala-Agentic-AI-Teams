@@ -214,25 +214,28 @@ def _run_build_verification(
         # Also try pytest if tests directory exists
         tests_dir = backend_dir / "tests"
         if tests_dir.exists() and any(tests_dir.rglob("test_*.py")):
-            # Install deps before pytest so agent-added packages (e.g. sqlalchemy) are available
+            # Install deps before pytest so agent-added packages (e.g. sqlalchemy) are available.
+            # Held across both the install and the pytest run: pytest imports whatever is in
+            # site-packages at collection time, so releasing the lock between install and pytest
+            # would let a second worker's install mutate those same packages mid-collection.
             req_txt = backend_dir / "requirements.txt"
-            # integration-only: shells out to `pip install`
-            if req_txt.exists():  # pragma: no cover
-                try:
-                    with pip_install_lock():
+            with pip_install_lock():
+                # integration-only: shells out to `pip install`
+                if req_txt.exists():  # pragma: no cover
+                    try:
                         pip_result = run_command(
                             [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
                             cwd=backend_dir,
                             timeout=120,
                         )
-                    if not pip_result.success:
-                        logger.warning(
-                            "pip install -r requirements.txt failed (non-fatal): %s",
-                            pip_result.error_summary,
-                        )
-                except Exception as e:
-                    logger.warning("pip install before pytest failed (non-fatal): %s", e)
-            test_result = run_pytest(backend_dir, python_exe=sys.executable)
+                        if not pip_result.success:
+                            logger.warning(
+                                "pip install -r requirements.txt failed (non-fatal): %s",
+                                pip_result.error_summary,
+                            )
+                    except Exception as e:
+                        logger.warning("pip install before pytest failed (non-fatal): %s", e)
+                test_result = run_pytest(backend_dir, python_exe=sys.executable)
             if not test_result.success:
                 failures = test_result.parsed_failures("pytest")
                 if failures:
@@ -682,28 +685,35 @@ def _try_build_fix_one_at_a_time(
             tests_dir = project_dir / "tests"
             if tests_dir.exists() and any(tests_dir.rglob("test_*.py")):
                 req_txt = project_dir / "requirements.txt"
-                if req_txt.exists():
-                    try:
-                        with pip_install_lock():
+                # Held across both the install and the pytest run: pytest imports whatever
+                # is in site-packages at collection time, so releasing the lock between
+                # install and pytest would let a second worker's install mutate those same
+                # packages mid-collection — reintroducing the race this lock exists to
+                # prevent.
+                with pip_install_lock():
+                    if req_txt.exists():
+                        try:
                             pip_result = run_command(
                                 [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
                                 cwd=project_dir,
                                 timeout=120,
                             )
-                        if not pip_result.success:
+                            if not pip_result.success:
+                                logger.warning(
+                                    "Build fix: pip install -r requirements.txt failed "
+                                    "(non-fatal): %s",
+                                    pip_result.error_summary,
+                                )
+                        except Exception as e:
                             logger.warning(
-                                "Build fix: pip install -r requirements.txt failed (non-fatal): %s",
-                                pip_result.error_summary,
+                                "Build fix: failed to install requirements.txt before test run: %s",
+                                e,
                             )
+                    try:
+                        test_result = run_pytest(project_dir, python_exe=sys.executable)
                     except Exception as e:
-                        logger.warning(
-                            "Build fix: failed to install requirements.txt before test run: %s", e
-                        )
-                try:
-                    test_result = run_pytest(project_dir, python_exe=sys.executable)
-                except Exception as e:
-                    logger.warning("Build fix: pytest failed to run: %s", e)
-                    return False, str(e)
+                        logger.warning("Build fix: pytest failed to run: %s", e)
+                        return False, str(e)
                 if not test_result.success:
                     for f in test_result.parsed_failures("pytest"):
                         issues.append(

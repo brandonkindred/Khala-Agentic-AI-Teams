@@ -11,25 +11,36 @@ concurrently, their installs race against each other: interleaved writes to
 the same package's files can corrupt the shared environment, or let one
 worker's ``pytest`` run start against a half-written package.
 
-:func:`pip_install_lock` serializes that install step across concurrent
-callers via an exclusive ``fcntl.flock`` on a single well-known lock file —
-the same mechanism (and the same reasoning: it must hold "even across worker
-processes on the shared host volume", not only threads in one process) that
-``unified_api``'s ``_ensure_repo_clone`` already uses to serialize concurrent
-clone/fetch of one checkout (see ``clone_workspace.clone_lock_path``). Unlike
-that per-checkout lock, this one is *not* keyed by repo/worktree path: the
-resource it protects (the shared interpreter's ``site-packages``) is the same
-regardless of which worktree's ``requirements.txt`` is being installed, so a
-single fixed path is correct here.
+:func:`pip_install_lock` serializes that install step, and the ``pytest`` run
+that reads its result, across concurrent callers via an exclusive
+``fcntl.flock`` on a single well-known lock file. Every call site holds the
+lock across *both* the install and the subsequent ``run_pytest`` call, not
+just the install: ``pytest`` imports whatever is in ``site-packages`` at
+collection time, so releasing the lock between install and pytest would let
+a second worker's install mutate those same packages mid-collection —
+reintroducing the exact race this lock exists to prevent.
+
+The lock itself is the same mechanism (and the same reasoning: it must hold
+"even across worker processes on the shared host volume", not only threads
+in one process) that ``unified_api``'s ``_ensure_repo_clone`` already uses to
+serialize concurrent clone/fetch of one checkout (see
+``clone_workspace.clone_lock_path``). Unlike that per-checkout lock, this one
+is *not* keyed by repo/worktree path: the resource it protects (the shared
+interpreter's ``site-packages``) is the same regardless of which worktree's
+``requirements.txt`` is being installed, so a single fixed path is correct
+here.
 
 Trade-off (documented per the module owning the wider guarantee,
 ``worktree_manager``): this serializes concurrent same-stack backend
-workers' install step — a single global serialization point, not per-worker
-isolation. A per-worktree virtualenv would fully isolate installs instead,
-at the cost of a fresh ``pip install`` (disk + time) per worktree and
-plumbing every downstream ``run_pytest(python_exe=...)`` call to the right
-interpreter; the lock is the minimal fix for the actual failure mode (races
-during the narrow install window), not a general isolation mechanism.
+workers' install-and-test step — a single global serialization point, not
+per-worker isolation. Two same-stack workers with tests can no longer build
+their pytest results concurrently; each waits for the other's install+test
+window to finish. A per-worktree virtualenv would fully isolate installs
+(and let pytest runs overlap) instead, at the cost of a fresh ``pip install``
+(disk + time) per worktree and plumbing every downstream
+``run_pytest(python_exe=...)`` call to the right interpreter; the lock is
+the minimal fix for the actual failure mode (races on the shared
+environment), not a general isolation mechanism.
 """
 
 from __future__ import annotations

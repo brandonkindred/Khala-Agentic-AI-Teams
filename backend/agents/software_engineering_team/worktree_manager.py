@@ -31,13 +31,17 @@ global-environment mutation is the backend worker's dependency install
 interpreter's own ``site-packages``, the same target regardless of which
 worktree's ``requirements.txt`` triggered it. That is guarded, not made
 per-worktree, by ``pip_install_lock`` (``software_engineering_team.
-pip_install_lock``): an exclusive, cross-process ``fcntl.flock`` around each
-install call site serializes concurrent same-stack backend workers' install
-step so they never race on the same shared files. Trade-off: this is a single
-global serialization point (concurrent installs queue up rather than running
-in parallel), not full isolation — a per-worktree virtualenv would isolate
-installs completely, at the cost of a fresh ``pip install`` (disk + time) per
-worktree and routing every downstream ``pytest`` invocation to the matching
+pip_install_lock``): an exclusive, cross-process ``fcntl.flock`` held across
+both the install and the pytest run that follows it at each call site (not
+just the install — pytest reads whatever is in site-packages at collection
+time, so releasing the lock any earlier would let a second worker's install
+mutate it mid-collection) serializes concurrent same-stack backend workers'
+install-and-test step so they never race on the same shared files.
+Trade-off: this is a single global serialization point (concurrent
+installs-and-tests queue up rather than running in parallel), not full
+isolation — a per-worktree virtualenv would isolate installs completely, at
+the cost of a fresh ``pip install`` (disk + time) per worktree and routing
+every downstream ``pytest`` invocation to the matching
 interpreter, for a race that only a narrow overlap window makes possible.
 """
 

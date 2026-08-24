@@ -191,6 +191,42 @@ def test_backend_installs_requirements_before_pytest(tmp_path: Path, monkeypatch
     assert lock_calls == ["entered"]  # guarded by the shared pip install lock
 
 
+def test_backend_lock_spans_install_and_pytest(tmp_path: Path, monkeypatch):
+    """The lock must stay held across BOTH the install and the pytest run.
+
+    Releasing it between the two would let a second worker's install mutate
+    site-packages while this worker's pytest is still importing from it —
+    exactly the race the lock exists to prevent. Verified here by recording
+    the order of lock-enter/install/pytest/lock-exit events.
+    """
+    (tmp_path / "a.py").write_text("print('ok')\n")
+    (tmp_path / "requirements.txt").write_text("pytest\n")
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_x.py").write_text("def test_a():\n    assert True\n")
+    _passing_syntax(monkeypatch)
+    events = []
+    monkeypatch.setattr(cr, "run_command", lambda *a, **kw: events.append("install") or None)
+    monkeypatch.setattr(
+        cr,
+        "run_pytest",
+        lambda p, python_exe=None: (
+            events.append("pytest")
+            or CommandResult(success=True, exit_code=0, stdout="ok", stderr="")
+        ),
+    )
+
+    @contextmanager
+    def _spy_lock():
+        events.append("lock_enter")
+        yield
+        events.append("lock_exit")
+
+    monkeypatch.setattr(tabs, "pip_install_lock", _spy_lock)
+    assert run_backend_build_and_parse(tmp_path) == []
+    assert events == ["lock_enter", "install", "pytest", "lock_exit"]
+
+
 def test_backend_pip_install_failure_is_non_fatal(tmp_path: Path, monkeypatch):
     """A failing pip install is swallowed; pytest still runs and reports failures."""
     (tmp_path / "a.py").write_text("print('ok')\n")
