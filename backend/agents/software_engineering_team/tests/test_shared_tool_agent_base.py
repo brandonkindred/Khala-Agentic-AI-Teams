@@ -17,6 +17,8 @@ from software_engineering_team.shared.tool_agent_base import (
     BaseReviewToolAgent,
     SingleIssueProblemSolveMixin,
     _strands_llm_call_errors,
+    build_code_text,
+    build_shared_tool_agent_review_system_content,
     fill_review_prompt,
     lenient_json_object,
     relevant_code_for_issue,
@@ -236,11 +238,18 @@ class _Microtask:
 
 
 class _Input:
-    def __init__(self, current_files=None, review_issues=None, task_description="d"):
+    def __init__(
+        self,
+        current_files=None,
+        review_issues=None,
+        task_description="d",
+        shared_review_context=None,
+    ):
         self.current_files = current_files or {}
         self.review_issues = review_issues or []
         self.task_description = task_description
         self.microtask = _Microtask()
+        self.shared_review_context = shared_review_context
 
 
 # Provide a module-level Agent symbol so _agent_factory (which resolves Agent
@@ -405,6 +414,130 @@ def test_review_task_description_literal_code_placeholder_not_resubstituted(monk
     assert "1 issue(s) found." in out.summary
     assert seen[0].count(code) == 1
     assert task in seen[0]
+
+
+# ---------------------------------------------------------------------------
+# build_code_text / build_shared_tool_agent_review_system_content
+# ---------------------------------------------------------------------------
+
+
+def test_build_code_text_joins_labeled_blocks():
+    out = build_code_text({"a.ts": "A", "b.ts": "B"})
+    assert out == "--- a.ts ---\nA\n\n--- b.ts ---\nB"
+
+
+def test_build_code_text_empty_files_returns_empty_string():
+    assert build_code_text({}) == ""
+
+
+def test_build_shared_review_system_content_none_when_no_code():
+    """No current_files -> nothing to cache."""
+    assert build_shared_tool_agent_review_system_content({}, "some task") is None
+
+
+def test_build_shared_review_system_content_wraps_cache_breakpoint():
+    from llm_service import CacheBreakpoint
+
+    result = build_shared_tool_agent_review_system_content({"a.ts": "code"}, "do the thing")
+    assert result is not None
+    assert len(result) == 1
+    assert isinstance(result[0], CacheBreakpoint)
+    assert "do the thing" in result[0].text
+    assert "--- a.ts ---\ncode" in result[0].text
+
+
+def test_build_shared_review_system_content_omits_task_when_blank():
+    result = build_shared_tool_agent_review_system_content({"a.ts": "code"}, "")
+    assert "**Task:**" not in result[0].text
+    assert "**Code to review:**" in result[0].text
+
+
+def test_build_shared_review_system_content_identical_inputs_produce_identical_text():
+    """Same (current_files, task_description) -> byte-identical text, the
+    property a Claude-backed provider cache relies on to serve a hit."""
+    first = build_shared_tool_agent_review_system_content({"a.ts": "code"}, "task")
+    second = build_shared_tool_agent_review_system_content({"a.ts": "code"}, "task")
+    assert first[0].text == second[0].text
+
+
+# ---------------------------------------------------------------------------
+# review() with a shared_review_context (once-per-microtask cache extraction)
+# ---------------------------------------------------------------------------
+
+
+class _CapturingAgentFactory:
+    """Callable ``Agent`` stand-in: records the kwargs each build call receives."""
+
+    def __init__(self, response):
+        self._response = response
+        self.build_kwargs: list[dict] = []
+
+    def __call__(self, **kwargs):
+        self.build_kwargs.append(kwargs)
+        return _FakeAgent(self._response)
+
+
+def test_review_with_shared_context_passes_it_as_system_prompt_content(monkeypatch):
+    """When inp.shared_review_context is set, it is forwarded to the agent build
+    call as system_prompt (the CacheBreakpoint segment), not embedded in the
+    user prompt string."""
+    from llm_service import CacheBreakpoint
+
+    shared_ctx = [CacheBreakpoint("**Task:**\nd\n\n**Code to review:**\n--- a.ts ---\ncode")]
+    factory = _CapturingAgentFactory("raw-review")
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    agent.llm = None
+    _patch_agent(monkeypatch, factory)
+
+    out = agent.review(_Input(current_files={"a.ts": "code"}, shared_review_context=shared_ctx))
+
+    assert "1 issue(s) found." in out.summary
+    assert len(factory.build_kwargs) == 1
+    assert factory.build_kwargs[0]["system_prompt"] == shared_ctx
+
+
+def test_review_with_shared_context_excludes_code_from_user_prompt(monkeypatch):
+    """The rendered user prompt must not carry the raw code text when a shared
+    (already-cached) system segment already carries it -- otherwise the
+    per-agent call still re-sends and re-bills the full code block."""
+    seen: list[str] = []
+    code = "UNIQUE_CODE_PAYLOAD_NOT_IN_USER_PROMPT"
+
+    class _Capture:
+        def __call__(self, prompt):
+            seen.append(prompt)
+            return "raw-review"
+
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    agent.llm = None
+    _patch_agent(monkeypatch, lambda *a, **k: _Capture())
+
+    from llm_service import CacheBreakpoint
+
+    shared_ctx = [CacheBreakpoint(f"**Code to review:**\n{code}")]
+    agent.review(_Input(current_files={"a.ts": code}, shared_review_context=shared_ctx))
+
+    assert len(seen) == 1
+    assert code not in seen[0]
+
+
+def test_review_without_shared_context_unchanged(monkeypatch):
+    """Absent shared_review_context (the default -- e.g. direct
+    ToolAgentPhaseInput construction), review() behaves exactly as before this
+    parameter existed: task/code inline in the prompt, no system_prompt kwarg."""
+    factory = _CapturingAgentFactory("raw-review")
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    agent.llm = None
+    _patch_agent(monkeypatch, factory)
+
+    out = agent.review(_Input(current_files={"a.ts": "code"}, task_description="d"))
+
+    assert "1 issue(s) found." in out.summary
+    assert len(factory.build_kwargs) == 1
+    assert "system_prompt" not in factory.build_kwargs[0]
 
 
 def test_fill_review_prompt_values_not_rescanned():

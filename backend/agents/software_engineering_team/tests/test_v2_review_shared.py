@@ -446,6 +446,80 @@ def test_run_review_threads_repo_path_into_tool_agents(tmp_path: Path) -> None:
     assert captured["repo_path"] == str(tmp_path)
 
 
+def test_run_review_shared_review_context_built_once_and_reused_across_tool_agents(
+    tmp_path: Path,
+) -> None:
+    """Every wired tool agent in one review pass must receive the identical
+    shared_review_context object -- the once-per-microtask cache-marked
+    segment, not a fresh copy rebuilt per agent."""
+    from llm_service import CacheBreakpoint
+    from software_engineering_team.backend_code_v2_team.models import (
+        ToolAgentKind,
+        ToolAgentPhaseOutput,
+    )
+
+    config = _build_config()
+    captured: list = []
+
+    def _capture(kind_name):
+        agent = MagicMock()
+        agent.review.side_effect = lambda phase_inp: (
+            captured.append((kind_name, phase_inp.shared_review_context))
+            or ToolAgentPhaseOutput(issues=[], recommendations=[])
+        )
+        return agent
+
+    run_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        tool_agents={
+            ToolAgentKind.TESTING_QA: _capture("qa"),
+            ToolAgentKind.SECURITY: _capture("security"),
+        },
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert len(captured) == 2
+    contexts = [ctx for _, ctx in captured]
+    assert contexts[0] is contexts[1]
+    assert len(contexts[0]) == 1
+    assert isinstance(contexts[0][0], CacheBreakpoint)
+    assert "x.py" in contexts[0][0].text
+
+
+def test_run_review_shared_review_context_none_when_no_code(tmp_path: Path) -> None:
+    """No files to review -> shared_review_context is None, not an empty list."""
+    from software_engineering_team.backend_code_v2_team.models import (
+        ToolAgentKind,
+        ToolAgentPhaseOutput,
+    )
+
+    config = _build_config()
+    captured: list = []
+    good = MagicMock()
+    good.review.side_effect = lambda phase_inp: (
+        captured.append(phase_inp.shared_review_context)
+        or ToolAgentPhaseOutput(issues=[], recommendations=[])
+    )
+
+    run_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result({}),
+        repo_path=tmp_path,
+        tool_agents={ToolAgentKind.TESTING_QA: good},
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert captured == [None]
+
+
 def test_run_review_raw_issue_count_from_llm_fallback(tmp_path: Path) -> None:
     """run_review forwards the LLM fallback's pre-grounding raw_issue_count onto
     ReviewResult via _code_review_step's _ReviewStepResult return value."""

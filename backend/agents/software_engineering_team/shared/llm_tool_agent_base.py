@@ -173,14 +173,18 @@ class LlmToolAgentBase:
         mod = importlib.import_module(type(self).__module__)
         return getattr(mod, "Agent")
 
-    def _invoke_llm(self, model, prompt: str) -> str:
+    def _invoke_llm(
+        self, model, prompt: str, *, system_prompt_content: Optional[List[Any]] = None
+    ) -> str:
         """Run a one-shot LLM call via the selected invocation path.
 
         When ``use_run_strands_agent`` is true, delegates to
         ``llm_service.strands_model.run_strands_agent`` (matching today's
         review-agent wrapper path). Otherwise uses the inline
         ``str(agent(prompt)).strip()`` call (matching today's plan/json
-        generators).
+        generators); ``system_prompt_content`` is only honored on the
+        ``run_strands_agent`` path (the inline path never receives it -- only
+        the review recipe passes this kwarg).
 
         Preconditions:
             ``self._agent_factory()(model=model)`` returns a callable that
@@ -197,7 +201,12 @@ class LlmToolAgentBase:
         if self.use_run_strands_agent:
             from llm_service.strands_model import run_strands_agent
 
-            return run_strands_agent(self._agent_factory(), model, prompt)
+            return run_strands_agent(
+                self._agent_factory(),
+                model,
+                prompt,
+                system_prompt_content=system_prompt_content,
+            )
         return str(self._agent_factory()(model=model)(prompt)).strip()
 
     def _cache_namespace(self) -> Optional[str]:
@@ -239,37 +248,55 @@ class LlmToolAgentBase:
 
         return env_int(cls.cache_capacity_env, cls.cache_default_capacity, 0)
 
-    def _cache_key(self, model: Any, prompt: str) -> str:
-        """Hash of this agent's identity, the resolved model, and the rendered prompt.
+    def _cache_key(
+        self, model: Any, prompt: str, *, system_prompt_content: Optional[List[Any]] = None
+    ) -> str:
+        """Hash of this agent's identity, the resolved model, the rendered prompt,
+        and any shared system-prompt content.
 
         By the time a caller has a ``prompt`` string to invoke the LLM with,
         whatever ``phase_inp`` shape produced it (``current_files`` +
         ``task_description``, or something else entirely) has already been
         flattened into that string — so keying on the prompt itself (rather
         than on ``phase_inp`` fields) generalizes across every tool-agent
-        kind without per-kind key-building logic.
+        kind without per-kind key-building logic. ``system_prompt_content``
+        must also be folded in: when a caller moves cacheable content (e.g.
+        the reviewed code) out of ``prompt`` and into a shared
+        ``system_prompt_content`` segment, two calls with an identical
+        ``prompt`` but different ``system_prompt_content`` are different
+        requests -- omitting it here would collide their cache entries and
+        silently serve one call's review result for the other's code.
 
         Preconditions:
             ``model`` is a resolved Strands model (or any object
             ``llm_service.strands_model.model_fingerprint`` accepts).
-            ``prompt`` is a str.
+            ``prompt`` is a str. ``system_prompt_content``, when given, is a
+            list of strings and/or objects exposing a ``text`` attribute
+            (e.g. ``CacheBreakpoint``).
 
         Postconditions:
-            Returns a stable hex digest: identical (class, model, prompt)
-            always yields the same key; any change to any of the three
-            changes the key.
+            Returns a stable hex digest: identical (class, model, prompt,
+            system_prompt_content) always yields the same key; any change to
+            any of the four changes the key.
         """
         from llm_service.strands_model import model_fingerprint  # noqa: PLC0415
 
+        segments = [
+            seg if isinstance(seg, str) else getattr(seg, "text", str(seg))
+            for seg in (system_prompt_content or [])
+        ]
         payload = {
             "agent": f"{type(self).__module__}.{type(self).__qualname__}",
             "model": model_fingerprint(model),
             "prompt": prompt,
+            "system_prompt_content": segments,
         }
         body = json.dumps(payload, sort_keys=True)
         return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
-    def _cached_invoke_llm(self, model: Any, prompt: str) -> str:
+    def _cached_invoke_llm(
+        self, model: Any, prompt: str, *, system_prompt_content: Optional[List[Any]] = None
+    ) -> str:
         """Cache-checked ``_invoke_llm``: a hit skips the LLM call entirely.
 
         Preconditions:
@@ -286,18 +313,20 @@ class LlmToolAgentBase:
             cache failure, and the fallen-open call's own exceptions (e.g. an
             LLM provider error) propagate unchanged to the caller, exactly as
             an uncached ``_invoke_llm`` call would. Only a successful
-            ``_invoke_llm`` result is written back to the cache.
+            ``_invoke_llm`` result is written back to the cache. The cache
+            key folds in ``system_prompt_content`` (see ``_cache_key``), so a
+            shared system segment never collides across distinct callers.
         """
         namespace = self._cache_namespace()
         capacity = self._cache_capacity() if namespace is not None else 0
         if namespace is None or capacity <= 0:
-            return self._invoke_llm(model, prompt)
+            return self._invoke_llm(model, prompt, system_prompt_content=system_prompt_content)
 
         from shared.cache import get_shared_cache  # noqa: PLC0415
 
         logger = logging.getLogger(type(self).__module__)
         cache = get_shared_cache(namespace)
-        key = self._cache_key(model, prompt)
+        key = self._cache_key(model, prompt, system_prompt_content=system_prompt_content)
 
         try:
             raw = cache.get(key)
@@ -326,7 +355,7 @@ class LlmToolAgentBase:
                         exc_info=True,
                     )
 
-        result = self._invoke_llm(model, prompt)
+        result = self._invoke_llm(model, prompt, system_prompt_content=system_prompt_content)
 
         try:
             cache.set(key, result.encode("utf-8"), max_entries=capacity)
