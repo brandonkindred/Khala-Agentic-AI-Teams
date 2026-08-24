@@ -77,6 +77,15 @@ def test_build_team_lead_routes_backend(monkeypatch) -> None:
     assert lead.llm == "L"
 
 
+def test_build_team_lead_unknown_kind_raises_keyerror() -> None:
+    """An unrecognised ``team_kind`` violates the documented precondition and
+    must surface as a caller bug (``KeyError``), not silently resolve to
+    either team -- matches this repo's DbC convention of never coercing a
+    precondition violation."""
+    with pytest.raises(KeyError):
+        SECodeEngineProvider().build_implementation_team_lead("mobile", "L")
+
+
 def test_quality_gate_methods_delegate(monkeypatch) -> None:
     import software_engineering_team.quality_gate_tools as qg
 

@@ -9,7 +9,7 @@ migrated to the Strands adapter (``BugReport`` location collapse and
 from __future__ import annotations
 
 from qa_agent import QAExpertAgent, QAInput
-from qa_agent.models import BugReport, QAOutput
+from qa_agent.models import AcceptanceEvidenceModel, BugReport, QAOutput
 
 from llm_service.clients.dummy import DummyLLMClient
 from shared.dev_models.models import SystemArchitecture
@@ -229,6 +229,44 @@ def test_qa_expert_agent_falls_back_on_validation_error() -> None:
     # instead: a well-formed empty QAOutput with approved=True (no bugs).
     assert isinstance(result, QAOutput)
     assert result.bugs_found == []
+
+
+def test_acceptance_evidence_model_fields_are_subset_of_qa_output() -> None:
+    """The acceptance_evidence prompt's field list is derived from
+    ``AcceptanceEvidenceModel`` (see ``_build_user_prompt``); this guards
+    against it drifting from the real ``QAOutput`` schema."""
+    assert set(AcceptanceEvidenceModel.model_fields) <= set(QAOutput.model_fields)
+
+
+def test_acceptance_evidence_model_field_types_match_qa_output() -> None:
+    """``AcceptanceEvidenceModel`` fields are built from ``QAOutput``'s actual
+    field annotations, not hand-copied ones — if a QAOutput field's type
+    changes, this model (and thus the prompt) picks it up automatically."""
+    for name, field in AcceptanceEvidenceModel.model_fields.items():
+        assert field.annotation == QAOutput.model_fields[name].annotation
+
+
+def test_acceptance_evidence_model_instantiates_with_no_args() -> None:
+    """Collection fields (``quality_gates``, ``acceptance_trace``,
+    ``validation_evidence``) use ``default_factory`` on ``QAOutput``; the
+    derived model must preserve that so it stays optional here too, not
+    become spuriously required."""
+    instance = AcceptanceEvidenceModel()
+    assert instance.approved is True
+    assert instance.quality_gates == {}
+    assert instance.acceptance_trace == []
+    assert instance.validation_evidence == []
+    assert instance.summary == ""
+
+
+def test_acceptance_evidence_prompt_field_list_matches_model() -> None:
+    """The 'Produce structured JSON with fields: ...' text names exactly the
+    ``AcceptanceEvidenceModel`` fields, not a hard-coded list."""
+    prompt = QAExpertAgent._build_user_prompt(
+        _input(request_mode="acceptance_evidence", acceptance_criteria=["c1"])
+    )
+    for field_name in AcceptanceEvidenceModel.model_fields:
+        assert field_name in prompt
 
 
 # ---------------------------------------------------------------------------

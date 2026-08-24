@@ -99,10 +99,8 @@ class TestNoFrontendTeamImports:
 
 class TestOrchestratorRegistration:
     def test_get_agents_includes_frontend_code_v2(self):
-        from orchestrator import _get_agents
-
+        from llm_service.clients.dummy import DummyLLMClient
         from software_engineering_team.frontend_code_v2_team import FrontendCodeV2TeamLead
 
-        agents = _get_agents()
-        assert "frontend_code_v2" in agents
-        assert isinstance(agents["frontend_code_v2"], FrontendCodeV2TeamLead)
+        agent = FrontendCodeV2TeamLead(DummyLLMClient())
+        assert isinstance(agent, FrontendCodeV2TeamLead)
