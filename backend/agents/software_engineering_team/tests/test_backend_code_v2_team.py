@@ -913,6 +913,36 @@ class TestBackendDevelopmentAgent:
         assert "app.py" in code
         assert "print('hello')" in code
 
+    def test_read_repo_code_empty(self, tmp_path):
+        from backend_code_v2_team.orchestrator import BackendDevelopmentAgent
+
+        agent = BackendDevelopmentAgent(MagicMock())
+        out = agent._read_repo_code(tmp_path)
+        assert "No code files" in out
+
+    def test_read_repo_code_max_chars(self, tmp_path):
+        """The max_chars budget truncates at a whole-file boundary: a file whose
+        chunk would push the running total past max_chars is excluded, so the output
+        is bounded by max_chars and never contains a partial file or the tail."""
+        from backend_code_v2_team.orchestrator import BackendDevelopmentAgent
+
+        # 20 files of 400 chars each (chunk ~413 incl. the ``--- fN.py ---`` header).
+        # With max_chars=1000 only f0 and f1 fit (413 + 413 = 826 <= 1000); f2 would
+        # push the running total to 1239 > 1000, so the walk stops at a file boundary.
+        for i in range(20):
+            (tmp_path / f"f{i}.py").write_text("x" * 400)
+        agent = BackendDevelopmentAgent(MagicMock())
+        out = agent._read_repo_code(tmp_path, max_chars=1000)
+        # Bounded by the whole-file budget — not the untruncated 20-file total — and
+        # non-empty (at least one file fit), proving max_chars is actually applied.
+        assert len(out) <= 1000
+        assert len(out) > 400
+        # The cutoff is at a file boundary: the first two files are present, the
+        # third and the last are not.
+        assert "f0.py" in out and "f1.py" in out
+        assert "f2.py" not in out
+        assert "f19.py" not in out
+
     def test_build_tool_runners(self):
         from backend_code_v2_team.orchestrator import (
             BackendDevelopmentAgent,
