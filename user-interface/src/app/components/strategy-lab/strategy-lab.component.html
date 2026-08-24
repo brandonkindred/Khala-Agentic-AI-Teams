@@ -47,38 +47,12 @@
           <span>{{ clearingAll() ? 'Clearing…' : 'Clear all' }}</span>
         </button>
       }
-      <mat-form-field appearance="outline" class="batch-input">
-        <mat-label>Strategies / batch</mat-label>
-        <input
-          matInput
-          type="number"
-          [(ngModel)]="batchSize"
-          [min]="BATCH_SIZE_MIN"
-          [max]="BATCH_SIZE_MAX"
-          [disabled]="running() || loading() || clearingAll()"
-          aria-label="Strategies per batch"
-        />
-        <mat-hint>{{ BATCH_SIZE_MIN }}–{{ BATCH_SIZE_MAX }}</mat-hint>
-      </mat-form-field>
-      <mat-form-field appearance="outline" class="batch-input">
-        <mat-label>Batches</mat-label>
-        <input
-          matInput
-          type="number"
-          [(ngModel)]="batchCount"
-          [min]="BATCH_COUNT_MIN"
-          [max]="BATCH_COUNT_MAX()"
-          [disabled]="running() || loading() || clearingAll()"
-          aria-label="Number of batches"
-        />
-        <mat-hint>{{ BATCH_COUNT_MIN }}–{{ BATCH_COUNT_MAX() }}; each new batch learns from prior batches</mat-hint>
-      </mat-form-field>
       <button
         mat-raised-button
         color="primary"
-        class="run-btn"
-        (click)="runNewStrategy()"
-        [disabled]="running() || loading() || clearingAll() || !categoriesValid"
+        class="generate-btn"
+        (click)="openGenerateStrategiesDialog()"
+        [disabled]="running() || loading() || clearingAll()"
       >
         @if (running()) {
           <mat-spinner diameter="18" class="btn-spinner" aria-hidden="true"></mat-spinner>
@@ -91,7 +65,7 @@
           } @else if (running()) {
             Starting…
           } @else {
-            {{ runButtonLabel() }}
+            Generate strategies
           }
         </span>
       </button>
@@ -119,36 +93,6 @@
       </a>
     </div>
   }
-
-  <!-- Asset-category selector: constrains which categories the design agent
-       may generate strategies for. All selected = no constraint. -->
-  <div class="category-row">
-    <div class="category-label">
-      <mat-icon aria-hidden="true">category</mat-icon>
-      <span>Categories</span>
-    </div>
-    <mat-button-toggle-group
-      multiple
-      [ngModel]="selectedCategories()"
-      (ngModelChange)="onCategoriesChanged($event)"
-      [disabled]="running() || loading() || clearingAll()"
-      class="category-toggle-group"
-      aria-label="Asset categories to generate strategies for"
-      aria-describedby="category-hint"
-    >
-      @for (cat of categoryOptions(); track cat.value) {
-        <mat-button-toggle [value]="cat.value">
-          <mat-icon aria-hidden="true">{{ cat.icon }}</mat-icon>
-          <span>{{ cat.label }}</span>
-        </mat-button-toggle>
-      }
-    </mat-button-toggle-group>
-    @if (!categoriesValid) {
-      <span id="category-hint" class="category-hint category-hint--error">Select at least one category.</span>
-    } @else {
-      <span id="category-hint" class="category-hint">Strategies are generated only for the selected categories.</span>
-    }
-  </div>
 
   <!-- Error banner -->
   @if (error(); as errorMessage) {
@@ -347,7 +291,7 @@
     <div class="empty-state">
       <mat-icon aria-hidden="true">science</mat-icon>
       <h3>No strategies yet</h3>
-      <p>Click <strong>Run New Strategy</strong> to have the agent ideate and backtest its first swing trading strategy.</p>
+      <p>Click <strong>Generate strategies</strong> to have the agent ideate and backtest its first swing trading strategy.</p>
     </div>
   }
 
