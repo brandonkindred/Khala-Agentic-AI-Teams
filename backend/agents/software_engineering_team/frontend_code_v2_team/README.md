@@ -253,7 +253,8 @@ frontend_code_v2_team/
 ├── phases/
 │   ├── _profile.py        # StackProfile + V2TeamConfig (FRONTEND_CONFIG) and
 │   │                       # bindings into the shared phase implementations
-│   └── problem_solving.py # Fix issues (per-team; not yet folded into shared/)
+│   └── problem_solving.py # Fix issues; thin wrapper around
+│                           # ../shared/phases/problem_solving.py's shared core
 └── tool_agents/
     ├── state_management/  # State management setup
     ├── auth/              # Auth UI components
@@ -273,7 +274,7 @@ frontend_code_v2_team/
 
 The fifteenth tool agent, Git Branch Management, is shared with the Backend Code V2 Team and lives at `../shared/tool_agent_git_branch.py` rather than under `tool_agents/` here.
 
-The Setup, Execution, Review, Documentation, Planning, and Deliver phase implementations are shared with the Backend Code V2 Team and live in `../shared/` (`v2_orchestrator.py`, `v2_phase_bindings.py`, `v2_execution_bindings.py`, `v2_review_bindings.py`, `phases/{setup,execution,review,documentation,planning,deliver}.py`), configured per team by `_profile.py`'s `FRONTEND_CONFIG`.
+The Setup, Execution, Review, Documentation, Planning, Deliver, and Problem-solving phase implementations are shared with the Backend Code V2 Team and live in `../shared/` (`v2_orchestrator.py`, `v2_phase_bindings.py`, `v2_execution_bindings.py`, `v2_review_bindings.py`, `phases/{setup,execution,review,documentation,planning,deliver,problem_solving}.py`), configured per team by `_profile.py`'s `FRONTEND_CONFIG` (Problem-solving via this team's `phases/problem_solving.py` wrapper).
 
 ## Integration with SE Team
 

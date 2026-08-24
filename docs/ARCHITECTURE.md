@@ -131,7 +131,7 @@ flowchart TB
 
     subgraph execGroup [Execution]
         backendAgent["Backend Expert"]
-        backendV2Team["Backend-Code-V2 Team\n(standalone 5-phase)"]
+        backendV2Team["Backend-Code-V2 Team\n(config-driven 7-phase)"]
         frontendAgent["Frontend Expert"]
         devopsTeam["DevOps Team Lead"]
     end
@@ -248,7 +248,7 @@ On agent crash, the Repair Agent analyzes the traceback and applies fixes. If th
 
 ## 5b. Backend-Code-V2 Team Workflow
 
-The **backend-code-v2** agent team is a standalone, experimental backend development team that operates independently from `BackendExpertAgent`. It uses a **three-layer architecture**: a Backend Tech Lead Agent runs Setup then delegates to a Backend Development Agent, which runs the 5-phase cycle and consults **tool agents in every phase**. No code from `backend_agent/` is imported or reused.
+The **backend-code-v2** agent team is a config-driven backend development team that operates independently from `BackendExpertAgent`. It uses a **three-layer architecture**: a Backend Tech Lead Agent runs Setup then delegates to a Backend Development Agent, which runs the remaining phases (7 total) and consults **tool agents in every phase**. No code from `backend_agent/` is imported or reused.
 
 ```mermaid
 flowchart TB
@@ -287,28 +287,28 @@ flowchart TB
     devAgent -->|"each phase consults"| toolGrid
 ```
 
-- **Layer 1 — Backend Tech Lead Agent**: Runs the **Setup** phase (git init if needed, README with project title, rename master→main, create `development` branch), then delegates the 5-phase development cycle to the Backend Development Agent.
-- **Layer 2 — Backend Development Agent**: Owns Planning (microtask decomposition, language detection), Execution (tool agents + LLM fallback), Review (build, lint, QA, security, code review), Problem-solving (fix loop), and Deliver (feature branch, commit, merge to `development`). The review/fix loop runs up to 5 iterations.
+- **Layer 1 — Backend Tech Lead Agent**: Runs the **Setup** phase (git init if needed, README with project title, rename master→main, create `development` branch), then delegates the remaining 6-phase cycle to the Backend Development Agent (7 phases total).
+- **Layer 2 — Backend Development Agent**: Owns Planning (microtask decomposition, language detection), Execution (tool agents + LLM fallback), Review (build, lint, QA, security, code review), Documentation (docstrings/README/API docs, self-review loop), and Deliver (feature branch, commit, merge to `development`), with Review looping back to Execution via Problem-solving (fix loop) when issues are found. The review/fix loop runs up to 5 iterations.
 - **Layer 3 — Tool agents**: Data Engineering, API/OpenAPI, Auth, Testing/QA, Security, Documentation, **Git branch management**, and **Build Specialist** agents each implement `plan()`, `execute()`, `review()`, `problem_solve()`, and `deliver()`, so they participate in every phase. The **Git branch management** agent creates a feature branch off `development` at the start of Execution, commits changes after each iteration ("commit along the way"), and in Deliver merges the feature branch back into `development`. The **Build Specialist** (stub) is intended to assist when the project doesn't build; it can be wired to the existing build verifier or a dedicated build-fix flow.
 
 The team supports both Python and Java (auto-detected). Quality gate agents (QA, Security, Code Review) are passed in by the main orchestrator and invoked during Review.
 
 **API endpoints:**
-- `POST /backend-code-v2/run` — Submit a task and repo path; starts Setup then the 5-phase workflow in a background thread.
+- `POST /backend-code-v2/run` — Submit a task and repo path; starts the 7-phase workflow (Setup, Planning, Execution, Review, Documentation, Deliver, plus the conditional Problem-solving loop) in a background thread.
 - `GET /backend-code-v2/status/{job_id}` — Returns current phase (including `setup`), completed phases, progress percentage, and microtask status.
 
 ---
 
 ## 5c. Frontend-Code-V2 Team Workflow
 
-The **frontend-code-v2** agent team is a standalone, experimental frontend development team that does **not** import or reuse any code from `frontend_team/` or `feature_agent/`. It mirrors the backend-code-v2 **three-layer architecture**: a Frontend Tech Lead Agent runs Setup then delegates to a Frontend Development Agent, which runs the 5-phase cycle and consults **tool agents in every phase**.
+The **frontend-code-v2** agent team is a config-driven frontend development team that does **not** import or reuse any code from `frontend_team/` or `feature_agent/`. It mirrors the backend-code-v2 **three-layer architecture**: a Frontend Tech Lead Agent runs Setup then delegates to a Frontend Development Agent, which runs the remaining phases (7 total) and consults **tool agents in every phase**.
 
-- **Layer 1 — Frontend Tech Lead Agent**: Runs **Setup** (git init if needed, README, development branch), then delegates the 5-phase cycle to the Frontend Development Agent.
-- **Layer 2 — Frontend Development Agent**: Planning (microtask decomposition; stack inferred as Angular/React/TypeScript/JavaScript), Execution (tool agents + LLM fallback), Review (build, lint, QA, security, code review), Problem-solving (fix loop), Deliver (feature branch, commit, merge to `development`). Review/fix loop runs up to 5 iterations.
+- **Layer 1 — Frontend Tech Lead Agent**: Runs **Setup** (git init if needed, README, development branch), then delegates the remaining 6-phase cycle to the Frontend Development Agent.
+- **Layer 2 — Frontend Development Agent**: Planning (microtask decomposition; stack inferred as Angular/React/TypeScript/JavaScript), Execution (tool agents + LLM fallback), Review (build, lint, QA, security, code review), Documentation (component docs, Storybook, README updates, self-review loop), Deliver (feature branch, commit, merge to `development`), with Review looping back to Execution via Problem-solving (fix loop) when issues are found. Review/fix loop runs up to 5 iterations.
 - **Layer 3 — Tool agents**: State Management, Auth, API/OpenAPI, Architecture, Documentation, Testing/QA, Security, **Git branch management**, UI Design, Branding/Theme, UX/Usability, Accessibility, Performance, **Build Specialist**, Linter. Each participates in plan, execute, review, problem_solve, and deliver. Git branch management creates a feature branch off `development`, commits along the way, and merges in Deliver.
 
 **API endpoints:**
-- `POST /frontend-code-v2/run` — Submit a task and repo path; starts Setup then the 6-phase workflow (setup + 5-phase cycle) in a background thread.
+- `POST /frontend-code-v2/run` — Submit a task and repo path; starts the 7-phase workflow (Setup, Planning, Execution, Review, Documentation, Deliver, plus the conditional Problem-solving loop) in a background thread.
 - `GET /frontend-code-v2/status/{job_id}` — Returns current phase (including `setup`), completed phases, progress percentage, and microtask status.
 
 The Software Engineering UI dashboard includes a **Frontend Developer (v2)** tab with a run form and job-status panel; the main orchestrator supports assignee **frontend-code-v2** (task_parsing and a dedicated frontend_code_v2_queue + worker).
