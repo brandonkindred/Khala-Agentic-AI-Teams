@@ -74,7 +74,10 @@ def mock_llm_latency(
         raises propagates out of the mocked call.
     Postconditions:
         Yields a ``MockLLMLatencyHarness`` whose ``call_count`` reflects every
-        completed mocked call so far, and whose ``executor_injected`` is
+        invocation of the mocked ``DummyLLMClient.chat`` so far -- incremented
+        at entry, before the injected sleep and before the underlying
+        ``original_chat`` call returns, so a call that raises still counts as
+        an invocation even though it never completed -- and whose ``executor_injected`` is
         ``True`` iff ``min_executor_workers`` was given and the patched
         event-loop factory actually ran at least once. ``llm_service.config
         .resolve_provider`` is patched to return ``"dummy"`` and
