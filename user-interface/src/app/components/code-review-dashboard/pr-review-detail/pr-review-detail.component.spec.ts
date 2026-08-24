@@ -285,6 +285,7 @@ describe('PrReviewDetailComponent', () => {
     const chip = rows[0].querySelector('.cr-chip--systemic');
     expect(chip).toBeTruthy();
     expect(chip?.textContent).toContain('2 systemic pattern(s)');
+    expect(chip?.getAttribute('aria-label')).toBe('View systemic findings');
     expect(rows[1].querySelector('.cr-chip--systemic')).toBeNull();
   });
 

@@ -694,7 +694,10 @@ def format_systemic_findings_comment(findings: list[dict[str, Any]]) -> str:
         parts.append(f"**{title}**" if title else "**Cross-cutting finding**")
         if description:
             parts.append(description)
-        for location in finding.get("related_locations") or []:
+        related_locations = finding.get("related_locations")
+        if not isinstance(related_locations, (list, tuple)):
+            related_locations = []
+        for location in related_locations:
             if not isinstance(location, dict):
                 continue
             file_path = str(location.get("file_path", "") or "").strip()

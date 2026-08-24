@@ -785,6 +785,20 @@ def test_format_systemic_findings_comment_skips_non_dict_entries() -> None:
     assert "- `a.py` — x" in body
 
 
+def test_format_systemic_findings_comment_non_iterable_related_locations() -> None:
+    # A truthy but non-iterable `related_locations` (e.g. an int) does not
+    # raise TypeError from `for ... in x or []` -- normalized to no locations,
+    # never raises -- and does not stop other findings from rendering.
+    body = format_systemic_findings_comment(
+        [
+            {"title": "First", "description": "d1", "related_locations": 5},
+            {"title": "Second", "description": "d2", "related_locations": []},
+        ]
+    )
+    assert "**First**" in body
+    assert "**Second**" in body
+
+
 # ---------------------------------------------------------------------------
 # choose_event
 # ---------------------------------------------------------------------------

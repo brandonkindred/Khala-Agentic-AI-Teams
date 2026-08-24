@@ -155,8 +155,12 @@ export class PrReviewDetailComponent {
   /**
    * Open the read-only systemic/cross-cutting findings dialog for a review run.
    *
-   * Preconditions: `record.reviewSummary` carries a non-empty `systemic_findings`
-   * (the "N systemic pattern(s)" chip is only rendered once it does).
+   * The template only renders the triggering chip once
+   * `systemicFindingsCount(record.reviewSummary)` is non-zero, but this
+   * method itself is defensive: a missing `reviewSummary`/`systemic_findings`
+   * degrades to opening the dialog with an empty findings list rather than
+   * throwing, so it is safe to call directly too.
+   *
    * Postconditions: opens `CodeReviewSystemicFindingsDialogComponent` with the
    * findings already in hand (no fetch — they are persisted on the summary);
    * this method has no return value.

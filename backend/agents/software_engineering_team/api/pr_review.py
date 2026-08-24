@@ -1713,10 +1713,12 @@ def _synthesize_systemic_findings(
           disabled, or when ``len(partition.pr_issues) <
           _MIN_FINDINGS_FOR_SYSTEMIC_SYNTHESIS``  — no provider call happens
           on either short-circuit.
-        - Otherwise returns ``provider.synthesize_systemic_findings(...)``
-          unchanged. **Never raises**: any exception from the provider call
-          (belt-and-suspenders — the provider method's own contract already
-          never raises) is caught, logged, and degrades to ``[]``.
+        - Otherwise returns ``provider.synthesize_systemic_findings(...)``,
+          normalized to ``[]`` if the provider returns ``None`` or another
+          falsy non-list value (belt-and-suspenders — the provider method's
+          own contract already never returns anything but a list). **Never
+          raises**: any exception from the provider call is caught, logged,
+          and degrades to ``[]``.
     """
     if not env_flag_enabled(_SYSTEMIC_SYNTHESIS_ENV):
         return []
