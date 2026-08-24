@@ -2085,16 +2085,18 @@ def _run_pr_review_body(
                 mode.valid_by_path,
                 mode.changed_by_path,
             )
-            # Synthesize now (it only needs partition.pr_issues, already final), but
-            # defer POSTING the standalone comment until _post_review_comments below
-            # has actually succeeded: that call can raise an untolerated
-            # GitHubAPIError, and posting first would leave an orphaned systemic
-            # comment on the PR referencing findings that were never posted -- and a
-            # retried review would then post a second copy on top of it.
+            # Synthesize now: it only needs partition.pr_issues, which is
+            # already final at this point.
             systemic_findings = _synthesize_systemic_findings(provider, partition, mode, pr)
             posting = _post_review_comments(
                 client, owner, repo, pr_number, pr, reviewer_login, output, partition
             )
+            # Post the standalone systemic comment only now, after
+            # _post_review_comments above has actually succeeded: that call
+            # can raise an untolerated GitHubAPIError, and posting the
+            # systemic comment earlier would leave it orphaned on the PR --
+            # referencing findings whose own comments never landed -- with a
+            # retried review then posting a second copy on top of it.
             if systemic_findings:
                 _main._safe_comment(
                     client,

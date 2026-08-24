@@ -665,17 +665,20 @@ def format_systemic_findings_comment(findings: list[dict[str, Any]]) -> str:
     """Render synthesized systemic/cross-cutting findings as one standalone comment.
 
     Preconditions:
-        - ``findings`` is non-empty; each entry is a dict shaped like
-          ``code_review_agent.systemic_synthesis.synthesize_systemic_findings``'s
-          output: ``{"title", "description", "related_locations"}``, where
-          ``related_locations`` is a list of ``{"file_path", "description"}``.
+        - ``findings`` is non-empty; each entry is expected to be a dict
+          shaped like ``code_review_agent.systemic_synthesis
+          .synthesize_systemic_findings``'s output: ``{"title", "description",
+          "related_locations"}``, where ``related_locations`` is a list of
+          ``{"file_path", "description"}``.
 
     Postconditions:
         - Returns a markdown body headed "### Systemic / cross-cutting
-          findings", with one numbered block per entry (title as a
-          sub-heading, the description, then a bullet per related location
-          naming its ``file_path`` when present). Never raises — a missing or
-          malformed field renders as an empty string rather than failing.
+          findings", with one bold-inline-titled block per entry (no
+          numbering, no sub-heading) — the title, the description, then a
+          bullet per related location naming its ``file_path``/
+          ``description`` when present. Never raises — a non-dict entry in
+          ``findings`` or in one entry's ``related_locations``, or a missing
+          or malformed field, is skipped rather than raising.
     """
     parts: list[str] = [
         "### Systemic / cross-cutting findings",
@@ -684,12 +687,16 @@ def format_systemic_findings_comment(findings: list[dict[str, Any]]) -> str:
         "",
     ]
     for finding in findings:
+        if not isinstance(finding, dict):
+            continue
         title = str(finding.get("title", "") or "").strip()
         description = str(finding.get("description", "") or "").strip()
         parts.append(f"**{title}**" if title else "**Cross-cutting finding**")
         if description:
             parts.append(description)
         for location in finding.get("related_locations") or []:
+            if not isinstance(location, dict):
+                continue
             file_path = str(location.get("file_path", "") or "").strip()
             loc_description = str(location.get("description", "") or "").strip()
             if file_path and loc_description:

@@ -764,6 +764,27 @@ def test_format_systemic_findings_comment_missing_related_locations_key() -> Non
     assert "d" in body
 
 
+def test_format_systemic_findings_comment_skips_non_dict_entries() -> None:
+    # A non-dict entry in `findings`, or in one entry's `related_locations`,
+    # is skipped rather than raising (e.g. AttributeError from `.get` on a
+    # non-mapping) -- well-formed siblings still render.
+    body = format_systemic_findings_comment(
+        [
+            "not a dict",
+            {
+                "title": "Good finding",
+                "description": "d",
+                "related_locations": [
+                    "not a dict either",
+                    {"file_path": "a.py", "description": "x"},
+                ],
+            },
+        ]
+    )
+    assert "**Good finding**" in body
+    assert "- `a.py` — x" in body
+
+
 # ---------------------------------------------------------------------------
 # choose_event
 # ---------------------------------------------------------------------------
