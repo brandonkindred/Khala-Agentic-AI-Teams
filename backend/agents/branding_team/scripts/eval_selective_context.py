@@ -199,14 +199,30 @@ def _average_phase_quality_score(a: PhaseQualityScore, b: PhaseQualityScore) -> 
 
     Preconditions: ``a`` and ``b`` are both valid :class:`PhaseQualityScore` instances.
     Postconditions: returns a new :class:`PhaseQualityScore` whose each dimension
-    is ``round((a + b) / 2)`` -- still within ``[1, 5]`` since both inputs are.
+    is the exact, unrounded ``(a + b) / 2`` -- still within ``[1, 5]`` since both
+    inputs are. Deliberately NOT rounded to the nearest integer: two per-call
+    scores of 3 and 4 average to a genuine 3.5, and rounding that away before
+    ``PhaseQualityComparison.delta``/``regressions`` compare it against the
+    ``QUALITY_REGRESSION_THRESHOLD_PTS`` (0.5) threshold could hide a real
+    one-point regression (both sides round to the same integer) or manufacture
+    a false one (a true 0.5-point gap rounds to a full point either way).
     """
     return PhaseQualityScore(
-        strategic_coherence=round((a.strategic_coherence + b.strategic_coherence) / 2),
-        completeness=round((a.completeness + b.completeness) / 2),
-        brand_consistency=round((a.brand_consistency + b.brand_consistency) / 2),
+        strategic_coherence=(a.strategic_coherence + b.strategic_coherence) / 2,
+        completeness=(a.completeness + b.completeness) / 2,
+        brand_consistency=(a.brand_consistency + b.brand_consistency) / 2,
         rationale=f"Averaged over both A/B orderings. A-first: {a.rationale!r} B-first: {b.rationale!r}",
     )
+
+
+def _fmt_score(value: float) -> str:
+    """Format a quality-score dimension value for display.
+
+    Preconditions: ``value`` is a float in ``[1, 5]``.
+    Postconditions: returns ``"5"`` for a whole number like ``5.0`` and
+    ``"3.5"`` for a genuine fractional average -- never a trailing ``".0"``.
+    """
+    return f"{value:g}"
 
 
 @dataclass
@@ -225,7 +241,7 @@ class PhaseQualityComparison:
     selective: PhaseQualityScore
     full: PhaseQualityScore
 
-    def delta(self, dimension: str) -> int:
+    def delta(self, dimension: str) -> float:
         """Return ``full``'s score minus ``selective``'s score for *dimension*.
 
         Preconditions:
@@ -706,8 +722,8 @@ def _print_quality_report(quality_comparisons: list[PhaseQualityComparison]) -> 
     for c in quality_comparisons:
         row = f"{c.mission_name:<32}{c.phase.value:<20}"
         for dim in _QUALITY_DIMENSIONS:
-            sel = getattr(c.selective, dim)
-            full = getattr(c.full, dim)
+            sel = _fmt_score(getattr(c.selective, dim))
+            full = _fmt_score(getattr(c.full, dim))
             row += f"{f'{sel}/{full}':<28}"
         print(row)
 
@@ -731,7 +747,8 @@ def _print_quality_report(quality_comparisons: list[PhaseQualityComparison]) -> 
     for c, dim in all_regressions:
         print(
             f"  REGRESSION: {c.mission_name} / {c.phase.value} / {dim}: "
-            f"selective={getattr(c.selective, dim)} full={getattr(c.full, dim)}"
+            f"selective={_fmt_score(getattr(c.selective, dim))} "
+            f"full={_fmt_score(getattr(c.full, dim))}"
         )
 
 
@@ -770,7 +787,8 @@ def _write_markdown_report(
     lines.append("|---|---|" + "---|" * len(_QUALITY_DIMENSIONS))
     for c in quality_comparisons:
         scores = " | ".join(
-            f"{getattr(c.selective, dim)}/{getattr(c.full, dim)}" for dim in _QUALITY_DIMENSIONS
+            f"{_fmt_score(getattr(c.selective, dim))}/{_fmt_score(getattr(c.full, dim))}"
+            for dim in _QUALITY_DIMENSIONS
         )
         lines.append(f"| {c.mission_name} | {c.phase.value} | {scores} |")
 
@@ -793,7 +811,8 @@ def _write_markdown_report(
         for c, dim in all_regressions:
             lines.append(
                 f"- {c.mission_name} / {c.phase.value} / {dim}: "
-                f"selective={getattr(c.selective, dim)} full={getattr(c.full, dim)}"
+                f"selective={_fmt_score(getattr(c.selective, dim))} "
+                f"full={_fmt_score(getattr(c.full, dim))}"
             )
 
     report_path = output_dir / "quality_report.md"

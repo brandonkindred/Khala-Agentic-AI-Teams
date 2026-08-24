@@ -73,19 +73,28 @@ OUTPUT contract:
 class PhaseQualityScore(BaseModel):
     """LLM-as-judge score for one phase output on three 1-5 dimensions.
 
+    Dimensions are typed ``float`` (not ``int``) even though a single judge
+    call always returns an integer 1-5 rating per the rubric: this same
+    model doubles as the container for an *averaged* score --
+    ``eval_selective_context._average_phase_quality_score`` combines two
+    real per-call scores (e.g. 3 and 4) into a genuine half-point value
+    (3.5), which an int-typed field would silently round away before the
+    0.5-point regression threshold ever saw it.
+
     Preconditions:
         None -- constructed only via ``model_validate``/``model_validate_json``
-        against a judge LLM's structured reply.
+        against a judge LLM's structured reply, or via
+        ``_average_phase_quality_score``.
     Postconditions:
         Each of ``strategic_coherence``, ``completeness``, and
-        ``brand_consistency`` is an integer in ``[1, 5]`` inclusive;
+        ``brand_consistency`` is a number in ``[1, 5]`` inclusive;
         construction with a value outside that range raises
         ``pydantic.ValidationError``. ``rationale`` may be empty.
     """
 
-    strategic_coherence: int = Field(ge=1, le=5)
-    completeness: int = Field(ge=1, le=5)
-    brand_consistency: int = Field(ge=1, le=5)
+    strategic_coherence: float = Field(ge=1, le=5)
+    completeness: float = Field(ge=1, le=5)
+    brand_consistency: float = Field(ge=1, le=5)
     rationale: str = ""
 
 

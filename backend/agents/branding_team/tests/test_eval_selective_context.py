@@ -357,10 +357,13 @@ def test_run_eval_averages_both_paired_orderings_to_cancel_positional_bias(tmp_p
         _comparisons, quality_comparisons = run_eval(missions=[make_mission()], output_dir=tmp_path)
 
     governance = next(c for c in quality_comparisons if c.phase == BrandPhase.GOVERNANCE)
-    # Averaging (5+4)/2 = 4.5 -> round() = 4 for both sides -- the one-point
-    # positional bias cancels out and reports zero regression, not a false one.
-    assert governance.selective.strategic_coherence == 4
-    assert governance.full.strategic_coherence == 4
+    # Averaging (5+4)/2 = 4.5 for both sides -- the one-point positional bias
+    # cancels out exactly (not merely to the same rounded integer) and reports
+    # zero regression, not a false one. The average is preserved as a genuine
+    # half-point float, never rounded away (see test_average_phase_quality_score
+    # _preserves_half_point_averages for why that distinction matters).
+    assert governance.selective.strategic_coherence == 4.5
+    assert governance.full.strategic_coherence == 4.5
     assert governance.regressions() == []
 
 
@@ -389,7 +392,7 @@ def _quality_score(**overrides) -> PhaseQualityScore:
 
 def test_average_phase_quality_score_averages_each_dimension() -> None:
     """_average_phase_quality_score must average each dimension independently,
-    not just one field, and round to the nearest valid integer score.
+    not just one field.
     """
     a = _quality_score(strategic_coherence=5, completeness=3, brand_consistency=1)
     b = _quality_score(strategic_coherence=3, completeness=3, brand_consistency=5)
@@ -399,6 +402,37 @@ def test_average_phase_quality_score_averages_each_dimension() -> None:
     assert averaged.strategic_coherence == 4  # (5+3)/2 = 4
     assert averaged.completeness == 3  # (3+3)/2 = 3
     assert averaged.brand_consistency == 3  # (1+5)/2 = 3
+
+
+def test_average_phase_quality_score_preserves_half_point_averages() -> None:
+    """A genuine half-point average (e.g. 3 and 4 -> 3.5) must be preserved
+    exactly, not rounded to the nearest integer -- rounding it away before
+    the 0.5-point regression threshold sees it could hide a real one-point
+    regression (two averages that both round to the same integer) or
+    manufacture a false one (a true 0.5-point gap rounding to a full point).
+    """
+    a = _quality_score(strategic_coherence=3)
+    b = _quality_score(strategic_coherence=4)
+
+    averaged = eval_ctx._average_phase_quality_score(a, b)
+
+    assert averaged.strategic_coherence == 3.5
+
+
+def test_phase_quality_comparison_detects_regression_hidden_by_rounding() -> None:
+    """Reproduces the exact bug this float-preservation fix closes: selective
+    averaging to 3.5 and full averaging to 4.5 is a true 1.0-point regression
+    (exceeds the 0.5 threshold), but round()-ing each to the nearest integer
+    would make both 4 -- a delta of 0 -- and silently hide it.
+    """
+    comparison = PhaseQualityComparison(
+        mission_name="Acme",
+        phase=BrandPhase.GOVERNANCE,
+        selective=_quality_score(strategic_coherence=3.5),
+        full=_quality_score(strategic_coherence=4.5),
+    )
+    assert comparison.delta("strategic_coherence") == 1.0
+    assert comparison.regressions() == ["strategic_coherence"]
 
 
 def test_phase_quality_comparison_no_regression_when_scores_are_equal() -> None:
@@ -435,6 +469,14 @@ def test_phase_quality_comparison_flags_multiple_regressed_dimensions() -> None:
         full=_quality_score(strategic_coherence=5, completeness=5, brand_consistency=5),
     )
     assert comparison.regressions() == ["strategic_coherence", "completeness"]
+
+
+def test_fmt_score_strips_trailing_zero_but_keeps_fractional_precision() -> None:
+    """_fmt_score must render a whole number without a trailing '.0' but keep
+    genuine fractional averages visible, e.g. for the markdown/console report.
+    """
+    assert eval_ctx._fmt_score(5.0) == "5"
+    assert eval_ctx._fmt_score(3.5) == "3.5"
 
 
 def test_phase_quality_comparison_delta_rejects_invalid_dimension() -> None:
