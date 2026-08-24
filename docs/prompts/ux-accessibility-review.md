@@ -62,7 +62,11 @@ Out of scope (note it and move on, do not fix):
   - `user-interface/src/app/shared/` — existing primitives to reuse before inventing
     anything: `dashboard-shell`, `empty-state`, `error-message`, `inline-banner`,
     `loading-spinner`, `stall-warning`, `confirm-dialog` / `confirm-destructive.service`,
-    `breadcrumb`, plus the helpers `defer-focus.ts` (move focus after a re-render),
+    `breadcrumb`, plus the helpers `destructive-action.helper.ts` (`DestructiveActionHelper`
+    — the confirm → re-entrancy guard → API call → error/toast orchestration behind the
+    agent-runner, strategy-lab, load-draft, and run-history destructive actions; the
+    current target for any hand-rolled destructive flow), `defer-focus.ts` (move focus
+    after a re-render),
     `result-count-announcement.ts` (live-region text for filtered lists), and
     `poll-while.ts` / `staleness.util.ts` (long-running job polling and staleness).
     "Build a custom X" when a shared X exists is itself a finding.
@@ -101,8 +105,13 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
    - Contrast and non-color signalling: text and UI-component contrast against the
      actual `--kh-surface-*` it sits on; status is never conveyed by hue alone (chips,
      graph edges, diff highlights, severity dots need text or shape too).
-   - Zoom and reflow: usable at 200% zoom and 320 CSS px wide without horizontal
-     scrolling or clipped controls; text-spacing overrides don't break layout.
+   - Zoom and reflow: usable at 200% zoom and 320 CSS px wide without clipped controls
+     and without horizontal scrolling — except where 1.4.10 exempts it, for the parts
+     of the content that genuinely require a two-dimensional layout for meaning or use
+     (data tables, task graphs, Mermaid diagrams). Test whether the two-dimensional
+     layout is actually necessary before reporting horizontal scroll: a wide data table
+     scrolling inside its own container is compliant, a paragraph doing so is not.
+     Text-spacing overrides don't break layout.
    - Motion and timing: animation respects `prefers-reduced-motion`; nothing
      auto-advances or auto-dismisses faster than a user can read it.
    - WCAG 2.2 additions specifically:
@@ -189,7 +198,9 @@ E. CONSISTENCY WITH THE DESIGN SYSTEM
 Open with:
   - **Pages reviewed** — the list from step 1.
   - **Primary task walkthrough** — the numbered steps and the current step count.
-  - **Top 5** — one line each, highest leverage first.
+  - **Top 5** — up to five, one line each, highest leverage first. Fewer is correct
+    when fewer survive verification, and none is a valid result; never pad this list
+    by duplicating or inventing findings to reach five.
 
 Then every finding, in ranked order:
 
