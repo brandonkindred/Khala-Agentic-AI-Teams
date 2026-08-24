@@ -39,7 +39,7 @@ from branding_team.scripts.eval_selective_context import (
     main,
     run_eval,
 )
-from branding_team.scripts.quality_judge import PhaseQualityScore
+from branding_team.scripts.quality_judge import PairedPhaseQualityScore, PhaseQualityScore
 from branding_team.tests.conftest import make_mission
 from llm_service.dummy_provider import force_dummy_llm_provider
 
@@ -335,8 +335,6 @@ def test_run_eval_averages_both_paired_orderings_to_cancel_positional_bias(tmp_p
     cancel the bias and leave both candidates with the same averaged score,
     since a single ordering alone would report a manufactured one-point delta.
     """
-    from branding_team.scripts.quality_judge import PairedPhaseQualityScore
-
     # Simulates a judge that always scores whichever candidate is OUTPUT A one
     # point higher than whichever is OUTPUT B, regardless of actual content.
     biased_high = PhaseQualityScore(
@@ -379,6 +377,7 @@ def test_run_eval_writes_markdown_report(tmp_path) -> None:
     assert report_path == tmp_path / "quality_report.md"
     content = report_path.read_text(encoding="utf-8")
     assert "# Selective-Context Eval Report" in content
+    assert "## Token counts" in content
     assert "## LLM-as-judge quality scores" in content
     assert "## Regression verdict" in content
     assert "No regressions" in content
