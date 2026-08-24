@@ -5,6 +5,14 @@ Asserts that:
   Agent's system_prompt (for trusted metadata like spec/architecture).
 - Untrusted file context (code under review) stays in the user message for
   QA and Security gates — never elevated to system-level instructions.
+- QA's trusted, non-code shared context (task description, architecture
+  overview) IS elevated to a ``CacheBreakpoint``-marked ``system_prompt_content``
+  segment, via ``run_structured_persona``/a Strands ``Agent``.
+- Security's trusted context (task description, architecture overview)
+  stays in the user prompt instead: ``run_single_shot_review``'s
+  ``LLMClient.complete_json`` path doesn't consume ``system_prompt_content``
+  on any real client (Claude/Ollama/RunPod/Dummy), so there is no channel to
+  elevate it to.
 - Code Review's ``_build_shared_review_prefix`` produces stable breakpoint text
   from trusted spec/architecture metadata.
 - The same breakpoint text is produced on repeated calls (stability).
@@ -144,7 +152,8 @@ def test_run_structured_persona_fallback_on_agent_construction_error() -> None:
 def test_qa_gate_keeps_file_context_in_user_prompt() -> None:
     """QAExpertAgent.run() keeps the file-context prefix (code under review)
     in the user prompt, not system_prompt_content — untrusted code must not
-    be elevated to system-level."""
+    be elevated to system-level. The trusted task_description, however, IS
+    elevated to a CacheBreakpoint-marked system_prompt_content segment."""
     from qa_agent import QAExpertAgent, QAInput
 
     captured_kwargs: List[dict] = []
@@ -171,21 +180,59 @@ def test_qa_gate_keeps_file_context_in_user_prompt() -> None:
         task_description="greet",
     )
 
-    with patch(
-        "qa_agent.agent.run_structured_persona", side_effect=_spy
-    ):
+    with patch("qa_agent.agent.run_structured_persona", side_effect=_spy):
         agent = QAExpertAgent(None)
         agent._model = object()
         agent.run(input_data)
 
     assert len(captured_kwargs) == 1
-    # system_prompt_content must NOT contain the code under review
+    # system_prompt_content must carry the trusted task_description as a
+    # CacheBreakpoint, but never the code under review.
     spc = captured_kwargs[0].get("system_prompt_content")
-    assert spc is None
-    # The code under review must appear in the user_prompt
+    assert spc is not None
+    assert len(spc) == 1
+    assert isinstance(spc[0], CacheBreakpoint)
+    assert "greet" in spc[0].text
+    assert "def hello(): pass" not in spc[0].text
+    # The code under review must appear in the user_prompt, not task_description.
     user_prompt = captured_kwargs[0]["user_prompt"]
     assert "def hello(): pass" in user_prompt
     assert "**Language:** python" in user_prompt
+    assert "greet" not in user_prompt
+
+
+def test_qa_gate_no_shared_prefix_when_no_trusted_metadata() -> None:
+    """When neither task_description nor architecture is set,
+    system_prompt_content stays None — no empty CacheBreakpoint is created."""
+    from qa_agent import QAExpertAgent, QAInput
+
+    captured_kwargs: List[dict] = []
+
+    def _spy(**kwargs: Any) -> Any:
+        captured_kwargs.append(kwargs)
+        from qa_agent.models import QAOutput
+
+        return QAOutput(
+            bugs_found=[],
+            approved=True,
+            summary="ok",
+            integration_tests="",
+            unit_tests="",
+            test_plan="",
+            live_test_notes="",
+            readme_content="",
+            suggested_commit_message="",
+        )
+
+    input_data = QAInput(code="x = 1", language="python")
+
+    with patch("qa_agent.agent.run_structured_persona", side_effect=_spy):
+        agent = QAExpertAgent(None)
+        agent._model = object()
+        agent.run(input_data)
+
+    assert len(captured_kwargs) == 1
+    assert captured_kwargs[0].get("system_prompt_content") is None
 
 
 def test_qa_gate_no_file_context_for_acceptance_evidence_mode() -> None:
@@ -221,9 +268,7 @@ def test_qa_gate_no_file_context_for_acceptance_evidence_mode() -> None:
         tool_results={"tests": {"status": "pass"}},
     )
 
-    with patch(
-        "qa_agent.agent.run_structured_persona", side_effect=_spy
-    ):
+    with patch("qa_agent.agent.run_structured_persona", side_effect=_spy):
         agent = QAExpertAgent(None)
         agent._model = object()
         agent.run(input_data)
@@ -241,7 +286,12 @@ def test_qa_gate_no_file_context_for_acceptance_evidence_mode() -> None:
 def test_security_gate_keeps_file_context_in_user_prompt() -> None:
     """CybersecurityExpertAgent._build_user_prompt includes the file-context
     prefix (code under review) in the user message, not the system prompt.
-    The system prompt is the plain SECURITY_PROMPT persona string."""
+    The system prompt is the plain SECURITY_PROMPT persona string.
+    task_description also stays in the user message — unlike QA (which uses
+    run_structured_persona/a Strands Agent), Security's
+    run_single_shot_review path ultimately calls LLMClient.complete_json,
+    whose Claude/Ollama/RunPod/Dummy implementations don't consume a
+    system_prompt_content kwarg, so nothing is available to elevate it to."""
     from security_agent.agent import CybersecurityExpertAgent, _build_security_file_context_prefix
     from security_agent.models import SecurityInput
 
@@ -257,10 +307,43 @@ def test_security_gate_keeps_file_context_in_user_prompt() -> None:
     assert "import os" in user_prompt
     assert "os.system('ls')" in user_prompt
     assert "**Language:** python" in user_prompt
+    # The trusted task description stays in the user prompt too (no
+    # supported system_prompt_content channel for this call path).
+    assert "review command runner" in user_prompt
 
     # The file-context prefix helper returns the expected parts
     prefix_parts = _build_security_file_context_prefix(input_data)
     assert any("os.system('ls')" in part for part in prefix_parts)
+
+
+def test_security_gate_does_not_pass_system_prompt_content() -> None:
+    """CybersecurityExpertAgent.run() never passes system_prompt_content to
+    run_single_shot_review — that kwarg would be silently dropped by every
+    real LLMClient.complete_json implementation, so nothing should be routed
+    through it."""
+    from security_agent.agent import CybersecurityExpertAgent
+    from security_agent.models import SecurityInput, SecurityLLMResponse
+
+    captured_kwargs: List[dict] = []
+
+    def _spy(*args: Any, **kwargs: Any) -> Any:
+        captured_kwargs.append(kwargs)
+        return SecurityLLMResponse(vulnerabilities=[], summary="ok", remediations=[])
+
+    input_data = SecurityInput(
+        code="import os\nos.system('ls')",
+        language="python",
+        task_description="review command runner",
+    )
+
+    with patch("security_agent.agent.run_single_shot_review", side_effect=_spy):
+        agent = CybersecurityExpertAgent(None)
+        agent.run(input_data)
+
+    assert len(captured_kwargs) == 1
+    assert "system_prompt_content" not in captured_kwargs[0]
+    assert "review command runner" in captured_kwargs[0]["prompt"]
+    assert "os.system" in captured_kwargs[0]["prompt"]
 
 
 # ---------------------------------------------------------------------------
