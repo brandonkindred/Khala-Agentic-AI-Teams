@@ -78,12 +78,15 @@ Out of scope (note it and move on, do not fix):
         empty listings, jobs, and runs audits the empty state and nothing else, so the
         populated, active-job, and error branches are unaudited even for defects axe
         could catch.
-      * By assertion — 25 of the 26 `.a11y.spec.ts` files assert nothing beyond
-        `expectNoAxeViolations`, so they guard only what axe checks in jsdom. That
-        excludes colour contrast (disabled outright in `axeOptions`; the SCSS guard and
-        browser axe cover it instead) and everything interaction-dependent: focus
-        restoration after a mutation, live-region announcements, keyboard sequences,
-        reflow at 320 px and 200%, and target size or spacing.
+      * By assertion — the specs vary, so read the one you intend to rely on rather
+        than assuming either way. Many are bare `expectNoAxeViolations` smoke tests;
+        others (`strategy-lab`, `strategy-card`, `paper-trading-panel`) additionally
+        assert accessible names and icon ARIA, and those assertions DO guard the
+        behaviour they name. A bare axe call guards only what axe checks in jsdom,
+        which excludes colour contrast (disabled outright in `axeOptions`; the SCSS
+        guard and browser axe cover it instead) and everything interaction-dependent:
+        focus restoration after a mutation, live-region announcements, keyboard
+        sequences, reflow at 320 px and 200%, and target size or spacing.
     Read each spec's fixtures AND its assertions before excluding a finding, then spend
     your attention on the unrendered states and on what axe structurally cannot see.
 
@@ -121,8 +124,13 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
      layout is actually necessary before reporting horizontal scroll: a wide data table
      scrolling inside its own container is compliant, a paragraph doing so is not.
      Text-spacing overrides don't break layout.
-   - Motion and timing: animation respects `prefers-reduced-motion`; nothing
-     auto-advances or auto-dismisses faster than a user can read it.
+   - Motion and timing, at the A/AA bar this review holds to: moving, blinking,
+     scrolling, or auto-updating content can be paused, stopped, or hidden (2.2.2);
+     nothing flashes more than three times a second (2.3.1); and nothing auto-advances
+     or auto-dismisses faster than a user can read it. Honouring
+     `prefers-reduced-motion` is 2.3.3, which is AAA — worth recommending as an
+     enhancement on a decorative entrance animation, but never reported as an AA
+     failure merely because the media query is absent.
    - WCAG 2.2 additions specifically:
        * Target size (2.5.8) is a size-OR-spacing rule, not a flat floor: a target
          passes at 24×24 CSS px or with sufficient spacing, and the inline, essential,
