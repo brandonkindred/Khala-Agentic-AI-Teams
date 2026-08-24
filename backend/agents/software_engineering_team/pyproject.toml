@@ -66,7 +66,6 @@ omit = [
     "software_engineering_team/frontend_code_v2_team/phases/problem_solving.py",
     "software_engineering_team/backend_code_v2_team/tool_agents/build_specialist/agent.py",
     "software_engineering_team/linting_tool_agent/linter_runner.py",
-    "software_engineering_team/backend_code_v2_team/tool_agents/git_branch_management/agent.py",
     "software_engineering_team/backend_code_v2_team/orchestrator.py",
     "software_engineering_team/frontend_code_v2_team/orchestrator.py",
     "software_engineering_team/build_fix_specialist/agent.py",

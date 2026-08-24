@@ -34,7 +34,7 @@ graph TB
 | Layer | Component | Responsibility |
 |-------|-----------|----------------|
 | Team Lead | `BackendCodeV2TeamLead` | Setup phase (repo init, branching), delegates to Development Agent |
-| Development Agent | `BackendDevelopmentAgent` | A `ConfigDrivenV2DevelopmentAgent` (`../shared/v2_orchestrator.py`) bound to `BACKEND_CONFIG`; executes the shared 5-phase cycle (Planning → Execution → Review → Problem-solving → Deliver) |
+| Development Agent | `BackendDevelopmentAgent` | A `ConfigDrivenV2DevelopmentAgent` (`../shared/v2_orchestrator.py`) bound to `BACKEND_CONFIG`; executes Planning → Execution → Review → Documentation → Deliver, with Review looping back to Execution via the per-team `problem_solving.py` when issues are found |
 
 ## Workflow Phases
 

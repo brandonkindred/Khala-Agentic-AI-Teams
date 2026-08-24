@@ -146,9 +146,6 @@ omit = [
     # `ruff`/`pylint` subprocess invocations on the agent-generated tree;
     # only runs against real lint binaries + a generated repo.
     "agents/software_engineering_team/linting_tool_agent/linter_runner.py",
-    # software_engineering_team: v2-team git_branch_management tool agent —
-    # shells out to real git in the agent workspace.
-    "agents/software_engineering_team/backend_code_v2_team/tool_agents/git_branch_management/agent.py",
     # software_engineering_team: v2-team orchestrators — wire setup → planning →
     # execution → review → problem-solving → deliver around live LLM + npm/git/pytest.
     # The smaller helpers and team-lead/dev-agent shell are covered via dedicated
