@@ -201,3 +201,27 @@ def test_cache_disabled_via_env_is_passthrough(monkeypatch: pytest.MonkeyPatch) 
     agent.run(_input())
 
     assert client.calls == 2
+
+
+def test_cache_disabled_via_env_ignores_stale_pre_existing_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-existing cache entry (e.g. written before a restart with
+    ``QA_REVIEW_CACHE_SIZE=0``) must never be served once the cache is
+    disabled -- disabling the cache means every call re-invokes the model,
+    not just that new results stop being written."""
+    client = _CountingClient(_CLEAN_RESPONSE)
+    agent = QAExpertAgent(client)
+    input_data = _input()
+
+    stale = dict(_CLEAN_RESPONSE)
+    stale["summary"] = "stale cached verdict"
+    key = build_model_cache_key(input_data, model_fingerprint(agent._model))
+    cache = get_shared_cache(agent_mod._REVIEW_CACHE._namespace())
+    cache.set(key, QAOutput(**stale).model_dump_json().encode(), max_entries=256)
+
+    monkeypatch.setenv("QA_REVIEW_CACHE_SIZE", "0")
+    result = agent.run(input_data)
+
+    assert client.calls == 1
+    assert result.summary != "stale cached verdict"

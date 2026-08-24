@@ -203,6 +203,30 @@ def test_cache_disabled_via_env_is_passthrough(monkeypatch: pytest.MonkeyPatch) 
     assert client.calls == 2
 
 
+def test_cache_disabled_via_env_ignores_stale_pre_existing_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-existing cache entry (e.g. written before a restart with
+    ``SECURITY_REVIEW_CACHE_SIZE=0``) must never be served once the cache is
+    disabled -- disabling the cache means every call re-invokes the model,
+    not just that new results stop being written."""
+    client = _CountingClient(_CLEAN_RESPONSE)
+    agent = CybersecurityExpertAgent(client)
+    input_data = _input()
+
+    stale = dict(_CLEAN_RESPONSE)
+    stale["summary"] = "stale cached verdict"
+    key = build_model_cache_key(input_data, agent_mod._security_model_fingerprint(agent.llm))
+    cache = get_shared_cache(agent_mod._REVIEW_CACHE._namespace())
+    cache.set(key, SecurityOutput(**stale).model_dump_json().encode(), max_entries=256)
+
+    monkeypatch.setenv("SECURITY_REVIEW_CACHE_SIZE", "0")
+    result = agent.run(input_data)
+
+    assert client.calls == 1
+    assert result.summary != "stale cached verdict"
+
+
 def test_clear_review_cache_falls_open_on_backend_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """``clear_review_cache()`` never raises, even when the backend does."""
 

@@ -193,13 +193,14 @@ class QAExpertAgent:
         )
 
         model_fp = model_fingerprint(self._model)
-        cached_result = _REVIEW_CACHE.get(input_data, model_fp)
-        if cached_result is not None:
-            logger.info(
-                "QA: review cache hit; skipping LLM call (approved=%s)",
-                cached_result.approved,
-            )
-            return cached_result
+        if _REVIEW_CACHE.capacity() > 0:
+            cached_result = _REVIEW_CACHE.get(input_data, model_fp)
+            if cached_result is not None:
+                logger.info(
+                    "QA: review cache hit; skipping LLM call (approved=%s)",
+                    cached_result.approved,
+                )
+                return cached_result
 
         user_prompt = self._build_user_prompt(input_data)
 
