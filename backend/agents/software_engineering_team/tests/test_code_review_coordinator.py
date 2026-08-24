@@ -3996,6 +3996,87 @@ def test_spec_compliance_single_pass_failure_falls_back_to_per_chunk_notes(monke
     )
 
 
+def test_run_spec_compliance_single_pass_flag_off_skips_call(monkeypatch) -> None:
+    """``_run_spec_compliance_single_pass`` in isolation: ``spec_compliance_single_pass=False``
+    returns ``None`` without ever calling ``synthesize_spec_compliance``."""
+    import code_review_agent.coordinator as coord
+
+    spec_calls: list = []
+    monkeypatch.setattr(
+        coord,
+        "synthesize_spec_compliance",
+        lambda *args, **kwargs: spec_calls.append((args, kwargs)),
+    )
+
+    result = coord._run_spec_compliance_single_pass(
+        llm=DummyLLMClient(),
+        input_data=CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+        deduped=[],
+        spec_compliance_single_pass=False,
+    )
+
+    assert result is None
+    assert spec_calls == []
+
+
+def test_run_spec_compliance_single_pass_flag_on_calls_synthesis(monkeypatch) -> None:
+    """``spec_compliance_single_pass=True`` calls ``synthesize_spec_compliance`` exactly
+    once with the ``deduped`` issues passed straight through, and returns its result."""
+    import code_review_agent.coordinator as coord
+
+    issue = CodeReviewIssue(
+        severity="high",
+        category="logic",
+        file_path="a.py",
+        line=1,
+        description="finding",
+    )
+
+    spec_calls: list = []
+
+    def _spec_spy(*args, **kwargs):
+        spec_calls.append((args, kwargs))
+        return "SPEC_GAP_MARKER: missing validation."
+
+    monkeypatch.setattr(coord, "synthesize_spec_compliance", _spec_spy)
+
+    dummy_llm = DummyLLMClient()
+    input_data = CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t")
+    result = coord._run_spec_compliance_single_pass(
+        llm=dummy_llm,
+        input_data=input_data,
+        deduped=[issue],
+        spec_compliance_single_pass=True,
+    )
+
+    assert result == "SPEC_GAP_MARKER: missing validation."
+    assert len(spec_calls) == 1
+    call_args, call_kwargs = spec_calls[0]
+    assert call_args == (dummy_llm,), "llm must be forwarded to synthesize_spec_compliance"
+    assert call_kwargs["input_data"] is input_data
+    assert call_kwargs["issues"] == [issue]
+
+
+def test_run_spec_compliance_single_pass_failure_returns_none(monkeypatch) -> None:
+    """A raising ``synthesize_spec_compliance`` is caught and logged, not propagated;
+    the helper returns ``None`` so the caller falls back to per-chunk notes."""
+    import code_review_agent.coordinator as coord
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("spec-compliance single pass exploded")
+
+    monkeypatch.setattr(coord, "synthesize_spec_compliance", _boom)
+
+    result = coord._run_spec_compliance_single_pass(
+        llm=DummyLLMClient(),
+        input_data=CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+        deduped=[],
+        spec_compliance_single_pass=True,
+    )
+
+    assert result is None
+
+
 def test_skip_tail_passes_short_circuits_with_no_llm_calls() -> None:
     """``input_data.skip_tail_passes=True`` returns the genuine issues unchanged
     with ``has_additive_findings`` False and no tail-pass LLM calls at all --
