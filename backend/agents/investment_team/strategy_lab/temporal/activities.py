@@ -904,6 +904,7 @@ _PROGRESS_PHASE_MAP: Dict[str, str] = {
     "coding": "coding",
     "backtesting": "backtesting",
     "aligning": "analyzing",
+    "analyzing": "analyzing",
     "complete": "analyzing",
 }
 
