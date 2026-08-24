@@ -40,7 +40,22 @@ only ``LLM_PROVIDER=dummy`` as a hard override; any other ``LLM_PROVIDER``
 value does *not* by itself select a live provider (there is no legacy
 single-provider env fallback, see ``llm_service/factory.py``). Without a
 configured provider list, ``--live`` raises ``LLMNotConfiguredError``. This is
-the mode a genuine quality comparison requires. If a ``--live`` run flags a
+the mode a genuine quality comparison requires.
+
+**Configure exactly one provider entry for a trustworthy ``--live`` run.**
+When more than one provider is configured, ``llm_service.get_client`` returns
+a dynamic ``FailoverLLMClient`` that re-resolves candidates on every single
+LLM call (pipeline generation *and* judge scoring) and can hand a call off to
+a different provider mid-run on a 429. Nothing in this script -- or in
+``llm_service`` itself, which has no per-scope "pin one provider" API -- stops
+a selective/full-context pair from having part or all of its *generation*
+served by different underlying models, which is a confound the paired judge
+call (see ``quality_judge.score_phase_output_pair``) does not and cannot
+correct, since it only controls which model does the *scoring*, not which
+model(s) produced the content being scored. A single-provider list makes
+failover structurally impossible, which is the only way this script
+eliminates the confound rather than merely reducing its surface.
+If a ``--live`` run flags a
 regression, report it on the parent
 story (Story: "Validate output quality with selective context via eval
 comparison") for a ``context_phases`` adjustment before that story merges --
@@ -777,7 +792,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             "LLM provider instead of the deterministic dummy stub. Required for the judge "
             "to surface a genuine quality difference between variants. Requires Postgres "
             "with a provider configured via /llm-config -- setting LLM_PROVIDER alone "
-            "(to anything other than 'dummy') does not select a live provider."
+            "(to anything other than 'dummy') does not select a live provider. Configure "
+            "exactly ONE provider entry: with more than one, failover between calls can "
+            "serve the two variants from different underlying models and manufacture a "
+            "false regression (see the module docstring)."
         ),
     )
     args = parser.parse_args(argv)
