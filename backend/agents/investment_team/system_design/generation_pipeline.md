@@ -79,11 +79,20 @@ themselves execute across three different mixins (below).
 
 ## Design ↔ review loop (DESIGN → DESIGN_REVIEW)
 
-Owned by `DesignMixin` (`orchestrator_design.py`). One round:
+Owned by `DesignMixin` (`orchestrator_design.py`). One round branches on
+readiness (`_review_and_handle_critique`, `orchestrator_design.py`:1046):
 
 ```
-DesignAgent.run/.revise → SpecReadinessGate (phase="design") → DesignReviewAgent → (ready? done : revise)
+DesignAgent.run/.revise → SpecReadinessGate (phase="design")
+  → readiness-clean: DesignReviewAgent.run → (ready? done : revise)
+  → readiness-critical: synthetic critique from the readiness findings
+      (DesignReviewAgent is skipped — no LLM call this round) → revise
 ```
+
+A critical `SpecReadinessGate` finding never reaches the reviewer: the round
+synthesizes a critique from the readiness findings themselves and routes
+straight to `DesignAgent.revise`, so only a readiness-clean spec ever costs
+a `DesignReviewAgent` LLM call.
 
 - **`DesignAgent`** (`../strategy_lab/agents/design.py`) authors the
   `StrategySpec` only — it never writes code. Before returning, it runs an

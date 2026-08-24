@@ -108,7 +108,7 @@ sequenceDiagram
     end
 
     loop for each batch
-        BatchWF->>SIE: compute_signal_brief_activity<br/>(once per batch; sees priors from batches 1..N-1)
+        BatchWF->>SIE: compute_signal_brief_activity<br/>(once per batch-workflow invocation; a mid-batch<br/>resume re-runs it, so later cycles in that batch<br/>can see a different brief than earlier ones)
         SIE->>LLM: complete_json
         LLM-->>SIE: SignalIntelligenceBriefV1
         SIE-->>BatchWF: brief

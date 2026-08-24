@@ -79,7 +79,10 @@ flowchart LR
     B6[(investment_backtests)]
     B7[(investment_strategy_lab_records)]
     B8[(investment_paper_trading_sessions)]
-    B9[(investment_strategy_lab_runs<br/>run-state store)]
+  end
+
+  subgraph run_store[Run-State Store — direct JobServiceClient, bypasses _PersistentDict]
+    B9[(investment_strategy_lab_runs)]
   end
 
   E1 --> FA --> B1
@@ -111,6 +114,7 @@ flowchart LR
   BatchWF -->|"after awaiting the wave's<br/>child workflows"| Finalize
   Finalize --> PTA
   Finalize --> B7
+  BatchWF -->|"progress writes<br/>(persist_run_state_activity)"| B9
   BatchWF --> EventBus
   L2 --> B7
   L3 --> B7
