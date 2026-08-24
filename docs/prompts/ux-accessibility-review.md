@@ -71,12 +71,21 @@ Out of scope (note it and move on, do not fix):
     `poll-while.ts` / `staleness.util.ts` (long-running job polling and staleness).
     "Build a custom X" when a shared X exists is itself a finding.
   - Existing `*.a11y.spec.ts` files and `user-interface/src/app/testing/a11y.ts`
-    (`expectNoAxeViolations`, with `color-contrast` disabled under jsdom). A spec
-    guards only the states its fixtures actually render: one that mounts empty
-    listings, jobs, and runs audits the empty state and nothing else, so the populated,
-    active-job, and error branches remain unaudited even for defects axe could catch.
-    Read each spec's fixtures before treating anything as covered, then spend your
-    attention on the unrendered states and on what axe structurally cannot see.
+    (`expectNoAxeViolations`, with `color-contrast` disabled under jsdom). Coverage is
+    narrower than it looks, in two independent ways, and BOTH must hold before you
+    treat anything as guarded:
+      * By state — a spec guards only the states its fixtures render. One that mounts
+        empty listings, jobs, and runs audits the empty state and nothing else, so the
+        populated, active-job, and error branches are unaudited even for defects axe
+        could catch.
+      * By assertion — 25 of the 26 `.a11y.spec.ts` files assert nothing beyond
+        `expectNoAxeViolations`, so they guard only what axe checks in jsdom. That
+        excludes colour contrast (disabled outright in `axeOptions`; the SCSS guard and
+        browser axe cover it instead) and everything interaction-dependent: focus
+        restoration after a mutation, live-region announcements, keyboard sequences,
+        reflow at 320 px and 200%, and target size or spacing.
+    Read each spec's fixtures AND its assertions before excluding a finding, then spend
+    your attention on the unrendered states and on what axe structurally cannot see.
 
 ## 3. Review lenses
 
@@ -263,9 +272,12 @@ Close with:
 
 ## 8. Do not report
 
-  - Findings that an existing `.a11y.spec.ts` already guards IN THE STATE you are
-    reporting. Check the spec's fixtures first — a state it never renders is not
-    guarded, and a defect there is worth reporting even if axe could have caught it.
+  - Findings that an existing `.a11y.spec.ts` guards with an assertion covering THAT
+    BEHAVIOUR in THAT STATE. Both halves are required: a state the fixtures never
+    render is not guarded, and neither is a behaviour the spec never asserts. A bare
+    `expectNoAxeViolations` in the populated state does not cover a focus-management,
+    announcement, keyboard, reflow, target-size, or contrast defect in that state —
+    report those.
   - Speculation that requires a running browser without labelling it as such.
   - Wholesale redesigns, restructures of the shared shell, or framework swaps.
   - Style preferences with no accessibility, comprehension, or step-count consequence.
