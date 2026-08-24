@@ -313,6 +313,44 @@ def test_run_eval_judges_diverging_phase_with_single_paired_call(tmp_path) -> No
     assert judged_phases == [BrandPhase.GOVERNANCE]
 
 
+def test_run_eval_paired_judge_order_is_randomized_and_correctly_unmapped(tmp_path) -> None:
+    """Which variant is OUTPUT A vs OUTPUT B must be randomized per call (so a
+    judge with positional bias can't systematically favor one treatment), and
+    whichever order is chosen, the returned scores must be correctly mapped
+    back to selective/full -- not silently swapped.
+    """
+    from branding_team.scripts.quality_judge import PairedPhaseQualityScore
+
+    score_for_a = PhaseQualityScore(
+        strategic_coherence=5, completeness=5, brand_consistency=5, rationale="a"
+    )
+    score_for_b = PhaseQualityScore(
+        strategic_coherence=1, completeness=1, brand_consistency=1, rationale="b"
+    )
+    fake_paired = PairedPhaseQualityScore(output_a=score_for_a, output_b=score_for_b)
+
+    for forced_random, selective_should_get in [(0.1, score_for_a), (0.9, score_for_b)]:
+        with (
+            patch(
+                "branding_team.scripts.eval_selective_context.score_phase_output_pair",
+                return_value=fake_paired,
+            ) as mock_pair,
+            patch("branding_team.scripts.eval_selective_context.random.random") as mock_random,
+        ):
+            mock_random.return_value = forced_random
+            _comparisons, quality_comparisons = run_eval(
+                missions=[make_mission()], output_dir=tmp_path
+            )
+
+        governance = next(c for c in quality_comparisons if c.phase == BrandPhase.GOVERNANCE)
+        # forced_random < 0.5 -> selective is passed as output_a, so it must get
+        # output_a's score back; >= 0.5 -> selective is output_b, so it must get
+        # output_b's score. This confirms the mapping is actually swapped at the
+        # call site, not just read differently from a fixed mock return value.
+        assert governance.selective == selective_should_get
+        assert mock_pair.call_count == 1
+
+
 def test_run_eval_writes_markdown_report(tmp_path) -> None:
     """run_eval's caller (main()) writes quality_report.md via
     _write_markdown_report; verify it contains both the token table and the

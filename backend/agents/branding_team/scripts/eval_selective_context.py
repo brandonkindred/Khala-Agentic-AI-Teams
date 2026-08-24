@@ -67,6 +67,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import random
 import re
 import sys
 from collections.abc import Iterator
@@ -553,15 +554,29 @@ def run_eval(
                     # land on the same provider (a 429 between calls can hand the
                     # second off elsewhere), which would let a change in *judge*
                     # masquerade as a change in *output quality*.
+                    #
+                    # Which variant is OUTPUT A vs OUTPUT B is randomized per call so
+                    # a judge with positional bias (favoring whichever label consistently
+                    # comes first) can't systematically favor one treatment across every
+                    # comparison -- that bias would otherwise mask or manufacture a
+                    # regression regardless of the neutral A/B labeling.
+                    selective_first = random.random() < 0.5
                     paired = score_phase_output_pair(
                         judge_client,
                         mission=mission,
                         phase=phase,
-                        output_a=selective_outputs[phase],
-                        output_b=full_outputs[phase],
+                        output_a=selective_outputs[phase]
+                        if selective_first
+                        else full_outputs[phase],
+                        output_b=full_outputs[phase]
+                        if selective_first
+                        else selective_outputs[phase],
                         strategic_core=selective_outputs[BrandPhase.STRATEGIC_CORE],
                     )
-                    selective_score, full_score = paired.output_a, paired.output_b
+                    if selective_first:
+                        selective_score, full_score = paired.output_a, paired.output_b
+                    else:
+                        selective_score, full_score = paired.output_b, paired.output_a
                 quality_comparisons.append(
                     PhaseQualityComparison(
                         mission_name=mission.company_name,
