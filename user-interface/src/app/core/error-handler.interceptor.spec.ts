@@ -96,6 +96,12 @@ describe('errorHandlerInterceptor', () => {
     expect(error).toBeDefined();
   });
 
+  it('falls back to statusText for a 400 without parseable detail, not the raw HttpErrorResponse message', () => {
+    http.get('/test').subscribe({ error: () => undefined });
+    httpMock.expectOne('/test').flush({}, { status: 400, statusText: 'Bad Request' });
+    expect(lastMessage()).toBe('Bad request: Bad Request');
+  });
+
   it('formats a 422 detail string (FastAPI validation)', () => {
     http.get('/test').subscribe({ error: () => undefined });
     httpMock
@@ -151,6 +157,12 @@ describe('errorHandlerInterceptor', () => {
     const req = httpMock.expectOne('/test');
     req.flush({ message: 'oops' }, { status: 500, statusText: 'Server Error' });
     expect(error).toBeDefined();
+  });
+
+  it('prefers err.error.message over the HttpErrorResponse message for a 500 without detail', () => {
+    http.get('/test').subscribe({ error: () => undefined });
+    httpMock.expectOne('/test').flush({ message: 'oops' }, { status: 500, statusText: 'Server Error' });
+    expect(lastMessage()).toBe('Server error: oops');
   });
 });
 
