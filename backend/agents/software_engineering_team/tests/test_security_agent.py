@@ -219,9 +219,13 @@ def test_security_agent_blocks_on_capitalized_severity() -> None:
 
 
 def test_user_prompt_contains_file_context_and_role_instructions() -> None:
-    """The user prompt carries both the file-context prefix (language + code
+    """The user prompt carries the file-context prefix (language + code
     under review) and the role instructions. Untrusted code must stay in the
-    user message, not be elevated to system-level instructions."""
+    user message, not be elevated to system-level instructions. The trusted
+    task_description and architecture overview are elevated out of the user
+    prompt to a CacheBreakpoint-marked system_prompt_content segment instead
+    — see ``test_security_gate_forwards_shared_prefix_as_cache_breakpoint``
+    in ``test_gate_cache_bp.py``."""
     prompt = CybersecurityExpertAgent._build_user_prompt(
         _input(
             context="Runs behind reverse proxy",
@@ -230,12 +234,14 @@ def test_user_prompt_contains_file_context_and_role_instructions() -> None:
     )
     # Role instructions are present
     assert "Review the code for security vulnerabilities" in prompt
-    assert "**Task:**" in prompt
     assert "**Context:**" in prompt
-    assert "**Architecture:**" in prompt
     # File-context prefix IS in the user prompt (untrusted code stays here)
     assert "os.system(cmd)" in prompt
     assert "**Language:**" in prompt
+    # The trusted task description and architecture overview are no longer
+    # in the user prompt.
+    assert "**Task:**" not in prompt
+    assert "**Architecture:**" not in prompt
     # DummyLLMClient's pattern-anchor regression guard: both words must still
     # appear somewhere in the prompt (order-independent substring match).
     assert "security" in prompt.lower()

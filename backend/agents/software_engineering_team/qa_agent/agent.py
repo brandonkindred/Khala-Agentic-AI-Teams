@@ -26,7 +26,7 @@ from typing import Dict, Optional
 
 from strands import Agent
 
-from llm_service import get_strands_model
+from llm_service import CacheBreakpoint, get_strands_model
 from llm_service.strands_model import model_fingerprint, resolve_strands_model
 from shared.cache import get_shared_cache
 from shared.cache.pydantic_cache import (
@@ -154,6 +154,36 @@ def _build_qa_file_context_prefix(input_data: QAInput) -> list[str]:
     return build_file_context_prefix(input_data.language, input_data.code)
 
 
+def _build_qa_shared_review_prefix(input_data: QAInput) -> list[str]:
+    """Render QA's trusted, non-code shared context as a stable prefix.
+
+    Mirrors ``code_review_agent.chunk_reviewer._build_shared_review_prefix``:
+    only internal, non-repository-controlled metadata belongs here (task
+    description, architecture overview) — never the code under review, which
+    stays in the user message (see ``_build_qa_file_context_prefix``). Both
+    fields, when present, are stable across every chunk/piece of one
+    microtask's QA review and across a fix->re-review retry for that
+    microtask, so this is attached to the ``Agent``'s system content as a
+    single ``CacheBreakpoint``-marked segment in :meth:`QAExpertAgent.run`
+    rather than embedded in the user-turn prompt.
+
+    Preconditions:
+        - ``input_data`` is a valid ``QAInput``.
+
+    Postconditions:
+        - Returns the task-description line (when ``input_data.task_description``
+          is truthy) followed by the architecture-overview line (when
+          ``input_data.architecture`` is set) — in that fixed order. Returns
+          ``[]`` when both are empty/``None``. Never raises.
+    """
+    parts: list[str] = []
+    if input_data.task_description:
+        parts.append(f"**Task:** {input_data.task_description}")
+    if input_data.architecture:
+        parts.append(f"**Architecture:** {input_data.architecture.overview}")
+    return parts
+
+
 def _build_qa_role_instructions(input_data: QAInput) -> list[str]:
     """Render the QA-specific review instructions that follow the file-context prefix.
 
@@ -161,9 +191,12 @@ def _build_qa_role_instructions(input_data: QAInput) -> list[str]:
         - ``input_data`` is a valid ``QAInput``.
 
     Postconditions:
-        - Returns non-empty prompt lines: the schema-hint sentence, then the
-          task description, architecture, run instructions, and build errors
-          when each is present — in that fixed order. Never raises.
+        - Returns non-empty prompt lines: the schema-hint sentence, then run
+          instructions and build errors when each is present — in that fixed
+          order. Never raises. Does not include ``task_description`` or
+          ``architecture`` — those are rendered separately by
+          ``_build_qa_shared_review_prefix`` for the ``CacheBreakpoint``
+          system segment.
     """
     parts = [
         "",
@@ -171,10 +204,6 @@ def _build_qa_role_instructions(input_data: QAInput) -> list[str]:
         "fields: bugs_found, test_plan, unit_tests, integration_tests, "
         "readme_content, summary, live_test_notes, suggested_commit_message.",
     ]
-    if input_data.task_description:
-        parts.append(f"**Task:** {input_data.task_description}")
-    if input_data.architecture:
-        parts.append(f"**Architecture:** {input_data.architecture.overview}")
     if input_data.run_instructions:
         parts.append(f"**Run instructions:** {input_data.run_instructions}")
     if input_data.build_errors:
@@ -259,6 +288,12 @@ class QAExpertAgent:
 
         user_prompt = self._build_user_prompt(input_data)
 
+        system_prompt_content = None
+        if mode != "acceptance_evidence":
+            shared_parts = _build_qa_shared_review_prefix(input_data)
+            if shared_parts:
+                system_prompt_content = [CacheBreakpoint("\n".join(shared_parts))]
+
         is_fallback = False
 
         def _fallback(exc: Exception) -> QAOutput:
@@ -319,6 +354,7 @@ class QAExpertAgent:
             fallback_factory=_fallback,
             agent_factory=Agent,
             on_success=_finalize,
+            system_prompt_content=system_prompt_content,
         )
 
         logger.info(
@@ -358,13 +394,19 @@ class QAExpertAgent:
 
         The persona (``QA_PROMPT`` and its mode-specific addendum) lives on
         the Strands ``Agent``'s system prompt. In the default/fix_build/
-        write_tests modes the user prompt carries the file-context prefix
-        (language + code under review, see ``_build_qa_file_context_prefix``)
-        as a stable prefix, followed by the explicit schema hint
-        (``bugs_found``, ``test_plan``, ...) and remaining per-gate
-        instructions (see ``_build_qa_role_instructions``). The file-context
-        prefix remains in the user message (rather than being elevated to
-        system content) because it is untrusted repository content.
+        write_tests modes the user prompt carries only the file-context
+        prefix (language + code under review, see
+        ``_build_qa_file_context_prefix``) followed by the explicit schema
+        hint (``bugs_found``, ``test_plan``, ...) and remaining per-gate
+        instructions (run instructions, build errors — see
+        ``_build_qa_role_instructions``). The file-context prefix stays in
+        the user message (rather than being elevated to system content)
+        because it is untrusted repository content. The trusted, non-code
+        task description and architecture overview are instead supplied
+        separately as a ``CacheBreakpoint``-marked ``system_prompt_content``
+        segment to ``run_structured_persona`` (see
+        ``_build_qa_shared_review_prefix``, built in :meth:`run`) — they are
+        no longer part of this returned string.
 
         In ``acceptance_evidence`` mode no code is included; the prompt
         instead carries the acceptance criteria and tool/test results so the
@@ -373,7 +415,8 @@ class QAExpertAgent:
         Preconditions: ``input_data`` is a valid :class:`QAInput`.
         Postconditions: returns a non-empty str. In non-``acceptance_evidence``
         modes the returned string contains the code under review followed by
-        role instructions and schema hints. In ``acceptance_evidence`` mode
+        role instructions and schema hints; it no longer contains the task
+        description or architecture overview. In ``acceptance_evidence`` mode
         the prompt names the acceptance-evidence output fields
         (``quality_gates``/``acceptance_trace``/``validation_evidence``) and
         carries the criteria and tool results instead of the code under review.
