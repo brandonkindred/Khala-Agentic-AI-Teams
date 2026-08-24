@@ -35,10 +35,11 @@ loop now runs a two-step inner check:
 
 1. `DeterministicAlignmentChecker` (in
    `strategy_lab/quality_gates/alignment_checks.py`) evaluates the
-   trade ledger against the structured `StrategySpec` across six
+   trade ledger against the structured `StrategySpec` across seven
    per-rule checks (universe, side, sizing ±1%, stop-loss compliance,
-   take-profit compliance, and entry-signal correlation with optional
-   near-miss adjudication). Output is a list of
+   take-profit compliance, entry-signal correlation with optional
+   near-miss adjudication, and signal-exit correlation for specs with a
+   `SignalExitRule`). Output is a list of
    `AlignmentFinding` rows that ride on `BacktestRecord.alignment_findings`
    plus matching `QualityGateResult` rows on the existing
    `quality_gate_results` stream.

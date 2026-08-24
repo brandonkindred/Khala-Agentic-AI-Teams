@@ -47,7 +47,7 @@ flowchart TB
     end
 
     subgraph lab_gates[Quality Gates — strategy_lab/quality_gates/]
-      QG[SpecReadinessGate · CodeSafetyChecker<br/>CodeConformanceGate · PredicateConformanceGate<br/>PredicateReachabilityProbe · BacktestAnomalyDetector<br/>AcceptanceGate · ExitRuleConformanceGate<br/>5 realism gates · DeterministicAlignmentChecker<br/>ConvergenceTracker · StrategySpecValidator]
+      QG[SpecReadinessGate · CodeSafetyChecker<br/>CodeConformanceGate · PredicateConformanceGate<br/>PredicateReachabilityProbe · BacktestAnomalyDetector<br/>AcceptanceGate · ExitRuleConformanceGate<br/>TargetSymbolCoverageGate · 5 more realism gates<br/>DeterministicAlignmentChecker · ConvergenceTracker<br/>StrategySpecValidator]
     end
 
     subgraph batch_agents[Batch-level Agents — investment_team/]

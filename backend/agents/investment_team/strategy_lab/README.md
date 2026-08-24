@@ -51,10 +51,15 @@ monitor worker liveness (e.g. Temporal Web's task-queue pollers view), not rely 
 ## Design-attempt checkpointing
 
 One design attempt (`run_design_attempt_activity`) can run up to `_DESIGN_ATTEMPT_TIMEOUT` (2
-hours) and up to `STRATEGY_LAB_DESIGN_MAX_LLM_CALLS`-bounded LLM round-trips (120 at the
+hours) before it produces a record. The **design phase** specifically is bounded by
+`STRATEGY_LAB_DESIGN_MAX_LLM_CALLS`-bounded, budget-charged LLM round-trips (120 at the
 documented default, spanning all re-entries — see that variable's own entry below for the
 distinct, larger 540-call figure it exists to cap: the *uncapped* worst-case multiplicative
-demand computed by `worst_case_design_llm_calls()`) before it produces a record. A durable checkpoint
+demand computed by `worst_case_design_llm_calls()`). That ceiling covers only budget-charged
+calls: `CodeSynthesisAgent.run` and `AnalysisAgent`'s calls are explicitly invoked with
+`charge=False` (custom-code synthesis and the final narrative), so a successful attempt's total
+LLM round-trip count can exceed 120 — the cap bounds design-phase cost specifically, not every
+LLM call the whole activity makes. A durable checkpoint
 taken at the design/synthesis boundary — where the design + review phase hands its `spec`/
 `rationale`/`design_context` off to code synthesis — means a worker crash partway through an
 attempt resumes past that design phase on the next (Temporal-granted) retry instead of

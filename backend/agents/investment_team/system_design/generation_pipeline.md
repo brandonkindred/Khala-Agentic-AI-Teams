@@ -195,10 +195,13 @@ has produced a real trade ledger. Each round:
 
 1. **`DeterministicAlignmentChecker`** (`../strategy_lab/quality_gates/alignment_checks.py`)
    evaluates the trade ledger against the structured `StrategySpec` across
-   six per-rule checks: universe, side, sizing (±1%), stop-loss compliance,
-   take-profit compliance, and entry-signal correlation. A near-miss on the
-   entry-signal check (within `STRATEGY_LAB_ALIGNMENT_NEAR_MISS_PCT`) routes
-   to `TradeAlignmentAgent.adjudicate_near_miss` — a single-shot yes/no call,
+   seven per-rule checks: universe, side, sizing (±1%), stop-loss compliance,
+   take-profit compliance, entry-signal correlation, and — for specs with a
+   `SignalExitRule` where the engine didn't attribute the close to a
+   structured exit — signal-exit correlation (`_check_signal_exit`). A
+   near-miss on the entry-signal check (within
+   `STRATEGY_LAB_ALIGNMENT_NEAR_MISS_PCT`) routes to
+   `TradeAlignmentAgent.adjudicate_near_miss` — a single-shot yes/no call,
    not a full re-audit.
 2. If misaligned, `TradeAlignmentAgent.propose_code_fix` receives the
    structured findings (never raw trade-ledger prose) and returns a rewritten
@@ -257,7 +260,7 @@ with the phase that invokes it:
 | `predicate_conformance.py` (+ `predicate_conformance_fixtures.py`, `conformance_bars.py`): `PredicateConformanceGate` | synthesis, re-checked at verification | Pre-execution predicate-conformance shadow check against synthetic bars |
 | `predicate_reachability.py`: `PredicateReachabilityProbe` | synthesis | Pre-backtest, data-driven check that spec predicates can actually fire |
 | `backtest_anomaly.py`: `BacktestAnomalyDetector` | synthesis (per-round), verification (fallback) | Threshold-based anomaly detection over backtest results |
-| `alignment_checks.py`: `DeterministicAlignmentChecker` | trade-alignment loop | The six per-rule trade-alignment checks described above |
+| `alignment_checks.py`: `DeterministicAlignmentChecker` | trade-alignment loop | The seven per-rule trade-alignment checks described above |
 | `acceptance_gate.py`: `AcceptanceGate` | verification | Composite walk-forward acceptance (deflated Sharpe, IS/OOS degradation) |
 | `exit_rule_conformance.py`: `ExitRuleConformanceGate` | verification | Deterministic conformance of engine-enforced exits to `spec.exit_rules` |
 | `target_symbol_coverage.py`: `TargetSymbolCoverageGate` | verification | Backtest universe matches the requested target symbols |
