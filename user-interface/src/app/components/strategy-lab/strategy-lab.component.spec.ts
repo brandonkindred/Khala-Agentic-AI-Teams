@@ -927,11 +927,12 @@ describe('StrategyLabComponent — openGenerateStrategiesDialog', () => {
     );
   });
 
-  it('falls back to every current category when the dialog result has no overlap with the refreshed config', () => {
+  it('surfaces an error and does not start a run when none of the explicitly-selected categories still exist', () => {
     component.categoryOptions.set([
       { value: 'crypto', label: 'Crypto', icon: 'currency_bitcoin' },
       { value: 'forex', label: 'Forex', icon: 'currency_exchange' },
     ]);
+    component.selectedCategories.set(['crypto', 'forex']);
     afterClosedResult = of({
       batchSize: 5,
       batchCount: 1,
@@ -941,12 +942,12 @@ describe('StrategyLabComponent — openGenerateStrategiesDialog', () => {
 
     component.openGenerateStrategiesDialog();
 
-    // Falls back to "every current category" (no constraint) rather than
-    // posting an empty allowed_asset_classes, which the backend rejects.
+    // Broadening to "every current category" would silently launch an
+    // unconstrained run the user never asked for, so this asks the user to
+    // reselect instead — leaving the existing selection and run state untouched.
+    expect(component.error()).toContain('no longer available');
     expect(component.selectedCategories()).toEqual(['crypto', 'forex']);
-    expect(apiSpy.runStrategyLab).toHaveBeenCalledWith(
-      expect.objectContaining({ allowed_asset_classes: undefined }),
-    );
+    expect(apiSpy.runStrategyLab).not.toHaveBeenCalled();
   });
 
   it('reconciles the dialog batch count against a batch-count max refreshed while the dialog was open', () => {

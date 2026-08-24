@@ -522,12 +522,21 @@ export class StrategyLabComponent implements OnInit {
       // should still include.
       if (result.categoriesTouched) {
         // categoryOptions() may have been refreshed while the dialog was open —
-        // intersect against the CURRENT options (falling back to all, same as
-        // applyCategoryConfig's own reconciliation) so a run can never be
+        // intersect against the CURRENT options so a run can never be
         // constrained to a selection the backend no longer recognizes.
         const currentOptionValues = this.categoryOptions().map((c) => c.value);
         const reconciled = currentOptionValues.filter((v) => result.selectedCategories.includes(v));
-        this.selectedCategories.set(reconciled.length ? reconciled : currentOptionValues);
+        if (!reconciled.length) {
+          // None of the user's explicitly chosen categories still exist —
+          // broadening to "every current category" would silently launch an
+          // unconstrained run the user never asked for. Ask them to
+          // reselect instead of guessing on their behalf.
+          this.error.set(
+            'The categories you selected are no longer available. Reopen "Generate strategies" to choose again.',
+          );
+          return;
+        }
+        this.selectedCategories.set(reconciled);
         this.userAdjustedCategories = true;
       }
       this.runNewStrategy();
