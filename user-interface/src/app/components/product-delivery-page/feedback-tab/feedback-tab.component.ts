@@ -25,6 +25,7 @@ import type {
   Product,
   Story,
 } from '../../../models/product-delivery.model';
+import { extractErrorDetail } from '../../../shared/extract-error-detail';
 
 const STATUS_FILTERS: { label: string; value: string | null }[] = [
   { label: 'All', value: null },
@@ -81,7 +82,7 @@ export class FeedbackTabComponent implements OnInit {
         }
       },
       error: (err) => {
-        this.error.set(err?.error?.detail ?? err?.message ?? 'Failed to load products.');
+        this.error.set(extractErrorDetail(err, 'Failed to load products.'));
         this.loadingProducts.set(false);
       },
     });
@@ -110,7 +111,7 @@ export class FeedbackTabComponent implements OnInit {
       },
       error: (err) => {
         this.items.set([]);
-        this.error.set(err?.error?.detail ?? err?.message ?? 'Failed to load feedback.');
+        this.error.set(extractErrorDetail(err, 'Failed to load feedback.'));
         this.loadingFeedback.set(false);
       },
     });
@@ -176,7 +177,7 @@ export class FeedbackTabComponent implements OnInit {
             row.id === item.id ? { ...row, linked_story_id: previous } : row,
           ),
         );
-        this.error.set(err?.error?.detail ?? err?.message ?? 'Failed to link feedback.');
+        this.error.set(extractErrorDetail(err, 'Failed to link feedback.'));
       },
     });
   }

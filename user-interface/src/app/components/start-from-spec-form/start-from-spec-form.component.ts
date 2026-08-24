@@ -7,6 +7,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import type { ProductAnalysisRunResponse } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 /** Project name: no spaces, only letters, numbers, hyphen, underscore */
 const PROJECT_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
@@ -118,7 +119,7 @@ export class StartFromSpecFormComponent {
           },
           error: (err) => {
             this.loading = false;
-            const msg = err?.error?.detail ?? err?.message ?? 'Failed to start project.';
+            const msg = extractErrorDetail(err, 'Failed to start project.');
             this.submitError.emit(msg);
           },
         });

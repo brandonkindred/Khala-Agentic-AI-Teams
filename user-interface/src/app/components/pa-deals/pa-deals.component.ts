@@ -11,6 +11,7 @@ import { MatDividerModule } from '@angular/material/divider';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { PersonalAssistantApiService } from '../../services/personal-assistant-api.service';
 import type { WishlistItem, Deal } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 /**
  * Deals component for managing wishlist and searching for deals.
@@ -106,7 +107,7 @@ export class PaDealsComponent implements OnInit, OnChanges {
         },
         error: (err) => {
           this.addingItem = false;
-          this.snackBar.open(err?.error?.detail || 'Failed to add item', 'Close', { duration: 3000 });
+          this.snackBar.open(extractErrorDetail(err, 'Failed to add item'), 'Close', { duration: 3000 });
         },
       });
   }
@@ -140,7 +141,7 @@ export class PaDealsComponent implements OnInit, OnChanges {
       },
       error: (err) => {
         this.searching = false;
-        this.snackBar.open(err?.error?.detail || 'Failed to search deals', 'Close', { duration: 3000 });
+        this.snackBar.open(extractErrorDetail(err, 'Failed to search deals'), 'Close', { duration: 3000 });
       },
     });
   }

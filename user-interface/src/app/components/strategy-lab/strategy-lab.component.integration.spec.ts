@@ -99,7 +99,7 @@ describe('StrategyLabComponent — end-to-end OnPush migration regression', () =
     await vi.advanceTimersByTimeAsync(1);
 
     expect(el().querySelector('.in-progress-section')).toBeTruthy();
-    expect(el().querySelector('.run-btn')?.textContent).toContain('Strategy 1 of 3');
+    expect(el().querySelector('.generate-btn')?.textContent).toContain('Strategy 1 of 3');
 
     // Step 1: ideation starts.
     sse.next({ type: 'progress', cycle_index: 0, phase: 'ideating', sub_phase: 'started' });
@@ -139,7 +139,7 @@ describe('StrategyLabComponent — end-to-end OnPush migration regression', () =
     });
     await vi.advanceTimersByTimeAsync(1);
     expect(el().querySelector('.in-progress-section')).toBeNull();
-    expect(el().querySelector('.run-btn')?.getAttribute('disabled')).toBeNull();
+    expect(el().querySelector('.generate-btn')?.getAttribute('disabled')).toBeNull();
   });
 
   it('renders correctly through the SSE-drop → polling-fallback transition', async () => {
@@ -161,7 +161,7 @@ describe('StrategyLabComponent — end-to-end OnPush migration regression', () =
     await vi.advanceTimersByTimeAsync(1); // fallbackToPolling's first (t=0) tick
 
     expect(apiSpy.getRunStatus).toHaveBeenCalledWith('run-1');
-    expect(el().querySelector('.run-btn')?.textContent).toContain('Strategy 3 of 3');
+    expect(el().querySelector('.generate-btn')?.textContent).toContain('Strategy 3 of 3');
 
     // Poll again, this time reporting the run finished.
     apiSpy.getRunStatus.mockReturnValue(of({

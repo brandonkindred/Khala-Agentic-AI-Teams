@@ -20,6 +20,7 @@ import type {
   DesignSystemContractResponse,
   Surface,
 } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 interface ComponentEntry {
   name: string;
@@ -87,7 +88,7 @@ export class AccessibilityDesignSystemComponent {
         this.loadingInventory = false;
       },
       error: (err) => {
-        this.inventoryError = err?.error?.detail ?? err?.message ?? 'Failed to build inventory';
+        this.inventoryError = extractErrorDetail(err, 'Failed to build inventory');
         this.loadingInventory = false;
       },
     });

@@ -22,6 +22,7 @@ import type {
   TestPipelineRun,
   PipelineStepResult,
 } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 @Component({
   selector: 'app-pipeline-test-runner',
@@ -87,7 +88,7 @@ export class PipelineTestRunnerComponent implements OnInit, OnDestroy {
         this.runs.update((r) => [run, ...r]);
         this.startPolling(run.run_id);
       },
-      error: (err) => this.error.set(err?.error?.detail ?? 'Failed to start run'),
+      error: (err) => this.error.set(extractErrorDetail(err, 'Failed to start run')),
     });
   }
 

@@ -21,6 +21,7 @@ import type {
   GroomMethod,
   GroomResult,
 } from '../../../models/product-delivery.model';
+import { extractErrorDetail } from '../../../shared/extract-error-detail';
 
 export interface GroomModalData {
   productId: string;
@@ -88,7 +89,7 @@ export class GroomModalComponent {
       },
       error: (err) => {
         this.preview.set(null);
-        this.error.set(err?.error?.detail ?? err?.message ?? 'Failed to preview grooming.');
+        this.error.set(extractErrorDetail(err, 'Failed to preview grooming.'));
         this.previewing.set(false);
       },
     });
@@ -105,7 +106,7 @@ export class GroomModalComponent {
       },
       error: (err) => {
         this.applying.set(false);
-        this.error.set(err?.error?.detail ?? err?.message ?? 'Failed to apply grooming.');
+        this.error.set(extractErrorDetail(err, 'Failed to apply grooming.'));
       },
     });
   }

@@ -9,6 +9,7 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatChipsModule } from '@angular/material/chips';
 import { PersonalAssistantApiService } from '../../services/personal-assistant-api.service';
 import type { AssistantMessage } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 /**
  * Chat component for conversational interaction with the Personal Assistant.
@@ -113,7 +114,7 @@ How can I help you today?`,
       error: (err) => {
         this.messages.push({
           role: 'assistant',
-          content: `Sorry, something went wrong: ${err?.error?.detail || err?.message || 'Unknown error'}`,
+          content: `Sorry, something went wrong: ${extractErrorDetail(err, 'Unknown error')}`,
           timestamp: new Date().toISOString(),
         });
         this.loading = false;
