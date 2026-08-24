@@ -118,7 +118,12 @@ def _run_build_verification(
     For frontend: runs ng build.
     For backend: runs python syntax check, then (if a tests/ dir with test_*.py
     files and requirements.txt exist) a non-fatal ``pip install -r requirements.txt``
-    before pytest.
+    before pytest. The install and the pytest run are both held under
+    ``pip_install_lock``, a cross-process ``fcntl.flock`` lock file under the
+    shared ``AGENT_CACHE`` root — concurrent same-stack backend workers
+    serialize their install-and-test step through it rather than racing on the
+    shared interpreter's ``site-packages``. A lock-acquisition failure degrades
+    to running unguarded (logged), matching the existing non-fatal behavior.
     For devops: validates .github/workflows and top-level *.yml/*.yaml files,
     then runs a docker build when a Dockerfile is present and Docker is installed.
 
@@ -215,9 +220,11 @@ def _run_build_verification(
         tests_dir = backend_dir / "tests"
         if tests_dir.exists() and any(tests_dir.rglob("test_*.py")):
             # Install deps before pytest so agent-added packages (e.g. sqlalchemy) are available.
-            # Held across both the install and the pytest run: pytest imports whatever is in
-            # site-packages at collection time, so releasing the lock between install and pytest
-            # would let a second worker's install mutate those same packages mid-collection.
+            # Same-stack backend workers share sys.executable's site-packages, so concurrent
+            # installs race; pip_install_lock serializes them. Held across both the install and
+            # the pytest run: pytest imports whatever is in site-packages at collection time, so
+            # releasing the lock between install and pytest would let a second worker's install
+            # mutate those same packages mid-collection.
             req_txt = backend_dir / "requirements.txt"
             with pip_install_lock():
                 # integration-only: shells out to `pip install`
@@ -685,11 +692,12 @@ def _try_build_fix_one_at_a_time(
             tests_dir = project_dir / "tests"
             if tests_dir.exists() and any(tests_dir.rglob("test_*.py")):
                 req_txt = project_dir / "requirements.txt"
-                # Held across both the install and the pytest run: pytest imports whatever
-                # is in site-packages at collection time, so releasing the lock between
-                # install and pytest would let a second worker's install mutate those same
-                # packages mid-collection — reintroducing the race this lock exists to
-                # prevent.
+                # Same-stack backend workers share sys.executable's site-packages, so
+                # concurrent installs race; pip_install_lock serializes them. Held across
+                # both the install and the pytest run: pytest imports whatever is in
+                # site-packages at collection time, so releasing the lock between install
+                # and pytest would let a second worker's install mutate those same packages
+                # mid-collection — reintroducing the race this lock exists to prevent.
                 with pip_install_lock():
                     if req_txt.exists():
                         try:

@@ -106,11 +106,12 @@ def run_backend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
     tests_dir = backend_dir / "tests"
     if tests_dir.exists() and any(tests_dir.rglob("test_*.py")):
         req_txt = backend_dir / "requirements.txt"
-        # Held across both the install and the pytest run: pytest imports whatever
-        # is in site-packages at collection time, so releasing the lock between
-        # install and pytest would let a second worker's install mutate those same
-        # packages mid-collection — reintroducing the race this lock exists to
-        # prevent.
+        # Same-stack backend workers share sys.executable's site-packages, so
+        # concurrent installs race; pip_install_lock serializes them. Held across
+        # both the install and the pytest run: pytest imports whatever is in
+        # site-packages at collection time, so releasing the lock between install
+        # and pytest would let a second worker's install mutate those same packages
+        # mid-collection — reintroducing the race this lock exists to prevent.
         with pip_install_lock():
             if req_txt.exists():
                 try:
