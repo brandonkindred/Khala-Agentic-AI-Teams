@@ -179,8 +179,10 @@ def _make_phase_job_updater(
           unwritten rather than marking the whole order complete; rescales a
           ``progress`` kwarg onto ``progress_band`` (garbage progress is dropped,
           never written); forces ``phase=phase`` on the ``update_job`` call when
-          ``phase`` is not ``None``; forwards all remaining kwargs untouched; and
-          swallows all exceptions raised during the update (observability-only
+          ``phase`` is not ``None`` (a ``phase`` kwarg passed in by the caller is
+          dropped in favor of the forced value, so a caller-supplied ``phase``
+          never collides with it); forwards all other remaining kwargs untouched;
+          and swallows all exceptions raised during the update (observability-only
           updater — never raises).
     """
     assert isinstance(subprocess_key, str) and subprocess_key, subprocess_key
@@ -208,6 +210,7 @@ def _make_phase_job_updater(
                 if scaled is not None:
                     kwargs["progress"] = scaled
             if phase is not None:
+                kwargs.pop("phase", None)
                 update_job(job_id, phase=phase, **kwargs)
             else:
                 update_job(job_id, **kwargs)

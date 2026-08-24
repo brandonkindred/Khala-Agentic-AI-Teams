@@ -547,9 +547,16 @@ def test_pra_and_planning_updaters_rescale_progress(monkeypatch):
 
 
 def test_make_phase_job_updater_edge_cases(monkeypatch):
-    """Edge cases for the shared factory: empty/unmatched phase_order, falsy
-    current_phase, garbage progress, and a None phase (no forced ``phase``
-    kwarg on the update_job call)."""
+    """Edge cases for the shared factory:
+    - empty / unmatched phase_order leaves completed_phases unwritten
+    - falsy-but-non-None current_phase is still recorded
+    - a current_phase found mid-order yields the entries preceding it
+    - garbage progress is dropped
+    - phase=None (default) does not force a ``phase`` kwarg
+    - phase=<value> forces the ``phase`` kwarg on every write, dropping any
+      caller-supplied ``phase`` kwarg rather than colliding with it
+    - update_job errors are swallowed and never raised
+    """
     import software_engineering_team.orchestrator as se_orch
 
     written: list = []
@@ -607,6 +614,12 @@ def test_make_phase_job_updater_edge_cases(monkeypatch):
     forced_updater(status_text="hi")
     assert written[-1]["phase"] == "some_phase"
     assert written[-1]["status_text"] == "hi"
+
+    # A caller-supplied "phase" kwarg is dropped in favor of the forced value —
+    # it must never collide with the forced phase= in the update_job() call.
+    forced_updater(phase="caller_phase", status_text="collide")
+    assert written[-1]["phase"] == "some_phase"
+    assert written[-1]["status_text"] == "collide"
 
     # update_job errors are swallowed (observability only, never raises).
     def _raise(job_id, **kw):
