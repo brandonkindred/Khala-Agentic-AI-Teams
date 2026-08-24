@@ -23,7 +23,7 @@ def _task(**overrides):
 
 
 def _microtask(**overrides):
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         Microtask,
         ToolAgentKind,
     )
@@ -34,7 +34,7 @@ def _microtask(**overrides):
 
 
 def _issue(**overrides):
-    from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
+    from software_engineering_team.codegen_team.models import ReviewIssue
 
     base = dict(
         source="code_review",
@@ -48,7 +48,7 @@ def _issue(**overrides):
 
 
 def _review_result(issues=None):
-    from software_engineering_team.frontend_code_v2_team.models import ReviewResult
+    from software_engineering_team.codegen_team.models import ReviewResult
 
     return ReviewResult(passed=False, issues=issues or [], build_ok=True, lint_ok=True)
 
@@ -65,7 +65,7 @@ class _StubAgent:
 
 
 def test_fe_format_all_code():
-    from software_engineering_team.frontend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.frontend.problem_solving import (
         _format_all_code,
     )
 
@@ -75,7 +75,7 @@ def test_fe_format_all_code():
 
 
 def test_fe_format_all_code_truncates():
-    from software_engineering_team.frontend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.frontend.problem_solving import (
         _format_all_code,
     )
 
@@ -85,7 +85,7 @@ def test_fe_format_all_code_truncates():
 
 
 def test_fe_format_all_code_raises_on_nonpositive_max_chars():
-    from software_engineering_team.frontend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.frontend.problem_solving import (
         _format_all_code,
     )
 
@@ -94,7 +94,7 @@ def test_fe_format_all_code_raises_on_nonpositive_max_chars():
 
 
 def test_fe_format_issues_for_batch():
-    from software_engineering_team.frontend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.frontend.problem_solving import (
         _format_issues_for_batch,
     )
 
@@ -104,7 +104,7 @@ def test_fe_format_issues_for_batch():
 
 
 def test_fe_relevant_code_for_issue():
-    from software_engineering_team.frontend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.frontend.problem_solving import (
         _relevant_code_for_issue,
     )
 
@@ -113,7 +113,7 @@ def test_fe_relevant_code_for_issue():
 
 
 def test_fe_relevant_code_for_issue_fallback():
-    from software_engineering_team.frontend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.frontend.problem_solving import (
         _relevant_code_for_issue,
     )
 
@@ -122,7 +122,7 @@ def test_fe_relevant_code_for_issue_fallback():
 
 
 def test_fe_run_batch_no_actionable():
-    from software_engineering_team.frontend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.frontend.problem_solving import (
         run_batch_coding_fixes,
     )
 
@@ -136,8 +136,8 @@ def test_fe_run_batch_no_actionable():
 
 
 def test_fe_run_batch_success(monkeypatch):
-    from software_engineering_team.frontend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.frontend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.frontend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.frontend.problem_solving import (
         run_batch_coding_fixes,
     )
 
@@ -161,8 +161,8 @@ def test_fe_run_batch_success(monkeypatch):
 
 
 def test_fe_run_batch_llm_failure(monkeypatch):
-    from software_engineering_team.frontend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.frontend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.frontend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.frontend.problem_solving import (
         run_batch_coding_fixes,
     )
 
@@ -181,7 +181,7 @@ def test_fe_run_batch_llm_failure(monkeypatch):
 
 
 def test_fe_run_problem_solving_no_actionable():
-    from software_engineering_team.frontend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.frontend.problem_solving import (
         run_problem_solving,
     )
 
@@ -195,8 +195,8 @@ def test_fe_run_problem_solving_no_actionable():
 
 
 def test_fe_run_problem_solving_llm_failure(monkeypatch):
-    from software_engineering_team.frontend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.frontend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.frontend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.frontend.problem_solving import (
         run_problem_solving,
     )
 
@@ -215,12 +215,12 @@ def test_fe_run_problem_solving_llm_failure(monkeypatch):
 
 
 def test_fe_run_problem_solving_with_tool_agents(monkeypatch):
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
-    from software_engineering_team.frontend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.frontend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.frontend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.frontend.problem_solving import (
         run_problem_solving,
     )
 
@@ -255,8 +255,8 @@ def _fe_review_only_tool_agents_do_not_consult_problem_solve(monkeypatch, kind, 
     ``spec=agent_cls`` makes the mock reject that attribute exactly like the
     real class would, unlike a bare ``MagicMock()`` (which fakes every attribute
     and would pass this assertion regardless of the real class's contract)."""
-    from software_engineering_team.frontend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.frontend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.frontend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.frontend.problem_solving import (
         run_problem_solving,
     )
 
@@ -284,8 +284,8 @@ def _fe_review_only_tool_agents_do_not_consult_problem_solve(monkeypatch, kind, 
 
 
 def test_fe_run_problem_solving_accessibility_tool_agent_has_no_problem_solve(monkeypatch):
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.frontend_code_v2_team.tool_agents.accessibility.agent import (
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.tool_agents.frontend.accessibility.agent import (
         AccessibilityToolAgent,
     )
 
@@ -295,8 +295,8 @@ def test_fe_run_problem_solving_accessibility_tool_agent_has_no_problem_solve(mo
 
 
 def test_fe_run_problem_solving_performance_tool_agent_has_no_problem_solve(monkeypatch):
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.frontend_code_v2_team.tool_agents.performance.agent import (
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.tool_agents.frontend.performance.agent import (
         PerformanceToolAgent,
     )
 
@@ -306,8 +306,8 @@ def test_fe_run_problem_solving_performance_tool_agent_has_no_problem_solve(monk
 
 
 def test_fe_run_problem_solving_ux_usability_tool_agent_has_no_problem_solve(monkeypatch):
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.frontend_code_v2_team.tool_agents.ux_usability.agent import (
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.tool_agents.frontend.ux_usability.agent import (
         UxUsabilityToolAgent,
     )
 
@@ -317,8 +317,8 @@ def test_fe_run_problem_solving_ux_usability_tool_agent_has_no_problem_solve(mon
 
 
 def test_fe_run_problem_solving_for_microtask(monkeypatch):
-    from software_engineering_team.frontend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.frontend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.frontend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.frontend.problem_solving import (
         run_problem_solving_for_microtask,
     )
 
@@ -340,7 +340,7 @@ def test_fe_run_problem_solving_for_microtask(monkeypatch):
 
 
 def test_fe_run_problem_solving_for_microtask_no_actionable():
-    from software_engineering_team.frontend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.frontend.problem_solving import (
         run_problem_solving_for_microtask,
     )
 

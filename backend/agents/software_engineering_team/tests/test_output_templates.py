@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from software_engineering_team.backend_code_v2_team.phases import _profile as be_tmpl
-from software_engineering_team.frontend_code_v2_team.phases import _profile as fe_tmpl
+from software_engineering_team.codegen_team.stacks.backend import profile as be_tmpl
+from software_engineering_team.codegen_team.stacks.frontend import profile as fe_tmpl
 
 
 @pytest.mark.parametrize("tmpl", [be_tmpl, fe_tmpl], ids=["backend", "frontend"])

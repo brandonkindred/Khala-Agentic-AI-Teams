@@ -65,7 +65,7 @@ class TestBackendOrchestratorParity:
     """
 
     def _make_agent(self):
-        from software_engineering_team.backend_code_v2_team.orchestrator import (
+        from software_engineering_team.codegen_team.orchestrator import (
             BackendDevelopmentAgent,
         )
 
@@ -85,7 +85,7 @@ class TestBackendOrchestratorParity:
         ``phases._profile`` module -- matching the pattern established in
         ``test_v2_config_orchestrator.py``.
         """
-        from software_engineering_team.backend_code_v2_team.phases._profile import BACKEND_CONFIG
+        from software_engineering_team.codegen_team.stacks.backend.profile import BACKEND_CONFIG
 
         agent = self._make_agent()
         assert agent.config is BACKEND_CONFIG
@@ -97,7 +97,7 @@ class TestBackendOrchestratorParity:
         straight from the enum), this reads ``tool_agent_kinds`` off the real
         agent/config, so it would catch ``BACKEND_CONFIG`` itself drifting from
         the enum it's meant to mirror."""
-        from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
+        from software_engineering_team.codegen_team.models import ToolAgentKind
 
         agent = self._make_agent()
         expected = frozenset(
@@ -112,7 +112,7 @@ class TestBackendOrchestratorParity:
 
     def test_stack_profile_is_the_real_profile_object(self):
         """The config's stack_profile is the team's canonical PROFILE, not a copy."""
-        from software_engineering_team.backend_code_v2_team.orchestrator import (
+        from software_engineering_team.codegen_team.orchestrator import (
             BackendDevelopmentAgent,
         )
 
@@ -155,8 +155,8 @@ class TestBackendOrchestratorParity:
         is a thin public wrapper that immediately delegates to
         ``_run_development_workflow``, so exercising it here also exercises that
         seam end-to-end."""
-        from software_engineering_team.backend_code_v2_team import orchestrator as orch
-        from software_engineering_team.backend_code_v2_team.models import (
+        from software_engineering_team.codegen_team import orchestrator as orch
+        from software_engineering_team.codegen_team.models import (
             DeliverResult,
             DocumentationPhaseResult,
             ExecutionResult,
@@ -213,9 +213,7 @@ class TestBackendOrchestratorParity:
             ),
         )
 
-        from software_engineering_team.backend_code_v2_team.phases import (
-            _profile as doc_phase,
-        )
+        from software_engineering_team.codegen_team.stacks.backend import profile as doc_phase
 
         monkeypatch.setattr(
             doc_phase,
@@ -270,7 +268,7 @@ class TestFrontendOrchestratorParity:
     """
 
     def _make_agent(self):
-        from software_engineering_team.frontend_code_v2_team.orchestrator import (
+        from software_engineering_team.codegen_team.orchestrator import (
             FrontendDevelopmentAgent,
         )
 
@@ -290,7 +288,7 @@ class TestFrontendOrchestratorParity:
         ``phases._profile`` module -- matching the pattern established in
         ``test_v2_config_orchestrator.py``.
         """
-        from software_engineering_team.frontend_code_v2_team.phases._profile import FRONTEND_CONFIG
+        from software_engineering_team.codegen_team.stacks.frontend.profile import FRONTEND_CONFIG
 
         agent = self._make_agent()
         assert agent.config is FRONTEND_CONFIG
@@ -302,7 +300,7 @@ class TestFrontendOrchestratorParity:
         straight from the enum), this reads ``tool_agent_kinds`` off the real
         agent/config, so it would catch ``FRONTEND_CONFIG`` itself drifting from
         the enum it's meant to mirror."""
-        from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+        from software_engineering_team.codegen_team.models import ToolAgentKind
 
         agent = self._make_agent()
         expected = frozenset(
@@ -337,7 +335,7 @@ class TestFrontendOrchestratorParity:
 
     def test_stack_profile_is_the_real_profile_object(self):
         """The config's stack_profile is the team's canonical PROFILE, not a copy."""
-        from software_engineering_team.frontend_code_v2_team.orchestrator import (
+        from software_engineering_team.codegen_team.orchestrator import (
             FrontendDevelopmentAgent,
         )
 
@@ -380,8 +378,8 @@ class TestFrontendOrchestratorParity:
         is a thin public wrapper that immediately delegates to
         ``_run_development_workflow``, so exercising it here also exercises that
         seam end-to-end."""
-        from software_engineering_team.frontend_code_v2_team import orchestrator as orch
-        from software_engineering_team.frontend_code_v2_team.models import (
+        from software_engineering_team.codegen_team import orchestrator as orch
+        from software_engineering_team.codegen_team.models import (
             DeliverResult,
             DocumentationPhaseResult,
             ExecutionResult,
@@ -438,9 +436,7 @@ class TestFrontendOrchestratorParity:
             ),
         )
 
-        from software_engineering_team.frontend_code_v2_team.phases import (
-            _profile as doc_phase,
-        )
+        from software_engineering_team.codegen_team.stacks.frontend import profile as doc_phase
 
         monkeypatch.setattr(
             doc_phase,
@@ -488,12 +484,12 @@ class TestCrossTeamConfigDivergence:
     """
 
     def _backend_config(self) -> V2TeamConfig:
-        from software_engineering_team.backend_code_v2_team.phases._profile import BACKEND_CONFIG
+        from software_engineering_team.codegen_team.stacks.backend.profile import BACKEND_CONFIG
 
         return BACKEND_CONFIG
 
     def _frontend_config(self) -> V2TeamConfig:
-        from software_engineering_team.frontend_code_v2_team.phases._profile import FRONTEND_CONFIG
+        from software_engineering_team.codegen_team.stacks.frontend.profile import FRONTEND_CONFIG
 
         return FRONTEND_CONFIG
 

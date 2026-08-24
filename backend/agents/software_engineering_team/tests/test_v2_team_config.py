@@ -79,8 +79,8 @@ class TestBackendParity:
 
     def _build(self) -> V2TeamConfig:
         """Compose the team's real, already-constructed PROFILE — not a copy of its fields."""
-        from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-        from software_engineering_team.backend_code_v2_team.phases._profile import PROFILE
+        from software_engineering_team.codegen_team.models import ToolAgentKind
+        from software_engineering_team.codegen_team.stacks.backend.profile import PROFILE
 
         return V2TeamConfig(
             stack_profile=PROFILE,
@@ -93,7 +93,7 @@ class TestBackendParity:
 
     def test_stack_profile_is_the_real_team_profile(self):
         """Composition, not copying: the same PROFILE object, not an equal one."""
-        from software_engineering_team.backend_code_v2_team.phases._profile import PROFILE
+        from software_engineering_team.codegen_team.stacks.backend.profile import PROFILE
 
         assert self._build().stack_profile is PROFILE
 
@@ -103,7 +103,7 @@ class TestBackendParity:
 
     def test_tool_agent_kinds_match_enum_members(self):
         """The tool-agent registry mirrors every ToolAgentKind member backend defines."""
-        from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
+        from software_engineering_team.codegen_team.models import ToolAgentKind
 
         config = self._build()
         assert config.tool_agent_kinds == frozenset(k.value for k in ToolAgentKind)
@@ -126,8 +126,8 @@ class TestFrontendParity:
 
     def _build(self) -> V2TeamConfig:
         """Compose the team's real, already-constructed PROFILE — not a copy of its fields."""
-        from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
-        from software_engineering_team.frontend_code_v2_team.phases._profile import (
+        from software_engineering_team.codegen_team.models import ToolAgentKind
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
             _ACCESSIBILITY_VERIFY_NOTE,
             PROFILE,
         )
@@ -149,7 +149,7 @@ class TestFrontendParity:
 
     def test_stack_profile_is_the_real_team_profile(self):
         """Composition, not copying: the same PROFILE object, not an equal one."""
-        from software_engineering_team.frontend_code_v2_team.phases._profile import PROFILE
+        from software_engineering_team.codegen_team.stacks.frontend.profile import PROFILE
 
         assert self._build().stack_profile is PROFILE
 
@@ -159,7 +159,7 @@ class TestFrontendParity:
 
     def test_tool_agent_kinds_match_enum_members(self):
         """The tool-agent registry mirrors every ToolAgentKind member frontend defines."""
-        from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+        from software_engineering_team.codegen_team.models import ToolAgentKind
 
         config = self._build()
         assert config.tool_agent_kinds == frozenset(k.value for k in ToolAgentKind)
@@ -173,7 +173,7 @@ class TestFrontendParity:
 
     def test_extra_review_clause_is_accessibility_note(self):
         """Frontend's extra review clause is the real accessibility-verification note."""
-        from software_engineering_team.frontend_code_v2_team.phases._profile import (
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
             _ACCESSIBILITY_VERIFY_NOTE,
         )
 

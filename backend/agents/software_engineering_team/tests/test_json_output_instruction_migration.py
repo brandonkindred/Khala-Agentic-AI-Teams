@@ -26,22 +26,22 @@ from software_engineering_team.devops_team.iac_agent.prompts import IAC_AGENT_PR
 from software_engineering_team.devops_team.task_clarifier.prompts import (
     DEVOPS_TASK_CLARIFIER_PROMPT,
 )
-from software_engineering_team.frontend_code_v2_team.tool_agents.accessibility.agent import (
+from software_engineering_team.codegen_team.tool_agents.frontend.accessibility.agent import (
     ACCESSIBILITY_REVIEW_PROMPT,
 )
-from software_engineering_team.frontend_code_v2_team.tool_agents.architecture.agent import (
+from software_engineering_team.codegen_team.tool_agents.frontend.architecture.agent import (
     FRONTEND_ARCHITECT_PROMPT,
 )
-from software_engineering_team.frontend_code_v2_team.tool_agents.branding_theme.agent import (
+from software_engineering_team.codegen_team.tool_agents.frontend.branding_theme.agent import (
     DESIGN_SYSTEM_PLAN_PROMPT,
 )
-from software_engineering_team.frontend_code_v2_team.tool_agents.performance.agent import (
+from software_engineering_team.codegen_team.tool_agents.frontend.performance.agent import (
     PERFORMANCE_REVIEW_PROMPT,
 )
-from software_engineering_team.frontend_code_v2_team.tool_agents.ui_design.agent import (
+from software_engineering_team.codegen_team.tool_agents.frontend.ui_design.agent import (
     UI_DESIGNER_PLAN_PROMPT,
 )
-from software_engineering_team.frontend_code_v2_team.tool_agents.ux_usability.agent import (
+from software_engineering_team.codegen_team.tool_agents.frontend.ux_usability.agent import (
     UX_DESIGNER_PLAN_PROMPT,
     UX_ENGINEER_REVIEW_PROMPT,
 )

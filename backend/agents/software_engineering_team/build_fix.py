@@ -20,8 +20,8 @@ Invariants:
       helper; they return ``(False, summary)`` for handled failures and
       otherwise propagate (see ``_try_build_fix_one_at_a_time`` Raises).
 
-No ``sys.path`` mutation on import: per-team imports (``backend_code_v2_team`` /
-``frontend_code_v2_team`` prompts and templates) use absolute
+No ``sys.path`` mutation on import: per-stack imports (``codegen_team``'s
+backend/frontend prompts and templates) use absolute
 ``software_engineering_team.*`` package paths, so importing this module — for
 static analysis, test discovery, or as a transitive dependency — leaves the
 interpreter path untouched (unlike the pre-existing ``sys.path.insert``
@@ -121,8 +121,8 @@ def _run_build_verification(
     For devops: validates .github/workflows and top-level *.yml/*.yaml files,
     then runs a docker build when a Dockerfile is present and Docker is installed.
 
-    The v2 phase-pipeline teams (``backend_code_v2_team``/``frontend_code_v2_team``)
-    pass ``"backend_code_v2"``/``"frontend_code_v2"`` as ``agent_type`` — normalize
+    The codegen team's v2 phase pipeline (either stack) passes
+    ``"backend_code_v2"``/``"frontend_code_v2"`` as ``agent_type`` — normalize
     those to their base ``"backend"``/``"frontend"`` verification path so v2 jobs
     actually run syntax check / ``ng build`` instead of silently no-op'ing to
     ``(True, "")`` via the fallthrough at the end of this function.
@@ -639,7 +639,7 @@ def _try_build_fix_one_at_a_time(
                 }
             )
         language = "typescript"
-        prompt_module = "frontend_code_v2_team.prompts"
+        prompt_module = "codegen_team.stacks.frontend.prompts"
     # integration-only: runs python syntax check + pytest + LLM repair loop
     elif agent_type == "backend":  # pragma: no cover
         project_dir = repo_path if any(repo_path.rglob("*.py")) else repo_path / "backend"
@@ -727,7 +727,7 @@ def _try_build_fix_one_at_a_time(
         if test_result is not None:
             result = test_result
         language = "python"
-        prompt_module = "backend_code_v2_team.prompts"
+        prompt_module = "codegen_team.stacks.backend.prompts"
     else:
         return False, "Unsupported agent_type for build fix"
 
@@ -743,22 +743,22 @@ def _try_build_fix_one_at_a_time(
         logger.warning("Build fix: could not get model: %s", e)
         return False, result.error_summary if result is not None else "Build failed"
 
-    from software_engineering_team.backend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.backend.profile import (
         parse_problem_solving_single_issue_template,
     )
 
-    if prompt_module == "frontend_code_v2_team.prompts":
-        from software_engineering_team.frontend_code_v2_team.prompts import (
+    if prompt_module == "codegen_team.stacks.frontend.prompts":
+        from software_engineering_team.codegen_team.stacks.frontend.prompts import (
             PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT as FIX_PROMPT,
         )
 
         language_conventions = ""
     else:
-        from software_engineering_team.backend_code_v2_team.prompts import (
+        from software_engineering_team.codegen_team.stacks.backend.prompts import (
             JAVA_CONVENTIONS,
             PYTHON_CONVENTIONS,
         )
-        from software_engineering_team.backend_code_v2_team.prompts import (
+        from software_engineering_team.codegen_team.stacks.backend.prompts import (
             PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT as FIX_PROMPT,
         )
 
@@ -778,7 +778,7 @@ def _try_build_fix_one_at_a_time(
                 model=_build_fix_model,
                 parse_fn=parse_problem_solving_single_issue_template,
                 fix_prompt=FIX_PROMPT,
-                is_frontend=prompt_module == "frontend_code_v2_team.prompts",
+                is_frontend=prompt_module == "codegen_team.stacks.frontend.prompts",
                 language_conventions=language_conventions,
                 task_id=task_id,
                 attempt=attempt,

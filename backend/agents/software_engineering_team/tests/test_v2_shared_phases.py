@@ -28,7 +28,7 @@ from shared.dev_models.models import (
     TaskType,
 )
 from shared.git.git_utils import write_files_and_commit
-from software_engineering_team.backend_code_v2_team import models as be_models
+from software_engineering_team.codegen_team import models as be_models
 from software_engineering_team.shared.phases import execution as sh_exec
 from software_engineering_team.shared.phases import planning as sh_plan
 from software_engineering_team.shared.phases import problem_solving as sh_ps

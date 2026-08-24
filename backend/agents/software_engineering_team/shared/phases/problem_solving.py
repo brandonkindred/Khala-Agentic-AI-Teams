@@ -9,17 +9,20 @@ fix loop, the tool-agent problem-solve application, and the two top-level
 
 Team-local models are injected via the team's ``models`` module and the
 stack-specific conventions / prompt-slot behavior via its
-:class:`~software_engineering_team.shared.stack_profile.StackProfile`. Backend's
-phase-specific fix functions (which interlock with the out-of-scope backend
-``review.py``) stay in the backend team module and reuse
-:func:`_fix_issues_one_at_a_time_impl` directly.
+:class:`~software_engineering_team.shared.stack_profile.StackProfile`. The
+phase-specific fix functions (``run_code_review_fixes``/``run_qa_fixes``/
+``run_security_fixes``/``run_documentation_fixes``, which interlock with each
+stack's review-gate phases) are also generic here, parametrized by
+:func:`make_phase_fix_functions`; each stack's ``problem_solving.py`` binds
+them with its own profile/models/prompt/tool-agent-map and re-exports the
+resulting four callables.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 from llm_service import LLMClient
 from llm_service.strands_model import LlmRunner
@@ -762,6 +765,370 @@ def run_problem_solving_impl(
         summary=summary,
         resolved=resolved,
         unresolved_issues=unresolved_issues,
+    )
+
+
+def _run_phase_fixes_impl(
+    *,
+    llm: LLMClient,
+    microtask: Any,
+    phase_result: Any,
+    current_files: Dict[str, str],
+    language: str,
+    repo_path: str,
+    tool_agents: Optional[Dict[Any, Any]],
+    task_id: str,
+    phase_name: str,
+    detail_callback: Optional[Callable[[str], None]],
+    profile: StackProfile,
+    models: PhaseModels,
+    single_issue_prompt: str,
+    parse_single: Callable[[str], Dict[str, Any]],
+    runner: LlmRunner,
+) -> Any:
+    """Fix a single review phase's actionable issues, one at a time.
+
+    Common implementation behind the four phase-specific fix functions
+    (``run_code_review_fixes``/``run_qa_fixes``/``run_security_fixes``/
+    ``run_documentation_fixes``) a stack exposes via
+    :func:`make_phase_fix_functions`. ``tool_agents`` is accepted for
+    signature symmetry with :func:`_run_phase_fixes_with_tool_agent_impl` but
+    is not consulted here — this function never runs a tool agent's
+    ``problem_solve``.
+
+    Preconditions: ``phase_result.issues`` is a list of review issues;
+      ``models`` exposes ``ProblemSolvingResult``; ``profile`` supplies the
+      language conventions.
+    Postconditions: returns a ``ProblemSolvingResult``. When no issue is
+      actionable (severity critical/high/medium), returns a resolved,
+      unmodified-files result without invoking the fix loop.
+    """
+    problem_solving_result_cls = models.ProblemSolvingResult
+
+    microtask_id = microtask.id
+    actionable = [i for i in phase_result.issues if _is_actionable_issue(i)]
+    if not actionable:
+        return problem_solving_result_cls(
+            resolved=True, files=current_files, summary=f"No actionable {phase_name} issues."
+        )
+
+    logger.info(
+        "[%s] %s fixes for microtask %s: %d actionable issues",
+        task_id,
+        phase_name.title(),
+        microtask_id,
+        len(actionable),
+    )
+
+    merged, fixes_applied, unresolved_issues = _fix_issues_one_at_a_time_impl(
+        llm=llm,
+        actionable=actionable,
+        current_files=current_files,
+        lang_conv=profile.conventions_for(language),
+        task_id=task_id,
+        single_issue_prompt=single_issue_prompt,
+        parse_single=parse_single,
+        has_language_conventions=profile.has_language_conventions,
+        runner=runner,
+        microtask_id=microtask_id,
+        phase_name=phase_name,
+        detail_callback=detail_callback,
+    )
+
+    resolved = len(unresolved_issues) == 0
+    summary = (
+        f"Microtask {microtask_id} {phase_name}: applied {len(fixes_applied)} fix(s); "
+        f"{len(unresolved_issues)} unresolved."
+    )
+    logger.info("[%s] %s", task_id, summary)
+
+    return problem_solving_result_cls(
+        fixes_applied=fixes_applied,
+        files=merged,
+        summary=summary,
+        resolved=resolved,
+        unresolved_issues=unresolved_issues,
+    )
+
+
+def _run_phase_fixes_with_tool_agent_impl(
+    *,
+    phase_name: str,
+    llm: LLMClient,
+    microtask: Any,
+    phase_result: Any,
+    current_files: Dict[str, str],
+    language: str,
+    repo_path: str,
+    tool_agents: Optional[Dict[Any, Any]],
+    task_id: str,
+    detail_callback: Optional[Callable[[str], None]],
+    profile: StackProfile,
+    models: PhaseModels,
+    single_issue_prompt: str,
+    parse_single: Callable[[str], Dict[str, Any]],
+    runner: LlmRunner,
+    phase_fix_tool_agent: Dict[str, Any],
+) -> Any:
+    """Run the generic phase fixes, then let the phase's dedicated tool agent take a pass.
+
+    Preconditions: ``phase_name`` is a key of ``phase_fix_tool_agent``; ``models``
+      exposes ``Phase`` and ``ToolAgentPhaseInput`` in addition to
+      ``ProblemSolvingResult``.
+    Postconditions: returns the phase fix result from the generic per-issue fix
+      loop, with the tool agent's file updates merged in when that agent is
+      wired, supports ``problem_solve``, and the call succeeds. If the tool
+      agent's ``problem_solve`` raises, the exception is logged (with
+      traceback), the generic loop's file updates already in ``result.files``
+      are preserved unchanged, and ``result.resolved`` is forced to ``False``
+      with a note appended to ``result.summary`` describing the failure.
+    """
+    result = _run_phase_fixes_impl(
+        llm=llm,
+        microtask=microtask,
+        phase_result=phase_result,
+        current_files=current_files,
+        language=language,
+        repo_path=repo_path,
+        tool_agents=tool_agents,
+        task_id=task_id,
+        phase_name=phase_name,
+        detail_callback=detail_callback,
+        profile=profile,
+        models=models,
+        single_issue_prompt=single_issue_prompt,
+        parse_single=parse_single,
+        runner=runner,
+    )
+
+    kind = phase_fix_tool_agent[phase_name]
+    if tool_agents and kind in tool_agents:
+        agent = tool_agents[kind]
+        if hasattr(agent, "problem_solve"):
+            try:
+                phase_input_cls = models.ToolAgentPhaseInput
+                phase_enum = models.Phase
+                phase_inp = phase_input_cls(
+                    phase=phase_enum.PROBLEM_SOLVING,
+                    microtask=microtask,
+                    repo_path=repo_path,
+                    spec_context=microtask.description or "",
+                    language=language,
+                    current_files=result.files,
+                    review_issues=phase_result.issues,
+                    task_title=microtask.title or "",
+                    task_description=microtask.description or "",
+                    task_id=task_id,
+                )
+                out = agent.problem_solve(phase_inp)
+                if out.files:
+                    result.files.update(out.files)
+            except Exception as exc:
+                logger.exception(
+                    "[%s] %s tool agent problem_solve failed: %s", task_id, phase_name, exc
+                )
+                result.resolved = False
+                result.summary += f" (tool-agent fix pass failed: {exc})"
+
+    return result
+
+
+class PhaseFixFunctions(NamedTuple):
+    """The four phase-specific fix callables a stack's ``problem_solving.py`` exposes."""
+
+    run_code_review_fixes: Callable[..., Any]
+    run_qa_fixes: Callable[..., Any]
+    run_security_fixes: Callable[..., Any]
+    run_documentation_fixes: Callable[..., Any]
+
+
+def make_phase_fix_functions(
+    *,
+    profile: StackProfile,
+    models: PhaseModels,
+    single_issue_prompt: str,
+    parse_single: Callable[[str], Dict[str, Any]],
+    runner_factory: Callable[[], LlmRunner],
+    phase_fix_tool_agent: Dict[str, Any],
+) -> PhaseFixFunctions:
+    """Build a stack's ``run_code_review_fixes``/``run_qa_fixes``/
+    ``run_security_fixes``/``run_documentation_fixes`` functions.
+
+    "qa" and "security" never consult a tool agent's ``problem_solve``: the QA
+    and Security tool agents are review-only (they report findings; fixing
+    them is the generic per-issue coding-agent loop's job) on every stack that
+    wires this factory. Only the phase names present in ``phase_fix_tool_agent``
+    (typically ``code_review`` -> Build Specialist, ``documentation`` ->
+    Documentation) get a second, tool-agent-driven fix pass.
+
+    ``runner_factory`` is called once per returned-function invocation (not
+    once here) so each call re-reads the caller module's own ``Agent``/
+    ``resolve_text_mode_strands_model`` globals -- matching
+    ``run_batch_coding_fixes``'s existing ``runner=_llm_runner()`` pattern and
+    keeping each stack module's own ``_llm_runner`` the test monkeypatch
+    surface (tests patch ``<stack module>.Agent`` /
+      ``<stack module>.resolve_text_mode_strands_model``, not this module's).
+
+    A ``language`` argument the caller omits (falsy) defaults to
+    ``profile.default_language`` — the same value each function's previous
+    hand-written ``language: str = "python"``/``"typescript"`` default
+    resolved to.
+
+    Preconditions: ``phase_fix_tool_agent`` contains entries for at least
+      ``"code_review"`` and ``"documentation"`` (the two phases with a
+      tool-agent-driven second pass); ``single_issue_prompt`` carries a
+      ``{language_conventions}`` slot iff ``profile.has_language_conventions``.
+    Postconditions: returns a :class:`PhaseFixFunctions` whose four callables
+      each accept ``(*, llm, microtask, phase_result, current_files,
+      language="", repo_path="", tool_agents=None, task_id="",
+      detail_callback=None)`` and return a ``ProblemSolvingResult``.
+    """
+
+    def run_code_review_fixes(
+        *,
+        llm: LLMClient,
+        microtask: Any,
+        phase_result: Any,
+        current_files: Dict[str, str],
+        language: str = "",
+        repo_path: str = "",
+        tool_agents: Optional[Dict[Any, Any]] = None,
+        task_id: str = "",
+        detail_callback: Optional[Callable[[str], None]] = None,
+    ) -> Any:
+        """Fix issues from code review phase (build errors, lint issues, code quality)."""
+        return _run_phase_fixes_with_tool_agent_impl(
+            phase_name="code_review",
+            llm=llm,
+            microtask=microtask,
+            phase_result=phase_result,
+            current_files=current_files,
+            language=language or profile.default_language,
+            repo_path=repo_path,
+            tool_agents=tool_agents,
+            task_id=task_id,
+            detail_callback=detail_callback,
+            profile=profile,
+            models=models,
+            single_issue_prompt=single_issue_prompt,
+            parse_single=parse_single,
+            runner=runner_factory(),
+            phase_fix_tool_agent=phase_fix_tool_agent,
+        )
+
+    def run_qa_fixes(
+        *,
+        llm: LLMClient,
+        microtask: Any,
+        phase_result: Any,
+        current_files: Dict[str, str],
+        language: str = "",
+        repo_path: str = "",
+        tool_agents: Optional[Dict[Any, Any]] = None,
+        task_id: str = "",
+        detail_callback: Optional[Callable[[str], None]] = None,
+    ) -> Any:
+        """Fix issues from QA testing phase (bugs, missing tests, quality issues).
+
+        The QA tool agent only reports findings — all fixing here is done by
+        the generic per-issue coding-agent loop; there is no second,
+        tool-agent-driven fix pass. ``tool_agents`` is accepted for signature
+        parity with the other phase-fix functions but unused.
+        """
+        del tool_agents  # QA is review-only; fixing is the coding agent's job.
+        return _run_phase_fixes_impl(
+            llm=llm,
+            microtask=microtask,
+            phase_result=phase_result,
+            current_files=current_files,
+            language=language or profile.default_language,
+            repo_path=repo_path,
+            tool_agents=None,
+            task_id=task_id,
+            phase_name="qa",
+            detail_callback=detail_callback,
+            profile=profile,
+            models=models,
+            single_issue_prompt=single_issue_prompt,
+            parse_single=parse_single,
+            runner=runner_factory(),
+        )
+
+    def run_security_fixes(
+        *,
+        llm: LLMClient,
+        microtask: Any,
+        phase_result: Any,
+        current_files: Dict[str, str],
+        language: str = "",
+        repo_path: str = "",
+        tool_agents: Optional[Dict[Any, Any]] = None,
+        task_id: str = "",
+        detail_callback: Optional[Callable[[str], None]] = None,
+    ) -> Any:
+        """Fix issues from security testing phase (vulnerabilities, security best practices).
+
+        The security tool agent only reports findings — all fixing here is
+        done by the generic per-issue coding-agent loop; there is no second,
+        tool-agent-driven fix pass. ``tool_agents`` is accepted for signature
+        parity with the other phase-fix functions but unused.
+        """
+        del tool_agents  # Security is review-only; fixing is the coding agent's job.
+        return _run_phase_fixes_impl(
+            llm=llm,
+            microtask=microtask,
+            phase_result=phase_result,
+            current_files=current_files,
+            language=language or profile.default_language,
+            repo_path=repo_path,
+            tool_agents=None,
+            task_id=task_id,
+            phase_name="security",
+            detail_callback=detail_callback,
+            profile=profile,
+            models=models,
+            single_issue_prompt=single_issue_prompt,
+            parse_single=parse_single,
+            runner=runner_factory(),
+        )
+
+    def run_documentation_fixes(
+        *,
+        llm: LLMClient,
+        microtask: Any,
+        phase_result: Any,
+        current_files: Dict[str, str],
+        language: str = "",
+        repo_path: str = "",
+        tool_agents: Optional[Dict[Any, Any]] = None,
+        task_id: str = "",
+        detail_callback: Optional[Callable[[str], None]] = None,
+    ) -> Any:
+        """Fix issues from documentation review phase (missing docs, incomplete comments)."""
+        return _run_phase_fixes_with_tool_agent_impl(
+            phase_name="documentation",
+            llm=llm,
+            microtask=microtask,
+            phase_result=phase_result,
+            current_files=current_files,
+            language=language or profile.default_language,
+            repo_path=repo_path,
+            tool_agents=tool_agents,
+            task_id=task_id,
+            detail_callback=detail_callback,
+            profile=profile,
+            models=models,
+            single_issue_prompt=single_issue_prompt,
+            parse_single=parse_single,
+            runner=runner_factory(),
+            phase_fix_tool_agent=phase_fix_tool_agent,
+        )
+
+    return PhaseFixFunctions(
+        run_code_review_fixes=run_code_review_fixes,
+        run_qa_fixes=run_qa_fixes,
+        run_security_fixes=run_security_fixes,
+        run_documentation_fixes=run_documentation_fixes,
     )
 
 

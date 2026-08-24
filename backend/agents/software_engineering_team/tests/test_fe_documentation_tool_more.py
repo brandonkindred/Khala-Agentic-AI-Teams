@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 def _fe_microtask():
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         Microtask,
         ToolAgentKind,
     )
@@ -13,7 +13,7 @@ def _fe_microtask():
 
 
 def _fe_phase_input(**kwargs):
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         Phase,
         ToolAgentPhaseInput,
     )
@@ -32,7 +32,7 @@ def _fe_phase_input(**kwargs):
 
 
 def _fe_review_issue(**kwargs):
-    from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
+    from software_engineering_team.codegen_team.models import ReviewIssue
 
     base = dict(source="documentation", severity="medium", description="d", file_path="", recommendation="")
     base.update(kwargs)
@@ -59,7 +59,7 @@ def _patch(monkeypatch, mod, response="", raise_exc=None):
 
 
 def _agent():
-    from software_engineering_team.frontend_code_v2_team.tool_agents.documentation import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.documentation import (
         agent as mod,
     )
 
@@ -144,8 +144,8 @@ def test_fe_doc_problem_solve_llm_failure(monkeypatch):
 
 
 def test_fe_doc_relevant_code_for_issue_includes_large_file():
-    from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
-    from software_engineering_team.frontend_code_v2_team.tool_agents.documentation.agent import (
+    from software_engineering_team.codegen_team.models import ReviewIssue
+    from software_engineering_team.codegen_team.tool_agents.frontend.documentation.agent import (
         MAX_RELEVANT_CODE_CHARS,
         _relevant_code_for_issue,
     )
@@ -159,8 +159,8 @@ def test_fe_doc_relevant_code_for_issue_includes_large_file():
 
 
 def test_fe_doc_relevant_code_for_issue_fallback_multifile():
-    from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
-    from software_engineering_team.frontend_code_v2_team.tool_agents.documentation.agent import (
+    from software_engineering_team.codegen_team.models import ReviewIssue
+    from software_engineering_team.codegen_team.tool_agents.frontend.documentation.agent import (
         _relevant_code_for_issue,
     )
 
@@ -172,8 +172,8 @@ def test_fe_doc_relevant_code_for_issue_fallback_multifile():
 
 
 def test_fe_doc_relevant_code_for_issue_empty():
-    from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
-    from software_engineering_team.frontend_code_v2_team.tool_agents.documentation.agent import (
+    from software_engineering_team.codegen_team.models import ReviewIssue
+    from software_engineering_team.codegen_team.tool_agents.frontend.documentation.agent import (
         _relevant_code_for_issue,
     )
 

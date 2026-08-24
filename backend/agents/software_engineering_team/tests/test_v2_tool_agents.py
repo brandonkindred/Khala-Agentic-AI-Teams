@@ -12,14 +12,14 @@ from __future__ import annotations
 import json
 
 from llm_service import get_strands_model
-from software_engineering_team.frontend_code_v2_team.tool_agents._plan_base import (
+from software_engineering_team.codegen_team.tool_agents.frontend._plan_base import (
     PlanGeneratorToolAgent,
 )
 from software_engineering_team.shared.llm_tool_agent_base import LlmToolAgentBase
 
 
 def _microtask():
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         Microtask,
         ToolAgentKind,
     )
@@ -33,7 +33,7 @@ def _microtask():
 
 
 def _phase_input(**kwargs):
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         Phase,
         ToolAgentPhaseInput,
     )
@@ -52,7 +52,7 @@ def _phase_input(**kwargs):
 
 
 def _tool_input():
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentInput
+    from software_engineering_team.codegen_team.models import ToolAgentInput
 
     return ToolAgentInput(
         microtask=_microtask(),
@@ -86,7 +86,7 @@ def test_plan_generator_selects_plan_recipe() -> None:
 
 
 def test_branding_theme_execute_returns_stub() -> None:
-    from software_engineering_team.frontend_code_v2_team.tool_agents.branding_theme.agent import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.branding_theme.agent import (
         BrandingThemeToolAgent,
     )
 
@@ -98,7 +98,7 @@ def test_branding_theme_execute_returns_stub() -> None:
 
 
 def test_branding_theme_plan_no_model_returns_default() -> None:
-    from software_engineering_team.frontend_code_v2_team.tool_agents.branding_theme.agent import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.branding_theme.agent import (
         BrandingThemeToolAgent,
     )
 
@@ -110,7 +110,7 @@ def test_branding_theme_plan_no_model_returns_default() -> None:
 
 
 def test_branding_theme_plan_llm_failure(monkeypatch) -> None:
-    from software_engineering_team.frontend_code_v2_team.tool_agents.branding_theme import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.branding_theme import (
         agent as mod,
     )
 
@@ -129,7 +129,7 @@ def test_branding_theme_plan_llm_failure(monkeypatch) -> None:
 
 
 def test_branding_theme_plan_llm_success(monkeypatch) -> None:
-    from software_engineering_team.frontend_code_v2_team.tool_agents.branding_theme import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.branding_theme import (
         agent as mod,
     )
 
@@ -157,7 +157,7 @@ def test_branding_theme_plan_llm_success(monkeypatch) -> None:
 
 
 def test_branding_theme_plan_llm_bad_json_recovers(monkeypatch) -> None:
-    from software_engineering_team.frontend_code_v2_team.tool_agents.branding_theme import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.branding_theme import (
         agent as mod,
     )
 
@@ -176,7 +176,7 @@ def test_branding_theme_plan_llm_bad_json_recovers(monkeypatch) -> None:
 
 
 def test_branding_theme_remaining_methods_stub_summaries() -> None:
-    from software_engineering_team.frontend_code_v2_team.tool_agents.branding_theme.agent import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.branding_theme.agent import (
         BrandingThemeToolAgent,
     )
 
@@ -195,7 +195,7 @@ def test_branding_theme_remaining_methods_stub_summaries() -> None:
 
 
 def test_ui_design_plan_no_model() -> None:
-    from software_engineering_team.frontend_code_v2_team.tool_agents.ui_design.agent import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.ui_design.agent import (
         UiDesignToolAgent,
     )
 
@@ -207,7 +207,7 @@ def test_ui_design_plan_no_model() -> None:
 
 
 def test_ui_design_execute_stub() -> None:
-    from software_engineering_team.frontend_code_v2_team.tool_agents.ui_design.agent import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.ui_design.agent import (
         UiDesignToolAgent,
     )
 
@@ -224,7 +224,7 @@ def test_ui_design_execute_stub() -> None:
 
 
 def test_architecture_plan_no_model() -> None:
-    from software_engineering_team.frontend_code_v2_team.tool_agents.architecture.agent import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.architecture.agent import (
         ArchitectureToolAgent,
     )
 
@@ -238,7 +238,7 @@ def test_architecture_plan_no_model() -> None:
 def test_architecture_build_plan_prompt_caps_spec_content() -> None:
     """An oversized spec is capped at MAX_SPEC_CHARS so a single-shot planning
     call (no tool fallback) can't be pushed past the model's context window."""
-    from software_engineering_team.frontend_code_v2_team.tool_agents.architecture.agent import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.architecture.agent import (
         MAX_SPEC_CHARS,
         ArchitectureToolAgent,
     )
@@ -251,7 +251,7 @@ def test_architecture_build_plan_prompt_caps_spec_content() -> None:
 
 
 def test_architecture_plan_null_summary_uses_empty_summary_override(monkeypatch) -> None:
-    from software_engineering_team.frontend_code_v2_team.tool_agents.architecture import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.architecture import (
         agent as mod,
     )
 
@@ -276,7 +276,7 @@ def test_architecture_plan_null_summary_uses_empty_summary_override(monkeypatch)
 
 
 def test_linter_tool_agent_constructs() -> None:
-    from software_engineering_team.frontend_code_v2_team.tool_agents.linter.agent import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.linter.agent import (
         LinterToolAgent,
     )
 
@@ -288,7 +288,7 @@ def test_linter_tool_agent_constructs() -> None:
 
 
 def test_auth_tool_agent_constructs() -> None:
-    from software_engineering_team.frontend_code_v2_team.tool_agents.auth.agent import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.auth.agent import (
         AuthToolAgent,
     )
 
@@ -300,7 +300,7 @@ def test_auth_tool_agent_constructs() -> None:
 
 
 def test_api_openapi_tool_agent_constructs() -> None:
-    from software_engineering_team.frontend_code_v2_team.tool_agents.api_openapi.agent import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.api_openapi.agent import (
         ApiOpenApiToolAgent,
     )
 
@@ -312,7 +312,7 @@ def test_api_openapi_tool_agent_constructs() -> None:
 
 
 def test_state_management_tool_agent_constructs() -> None:
-    from software_engineering_team.frontend_code_v2_team.tool_agents.state_management.agent import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.state_management.agent import (
         StateManagementToolAgent,
     )
 

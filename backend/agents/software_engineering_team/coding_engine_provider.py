@@ -48,13 +48,14 @@ for _p in (_TEAM_DIR / "architect_agents", _TEAM_DIR):
 # One generic, config-driven resolution point for both code-v2 language
 # surfaces (Story 3e Step 2) -- replaces a hardcoded if/else that imported
 # each team's ``*CodeV2TeamLead`` separately. Keyed on the same ``team_kind``
-# values the two teams' ``V2TeamConfig``-backed orchestrators already use.
-# Deferred import (module name + class name, not the class itself) keeps this
-# module cheap to import, matching the class's existing per-method contract.
-_TEAM_LEAD_MODULES: Dict[str, Tuple[str, str]] = {
-    "frontend": ("software_engineering_team.frontend_code_v2_team", "FrontendCodeV2TeamLead"),
-    "backend": ("software_engineering_team.backend_code_v2_team", "BackendCodeV2TeamLead"),
-}
+# values the codegen team's ``V2TeamConfig``-backed orchestrator already uses
+# as its ``stack`` parameter. Deferred import (module name + class name, not
+# the class itself) keeps this module cheap to import, matching the class's
+# existing per-method contract.
+_CODEGEN_TEAM_LEAD_MODULE: Tuple[str, str] = (
+    "software_engineering_team.codegen_team",
+    "CodegenTeamLead",
+)
 
 
 def _resolve_verify_input_and_client(
@@ -101,15 +102,16 @@ class SECodeEngineProvider:
     """Concrete engine provider backed by the software-engineering team's engines."""
 
     def build_implementation_team_lead(self, team_kind: str, llm: Any) -> Any:
-        """Construct the frontend/backend code-v2 team lead for ``team_kind``.
+        """Construct the codegen team lead for ``team_kind`` (its ``stack``).
 
         Preconditions: ``team_kind`` in ``{"frontend", "backend"}``.
-        Postconditions: returns a code-v2 team-lead instance built from ``llm``.
+        Postconditions: returns a codegen team-lead instance built from ``llm``
+        and ``stack=team_kind``.
         """
-        module_name, class_name = _TEAM_LEAD_MODULES[team_kind]
+        module_name, class_name = _CODEGEN_TEAM_LEAD_MODULE
         module = importlib.import_module(module_name)
         team_lead_cls = getattr(module, class_name)
-        return team_lead_cls(llm)
+        return team_lead_cls(llm, stack=team_kind)
 
     def run_build_verification(self, repo_path: Any, agent_type: str, task_id: str) -> Any:
         from software_engineering_team.quality_gate_tools import run_build_verification

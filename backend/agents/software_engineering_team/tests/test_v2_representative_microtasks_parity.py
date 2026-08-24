@@ -97,13 +97,13 @@ class TestRepresentativeExecutionReviewGateParity:
     outcome shape for both teams."""
 
     def test_backend_execution_completes_representative_microtask(self, tmp_path):
-        from backend_code_v2_team.models import (
+        from software_engineering_team.codegen_team.models import (
             Microtask,
             MicrotaskReviewConfig,
             PlanningResult,
             ToolAgentKind,
         )
-        from backend_code_v2_team.phases._profile import (
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
             ReviewDependencies,
             run_execution_with_review_gates,
         )
@@ -130,13 +130,13 @@ class TestRepresentativeExecutionReviewGateParity:
         _assert_microtask_completed(result, "app.py")
 
     def test_frontend_execution_completes_representative_microtask(self, tmp_path):
-        from frontend_code_v2_team.models import (
+        from software_engineering_team.codegen_team.models import (
             Microtask,
             MicrotaskReviewConfig,
             PlanningResult,
             ToolAgentKind,
         )
-        from frontend_code_v2_team.phases._profile import (
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
             ReviewDependencies,
             run_execution_with_review_gates,
         )
@@ -165,10 +165,10 @@ class TestRepresentativeExecutionReviewGateParity:
         teams, not just similar-looking ones."""
         import inspect
 
-        from backend_code_v2_team.phases._profile import (
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
             run_execution_with_review_gates as be_run,
         )
-        from frontend_code_v2_team.phases._profile import (
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
             run_execution_with_review_gates as fe_run,
         )
 
@@ -195,8 +195,8 @@ class TestRepresentativePlanningDocumentationParity:
     """
 
     def test_backend_planning_and_documentation_real_pipeline(self, tmp_path):
-        from backend_code_v2_team.models import DocumentationPhaseResult, ExecutionResult
-        from backend_code_v2_team.phases._profile import run_documentation_phase, run_planning
+        from software_engineering_team.codegen_team.models import DocumentationPhaseResult, ExecutionResult
+        from software_engineering_team.codegen_team.stacks.backend.profile import run_documentation_phase, run_planning
 
         task = _make_task("backend")
         mock_llm = _CallableTextClient(lambda _p: "## SUMMARY ##\nno-op\n")
@@ -223,8 +223,8 @@ class TestRepresentativePlanningDocumentationParity:
         assert "skipped" in doc_result.summary.lower()
 
     def test_frontend_planning_and_documentation_real_pipeline(self, tmp_path):
-        from frontend_code_v2_team.models import DocumentationPhaseResult, ExecutionResult
-        from frontend_code_v2_team.phases._profile import run_documentation_phase, run_planning
+        from software_engineering_team.codegen_team.models import DocumentationPhaseResult, ExecutionResult
+        from software_engineering_team.codegen_team.stacks.frontend.profile import run_documentation_phase, run_planning
 
         task = _make_task("frontend")
         mock_llm = _CallableTextClient(lambda _p: "## SUMMARY ##\nno-op\n")
@@ -255,8 +255,8 @@ class TestRepresentativePlanningDocumentationParity:
         teams -- the only difference in the planning outcome is the
         config-resolved default language, exactly the divergence
         ``V2TeamConfig``/``StackProfile`` documents."""
-        from backend_code_v2_team.phases._profile import run_planning as be_run_planning
-        from frontend_code_v2_team.phases._profile import run_planning as fe_run_planning
+        from software_engineering_team.codegen_team.stacks.backend.profile import run_planning as be_run_planning
+        from software_engineering_team.codegen_team.stacks.frontend.profile import run_planning as fe_run_planning
 
         mock_llm = _CallableTextClient(lambda _p: "## SUMMARY ##\nno-op\n")
 
@@ -294,8 +294,8 @@ class TestRepresentativeAccessibilityConfigHookParity:
         }
 
     def test_frontend_qa_gate_narrows_via_scope_tool_agents_by_kind(self, tmp_path):
-        from frontend_code_v2_team.models import Microtask, ToolAgentKind
-        from frontend_code_v2_team.phases._profile import ReviewDependencies, _qa_gate
+        from software_engineering_team.codegen_team.models import Microtask, ToolAgentKind
+        from software_engineering_team.codegen_team.stacks.frontend.profile import ReviewDependencies, _qa_gate
 
         tool_agents = self._multi_kind_tool_agents(ToolAgentKind)
         deps = ReviewDependencies(tool_agents=tool_agents)
@@ -316,9 +316,9 @@ class TestRepresentativeAccessibilityConfigHookParity:
         assert tool_agents[ToolAgentKind.SECURITY].review_calls == 0
 
     def test_backend_qa_gate_never_calls_scope_tool_agents_by_kind(self, tmp_path, monkeypatch):
-        import backend_code_v2_team.phases._profile as backend_profile
-        from backend_code_v2_team.models import Microtask, ToolAgentKind
-        from backend_code_v2_team.phases._profile import ReviewDependencies, _qa_gate
+        import software_engineering_team.codegen_team.stacks.backend.profile as backend_profile
+        from software_engineering_team.codegen_team.models import Microtask, ToolAgentKind
+        from software_engineering_team.codegen_team.stacks.backend.profile import ReviewDependencies, _qa_gate
 
         from software_engineering_team.shared import v2_execution_bindings
 
@@ -352,8 +352,8 @@ class TestRepresentativeAccessibilityConfigHookParity:
         """Identical base task-requirements string through both teams' real
         orchestrators -- frontend appends its accessibility clause, backend
         returns the base unchanged, and nothing else differs."""
-        from backend_code_v2_team.orchestrator import BackendDevelopmentAgent
-        from frontend_code_v2_team.orchestrator import FrontendDevelopmentAgent
+        from software_engineering_team.codegen_team.orchestrator import BackendDevelopmentAgent
+        from software_engineering_team.codegen_team.orchestrator import FrontendDevelopmentAgent
 
         base = "Review the diff for correctness."
         be_agent = BackendDevelopmentAgent(MagicMock())
