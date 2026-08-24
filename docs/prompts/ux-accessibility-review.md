@@ -5,9 +5,22 @@ A reusable prompt for reviewing one team's pages in the Khala Angular frontend
 slug (e.g. `job-matching`, `investment`, `agent-studio`) before running it.
 
 The prompt is deliberately repo-aware: the **Context to load first** and
-**House constraints** sections are what keep the output specific to this codebase
-instead of a generic WCAG checklist. Swap those two sections when reusing the
-prompt on a different project; the rest is portable.
+**House constraints** sections carry most of what keeps the output specific to this
+codebase instead of a generic WCAG checklist.
+
+Reusing it on a different project takes more than swapping those two, because
+repo-specific references are load-bearing elsewhere too. Adapt all of these:
+
+- §1 Scope — the route file (`user-interface/src/app/app.routes.ts`)
+- §2 Context to load first — the whole section
+- §3 Review lenses — the named shared primitives and helpers (`stall-warning`,
+  `defer-focus.ts`, the `--kh-*` tokens, …)
+- §7 House constraints — the whole section
+- §8 Do not report — the test-harness assumptions (`.a11y.spec.ts`,
+  `expectNoAxeViolations`, the SCSS contrast guard)
+
+What genuinely ports unchanged is the method: the five lenses, the state-disposition
+model, the finding format and severity rubric, and the noise-control rules.
 
 ---
 
@@ -129,8 +142,11 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
        * 2.2.2 covers moving, blinking, or scrolling content that starts
          automatically, lasts MORE THAN FIVE SECONDS, and is presented in parallel
          with other content; and auto-updating content that starts automatically and
-         is presented in parallel. Only then is a pause, stop, or hide mechanism
-         required, and essential movement is excepted. A short transition, or a
+         is presented in parallel. Only then is a mechanism required, and the two
+         branches accept different ones: pause, stop, or hide for moving/blinking/
+         scrolling content; pause, stop, hide, OR a control over the update frequency
+         for auto-updating content — so a feed whose refresh interval the user can
+         change is compliant. Essential movement is excepted. A short transition, or a
          progress display that is the only thing on screen, is not a 2.2.2 failure.
        * 2.3.1 is satisfied EITHER by flashing no more than three times in any one
          second OR by staying below the general-flash and red-flash thresholds — a
@@ -295,8 +311,12 @@ Close with:
     tokens, existing shared primitives.
   - ARIA attributes in templates use the `[attr.aria-*]` form.
   - Native semantics before ARIA; ARIA only where no native element does the job.
-  - Design by Contract applies to any code you propose: preconditions, postconditions,
+  - Design by Contract applies to any code you propose, per the repo-wide mandate in
+    `CLAUDE.md` ("mandatory for all code and comments"): preconditions, postconditions,
     and invariants documented in the docstring, enforced rather than silently coerced.
+    The narrower "public APIs" phrasing in `CONTRIBUTORS.md` describes what the
+    software-engineering team enforces in generated code, and does not relax the
+    repo-wide rule.
   - Any behavior change needs test coverage (90% line-coverage floor). Prefer extending
     the existing `.a11y.spec.ts` for the component over writing a new harness.
   - Never reference an external issue tracker in code, comments, or docs.
