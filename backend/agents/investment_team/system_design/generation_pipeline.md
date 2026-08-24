@@ -352,7 +352,7 @@ mapped to what it durability-wraps:
 | `snapshot_prior_records_activity` | Reads the durable record store, sorted by creation time |
 | `build_short_circuit_record_activity` | `StrategyLabOrchestrator._build_short_circuit_record` |
 | **`run_design_attempt_activity`** | **The entire per-attempt pipeline above, verbatim** (`_run_design_attempt`) |
-| `compute_signal_brief_activity` | Per-batch signal brief (`SignalIntelligenceExpert`), once per batch |
+| `compute_signal_brief_activity` | Signal brief (`SignalIntelligenceExpert`), once per batch-workflow invocation — a mid-batch resume re-runs it |
 | `is_run_cancelled_activity` | Whether the run stopped for an external reason |
 | `external_terminal_status_activity` | The run's persisted external stop status, if any |
 | `finalize_cycle_record_activity` | Post-`run_cycle` tail: signal-brief attach + paper-trade (`PaperTradingAgent`) + persist |
@@ -364,9 +364,12 @@ bounded by `MAX_DESIGN_REENTRIES` (2) — the *outer* design-re-entry loop is
 the only part of this pipeline actually expressed as durable workflow code;
 everything from "Design ↔ review loop" through "Record assembly" above runs
 inside that one activity call. `StrategyLabBatchWorkflow` calls
-`compute_signal_brief_activity` once per batch, then fans a wave of cycles
-out as `StrategyLabCycleWorkflow` child workflows before awaiting them
-together, then calls `finalize_cycle_record_activity` per settled result.
+`compute_signal_brief_activity` once per batch-workflow invocation (a
+mid-batch resume via `start_cycle_offset` re-enters that batch and re-runs
+it, so a resumed batch's later cycles can see a different brief than its
+already-completed earlier ones), then fans a wave of cycles out as
+`StrategyLabCycleWorkflow` child workflows before awaiting them together,
+then calls `finalize_cycle_record_activity` per settled result.
 
 ## At a glance
 
