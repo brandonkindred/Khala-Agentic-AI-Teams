@@ -189,8 +189,8 @@ The Unified API security gateway sits in front of all routes (see `backend/unifi
 flowchart LR
     Req["Incoming request"] --> Route["FastAPI route<br/>(api/routes/*)"]
     Route -->|default| Thread["Python thread<br/>(PipelineRunner / AgentEnvProvisioner)"]
-    Route -->|TEMPORAL_ADDRESS set| Workflow["AgenticTeamProvisioningWorkflow<br/>(temporal/__init__.py:22-30)"]
-    Workflow --> Activity["run_pipeline_activity<br/>(2h start_to_close_timeout)"]
+    Route -->|TEMPORAL_ADDRESS set| Workflow["AgenticPipelineWorkflow<br/>(temporal/workflows.py:353)"]
+    Workflow --> Activity["agentic_pipeline_advance_step /<br/>run_step / wait_setup / wait_finalize /<br/>complete / cancel_reconcile / fail<br/>(temporal/workflows.py)"]
     Activity --> Thread
 
     classDef external fill:#f1f3f4,stroke:#5f6368,stroke-dasharray: 3 3
@@ -198,7 +198,7 @@ flowchart LR
 ```
 
 - **Thread mode (default).** `PipelineRunner.start_run` (`runtime/pipeline_runner.py:41-56`) starts a daemon thread named `pipeline-{run_id[:16]}`; `AgentEnvProvisioner._spawn_provision_thread` (`agent_env_provisioning.py:88-129`) starts a daemon thread named `prov-{provisioning_agent_id[:24]}`.
-- **Temporal mode (optional).** When `shared.temporal.is_temporal_enabled()` returns true (`temporal/__init__.py:38-44`), a worker is bootstrapped on import for task queue `agentic_team_provisioning-queue` with workflow `AgenticTeamProvisioningWorkflow` and activity `agentic_team_provisioning_run_pipeline`.
+- **Temporal mode (optional).** `temporal/__init__.py` stays free of import-time side effects (the temporalio sandbox replays it during workflow registration) and only exports `WORKFLOWS = [AgenticPipelineWorkflow]`, `ACTIVITIES` (the seven `agentic_pipeline_*` activities above), and `TASK_QUEUE = "agentic_team_provisioning-queue"`. The worker itself is started by `temporal/worker.py`'s `start_agentic_team_provisioning_temporal_worker_thread`, invoked from two places: the team-service entrypoint at boot (`TEAM_TEMPORAL_WORKER_MODULE`/`TEAM_TEMPORAL_WORKER_FUNC`), and — as a standalone-dev backstop — the API lifespan's `_startup` hook in `api/lifecycle.py`.
 
 ## 5. Reused shared infrastructure
 
@@ -206,6 +206,6 @@ flowchart LR
 |---|---|
 | `shared.observability` (`init_otel`, `instrument_fastapi_app`) | OpenTelemetry spans on every route, wired by `shared.app.create_team_app` (called from `api/main.py`) |
 | `shared.postgres` (`register_team_schemas`, `close_pool`) | Registers `AGENTIC_POSTGRES_SCHEMA` in the FastAPI lifespan built by `shared.app.create_team_app` (`api/main.py` passes the schema in; registration itself lives in `shared/app/factory.py`) — no-op when `POSTGRES_HOST` unset |
-| `shared.temporal` (`is_temporal_enabled`, `start_team_worker`) | Per-team worker bootstrap on module import (`temporal/__init__.py:36-44`) |
+| `shared.temporal` (`is_temporal_enabled`, `start_team_worker`) | Worker bootstrap via `temporal/worker.py`'s `start_agentic_team_provisioning_temporal_worker_thread`, called from the team-service entrypoint and, as a standalone-dev backstop, `api/lifecycle.py`'s `_startup` hook — never at `temporal/__init__.py` import time |
 | `job_service_client` (`JobServiceClient`) | Per-team job lifecycle and pending question tracking via `infrastructure.py` |
 | `llm_service.get_client()` | Single LLM client consumed by both `ProcessDesignerAgent` (chat) and `AgentBuilder` (test chat + starter prompts) |

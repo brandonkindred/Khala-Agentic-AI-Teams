@@ -31,7 +31,8 @@ graph LR
 
     %% Shared / external
     pg["postgres/__init__.py<br/>(AGENTIC_POSTGRES_SCHEMA)"]
-    tmp["temporal/__init__.py<br/>(AgenticTeamProvisioningWorkflow)"]
+    tmp["temporal/__init__.py<br/>(WORKFLOWS/ACTIVITIES/TASK_QUEUE — no import-time side effects)"]
+    tmpworker["temporal/worker.py<br/>(start_agentic_team_provisioning_temporal_worker_thread)"]
     llm["llm_service"]
     shared_pg["shared.postgres"]
     shared_tmp["shared.temporal"]
@@ -77,12 +78,13 @@ graph LR
     envprov --> apt
     infra --> jsc
     test_store --> shared_pg
-    tmp --> main
-    tmp --> shared_tmp
+    lifecycle --> tmpworker
+    tmpworker --> tmp
+    tmpworker --> shared_tmp
 
     classDef orchestrator fill:#fff4e5,stroke:#e8710a
     classDef external fill:#f1f3f4,stroke:#5f6368,stroke-dasharray: 3 3
-    class main,state,lifecycle,routes,services,agent,store,runner,builder,roster,envprov,infra,models,test_store,pg,tmp orchestrator
+    class main,state,lifecycle,routes,services,agent,store,runner,builder,roster,envprov,infra,models,test_store,pg,tmp,tmpworker orchestrator
     class llm,shared_pg,shared_tmp,shared_obs,jsc,apt external
 ```
 
@@ -100,11 +102,12 @@ graph LR
 | [`../assistant/agent.py`](../assistant/agent.py) | ~364 | `ProcessDesignerAgent` — system prompt, LLM call, JSON block parser |
 | [`../runtime/pipeline_runner.py`](../runtime/pipeline_runner.py) | ~307 | Background-thread DAG walker; `WAIT`-step handling via `threading.Event` (`runtime/pipeline_runner.py:38-71`) |
 | [`../infrastructure.py`](../infrastructure.py) | ~241 | Per-team `assets/` + `runs/` + `team.db`; `TeamFormStore` in WAL mode (`infrastructure.py:30-74`) |
-| [`../roster_validation.py`](../roster_validation.py) | 182 | `validate_roster` → `RosterValidationResult`; gap categories in `models.py:295-316` |
+| [`../roster_validation.py`](../roster_validation.py) | 182 | `validate_roster` → `RosterValidationResult`; gap categories (`unstaffed_step`, `unrostered_agent`, `unused_agent`, `missing_manifest`, `incomplete_profile`, `sparse_profile`) in `RosterGap` at `models.py:440-451` |
 | [`../runtime/agent_builder.py`](../runtime/agent_builder.py) | ~160 | Roster entry → `strands.Agent`; starter prompt generator |
 | [`../agent_env_provisioning.py`](../agent_env_provisioning.py) | 134 | `make_provisioning_agent_id`, `schedule_provision_step_agents`, `_spawn_provision_thread` |
 | [`../postgres/__init__.py`](../postgres/__init__.py) | ~130 | `AGENTIC_POSTGRES_SCHEMA` — 10 JSONB-backed tables |
-| [`../temporal/__init__.py`](../temporal/__init__.py) | ~45 | `run_pipeline_activity`, `AgenticTeamProvisioningWorkflow`, `agentic_team_provisioning-queue` |
+| [`../temporal/__init__.py`](../temporal/__init__.py) | ~50 | Re-exports `WORKFLOWS = [AgenticPipelineWorkflow]`, `ACTIVITIES` (7 `agentic_pipeline_*` activities), `TASK_QUEUE = "agentic_team_provisioning-queue"` from `temporal/workflows.py`; no import-time side effects (temporalio sandbox replays it during workflow registration) |
+| [`../temporal/worker.py`](../temporal/worker.py) | ~40 | `start_agentic_team_provisioning_temporal_worker_thread` — the actual worker bootstrap, invoked by the team-service entrypoint at boot and, as a standalone-dev backstop, by `api/lifecycle.py`'s `_startup` |
 | [`../testing/store.py`](../testing/store.py) | ~332 | Test-mode persistence (sessions, messages, pipeline runs) |
 
 ## 2. Persistence — ER diagram
@@ -263,7 +266,7 @@ flowchart TD
     Q1 -->|no| SQLite["Use local SQLite<br/>$AGENT_CACHE/agentic_team_provisioning.db"]
 
     Start --> Q2{"TEMPORAL_ADDRESS set<br/>and is_temporal_enabled()?"}
-    Q2 -->|yes| T["start_team_worker('agentic_team_provisioning', …)<br/>task_queue='agentic_team_provisioning-queue'<br/>workflow=AgenticTeamProvisioningWorkflow"]
+    Q2 -->|yes| T["start_team_worker('agentic_team_provisioning', …)<br/>task_queue='agentic_team_provisioning-queue'<br/>workflow=AgenticPipelineWorkflow"]
     Q2 -->|no| Thread["Daemon threads for PipelineRunner<br/>and AgentEnvProvisioner"]
 
     Start --> Q3{"AGENTIC_TEAM_AGENT_PROVISIONING_ENABLED<br/>!= false?"}

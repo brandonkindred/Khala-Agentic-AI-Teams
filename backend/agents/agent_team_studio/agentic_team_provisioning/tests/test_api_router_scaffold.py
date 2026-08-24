@@ -76,13 +76,20 @@ def _app_route_keys(app) -> set[tuple[str, str]]:
     Preconditions: ``app`` is a FastAPI application whose module import has
         finished (all ``include_router`` calls have run).
     Postconditions: returns one (method, path) entry per operation across every
-        mounted router, HEAD/OPTIONS excluded.
+        mounted router, HEAD/OPTIONS excluded. Non-operation keys a path-item
+        object may carry per the OpenAPI spec (``parameters``, ``summary``,
+        ``description``, ``servers``, ``$ref``, vendor ``x-*`` extensions) are
+        never mistaken for HTTP methods.
     """
+    # OpenAPI Path Item Object keys: fixed HTTP-method fields plus a handful of
+    # non-operation fields (parameters/summary/description/servers/$ref) that
+    # would otherwise be misread as bogus HTTP methods.
+    _HTTP_METHODS = {"GET", "PUT", "POST", "DELETE", "OPTIONS", "HEAD", "PATCH", "TRACE"}
     keys: set[tuple[str, str]] = set()
     for path, operations in app.openapi()["paths"].items():
         for method in operations:
             method_upper = method.upper()
-            if method_upper in {"HEAD", "OPTIONS"}:
+            if method_upper not in _HTTP_METHODS or method_upper in {"HEAD", "OPTIONS"}:
                 continue
             keys.add((method_upper, path))
     return keys

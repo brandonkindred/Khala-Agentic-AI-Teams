@@ -153,18 +153,22 @@ flowchart TD
     LoopUnused -->|name not in used| GapUnused["gap: unused_agent"]
     LoopUnused -->|done| DepthCheck["_check_roster_depth(team.agents)"]
     DepthCheck --> LoopDepth{"for a in agents"}
-    LoopDepth -->|"missing == 4 (skills, capabilities, tools, expertise)"| GapIncomplete["gap: incomplete_profile"]
-    LoopDepth -->|"missing >= 3"| GapSparse["gap: sparse_profile"]
+    LoopDepth --> ResolvePersona{"resolve_persona(a.manifest_id)<br/>raises LookupError?"}
+    ResolvePersona -->|yes| GapMissingManifest["gap: missing_manifest"]
+    ResolvePersona -->|no| CountMissing{"missing = [f for f in<br/>(skills, tools, expertise) if empty]<br/>(capabilities never checked)"}
+    CountMissing -->|"len(missing) == 3"| GapIncomplete["gap: incomplete_profile"]
+    CountMissing -->|"len(missing) >= 2"| GapSparse["gap: sparse_profile"]
+    GapMissingManifest --> LoopDepth
     LoopDepth -->|done| Aggregate["is_fully_staffed = len(gaps) == 0<br/>summary = _build_summary(...)"]
     Aggregate --> Result["RosterValidationResult(is_fully_staffed, agent_count, process_count, gaps, summary)"]
 
     classDef good fill:#e6f4ea,stroke:#188038
     classDef bad fill:#fce8e6,stroke:#c5221f
     class Result good
-    class GapUnstaffed1,GapUnstaffed2,GapUnrostered,GapUnused,GapIncomplete,GapSparse bad
+    class GapUnstaffed1,GapUnstaffed2,GapUnrostered,GapUnused,GapMissingManifest,GapIncomplete,GapSparse bad
 ```
 
-Source: [`roster_validation.py:23-151`](../roster_validation.py).
+Source: [`roster_validation.py:23-179`](../roster_validation.py).
 
 ## 6. Flowchart — Pipeline test run (animates UC9)
 

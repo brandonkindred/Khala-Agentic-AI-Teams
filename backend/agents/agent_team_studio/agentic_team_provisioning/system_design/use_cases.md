@@ -86,9 +86,9 @@ The left-to-right ribbon (`Actor → UI → API Layer → Agentic Team → File 
 | **Preconditions** | Team has at least one roster agent or process. |
 | **Trigger** | `GET /teams/{team_id}/roster/validation`. |
 | **Main flow** | 1. Route fetches the team (`api/routes/teams.py:66-68` → `api/services/teams.py:189-210` — `validate_team_roster`); 2. `roster_validation.validate_roster` iterates `team.processes`, calling `_check_process`, `_check_unused_agents`, `_check_roster_depth` (`roster_validation.py:23-151`); 3. Returns `RosterValidationResult` with `is_fully_staffed`, `gaps`, `summary`. |
-| **Gap categories** | `unstaffed_step`, `unrostered_agent`, `unused_agent`, `incomplete_profile`, `sparse_profile` |
+| **Gap categories** | `unstaffed_step`, `unrostered_agent`, `unused_agent`, `missing_manifest`, `incomplete_profile`, `sparse_profile` |
 | **Postconditions** | UI surfaces gap badges; team is "fully staffed" only when `len(gaps) == 0`. |
-| **Relevant files** | `api/routes/teams.py:66-68`, `api/services/teams.py:189-210`, `roster_validation.py`, `models.py:295-316` |
+| **Relevant files** | `api/routes/teams.py:66-68`, `api/services/teams.py:189-210`, `roster_validation.py`, `models.py:440-451` (`RosterGap`) |
 
 ### UC3 — Define or edit a process DAG (visual or chat)
 
