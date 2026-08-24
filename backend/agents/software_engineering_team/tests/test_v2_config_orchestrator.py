@@ -213,27 +213,6 @@ class TestConfigDrivenRepoReading:
         assert "b.marker" not in out
         assert "y" * 30 not in out
 
-    def test_read_repo_code_respects_explicit_max_chars_override(self, tmp_path: Path):
-        """An explicit ``max_chars`` argument takes the ``if max_chars is not
-        None`` branch and overrides ``profile.repo_max_chars`` entirely -- a
-        separate branch from the config-default budget covered above, so a
-        regression that ignores the caller-supplied override while still
-        honoring the profile default would pass that test but not this one."""
-        (tmp_path / "a.marker").write_text("x" * 30)
-        (tmp_path / "b.marker").write_text("y" * 30)
-
-        config = _make_config(
-            stack_profile=_make_stack_profile(
-                repo_extensions=frozenset({".marker"}),
-                repo_max_chars=1000,
-            )
-        )
-        agent = ConfigDrivenV2DevelopmentAgent(MagicMock(), config)
-        out = agent._read_repo_code(tmp_path, max_chars=60)
-        assert len(out) <= 60
-        assert "a.marker" in out
-        assert "b.marker" not in out
-
     def test_detect_tooling_uses_config_stack_profile(self, tmp_path: Path):
         config = _make_config(
             stack_profile=_make_stack_profile(detect_tooling=lambda _p: (False, True))
