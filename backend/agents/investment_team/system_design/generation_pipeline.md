@@ -203,7 +203,8 @@ carve-out. The loop is capped at `STRATEGY_LAB_MAX_CODE_REFINEMENT_ROUNDS`
 (`STRATEGY_LAB_REFINEMENT_STALL_ROUNDS`); exhaustion sets
 `backtest_status="failed: max_refinement_rounds"` rather than looping forever.
 A **zero-trade backtest** (a strategy that compiles and runs but never
-enters a position) is routed to `ZeroTradeRepairer`/`ZeroTradeRepairAgent`
+enters a position) is routed to
+[`ZeroTradeRepairer`](../strategy_lab/zero_trade_repair.py)/[`ZeroTradeRepairAgent`](../strategy_lab/agents/zero_trade_repair.py)
 ahead of the generic refinement path, since "why did this never fire" needs
 different diagnosis than a runtime exception — the `coverage_probe/`
 subsystem (static + runtime AST instrumentation) supplies the evidence for

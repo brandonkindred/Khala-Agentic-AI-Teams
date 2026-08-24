@@ -69,12 +69,12 @@ with implementation detail for individual Strategy Lab capabilities:
 |---|---|
 | Two-track API, all 30+ endpoints | [`api/main.py`](../api/main.py) (2063 lines) |
 | Core agents (Advisor, PolicyGuardian, ValidationAgent, PromotionGate, InvestmentCommittee) | [`agents.py`](../agents.py) (933 lines) |
-| Batch-level Strategy Lab agents (once-per-batch signal brief, post-cycle paper trading) | [`signal_intelligence_agent.py`](../signal_intelligence_agent.py)`::SignalIntelligenceExpert`, [`paper_trading_agent.py`](../paper_trading_agent.py)`::PaperTradingAgent` |
+| Batch-level Strategy Lab agents (once-per-batch signal brief, post-cycle paper trading) | [`signal_intelligence_agent.py::SignalIntelligenceExpert`](../signal_intelligence_agent.py), [`paper_trading_agent.py::PaperTradingAgent`](../paper_trading_agent.py) |
 | Strategy generation pipeline agents (design, review, code synthesis, refinement, alignment, analysis) | [`strategy_lab/agents/`](../strategy_lab/agents/) — see [`generation_pipeline.md`](./generation_pipeline.md) |
 | 4-phase contract + drift-hash tracking | [`strategy_lab/phases.py`](../strategy_lab/phases.py) |
 | Orchestrator per-attempt pipeline (5-mixin composition) | [`strategy_lab/orchestrator.py`](../strategy_lab/orchestrator.py) + `strategy_lab/orchestrator_{design,synthesis,alignment,verification,record_assembly}.py` |
 | Quality gates (readiness, safety, conformance, acceptance, realism, alignment) | [`strategy_lab/quality_gates/`](../strategy_lab/quality_gates/) — full catalog in [`generation_pipeline.md`](./generation_pipeline.md) |
-| Deterministic DSL-to-code compiler | [`strategy_lab/synthesis/compiler.py`](../strategy_lab/synthesis/compiler.py)`::compile_strategy` |
+| Deterministic DSL-to-code compiler | [`strategy_lab/synthesis/compiler.py::compile_strategy`](../strategy_lab/synthesis/compiler.py) |
 | Streaming indicator evaluation for synthesis-time checks; legacy/test-only `TradeRecord` converter (`trade_builder.py`, not on the production path) | [`strategy_lab/executor/`](../strategy_lab/executor/) |
 | Factor/genome DSL and compiler | [`strategy_lab/factors/`](../strategy_lab/factors/) |
 | Canonical streaming indicator implementations | [`strategy_lab/indicators/`](../strategy_lab/indicators/) |
