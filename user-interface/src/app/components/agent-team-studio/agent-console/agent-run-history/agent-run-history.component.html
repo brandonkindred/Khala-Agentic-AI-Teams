@@ -74,7 +74,11 @@
               <mat-icon>compare_arrows</mat-icon>
               Compare…
             </button>
-            <button mat-menu-item (click)="deleteRun(run, $event)">
+            <button
+              mat-menu-item
+              (click)="deleteRun(run, $event)"
+              [disabled]="deletingRunId() === run.id"
+            >
               <mat-icon>delete</mat-icon>
               Delete
             </button>
