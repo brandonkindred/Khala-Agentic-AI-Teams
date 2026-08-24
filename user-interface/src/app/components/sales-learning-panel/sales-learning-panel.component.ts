@@ -17,6 +17,7 @@ import type {
   OutcomeResult,
   CloseType,
 } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 @Component({
   selector: 'app-sales-learning-panel',
@@ -123,7 +124,7 @@ export class SalesLearningPanelComponent implements OnInit {
         if (err.status === 404) {
           this.insightsError = null; // 404 is expected — show empty state
         } else {
-          this.insightsError = err?.error?.detail ?? 'Failed to load insights.';
+          this.insightsError = extractErrorDetail(err, 'Failed to load insights.');
         }
       },
     });
@@ -143,7 +144,7 @@ export class SalesLearningPanelComponent implements OnInit {
       },
       error: (err) => {
         this.refreshing = false;
-        this.snackBar.open(err?.error?.detail ?? 'Refresh failed.', 'Dismiss', { duration: 3000 });
+        this.snackBar.open(extractErrorDetail(err, 'Refresh failed.'), 'Dismiss', { duration: 3000 });
       },
     });
   }
@@ -170,7 +171,7 @@ export class SalesLearningPanelComponent implements OnInit {
       },
       error: (err) => {
         this.recordingStage = false;
-        this.snackBar.open(err?.error?.detail ?? 'Failed to record outcome.', 'Dismiss', { duration: 3000 });
+        this.snackBar.open(extractErrorDetail(err, 'Failed to record outcome.'), 'Dismiss', { duration: 3000 });
       },
     });
   }
@@ -199,7 +200,7 @@ export class SalesLearningPanelComponent implements OnInit {
       },
       error: (err) => {
         this.recordingDeal = false;
-        this.snackBar.open(err?.error?.detail ?? 'Failed to record outcome.', 'Dismiss', { duration: 3000 });
+        this.snackBar.open(extractErrorDetail(err, 'Failed to record outcome.'), 'Dismiss', { duration: 3000 });
       },
     });
   }

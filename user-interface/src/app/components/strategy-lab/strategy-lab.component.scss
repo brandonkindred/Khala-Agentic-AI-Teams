@@ -54,61 +54,12 @@
   height: 40px;
 }
 
-.run-btn {
+.generate-btn {
   display: flex;
   align-items: center;
   gap: 0.4rem;
   height: 40px;
   flex-shrink: 0;
-}
-
-.batch-input {
-  width: 9rem;
-}
-
-// ── Asset-category selector ──────────────────────────────────────────────────
-.category-row {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-  margin: 0.25rem 0 1rem;
-}
-
-.category-label {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  font-size: 0.875rem;
-  font-weight: 600;
-  color: var(--kh-text-secondary);
-
-  mat-icon {
-    font-size: 1.1rem;
-    width: 1.1rem;
-    height: 1.1rem;
-  }
-}
-
-.category-toggle-group {
-  flex-wrap: wrap;
-
-  mat-button-toggle mat-icon {
-    font-size: 1.1rem;
-    width: 1.1rem;
-    height: 1.1rem;
-    margin-right: 0.3rem;
-    vertical-align: middle;
-  }
-}
-
-.category-hint {
-  font-size: 0.8rem;
-  color: var(--kh-text-tertiary);
-
-  &--error {
-    color: var(--kh-error);
-  }
 }
 
 .btn-spinner {

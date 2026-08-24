@@ -45,6 +45,7 @@ import {
   readinessSummary,
   userMessage,
 } from './trip-slot-filler';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 const STORAGE_KEY = 'khala.roadTripPlanning.session.v1';
 
@@ -326,7 +327,7 @@ export class RoadTripPlanningDashboardComponent implements OnInit, AfterViewChec
           }
         },
         error: (err) => {
-          this.onPlanFailed(err?.error?.detail ?? err?.message ?? 'Planning request failed');
+          this.onPlanFailed(extractErrorDetail(err, 'Planning request failed'));
         },
       });
   }

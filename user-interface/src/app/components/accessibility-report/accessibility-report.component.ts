@@ -17,6 +17,7 @@ import { MatDividerModule } from '@angular/material/divider';
 import { MatListModule } from '@angular/material/list';
 import { AccessibilityApiService } from '../../services/accessibility-api.service';
 import type { AuditReportResponse, PatternCluster, Severity } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 @Component({
   selector: 'app-accessibility-report',
@@ -63,7 +64,7 @@ export class AccessibilityReportComponent implements OnChanges {
         this.loading = false;
       },
       error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to load report';
+        this.error = extractErrorDetail(err, 'Failed to load report');
         this.loading = false;
       },
     });

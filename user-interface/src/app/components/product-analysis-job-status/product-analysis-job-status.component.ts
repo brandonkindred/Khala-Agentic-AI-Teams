@@ -8,6 +8,7 @@ import { Subscription, timer } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import type { ProductAnalysisStatusResponse } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 @Component({
   selector: 'app-product-analysis-job-status',
@@ -66,7 +67,7 @@ export class ProductAnalysisJobStatusComponent implements OnChanges, OnDestroy {
           }
         },
         error: (err) => {
-          this.error = err?.error?.detail ?? err?.message ?? 'Failed to fetch status';
+          this.error = extractErrorDetail(err, 'Failed to fetch status');
         },
       });
   }

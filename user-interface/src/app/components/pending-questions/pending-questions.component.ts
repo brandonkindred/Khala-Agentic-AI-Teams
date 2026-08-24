@@ -25,6 +25,7 @@ import type {
 } from '../../models';
 import type { CodingTeamJobStatus } from '../../models/coding-team.model';
 import { QuestionCardComponent } from './question-card/question-card.component';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 /** Endpoint type determines which API to call for submitting answers. */
 export type SubmitEndpointType = 'run-team' | 'planning' | 'product-analysis' | 'coding-team';
@@ -263,7 +264,7 @@ export class PendingQuestionsComponent implements OnChanges {
 
     const handleError = (err: { error?: { detail?: string }; message?: string }): void => {
       this.autoAnsweringQuestions.delete(question.id);
-      this.error = `Auto-answer failed for Q${this.questions.indexOf(question) + 1}: ${err?.error?.detail ?? err?.message ?? 'Unknown error'}`;
+      this.error = `Auto-answer failed for Q${this.questions.indexOf(question) + 1}: ${extractErrorDetail(err, 'Unknown error')}`;
     };
 
     // Explicit per-endpoint dispatch — never fall through to a foreign team's
@@ -315,7 +316,7 @@ export class PendingQuestionsComponent implements OnChanges {
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
         this.autoAnsweringQuestions.delete(questionId);
-        this.error = `Failed to submit auto-answer: ${err?.error?.detail ?? err?.message ?? 'Unknown error'}`;
+        this.error = `Failed to submit auto-answer: ${extractErrorDetail(err, 'Unknown error')}`;
       },
     });
   }
@@ -417,7 +418,7 @@ export class PendingQuestionsComponent implements OnChanges {
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
         this.submitting = false;
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to submit answers';
+        this.error = extractErrorDetail(err, 'Failed to submit answers');
       },
     });
   }

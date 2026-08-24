@@ -17,6 +17,7 @@ import { Observable, Subscription, interval, switchMap, takeWhile } from 'rxjs';
 import { AgentProvisioningApiService } from '../../../services/agent-provisioning-api.service';
 import { AgentProvisioningPanelComponent } from '../agent-provisioning-panel/agent-provisioning-panel.component';
 import { DashboardShellComponent } from '../../../shared/dashboard-shell/dashboard-shell.component';
+import { extractErrorDetail } from '../../../shared/extract-error-detail';
 import type {
   ProvisionRequest,
   ProvisionStatusResponse,
@@ -135,7 +136,7 @@ export class AgentProvisioningDashboardComponent implements OnInit, OnDestroy {
         this.startJobPolling(res.job_id);
       },
       error: (err) => {
-        this.submitError = err?.error?.detail ?? err?.message ?? 'Failed to start provisioning';
+        this.submitError = extractErrorDetail(err, 'Failed to start provisioning');
         this.submitting = false;
       },
     });
@@ -251,7 +252,7 @@ export class AgentProvisioningDashboardComponent implements OnInit, OnDestroy {
       },
       error: (err) => {
         console.error('Failed to cancel job:', err);
-        this.submitError = err?.error?.detail ?? err?.message ?? 'Failed to cancel job';
+        this.submitError = extractErrorDetail(err, 'Failed to cancel job');
       },
     });
   }
@@ -267,7 +268,7 @@ export class AgentProvisioningDashboardComponent implements OnInit, OnDestroy {
       },
       error: (err) => {
         console.error('Failed to delete job:', err);
-        this.submitError = err?.error?.detail ?? err?.message ?? 'Failed to delete job';
+        this.submitError = extractErrorDetail(err, 'Failed to delete job');
       },
     });
   }

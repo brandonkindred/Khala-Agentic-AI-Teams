@@ -8,6 +8,7 @@ import { AgentProvisioningPanelComponent } from '../agent-provisioning-panel/age
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { InlineBannerComponent } from '../../../shared/inline-banner/inline-banner.component';
+import { extractErrorDetail } from '../../../shared/extract-error-detail';
 import { AgentStudioSlideOutComponent } from './agent-studio-slide-out/agent-studio-slide-out.component';
 import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-placeholder.component';
 
@@ -130,7 +131,7 @@ export class AgentStudioBuildAgentComponent {
         },
         error: (err) => {
           this.cloning.set(false);
-          this.cloneError.set(err?.error?.detail ?? 'Could not clone this agent — try again.');
+          this.cloneError.set(extractErrorDetail(err, 'Could not clone this agent — try again.'));
         },
       });
   }
@@ -174,7 +175,7 @@ export class AgentStudioBuildAgentComponent {
         },
         error: (err) => {
           this.saving.set(false);
-          this.saveError.set(err?.error?.detail ?? 'Could not save this agent — try again.');
+          this.saveError.set(extractErrorDetail(err, 'Could not save this agent — try again.'));
         },
       });
   }

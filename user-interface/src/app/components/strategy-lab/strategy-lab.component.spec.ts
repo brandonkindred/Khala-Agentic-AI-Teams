@@ -767,3 +767,224 @@ describe('StrategyLabComponent — pure helpers and remaining error paths', () =
     expect(component.error()).toBe('worker unavailable');
   });
 });
+
+describe('StrategyLabComponent — openGenerateStrategiesDialog', () => {
+  let component: StrategyLabComponent;
+  let runService: RunServiceStub;
+  let apiSpy: {
+    runStrategyLab: ReturnType<typeof vi.fn>;
+    streamRunStatus: ReturnType<typeof vi.fn>;
+    getStrategyLabConfig: ReturnType<typeof vi.fn>;
+    getStrategyLabResults: ReturnType<typeof vi.fn>;
+    getPaperTradingResults: ReturnType<typeof vi.fn>;
+    getActiveRuns: ReturnType<typeof vi.fn>;
+  };
+  let dialogOpenSpy: ReturnType<typeof vi.fn>;
+  let afterClosedResult: ReturnType<typeof of>;
+
+  beforeEach(async () => {
+    runService = createRunServiceStub();
+    afterClosedResult = of(undefined);
+    apiSpy = {
+      runStrategyLab: vi.fn().mockReturnValue(
+        of({ run_id: 'run-1', status: 'running', total_cycles: 10, message: 'started' }),
+      ),
+      streamRunStatus: vi.fn().mockReturnValue(NEVER),
+      getStrategyLabConfig: vi.fn().mockReturnValue(
+        of({ batch_count_min: 1, batch_count_max: 100, asset_categories: [] }),
+      ),
+      getStrategyLabResults: vi.fn().mockReturnValue(
+        of({ items: [], count: 0, winning_count: 0, losing_count: 0 }),
+      ),
+      getPaperTradingResults: vi.fn().mockReturnValue(of({ items: [] })),
+      getActiveRuns: vi.fn().mockReturnValue(of({ runs: [] })),
+    };
+    dialogOpenSpy = vi.fn(() => ({ afterClosed: () => afterClosedResult }));
+
+    await TestBed.configureTestingModule({
+      imports: [StrategyLabComponent, NoopAnimationsModule],
+      providers: [
+        provideRouter([]),
+        { provide: InvestmentApiService, useValue: apiSpy },
+        {
+          provide: IntegrationsApiService,
+          useValue: {
+            getTradingViewConfig: vi.fn().mockReturnValue(
+              of({ enabled: false, mcp_server_url: '', tool_name: 'get_ohlcv', auth_token_configured: false }),
+            ),
+          },
+        },
+      ],
+    })
+      .overrideProvider(MatDialog, { useValue: { open: dialogOpenSpy } })
+      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride(runService))
+      .compileComponents();
+
+    component = TestBed.createComponent(StrategyLabComponent).componentInstance;
+  });
+
+  it('opens the dialog seeded with the current batch/category configuration', () => {
+    component.batchSize = 7;
+    component.batchCount = 2;
+
+    component.openGenerateStrategiesDialog();
+
+    expect(dialogOpenSpy).toHaveBeenCalledTimes(1);
+    const [, config] = dialogOpenSpy.mock.calls[0];
+    expect(config.data).toEqual(
+      expect.objectContaining({
+        batchSize: 7,
+        batchCount: 2,
+        batchSizeMin: component.BATCH_SIZE_MIN,
+        batchSizeMax: component.BATCH_SIZE_MAX,
+        batchCountMin: component.BATCH_COUNT_MIN,
+        batchCountMax: component.BATCH_COUNT_MAX,
+        categoryOptions: component.categoryOptions(),
+        selectedCategories: component.selectedCategories(),
+      }),
+    );
+  });
+
+  it('applies the dialog result and starts a run when the user submits', () => {
+    afterClosedResult = of({
+      batchSize: 15,
+      batchCount: 4,
+      selectedCategories: ['crypto'],
+      categoriesTouched: true,
+    });
+
+    component.openGenerateStrategiesDialog();
+
+    expect(component.batchSize).toBe(15);
+    expect(component.batchCount).toBe(4);
+    expect(component.selectedCategories()).toEqual(['crypto']);
+    expect(apiSpy.runStrategyLab).toHaveBeenCalledWith(
+      expect.objectContaining({ batch_size: 15, batch_count: 4 }),
+    );
+  });
+
+  it('leaves configuration and run state untouched when the dialog is cancelled', () => {
+    afterClosedResult = of(undefined);
+    component.batchSize = 10;
+    component.batchCount = 1;
+
+    component.openGenerateStrategiesDialog();
+
+    expect(component.batchSize).toBe(10);
+    expect(component.batchCount).toBe(1);
+    expect(apiSpy.runStrategyLab).not.toHaveBeenCalled();
+  });
+
+  it('preserves the current category selection when the dialog result was untouched, even on a partial overlap with a stale snapshot', () => {
+    // The dialog was seeded with all 3 current categories selected (the
+    // untouched default). While it was open, a config fetch added a new
+    // category and applyCategoryConfig() (untouched -> select-all) put the
+    // parent's live selection at all 4. The dialog itself never learned
+    // about the new category, so its returned selection is still the stale
+    // 3 — but since the user never edited the toggles, that stale snapshot
+    // must NOT overwrite the parent's already-correct live selection.
+    component.categoryOptions.set([
+      { value: 'stocks', label: 'Stocks', icon: 'show_chart' },
+      { value: 'crypto', label: 'Crypto', icon: 'currency_bitcoin' },
+      { value: 'forex', label: 'Forex', icon: 'currency_exchange' },
+      { value: 'futures', label: 'Futures', icon: 'candlestick_chart' },
+    ]);
+    component.selectedCategories.set(['stocks', 'crypto', 'forex', 'futures']);
+    afterClosedResult = of({
+      batchSize: 5,
+      batchCount: 1,
+      selectedCategories: ['stocks', 'crypto', 'forex'], // stale — missing 'futures'
+      categoriesTouched: false,
+    });
+
+    component.openGenerateStrategiesDialog();
+
+    expect(component.selectedCategories()).toEqual(['stocks', 'crypto', 'forex', 'futures']);
+    expect(apiSpy.runStrategyLab).toHaveBeenCalledWith(
+      expect.objectContaining({ allowed_asset_classes: undefined }), // all selected -> no constraint
+    );
+  });
+
+  it('intersects the dialog result with categories that changed while it was open, keeping the overlap', () => {
+    // Simulate a config fetch resolving (after the dialog was seeded) that
+    // narrows the authoritative category list.
+    component.categoryOptions.set([
+      { value: 'crypto', label: 'Crypto', icon: 'currency_bitcoin' },
+      { value: 'forex', label: 'Forex', icon: 'currency_exchange' },
+    ]);
+    afterClosedResult = of({
+      batchSize: 5,
+      batchCount: 1,
+      selectedCategories: ['stocks', 'crypto'], // 'stocks' no longer exists
+      categoriesTouched: true,
+    });
+
+    component.openGenerateStrategiesDialog();
+
+    expect(component.selectedCategories()).toEqual(['crypto']);
+    expect(apiSpy.runStrategyLab).toHaveBeenCalledWith(
+      expect.objectContaining({ allowed_asset_classes: ['crypto'] }),
+    );
+  });
+
+  it('surfaces an error and does not start a run when none of the explicitly-selected categories still exist', () => {
+    component.categoryOptions.set([
+      { value: 'crypto', label: 'Crypto', icon: 'currency_bitcoin' },
+      { value: 'forex', label: 'Forex', icon: 'currency_exchange' },
+    ]);
+    component.selectedCategories.set(['crypto', 'forex']);
+    afterClosedResult = of({
+      batchSize: 5,
+      batchCount: 1,
+      selectedCategories: ['stocks'], // no longer a valid category at all
+      categoriesTouched: true,
+    });
+
+    component.openGenerateStrategiesDialog();
+
+    // Broadening to "every current category" would silently launch an
+    // unconstrained run the user never asked for, so this asks the user to
+    // reselect instead — leaving the existing selection and run state untouched.
+    expect(component.error()).toContain('no longer available');
+    expect(component.selectedCategories()).toEqual(['crypto', 'forex']);
+    expect(apiSpy.runStrategyLab).not.toHaveBeenCalled();
+  });
+
+  it('reconciles the dialog batch count against a batch-count max refreshed while the dialog was open', () => {
+    // Simulate a config fetch resolving (after the dialog was seeded with
+    // the fallback max of 100) that lowers the operator-configured max.
+    component.BATCH_COUNT_MAX.set(3);
+    afterClosedResult = of({
+      batchSize: 5,
+      batchCount: 20, // valid against the dialog's stale snapshot, not the new max
+      selectedCategories: ['stocks', 'crypto'],
+      categoriesTouched: true,
+    });
+
+    component.openGenerateStrategiesDialog();
+
+    expect(component.batchCount).toBe(3);
+    expect(apiSpy.runStrategyLab).toHaveBeenCalledWith(
+      expect.objectContaining({ batch_count: 3 }),
+    );
+  });
+
+  it('surfaces an error and does not start a run when a run becomes active while the dialog is open', () => {
+    afterClosedResult = of({
+      batchSize: 5,
+      batchCount: 1,
+      selectedCategories: ['stocks'],
+      categoriesTouched: true,
+    });
+    // A run started elsewhere (another tab, or a reconnect) while the dialog
+    // was open — the dialog's own snapshot never learned about it.
+    runService.running.set(true);
+    component.batchSize = 10;
+
+    component.openGenerateStrategiesDialog();
+
+    expect(component.error()).toContain('already in progress');
+    expect(component.batchSize).toBe(10); // left untouched, not overwritten with the dropped result
+    expect(apiSpy.runStrategyLab).not.toHaveBeenCalled();
+  });
+});

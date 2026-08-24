@@ -8,6 +8,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { AgentStudioFacade } from '../../../../services/agent-studio.facade';
+import { extractErrorDetail } from '../../../../shared/extract-error-detail';
 import type { AgentStudioDraftSummary } from '../../../../models/agent-studio.model';
 
 /**
@@ -98,7 +99,7 @@ export class SaveDraftDialogComponent {
       next: (summary) => this.ref.close(summary),
       error: (err) => {
         this.busy.set(false);
-        this.serverError.set(err?.error?.detail ?? err?.message ?? 'Failed to save draft.');
+        this.serverError.set(extractErrorDetail(err, 'Failed to save draft.'));
       },
     });
   }

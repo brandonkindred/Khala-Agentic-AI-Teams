@@ -24,6 +24,7 @@ import type {
   AgentBlueprint,
 } from '../../models';
 import { AI_SYSTEM_PHASES } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 type DashboardTab = 'build' | 'jobs' | 'blueprints';
 
@@ -136,7 +137,7 @@ export class AISystemsDashboardComponent implements OnInit, OnDestroy {
         this.startJobPolling(res.job_id);
       },
       error: (err) => {
-        this.submitError = err?.error?.detail ?? err?.message ?? 'Failed to start build';
+        this.submitError = extractErrorDetail(err, 'Failed to start build');
         this.submitting = false;
       },
     });
@@ -261,7 +262,7 @@ export class AISystemsDashboardComponent implements OnInit, OnDestroy {
       },
       error: (err) => {
         console.error('Failed to cancel job:', err);
-        this.submitError = err?.error?.detail ?? err?.message ?? 'Failed to cancel job';
+        this.submitError = extractErrorDetail(err, 'Failed to cancel job');
       },
     });
   }
@@ -277,7 +278,7 @@ export class AISystemsDashboardComponent implements OnInit, OnDestroy {
       },
       error: (err) => {
         console.error('Failed to delete job:', err);
-        this.submitError = err?.error?.detail ?? err?.message ?? 'Failed to delete job';
+        this.submitError = extractErrorDetail(err, 'Failed to delete job');
       },
     });
   }

@@ -8,6 +8,7 @@ import { PlanningApiService } from '../../services/planning-api.service';
 import { PLANNING_PHASES } from '../../models';
 import type { PlanningStatusResponse, PlanningResultResponse } from '../../models';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 const PHASES = PLANNING_PHASES.map((p) => p.id);
 
@@ -77,14 +78,14 @@ export class PlanningJobStatusComponent implements OnInit, OnDestroy {
                 .subscribe({
                   next: (r) => (this.result = r),
                   error: (err) => {
-                    this.error = err?.error?.detail ?? err?.message ?? 'Failed to load planning result';
+                    this.error = extractErrorDetail(err, 'Failed to load planning result');
                   },
                 });
             }
           }
         },
         error: (err) => {
-          this.error = err?.error?.detail ?? err?.message ?? 'Failed to fetch status';
+          this.error = extractErrorDetail(err, 'Failed to fetch status');
         },
       });
   }

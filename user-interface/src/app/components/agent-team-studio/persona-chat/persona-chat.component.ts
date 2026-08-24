@@ -18,6 +18,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { Subscription, timer, EMPTY } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import { PersonaTestingApiService } from '../../../services/persona-testing-api.service';
+import { extractErrorDetail } from '../../../shared/extract-error-detail';
 import type { PersonaChatMessage } from '../../../models';
 
 const POLL_MS = 5_000;
@@ -78,7 +79,7 @@ export class PersonaChatComponent implements OnInit, OnDestroy, AfterViewChecked
           }
         },
         error: (err) => {
-          this.error = err?.error?.detail ?? 'Failed to load chat';
+          this.error = extractErrorDetail(err, 'Failed to load chat');
         },
       });
   }
@@ -125,7 +126,7 @@ export class PersonaChatComponent implements OnInit, OnDestroy, AfterViewChecked
         this.sending = false;
       },
       error: (err) => {
-        this.error = err?.error?.detail ?? 'Failed to send message';
+        this.error = extractErrorDetail(err, 'Failed to send message');
         // Remove optimistic message
         this.messages = this.messages.filter((m) => m.message_id !== -1);
         this.sending = false;
