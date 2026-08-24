@@ -238,8 +238,12 @@ D. STATE COVERAGE
        needs correct semantics, not a live region: the house standard reserves
        `aria-live` for dynamic content and status changes, so neither report a
        compliant initial render as missing an announcement nor recommend adding one.
-     - MISSING — a finding. Cite the branch in the template or component that proves
-       it is missing.
+     - MISSING — a finding. Evidence for an absence is not the same shape as evidence
+       for a presence, so either form counts: cite the branch that handles the state
+       incorrectly, OR — where the state is wholly unimplemented and no such branch
+       exists — cite the nearest operation or conditional where the handling would
+       belong, say what is absent there, and back it with the scoped search that
+       found nothing handling it. Never invent a line number to satisfy the format.
      - NOT APPLICABLE — the page does not own this state. Evidence is required, not
        assertion, and either form counts: name the code that hands the state elsewhere
        (a landing page redirecting to a dashboard as soon as work exists owns neither
@@ -284,7 +288,9 @@ Open with:
     by duplicating or inventing findings to reach five.
   - **State dispositions** — one table per routed page, a row per state, covering all
     fourteen from §3D. Columns: state | HANDLED / MISSING / N/A | evidence (the
-    `file:line` for a handled branch, the missing branch, or the N/A justification).
+    `file:line` of the handled branch; for MISSING, either the incorrect branch or
+    the nearest operation where handling would belong plus what is absent; for N/A,
+    the justification).
     This is the audit the definition of done requires; a page whose table omits a
     state is not finished. Each MISSING row is also a finding below.
 
@@ -361,9 +367,10 @@ Close with:
 
 You are finished when: every routed <TEAM> page carries a stated disposition —
 handled, missing, or evidenced not-applicable — for all fourteen states in §3D; every
-finding cites a file and line or is explicitly marked as needing a
-browser; every recommendation names a concrete mechanism — an element, attribute,
-token, shared primitive, copy change, or component-logic change — rather than
+finding cites a file and line, or — for an absence — the nearest relevant location
+plus what is missing there, or is explicitly marked as needing a browser; every
+recommendation names a concrete mechanism — an element, attribute, token, shared
+primitive, copy change, or component-logic change — rather than
 describing an intention; and the top 5 are ordered such that shipping only those
 removes the largest share of user pain.
 ```
