@@ -139,12 +139,13 @@ C. CLARITY AND INFORMATION ARCHITECTURE
      sensible defaults for sort and filter, stable ordering across polls.
 
 D. STATE COVERAGE
-   For each page, walk all of: first visit / empty; loading (first load vs refresh);
-   partial; populated; long-running; stalled; failed; permission-denied;
-   backend-unconfigured; offline; API-error; and stale-data. Each is its own state:
-   permission-denied and backend-unconfigured need different copy and different
-   recovery, as do offline and API-error, so a disposition covering one never covers
-   the other.
+   For each page, walk all of: first visit / empty; first load; refresh; partial;
+   populated; long-running; stalled; failed; permission-denied; backend-unconfigured;
+   offline; API-error; and stale-data. Each is its own state: first load and refresh
+   differ (a refresh that silently blanks already-rendered content is a defect that a
+   correct first-load spinner hides), permission-denied and backend-unconfigured need
+   different copy and different recovery, as do offline and API-error — so a
+   disposition covering one never covers the other.
    Give every state exactly one disposition, and state which:
      - HANDLED — the UI is (1) rendered at all, (2) recoverable from, and (3) where the
        state arrives dynamically — without navigation or focus movement — announced to
@@ -200,8 +201,11 @@ Then every finding, in ranked order:
     body and nothing is announced")
   - **Why it's a problem**: the WCAG success criterion (number and name) or the UX
     principle. Do not cite a criterion you have not checked against.
-  - **Recommended change**: specific enough to implement — the element, attribute,
-    token, or shared primitive to use. Include a code sketch when the change is subtle.
+  - **Recommended change**: specific enough to implement — name the concrete mechanism,
+    whichever fits the finding: an element, attribute, token, or shared primitive; the
+    replacement copy; or the component-logic change (remembering known input,
+    stabilizing sort order across polls). Include a code sketch when the change is
+    subtle. Do not invent an irrelevant token or attribute to satisfy the format.
   - **Cost**: S / M / L, plus blast radius (this page | this team | shared primitive).
   - **Verification**: how a reviewer proves it fixed — the `.a11y.spec.ts` assertion to
     add, the contrast-guard allowlist entry to remove, or the manual keyboard /
@@ -249,9 +253,10 @@ Close with:
 ## 9. Definition of done
 
 You are finished when: every routed <TEAM> page carries a stated disposition —
-handled, missing, or evidenced not-applicable — for all twelve states in §3D; every
+handled, missing, or evidenced not-applicable — for all thirteen states in §3D; every
 finding cites a file and line or is explicitly marked as needing a
-browser; every recommendation names a token, primitive, or attribute rather than
+browser; every recommendation names a concrete mechanism — an element, attribute,
+token, shared primitive, copy change, or component-logic change — rather than
 describing an intention; and the top 5 are ordered such that shipping only those
 removes the largest share of user pain.
 ```
