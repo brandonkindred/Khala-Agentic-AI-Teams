@@ -138,17 +138,25 @@ def test_workflows_register_in_temporalio_sandbox() -> None:
     ``test_workflow_registers_in_temporalio_sandbox``, extended to cover all
     three of this team's queues in one pass since they share the same
     package-level import chain.
+
+    Deliberately does NOT ``_purge`` ``investment_team.temporal`` /
+    ``investment_team.strategy_lab.temporal`` first: ``prepare_workflow``
+    always re-imports the workflow's module chain fresh inside the sandbox's
+    own isolated namespace regardless of what this (outer) process's
+    ``sys.modules`` holds, so purging buys this test nothing. It did cost
+    something: ``test_strategy_lab_temporal_workflows.py`` binds
+    ``investment_team.strategy_lab.temporal.workflows`` to a module-level
+    ``wf`` at collection time, and purging it here mid-run forced a stale-vs.
+    -fresh identity mismatch on ``wf.ACTIVITIES`` the next time that file's
+    ``test_module_exports_workflow_and_activities`` ran in the same process.
     """
     import asyncio
 
     import temporalio.workflow as _wf
 
-    from shared.temporal.worker import _build_workflow_runner
-
-    _purge("investment_team.temporal")
-    _purge("investment_team.strategy_lab.temporal")
     from investment_team.strategy_lab.temporal import WORKFLOWS as STRATEGY_LAB_WORKFLOWS
     from investment_team.temporal import ADVISORY_WORKFLOWS, WORKFLOWS
+    from shared.temporal.worker import _build_workflow_runner
 
     all_workflows = list(WORKFLOWS) + list(ADVISORY_WORKFLOWS) + list(STRATEGY_LAB_WORKFLOWS)
     assert all_workflows, "expected at least one workflow class to validate"
