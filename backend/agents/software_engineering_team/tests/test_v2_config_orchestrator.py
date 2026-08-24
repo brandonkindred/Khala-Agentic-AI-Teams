@@ -193,9 +193,9 @@ class TestConfigDrivenRepoReading:
 
     def test_read_repo_code_respects_max_chars_budget_from_config(self, tmp_path: Path):
         """Budget truncates at a whole-file boundary (read_repo_code_budgeted's
-        contract, matching test_be_development_agent_read_repo_code_max_chars):
-        the first file's full chunk is included, the second excluded entirely --
-        not a budget that happens to exclude everything or truncate mid-file."""
+        contract): the first file's full chunk is included, the second excluded
+        entirely -- not a budget that happens to exclude everything or truncate
+        mid-file."""
         (tmp_path / "a.marker").write_text("x" * 30)
         (tmp_path / "b.marker").write_text("y" * 30)
 
