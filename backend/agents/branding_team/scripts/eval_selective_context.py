@@ -13,15 +13,32 @@ Reports a token-count table for both variants plus the percentage reduction,
 and saves each mission's Phase 4 (channel_activation) and Phase 5
 (governance) outputs to a JSON file for manual quality comparison.
 
+Also runs an LLM-as-judge pass (``branding_team.scripts.quality_judge``) that
+scores both variants' Phase 4/5 outputs on strategic coherence, completeness,
+and brand consistency (1-5 each), flags a regression when the selective
+variant scores more than 0.5 points below the full-context variant on any
+dimension, and writes both the token and quality results to a markdown
+report (``<output-dir>/quality_report.md``).
+
 Run from ``backend/`` (same directory as ``Makefile``)::
 
     PYTHONPATH=.:agents python3 -m branding_team.scripts.eval_selective_context
 
-Requires no Postgres, Temporal, or live LLM provider: ``run_eval`` forces
-every agent it constructs through the deterministic dummy stub client (see
-``llm_service.dummy_provider.force_dummy_llm_provider``), regardless of any live
-provider selected in the Postgres-backed runtime config or an inherited
-``LLM_PROVIDER`` environment value.
+By default (no ``--live``), the whole run -- pipeline execution AND judge
+scoring -- goes through the deterministic dummy stub client (see
+``llm_service.dummy_provider.force_dummy_llm_provider``), regardless of any
+live provider selected in the Postgres-backed runtime config or an inherited
+``LLM_PROVIDER`` environment value; this makes the run fast, offline, and
+reproducible, but ``DummyLLMClient`` replies from the requested schema, not
+the prompt content, so both variants' output is identical and the judge can
+never surface a real quality regression in this mode. Pass ``--live`` to run
+both the pipeline and the judge against whatever LLM provider is actually
+configured (requires Postgres and a configured provider, or ``LLM_PROVIDER``
+pointing at a live provider) -- that is the mode a genuine quality comparison
+requires. If a ``--live`` run flags a regression, report it on the parent
+story (Story: "Validate output quality with selective context via eval
+comparison") for a ``context_phases`` adjustment before that story merges --
+this script does not post to GitHub itself.
 """
 
 from __future__ import annotations
@@ -40,11 +57,18 @@ from branding_team.graphs.shared import PHASE_ORDER
 from branding_team.models import BrandingMission, BrandPhase
 from branding_team.orchestrator import _PHASE_SPEC, BrandingTeamOrchestrator
 from branding_team.scripts.eval_fixtures.sample_missions import SAMPLE_MISSIONS
+from branding_team.scripts.quality_judge import PhaseQualityScore, score_phase_output
+from llm_service import get_client
 from llm_service.dummy_provider import force_dummy_llm_provider
 
 PHASE5_REDUCTION_TARGET_PCT = 40.0
+QUALITY_REGRESSION_THRESHOLD_PTS = 0.5
 
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "eval_results"
+
+# Phases scored by the LLM-as-judge pass -- the same two phases whose outputs
+# are already saved to JSON for manual comparison.
+_JUDGED_PHASES: tuple[BrandPhase, ...] = (BrandPhase.CHANNEL_ACTIVATION, BrandPhase.GOVERNANCE)
 
 
 def _approx_token_count(text: str) -> int:
@@ -132,6 +156,54 @@ class PhasePromptComparison:
         return 100.0 * (self.full_tokens - self.selective_tokens) / self.full_tokens
 
 
+_QUALITY_DIMENSIONS: tuple[str, ...] = (
+    "strategic_coherence",
+    "completeness",
+    "brand_consistency",
+)
+
+
+@dataclass
+class PhaseQualityComparison:
+    """LLM-as-judge quality scores for one phase's output under both context variants.
+
+    Attributes:
+        mission_name: The mission this comparison was computed for.
+        phase: The branding phase whose output was judged.
+        selective: The judge's score of the real, selective-context output.
+        full: The judge's score of the full-context output.
+    """
+
+    mission_name: str
+    phase: BrandPhase
+    selective: PhaseQualityScore
+    full: PhaseQualityScore
+
+    def delta(self, dimension: str) -> int:
+        """Return ``full``'s score minus ``selective``'s score for *dimension*.
+
+        Preconditions:
+            ``dimension`` is one of :data:`_QUALITY_DIMENSIONS`.
+        Postconditions:
+            Returns a positive value when the selective variant scored lower
+            than the full-context variant on that dimension.
+        """
+        return getattr(self.full, dimension) - getattr(self.selective, dimension)
+
+    def regressions(self) -> list[str]:
+        """Return the dimension names where selective scores more than the threshold below full.
+
+        Postconditions:
+            Returns the subset of :data:`_QUALITY_DIMENSIONS` (in their
+            declared order) whose ``delta`` strictly exceeds
+            ``QUALITY_REGRESSION_THRESHOLD_PTS``; empty when no dimension
+            regresses.
+        """
+        return [
+            dim for dim in _QUALITY_DIMENSIONS if self.delta(dim) > QUALITY_REGRESSION_THRESHOLD_PTS
+        ]
+
+
 @contextlib.contextmanager
 def _phase_spec_context_override(
     phase: BrandPhase, context_phases: tuple[BrandPhase, ...]
@@ -217,16 +289,22 @@ def _run_variant(
 
 
 def run_eval(
-    missions: Optional[list[BrandingMission]] = None, output_dir: Path = DEFAULT_OUTPUT_DIR
-) -> list[PhasePromptComparison]:
+    missions: Optional[list[BrandingMission]] = None,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    *,
+    live: bool = False,
+) -> tuple[list[PhasePromptComparison], list[PhaseQualityComparison]]:
     """Run the full-vs-selective-context eval over *missions* and save Phase 4/5 outputs.
 
     Preconditions:
         ``missions`` is an iterable of ``BrandingMission`` instances, or
         ``None`` (defaults to ``SAMPLE_MISSIONS``).
     Postconditions:
-        - Returns one ``PhasePromptComparison`` per (mission, phase) pair for
-          every phase after ``STRATEGIC_CORE`` (which never filters).
+        - Returns ``(comparisons, quality_comparisons)``: one
+          ``PhasePromptComparison`` per (mission, phase) pair for every phase
+          after ``STRATEGIC_CORE`` (which never filters), and one
+          ``PhaseQualityComparison`` per (mission, phase) pair for each phase
+          in ``_JUDGED_PHASES`` (channel_activation, governance).
         - Writes each mission's Phase 4 and Phase 5 outputs, under both the
           ``selective`` and ``full_context`` variants, to
           ``output_dir/<mission-slug>.json`` -- each produced by its own
@@ -234,18 +312,24 @@ def run_eval(
           task prompts (not a shared prompt-string-only comparison). If two
           missions in ``missions`` share the same slugified ``company_name``,
           the second and later occurrences get a ``-2``, ``-3``, ... suffix
-          rather than silently overwriting an earlier mission's file. Under
-          the forced dummy client the two variants' output *content* will
+          rather than silently overwriting an earlier mission's file.
+        - When ``live`` is ``False`` (the default): both pipeline execution
+          and judge scoring go through the forced dummy client. Under the
+          forced dummy client the two variants' output *content* will
           typically be identical regardless of prompt differences --
           ``DummyLLMClient`` replies from an agent's output schema, not its
-          prompt text -- so this script validates that the real
+          prompt text -- so this mode validates that the real
           selective-context code path runs (and measures its prompt-size
-          effect), not output quality; a live-provider run swapping in for
-          ``force_dummy_llm_provider`` would be needed for actual
-          LLM-as-judge or manual quality comparison, which issue #6969
-          explicitly leaves out of scope.
-        - Every phase genuinely executes through the forced dummy client for
-          every mission in this call, via ``_run_variant`` -> ``run_single_phase``
+          effect) and that the judge pipeline itself works end to end, not
+          real output quality; every ``PhaseQualityComparison.regressions()``
+          is empty in this mode.
+        - When ``live`` is ``True``: ``force_dummy_llm_provider`` is not
+          entered, so both the pipeline and the judge (via
+          ``llm_service.get_client``) run against whatever LLM provider is
+          actually configured (the Postgres provider list, or
+          ``LLM_PROVIDER`` when Postgres is unset) -- this is the mode a
+          genuine quality comparison requires.
+        - Every phase genuinely executes via ``_run_variant`` -> ``run_single_phase``
           (never ``orchestrator.run()``'s cached thread path or its
           ``_use_monolithic`` escape hatch): ``run_single_phase`` takes no
           ``phase_cache`` parameter at all, so this never touches the
@@ -259,10 +343,13 @@ def run_eval(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     comparisons: list[PhasePromptComparison] = []
+    quality_comparisons: list[PhaseQualityComparison] = []
     slug_counts: dict[str, int] = {}
 
-    with force_dummy_llm_provider():
+    llm_context = contextlib.nullcontext() if live else force_dummy_llm_provider()
+    with llm_context:
         orchestrator = BrandingTeamOrchestrator()
+        judge_client = get_client(agent_key="branding_quality_judge")
         for mission in missions:
             selective_outputs, selective_tasks = _run_variant(
                 orchestrator, mission, full_context=False
@@ -278,6 +365,30 @@ def run_eval(
                         phase=phase,
                         selective_tokens=_approx_token_count(selective_tasks[phase]),
                         full_tokens=_approx_token_count(full_tasks[phase]),
+                    )
+                )
+
+            for phase in _JUDGED_PHASES:
+                selective_score = score_phase_output(
+                    judge_client,
+                    mission=mission,
+                    phase=phase,
+                    output=selective_outputs[phase],
+                    variant_label="selective",
+                )
+                full_score = score_phase_output(
+                    judge_client,
+                    mission=mission,
+                    phase=phase,
+                    output=full_outputs[phase],
+                    variant_label="full",
+                )
+                quality_comparisons.append(
+                    PhaseQualityComparison(
+                        mission_name=mission.company_name,
+                        phase=phase,
+                        selective=selective_score,
+                        full=full_score,
                     )
                 )
 
@@ -303,7 +414,7 @@ def run_eval(
             out_path = output_dir / f"{slug}.json"
             out_path.write_text(json.dumps(eval_record, indent=2), encoding="utf-8")
 
-    return comparisons
+    return comparisons, quality_comparisons
 
 
 def _print_report(comparisons: list[PhasePromptComparison]) -> None:
@@ -348,11 +459,127 @@ def _print_report(comparisons: list[PhasePromptComparison]) -> None:
     )
 
 
+def _print_quality_report(quality_comparisons: list[PhaseQualityComparison]) -> None:
+    """Print the per-phase LLM-as-judge quality-score table and the overall regression verdict.
+
+    Preconditions:
+        ``quality_comparisons`` is the list ``run_eval`` returns (may be empty).
+    Postconditions:
+        Prints one table row per comparison (selective/full score per
+        dimension) and, when at least one comparison exists, an overall
+        PASS/FAIL verdict -- FAIL when any comparison's ``regressions()`` is
+        non-empty, naming every regressed (mission, phase, dimension). Writes
+        to stdout only; returns nothing.
+    """
+    header = f"\n{'Mission':<32}{'Phase':<20}"
+    for dim in _QUALITY_DIMENSIONS:
+        header += f"{dim + ' (sel/full)':<28}"
+    print(header)
+    print("-" * (52 + 28 * len(_QUALITY_DIMENSIONS)))
+    for c in quality_comparisons:
+        row = f"{c.mission_name:<32}{c.phase.value:<20}"
+        for dim in _QUALITY_DIMENSIONS:
+            sel = getattr(c.selective, dim)
+            full = getattr(c.full, dim)
+            row += f"{f'{sel}/{full}':<28}"
+        print(row)
+
+    if not quality_comparisons:
+        print("\nNo quality comparisons collected.")
+        return
+
+    all_regressions = [(c, dim) for c in quality_comparisons for dim in c.regressions()]
+    print("-" * (52 + 28 * len(_QUALITY_DIMENSIONS)))
+    if not all_regressions:
+        print(
+            "Quality regression check (selective within "
+            f"{QUALITY_REGRESSION_THRESHOLD_PTS} pts of full-context on every dimension): PASS"
+        )
+        return
+
+    print(
+        "Quality regression check (selective within "
+        f"{QUALITY_REGRESSION_THRESHOLD_PTS} pts of full-context on every dimension): FAIL"
+    )
+    for c, dim in all_regressions:
+        print(
+            f"  REGRESSION: {c.mission_name} / {c.phase.value} / {dim}: "
+            f"selective={getattr(c.selective, dim)} full={getattr(c.full, dim)}"
+        )
+
+
+def _write_markdown_report(
+    comparisons: list[PhasePromptComparison],
+    quality_comparisons: list[PhaseQualityComparison],
+    output_dir: Path,
+) -> Path:
+    """Write the combined token/quality results to ``output_dir/quality_report.md``.
+
+    Preconditions:
+        ``output_dir`` exists (``run_eval`` already creates it).
+    Postconditions:
+        Returns the written file's path. The file contains a token-reduction
+        table, a quality-score table, and a regression verdict section
+        listing every flagged (mission, phase, dimension), or a line stating
+        no regressions were found.
+    """
+    lines = ["# Selective-Context Eval Report", ""]
+
+    lines.append("## Token counts")
+    lines.append("")
+    lines.append("| Mission | Phase | Selective | Full | Reduction |")
+    lines.append("|---|---|---:|---:|---:|")
+    for c in comparisons:
+        lines.append(
+            f"| {c.mission_name} | {c.phase.value} | {c.selective_tokens} | "
+            f"{c.full_tokens} | {c.reduction_pct:.1f}% |"
+        )
+
+    lines.append("")
+    lines.append("## LLM-as-judge quality scores")
+    lines.append("")
+    dim_headers = " | ".join(f"{dim} (sel/full)" for dim in _QUALITY_DIMENSIONS)
+    lines.append(f"| Mission | Phase | {dim_headers} |")
+    lines.append("|---|---|" + "---|" * len(_QUALITY_DIMENSIONS))
+    for c in quality_comparisons:
+        scores = " | ".join(
+            f"{getattr(c.selective, dim)}/{getattr(c.full, dim)}" for dim in _QUALITY_DIMENSIONS
+        )
+        lines.append(f"| {c.mission_name} | {c.phase.value} | {scores} |")
+
+    lines.append("")
+    lines.append("## Regression verdict")
+    lines.append("")
+    all_regressions = [(c, dim) for c in quality_comparisons for dim in c.regressions()]
+    if not all_regressions:
+        lines.append(
+            "No regressions: every selective-context score is within "
+            f"{QUALITY_REGRESSION_THRESHOLD_PTS} points of the full-context score "
+            "on every dimension."
+        )
+    else:
+        lines.append(
+            "Regressions detected (selective more than "
+            f"{QUALITY_REGRESSION_THRESHOLD_PTS} points below full-context):"
+        )
+        lines.append("")
+        for c, dim in all_regressions:
+            lines.append(
+                f"- {c.mission_name} / {c.phase.value} / {dim}: "
+                f"selective={getattr(c.selective, dim)} full={getattr(c.full, dim)}"
+            )
+
+    report_path = output_dir / "quality_report.md"
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return report_path
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     """Run the eval script's CLI entry point.
 
-    Parses ``--output-dir`` and ``--mission``, runs the eval over the
-    selected sample missions, and prints the report.
+    Parses ``--output-dir``, ``--mission``, and ``--live``, runs the eval
+    over the selected sample missions, and prints the token and quality
+    reports.
 
     Preconditions:
         ``argv`` is a list of CLI argument strings, or ``None`` to use
@@ -360,9 +587,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     Postconditions:
         Returns ``0`` on success. Returns ``1`` without running the eval if
         ``--mission`` matches no sample mission (prints the reason to
-        stderr). On success, writes one JSON file per selected mission to
-        ``--output-dir`` (see ``run_eval``) and prints the comparison table
-        and verdict to stdout (see ``_print_report``).
+        stderr). On success, writes one JSON file per selected mission plus
+        ``quality_report.md`` to ``--output-dir`` (see ``run_eval`` and
+        ``_write_markdown_report``), and prints the token and quality-score
+        tables and verdicts to stdout (see ``_print_report`` and
+        ``_print_quality_report``).
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -376,6 +605,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=None,
         help="Case-insensitive substring filter on company_name; runs only matching sample missions.",
     )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help=(
+            "Run the pipeline and the LLM-as-judge pass against the actually-configured "
+            "LLM provider instead of the deterministic dummy stub. Required for the judge "
+            "to surface a genuine quality difference between variants."
+        ),
+    )
     args = parser.parse_args(argv)
 
     missions = SAMPLE_MISSIONS
@@ -386,8 +624,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"No sample mission matches --mission={args.mission!r}", file=sys.stderr)
             return 1
 
-    comparisons = run_eval(missions=missions, output_dir=args.output_dir)
+    comparisons, quality_comparisons = run_eval(
+        missions=missions, output_dir=args.output_dir, live=args.live
+    )
     _print_report(comparisons)
+    _print_quality_report(quality_comparisons)
+    report_path = _write_markdown_report(comparisons, quality_comparisons, args.output_dir)
+    print(f"\nMarkdown report written to {report_path}")
     return 0
 
 

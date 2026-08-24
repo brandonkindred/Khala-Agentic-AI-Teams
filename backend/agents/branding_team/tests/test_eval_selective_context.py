@@ -22,15 +22,20 @@ from branding_team.graphs.shared import PHASE_ORDER
 from branding_team.models import BrandPhase
 from branding_team.orchestrator import _PHASE_SPEC, BrandingTeamOrchestrator
 from branding_team.scripts.eval_selective_context import (
+    QUALITY_REGRESSION_THRESHOLD_PTS,
     SAMPLE_MISSIONS,
+    PhaseQualityComparison,
     _approx_token_count,
     _full_context_phases,
     _phase_spec_context_override,
+    _print_quality_report,
     _run_variant,
     _slugify,
+    _write_markdown_report,
     main,
     run_eval,
 )
+from branding_team.scripts.quality_judge import PhaseQualityScore
 from branding_team.tests.conftest import make_mission
 from llm_service.dummy_provider import force_dummy_llm_provider
 
@@ -169,7 +174,89 @@ def test_run_eval_disambiguates_duplicate_company_name_slugs(tmp_path) -> None:
 
     slug = _slugify(first.company_name)
     written = sorted(p.name for p in tmp_path.glob("*.json"))
-    assert written == [f"{slug}-2.json", f"{slug}.json"]
+    assert f"{slug}.json" in written
+    assert f"{slug}-2.json" in written
+
+
+def test_run_eval_default_dummy_mode_has_no_quality_regressions(tmp_path) -> None:
+    """Under the default (dummy) mode, the judge always scores both variants
+    identically, so run_eval must return a non-empty quality_comparisons list
+    with zero regressions on every comparison.
+    """
+    _comparisons, quality_comparisons = run_eval(missions=[make_mission()], output_dir=tmp_path)
+
+    assert quality_comparisons
+    assert all(c.regressions() == [] for c in quality_comparisons)
+    phases = {c.phase for c in quality_comparisons}
+    assert phases == {BrandPhase.CHANNEL_ACTIVATION, BrandPhase.GOVERNANCE}
+
+
+def test_run_eval_writes_markdown_report(tmp_path) -> None:
+    """run_eval's caller (main()) writes quality_report.md via
+    _write_markdown_report; verify it contains both the token table and the
+    quality-score table for a real run.
+    """
+    comparisons, quality_comparisons = run_eval(missions=[make_mission()], output_dir=tmp_path)
+
+    report_path = _write_markdown_report(comparisons, quality_comparisons, tmp_path)
+
+    assert report_path == tmp_path / "quality_report.md"
+    content = report_path.read_text(encoding="utf-8")
+    assert "# Selective-Context Eval Report" in content
+    assert "## LLM-as-judge quality scores" in content
+    assert "## Regression verdict" in content
+    assert "No regressions" in content
+
+
+def _quality_score(**overrides) -> PhaseQualityScore:
+    values = {"strategic_coherence": 5, "completeness": 5, "brand_consistency": 5, "rationale": ""}
+    values.update(overrides)
+    return PhaseQualityScore(**values)
+
+
+def test_phase_quality_comparison_no_regression_when_scores_are_equal() -> None:
+    """Identical scores (delta 0, well within the 0.5-point threshold) are never a regression."""
+    assert QUALITY_REGRESSION_THRESHOLD_PTS == 0.5
+    comparison = PhaseQualityComparison(
+        mission_name="Acme",
+        phase=BrandPhase.GOVERNANCE,
+        selective=_quality_score(strategic_coherence=4),
+        full=_quality_score(strategic_coherence=4),
+    )
+    assert comparison.regressions() == []
+
+
+def test_phase_quality_comparison_flags_regression_past_threshold() -> None:
+    """A one-point drop on a single dimension exceeds the 0.5-point threshold
+    and must be flagged by name.
+    """
+    comparison = PhaseQualityComparison(
+        mission_name="Acme",
+        phase=BrandPhase.GOVERNANCE,
+        selective=_quality_score(strategic_coherence=3),
+        full=_quality_score(strategic_coherence=5),
+    )
+    assert comparison.regressions() == ["strategic_coherence"]
+
+
+def test_phase_quality_comparison_flags_multiple_regressed_dimensions() -> None:
+    """Every dimension that regresses past the threshold is reported, not just the first."""
+    comparison = PhaseQualityComparison(
+        mission_name="Acme",
+        phase=BrandPhase.CHANNEL_ACTIVATION,
+        selective=_quality_score(strategic_coherence=2, completeness=2, brand_consistency=5),
+        full=_quality_score(strategic_coherence=5, completeness=5, brand_consistency=5),
+    )
+    assert comparison.regressions() == ["strategic_coherence", "completeness"]
+
+
+def test_print_quality_report_handles_empty_list(capsys) -> None:
+    """_print_quality_report must not raise on an empty comparisons list and
+    must state that nothing was collected.
+    """
+    _print_quality_report([])
+    out = capsys.readouterr().out
+    assert "No quality comparisons collected." in out
 
 
 def test_main_no_mission_filter_runs_all_sample_missions(tmp_path) -> None:
@@ -177,11 +264,11 @@ def test_main_no_mission_filter_runs_all_sample_missions(tmp_path) -> None:
     to run_eval and return 0 -- the CLI's default/happy path.
     """
     with patch("branding_team.scripts.eval_selective_context.run_eval") as mock_run_eval:
-        mock_run_eval.return_value = []
+        mock_run_eval.return_value = ([], [])
         exit_code = main(["--output-dir", str(tmp_path)])
 
     assert exit_code == 0
-    mock_run_eval.assert_called_once_with(missions=SAMPLE_MISSIONS, output_dir=tmp_path)
+    mock_run_eval.assert_called_once_with(missions=SAMPLE_MISSIONS, output_dir=tmp_path, live=False)
 
 
 def test_main_mission_filter_no_match_returns_one(tmp_path) -> None:
@@ -200,10 +287,22 @@ def test_main_mission_filter_matches_case_insensitive_substring(tmp_path) -> Non
     company_name, passing only the matches through to run_eval.
     """
     with patch("branding_team.scripts.eval_selective_context.run_eval") as mock_run_eval:
-        mock_run_eval.return_value = []
+        mock_run_eval.return_value = ([], [])
         exit_code = main(["--output-dir", str(tmp_path), "--mission", "northwind"])
 
     assert exit_code == 0
     called_missions = mock_run_eval.call_args.kwargs["missions"]
     assert called_missions
     assert all("northwind" in m.company_name.lower() for m in called_missions)
+
+
+def test_main_live_flag_forwarded_to_run_eval(tmp_path) -> None:
+    """--live must be forwarded to run_eval as live=True; omitting it defaults to False
+    (already covered by the other main() tests above).
+    """
+    with patch("branding_team.scripts.eval_selective_context.run_eval") as mock_run_eval:
+        mock_run_eval.return_value = ([], [])
+        exit_code = main(["--output-dir", str(tmp_path), "--live"])
+
+    assert exit_code == 0
+    mock_run_eval.assert_called_once_with(missions=SAMPLE_MISSIONS, output_dir=tmp_path, live=True)

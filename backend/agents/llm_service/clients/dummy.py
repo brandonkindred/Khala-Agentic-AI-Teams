@@ -1056,13 +1056,38 @@ def _branding_phase5_structured_output_stub(model_name: str) -> Optional[Dict[st
     return None
 
 
+_QUALITY_JUDGE_STRUCTURED_OUTPUT_MODEL_NAMES: frozenset[str] = frozenset({"PhaseQualityScore"})
+
+
+def _quality_judge_score_stub() -> Dict[str, Any]:
+    """Return the ``PhaseQualityScore`` dummy payload for the eval LLM-as-judge.
+
+    Fixed at the top of the 1-5 scale for both variants under the forced
+    dummy client: ``DummyLLMClient`` replies from the requested schema, not
+    the prompt content, so a selective vs. full-context comparison run under
+    the dummy provider can never itself surface a quality regression (see
+    ``branding_team.scripts.eval_selective_context.run_eval``'s docstring) --
+    only a ``--live`` run against a real provider does.
+
+    Preconditions: none.
+    Postconditions: returns a fresh dict matching ``PhaseQualityScore``'s field set.
+    """
+    return {
+        "strategic_coherence": 5,
+        "completeness": 5,
+        "brand_consistency": 5,
+        "rationale": "Dummy judge: stub score, not a real quality assessment (dummy).",
+    }
+
+
 def _branding_structured_output_stub_by_model_name(
     model_name: str, system_lowered: str = ""
 ) -> Optional[Dict[str, Any]]:
     """Resolve a branding stub by structured-output model class name.
 
-    Tries Phase 2, then Phase 4, then Phase 5. Shared by ``complete_json``,
-    ``chat``, and ``stream`` so all three keep one precedence order.
+    Tries Phase 2, then Phase 4, then Phase 5, then the eval LLM-as-judge
+    score model. Shared by ``complete_json``, ``chat``, and ``stream`` so all
+    three keep one precedence order.
 
     Preconditions:
         ``model_name`` is a string; ``system_lowered`` is already lowercased
@@ -1077,7 +1102,12 @@ def _branding_structured_output_stub_by_model_name(
     stub = _branding_phase4_structured_output_stub(model_name, system_lowered)
     if stub is not None:
         return stub
-    return _branding_phase5_structured_output_stub(model_name)
+    stub = _branding_phase5_structured_output_stub(model_name)
+    if stub is not None:
+        return stub
+    if model_name in _QUALITY_JUDGE_STRUCTURED_OUTPUT_MODEL_NAMES:
+        return _quality_judge_score_stub()
+    return None
 
 
 def _branding_phase5_text_routed_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
@@ -1394,6 +1424,7 @@ def _looks_like_structured_output_tool(name: str, description_lowered: str) -> b
         or name in _PHASE2_STRUCTURED_OUTPUT_MODEL_NAMES
         or name in _PHASE4_STRUCTURED_OUTPUT_MODEL_NAMES
         or name in _PHASE5_STRUCTURED_OUTPUT_MODEL_NAMES
+        or name in _QUALITY_JUDGE_STRUCTURED_OUTPUT_MODEL_NAMES
     )
 
 
