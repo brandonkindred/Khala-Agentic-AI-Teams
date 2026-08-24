@@ -300,6 +300,7 @@ export class AgentConsoleApiService {
   deleteRun(runId: string): Observable<{ id: string; status: string }> {
     return this.http.delete<{ id: string; status: string }>(
       `${this.baseUrl}/runs/${encodeURIComponent(runId)}`,
+      SKIP_NOTIFY_OPTIONS,
     );
   }
 
