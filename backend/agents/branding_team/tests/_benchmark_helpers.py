@@ -61,13 +61,17 @@ def mock_llm_latency(
     """Force the dummy LLM provider and inject fixed per-call latency for one benchmark run.
 
     Preconditions:
-        ``delay_seconds`` is the sleep injected into every mocked
-        ``DummyLLMClient.chat`` call; ``min_executor_workers``, when given, is
-        at least the largest number of LLM calls the benchmarked code path can
-        have concurrently in flight; ``on_call``, when given, is invoked
-        synchronously on every mocked call before the sleep (e.g. a
-        ``threading.Barrier.wait`` a caller uses to prove true concurrency) --
-        any exception it raises propagates out of the mocked call.
+        ``delay_seconds`` must be a non-negative float (seconds to sleep on
+        each mocked call). ``min_executor_workers``, when given, must be a
+        positive integer at least the largest number of LLM calls the
+        benchmarked code path can have concurrently in flight. ``on_call``,
+        when given, must be thread-safe: it is invoked synchronously on every
+        mocked call before the sleep (e.g. a ``threading.Barrier.wait`` a
+        caller uses to prove true concurrency), and because those calls reach
+        this harness via ``asyncio.to_thread``, multiple LLM calls -- and so
+        multiple concurrent invocations of ``on_call`` -- may be in flight at
+        once whenever the benchmarked code path fans out; any exception it
+        raises propagates out of the mocked call.
     Postconditions:
         Yields a ``MockLLMLatencyHarness`` whose ``call_count`` reflects every
         completed mocked call so far, and whose ``executor_injected`` is
@@ -81,9 +85,22 @@ def mock_llm_latency(
         test leaks across the boundary. When ``min_executor_workers`` is
         given, ``asyncio.events.new_event_loop`` is also patched so any event
         loop created inside the block gets a ``ThreadPoolExecutor`` default
-        executor sized to at least ``min_executor_workers`` workers,
+        executor sized to exactly ``min_executor_workers`` workers,
         independent of the runner's real core count.
+
+    Raises:
+        ValueError: if ``delay_seconds`` is negative, or ``min_executor_workers``
+            is given and is not a positive integer -- raised immediately, before
+            any patching, so a harness-misuse mistake never masquerades as a
+            benchmark regression.
     """
+    if delay_seconds < 0:
+        raise ValueError(f"delay_seconds must be non-negative, got {delay_seconds}")
+    if min_executor_workers is not None and min_executor_workers < 1:
+        raise ValueError(
+            f"min_executor_workers must be a positive integer, got {min_executor_workers}"
+        )
+
     harness = MockLLMLatencyHarness()
     original_chat = DummyLLMClient.chat
 
