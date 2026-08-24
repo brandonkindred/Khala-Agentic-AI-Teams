@@ -124,8 +124,8 @@ class CodegenWorkflowResult(BaseModel):
     """
     Full result of the codegen team's autonomous workflow (either stack).
 
-    Captures outcome of the 5-phase lifecycle:
-    Planning → Execution → Review → Problem-solving → Deliver.
+    Captures outcome of the 7-phase lifecycle:
+    Setup → Planning → Execution → Review → Problem-solving → Documentation → Deliver.
     """
 
     task_id: str = Field(default="", description="ID of the task that was executed")

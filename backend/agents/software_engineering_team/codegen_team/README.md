@@ -82,7 +82,7 @@ stateDiagram-v2
 | **Documentation** | Add/update docstrings, README, API docs (Storybook for frontend) | `DocumentationPhaseResult` |
 | **Deliver** | Commit, merge to main branch | `DeliverResult` |
 
-The Review → Problem Solving → Execution cycle repeats up to 5 times until review passes.
+The Review → Problem Solving → Execution cycle repeats up to `MicrotaskReviewConfig.max_retries` times (default 3) until review passes.
 
 ## Tool Agents
 
@@ -208,9 +208,9 @@ Backend output lands under `{repo_path}/backend/`; frontend output lands under `
 
 ## Configuration
 
-| Variable | Description | Default |
-|----------|--------------|---------|
-| `MAX_REVIEW_ITERATIONS` | Max review → problem-solving cycles | 100 |
+Review → problem-solving cycles are capped by `MicrotaskReviewConfig` fields (see
+[§ Per-Microtask Review Gates](#per-microtask-review-gates)), not an environment
+variable — `max_retries` (default 3) is the overall per-microtask cap.
 
 ## Directory Structure
 

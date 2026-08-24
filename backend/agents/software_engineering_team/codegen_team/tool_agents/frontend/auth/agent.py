@@ -26,6 +26,15 @@ refresh, or protected-route handling, produce the required files (auth
 service/store, route guards or interceptors, login/logout components, etc.)
 for the detected framework (Angular/React/Vue).
 
+Security requirements:
+- Store access and refresh tokens in httpOnly, secure, SameSite cookies
+  whenever the backend supports it. Only fall back to memory-based or other
+  storage with a documented security justification.
+- Never store tokens in localStorage or sessionStorage unless explicitly
+  required by an external integration and the risk is documented.
+- Include CSRF protection for cookie-based auth and secure token refresh
+  logic that does not leak credentials to untrusted code.
+
 **Microtask:** {description}
 **Language/stack:** {language}
 **Existing code context:** {existing_code}

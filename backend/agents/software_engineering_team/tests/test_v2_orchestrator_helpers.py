@@ -1382,11 +1382,11 @@ _GIT_KIND = "git_branch_management"
 
 class TestRunDevelopmentWorkflow:
     """Tests for the shared ``BaseV2DevelopmentAgent._run_development_workflow`` template
-    method — the glue that both ``CodegenDevelopmentAgent.run_workflow`` and
-    ``CodegenDevelopmentAgent.run_workflow`` now delegate to. Every team-specific
-    callable/class is injected with a fake here, mirroring ``TestRunPreflight`` /
+    method — the glue that ``CodegenDevelopmentAgent.run_workflow`` delegates to for
+    either stack (backend or frontend). Every stack-specific callable/class is
+    injected with a fake here, mirroring ``TestRunPreflight`` /
     ``TestRunPlanningAndBranchSetup`` / ``TestRunDeliverAndFinalize``'s style, so the
-    full phase sequencing is unit-isolated from either team's orchestrator module.
+    full phase sequencing is unit-isolated from either stack's profile module.
     """
 
     @staticmethod
@@ -1469,10 +1469,10 @@ class TestRunDevelopmentWorkflow:
 
     def test_forwards_profile_labels_and_verifier_to_deliver(self, tmp_path: Path) -> None:
         """Regression: when a concrete subclass sets ``PROFILE`` (e.g.
-        Backend/CodegenDevelopmentAgent), its ``build_verify_label``/``name``
-        must be forwarded to the deliver phase alongside the injected
-        build_verifier/linting_tool_agent -- this is how the standalone
-        code-v2 endpoints' quality gate gets its labels."""
+        ``CodegenDevelopmentAgent`` with ``stack="backend"``), its
+        ``build_verify_label``/``name`` must be forwarded to the deliver phase
+        alongside the injected build_verifier/linting_tool_agent -- this is how
+        the standalone code-v2 endpoints' quality gate gets its labels."""
         captured: dict = {}
 
         def _capture_run_deliver(**kw):

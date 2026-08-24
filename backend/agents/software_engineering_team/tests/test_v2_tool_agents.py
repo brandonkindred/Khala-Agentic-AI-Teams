@@ -301,7 +301,7 @@ class _GoodFileGeneratorAgent:
 
 
 def test_auth_tool_agent_constructs(monkeypatch) -> None:
-    """Real (non-stub) FileGeneratorToolAgent: execute() drives an LLM call and
+    """Real (non-stub) AuthToolAgent: execute() drives an LLM call and
     parses its template output, so it needs a stubbed Agent, not a bare
     ``_model = None`` (that path is only for the static-lifecycle stubs)."""
     from software_engineering_team.codegen_team.tool_agents.frontend.auth import (

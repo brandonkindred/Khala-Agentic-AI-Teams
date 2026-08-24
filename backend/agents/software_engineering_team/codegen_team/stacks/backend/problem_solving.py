@@ -89,7 +89,28 @@ def run_batch_coding_fixes(
     phase_name: str = "review",
     detail_callback: Optional[Callable[[str], None]] = None,
 ) -> ProblemSolvingResult:
-    """Fix ALL issues from a review phase in a single batch (backend models)."""
+    """Fix ALL issues from a review phase in a single batch, bound to backend's
+    models/prompts/profile.
+
+    Thin wrapper over :func:`~software_engineering_team.shared.phases.problem_solving.run_batch_coding_fixes_impl`
+    (see its docstring for the full Preconditions/Postconditions contract);
+    this call only supplies the backend stack's ``PROFILE``, ``models``
+    module, ``BATCH_FIX_PROMPT``, and template parser.
+
+    Args:
+        llm: LLM client used for the batch-fix call.
+        microtask: The microtask whose files/issues are being fixed.
+        issues: Review issues to fix; only ``critical``/``high``/``medium``
+            severities are actionable (see the wrapped function).
+        current_files: The microtask's current file contents, keyed by path.
+        language: Language label used to select conventions text.
+        task_id: Task id, used for logging only.
+        phase_name: Which review phase produced ``issues`` (for logging/telemetry).
+        detail_callback: Optional progress callback.
+
+    Returns:
+        A ``ProblemSolvingResult`` (backend's ``models.ProblemSolvingResult``).
+    """
     return run_batch_coding_fixes_impl(
         llm=llm,
         microtask=microtask,
@@ -117,7 +138,28 @@ def run_problem_solving(
     repo_path: str = "",
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
 ) -> ProblemSolvingResult:
-    """Analyse review issues and produce fixes, one issue at a time (backend models)."""
+    """Analyse review issues and produce fixes, one issue at a time, bound to
+    backend's models/prompts/profile.
+
+    Thin wrapper over :func:`~software_engineering_team.shared.phases.problem_solving.run_problem_solving_impl`
+    (see its docstring for the full Preconditions/Postconditions contract);
+    this call only supplies the backend stack's ``PROFILE``, ``models``
+    module, single-issue prompt, and template parser.
+
+    Args:
+        llm: LLM client used for each per-issue fix call.
+        task: The task whose review issues are being resolved.
+        review_result: The review-phase result carrying the issues to fix.
+        current_files: The task's current file contents, keyed by path.
+        language: Language label used to select conventions text.
+        repo_path: Repo path, forwarded to any tool-agent fix pass.
+        tool_agents: Optional tool-agent map for kinds with a dedicated fix
+            pass (e.g. Build Specialist, Documentation); ``None`` skips them.
+
+    Returns:
+        A ``ProblemSolvingResult`` with unresolved issues surfaced for the
+        caller to escalate into fix microtasks.
+    """
     return run_problem_solving_impl(
         llm=llm,
         task=task,
@@ -146,7 +188,30 @@ def run_problem_solving_for_microtask(
     task_id: str = "",
     detail_callback: Optional[Callable[[str], None]] = None,
 ) -> ProblemSolvingResult:
-    """Fix issues for a single microtask, one issue at a time (backend models)."""
+    """Fix issues for a single microtask, one issue at a time, bound to
+    backend's models/prompts/profile.
+
+    Thin wrapper over :func:`~software_engineering_team.shared.phases.problem_solving.run_problem_solving_for_microtask_impl`
+    (see its docstring, and :func:`run_problem_solving`'s, for the full
+    Preconditions/Postconditions contract); scoped to a single microtask's
+    files within the per-microtask review loop rather than the whole task.
+
+    Args:
+        llm: LLM client used for each per-issue fix call.
+        microtask: The microtask whose files/issues are being fixed.
+        review_result: The review-phase result carrying the issues to fix.
+        current_files: The microtask's current file contents, keyed by path.
+        language: Language label used to select conventions text.
+        repo_path: Repo path, forwarded to any tool-agent fix pass.
+        tool_agents: Optional tool-agent map for kinds with a dedicated fix
+            pass (e.g. Build Specialist, Documentation); ``None`` skips them.
+        task_id: Task id, used for logging only.
+        detail_callback: Optional progress callback.
+
+    Returns:
+        A ``ProblemSolvingResult`` with unresolved issues surfaced for the
+        caller to escalate into fix microtasks.
+    """
     return run_problem_solving_for_microtask_impl(
         llm=llm,
         microtask=microtask,

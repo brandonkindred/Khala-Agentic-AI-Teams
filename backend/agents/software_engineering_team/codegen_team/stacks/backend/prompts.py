@@ -12,6 +12,9 @@ from software_engineering_team.shared.prompts import (
     DOCUMENTATION_PROBLEM_SOLVE_PROMPT as DOCUMENTATION_PROBLEM_SOLVE_PROMPT,
 )
 from software_engineering_team.shared.prompts import (
+    FILES_OUTPUT_TEMPLATE_INSTRUCTIONS as FILES_OUTPUT_TEMPLATE_INSTRUCTIONS,
+)
+from software_engineering_team.shared.prompts import (
     build_batch_fix_prompt,
     build_code_review_prompt,
     build_documentation_self_review_prompt,
@@ -181,20 +184,8 @@ SECURITY_TOOL_AGENT_REVIEW_PROMPT = build_review_prompt(
 # Tool agents: files + summary (template output, reused by execution and tool agents)
 # ---------------------------------------------------------------------------
 
-FILES_OUTPUT_TEMPLATE_INSTRUCTIONS = """
-**Output format (template – use exactly these markers):**
-For each file:
-## FILE path/to/file.ext ##
-<full file content>
-## FILE path/to/next.ext ##
-<content>
-## SUMMARY ##
-what you produced
-## END SUMMARY ##
-- Use "## FILE <path> ##" at the start of each file; the next "## FILE " or "## SUMMARY ##" ends the previous file.
-- Do not put the exact line "## FILE " or "## SUMMARY ##" inside file content.
-- Do not use JSON. Use only the template above. No explanatory text before or after.
-"""
+# FILES_OUTPUT_TEMPLATE_INSTRUCTIONS is byte-identical between backend and
+# frontend; imported from shared above and re-exported here (no local override).
 
 # ---------------------------------------------------------------------------
 # Documentation tool agent

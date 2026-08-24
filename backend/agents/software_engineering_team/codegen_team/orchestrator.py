@@ -1,7 +1,8 @@
 """
-Codegen team orchestrator: config-driven 5-phase state machine (Pre-flight ->
-Planning -> Execution -> Documentation -> Deliver) for backend and frontend
-code-generation tasks, selected at construction time by a ``stack`` parameter.
+Codegen team orchestrator: config-driven 7-phase state machine (Setup ->
+Planning -> Execution -> Review -> Problem Solving -> Documentation -> Deliver)
+for backend and frontend code-generation tasks, selected at construction time
+by a ``stack`` parameter.
 
 Entry point used by the coding-team engine's ``CodeEngineProvider`` seam
 (``coding_engine_provider.py``), the SE team's standalone Temporal activities
@@ -48,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 Stack = Literal["backend", "frontend"]
 
-STACK_CONFIGS: Dict[str, V2TeamConfig] = {
+STACK_CONFIGS: Dict[Stack, V2TeamConfig] = {
     "backend": _backend_profile.BACKEND_CONFIG,
     "frontend": _frontend_profile.FRONTEND_CONFIG,
 }
@@ -72,7 +73,13 @@ def _build_backend_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
     pulls in heavy strands/llm_service machinery, and constructing them here at
     module import would make the orchestrator expensive to import (and would
     eagerly build agents even on paths that never run a workflow).
+
+    Preconditions: ``llm`` is a configured ``LLMClient`` (not ``None``) —
+      every backend tool agent is constructed with it.
     """
+    if llm is None:
+        raise ValueError("llm must be a configured LLMClient (not None)")
+
     from software_engineering_team.shared.tool_agent_git_branch import (
         GitBranchManagementToolAgent,
     )
@@ -170,13 +177,14 @@ class StackWiring:
     ``run_workflow`` call time -- mirroring how each former per-team
     orchestrator module referenced its own bare ``run_setup`` etc. global
     directly, just with an explicit stack prefix now that one module serves
-    both stacks. Tests monkeypatch the bare per-stack name (e.g.
-    ``monkeypatch.setattr(orch, "_backend_run_setup", fake)``) or the owning
-    profile module's attribute directly (e.g. ``monkeypatch.setattr(
-    backend_profile, "run_documentation_phase", fake)`` -- both work, since
-    ``_backend_run_documentation_phase`` is itself just
-    ``backend_profile.run_documentation_phase`` re-exported as a module-level
-    name here).
+    both stacks. Tests must monkeypatch the bare per-stack name on *this*
+    module (e.g. ``monkeypatch.setattr(orch, "_backend_run_setup", fake)``):
+    the aliases below bind the profile module's function *value* once at
+    import time, so patching the owning profile module's attribute afterward
+    (e.g. ``monkeypatch.setattr(backend_profile, "run_documentation_phase",
+    fake)``) does *not* change what ``_backend_run_documentation_phase``
+    already points to here -- only ``globals()`` lookups against this
+    module's own names stay live.
     """
 
     team_label: str
@@ -189,7 +197,7 @@ class StackWiring:
     documentation_status_text: str
 
 
-STACK_WIRING: Dict[str, StackWiring] = {
+STACK_WIRING: Dict[Stack, StackWiring] = {
     "backend": StackWiring(
         team_label="Backend",
         deliver_in_progress_status="Committing changes and preparing delivery",
@@ -213,12 +221,13 @@ STACK_WIRING: Dict[str, StackWiring] = {
 }
 
 # Bare per-stack module-level names for the six phase callables that must
-# stay individually monkeypatchable per stack profile module (see
-# StackWiring's docstring above). ``run_workflow`` looks each of these up via
+# stay individually monkeypatchable per stack (see StackWiring's docstring
+# above). ``run_workflow`` looks each of these up via
 # ``globals()[f"_{stack}_<name>"]`` at call time rather than reading a
 # precomputed StackWiring field, so a test's ``monkeypatch.setattr`` on the
-# name here (or on the owning profile module's own attribute) is honored on
-# the next call.
+# bare name here is honored on the next call -- patching the owning profile
+# module's own attribute afterward is NOT honored, since these aliases bind
+# the function value once at import time.
 _backend_run_setup = _backend_profile.run_setup
 _frontend_run_setup = _frontend_profile.run_setup
 _backend_configure_quality_tooling = _backend_profile.configure_quality_tooling
@@ -291,12 +300,37 @@ class CodegenDevelopmentAgent(ConfigDrivenV2DevelopmentAgent):
         Each microtask must pass full review (code quality, QA, security, build, lint)
         before the next microtask can begin.
 
-        merge_to_development defaults to True. When False, the deliver phase commits
-        a feature branch and leaves it ready for external Tech Lead review instead of
-        merging it into the development branch.
+        Args:
+            repo_path: Path to the checked-out repo the workflow writes into.
+            task: The task being implemented (id/title/description/assignee).
+            architecture: Optional system architecture context passed to planning.
+            spec_content: Optional spec text passed to planning/execution prompts.
+            qa_agent: Optional pre-built QA review tool agent to reuse instead of
+                the stack's own; falls back to the stack's tool-agent roster when
+                ``None``.
+            security_agent: Same as ``qa_agent`` but for the security review pass.
+            code_review_agent: Optional pre-built production code-review agent
+                (e.g. from ``shared.production_review_agents``) reused for the
+                Code Review gate instead of an LLM one-shot review.
+            build_verifier: Optional callable ``(repo_path, agent_type, task_id) ->
+                (success, message)`` reused as the build gate instead of the
+                stack's default build tooling.
+            doc_agent: Deprecated and ignored — see
+                :func:`software_engineering_team.shared.team_lead_base.warn_doc_agent_deprecated`.
+            linting_tool_agent: Optional pre-built linting tool agent reused for
+                the lint gate instead of the stack's default.
+            job_updater: Optional callback invoked with progress/status updates
+                as the workflow advances through phases.
+            review_config: Optional ``MicrotaskReviewConfig`` overriding the
+                default per-gate retry caps; defaults to ``MicrotaskReviewConfig()``.
+            merge_to_development: Defaults to True. When False, the deliver phase
+                commits a feature branch and leaves it ready for external Tech
+                Lead review instead of merging it into the development branch.
+            repo_context_cache: Optional shared repo-context cache reused across
+                calls to avoid re-scanning the repo for each microtask.
 
-        ``doc_agent`` is deprecated and ignored — see
-        :func:`software_engineering_team.shared.team_lead_base.warn_doc_agent_deprecated`.
+        Returns:
+            A :class:`CodegenWorkflowResult` capturing every phase's outcome.
         """
         warn_doc_agent_deprecated(doc_agent)
 

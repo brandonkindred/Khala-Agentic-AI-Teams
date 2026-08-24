@@ -12,6 +12,9 @@ from software_engineering_team.shared.prompts import (
     DOCUMENTATION_PROBLEM_SOLVE_PROMPT as DOCUMENTATION_PROBLEM_SOLVE_PROMPT,
 )
 from software_engineering_team.shared.prompts import (
+    FILES_OUTPUT_TEMPLATE_INSTRUCTIONS as FILES_OUTPUT_TEMPLATE_INSTRUCTIONS,
+)
+from software_engineering_team.shared.prompts import (
     build_batch_fix_prompt,
     build_documentation_self_review_prompt,
     build_execution_prompt,
@@ -266,26 +269,9 @@ DOCUMENTATION_SELF_REVIEW_PROMPT = build_documentation_self_review_prompt(
 # ---------------------------------------------------------------------------
 # File-generator tool agents (auth, api_openapi, state_management): a single
 # LLM prompt whose output is parsed via ``parse_files_and_summary_template``.
-# Byte-identical to backend's version (generic template-format instructions,
-# not backend-specific content) — kept as a local constant rather than a
-# shared import so each stack's tool agents import from their own
-# ``prompts`` module, matching every other prompt in this file.
+# FILES_OUTPUT_TEMPLATE_INSTRUCTIONS is byte-identical to backend's version;
+# imported from shared above and re-exported here (no local override).
 # ---------------------------------------------------------------------------
-
-FILES_OUTPUT_TEMPLATE_INSTRUCTIONS = """
-**Output format (template – use exactly these markers):**
-For each file:
-## FILE path/to/file.ext ##
-<full file content>
-## FILE path/to/next.ext ##
-<content>
-## SUMMARY ##
-what you produced
-## END SUMMARY ##
-- Use "## FILE <path> ##" at the start of each file; the next "## FILE " or "## SUMMARY ##" ends the previous file.
-- Do not put the exact line "## FILE " or "## SUMMARY ##" inside file content.
-- Do not use JSON. Use only the template above. No explanatory text before or after.
-"""
 
 # ---------------------------------------------------------------------------
 # Deliver phase (procedural git work; no LLM prompt)

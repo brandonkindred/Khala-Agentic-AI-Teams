@@ -639,7 +639,7 @@ def _try_build_fix_one_at_a_time(
                 }
             )
         language = "typescript"
-        prompt_module = "codegen_team.stacks.frontend.prompts"
+        is_frontend = True
     # integration-only: runs python syntax check + pytest + LLM repair loop
     elif agent_type == "backend":  # pragma: no cover
         project_dir = repo_path if any(repo_path.rglob("*.py")) else repo_path / "backend"
@@ -727,7 +727,7 @@ def _try_build_fix_one_at_a_time(
         if test_result is not None:
             result = test_result
         language = "python"
-        prompt_module = "codegen_team.stacks.backend.prompts"
+        is_frontend = False
     else:
         return False, "Unsupported agent_type for build fix"
 
@@ -743,17 +743,19 @@ def _try_build_fix_one_at_a_time(
         logger.warning("Build fix: could not get model: %s", e)
         return False, result.error_summary if result is not None else "Build failed"
 
-    from software_engineering_team.codegen_team.stacks.backend.profile import (
-        parse_problem_solving_single_issue_template,
-    )
-
-    if prompt_module == "codegen_team.stacks.frontend.prompts":
+    if is_frontend:
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
+            parse_problem_solving_single_issue_template,
+        )
         from software_engineering_team.codegen_team.stacks.frontend.prompts import (
             PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT as FIX_PROMPT,
         )
 
         language_conventions = ""
     else:
+        from software_engineering_team.codegen_team.stacks.backend.profile import (
+            parse_problem_solving_single_issue_template,
+        )
         from software_engineering_team.codegen_team.stacks.backend.prompts import (
             JAVA_CONVENTIONS,
             PYTHON_CONVENTIONS,
@@ -778,7 +780,7 @@ def _try_build_fix_one_at_a_time(
                 model=_build_fix_model,
                 parse_fn=parse_problem_solving_single_issue_template,
                 fix_prompt=FIX_PROMPT,
-                is_frontend=prompt_module == "codegen_team.stacks.frontend.prompts",
+                is_frontend=is_frontend,
                 language_conventions=language_conventions,
                 task_id=task_id,
                 attempt=attempt,

@@ -249,7 +249,7 @@ def run_codegen(request: CodegenRunRequest) -> CodegenRunResponse:
         status="running",
         message=(
             f"Codegen ({request.stack}) workflow started. "
-            "Poll GET /code-v2/status/{job_id} for progress."
+            f"Poll GET /code-v2/status/{job_id} for progress."
         ),
     )
 

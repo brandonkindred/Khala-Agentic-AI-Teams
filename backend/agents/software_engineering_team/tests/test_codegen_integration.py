@@ -151,22 +151,32 @@ class TestNoLegacyTeamImports:
     """Verify zero backend_agent/frontend_team/feature_agent imports in codegen_team."""
 
     def test_no_import_statements(self):
+        import ast
+
         team_dir = Path(__file__).resolve().parent.parent / "codegen_team"
         assert team_dir.is_dir(), f"codegen_team not found at {team_dir}"
 
-        banned = ("backend_agent", "frontend_team", "feature_agent")
+        banned = {"backend_agent", "frontend_team", "feature_agent"}
         violations: list[str] = []
         for py_file in team_dir.rglob("*.py"):
-            content = py_file.read_text(encoding="utf-8", errors="replace")
-            for i, line in enumerate(content.splitlines(), 1):
-                stripped = line.strip()
-                if stripped.startswith("#"):
-                    continue
-                if stripped.startswith('"""') or stripped.startswith("'''"):
-                    continue
-                is_import = stripped.startswith("from ") or stripped.startswith("import ")
-                if is_import and any(name in stripped for name in banned):
-                    violations.append(f"{py_file.relative_to(team_dir)}:{i}: {stripped}")
+            tree = ast.parse(py_file.read_text(encoding="utf-8", errors="replace"), filename=str(py_file))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if any(part in banned for part in alias.name.split(".")):
+                            violations.append(
+                                f"{py_file.relative_to(team_dir)}:{node.lineno}: import {alias.name}"
+                            )
+                elif isinstance(node, ast.ImportFrom):
+                    module = node.module or ""
+                    imported_names = [alias.name for alias in node.names]
+                    if any(part in banned for part in module.split(".")) or any(
+                        part in banned for name in imported_names for part in name.split(".")
+                    ):
+                        violations.append(
+                            f"{py_file.relative_to(team_dir)}:{node.lineno}: "
+                            f"from {module} import {', '.join(imported_names)}"
+                        )
 
         assert not violations, "Found banned legacy-team imports in codegen_team:\n" + "\n".join(
             violations
