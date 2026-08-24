@@ -171,13 +171,16 @@ def _make_phase_job_updater(
         - ``phase`` is either ``None`` (forward the caller's own ``phase`` kwarg, if
           any, unmodified) or a job-status phase string to force on every write.
     Postconditions:
-        - Returns an updater that pops ``current_phase`` from kwargs and rewrites
-          it into ``subprocess_key``/``completed_key`` (the latter being every
-          ``phase_order`` entry preceding ``current_phase``); rescales a ``progress``
-          kwarg onto ``progress_band`` (garbage progress is dropped, never written);
-          forces ``phase=phase`` on the ``update_job`` call when ``phase`` is not
-          ``None``; forwards all remaining kwargs untouched; and swallows store
-          errors (observability only — never raises).
+        - Returns an updater that pops ``current_phase`` from kwargs (any non-``None``
+          value, including falsy ones like ``""``) and rewrites it into ``subprocess_key``;
+          ``completed_key`` is set to every ``phase_order`` entry preceding
+          ``current_phase`` only when ``current_phase`` is actually found in
+          ``phase_order`` — an unrecognized ``current_phase`` leaves ``completed_key``
+          unwritten rather than marking the whole order complete; rescales a
+          ``progress`` kwarg onto ``progress_band`` (garbage progress is dropped,
+          never written); forces ``phase=phase`` on the ``update_job`` call when
+          ``phase`` is not ``None``; forwards all remaining kwargs untouched; and
+          swallows store errors (observability only — never raises).
     """
     assert isinstance(subprocess_key, str) and subprocess_key, subprocess_key
     assert isinstance(completed_key, str) and completed_key, completed_key
@@ -186,14 +189,17 @@ def _make_phase_job_updater(
     def _updater(**kwargs: Any) -> None:
         try:
             current_phase = kwargs.pop("current_phase", None)
-            if current_phase:
+            if current_phase is not None:
                 kwargs[subprocess_key] = current_phase
                 completed_phases = []
+                found = False
                 for p in phase_order:
                     if p == current_phase:
+                        found = True
                         break
                     completed_phases.append(p)
-                kwargs[completed_key] = completed_phases
+                if found:
+                    kwargs[completed_key] = completed_phases
             # The sub-agent reports its own 0-100 progress; rescale onto this
             # phase's band so the job bar is monotone across the whole run.
             if "progress" in kwargs:

@@ -547,15 +547,16 @@ def test_pra_and_planning_updaters_rescale_progress(monkeypatch):
 
 
 def test_make_phase_job_updater_edge_cases(monkeypatch):
-    """Edge cases for the shared factory: empty phase_order, garbage progress,
-    and a None phase (no forced ``phase`` kwarg on the update_job call)."""
+    """Edge cases for the shared factory: empty/unmatched phase_order, falsy
+    current_phase, garbage progress, and a None phase (no forced ``phase``
+    kwarg on the update_job call)."""
     import software_engineering_team.orchestrator as se_orch
 
     written: list = []
     monkeypatch.setattr(se_orch, "update_job", lambda job_id, **kw: written.append(kw))
 
-    # Empty phase_order: current_phase is still recorded, but completed_phases
-    # is always empty since there's nothing in the order to have completed.
+    # Empty phase_order: current_phase is never found, so x_subprocess is still
+    # recorded but x_completed_phases is left unwritten (never the whole order).
     updater = se_orch._make_phase_job_updater(
         "j-empty",
         subprocess_key="x_subprocess",
@@ -565,9 +566,30 @@ def test_make_phase_job_updater_edge_cases(monkeypatch):
     )
     updater(current_phase="anything")
     assert written[-1]["x_subprocess"] == "anything"
-    assert written[-1]["x_completed_phases"] == []
+    assert "x_completed_phases" not in written[-1]
     # phase=None (the default) forwards kwargs without forcing a "phase" key.
     assert "phase" not in written[-1]
+
+    # current_phase not present in a non-empty phase_order: same fallback —
+    # x_completed_phases stays unwritten rather than becoming the whole order.
+    updater_with_order = se_orch._make_phase_job_updater(
+        "j-order",
+        subprocess_key="z_subprocess",
+        completed_key="z_completed_phases",
+        phase_order=["a", "b", "c"],
+        progress_band=(0, 15),
+    )
+    updater_with_order(current_phase="unknown")
+    assert written[-1]["z_subprocess"] == "unknown"
+    assert "z_completed_phases" not in written[-1]
+
+    # current_phase found mid-order: completed_phases is every entry before it.
+    updater_with_order(current_phase="b")
+    assert written[-1]["z_completed_phases"] == ["a"]
+
+    # A falsy-but-non-None current_phase (empty string) is still recorded.
+    updater_with_order(current_phase="")
+    assert written[-1]["z_subprocess"] == ""
 
     # Garbage progress is dropped, never written.
     updater(current_phase="anything", progress="not-a-number")
