@@ -33,9 +33,15 @@ reproducible, but ``DummyLLMClient`` replies from the requested schema, not
 the prompt content, so both variants' output is identical and the judge can
 never surface a real quality regression in this mode. Pass ``--live`` to run
 both the pipeline and the judge against whatever LLM provider is actually
-configured (requires Postgres and a configured provider, or ``LLM_PROVIDER``
-pointing at a live provider) -- that is the mode a genuine quality comparison
-requires. If a ``--live`` run flags a regression, report it on the parent
+configured. This requires Postgres (``POSTGRES_HOST`` etc.) with at least one
+provider entry in the ordered provider list (``/llm-config`` UI, or directly
+in the ``llm_provider_configs`` table) -- ``llm_service.get_client`` treats
+only ``LLM_PROVIDER=dummy`` as a hard override; any other ``LLM_PROVIDER``
+value does *not* by itself select a live provider (there is no legacy
+single-provider env fallback, see ``llm_service/factory.py``). Without a
+configured provider list, ``--live`` raises ``LLMNotConfiguredError``. This is
+the mode a genuine quality comparison requires. If a ``--live`` run flags a
+regression, report it on the parent
 story (Story: "Validate output quality with selective context via eval
 comparison") for a ``context_phases`` adjustment before that story merges --
 this script does not post to GitHub itself.
@@ -375,6 +381,7 @@ def run_eval(
                     phase=phase,
                     output=selective_outputs[phase],
                     variant_label="selective",
+                    strategic_core=selective_outputs[BrandPhase.STRATEGIC_CORE],
                 )
                 full_score = score_phase_output(
                     judge_client,
@@ -382,6 +389,7 @@ def run_eval(
                     phase=phase,
                     output=full_outputs[phase],
                     variant_label="full",
+                    strategic_core=full_outputs[BrandPhase.STRATEGIC_CORE],
                 )
                 quality_comparisons.append(
                     PhaseQualityComparison(
@@ -611,7 +619,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         help=(
             "Run the pipeline and the LLM-as-judge pass against the actually-configured "
             "LLM provider instead of the deterministic dummy stub. Required for the judge "
-            "to surface a genuine quality difference between variants."
+            "to surface a genuine quality difference between variants. Requires Postgres "
+            "with a provider configured via /llm-config -- setting LLM_PROVIDER alone "
+            "(to anything other than 'dummy') does not select a live provider."
         ),
     )
     args = parser.parse_args(argv)

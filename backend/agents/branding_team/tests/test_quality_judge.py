@@ -10,8 +10,12 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from branding_team.models import BrandPhase, GovernanceOutput
-from branding_team.scripts.quality_judge import PhaseQualityScore, score_phase_output
+from branding_team.models import BrandPhase, GovernanceOutput, StrategicCoreOutput
+from branding_team.scripts.quality_judge import (
+    PhaseQualityScore,
+    _build_judge_prompt,
+    score_phase_output,
+)
 from branding_team.tests.conftest import make_mission
 from llm_service import get_client
 from llm_service.dummy_provider import force_dummy_llm_provider
@@ -98,3 +102,44 @@ def test_score_phase_output_dummy_client_is_deterministic() -> None:
         )
 
     assert first == second
+
+
+def test_build_judge_prompt_embeds_strategic_core_when_supplied() -> None:
+    """The generated strategic core must appear in the prompt so the judge can
+    score coherence against what was actually generated upstream, not just the
+    raw mission brief -- the P1 fix this eval PR applies.
+    """
+    mission = make_mission()
+    strategic_core = StrategicCoreOutput(mission_statement="Ship brand with the product.")
+    output = GovernanceOutput()
+
+    prompt = _build_judge_prompt(
+        mission=mission,
+        phase=BrandPhase.GOVERNANCE,
+        output=output,
+        variant_label="selective",
+        strategic_core=strategic_core,
+    )
+
+    assert "GENERATED STRATEGIC CORE" in prompt
+    assert "Ship brand with the product." in prompt
+
+
+def test_build_judge_prompt_omits_strategic_core_block_when_none() -> None:
+    """No GENERATED STRATEGIC CORE section header is rendered when strategic_core
+    is None (e.g. when judging the strategic core phase itself, which has no
+    upstream strategic core to compare against) -- only the fixed reminder in
+    the TASK section mentions the phrase in that case.
+    """
+    mission = make_mission()
+    output = GovernanceOutput()
+
+    prompt = _build_judge_prompt(
+        mission=mission,
+        phase=BrandPhase.GOVERNANCE,
+        output=output,
+        variant_label="selective",
+        strategic_core=None,
+    )
+
+    assert "--- GENERATED STRATEGIC CORE" not in prompt

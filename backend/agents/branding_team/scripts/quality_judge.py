@@ -79,17 +79,29 @@ class PhaseQualityScore(BaseModel):
 
 
 def _build_judge_prompt(
-    *, mission: BrandingMission, phase: BrandPhase, output: BaseModel, variant_label: str
+    *,
+    mission: BrandingMission,
+    phase: BrandPhase,
+    output: BaseModel,
+    variant_label: str,
+    strategic_core: BaseModel | None,
 ) -> str:
     """Render the user prompt for one judge call.
 
     Preconditions:
         ``output`` is the Pydantic output model instance for ``phase``.
+        ``strategic_core`` is the ``StrategicCoreOutput``-shaped model this
+        variant's own pipeline run generated for ``BrandPhase.STRATEGIC_CORE``
+        (``None`` only when judging the strategic core phase itself, which
+        has no upstream strategic core to compare against).
     Postconditions:
         Returns a non-empty string embedding the mission's identifying
-        fields, the phase name, the variant label (for the judge's own
-        context only -- it does not see the other variant), and
-        ``output.model_dump(mode="json")`` as pretty-printed JSON.
+        fields, the generated strategic core (when supplied) so the judge
+        can score coherence against what was actually generated upstream
+        (not just the raw mission brief), the phase name, the variant label
+        (for the judge's own context only -- it does not see the other
+        variant), and ``output.model_dump(mode="json")`` as pretty-printed
+        JSON.
     """
     mission_summary = json.dumps(
         {
@@ -101,14 +113,24 @@ def _build_judge_prompt(
         },
         indent=2,
     )
+    strategic_core_block = ""
+    if strategic_core is not None:
+        strategic_core_json = json.dumps(strategic_core.model_dump(mode="json"), indent=2)
+        strategic_core_block = (
+            f"--- GENERATED STRATEGIC CORE ({variant_label} context) ---\n{strategic_core_json}\n\n"
+        )
     output_json = json.dumps(output.model_dump(mode="json"), indent=2)
     return (
         "--- MISSION ---\n"
         f"{mission_summary}\n\n"
+        f"{strategic_core_block}"
         f"--- PHASE ({phase.value}, {variant_label} context) OUTPUT ---\n"
         f"{output_json}\n\n"
         "--- TASK ---\n"
-        "Score this phase output against the rubric in your system prompt."
+        "Score this phase output against the rubric in your system prompt. Score "
+        "strategic_coherence against the GENERATED STRATEGIC CORE above (when supplied), "
+        "not just the raw mission brief -- that is the actual upstream strategy this "
+        "phase's output must stay consistent with."
     )
 
 
@@ -119,6 +141,7 @@ def score_phase_output(
     phase: BrandPhase,
     output: BaseModel,
     variant_label: str,
+    strategic_core: BaseModel | None = None,
 ) -> PhaseQualityScore:
     """Score ``output`` (one phase, one context variant) via LLM-as-judge.
 
@@ -127,13 +150,21 @@ def score_phase_output(
         Pydantic output model instance produced for ``phase``. ``variant_label``
         is a short caller-chosen string (e.g. ``"selective"``/``"full"``)
         used only for the judge's own framing, never for scoring logic.
+        ``strategic_core`` should be this same variant's own generated
+        ``BrandPhase.STRATEGIC_CORE`` output when ``phase`` is downstream of
+        it (every phase this eval judges is); omit only when judging the
+        strategic core phase itself.
     Postconditions:
         Returns a validated :class:`PhaseQualityScore`. ``structured_output_model``
         is forwarded to ``client.complete_json`` so a dummy/test double can
         route by exact class name instead of parsing prompt text.
     """
     prompt = _build_judge_prompt(
-        mission=mission, phase=phase, output=output, variant_label=variant_label
+        mission=mission,
+        phase=phase,
+        output=output,
+        variant_label=variant_label,
+        strategic_core=strategic_core,
     )
     return complete_validated(
         client,
