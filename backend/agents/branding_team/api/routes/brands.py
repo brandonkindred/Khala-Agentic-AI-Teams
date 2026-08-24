@@ -14,7 +14,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from branding_team.api.conversation import _conversation_to_response
+from branding_team.api.conversation import _conversation_to_response, link_conversation_to_brand
 from branding_team.api.models import (
     ConversationStateResponse,
     CreateBrandRequest,
@@ -22,7 +22,6 @@ from branding_team.api.models import (
 )
 from branding_team.api.state import _mission_from_payload
 from branding_team.models import Brand, BrandStatus
-from branding_team.store import AttachConversationResult
 
 router = APIRouter()
 
@@ -61,14 +60,14 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
     The brand's mission is derived from ``payload`` via ``_mission_from_payload``.
     A conversation is resolved first — ``payload.conversation_id`` (stripped) if
     set, otherwise a fresh, unattached one via ``conversation_store.create`` — and
-    then linked to the brand through the single atomic
-    ``store.attach_conversation`` call, so both the provided-conversation and
-    create-new cases share one linking step instead of two independently
-    maintained ones.
+    then linked to the brand through ``link_conversation_to_brand`` (the shared
+    choke point wrapping the atomic ``store.attach_conversation``; see its
+    docstring), so both the provided-conversation and create-new cases share
+    one linking step instead of two independently maintained ones.
 
-    When the link step reports a failure — a non-OK ``attach_conversation``
-    result, or ``attach_conversation``/``conversation_store.create`` raising —
-    the just-created brand is rolled back with ``store.delete_brand`` so this
+    When the link step reports a failure — ``link_conversation_to_brand``
+    raises an ``HTTPException``, or ``conversation_store.create`` raises — the
+    just-created brand is rolled back with ``store.delete_brand`` so this
     handler never leaves a listable, conversation-less orphan. Because the
     conversation is created (or reused) unattached and only ever gains a
     ``brand_id`` inside ``attach_conversation``'s own transaction, there is no
@@ -86,13 +85,11 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
         Resolves a conversation id — ``payload.conversation_id`` (stripped) if
         set, otherwise one freshly created unattached — deleting the brand and
         re-raising if that creation raises. Attaches it via
-        ``store.attach_conversation``; on :attr:`AttachConversationResult.OK`
-        returns the attached brand immediately. Any other outcome — a non-OK
-        result, or ``attach_conversation`` raising — deletes the just-created
-        brand first, then either re-raises the original exception or maps the
-        result to HTTP status: 404 for
-        ``CONVERSATION_NOT_FOUND``/``BRAND_NOT_FOUND``, 409 for
-        ``ALREADY_ATTACHED``, or 500 for any other (unrecognized) result.
+        ``link_conversation_to_brand``; on success returns the attached brand
+        immediately. Any failure — the helper's ``HTTPException`` (404 for a
+        missing conversation/brand, 409 for ``ALREADY_ATTACHED``, 500 for an
+        unrecognized result) or any other exception — deletes the just-created
+        brand first, then re-raises.
     """
     from branding_team.api import main as _main
 
@@ -106,8 +103,8 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
 
     conversation_store = _main.conversation_store
     # Reuse the caller's conversation if provided, otherwise create a fresh,
-    # unattached one — either way, attach_conversation below performs the one
-    # atomic brand<->conversation link.
+    # unattached one — either way, link_conversation_to_brand below performs
+    # the one atomic brand<->conversation link.
     conversation_id = (payload.conversation_id or "").strip() or None
     if not conversation_id:
         try:
@@ -117,38 +114,14 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
             raise
 
     try:
-        # Single-transaction attach: checks the uniqueness invariant and
-        # writes both the conversation and brand rows atomically, so a
-        # concurrent request can't attach the same conversation elsewhere
-        # in between, and a failed brand patch can't leave the conversation
-        # pointing at a brand that doesn't reference it back.
-        result, attached_brand = _main.branding_store.attach_conversation(
-            client_id, brand.id, conversation_id, mission
-        )
+        return link_conversation_to_brand(client_id, brand.id, conversation_id, mission)
     except Exception:
+        # The link failed after create_brand already committed the brand row
+        # above — roll it back so a failed request never leaves a listable,
+        # conversation-less orphan behind, then re-raise unchanged (an
+        # HTTPException from the helper, or any other error).
         _main.branding_store.delete_brand(client_id, brand.id)
         raise
-
-    if result is AttachConversationResult.OK:
-        return attached_brand
-
-    # Any other result means the attach failed after create_brand already
-    # committed the brand row above — roll it back so a failed request never
-    # leaves a listable, conversation-less orphan behind.
-    _main.branding_store.delete_brand(client_id, brand.id)
-    if result is AttachConversationResult.CONVERSATION_NOT_FOUND:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    if result is AttachConversationResult.ALREADY_ATTACHED:
-        raise HTTPException(
-            status_code=409,
-            detail="Conversation is already attached to another brand",
-        )
-    if result is AttachConversationResult.BRAND_NOT_FOUND:
-        raise HTTPException(status_code=404, detail="Brand not found")
-    # Defensive: every known AttachConversationResult member is handled
-    # above, so this only fires if the enum ever grows a new member —
-    # never silently fall through to returning a brand that was just deleted.
-    raise HTTPException(status_code=500, detail="Unexpected attach result")
 
 
 @router.get("/clients/{client_id}/brands/{brand_id}", response_model=Brand)
