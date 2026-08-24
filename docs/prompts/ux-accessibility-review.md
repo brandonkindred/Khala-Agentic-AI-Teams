@@ -179,10 +179,20 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
      failure merely because the media query is absent.
    - WCAG 2.2 additions specifically:
        * Target size (2.5.8) is a size-OR-spacing rule, not a flat floor: a target
-         passes at 24×24 CSS px or with sufficient spacing, and the inline, essential,
-         equivalent, and user-agent-control exceptions apply. Do not report a small but
-         well-separated or inline target as a violation — check spacing and exceptions
-         before flagging, and say which one you checked.
+         passes at 24×24 CSS px, or under one of the criterion's own carve-outs. Check
+         these before flagging, and say which one you checked — naming an exception is
+         not the same as meeting it:
+           - Spacing — undersized targets positioned so a 24 px circle centred on each
+             does not intersect another target's circle.
+           - Inline — the target sits IN A SENTENCE, or its size is constrained by the
+             line-height of surrounding non-target text. A control merely styled
+             inline does not qualify: a compact toolbar action still owes 24×24 or the
+             spacing test.
+           - Equivalent — the same function is reachable from another control on the
+             same page that does meet the size.
+           - User-agent control — the size is set by the user agent and unmodified by
+             the author.
+           - Essential — a particular presentation is essential or legally required.
        * Focus not obscured: at the AA bar this review holds to (2.4.11), a focused
          control must not be ENTIRELY hidden by a sticky header, toolbar, or footer.
          Partial obscuration fails only the AAA criterion (2.4.12) — report it, if at
