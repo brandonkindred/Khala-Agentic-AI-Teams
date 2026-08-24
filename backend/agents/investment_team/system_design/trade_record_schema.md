@@ -79,10 +79,13 @@ equal the fill prices. New analysis code should prefer the explicit
 The production path — both sandboxed backtests and paper trading — is
 [`trading_service/engine/fill_simulator.py::FillSimulator`](../trading_service/engine/fill_simulator.py),
 the live event-driven fill engine driven by `TradingService`.
-`OpenPosition` (`trade_simulator.py`) carries `entry_bid_price` and
+[`Position`](../trading_service/engine/portfolio.py) (`trading_service/engine/portfolio.py`,
+`FillSimulator`'s own state carrier) carries `entry_bid_price` and
 `entry_order_type` from the entry bar through to the close; the exit bar's
 raw close becomes `exit_bid_price`, and slippage is applied on both sides
-symmetrically. Transaction costs are charged on entry and exit notional
+symmetrically. `trade_simulator.OpenPosition` is a separate, retired-simulator
+dataclass kept only for legacy/unit-test consumers — not the production state
+carrier. Transaction costs are charged on entry and exit notional
 separately: `(entry_notional + exit_notional) * cost_rate`.
 
 [`strategy_lab/executor/trade_builder.py::build_trade_records`](../strategy_lab/executor/trade_builder.py)
