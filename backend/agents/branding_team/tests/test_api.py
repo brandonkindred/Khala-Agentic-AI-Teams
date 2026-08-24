@@ -797,6 +797,37 @@ def test_create_brand_rolls_back_when_conversation_create_raises(
     assert brands == []
 
 
+def test_create_brand_rejects_unrecognized_attach_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An attach_conversation result that isn't OK or one of the three known
+    failure members must still roll back the brand and raise — never fall
+    through to returning a brand that was just deleted."""
+    from branding_team.api import main as main_mod
+
+    create_c = client.post("/clients", json={"name": "UnrecognizedAttach Client"})
+    client_id = create_c.json()["id"]
+
+    def _unrecognized(*args: Any, **kwargs: Any) -> tuple:
+        return object(), None
+
+    monkeypatch.setattr(main_mod.branding_store, "attach_conversation", _unrecognized)
+
+    resp = client.post(
+        f"/clients/{client_id}/brands",
+        json={
+            "company_name": "UnrecognizedAttachCo",
+            "company_description": "Company whose attach result is unrecognized",
+            "target_audience": "teams",
+        },
+    )
+    assert resp.status_code == 500
+
+    # The brand must not survive as a listable, conversation-less orphan.
+    brands = client.get(f"/clients/{client_id}/brands").json()
+    assert brands == []
+
+
 def test_create_brand_rolls_back_when_attach_conversation_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -86,10 +86,13 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
         Resolves a conversation id — ``payload.conversation_id`` (stripped) if
         set, otherwise one freshly created unattached — deleting the brand and
         re-raising if that creation raises. Attaches it via
-        ``store.attach_conversation``; on a non-OK result (or that call
-        raising) it deletes the just-created brand, then maps a non-OK result
-        to HTTP status: 404 for ``CONVERSATION_NOT_FOUND``/``BRAND_NOT_FOUND``
-        and 409 for ``ALREADY_ATTACHED``, or re-raises the original exception.
+        ``store.attach_conversation``; on :attr:`AttachConversationResult.OK`
+        returns the attached brand immediately. Any other outcome — a non-OK
+        result, or ``attach_conversation`` raising — deletes the just-created
+        brand first, then either re-raises the original exception or maps the
+        result to HTTP status: 404 for
+        ``CONVERSATION_NOT_FOUND``/``BRAND_NOT_FOUND``, 409 for
+        ``ALREADY_ATTACHED``, or 500 for any other (unrecognized) result.
     """
     from branding_team.api import main as _main
 
@@ -126,11 +129,13 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
         _main.branding_store.delete_brand(client_id, brand.id)
         raise
 
-    if result is not AttachConversationResult.OK:
-        # The attach failed after create_brand already committed the brand
-        # row above — roll it back so a failed request never leaves a
-        # listable, conversation-less orphan behind.
-        _main.branding_store.delete_brand(client_id, brand.id)
+    if result is AttachConversationResult.OK:
+        return attached_brand
+
+    # Any other result means the attach failed after create_brand already
+    # committed the brand row above — roll it back so a failed request never
+    # leaves a listable, conversation-less orphan behind.
+    _main.branding_store.delete_brand(client_id, brand.id)
     if result is AttachConversationResult.CONVERSATION_NOT_FOUND:
         raise HTTPException(status_code=404, detail="Conversation not found")
     if result is AttachConversationResult.ALREADY_ATTACHED:
@@ -140,7 +145,10 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
         )
     if result is AttachConversationResult.BRAND_NOT_FOUND:
         raise HTTPException(status_code=404, detail="Brand not found")
-    return attached_brand
+    # Defensive: every known AttachConversationResult member is handled
+    # above, so this only fires if the enum ever grows a new member —
+    # never silently fall through to returning a brand that was just deleted.
+    raise HTTPException(status_code=500, detail="Unexpected attach result")
 
 
 @router.get("/clients/{client_id}/brands/{brand_id}", response_model=Brand)
