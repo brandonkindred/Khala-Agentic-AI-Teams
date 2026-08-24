@@ -67,7 +67,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
-import random
 import re
 import sys
 from collections.abc import Iterator
@@ -187,6 +186,27 @@ _QUALITY_DIMENSIONS: tuple[str, ...] = (
     "completeness",
     "brand_consistency",
 )
+
+
+def _average_phase_quality_score(a: PhaseQualityScore, b: PhaseQualityScore) -> PhaseQualityScore:
+    """Average two independent judge scores for the same candidate, dimension by dimension.
+
+    Used to cancel positional bias in the paired judge call: scoring the same
+    candidate once as OUTPUT A and once as OUTPUT B and averaging removes any
+    consistent A-vs-B bias regardless of its direction, which picking a single
+    (even randomized) ordering cannot -- a random draw only redistributes the
+    bias unpredictably across comparisons instead of eliminating it.
+
+    Preconditions: ``a`` and ``b`` are both valid :class:`PhaseQualityScore` instances.
+    Postconditions: returns a new :class:`PhaseQualityScore` whose each dimension
+    is ``round((a + b) / 2)`` -- still within ``[1, 5]`` since both inputs are.
+    """
+    return PhaseQualityScore(
+        strategic_coherence=round((a.strategic_coherence + b.strategic_coherence) / 2),
+        completeness=round((a.completeness + b.completeness) / 2),
+        brand_consistency=round((a.brand_consistency + b.brand_consistency) / 2),
+        rationale=f"Averaged over both A/B orderings. A-first: {a.rationale!r} B-first: {b.rationale!r}",
+    )
 
 
 @dataclass
@@ -562,28 +582,34 @@ def run_eval(
                     # second off elsewhere), which would let a change in *judge*
                     # masquerade as a change in *output quality*.
                     #
-                    # Which variant is OUTPUT A vs OUTPUT B is randomized per call so
-                    # a judge with positional bias (favoring whichever label consistently
-                    # comes first) can't systematically favor one treatment across every
-                    # comparison -- that bias would otherwise mask or manufacture a
-                    # regression regardless of the neutral A/B labeling.
-                    selective_first = random.random() < 0.5
-                    paired = score_phase_output_pair(
+                    # Evaluated under BOTH A/B orderings and averaged: a single
+                    # randomized draw only redistributes a judge's positional bias
+                    # (favoring whichever label comes first) unpredictably across
+                    # comparisons, it doesn't cancel it -- any one comparison could
+                    # still land selective-in-B and take the full bias as a false
+                    # deficit. Scoring each candidate once as A and once as B and
+                    # averaging removes the bias regardless of its direction or size.
+                    strategic_core = selective_outputs[BrandPhase.STRATEGIC_CORE]
+                    forward = score_phase_output_pair(
                         judge_client,
                         mission=mission,
                         phase=phase,
-                        output_a=selective_outputs[phase]
-                        if selective_first
-                        else full_outputs[phase],
-                        output_b=full_outputs[phase]
-                        if selective_first
-                        else selective_outputs[phase],
-                        strategic_core=selective_outputs[BrandPhase.STRATEGIC_CORE],
+                        output_a=selective_outputs[phase],
+                        output_b=full_outputs[phase],
+                        strategic_core=strategic_core,
                     )
-                    if selective_first:
-                        selective_score, full_score = paired.output_a, paired.output_b
-                    else:
-                        selective_score, full_score = paired.output_b, paired.output_a
+                    reverse = score_phase_output_pair(
+                        judge_client,
+                        mission=mission,
+                        phase=phase,
+                        output_a=full_outputs[phase],
+                        output_b=selective_outputs[phase],
+                        strategic_core=strategic_core,
+                    )
+                    selective_score = _average_phase_quality_score(
+                        forward.output_a, reverse.output_b
+                    )
+                    full_score = _average_phase_quality_score(forward.output_b, reverse.output_a)
                 quality_comparisons.append(
                     PhaseQualityComparison(
                         mission_name=mission.company_name,

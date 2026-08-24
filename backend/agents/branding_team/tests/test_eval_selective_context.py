@@ -304,11 +304,11 @@ def test_run_eval_judges_shared_phase_output_only_once(tmp_path) -> None:
     assert judged_phases == [BrandPhase.CHANNEL_ACTIVATION]
 
 
-def test_run_eval_judges_diverging_phase_with_single_paired_call(tmp_path) -> None:
+def test_run_eval_judges_diverging_phase_with_both_paired_orderings(tmp_path) -> None:
     """GOVERNANCE's context does diverge between variants, so run_eval must score
-    both candidates through exactly one score_phase_output_pair call -- never two
-    separate score_phase_output calls -- so both are judged by the same
-    provider/model response.
+    both candidates through exactly two score_phase_output_pair calls -- one with
+    selective as OUTPUT A, one with full as OUTPUT A -- to average out any
+    positional bias, never a single call or two separate score_phase_output calls.
     """
     # GOVERNANCE is asserted directly for the same reason as the shared-phase
     # test above: it mirrors test_first_diverging_phase_is_governance(), which
@@ -321,45 +321,47 @@ def test_run_eval_judges_diverging_phase_with_single_paired_call(tmp_path) -> No
         run_eval(missions=[make_mission()], output_dir=tmp_path)
 
     judged_phases = [call.kwargs["phase"] for call in mock_pair.call_args_list]
-    assert judged_phases == [BrandPhase.GOVERNANCE]
+    assert judged_phases == [BrandPhase.GOVERNANCE, BrandPhase.GOVERNANCE]
+    output_a_args = [call.kwargs["output_a"] for call in mock_pair.call_args_list]
+    output_b_args = [call.kwargs["output_b"] for call in mock_pair.call_args_list]
+    # The two calls must use opposite orderings of the same two candidates.
+    assert output_a_args[0] is output_b_args[1]
+    assert output_b_args[0] is output_a_args[1]
 
 
-def test_run_eval_paired_judge_order_is_randomized_and_correctly_unmapped(tmp_path) -> None:
-    """Which variant is OUTPUT A vs OUTPUT B must be randomized per call (so a
-    judge with positional bias can't systematically favor one treatment), and
-    whichever order is chosen, the returned scores must be correctly mapped
-    back to selective/full -- not silently swapped.
+def test_run_eval_averages_both_paired_orderings_to_cancel_positional_bias(tmp_path) -> None:
+    """A judge with a fixed A-over-B positional bias must not skew the final
+    selective/full scores: averaging the forward and reverse orderings should
+    cancel the bias and leave both candidates with the same averaged score,
+    since a single ordering alone would report a manufactured one-point delta.
     """
     from branding_team.scripts.quality_judge import PairedPhaseQualityScore
 
-    score_for_a = PhaseQualityScore(
-        strategic_coherence=5, completeness=5, brand_consistency=5, rationale="a"
+    # Simulates a judge that always scores whichever candidate is OUTPUT A one
+    # point higher than whichever is OUTPUT B, regardless of actual content.
+    biased_high = PhaseQualityScore(
+        strategic_coherence=5, completeness=5, brand_consistency=5, rationale="a-slot"
     )
-    score_for_b = PhaseQualityScore(
-        strategic_coherence=1, completeness=1, brand_consistency=1, rationale="b"
+    biased_low = PhaseQualityScore(
+        strategic_coherence=4, completeness=4, brand_consistency=4, rationale="b-slot"
     )
-    fake_paired = PairedPhaseQualityScore(output_a=score_for_a, output_b=score_for_b)
 
-    for forced_random, selective_should_get in [(0.1, score_for_a), (0.9, score_for_b)]:
-        with (
-            patch(
-                "branding_team.scripts.eval_selective_context.score_phase_output_pair",
-                return_value=fake_paired,
-            ) as mock_pair,
-            patch("branding_team.scripts.eval_selective_context.random.random") as mock_random,
-        ):
-            mock_random.return_value = forced_random
-            _comparisons, quality_comparisons = run_eval(
-                missions=[make_mission()], output_dir=tmp_path
-            )
+    def fake_paired(*_args, **kwargs):
+        # Whichever candidate is passed as output_a gets the higher score.
+        return PairedPhaseQualityScore(output_a=biased_high, output_b=biased_low)
 
-        governance = next(c for c in quality_comparisons if c.phase == BrandPhase.GOVERNANCE)
-        # forced_random < 0.5 -> selective is passed as output_a, so it must get
-        # output_a's score back; >= 0.5 -> selective is output_b, so it must get
-        # output_b's score. This confirms the mapping is actually swapped at the
-        # call site, not just read differently from a fixed mock return value.
-        assert governance.selective == selective_should_get
-        assert mock_pair.call_count == 1
+    with patch(
+        "branding_team.scripts.eval_selective_context.score_phase_output_pair",
+        side_effect=fake_paired,
+    ):
+        _comparisons, quality_comparisons = run_eval(missions=[make_mission()], output_dir=tmp_path)
+
+    governance = next(c for c in quality_comparisons if c.phase == BrandPhase.GOVERNANCE)
+    # Averaging (5+4)/2 = 4.5 -> round() = 4 for both sides -- the one-point
+    # positional bias cancels out and reports zero regression, not a false one.
+    assert governance.selective.strategic_coherence == 4
+    assert governance.full.strategic_coherence == 4
+    assert governance.regressions() == []
 
 
 def test_run_eval_writes_markdown_report(tmp_path) -> None:
@@ -383,6 +385,20 @@ def _quality_score(**overrides) -> PhaseQualityScore:
     values = {"strategic_coherence": 5, "completeness": 5, "brand_consistency": 5, "rationale": ""}
     values.update(overrides)
     return PhaseQualityScore(**values)
+
+
+def test_average_phase_quality_score_averages_each_dimension() -> None:
+    """_average_phase_quality_score must average each dimension independently,
+    not just one field, and round to the nearest valid integer score.
+    """
+    a = _quality_score(strategic_coherence=5, completeness=3, brand_consistency=1)
+    b = _quality_score(strategic_coherence=3, completeness=3, brand_consistency=5)
+
+    averaged = eval_ctx._average_phase_quality_score(a, b)
+
+    assert averaged.strategic_coherence == 4  # (5+3)/2 = 4
+    assert averaged.completeness == 3  # (3+3)/2 = 3
+    assert averaged.brand_consistency == 3  # (1+5)/2 = 3
 
 
 def test_phase_quality_comparison_no_regression_when_scores_are_equal() -> None:
