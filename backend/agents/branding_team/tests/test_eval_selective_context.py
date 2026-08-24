@@ -25,7 +25,9 @@ from branding_team.scripts.eval_selective_context import (
     _full_context_phases,
     _phase_spec_context_override,
     _run_variant,
+    _slugify,
     main,
+    run_eval,
 )
 from branding_team.tests.conftest import make_mission
 from llm_service.dummy_provider import force_dummy_llm_provider
@@ -151,6 +153,21 @@ def test_run_variant_restores_phase_spec_after_full_context() -> None:
 
     for phase, spec in _PHASE_SPEC.items():
         assert spec.context_phases == originals[phase]
+
+
+def test_run_eval_disambiguates_duplicate_company_name_slugs(tmp_path) -> None:
+    """Two missions sharing a company_name must each get their own output
+    file (`-2` suffix on the second) instead of the second silently
+    overwriting the first's Phase 4/5 results.
+    """
+    first = make_mission()
+    second = first.model_copy()
+
+    run_eval(missions=[first, second], output_dir=tmp_path)
+
+    slug = _slugify(first.company_name)
+    written = sorted(p.name for p in tmp_path.glob("*.json"))
+    assert written == [f"{slug}-2.json", f"{slug}.json"]
 
 
 def test_main_no_mission_filter_runs_all_sample_missions(tmp_path) -> None:

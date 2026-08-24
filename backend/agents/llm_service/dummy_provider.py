@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import os
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 
 from . import config as _llm_config
 from . import factory as _llm_factory
@@ -28,7 +28,7 @@ from . import provider_store as _llm_provider_store
 
 
 @contextlib.contextmanager
-def force_dummy_llm_provider():
+def force_dummy_llm_provider() -> Iterator[None]:
     """Force every agent constructed inside this block through the dummy stub client.
 
     Every ``resolve_*`` function in ``llm_service.config`` (provider, model,

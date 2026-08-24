@@ -31,6 +31,7 @@ import contextlib
 import json
 import re
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -132,11 +133,16 @@ class PhasePromptComparison:
 
 
 @contextlib.contextmanager
-def _phase_spec_context_override(phase: BrandPhase, context_phases: tuple[BrandPhase, ...]):
+def _phase_spec_context_override(
+    phase: BrandPhase, context_phases: tuple[BrandPhase, ...]
+) -> Iterator[None]:
     """Temporarily replace ``_PHASE_SPEC[phase].context_phases``.
 
     Preconditions:
-        ``phase`` is a key of ``_PHASE_SPEC``.
+        ``phase`` is a key of ``_PHASE_SPEC``, and ``_PHASE_SPEC[phase]`` is a
+        ``_PhaseSpec`` namedtuple (it always is, per its declared type in
+        ``orchestrator.py``) -- this relies on ``._replace``, which only
+        namedtuple-like records provide.
     Postconditions:
         ``_PHASE_SPEC[phase]`` is restored to its original value on exit,
         even if the wrapped block raises.
@@ -225,7 +231,10 @@ def run_eval(
           ``selective`` and ``full_context`` variants, to
           ``output_dir/<mission-slug>.json`` -- each produced by its own
           real, independent phase execution against genuinely different
-          task prompts (not a shared prompt-string-only comparison). Under
+          task prompts (not a shared prompt-string-only comparison). If two
+          missions in ``missions`` share the same slugified ``company_name``,
+          the second and later occurrences get a ``-2``, ``-3``, ... suffix
+          rather than silently overwriting an earlier mission's file. Under
           the forced dummy client the two variants' output *content* will
           typically be identical regardless of prompt differences --
           ``DummyLLMClient`` replies from an agent's output schema, not its
@@ -250,6 +259,7 @@ def run_eval(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     comparisons: list[PhasePromptComparison] = []
+    slug_counts: dict[str, int] = {}
 
     with force_dummy_llm_provider():
         orchestrator = BrandingTeamOrchestrator()
@@ -286,7 +296,11 @@ def run_eval(
                     "governance": full_outputs[BrandPhase.GOVERNANCE].model_dump(mode="json"),
                 },
             }
-            out_path = output_dir / f"{_slugify(mission.company_name)}.json"
+            base_slug = _slugify(mission.company_name)
+            slug_counts[base_slug] = slug_counts.get(base_slug, 0) + 1
+            occurrence = slug_counts[base_slug]
+            slug = base_slug if occurrence == 1 else f"{base_slug}-{occurrence}"
+            out_path = output_dir / f"{slug}.json"
             out_path.write_text(json.dumps(eval_record, indent=2), encoding="utf-8")
 
     return comparisons
