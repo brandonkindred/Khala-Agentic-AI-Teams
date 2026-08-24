@@ -1,4 +1,4 @@
-"""LLM-as-judge quality scoring for a single branding phase output.
+"""LLM-as-judge quality scoring for branding phase outputs.
 
 Scores a phase's output (``ChannelActivationOutput``/``GovernanceOutput``, or
 any other phase model) against three dimensions -- strategic coherence,
@@ -7,11 +7,22 @@ rationale. Used by ``branding_team.scripts.eval_selective_context`` to
 compare the real, selective-context output against a full-context variant
 and flag any quality regression.
 
-The rubric below (:data:`_JUDGE_SYSTEM_PROMPT`) is the reproducible judge
-prompt required by the eval task: it is the single source of truth for how
-scores are assigned, and :func:`score_phase_output` is the only call site
-that renders it, so every judge call in this codebase uses the identical
-wording.
+Two reproducible rubric prompts are defined, sharing the same three scoring
+dimensions and the same blind-to-variant design (see
+:func:`_build_judge_prompt`/:func:`_build_paired_judge_prompt`), but with
+different output schemas:
+
+- :data:`_JUDGE_SYSTEM_PROMPT` scores one output; :func:`score_phase_output`
+  is its only call site.
+- :data:`_PAIRED_JUDGE_SYSTEM_PROMPT` scores two candidates in a single call
+  (nested ``output_a``/``output_b``), used by :func:`score_phase_output_pair`
+  to guarantee both are judged by the identical provider/model response and
+  to cancel positional bias when called under both A/B orderings (see
+  ``eval_selective_context.run_eval``).
+
+Each is the single source of truth for its own shape: every single-output
+judge call uses ``_JUDGE_SYSTEM_PROMPT`` verbatim, and every paired judge
+call uses ``_PAIRED_JUDGE_SYSTEM_PROMPT`` verbatim.
 """
 
 from __future__ import annotations
