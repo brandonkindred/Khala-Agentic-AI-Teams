@@ -13,16 +13,15 @@ from typing import Any, Dict
 from unittest.mock import MagicMock
 
 from shared.dev_models.models import Task, TaskStatus, TaskType
-from software_engineering_team.backend_code_v2_team import models as be_models
-from software_engineering_team.backend_code_v2_team.models import (
+from software_engineering_team.codegen_team import models as codegen_models
+from software_engineering_team.codegen_team.models import (
     Microtask,
     MicrotaskStatus,
     PlanningResult,
     ToolAgentKind,
 )
-from software_engineering_team.backend_code_v2_team.phases._profile import PROFILE as BE_PROFILE
-from software_engineering_team.frontend_code_v2_team import models as fe_models
-from software_engineering_team.frontend_code_v2_team.phases._profile import PROFILE as FE_PROFILE
+from software_engineering_team.codegen_team.stacks.backend.profile import PROFILE as BE_PROFILE
+from software_engineering_team.codegen_team.stacks.frontend.profile import PROFILE as FE_PROFILE
 from software_engineering_team.shared.phases.execution import GateOutcome
 from software_engineering_team.shared.v2_execution_bindings import (
     ExecutionBindings,
@@ -53,7 +52,7 @@ def _pass_gate(**_kwargs: Any) -> GateOutcome:
 
 def _build_test_bindings(**overrides: Any) -> ExecutionBindings:
     kwargs: Dict[str, Any] = dict(
-        models=be_models,
+        models=codegen_models,
         profile=BE_PROFILE,
         execution_prompt="{microtask_description} {requirements} {existing_code} {architecture_context}",
         parse_files_and_summary=lambda raw: {"files": {}, "summary": raw},
@@ -160,7 +159,7 @@ class TestFrontendProfileGateConfigMatchesProductionWiring:
     synthetic ``_build_test_bindings`` call against backend's real ``PROFILE``)."""
 
     def test_gate_config_wires_the_real_frontend_gate_closures_and_statuses(self):
-        from frontend_code_v2_team.phases._profile import (
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
             GATE_CONFIG,
             _code_review_gate,
             _qa_gate,
@@ -198,7 +197,6 @@ class TestBuildExecutionBindingsFrontendParity:
             return {"files": {"app.tsx": "export default function App() {}"}, "summary": "done"}
 
         bindings = _build_test_bindings(
-            models=fe_models,
             profile=FE_PROFILE,
             parse_files_and_summary=parse_files_and_summary,
         )

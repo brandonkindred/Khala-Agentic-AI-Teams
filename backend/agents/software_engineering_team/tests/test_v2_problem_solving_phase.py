@@ -24,7 +24,7 @@ def _task(**overrides):
 
 
 def _microtask(**overrides):
-    from software_engineering_team.backend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         Microtask,
         ToolAgentKind,
     )
@@ -35,7 +35,7 @@ def _microtask(**overrides):
 
 
 def _issue(**overrides):
-    from software_engineering_team.backend_code_v2_team.models import ReviewIssue
+    from software_engineering_team.codegen_team.models import ReviewIssue
 
     base = dict(
         source="code_review",
@@ -49,7 +49,7 @@ def _issue(**overrides):
 
 
 def _review_result(issues=None):
-    from software_engineering_team.backend_code_v2_team.models import ReviewResult
+    from software_engineering_team.codegen_team.models import ReviewResult
 
     return ReviewResult(passed=False, issues=issues or [], build_ok=True, lint_ok=True)
 
@@ -66,7 +66,7 @@ class _StubAgent:
 
 
 def test_format_all_code_truncates():
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         _format_all_code,
     )
 
@@ -76,7 +76,7 @@ def test_format_all_code_truncates():
 
 
 def test_format_all_code_empty():
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         _format_all_code,
     )
 
@@ -84,7 +84,7 @@ def test_format_all_code_empty():
 
 
 def test_format_all_code_raises_on_nonpositive_max_chars():
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         _format_all_code,
     )
 
@@ -93,7 +93,7 @@ def test_format_all_code_raises_on_nonpositive_max_chars():
 
 
 def test_format_issues_for_batch():
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         _format_issues_for_batch,
     )
 
@@ -105,7 +105,7 @@ def test_format_issues_for_batch():
 
 
 def test_relevant_code_for_issue_with_match():
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         _relevant_code_for_issue,
     )
 
@@ -114,7 +114,7 @@ def test_relevant_code_for_issue_with_match():
 
 
 def test_relevant_code_for_issue_fallback():
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         _relevant_code_for_issue,
     )
 
@@ -124,7 +124,7 @@ def test_relevant_code_for_issue_fallback():
 
 
 def test_relevant_code_for_issue_empty():
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         _relevant_code_for_issue,
     )
 
@@ -133,7 +133,7 @@ def test_relevant_code_for_issue_empty():
 
 
 def test_run_batch_coding_fixes_no_actionable_issues():
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_batch_coding_fixes,
     )
 
@@ -148,8 +148,8 @@ def test_run_batch_coding_fixes_no_actionable_issues():
 
 
 def test_run_batch_coding_fixes_llm_failure(monkeypatch):
-    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_batch_coding_fixes,
     )
 
@@ -169,8 +169,8 @@ def test_run_batch_coding_fixes_llm_failure(monkeypatch):
 
 
 def test_run_batch_coding_fixes_success(monkeypatch):
-    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_batch_coding_fixes,
     )
 
@@ -196,8 +196,8 @@ def test_run_batch_coding_fixes_success(monkeypatch):
 
 def test_run_batch_coding_fixes_partial_with_unresolved(monkeypatch):
     """Some issues addressed, others not -> unresolved_issues populated."""
-    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_batch_coding_fixes,
     )
 
@@ -223,8 +223,8 @@ def test_run_batch_coding_fixes_partial_with_unresolved(monkeypatch):
 
 def test_run_batch_coding_fixes_rejects_unparsable_python(monkeypatch):
     """A batch fix that returns an incomplete .py rewrite must not be merged."""
-    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_batch_coding_fixes,
     )
 
@@ -250,8 +250,8 @@ def test_run_batch_coding_fixes_rejects_unparsable_python(monkeypatch):
 
 
 def test_run_batch_coding_fixes_with_callback(monkeypatch):
-    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_batch_coding_fixes,
     )
 
@@ -276,7 +276,7 @@ def test_run_batch_coding_fixes_with_callback(monkeypatch):
 
 
 def test_run_problem_solving_no_actionable():
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_problem_solving,
     )
 
@@ -290,8 +290,8 @@ def test_run_problem_solving_no_actionable():
 
 
 def test_run_problem_solving_llm_failure(monkeypatch):
-    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_problem_solving,
     )
 
@@ -312,8 +312,8 @@ def test_run_problem_solving_llm_failure(monkeypatch):
 
 
 def test_run_problem_solving_fix_success(monkeypatch):
-    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_problem_solving,
     )
 
@@ -338,8 +338,8 @@ def test_run_problem_solving_rejects_unparsable_python_even_if_resolved(monkeypa
     """A mixed response (one valid file + the issue's own file broken) that
     claims resolved=yes must NOT be trusted -- the issue's file was
     discarded, so the issue must stay unresolved and retry."""
-    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_problem_solving,
     )
 
@@ -372,12 +372,12 @@ def test_run_problem_solving_rejects_unparsable_python_even_if_resolved(monkeypa
 
 
 def test_run_problem_solving_with_tool_agents(monkeypatch):
-    from software_engineering_team.backend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
-    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_problem_solving,
     )
 
@@ -412,12 +412,12 @@ def test_run_problem_solving_with_tool_agents(monkeypatch):
 def test_run_problem_solving_tool_agent_partial_rejection(monkeypatch):
     """A tool agent returning a mix of valid and unparsable Python files must
     only merge the valid ones; the unparsable file is discarded."""
-    from software_engineering_team.backend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
-    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_problem_solving,
     )
 
@@ -449,9 +449,9 @@ def test_run_problem_solving_tool_agent_partial_rejection(monkeypatch):
 
 
 def test_run_problem_solving_tool_agent_raises(monkeypatch):
-    from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.stacks.backend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_problem_solving,
     )
 
@@ -480,7 +480,7 @@ def test_run_problem_solving_tool_agent_raises(monkeypatch):
 
 
 def test_run_problem_solving_for_microtask_no_actionable():
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_problem_solving_for_microtask,
     )
 
@@ -496,8 +496,8 @@ def test_run_problem_solving_for_microtask_no_actionable():
 
 
 def test_run_problem_solving_for_microtask_success(monkeypatch):
-    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_problem_solving_for_microtask,
     )
 
@@ -526,7 +526,7 @@ def test_run_problem_solving_for_microtask_success(monkeypatch):
 
 
 def _phase_result(issues, phase_name="code_review"):
-    from software_engineering_team.backend_code_v2_team.models import PhaseReviewResult
+    from software_engineering_team.codegen_team.models import PhaseReviewResult
 
     return PhaseReviewResult(passed=False, issues=issues, phase_name=phase_name)
 
@@ -537,7 +537,7 @@ def test_run_phase_fixes_via_code_review():
     severity='info' issue is filtered out before the per-issue fix loop runs.
     See test_run_code_review_fixes_with_actionable for the actionable path.
     """
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_code_review_fixes,
     )
 
@@ -553,7 +553,7 @@ def test_run_phase_fixes_via_code_review():
 
 
 def test_run_qa_fixes():
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_qa_fixes,
     )
 
@@ -570,9 +570,9 @@ def test_run_qa_fixes_does_not_consult_tool_agent_problem_solve(monkeypatch):
     """QA is review-only: even when a QA tool agent is wired and the issue is
     actionable, fixing must come entirely from the generic coding-agent fix
     loop, never from the reviewer's own problem_solve."""
-    from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.stacks.backend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_qa_fixes,
     )
 
@@ -599,7 +599,7 @@ def test_run_qa_fixes_does_not_consult_tool_agent_problem_solve(monkeypatch):
 
 
 def test_run_security_fixes():
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_security_fixes,
     )
 
@@ -618,9 +618,9 @@ def test_run_security_fixes_does_not_consult_tool_agent_problem_solve(monkeypatc
     """Security is review-only: even when a Security tool agent is wired and
     the issue is actionable, fixing must come entirely from the generic
     coding-agent fix loop, never from the reviewer's own problem_solve."""
-    from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.stacks.backend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_security_fixes,
     )
 
@@ -649,7 +649,7 @@ def test_run_security_fixes_does_not_consult_tool_agent_problem_solve(monkeypatc
 
 
 def test_run_documentation_fixes():
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_documentation_fixes,
     )
 
@@ -666,8 +666,8 @@ def test_run_documentation_fixes():
 
 def test_run_code_review_fixes_with_actionable(monkeypatch):
     """Exercises _run_phase_fixes via run_code_review_fixes with an actionable issue."""
-    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.stacks.backend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_code_review_fixes,
     )
 
@@ -692,9 +692,9 @@ def test_run_code_review_fixes_tool_agent_raises(monkeypatch, caplog):
     """A BUILD_SPECIALIST problem_solve failure must mark the result
     unresolved and note the failure in the summary, without discarding the
     generic fix loop's already-applied file changes."""
-    from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.stacks.backend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_code_review_fixes,
     )
 
@@ -733,9 +733,9 @@ def test_run_code_review_fixes_tool_agent_raises(monkeypatch, caplog):
 
 def test_run_documentation_fixes_tool_agent_raises(monkeypatch, caplog):
     """Same contract as the code_review case, for the DOCUMENTATION tool agent."""
-    from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
-    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.stacks.backend import problem_solving as ps_mod
+    from software_engineering_team.codegen_team.stacks.backend.problem_solving import (
         run_documentation_fixes,
     )
 

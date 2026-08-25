@@ -9,6 +9,7 @@ from software_engineering_team.shared.prompts.requirement_citation import (
 from software_engineering_team.shared.prompts.templates import (
     DELIVER_COMMIT_MSG_TEMPLATE,
     DOCUMENTATION_PROBLEM_SOLVE_PROMPT,
+    FILES_OUTPUT_TEMPLATE_INSTRUCTIONS,
     build_batch_fix_prompt,
     build_code_review_prompt,
     build_document_rewrite_prompt,
@@ -25,6 +26,7 @@ from software_engineering_team.shared.prompts.templates import (
 __all__ = [
     "DELIVER_COMMIT_MSG_TEMPLATE",
     "DOCUMENTATION_PROBLEM_SOLVE_PROMPT",
+    "FILES_OUTPUT_TEMPLATE_INSTRUCTIONS",
     "REQUIREMENT_CITATION_GUARDRAIL",
     "build_batch_fix_prompt",
     "build_code_review_prompt",
