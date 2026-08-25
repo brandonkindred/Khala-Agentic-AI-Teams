@@ -759,10 +759,17 @@ def test_execute_coding_team_activity_stays_on_block_pause_strategy(
     )
 
 
-def test_pra_and_planning_band_factories_rescale_progress(monkeypatch) -> None:
-    """The shared phase updater factories rescale sub-agent 0-100 progress onto
-    the PRA and planning bands when called through the same entry points the
-    Temporal activities import."""
+def test_pra_and_planning_phase_updaters_rescale_progress_to_bands(monkeypatch) -> None:
+    """``_make_phase_job_updater`` rescales a sub-agent's raw 0-100 progress onto
+    its phase's progress band, for both the PRA and Planning phase configs —
+    without this, sub-agent progress would sprint to 100 during a phase and
+    collapse at the next phase handoff.
+
+    This test calls the factory directly and only verifies its band math; it
+    does not exercise ``_parse_spec_activity_body``/``_plan_project_activity_body``
+    (the Temporal activity bodies that import and bind this same factory), so it
+    does not verify that those activities are actually wired to it.
+    """
     import software_engineering_team.orchestrator as se_orch
 
     written: list = []

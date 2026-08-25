@@ -35,6 +35,23 @@ cache." The wire translation happens downstream:
    `DummyLLMClient`), breakpoints are flattened to plain text — no error,
    byte-identical behavior.
 
+### V2 tool-agent review path (security, testing/QA, accessibility, performance, UX): no cache opt-in
+
+`shared/tool_agent_base.py::build_shared_tool_agent_review_system_content` exists
+as the plumbing for a once-per-microtask `CacheBreakpoint` segment shared
+across every wired tool agent's `review()` call (mirroring the two
+established helpers above), but it always returns `None` today. Neither
+field available to this call site clears the trust bar: `current_files` (the
+reviewed code) is repository-controlled, and `task_description` can
+originate directly from an externally-authored GitHub issue body (see
+`github_source/issue_to_plan.py`), making it adversary-controllable the same
+way. The `ToolAgentPhaseInput.shared_review_context` field and the
+`system_prompt_content` threading through
+`LlmToolAgentBase._invoke_llm`/`run_strands_agent` are kept in place for a
+genuinely trusted, run-wide field that may become available to this call
+site in the future -- not duplicated logic, an intentionally inert
+placeholder pending one.
+
 ### QA and Security: no explicit cache opt-in
 
 QA and Security keep the file-context prefix (language + code under review) in the
