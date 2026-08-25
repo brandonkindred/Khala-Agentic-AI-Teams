@@ -120,6 +120,10 @@ def _run_two_backend_tasks(
     output, unmocked), and every ``update_job_fn`` call the run made, in order.
     """
     monkeypatch.setenv("CODING_TEAM_WORKERS_PER_STACK", "2")
+    # Pin explicitly rather than relying on the default: an ambient
+    # CODING_TEAM_IMPLEMENTATION_CONCURRENCY=1 in the environment would otherwise make this
+    # test fail for a reason that has nothing to do with the orchestrator's own scheduling.
+    monkeypatch.setenv("CODING_TEAM_IMPLEMENTATION_CONCURRENCY", "2")
     _patch_git(monkeypatch)
     monkeypatch.setattr(orch_mod, "TechLeadAgent", _TwoBackendTasksTechLead)
     monkeypatch.setattr(orch_mod, "WorktreeManager", _FakeWorktreeManager)
