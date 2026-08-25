@@ -35,6 +35,10 @@ function record(over: Partial<PrReviewRecord> = {}): PrReviewRecord {
   };
 }
 
+// This spec intentionally has no coverage for pending-issue-proposal behavior
+// (creating GitHub issues from a review, `hasProposals`/`isCreatingIssues`/etc.).
+// That responsibility was moved out of PrReviewDetailComponent into the Coding
+// Team page's Issues tab; see the component's class docstring.
 describe('PrReviewDetailComponent', () => {
   let component: PrReviewDetailComponent;
   let fixture: ComponentFixture<PrReviewDetailComponent>;

@@ -1437,6 +1437,21 @@ fail open to a miss/recompute, same as every other `shared.cache` consumer.
 Default `256`, floor `0` (`0` disables the cache — every call re-invokes the
 model).
 
+### ACCESSIBILITY_REVIEW_CACHE_SIZE
+Max entries in the shared Accessibility review-result cache (`shared.cache`;
+owned by `accessibility_agent.agent.AccessibilityExpertAgent.run`), via the
+same `software_engineering_team.shared.review_result_cache.ReviewResultCache`
+class that backs `QA_REVIEW_CACHE_SIZE` above. The key hashes the whole
+`AccessibilityInput` — code, language, task description, architecture — plus
+the resolved review model in one shot, so any reviewed-file byte change
+naturally busts the key with no explicit invalidation logic. A cache hit
+skips the LLM call entirely. Every genuine (non-fallback) result is cached
+regardless of `approved`; only a structured-output parse/model failure is
+never cached, so it is retried for real on the next call. Backend failures
+(Redis unavailable, corrupt entry) fail open to a miss/recompute, same as
+every other `shared.cache` consumer. Default `256`, floor `0` (`0` disables
+the cache — every call re-invokes the model).
+
 ---
 
 ## Software Engineering DevOps Review
