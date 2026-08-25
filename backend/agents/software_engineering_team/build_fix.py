@@ -536,17 +536,23 @@ def _run_post_fix_build_verification(project_dir: Path, agent_type: str) -> Any:
     Postconditions:
         Frontend always returns the ``ng build`` result. Backend returns the
         syntax-check result, or the pytest result when syntax passed and a
-        ``tests/`` tree with ``test_*.py`` files exists — held under
-        ``pip_install_lock`` (same-stack backend workers share
-        ``sys.executable``'s ``site-packages``, so a concurrent worker's
-        install must not mutate it while this pytest run is importing from
-        it). If ``run_pytest`` itself raises, logs ``Build fix: pytest
-        failed to run`` and raises ``_BuildFixCommandError`` so the
-        orchestrator can return ``(False, message)`` without aborting the
-        process.
+        ``tests/`` tree with ``test_*.py`` files exists. The reinstall (when
+        ``requirements.txt`` is present) and the pytest run are both held
+        under one ``pip_install_lock`` acquisition: same-stack backend
+        workers share ``sys.executable``'s ``site-packages``, so between
+        this project's own initial install (before the repair loop started)
+        and this rerun, a concurrent worker holding the lock in between
+        could have installed a different dependency set into it — reinstall
+        this project's own requirements before pytest reruns so this project
+        is verified against its own dependencies, not whatever the other
+        worker left behind, and hold the lock across both so a third worker
+        can't interleave between the reinstall and the pytest read. If
+        ``run_pytest`` itself raises, logs ``Build fix: pytest failed to
+        run`` and raises ``_BuildFixCommandError`` so the orchestrator can
+        return ``(False, message)`` without aborting the process.
     """
     from shared.command_runner.angular_repair import run_ng_build_with_nvm_fallback
-    from shared.command_runner.executor import run_pytest, run_python_syntax_check
+    from shared.command_runner.executor import run_command, run_pytest, run_python_syntax_check
 
     if agent_type == "frontend":
         return run_ng_build_with_nvm_fallback(project_dir)
@@ -554,8 +560,28 @@ def _run_post_fix_build_verification(project_dir: Path, agent_type: str) -> Any:
     if result.success:
         tests_dir = project_dir / "tests"
         if tests_dir.exists() and any(tests_dir.rglob("test_*.py")):
+            req_txt = project_dir / "requirements.txt"
             try:
                 with pip_install_lock():
+                    if req_txt.exists():
+                        try:
+                            pip_result = run_command(
+                                [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+                                cwd=project_dir,
+                                timeout=120,
+                            )
+                            if not pip_result.success:
+                                logger.warning(
+                                    "Build fix: pip install -r requirements.txt failed "
+                                    "(non-fatal) before repair-loop pytest rerun: %s",
+                                    pip_result.error_summary,
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                "Build fix: failed to reinstall requirements.txt before "
+                                "repair-loop pytest rerun: %s",
+                                e,
+                            )
                     result = run_pytest(project_dir, python_exe=sys.executable)
             except Exception as e:
                 logger.warning("Build fix: pytest failed to run: %s", e)
@@ -897,8 +923,38 @@ def _try_build_fix_one_at_a_time(
                 try:
                     # Same lock as every other backend pytest run in this module: this
                     # worker's pytest must not observe a concurrent worker's in-flight
-                    # pip install into the shared interpreter's site-packages.
+                    # pip install into the shared interpreter's site-packages. Also
+                    # reinstall this project's own requirements first (best-effort): a
+                    # worker that held the lock between this project's earlier install
+                    # and this rerun could have installed a different dependency set.
+                    req_txt = project_dir / "requirements.txt"
                     with pip_install_lock():
+                        if req_txt.exists():
+                            try:
+                                pip_result = run_command(
+                                    [
+                                        sys.executable,
+                                        "-m",
+                                        "pip",
+                                        "install",
+                                        "-r",
+                                        "requirements.txt",
+                                    ],
+                                    cwd=project_dir,
+                                    timeout=120,
+                                )
+                                if not pip_result.success:
+                                    logger.warning(
+                                        "Build fix: pip install -r requirements.txt failed "
+                                        "(non-fatal) before in-loop pytest rerun: %s",
+                                        pip_result.error_summary,
+                                    )
+                            except Exception as e:
+                                logger.warning(
+                                    "Build fix: failed to reinstall requirements.txt before "
+                                    "in-loop pytest rerun: %s",
+                                    e,
+                                )
                         test_result = run_pytest(project_dir, python_exe=sys.executable)
                     result = test_result
                 except Exception as e:

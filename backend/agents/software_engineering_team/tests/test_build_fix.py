@@ -364,6 +364,56 @@ def test_run_post_fix_build_verification_backend_pytest_holds_lock(
     assert events == ["lock_enter", "pytest", "lock_exit"]
 
 
+def test_run_post_fix_build_verification_reinstalls_requirements_under_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A concurrent worker's install in between repair-loop reruns must not stick.
+
+    ``_run_post_fix_build_verification`` didn't reinstall ``requirements.txt``
+    before its pytest rerun, so if a different worker held the lock between
+    this project's own earlier install and this rerun (installing its own,
+    different dependency set), this project's pytest would run against the
+    wrong environment — flagged by review on PR #7194. The reinstall must
+    happen inside the same lock acquisition as the pytest call.
+    """
+    _write(tmp_path / "app.py", "x = 1\n")
+    _write(tmp_path / "requirements.txt", "pytest\n")
+    _write(tmp_path / "tests" / "test_app.py", "def test_ok():\n    assert True\n")
+
+    syntax_ok = type("R", (), {"success": True})()
+    pytest_result = type("R", (), {"success": True})()
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_python_syntax_check",
+        lambda project_dir: syntax_ok,
+    )
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_command",
+        lambda *a, **kw: (
+            events.append("install")
+            or CommandResult(success=True, exit_code=0, stdout="", stderr="")
+        ),
+    )
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_pytest",
+        lambda project_dir, python_exe=None: events.append("pytest") or pytest_result,
+    )
+
+    @contextmanager
+    def _spy_lock():
+        events.append("lock_enter")
+        yield
+        events.append("lock_exit")
+
+    monkeypatch.setattr("software_engineering_team.build_fix.pip_install_lock", _spy_lock)
+
+    result = _run_post_fix_build_verification(tmp_path, "backend")
+
+    assert result is pytest_result
+    assert events == ["lock_enter", "install", "pytest", "lock_exit"]
+
+
 def test_execute_llm_repair_attempt_writes_parsed_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
