@@ -52,7 +52,7 @@ flowchart TB
 
     subgraph batch_agents[Batch-level Agents — investment_team/]
       SIE[SignalIntelligenceExpert<br/>signal_intelligence_agent.py<br/>runs once per batch, not per cycle —<br/>a multi-batch run sees a fresh brief each<br/>batch by design; a mid-batch resume can<br/>also re-run it within one batch]
-      PTA[PaperTradingAgent<br/>paper_trading_agent.py<br/>runs post-cycle from Finalize (winner gate),<br/>or standalone from POST /strategy-lab/paper-trade —<br/>never inside orchestrator.py]
+      PTA["PaperTradingAgent<br/>paper_trading_agent.py<br/>post-cycle from Finalize, or standalone<br/>from POST /strategy-lab/paper-trade —<br/>never inside orchestrator.py"]
     end
 
     subgraph orch[Orchestration — orchestrator.py]
