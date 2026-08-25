@@ -972,12 +972,15 @@ def _run_tool_agents_review(
     """Run each wired tool agent's ``review`` and fold its output into issues.
 
     Builds one ``shared_review_context`` (a ``CacheBreakpoint``-wrapped system
-    segment carrying ``current_files``/``task_description``, or ``None`` when
-    there is no code) via
+    segment carrying ``task_description``, or ``None`` when it is empty) via
     ``tool_agent_base.build_shared_tool_agent_review_system_content``, and
     attaches it to the single ``phase_inp`` every wired agent's ``review()``
     call below shares -- so all of them reuse the identical cache-marked
     segment for this microtask instead of each re-sending an uncached copy.
+    ``current_files`` (the code under review) deliberately stays out of this
+    segment -- it is untrusted, repository-controlled content and must remain
+    in each agent's user prompt, never the system prompt; see
+    ``build_shared_tool_agent_review_system_content``'s docstring.
 
     Preconditions:
         - ``tool_agents`` is ``None`` or a ``{ToolAgentKind: agent}`` mapping.
@@ -1025,9 +1028,7 @@ def _run_tool_agents_review(
         "review_issues": issues,
         "task_title": task.title or "",
         "task_description": task_description,
-        "shared_review_context": build_shared_tool_agent_review_system_content(
-            current_files, task_description
-        ),
+        "shared_review_context": build_shared_tool_agent_review_system_content(task_description),
     }
     if microtask is not None:
         phase_inp_kwargs["microtask"] = microtask

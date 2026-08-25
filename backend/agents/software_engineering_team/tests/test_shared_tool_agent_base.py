@@ -430,33 +430,26 @@ def test_build_code_text_empty_files_returns_empty_string():
     assert build_code_text({}) == ""
 
 
-def test_build_shared_review_system_content_none_when_no_code():
-    """No current_files -> nothing to cache."""
-    assert build_shared_tool_agent_review_system_content({}, "some task") is None
+def test_build_shared_review_system_content_none_when_task_description_blank():
+    """No task_description -> nothing to cache."""
+    assert build_shared_tool_agent_review_system_content("") is None
 
 
 def test_build_shared_review_system_content_wraps_cache_breakpoint():
     from llm_service import CacheBreakpoint
 
-    result = build_shared_tool_agent_review_system_content({"a.ts": "code"}, "do the thing")
+    result = build_shared_tool_agent_review_system_content("do the thing")
     assert result is not None
     assert len(result) == 1
     assert isinstance(result[0], CacheBreakpoint)
-    assert "do the thing" in result[0].text
-    assert "--- a.ts ---\ncode" in result[0].text
-
-
-def test_build_shared_review_system_content_omits_task_when_blank():
-    result = build_shared_tool_agent_review_system_content({"a.ts": "code"}, "")
-    assert "**Task:**" not in result[0].text
-    assert "**Code to review:**" in result[0].text
+    assert result[0].text == "**Task:** do the thing"
 
 
 def test_build_shared_review_system_content_identical_inputs_produce_identical_text():
-    """Same (current_files, task_description) -> byte-identical text, the
-    property a Claude-backed provider cache relies on to serve a hit."""
-    first = build_shared_tool_agent_review_system_content({"a.ts": "code"}, "task")
-    second = build_shared_tool_agent_review_system_content({"a.ts": "code"}, "task")
+    """Same task_description -> byte-identical text, the property a
+    Claude-backed provider cache relies on to serve a hit."""
+    first = build_shared_tool_agent_review_system_content("task")
+    second = build_shared_tool_agent_review_system_content("task")
     assert first[0].text == second[0].text
 
 
@@ -483,7 +476,7 @@ def test_review_with_shared_context_passes_it_as_system_prompt_content(monkeypat
     user prompt string."""
     from llm_service import CacheBreakpoint
 
-    shared_ctx = [CacheBreakpoint("**Task:**\nd\n\n**Code to review:**\n--- a.ts ---\ncode")]
+    shared_ctx = [CacheBreakpoint("**Task:** d")]
     factory = _CapturingAgentFactory("raw-review")
     agent = _DemoAgent.__new__(_DemoAgent)
     agent._model = object()
@@ -497,12 +490,12 @@ def test_review_with_shared_context_passes_it_as_system_prompt_content(monkeypat
     assert factory.build_kwargs[0]["system_prompt"] == shared_ctx
 
 
-def test_review_with_shared_context_excludes_code_from_user_prompt(monkeypatch):
-    """The rendered user prompt must not carry the raw code text when a shared
+def test_review_with_shared_context_excludes_task_description_from_user_prompt(monkeypatch):
+    """The rendered user prompt must not re-embed task_description when a shared
     (already-cached) system segment already carries it -- otherwise the
-    per-agent call still re-sends and re-bills the full code block."""
+    per-agent call still re-sends and re-bills the task text."""
     seen: list[str] = []
-    code = "UNIQUE_CODE_PAYLOAD_NOT_IN_USER_PROMPT"
+    task = "UNIQUE_TASK_DESCRIPTION_NOT_IN_USER_PROMPT"
 
     class _Capture:
         def __call__(self, prompt):
@@ -516,11 +509,43 @@ def test_review_with_shared_context_excludes_code_from_user_prompt(monkeypatch):
 
     from llm_service import CacheBreakpoint
 
-    shared_ctx = [CacheBreakpoint(f"**Code to review:**\n{code}")]
+    shared_ctx = [CacheBreakpoint(f"**Task:** {task}")]
+    agent.review(
+        _Input(
+            current_files={"a.ts": "code"}, task_description=task, shared_review_context=shared_ctx
+        )
+    )
+
+    assert len(seen) == 1
+    assert task not in seen[0]
+
+
+def test_review_with_shared_context_still_sends_code_in_user_prompt(monkeypatch):
+    """Security invariant: the reviewed code must always reach the LLM via the
+    (lower-privilege) user prompt, whether or not a shared system context is
+    present -- untrusted, repository-controlled content must never move to
+    the system prompt (see build_shared_tool_agent_review_system_content's
+    docstring). A shared context only ever hoists task_description."""
+    seen: list[str] = []
+    code = "UNIQUE_CODE_PAYLOAD_MUST_STAY_IN_USER_PROMPT"
+
+    class _Capture:
+        def __call__(self, prompt):
+            seen.append(prompt)
+            return "raw-review"
+
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    agent.llm = None
+    _patch_agent(monkeypatch, lambda *a, **k: _Capture())
+
+    from llm_service import CacheBreakpoint
+
+    shared_ctx = [CacheBreakpoint("**Task:** d")]
     agent.review(_Input(current_files={"a.ts": code}, shared_review_context=shared_ctx))
 
     assert len(seen) == 1
-    assert code not in seen[0]
+    assert code in seen[0]
 
 
 def test_review_without_shared_context_unchanged(monkeypatch):

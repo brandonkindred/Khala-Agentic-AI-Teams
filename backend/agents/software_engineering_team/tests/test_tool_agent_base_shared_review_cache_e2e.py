@@ -34,14 +34,20 @@ pytestmark = [pytest.mark.usefixtures("_reset_llm_telemetry_state")]
 class _SecurityDemoAgent(BaseReviewToolAgent):
     name = "Security"
     issue_source = "security"
-    review_prompt = "You are a security reviewer. Report issues as JSON."
+    review_prompt = (
+        "You are a security reviewer. Report issues as JSON.\n\n"
+        "**Task:** {task_description}\n\n**Code to review:**\n{code}"
+    )
     review_parse_mode = "json"
 
 
 class _QaDemoAgent(BaseReviewToolAgent):
     name = "TestingQA"
     issue_source = "testing_qa"
-    review_prompt = "You are a QA reviewer. Report issues as JSON."
+    review_prompt = (
+        "You are a QA reviewer. Report issues as JSON.\n\n"
+        "**Task:** {task_description}\n\n**Code to review:**\n{code}"
+    )
     review_parse_mode = "json"
 
 
@@ -75,7 +81,7 @@ def test_second_tool_agent_call_reads_nonzero_cache_after_first_writes_it() -> N
     qa_agent = _QaDemoAgent(model)
 
     shared_ctx = build_shared_tool_agent_review_system_content(
-        {"app/main.py": "def list_users(): ..."}, "Add pagination to the users endpoint"
+        "Add pagination to the users endpoint"
     )
     phase_inp = _phase_input(shared_ctx)
 
@@ -115,6 +121,20 @@ def test_second_tool_agent_call_reads_nonzero_cache_after_first_writes_it() -> N
     )
     assert first_cache_marked == second_cache_marked
 
+    # Security invariant, proven at the wire level (not just asserted in
+    # docstrings): the reviewed code is untrusted, repository-controlled
+    # content and must never appear in the (higher-privilege) system prompt
+    # -- only the internal task description is cache-eligible. It must still
+    # reach the model, via the user-turn messages.
+    code_marker = "def list_users(): ..."
+    for system_block in (first_system, second_system):
+        rendered_system = json.dumps(system_block)
+        assert code_marker not in rendered_system, (
+            f"reviewed code leaked into the system prompt: {system_block}"
+        )
+    for call in fake_messages.captured_calls:
+        assert code_marker in json.dumps(call["messages"])
+
 
 def test_tool_agent_findings_unchanged_regardless_of_cache_state() -> None:
     """Two tool agents reviewing the same shared context get their own,
@@ -139,7 +159,7 @@ def test_tool_agent_findings_unchanged_regardless_of_cache_state() -> None:
     qa_agent = _QaDemoAgent(model)
 
     shared_ctx = build_shared_tool_agent_review_system_content(
-        {"app/main.py": "def list_users(): ..."}, "Add pagination to the users endpoint"
+        "Add pagination to the users endpoint"
     )
     phase_inp = _phase_input(shared_ctx)
 

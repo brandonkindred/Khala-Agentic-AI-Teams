@@ -488,11 +488,16 @@ def test_run_review_shared_review_context_built_once_and_reused_across_tool_agen
     assert contexts[0] is contexts[1]
     assert len(contexts[0]) == 1
     assert isinstance(contexts[0][0], CacheBreakpoint)
-    assert "x.py" in contexts[0][0].text
+    # Only the (internal, non-repository-controlled) task description is
+    # cache-marked; the reviewed code must never appear here -- see
+    # build_shared_tool_agent_review_system_content's docstring.
+    assert contexts[0][0].text == "**Task:** desc"
 
 
-def test_run_review_shared_review_context_none_when_no_code(tmp_path: Path) -> None:
-    """No files to review -> shared_review_context is None, not an empty list."""
+def test_run_review_shared_review_context_none_when_task_description_blank(
+    tmp_path: Path,
+) -> None:
+    """No task description -> shared_review_context is None, not an empty list."""
     from software_engineering_team.backend_code_v2_team.models import (
         ToolAgentKind,
         ToolAgentPhaseOutput,
@@ -506,11 +511,14 @@ def test_run_review_shared_review_context_none_when_no_code(tmp_path: Path) -> N
         or ToolAgentPhaseOutput(issues=[], recommendations=[])
     )
 
+    blank_task = SimpleNamespace(
+        id="t1", title="T", description="", requirements="reqs", acceptance_criteria=["AC"]
+    )
     run_review(
         config=config,
         llm=DummyLLMClient(),
-        task=_task(),
-        execution_result=_execution_result({}),
+        task=blank_task,
+        execution_result=_execution_result({"x.py": "code"}),
         repo_path=tmp_path,
         tool_agents={ToolAgentKind.TESTING_QA: good},
         language="python",
