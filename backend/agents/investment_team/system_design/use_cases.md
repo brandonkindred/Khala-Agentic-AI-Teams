@@ -35,7 +35,9 @@ flowchart LR
       UC3([Review IPS draft])
       UC4([Finalize IPS])
       UC5([Upsert profile directly])
+      UC29([Get profile / IPS])
       UC6([Create portfolio proposal])
+      UC30([Get proposal])
       UC7([Validate proposal<br/>against IPS])
       UC8([Request investment<br/>committee memo])
     end
@@ -48,6 +50,7 @@ flowchart LR
       UC13([Decide promotion<br/>6-gate checklist])
       UC14([View workflow status])
       UC15([View workflow queues])
+      UC31([Health check])
     end
 
     subgraph lab_uc[Strategy Lab track]
@@ -72,7 +75,9 @@ flowchart LR
   EndUser --> UC3
   EndUser --> UC4
   EndUser --> UC5
+  EndUser --> UC29
   EndUser --> UC6
+  EndUser --> UC30
   EndUser --> UC7
   EndUser --> UC8
   EndUser --> UC17
@@ -88,6 +93,7 @@ flowchart LR
 
   Ops --> UC14
   Ops --> UC15
+  Ops --> UC31
   Ops --> UC18
   Ops --> UC19
   Ops --> UC20
@@ -150,7 +156,7 @@ flowchart LR
 
 | Use case | Endpoint | Agent(s) | Persists to |
 |---|---|---|---|
-| Run strategy lab batch | `POST /strategy-lab/run` | `StrategyLabBatchWorkflow` → `SignalIntelligenceExpert` (once/batch) → `StrategyLabCycleWorkflow` → `run_design_attempt_activity` (`DesignAgent`/`DesignReviewAgent`/`CodeSynthesisAgent`/`RefinementAgent`/`TradeAlignmentAgent`/`AnalysisAgent` + quality gates — see [`generation_pipeline.md`](./generation_pipeline.md)) → `finalize_cycle_record_activity` (`PaperTradingAgent`) | `investment_strategy_lab_records` |
+| Run strategy lab batch | `POST /strategy-lab/run` | `StrategyLabBatchWorkflow` → `SignalIntelligenceExpert` (once/batch) → `StrategyLabCycleWorkflow` → `run_design_attempt_activity` (`DesignAgent`/`DesignReviewAgent`/`CodeSynthesisAgent`/`RefinementAgent`/`TradeAlignmentAgent`/`AnalysisAgent`/`ZeroTradeRepairAgent` + quality gates — see [`generation_pipeline.md`](./generation_pipeline.md)) → `finalize_cycle_record_activity` (`PaperTradingAgent`) | `investment_strategy_lab_records` |
 | Stream run progress | `GET /strategy-lab/runs/{id}/stream` | `job_event_bus` subscription | — |
 | Poll run status | `GET /strategy-lab/runs/{id}/status` | `_active_runs` + `_load_run_from_job_service` | — |
 | Resume paused run | `POST /strategy-lab/runs/{id}/resume` | `StrategyLabBatchWorkflow` | `investment_strategy_lab_records` |
@@ -166,7 +172,7 @@ flowchart LR
 
 ## Profile requirement per use case
 
-Matches the authoritative list in [`../README.md`](../README.md):58-76.
+Matches the authoritative list in [`../README.md`](../README.md):66-84.
 
 **Requires `user_id` / IPS loaded from store:**
 `POST /profiles`, `GET /profiles/{user_id}`,

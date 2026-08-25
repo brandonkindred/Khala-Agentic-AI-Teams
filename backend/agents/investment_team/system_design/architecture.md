@@ -193,7 +193,10 @@ a specific client's IPS. Keeping both tracks in one package lets
 
 `PolicyGuardianAgent` ([`agents.py`](../agents.py):49-103) treats IPS caps
 (per-position, asset-class, speculative sleeve) and explicit permissions
-(options, crypto, live trading) as **hard constraints** — not soft scores.
+(options, crypto) as **hard constraints** — not soft scores. Live-trading
+permission is a separate hard constraint enforced later, by
+`PromotionGateAgent`'s Gate 4 (`../README.md`'s "Universal promotion
+checklist"), not by `PolicyGuardianAgent.check_portfolio`.
 When a proposal is run through `POST /proposals/{proposal_id}/validate`
 ([`api/main.py`](../api/main.py):534-555) the guardian returns a structured
 list of violations that the caller is expected to gate on before acting.

@@ -55,7 +55,7 @@ loop now runs a two-step inner check:
    sandbox re-executes the proposal, and the loop iterates.
 
 The re-execution loop and its cap remain intentional and unchanged:
-the cap (`MAX_ALIGNMENT_ROUNDS = 10`) prevents runaway iterations while
+the cap (`STRATEGY_LAB_MAX_ALIGNMENT_ROUNDS = 10`) prevents runaway iterations while
 still giving the system room to correct genuine code defects across
 multiple rounds. The loop exits as soon as the gate reports aligned,
 no further fix is proposed, or the cap is hit. Entry-signal predicate
