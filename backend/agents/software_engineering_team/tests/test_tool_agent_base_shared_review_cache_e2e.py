@@ -158,3 +158,8 @@ def test_tool_agent_findings_independent_across_agents() -> None:
     assert len(calls) == 2
     assert calls[0]["cache_creation_tokens"] == 0
     assert calls[1]["cache_creation_tokens"] == 0
+    # No CacheBreakpoint means no cache read either -- explicit alongside the
+    # cache_creation_tokens checks above so #7166's "no wire-level caching in
+    # the V2 tool-agent family" claim is asserted directly, not just inferred.
+    assert calls[0]["cache_read_tokens"] == 0
+    assert calls[1]["cache_read_tokens"] == 0
