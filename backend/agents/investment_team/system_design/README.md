@@ -44,9 +44,9 @@ with implementation detail for individual Strategy Lab capabilities:
   precedence + geo-failover, how a source is retrieved and streamed into the
   engine, and the four-step fill-price-from-bar derivation.
 - **[`strategy_lab_pipeline.md`](./strategy_lab_pipeline.md)** — full per-cycle
-  pipeline shape (`ideating → fetching_data → analyzing → paper_trading? →
-  complete`), the complete list of SSE phase events, the winner gate, and the
-  paper-trade skip/failure paths.
+  pipeline shape (`ideating → fetching_data → backtest → aligning →
+  analyzing → paper_trading? → complete`), the complete list of SSE phase
+  events, the winner gate, and the paper-trade skip/failure paths.
 - **[`generation_pipeline.md`](./generation_pipeline.md)** — what actually
   happens *inside* "ideating" and "backtest" above: the 4-phase contract, the
   design ↔ review loop, the compiled-DSL-vs-custom-code fork, the refinement

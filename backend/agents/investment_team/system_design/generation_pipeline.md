@@ -288,7 +288,7 @@ invokes it:
 
 | Gate / file | Phase | Purpose |
 |---|---|---|
-| `strategy_validator.py`: `StrategySpecValidator` | design (default `phase` for both the design-loop readiness check and the pre-synthesis call at `orchestrator_synthesis.py:203`) and synthesis (`zero_trade_repair.py:509` tags its re-validation of a repaired spec `phase="synthesis"`) | Deterministic field-level validation of `StrategySpec` |
+| `strategy_validator.py`: `StrategySpecValidator` | design (`check_hypothesis_rules(spec, phase="design")` — the hypothesis/rules check feeding `DesignReviewAgent`, called with an explicit phase at `orchestrator_design.py:1082`; and `validate(spec)`'s pre-synthesis call at `orchestrator_synthesis.py:203`, which defaults to the same `phase="design"`) and synthesis (`validate()` again, at `zero_trade_repair.py:509`, tagged `phase="synthesis"` for its re-validation of a repaired spec) | Deterministic field-level validation of `StrategySpec` |
 | `spec_readiness.py`: `SpecReadinessGate` | design, re-checked at synthesis round 0 | The implementability gate that decides design-loop readiness (sizing coherence, timeframe validity, DSL completeness) |
 | `code_safety.py` (+ `code_safety_ast.py`): `CodeSafetyChecker` | synthesis, and verification (alignment-proposal re-check) | AST + regex safety scan of generated strategy Python |
 | `code_conformance/gate.py` (+ `ast_helpers.py`): `CodeConformanceGate` | synthesis | Deterministic spec→code conformance, incl. custom-code faithfulness checks |

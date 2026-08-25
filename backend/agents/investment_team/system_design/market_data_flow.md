@@ -737,11 +737,11 @@ flowchart LR
 
 | Use case | Endpoint / entry | Data path |
 |---|---|---|
-| Run strategy-lab batch | `POST /strategy-lab/run` (`api/main.py:1960`) | context snapshot → ideation → backtest → (winner) paper trade |
-| Run backtest | `POST /backtests` (`:873`) → `_run_real_data_backtest` (`:1064`) | `MarketDataService.fetch_multi_symbol_range` → `HistoricalReplayStream` → engine |
-| Run paper trade | `POST /strategy-lab/paper-trade` (`:2780`) | flag-off: recent OHLCV replay · flag-on: live `ProviderAdapter` stream |
-| Stop live session | `POST /strategy-lab/paper-trade/{id}/stop` (`:3070`) | sets `StopController` flag the run loop polls |
-| List providers | `GET /providers` (`:3120`) | `registry.describe_all()` |
+| Run strategy-lab batch | `POST /strategy-lab/run` (`api/main.py:3024`) | context snapshot → ideation → backtest → (winner) paper trade |
+| Run backtest | `POST /backtests` (`:1506`) → `_run_real_data_backtest` (`:1907`) | `MarketDataService.fetch_multi_symbol_range` → `HistoricalReplayStream` → engine |
+| Run paper trade | `POST /strategy-lab/paper-trade` (`:4854`) | flag-off: recent OHLCV replay · flag-on: live `ProviderAdapter` stream |
+| Stop live session | `POST /strategy-lab/paper-trade/{id}/stop` (`:5471`) | sets `StopController` flag the run loop polls |
+| List providers | `GET /providers` (`:5638`) | `registry.describe_all()` |
 
 ---
 

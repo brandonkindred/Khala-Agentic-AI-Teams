@@ -52,7 +52,7 @@ flowchart TB
 
     subgraph batch_agents[Batch-level Agents — investment_team/]
       SIE[SignalIntelligenceExpert<br/>signal_intelligence_agent.py<br/>runs once per batch, not per cycle —<br/>a multi-batch run sees a fresh brief each<br/>batch by design; a mid-batch resume can<br/>also re-run it within one batch]
-      PTA[PaperTradingAgent<br/>paper_trading_agent.py<br/>runs post-cycle, never inside orchestrator.py]
+      PTA[PaperTradingAgent<br/>paper_trading_agent.py<br/>runs post-cycle from Finalize (winner gate),<br/>or standalone from POST /strategy-lab/paper-trade —<br/>never inside orchestrator.py]
     end
 
     subgraph orch[Orchestration — orchestrator.py]
@@ -128,6 +128,7 @@ flowchart TB
   CycleWF -->|"assembled record"| BatchWF
   BatchWF -->|"after awaiting the wave's child workflows"| Finalize
   Finalize --> PTA
+  LabEP -.->|"POST /strategy-lab/paper-trade (standalone,<br/>bypasses BatchWF/Finalize)"| PTA
 
   ORCH --> PG
   ORCH --> PGate
@@ -198,12 +199,12 @@ permission is a separate hard constraint enforced later, by
 `PromotionGateAgent`'s Gate 4 (`../README.md`'s "Universal promotion
 checklist"), not by `PolicyGuardianAgent.check_portfolio`.
 When a proposal is run through `POST /proposals/{proposal_id}/validate`
-([`api/main.py`](../api/main.py):534-555) the guardian returns a structured
+([`api/main.py`](../api/main.py):1174-1224) the guardian returns a structured
 list of violations that the caller is expected to gate on before acting.
 
 **Scope of enforcement (today).** The guardian is only invoked by the
 proposal-validation endpoint. It is **not** automatically applied by
-`POST /memos` ([`api/main.py`](../api/main.py):783-793) — that endpoint calls
+`POST /memos` ([`api/main.py`](../api/main.py):1859-1899) — that endpoint calls
 `InvestmentCommitteeAgent.draft_memo` directly — nor by `POST /promotions/decide`,
 which consumes a `ValidationReport` rather than a `PortfolioProposal`. In
 practice, enforcement is the caller's responsibility: validate the proposal
@@ -237,13 +238,13 @@ See [`flow_charts.md`](./flow_charts.md) for the decision tree.
 ### 5. Safe-by-default workflow mode
 
 The API module constructs a single process-wide `WorkflowState()` at
-import time ([`api/main.py`](../api/main.py):78). `WorkflowState` is a
+import time ([`api/main.py`](../api/main.py):287). `WorkflowState` is a
 dataclass whose `mode` field defaults to `WorkflowMode.MONITOR_ONLY`
 ([`orchestrator.py`](../orchestrator.py):50), so the running system always
 boots in `monitor_only` regardless of any user's `IPS.default_mode`. The only
 endpoints that expose the workflow state are the read-only
-`GET /workflow/status` ([`api/main.py`](../api/main.py):756) and
-`GET /workflow/queues` ([`api/main.py`](../api/main.py):767).
+`GET /workflow/status` ([`api/main.py`](../api/main.py):1807) and
+`GET /workflow/queues` ([`api/main.py`](../api/main.py):1830).
 
 **What is designed but not wired.** `InvestmentTeamOrchestrator.bootstrap`
 ([`orchestrator.py`](../orchestrator.py):69-71) — which would copy
@@ -265,8 +266,8 @@ raise the mode) is tracked in
 Unlike teams that own a Postgres schema via `shared.postgres`, the investment
 team persists **everything** through the job service:
 
-- `_PersistentDict` ([`api/main.py`](../api/main.py):85) presents a dict-like
-  interface backed by `JobServiceClient`.
+- `_PersistentDict` (`api/main.py` — search for `class _PersistentDict`)
+  presents a dict-like interface backed by `JobServiceClient`.
 - Separate logical buckets per artifact type: `investment_profiles`,
   `investment_proposals`, `investment_strategies`, `investment_validations`,
   `investment_backtests`, `investment_strategy_lab_records`,
@@ -381,9 +382,12 @@ prompt-side data shape without destabilizing the backtester.
 ### 10. LLM access goes through the shared service
 
 Every agent takes an `LLMClient` from `backend/agents/llm_service/` and calls
-`.complete_json(...)`. Provider (Ollama vs Claude), base URL, and model are
-selected by `LLM_PROVIDER`, `LLM_BASE_URL`, and `LLM_MODEL` — the same
-environment variables used by every other Khala team. Strategy Lab's own
+`.complete_json(...)`. Provider, base URL, and model are resolved from the
+Postgres-backed ordered provider list (`/llm-config` UI → `llm_provider_configs`)
+— the **sole** source of LLM resolution across Khala, per the root `CLAUDE.md`.
+`LLM_PROVIDER=dummy` is the only env override (selects the no-LLM test/dev
+harness); `LLM_BASE_URL`/`LLM_MODEL` only supply defaults for a blank
+provider-list entry, they don't select a live provider on their own. Strategy Lab's own
 agents route through an additional shared fault-tolerance envelope on top of
 this (`strategy_lab/agents/_llm_envelope.py` — per-call timeout, retries,
 backoff, total wall-time budget); see
@@ -432,7 +436,8 @@ alignment loops, and the ~20-gate `quality_gates/` catalog — are documented in
 | `STRATEGY_LAB_MARKET_DATA_CACHE_TTL_SEC` | Snapshot cache TTL (default 120.0) |
 | `STRATEGY_LAB_MARKET_DATA_PROVIDER` | Provider key (only `free_tier` is implemented) |
 | `STRATEGY_LAB_SIGNAL_EXPERT_ENABLED` | Toggles the signal-intelligence step |
-| `LLM_PROVIDER` / `LLM_BASE_URL` / `LLM_MODEL` | Shared LLM client config |
+| `LLM_PROVIDER=dummy` | Selects the no-LLM test/dev harness (the only load-bearing value for this team, same as every other Khala team) |
+| `LLM_BASE_URL` / `LLM_MODEL` | Default base URL / model for a blank Postgres provider-list entry only — not a live-provider selector |
 | `POSTGRES_HOST` (+ friends) | Enables job-service persistence (required for non-trivial use) |
 
 This table covers only the batch-level / market-data vars read directly by

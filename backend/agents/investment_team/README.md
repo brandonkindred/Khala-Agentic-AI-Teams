@@ -193,7 +193,7 @@ Engineer-facing architecture details live under [`system_design/`](./system_desi
 - [`use_cases.md`](./system_design/use_cases.md) — use-case diagram grouped by actor and track.
 - [`flow_charts.md`](./system_design/flow_charts.md) — sequence/state diagrams for advisor, Strategy Lab batch, promotion gate, orchestrator mode.
 - [`market_data_flow.md`](./system_design/market_data_flow.md) — data providers, how data is retrieved and streamed into the engine, provider-selection precedence, and fill-price-from-bar logic for backtest + paper trade.
-- [`strategy_lab_pipeline.md`](./system_design/strategy_lab_pipeline.md) — per-cycle pipeline (`ideating → fetching_data → analyzing → paper_trading? → complete`), phase events, winner gate, skip paths.
+- [`strategy_lab_pipeline.md`](./system_design/strategy_lab_pipeline.md) — per-cycle pipeline (`ideating → fetching_data → backtest → aligning → analyzing → paper_trading? → complete`), phase events, winner gate, skip paths.
 - [`generation_pipeline.md`](./system_design/generation_pipeline.md) — what happens inside "ideating" and "backtest": the 4-phase contract, design ↔ review loop, code synthesis, refinement/alignment loops, the full quality-gates catalog, and the Temporal activity mapping.
 - [`paper_trading_integration.md`](./system_design/paper_trading_integration.md) — paper trading as an integrated cycle step: winner gate, config, failure contract, linkage to `StrategyLabRecord`.
 - [`trade_record_schema.md`](./system_design/trade_record_schema.md) — every `TradeRecord` field, including bid vs fill prices and order-type fields used for post-hoc execution analysis.

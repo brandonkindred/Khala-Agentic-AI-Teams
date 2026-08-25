@@ -15,43 +15,43 @@ bucket it reads/writes. Every line number below is from
 ```mermaid
 flowchart LR
   subgraph advisor_api[Advisor Endpoints]
-    E1["POST /advisor/sessions<br/>L1981"]
-    E2["POST /advisor/sessions/{id}/messages<br/>L1997"]
-    E3["GET /advisor/sessions/{id}<br/>L2022"]
-    E4["POST /advisor/sessions/{id}/complete<br/>L2033"]
-    E5["POST /profiles<br/>L395"]
-    E6["GET /profiles/{user_id}<br/>L474"]
-    E7["POST /proposals/create<br/>L484"]
-    E8["GET /proposals/{id}<br/>L524"]
-    E9["POST /proposals/{id}/validate<br/>L534"]
-    E10["POST /memos<br/>L783"]
+    E1["POST /advisor/sessions<br/>L5918"]
+    E2["POST /advisor/sessions/{id}/messages<br/>L5965"]
+    E3["GET /advisor/sessions/{id}<br/>L6031"]
+    E4["POST /advisor/sessions/{id}/complete<br/>L6055"]
+    E5["POST /profiles<br/>L1010"]
+    E6["GET /profiles/{user_id}<br/>L1102"]
+    E7["POST /proposals/create<br/>L1118"]
+    E8["GET /proposals/{id}<br/>L1157"]
+    E9["POST /proposals/{id}/validate<br/>L1174"]
+    E10["POST /memos<br/>L1859"]
   end
 
   subgraph shared_api[Shared Endpoints]
-    S1["POST /strategies<br/>L557"]
-    S2["POST /strategies/{id}/validate<br/>L581"]
-    S3["POST /backtests<br/>L654"]
-    S4["GET /backtests<br/>L704"]
-    S5["POST /promotions/decide<br/>L719"]
-    S6["GET /workflow/status<br/>L756"]
-    S7["GET /workflow/queues<br/>L767"]
-    S8["GET /health<br/>L389"]
+    S1["POST /strategies<br/>L1227"]
+    S2["POST /strategies/{id}/validate<br/>L1278"]
+    S3["POST /backtests<br/>L1506"]
+    S4["GET /backtests<br/>L1648"]
+    S5["POST /promotions/decide<br/>L1674"]
+    S6["GET /workflow/status<br/>L1807"]
+    S7["GET /workflow/queues<br/>L1830"]
+    S8["GET /health<br/>L1004"]
   end
 
   subgraph lab_api[Strategy Lab Endpoints]
-    L1["POST /strategy-lab/run<br/>L1251"]
-    L2["GET /strategy-lab/results<br/>L1294"]
-    L3["GET /strategy-lab/jobs<br/>L1340"]
-    L4["POST /strategy-lab/runs/{id}/resume<br/>L1402"]
-    L5["POST /strategy-lab/runs/{id}/restart<br/>L1467"]
+    L1["POST /strategy-lab/run<br/>L3024"]
+    L2["GET /strategy-lab/results<br/>L3098"]
+    L3["GET /strategy-lab/jobs<br/>L3142"]
+    L4["POST /strategy-lab/runs/{id}/resume<br/>L3310"]
+    L5["POST /strategy-lab/runs/{id}/restart<br/>L3565"]
     L6["GET /strategy-lab/runs<br/>L4159"]
     L7["GET /strategy-lab/runs/{id}/status<br/>L4259"]
-    L8["GET /strategy-lab/runs/{id}/stream<br/>L1550"]
-    L9["DELETE /strategy-lab/records/{id}<br/>L1692"]
-    L10["DELETE /strategy-lab/storage<br/>L1732"]
-    L11["POST /strategy-lab/paper-trade<br/>L1792"]
-    L12["GET /strategy-lab/paper-trade/results<br/>L1901"]
-    L13["GET /strategy-lab/paper-trade/{id}<br/>L1929"]
+    L8["GET /strategy-lab/runs/{id}/stream<br/>L4300"]
+    L9["DELETE /strategy-lab/records/{id}<br/>L4450"]
+    L10["DELETE /strategy-lab/storage<br/>L4534"]
+    L11["POST /strategy-lab/paper-trade<br/>L4854"]
+    L12["GET /strategy-lab/paper-trade/results<br/>L5700"]
+    L13["GET /strategy-lab/paper-trade/{id}<br/>L5759"]
   end
 
   subgraph handlers[Agents & Orchestrator]
@@ -145,8 +145,8 @@ priority)`:
 | `execution` | Accepted strategies awaiting execution routing | Ad hoc |
 | `escalation` | Rejected / revised strategies needing human review | **Automatic**: any `PromotionDecision` with outcome `reject` or `revise` is enqueued here with `priority="high"` ([`orchestrator.py`](../orchestrator.py):113-117) |
 
-`GET /workflow/queues` ([`api/main.py`](../api/main.py):767) exposes the
-current contents of every queue; `GET /workflow/status` ([`api/main.py`](../api/main.py):756)
+`GET /workflow/queues` ([`api/main.py`](../api/main.py):1830) exposes the
+current contents of every queue; `GET /workflow/status` ([`api/main.py`](../api/main.py):1807)
 returns the current `WorkflowMode` and the audit log.
 
 ## Orchestrator — promotion gates
@@ -314,6 +314,11 @@ classDiagram
       +details: str
       +timestamp: str
     }
+    class RuleImplementationMap {
+      +rule_id: str
+      +code_line_refs: "List[List[int]]"
+      +traded_count: int
+    }
     class PromotionDecision {
       +strategy_id: str
       +outcome: PromotionStage
@@ -389,6 +394,7 @@ classDiagram
     StrategyLabRecord o-- SpecRevision : spec_history
     StrategyLabRecord o-- CodeRevision : code_history
     StrategyLabRecord o-- GateEvent : gate_timeline
+    StrategyLabRecord o-- RuleImplementationMap : rule_implementation_map
 ```
 
 `BacktestResult` carries substantially more than the core metrics shown above
@@ -431,7 +437,9 @@ deliberately separate fields, not one enum reused inconsistently.
 ## Persistence strategy (recap)
 
 Instead of owning a `shared.postgres` schema, the team pushes every artifact
-through the `_PersistentDict` wrapper ([`api/main.py`](../api/main.py):85-132).
+through the `_PersistentDict` wrapper (`api/main.py` — search for `class
+_PersistentDict`; line numbers here drift with unrelated edits elsewhere in
+that file).
 Reads and writes look like a normal Python dict but the backing store is the
 Khala job service (`JobServiceClient`), which persists to the `khala_jobs`
 Postgres database. The bucket names double as the job-service `team` field so

@@ -28,7 +28,7 @@ sequenceDiagram
     participant LLM as LLM Service
     participant Store as _PersistentDict
 
-    UI->>API: POST /advisor/sessions (L1981)
+    UI->>API: POST /advisor/sessions (L5918)
     API->>FA: start_session() (agents.py:433)
     FA->>FA: create AdvisorSession<br/>topic = GREETING
     FA-->>API: session + opening question
@@ -36,7 +36,7 @@ sequenceDiagram
     API-->>UI: StartAdvisorSessionResponse
 
     loop While session.status == active
-        UI->>API: POST /advisor/sessions/{id}/messages (L1997)
+        UI->>API: POST /advisor/sessions/{id}/messages (L5965)
         API->>Store: load session
         API->>FA: handle_message(session, user_msg) (agents.py:449)
         FA->>FA: _extract_topic_data(current_topic, msg)<br/>(regex-heavy, agents.py:615-881)
@@ -51,7 +51,7 @@ sequenceDiagram
         API-->>UI: SendAdvisorMessageResponse
     end
 
-    UI->>API: POST /advisor/sessions/{id}/complete (L2033)
+    UI->>API: POST /advisor/sessions/{id}/complete (L6055)
     API->>FA: build_ips(session) (agents.py:509)
     FA->>FA: CollectedProfileData → InvestmentProfile → IPS
     FA-->>API: IPS
@@ -99,20 +99,22 @@ sequenceDiagram
     participant RunStore as investment_strategy_lab_runs<br/>(direct JobServiceClient)
     participant Bus as job_event_bus
 
-    Client->>API: POST /strategy-lab/run (L1251)
+    Client->>API: POST /strategy-lab/run (L3024)
     API->>BatchWF: start_workflow (503 if Temporal unreachable)
     API-->>Client: StrategyLabRunStartResponse (run_id)
 
     opt Real-time subscription
-        Client->>API: GET /strategy-lab/runs/{run_id}/stream (L1550)
+        Client->>API: GET /strategy-lab/runs/{run_id}/stream (L4300)
         API->>Bus: subscribe(run_id)
     end
 
     loop for each batch
-        BatchWF->>SIE: compute_signal_brief_activity<br/>(once per batch-workflow invocation; a mid-batch<br/>resume re-runs it, so later cycles in that batch<br/>can see a different brief than earlier ones)
-        SIE->>LLM: complete_json
-        LLM-->>SIE: SignalIntelligenceBriefV1
-        SIE-->>BatchWF: brief
+        opt STRATEGY_LAB_SIGNAL_EXPERT_ENABLED (default true)
+            BatchWF->>SIE: compute_signal_brief_activity<br/>(once per batch-workflow invocation, a mid-batch<br/>resume re-runs it, so later cycles in that batch<br/>can see a different brief than earlier ones)
+            SIE->>LLM: complete_json
+            LLM-->>SIE: SignalIntelligenceBriefV1
+            SIE-->>BatchWF: brief
+        end
 
         loop wave of cycles (bounded parallelism)
             loop start every cycle in the wave, before awaiting any
@@ -194,7 +196,7 @@ the `escalation` queue in
 
 ```mermaid
 flowchart TD
-    START([POST /promotions/decide<br/>L719]) --> G1{Gate 1<br/>Separation of duties<br/>proposer_id ≠ approver.agent_id?}
+    START([POST /promotions/decide<br/>L1674]) --> G1{Gate 1<br/>Separation of duties<br/>proposer_id ≠ approver.agent_id?}
     G1 -- No --> REJ1[outcome = reject<br/>gate: separation_of_duties = fail]
     G1 -- Yes --> G2{Gate 2<br/>Risk veto?}
     G2 -- Yes --> REJ2[outcome = reject<br/>gate: risk_veto = fail]
@@ -236,7 +238,7 @@ transitions defined on the orchestrator but only exercised by tests).
 
 ```mermaid
 stateDiagram-v2
-    [*] --> monitor_only : WorkflowState() default<br/>(orchestrator.py:50)<br/>instantiated at api/main.py:78
+    [*] --> monitor_only : WorkflowState() default<br/>(orchestrator.py:50)<br/>instantiated at api/main.py:287
 
     monitor_only --> monitor_only : GET /workflow/status<br/>(read-only)
 
@@ -264,11 +266,11 @@ stateDiagram-v2
 **Key notes**
 
 - **Current behavior.** `_workflow_state = WorkflowState()` is created once
-  at module import ([`api/main.py`](../api/main.py):78) and the dataclass
+  at module import ([`api/main.py`](../api/main.py):287) and the dataclass
   default pins `mode = WorkflowMode.MONITOR_ONLY`
   ([`orchestrator.py`](../orchestrator.py):50). `GET /workflow/status`
-  ([`api/main.py`](../api/main.py):756) and `GET /workflow/queues`
-  ([`api/main.py`](../api/main.py):767) are the only endpoints that touch
+  ([`api/main.py`](../api/main.py):1807) and `GET /workflow/queues`
+  ([`api/main.py`](../api/main.py):1830) are the only endpoints that touch
   it, and both are read-only.
 - **What is defined but not called.** `InvestmentTeamOrchestrator.bootstrap`
   ([`orchestrator.py`](../orchestrator.py):69-71) (which would copy
