@@ -196,6 +196,31 @@ def _clear_security_review_cache() -> None:
             mod.clear_review_cache()
 
 
+# Same dual-identity story as ``_QA_AGENT_IDENTITIES`` above, for
+# accessibility_agent's shared review-result cache.
+_ACCESSIBILITY_AGENT_IDENTITIES = (
+    "accessibility_agent.agent",
+    "software_engineering_team.accessibility_agent.agent",
+)
+
+
+def _clear_accessibility_review_cache() -> None:
+    """Clear the accessibility-agent review-result cache on every loaded module identity.
+
+    Preconditions:
+        - None. Identities that are not present in ``sys.modules`` are skipped
+          (an unimported module cannot have populated its cache).
+
+    Postconditions:
+        - For each loaded identity in ``_ACCESSIBILITY_AGENT_IDENTITIES``, the
+          shared review-result cache namespace is empty.
+    """
+    for name in _ACCESSIBILITY_AGENT_IDENTITIES:
+        mod = sys.modules.get(name)
+        if mod is not None:
+            mod.clear_review_cache()
+
+
 def _ensure_real_modules() -> None:
     """Evict synthetic module stubs other test files may have installed.
 
@@ -372,6 +397,24 @@ def _reset_security_review_cache():
     _clear_security_review_cache()
     yield
     _clear_security_review_cache()
+
+
+@pytest.fixture(autouse=True)
+def _reset_accessibility_review_cache():
+    """Clear the process-global accessibility review-result cache around every test.
+
+    Mirrors ``_reset_qa_review_cache`` above, for the same reason: several
+    ``test_accessibility_agent*.py`` tests reuse a byte-identical
+    ``AccessibilityInput`` (or a locally-scoped dummy-client class whose name
+    — the model fingerprint's fallback identifier — collides across test
+    functions) across test functions that expect independent LLM
+    invocations. Without a reset, one test's cached outcome could be served
+    to another. Clearing an empty cache is trivially cheap, so this runs for
+    every SE test unconditionally.
+    """
+    _clear_accessibility_review_cache()
+    yield
+    _clear_accessibility_review_cache()
 
 
 def pytest_configure(config: pytest.Config) -> None:

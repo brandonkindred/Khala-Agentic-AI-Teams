@@ -13,14 +13,48 @@ import logging
 from strands import Agent
 
 from llm_service import get_strands_model
-from llm_service.strands_model import resolve_strands_model
+from llm_service.strands_model import model_fingerprint, resolve_strands_model
 from software_engineering_team.shared.persona_agent_base import run_structured_persona
+from software_engineering_team.shared.review_result_cache import ReviewResultCache
 from software_engineering_team.shared.security_service import derive_approved
 
 from .models import AccessibilityInput, AccessibilityOutput
 from .prompts import ACCESSIBILITY_PROMPT
 
 logger = logging.getLogger(__name__)
+
+_CACHE_LABEL = "Accessibility"
+
+# Shared review-result cache: keyed on the whole AccessibilityInput content
+# plus the resolved review model, so a byte-identical resubmission skips the
+# LLM call entirely. Same shared ``ReviewResultCache`` used by qa_agent's and
+# security_agent's analogous caches; this module supplies only its own
+# namespace stem, env var, capacity default, and output model.
+DEFAULT_REVIEW_CACHE_SIZE = 256  # ACCESSIBILITY_REVIEW_CACHE_SIZE, floor 0
+_REVIEW_CACHE: ReviewResultCache[AccessibilityOutput] = ReviewResultCache(
+    namespace_stem="accessibility:review:v1",
+    env_var="ACCESSIBILITY_REVIEW_CACHE_SIZE",
+    default_capacity=DEFAULT_REVIEW_CACHE_SIZE,
+    label=_CACHE_LABEL,
+    output_model=AccessibilityOutput,
+)
+
+
+def clear_review_cache() -> None:
+    """Drop every cached Accessibility review result.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - This process's view of the shared review-cache namespace is empty
+          when the call returns (best-effort across Redis). A cache backend
+          error is caught and logged rather than propagated — fails open,
+          same as every other cache operation in this module — so a broken
+          backend never breaks a caller (e.g. a test-teardown fixture)
+          forcing a cold review. Intended for tests and for callers that
+          must force a cold review.
+    """
+    _REVIEW_CACHE.clear()
 
 
 class AccessibilityExpertAgent:
@@ -35,12 +69,38 @@ class AccessibilityExpertAgent:
         )
 
     def run(self, input_data: AccessibilityInput) -> AccessibilityOutput:
-        """Review code for WCAG 2.2 compliance and produce issue list."""
+        """Review code for WCAG 2.2 compliance and produce issue list.
+
+        Preconditions:
+            - ``input_data`` is a valid :class:`AccessibilityInput`.
+        Postconditions:
+            - A cache hit (byte-identical ``AccessibilityInput`` and resolved
+              model) returns the prior result without invoking the LLM. A
+              cache miss, a disabled cache
+              (``ACCESSIBILITY_REVIEW_CACHE_SIZE=0``), or any cache backend
+              error falls open to a genuine review — never raises for a
+              cache failure. Only a genuine (non-fallback) result is written
+              back to the cache, regardless of ``approved``.
+        """
         logger.info("Accessibility: reviewing %s chars of code", len(input_data.code or ""))
+
+        model_fp = model_fingerprint(self._model)
+        if _REVIEW_CACHE.capacity() > 0:
+            cached_result = _REVIEW_CACHE.get(input_data, model_fp)
+            if cached_result is not None:
+                logger.info(
+                    "Accessibility: review cache hit; skipping LLM call (approved=%s)",
+                    cached_result.approved,
+                )
+                return cached_result
 
         user_prompt = self._build_user_prompt(input_data)
 
+        is_fallback = False
+
         def _fallback(exc: Exception) -> AccessibilityOutput:
+            nonlocal is_fallback
+            is_fallback = True
             logger.warning("Accessibility: structured_output failed (%s); returning fallback", exc)
             return AccessibilityOutput(
                 issues=[],
@@ -74,6 +134,10 @@ class AccessibilityExpertAgent:
             len(result.issues),
             result.approved,
         )
+
+        if not is_fallback:
+            _REVIEW_CACHE.put(input_data, model_fp, result)
+
         return result
 
     @staticmethod
