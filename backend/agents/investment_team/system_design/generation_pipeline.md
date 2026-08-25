@@ -115,16 +115,19 @@ a `DesignReviewAgent` LLM call.
   issue to the external `DesignReviewAgent` loop, which stays authoritative.
 - **Mechanical-repair pre-flight** (`../strategy_lab/mechanical_repair.py`,
   gated by `STRATEGY_LAB_MECHANICAL_REPAIR_ENABLED`) runs before *every*
-  review round, regardless of the readiness verdict — fully-determined,
-  semantics-preserving fixes that never cost an LLM round: coercing an
-  intraday timeframe on an asset class with no intraday data, clamping
-  `risk_limits.max_position_pct` to the shared ceiling, and a trial
+  review round — fully-determined, semantics-preserving fixes that never
+  cost an LLM round. Two stages: unconditionally, coercing an intraday
+  timeframe on an asset class with no intraday data and clamping
+  `risk_limits.max_position_pct` to the shared ceiling; then, **only on a
+  readiness-clean spec** (`orchestrator_design.py`:983-984), a trial
   `compile_strategy()` call that promotes a spec to
   `requires_custom_code=True` on `CompilerError` (or, inversely, demotes an
   over-elected custom-code spec back to the compiled path when it turns out
-  to compile cleanly — `STRATEGY_LAB_DEMOTE_COMPILABLE_CUSTOM_CODE`). Only
-  after mechanical repair exhausts its fixed scope does a critical fall
-  through to `DesignAgent.revise`.
+  to compile cleanly — `STRATEGY_LAB_DEMOTE_COMPILABLE_CUSTOM_CODE`). That
+  second stage is readiness-gated because the compiler assumes structurally
+  valid DSL — a readiness-defective spec can make `compile_strategy` raise a
+  *non*-`CompilerError`. Only after mechanical repair exhausts its fixed
+  scope does a critical fall through to `DesignAgent.revise`.
 - **`SpecReadinessGate`** (`../strategy_lab/quality_gates/spec_readiness.py`) is the
   deterministic implementability check — sizing-coherence math, timeframe
   validity, DSL completeness — invoked at `phase="design"`
@@ -243,8 +246,11 @@ the mechanism, that doc keeps the wire-level summary.
 Owned by `VerificationMixin` (`orchestrator_verification.py`):
 
 - **Walk-forward acceptance** — `AcceptanceGate.check` (`../strategy_lab/quality_gates/acceptance_gate.py`)
-  evaluates deflated Sharpe, in-sample→out-of-sample degradation, and
-  minimum OOS trade count across the backtest's walk-forward folds.
+  is a four-criteria check: deflated Sharpe, in-sample→out-of-sample
+  degradation, minimum OOS trade count, and a regime-conditional pass
+  (beats the configured benchmark in at least `min_regime_beats` of the
+  regime subwindows, default 2 of 4) — across the backtest's walk-forward
+  folds.
 - **Exit-rule conformance** — `ExitRuleConformanceGate`
   (`../strategy_lab/quality_gates/exit_rule_conformance.py`) deterministically checks that
   engine-enforced exits actually matched `spec.exit_rules`.
@@ -270,8 +276,9 @@ lost, informed by every gate result above.
 
 ## Quality gates catalog
 
-Every deterministic check in `../strategy_lab/quality_gates/` (23 files),
-with the phase that invokes it:
+Every deterministic check in `../strategy_lab/quality_gates/` (23 of the
+directory's 26 files — see the omission note below), with the phase that
+invokes it:
 
 | Gate / file | Phase | Purpose |
 |---|---|---|
@@ -283,7 +290,7 @@ with the phase that invokes it:
 | `predicate_reachability.py`: `PredicateReachabilityProbe` | synthesis | Pre-backtest, data-driven check that spec predicates can actually fire |
 | `backtest_anomaly.py`: `BacktestAnomalyDetector` | synthesis (per-round), verification (fallback) | Threshold-based anomaly detection over backtest results |
 | `alignment_checks.py`: `DeterministicAlignmentChecker` | trade-alignment loop | The seven per-rule trade-alignment checks described above |
-| `acceptance_gate.py`: `AcceptanceGate` | verification | Composite walk-forward acceptance (deflated Sharpe, IS/OOS degradation) |
+| `acceptance_gate.py`: `AcceptanceGate` | verification | Composite walk-forward acceptance (deflated Sharpe, IS/OOS degradation, OOS trade count, regime-conditional pass) |
 | `exit_rule_conformance.py`: `ExitRuleConformanceGate` | verification | Deterministic conformance of engine-enforced exits to `spec.exit_rules` |
 | `target_symbol_coverage.py`: `TargetSymbolCoverageGate` | synthesis (`check_fetch`/`check_trades`, critical failures fail the run closed before verification) and verification (`check_breadth`, softer check) | Backtest universe matches the requested target symbols |
 | `cost_stress_realism.py`: `CostStressRealismGate` | verification | Realism under cost-stress multipliers |
@@ -295,8 +302,8 @@ with the phase that invokes it:
 | `universe_injection.py` | synthesis | Deterministic post-synthesis injection of the `UNIVERSE` constant |
 | `models.py` | — | Shared `QualityGateResult` / `StrategyLabPhase` types (not a gate itself) |
 
-`code_conformance/__init__.py` and `realism/__init__.py` are package markers,
-omitted above.
+`quality_gates/__init__.py` and its two subpackage markers
+(`code_conformance/__init__.py`, `realism/__init__.py`) are omitted above.
 
 ## Record assembly (end of BACKTEST_AND_VERIFICATION)
 
