@@ -633,7 +633,11 @@ from the *current* bar; the close is never used as a decision-time fill price:
 `_qty_fraction_from_participation` `:344`). A single bar can't absorb an
 unbounded order: `raw_participation = order_notional / (bar.volume · bar.close)`;
 `qty_fraction = 1.0` if within `participation_cap` (default 10%) else
-`participation_cap / raw_participation` (missing volume → 0). The unfilled
+`participation_cap / raw_participation`. **Missing or zero volume yields a
+full fill, not a rejected one**: `_bar_dollar_volume` returns 0.0, so
+`raw_participation` is 0.0 and `_qty_fraction_from_participation` short-circuits
+to `1.0` — a deliberate fallback so daily-bar feeds without volume keep
+working. A feed that silently drops volume therefore fills orders of any size. The unfilled
 remainder follows the run's `default_unfilled_policy` (backtest
 `REQUEUE_NEXT_BAR`, paper `DROP`).
 

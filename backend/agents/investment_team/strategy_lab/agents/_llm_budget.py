@@ -101,12 +101,20 @@ def _annotate_budget_exhaustion(
 
 
 class LLMCallBudget:
-    """Counter for design-phase LLM calls within a single ``run_cycle``.
+    """Counter for budget-charged LLM calls across a whole design attempt.
 
-    Created once in ``run_cycle`` and threaded through ``_run_design_attempt``
-    → ``_run_design_loop`` → the design/review agents, so the cap is a true
-    ceiling on the whole cycle (spanning every ``MAX_DESIGN_REENTRIES``
-    re-entry), not a per-attempt allowance.
+    Despite the ``DESIGN`` in ``STRATEGY_LAB_DESIGN_MAX_LLM_CALLS``, the scope
+    is **not** the design phase alone: ``use_budget`` wraps the entire
+    ``_run_design_attempt``, so refinement (``RefinementAgent``),
+    trade-alignment (``TradeAlignmentAgent``) and zero-trade repair
+    (``ZeroTradeRepairAgent``) all charge against it too. Only
+    ``CodeSynthesisAgent`` and ``AnalysisAgent`` are genuinely uncharged.
+
+    In thread mode the budget is created once in ``run_cycle`` and spans every
+    ``MAX_DESIGN_REENTRIES`` re-entry. In Temporal mode — the supported mode —
+    a fresh instance is built inside each design-attempt activity and seeded
+    from the previous attempt's count, which preserves the ceiling across
+    re-entries but not across a Temporal activity retry.
 
     Invariants:
       * ``0 <= calls_made <= limit`` at all times.
@@ -146,10 +154,11 @@ class LLMCallBudget:
         self.calls_made += 1
 
 
-# The budget in force for the current design phase. Bound by ``use_budget``
-# in ``run_cycle`` and read by ``charge_active_budget`` at each LLM call site.
-# Default ``None`` means "no cap" — agents invoked outside a design cycle
-# (e.g. unit tests calling an agent directly) are unaffected.
+# The budget in force for the current design attempt. Bound by ``use_budget``
+# around the whole ``_run_design_attempt`` and read by ``charge_active_budget``
+# at each LLM call site. Default ``None`` means "no cap" — agents invoked
+# outside a design attempt (e.g. unit tests calling an agent directly) are
+# unaffected.
 _active_budget: contextvars.ContextVar[Optional[LLMCallBudget]] = contextvars.ContextVar(
     "strategy_lab_design_budget", default=None
 )
@@ -157,10 +166,11 @@ _active_budget: contextvars.ContextVar[Optional[LLMCallBudget]] = contextvars.Co
 
 @contextmanager
 def use_budget(budget: Optional[LLMCallBudget]) -> Iterator[None]:
-    """Bind ``budget`` as the active design-phase budget for the duration.
+    """Bind ``budget`` as the active budget for the duration.
 
     Preconditions:
-      Called once per cycle around the whole design phase (all re-entries).
+      Wraps a whole design attempt — not just its design phase — so
+      refinement, alignment and repair calls charge against it too.
     Postconditions:
       Within the ``with`` block ``charge_active_budget`` charges ``budget``;
       the prior binding is restored on exit even if the block raises.

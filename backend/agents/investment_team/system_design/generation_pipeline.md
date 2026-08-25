@@ -19,7 +19,7 @@ view and §11 (orchestrator composition).
 
 Everything below through "Record assembly" happens inside **one Temporal
 activity**, `run_design_attempt_activity`
-([`../strategy_lab/temporal/activities.py`](../strategy_lab/temporal/activities.py):935),
+(`run_design_attempt_activity` in [`../strategy_lab/temporal/activities.py`](../strategy_lab/temporal/activities.py)),
 a thin wrapper around
 `StrategyLabOrchestrator._run_design_attempt`
 (`_run_design_attempt` in [`../strategy_lab/orchestrator_design.py`](../strategy_lab/orchestrator_design.py)).
@@ -58,6 +58,14 @@ enum every attempt moves through, in order:
 DESIGN → DESIGN_REVIEW → CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION
 ```
 
+All four fire on a fresh attempt. A **checkpoint-resumed** attempt is the
+exception: `_run_design_attempt` skips `_orchestrate_design_and_review`
+entirely when `resume_spec` is set, and that method owns both design-phase
+emits — so such an attempt's transition stream starts at `CODE_SYNTHESIS →
+BACKTEST_AND_VERIFICATION`. A consumer that derives a drift baseline from the
+first transition it sees must handle that case rather than assume boundary 2
+is present.
+
 Each transition emits a `PhaseTransition` event (`class PhaseTransition`,
 `phases.py`) carrying `from_phase`, `to_phase`, a 64-char SHA-256 `spec_hash`
 (`hash_spec` — canonical-JSON of the spec, deliberately excluding
@@ -69,9 +77,10 @@ its own transition fires, not a value pinned for the rest of the attempt.
 Comparing two boundaries detects drift only where none of the carve-outs
 below applies.
 
-`spec_hash` is frozen post-design apart from **three** carve-outs, all of
-which occur inside the synthesis loop and therefore land on the
-`CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION` boundary:
+`spec_hash` is frozen post-design apart from **three** carve-outs. All three
+land on the `CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION` boundary, but only
+(1) and (2) are inside `_run_synthesis_loop` — (3) fires earlier, in
+`_synthesize_initial_code`, before the loop is entered:
 
 1. the refinement loop accepting a **tighten-only** `risk_limits` update
    (`_apply_updates` → `_merge_risk_limits_tighten_only`);
@@ -190,7 +199,7 @@ between retries and budgets, and the parse/clamp rules).
 per spec:
 
 - **Compiled DSL (default / preferred path)** — `compile_strategy(spec)`
-  (`../strategy_lab/synthesis/compiler.py`:94) deterministically compiles the
+  (`compile_strategy` in `../strategy_lab/synthesis/compiler.py`) deterministically compiles the
   structured `entry_rules`/`exit_rules`/`sizing` DSL into a thin `on_bar`
   shim. All entry/exit decisions are made **engine-side** by
   `_EngineEntryDispatcher`/`_EngineExitDispatcher`
@@ -291,7 +300,7 @@ Owned by `VerificationMixin` (`orchestrator_verification.py`):
 
 The **winner label** is a simple deterministic threshold —
 `is_winning = execution_succeeded and trades and annualized_return_pct >= 8.0`
-(`WINNING_THRESHOLD`, `../models.py`:30) — independent of every gate above. The
+(`WINNING_THRESHOLD` in `../models.py`) — independent of every gate above. The
 **publishable gate** is what actually decides paper-trading eligibility:
 `is_publishable = is_winning and realism_passed and trades_aligned and
 exit_rule_conformance_passed and not lookahead_violation`. Both the exact
@@ -324,13 +333,13 @@ the table.
 | Gate / file | Phase | Purpose |
 |---|---|---|
 | `strategy_validator.py`: `StrategySpecValidator` | design, synthesis <sup>a</sup> | Deterministic field-level validation of `StrategySpec` |
-| `spec_readiness.py`: `SpecReadinessGate` | design, re-checked at synthesis round 0 | The implementability gate that decides design-loop readiness (sizing coherence, timeframe validity, DSL completeness) |
+| `spec_readiness.py`: `SpecReadinessGate` | design, synthesis <sup>f</sup> | The implementability gate that decides design-loop readiness (sizing coherence, timeframe validity, DSL completeness) |
 | `code_safety.py` (+ `code_safety_ast.py`): `CodeSafetyChecker` | synthesis, and verification (alignment-proposal re-check) | AST + regex safety scan of generated strategy Python |
 | `code_conformance/gate.py` (+ `ast_helpers.py`): `CodeConformanceGate` | synthesis | Deterministic spec→code conformance, incl. custom-code faithfulness checks |
 | `predicate_conformance.py` (+ `predicate_conformance_fixtures.py`, `conformance_bars.py`): `PredicateConformanceGate` | synthesis, re-checked at verification | Pre-execution predicate-conformance shadow check against synthetic bars |
 | `predicate_reachability.py`: `PredicateReachabilityProbe` | synthesis | Pre-backtest, data-driven check that spec predicates can actually fire |
 | `backtest_anomaly.py`: `BacktestAnomalyDetector` | synthesis, verification <sup>b</sup> | Threshold-based anomaly detection over backtest results |
-| `alignment_checks.py`: `DeterministicAlignmentChecker` | trade-alignment loop | The seven per-rule trade-alignment checks described above |
+| `alignment_checks.py`: `DeterministicAlignmentChecker` | verification <sup>e</sup> | The seven per-rule trade-alignment checks described above |
 | `acceptance_gate.py`: `AcceptanceGate` | verification | Composite walk-forward acceptance (deflated Sharpe, IS/OOS degradation, OOS trade count, regime-conditional pass) |
 | `exit_rule_conformance.py`: `ExitRuleConformanceGate` | verification | Deterministic conformance of engine-enforced exits to `spec.exit_rules` |
 | `target_symbol_coverage.py`: `TargetSymbolCoverageGate` | synthesis, verification <sup>c</sup> | Backtest universe matches the requested target symbols |
@@ -339,30 +348,41 @@ the table.
 | `realism/regime_coverage.py`: `RegimeCoverageGate` | verification | Coverage across market regimes |
 | `realism/trade_clustering.py`: `TradeClusteringGate` | verification | Detects unrealistic trade clustering |
 | `realism/rule_firing.py`: `RuleFiringRateGate` | verification | Spec-rule firing-rate realism |
-| `convergence_tracker.py`: `ConvergenceTracker` | record assembly <sup>d</sup> | Stall/diversity/failure directives fed into design prompts |
+| `convergence_tracker.py`: `ConvergenceTracker` | — <sup>d</sup> | Stall/diversity/failure directives fed into design prompts |
 | `universe_injection.py` | synthesis | Deterministic post-synthesis injection of the `UNIVERSE` constant |
 | `models.py` | — | Shared `QualityGateResult` / `StrategyLabPhase` types (not a gate itself) |
 
 <sup>a</sup> Two methods, three call sites. `check_hypothesis_rules(spec,
 phase="design")` is the hypothesis-vs-rules consistency check feeding
 `DesignReviewAgent` (`orchestrator_design.py`). `validate(spec)` runs
-pre-synthesis (`orchestrator_synthesis.py:203`, defaulting to the same
-`phase="design"`), and again on a repaired spec at `zero_trade_repair.py:509`
+pre-synthesis (the pre-synthesis call in `orchestrator_synthesis.py`, defaulting to the same
+`phase="design"`), and again on a repaired spec at `zero_trade_repair.py`
 tagged `phase="synthesis"`. Readiness is a different gate — `SpecReadinessGate`,
 next row.
 
-<sup>b</sup> Three call sites: per refinement round
-(`orchestrator_synthesis.py:938`, `phase="synthesis"`); unconditionally after
-every trade-alignment round (`orchestrator_alignment.py:653`,
-`phase="verification"`); and the walk-forward-failure fallback recheck with
-`dsr_aware=False` (`orchestrator_verification.py:357`).
+<sup>b</sup> Four call sites: per refinement round (`orchestrator_synthesis.py`,
+`phase="synthesis"`); unconditionally after every trade-alignment round
+(`orchestrator_alignment.py`, `phase="verification"`); the walk-forward-failure
+fallback recheck with `dsr_aware=False` (`orchestrator_verification.py`); and
+inside zero-trade repair (`zero_trade_repair.py`), which passes no `phase=` and
+so takes the `"synthesis"` default, emitting `zero_trade_repair_`-prefixed rows.
 
 <sup>c</sup> `check_fetch`/`check_trades` run at synthesis, where a critical
 failure fails the run closed before verification; `check_breadth` is a softer
 verification-phase check.
 
-<sup>d</sup> `record()` is called per-attempt inside `RecordAssemblyMixin`
-(`orchestrator_record_assembly.py:276` and `:399`) — the same activity scope as
+<sup>e</sup> `check()` runs its whole body inside
+`with self._using_phase("verification")`, so every finding it emits is stamped
+`phase="verification"` — there is no `"trade-alignment"` tag to grep for,
+even though the loop that drives it is the trade-alignment loop.
+
+<sup>f</sup> Stamped `"design"` in the design loop and `"synthesis"` on the
+round-0 re-check.
+
+<sup>d</sup> `ConvergenceTracker` stamps no phase — `record()` files an
+outcome rather than emitting a `QualityGateResult`. It is called per-attempt
+inside `RecordAssemblyMixin`
+(`orchestrator_record_assembly.py`) — the same activity scope as
 everything else here, not a batch-level step. The directives it *derives* are
 what carry across cycles; batch-level merging is a separate step
 (`merge_wave_results_activity`).
@@ -386,7 +406,7 @@ and derives the three-state `code_path`
 drift ledgers (`spec_history`, `code_history`, `gate_timeline` — exactly the
 three `_DriftCollector` fields) accumulate via the
 copy-on-entry/commit-on-completion `_DriftCollector`
-(`_orchestrator_helpers.py`:322) — see
+(`_orchestrator_helpers.py`) — see
 [`../strategy_lab/RETRY_STATE_ISOLATION.md`](../strategy_lab/RETRY_STATE_ISOLATION.md)
 for exactly how that isolates one design attempt's drift from the next
 attempt's, and from a Temporal activity retry of the same attempt.
@@ -463,11 +483,12 @@ flowchart TB
         CS -->|yes: compiled DSL| SYN
         CS -->|CompilerError:<br/>requires_custom_code=True| CSA
         CSA --> SYN
-        SYN[Synthesis gates:<br/>CodeSafety · CodeConformance ·<br/>PredicateConformance · Reachability ·<br/>TargetSymbolCoverage]
+        SYN[Pre-execution synthesis gates:<br/>CodeSafety · CodeConformance ·<br/>PredicateConformance · Reachability ·<br/>TargetSymbolCoverage.check_fetch]
         SYN -->|fail| RF[RefinementAgent]
         RF --> SYN
         SYN -->|pass| BT[Execute in sandbox<br/>→ trade ledger]
-        BT --> EV{critical anomaly<br/>or zero trades?}
+        BT --> POST[Post-execution, still synthesis phase:<br/>TargetSymbolCoverage.check_trades]
+        POST --> EV{critical anomaly<br/>or zero trades?}
         EV -->|zero-trade| ZTRA[ZeroTradeRepairAgent]
         ZTRA --> BT
         EV -->|other anomaly| RF

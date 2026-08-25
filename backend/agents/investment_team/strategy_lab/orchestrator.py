@@ -549,12 +549,14 @@ class StrategyLabOrchestrator(
             ``status='failed: spec_unimplementable'``.
 
         Invariants:
-          - ``spec_hash`` on transitions is stable from the
-            ``DESIGN_REVIEW → CODE_SYNTHESIS`` boundary onward within a
-            single design attempt (spec frozen post-design).
-          - ``code_hash`` on transitions is stable from the
-            ``CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION`` boundary onward
-            within a single design attempt.
+          - ``spec_hash``/``code_hash`` on transitions are **boundary
+            snapshots**, not values pinned for the rest of the attempt.
+            Both are broadly stable post-design, but each has documented
+            carve-outs (a zero-trade repair committing ``risk_limits``
+            without a tighten-only guard; a ``requires_custom_code`` flip
+            on compiler fallback; an alignment-committed code rewrite).
+            :class:`~investment_team.strategy_lab.phases.PhaseTransition`
+            owns the authoritative list — do not restate it here.
         """
         emit = on_phase or (lambda phase, data: None)
 

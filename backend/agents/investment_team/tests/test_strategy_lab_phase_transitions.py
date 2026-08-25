@@ -7,7 +7,11 @@ These tests drive a real ``StrategyLabOrchestrator`` through
 * On the happy path, exactly four transitions fire in the order
   ``DESIGN → DESIGN_REVIEW → CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION → ∅``.
 * The ``spec_hash`` is stable across every transition emitted after
-  the design phase exits — i.e. no downstream phase mutates the spec.
+  the design phase exits, **for these happy-path fixtures**. This is not
+  a universal invariant: ``PhaseTransition`` documents three carve-outs
+  (zero-trade repair committing ``risk_limits``, a tighten-only
+  refinement merge, and a ``requires_custom_code`` flip on compiler
+  fallback) that none of these stubs exercise.
 * The ``code_hash`` recorded at the synthesis exit boundary matches the
   SHA-256 of the synthesised code string.
 * Critical ``SpecReadinessGate`` failure blocks the ``DESIGN_REVIEW →
@@ -222,9 +226,17 @@ def test_run_cycle_emits_exactly_four_phase_transitions(
 def test_spec_hash_stable_after_design_review_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The spec is frozen post-design; ``spec_hash`` on every transition
-    from the ``DESIGN_REVIEW → CODE_SYNTHESIS`` boundary onward must be
-    equal — any drift indicates a downstream phase mutated the spec."""
+    """On this happy-path fixture the spec is not mutated post-design, so
+    ``spec_hash`` from the ``DESIGN_REVIEW → CODE_SYNTHESIS`` boundary
+    onward must be equal.
+
+    Scope: this asserts the *fixture's* behaviour, not a universal
+    invariant. ``PhaseTransition`` documents three legitimate carve-outs
+    that mutate the spec inside the synthesis phase; a fixture that
+    exercises any of them would produce a different — and correct —
+    hash at the CODE_SYNTHESIS exit boundary. Extend rather than
+    "fix" this assertion if you add such a case.
+    """
     orch = StrategyLabOrchestrator()
     _stub_pipeline_for_happy_path(monkeypatch, orch)
 
@@ -235,7 +247,8 @@ def test_spec_hash_stable_after_design_review_exit(
     # Boundary 2 onward the spec is frozen.
     post_design_hashes = {t["spec_hash"] for t in transitions[1:]}
     assert len(post_design_hashes) == 1, (
-        f"spec_hash drift detected after design review — distinct hashes: {post_design_hashes!r}"
+        "spec_hash changed after design review on a fixture that exercises "
+        f"none of PhaseTransition's documented carve-outs — distinct hashes: {post_design_hashes!r}"
     )
 
 
