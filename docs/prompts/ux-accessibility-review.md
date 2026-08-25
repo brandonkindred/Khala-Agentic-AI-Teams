@@ -18,9 +18,9 @@ repo-specific references are load-bearing elsewhere too. Adapt all of these:
   `backend/agents/accessibility_audit_team/wcag_criteria.py`, a Khala backend file
   that does not exist elsewhere — drop it and send the reviewer straight to the
   specification
-- §7 House constraints — the whole section
 - §5 Output format — the Verification bullet defers to §7's spec-selection rule, and
   the state table is pinned to the fourteen states of §3D
+- §7 House constraints — the whole section
 - §8 Do not report — the `expectNoAxeViolations` harness assumptions (the SCSS
   contrast guard is a §2 item, covered by adapting that section whole)
 
