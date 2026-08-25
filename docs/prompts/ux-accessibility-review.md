@@ -99,7 +99,9 @@ for primitive defects you deliberately chose not to pursue at all.
     work — around 90 raw-hex `color:` declarations across some 28 distinct values sit
     in `src/app` today, `#fff` only a handful of them. Measure it yourself with
     `grep -rhoE 'color: *#[0-9a-fA-F]{3,6}' user-interface/src/app --include=*.scss`
-    rather than assuming CI caught it. Its `BURNDOWN` allowlist IS empty, and its
+    rather than assuming CI caught it — approximate, since `grep -E` cannot express
+    the guard's `(?<![-\w])` anchor and so would also count a `background-color` or
+    `border-color` (there are none today), nor match an 8-digit alpha hex. Its `BURNDOWN` allowlist IS empty, and its
     docstring forbids adding entries to silence a failure, so never propose adding or
     removing one. `#fff` is the single gap the spec documents explicitly ("joins the
     set in the Phase-2 token sweep"), which makes a bare `color: #fff` queued debt
@@ -480,8 +482,9 @@ D. STATE COVERAGE
        server-stamped `last_activity_at`, so it measures job-side activity (which
        keeps advancing while the browser view is frozen) and returns nothing at all
        for a once-fetched list like `llm-config` or `integrations`. It fits only a
-       job-backed view — and §3B already assigns it to the STALLED state, so naming
-       it here risks conflating two states this section insists are distinct. For
+       job-backed view, and there it belongs to the STALLED state (§3B reaches the
+       same helper through the `stall-warning` component), so naming it for
+       stale-data risks conflating two states this section insists are distinct. For
        every other page the recommendation is a rendered fetched-at timestamp or an
        explicit refresh affordance, not this helper.
    The five failure states are a PARTITION, not overlapping labels — classify each
@@ -661,11 +664,13 @@ Close with:
 
   - No new dependencies. Angular 19 standalone components, SCSS, existing `--kh-*`
     tokens, existing shared primitives.
-  - ARIA in templates — follow `ACCESSIBILITY.md`'s "attr. prefix" rule as written:
+  - ARIA in templates — follow `ACCESSIBILITY.md`'s "ARIA attribute form" rule as
+    written:
     it states a preference for NEW code (plain attribute for a constant,
     `[attr.aria-*]` for a computed value) and explicitly declines to enforce it
-    retroactively. BOTH ARE CORRECT and both are in wide use — dozens of existing
-    templates bind a constant through `[attr.aria-*]` — so file no finding for a
+    retroactively. BOTH ARE CORRECT and both are in wide use — a couple of dozen
+    templates carry constant values bound through `[attr.aria-*]` — so file no
+    finding for a
     conversion in EITHER direction; that is a no-op refactor and the kind of style
     preference §8 forbids. If you think one form should govern everywhere, raise it
     under §5's Open questions rather than filing per-attribute findings.

@@ -9,6 +9,68 @@ from accessibility_audit_team.wcag_criteria import (
     get_criterion,
 )
 
+# The complete WCAG 2.2 Level A and AA sets. 4.1.1 Parsing is absent from Level A
+# because WCAG 2.2 removed it.
+LEVEL_A_WCAG_22 = {
+    "1.1.1",
+    "1.2.1",
+    "1.2.2",
+    "1.2.3",
+    "1.3.1",
+    "1.3.2",
+    "1.3.3",
+    "1.4.1",
+    "1.4.2",
+    "2.1.1",
+    "2.1.2",
+    "2.1.4",
+    "2.2.1",
+    "2.2.2",
+    "2.3.1",
+    "2.4.1",
+    "2.4.2",
+    "2.4.3",
+    "2.4.4",
+    "2.5.1",
+    "2.5.2",
+    "2.5.3",
+    "2.5.4",
+    "3.1.1",
+    "3.2.1",
+    "3.2.2",
+    "3.3.1",
+    "3.3.2",
+    "3.3.7",
+    "3.2.6",
+    "4.1.2",
+}
+LEVEL_AA_WCAG_22 = {
+    "1.2.4",
+    "1.2.5",
+    "1.3.4",
+    "1.3.5",
+    "1.4.3",
+    "1.4.4",
+    "1.4.5",
+    "1.4.10",
+    "1.4.11",
+    "1.4.12",
+    "1.4.13",
+    "2.4.5",
+    "2.4.6",
+    "2.4.7",
+    "2.4.11",
+    "2.5.7",
+    "2.5.8",
+    "3.1.2",
+    "3.2.3",
+    "3.2.4",
+    "3.3.3",
+    "3.3.4",
+    "3.3.8",
+    "4.1.3",
+}
+
 
 def _get_criterion(sc_id: str):
     return WCAG_22_CRITERIA.get(sc_id)
@@ -105,26 +167,36 @@ def test_parsing_criterion_absent():
     assert get_criterion("4.1.1") is None
 
 
-def test_level_counts_match_wcag_22():
-    """Pin all three coverage counts the module docstring states.
+def test_level_a_and_aa_sets_are_complete():
+    """Pin the A and AA sets by MEMBERSHIP, not cardinality.
 
-    WCAG 2.2 defines 31 Level A and 24 Level AA criteria, and this table carries
-    both sets complete. It carries 3 of the 31 Level AAA criteria by choice. A
-    count that drifts in either direction means a criterion was dropped, added, or
-    mis-levelled — the assertion messages name the criteria so the diff is visible
-    without hand-diffing a 58-entry table.
+    The module docstring states these are the complete WCAG 2.2 sets. A count alone
+    would miss a swap — mis-numbering one key, or mis-levelling one criterion in each
+    direction, keeps the totals right while the set is wrong. Comparing sets makes
+    pytest print the symmetric difference, naming the criterion that drifted.
 
     Preconditions:
         None.
 
     Postconditions:
-        Asserts the three counts; does not mutate the table.
+        Asserts both sets exactly; does not mutate the table.
     """
-    for level, expected in ((WCAGLevel.A, 31), (WCAGLevel.AA, 24), (WCAGLevel.AAA, 3)):
-        numbers = sorted(sc.sc for sc in get_criteria_by_level(level))
-        assert len(numbers) == expected, (
-            f"Level {level.value}: expected {expected}, got {len(numbers)}: {numbers}"
-        )
+    assert {sc.sc for sc in get_criteria_by_level(WCAGLevel.A)} == LEVEL_A_WCAG_22
+    assert {sc.sc for sc in get_criteria_by_level(WCAGLevel.AA)} == LEVEL_AA_WCAG_22
+
+
+def test_level_aaa_is_deliberately_partial():
+    """AAA coverage is 3 of WCAG 2.2's 31, by choice rather than omission-as-bug.
+
+    Pinned so the module docstring's third coverage claim cannot drift unnoticed.
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Asserts the AAA set; does not mutate the table.
+    """
+    assert {sc.sc for sc in get_criteria_by_level(WCAGLevel.AAA)} == {"2.4.12", "2.4.13", "3.3.9"}
 
 
 def test_f109_only_on_accessible_authentication():

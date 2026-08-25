@@ -22,8 +22,12 @@ Invariants:
   - Level A holds 31 entries and Level AA holds 24 — the complete WCAG 2.2
     sets. Level AAA is partial (3 of 31) by choice, not by omission-as-bug.
   - 4.1.1 Parsing is absent: WCAG 2.2 removed it.
-  - Accessors returning lists hand back a cached list object; callers must
-    treat it as read-only.
+  - The ``lru_cache``-decorated accessors (``get_criteria_by_level``,
+    ``get_criteria_by_principle``, ``get_level_a_aa_criteria``,
+    ``get_new_in_22_criteria``, ``get_new_in_21_criteria``) hand every caller the
+    same list object, so callers must treat their results as read-only.
+    ``get_all_sc_numbers`` and ``get_guideline_criteria`` are uncached and build a
+    fresh list per call.
 """
 
 import functools
