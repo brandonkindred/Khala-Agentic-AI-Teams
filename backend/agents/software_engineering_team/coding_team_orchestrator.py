@@ -104,7 +104,8 @@ def _build_review_evidence(summary: str, diff: str) -> str:
 
     The reviewer must see the complete change to judge it; the diff is never truncated. If the
     evidence genuinely exceeds the model context, the review call fails and the caller fails that
-    single task cleanly (see ``_review_and_merge``) rather than silently reviewing partial evidence.
+    single task cleanly (see ``CodingTeamSwarm._review_and_merge``) rather than silently reviewing
+    partial evidence.
 
     Postconditions:
         - The full summary and the full diff (when present) both appear verbatim in the result.
@@ -591,6 +592,87 @@ def _assign_and_implement(
     return swarm
 
 
+def _review_and_merge(*, coord: GraphPersistCoordinator, swarm: "CodingTeamSwarm") -> None:
+    """Interpret the finished swarm's outcome and record the pipeline's terminal job status.
+
+    Extracted from ``run_coding_team_orchestrator`` so the post-run outcome bookkeeping — merged/
+    failed task tallies and the already-complete/completed/completed-with-failures status decision
+    — is defined once, isolated from plan/grooming/Task Graph setup (``_plan_and_groom``) and from
+    the assign/implement round loop (``_assign_and_implement``).
+
+    This function does not perform the per-round Tech Lead code review, approve/merge, or
+    rejection-feedback loop itself — that mechanic is ``CodingTeamSwarm._review_and_merge`` (see
+    ``swarm_review.py``'s ``_ReviewMixin``), which already ran as part of ``swarm.run()`` inside
+    ``_assign_and_implement`` before this function is ever called. This function only reads the
+    graph's final task states to decide, and durably record, the pipeline's own terminal outcome.
+
+    Preconditions:
+        - ``swarm`` is the already-run ``CodingTeamSwarm`` returned by ``_assign_and_implement``
+          (``swarm.run(...)`` has completed, normally or via cancellation/abort); ``coord.graph``
+          holds that run's final task states.
+    Postconditions:
+        - When ``swarm.aborted`` is set (a pause ended without answers), returns immediately without
+          writing any status — the pause cycle has already recorded the failure status, and this
+          function must not overwrite it with a completion status.
+        - Otherwise, writes exactly one terminal ``coord.update(...)``: ``ALREADY_COMPLETE`` when
+          every task is terminal, none failed, at least one merged, and every merged task was
+          ``resolved_without_changes`` (no real diff landed); else ``COMPLETED_WITH_FAILURES`` when
+          any task failed, else ``COMPLETED`` — in every case with ``phase="completed"``,
+          ``progress=100``, and ``current_activity=None``.
+    """
+    graph = coord.graph
+
+    # A worker raising a decision that ended without answers (terminal/timeout) aborts the swarm;
+    # the pause cycle has already set the failure status, so do not overwrite it with "completed".
+    if getattr(swarm, "aborted", False):
+        return
+
+    all_tasks = graph.get_tasks()
+    merged_tasks = [t for t in all_tasks if t.status == TaskStatus.MERGED]
+    merged_count = len(merged_tasks)
+    failed_count = graph.count_with_status(TaskStatus.FAILED)
+    # Tasks the Tech Lead adjudicated as already-done (terminal MERGED but no real diff landed).
+    resolved_count = sum(1 for t in merged_tasks if t.resolved_without_changes)
+    # When nothing failed and every "merged" task was actually already-done (no real changes
+    # landed), the issue's work was already complete — report that distinct terminal status so the
+    # publish flow recommends closure instead of opening a no-op PR. A mixed result (some real
+    # merges) stays a normal completion and publishes the real work.
+    #
+    # Require EVERY task to be terminal (MERGED or FAILED) before claiming already-complete: the
+    # swarm loop can exit at max_rounds with a task still TO_DO/IN_PROGRESS/IN_REVIEW, and reporting
+    # already_complete there (recommend-closing, no PR) would abandon genuinely unfinished work.
+    # Since this branch also requires failed_count == 0, "all terminal" means all MERGED.
+    all_terminal = (merged_count + failed_count) == len(all_tasks)
+    already_complete = (
+        all_terminal and failed_count == 0 and merged_count > 0 and resolved_count == merged_count
+    )
+    # A job with failed tasks must not be presented as a clean success — surface a distinct
+    # terminal status so downstream consumers (and the GitHub publish flow) can flag the gap.
+    # current_activity=None travels in the terminal write itself so a transient
+    # failure of an earlier best-effort clear cannot leave a terminal job serving
+    # a stale mid-review activity entry.
+    if already_complete:
+        coord.update(
+            status=JobStatus.ALREADY_COMPLETE.value,
+            phase="completed",
+            status_text="Work already complete; no changes needed",
+            already_complete=True,
+            completion_evidence="The requested work was already present; no changes were needed.",
+            progress=100,
+            current_activity=None,
+        )
+        return
+    coord.update(
+        status=(
+            JobStatus.COMPLETED_WITH_FAILURES.value if failed_count else JobStatus.COMPLETED.value
+        ),
+        phase="completed",
+        status_text=f"Completed: {merged_count} merged, {failed_count} failed",
+        progress=100,
+        current_activity=None,
+    )
+
+
 def run_coding_team_orchestrator(
     job_id: str,
     repo_path: str | Path,
@@ -809,62 +891,8 @@ def run_coding_team_orchestrator(
             pause_cycle=_pause_cycle,
             pause_strategy=pause_strategy,
         )
-        graph = coord.graph
 
-        # A worker raising a decision that ended without answers (terminal/timeout) aborts the swarm;
-        # the pause cycle has already set the failure status, so do not overwrite it with "completed".
-        if getattr(swarm, "aborted", False):
-            return
-
-        all_tasks = graph.get_tasks()
-        merged_tasks = [t for t in all_tasks if t.status == TaskStatus.MERGED]
-        merged_count = len(merged_tasks)
-        failed_count = graph.count_with_status(TaskStatus.FAILED)
-        # Tasks the Tech Lead adjudicated as already-done (terminal MERGED but no real diff landed).
-        resolved_count = sum(1 for t in merged_tasks if t.resolved_without_changes)
-        # When nothing failed and every "merged" task was actually already-done (no real changes
-        # landed), the issue's work was already complete — report that distinct terminal status so the
-        # publish flow recommends closure instead of opening a no-op PR. A mixed result (some real
-        # merges) stays a normal completion and publishes the real work.
-        #
-        # Require EVERY task to be terminal (MERGED or FAILED) before claiming already-complete: the
-        # swarm loop can exit at max_rounds with a task still TO_DO/IN_PROGRESS/IN_REVIEW, and reporting
-        # already_complete there (recommend-closing, no PR) would abandon genuinely unfinished work.
-        # Since this branch also requires failed_count == 0, "all terminal" means all MERGED.
-        all_terminal = (merged_count + failed_count) == len(all_tasks)
-        already_complete = (
-            all_terminal
-            and failed_count == 0
-            and merged_count > 0
-            and resolved_count == merged_count
-        )
-        # A job with failed tasks must not be presented as a clean success — surface a distinct
-        # terminal status so downstream consumers (and the GitHub publish flow) can flag the gap.
-        # current_activity=None travels in the terminal write itself so a transient
-        # failure of an earlier best-effort clear cannot leave a terminal job serving
-        # a stale mid-review activity entry.
-        if already_complete:
-            coord.update(
-                status=JobStatus.ALREADY_COMPLETE.value,
-                phase="completed",
-                status_text="Work already complete; no changes needed",
-                already_complete=True,
-                completion_evidence="The requested work was already present; no changes were needed.",
-                progress=100,
-                current_activity=None,
-            )
-            return
-        coord.update(
-            status=(
-                JobStatus.COMPLETED_WITH_FAILURES.value
-                if failed_count
-                else JobStatus.COMPLETED.value
-            ),
-            phase="completed",
-            status_text=f"Completed: {merged_count} merged, {failed_count} failed",
-            progress=100,
-            current_activity=None,
-        )
+        _review_and_merge(coord=coord, swarm=swarm)
     except _ActivityPauseSignal as sig:
         # Raised only under pause_strategy="return" (see _run_pause_cycle) — a HITL gate paused
         # somewhere in this call's stack (the entry-gate call above, _plan_with_hitl's loop, or a
@@ -1166,7 +1194,7 @@ class CodingTeamSwarm(
                 _persist()
 
                 # Workers: implement + quality gates, each isolated to its own git worktree.
-                # Reviews already fan out this way (see _review_and_merge) — compute concurrently
+                # Reviews already fan out this way (see CodingTeamSwarm._review_and_merge) — compute concurrently
                 # when there is more than one active worker this round, run inline with live
                 # progress when there is at most one (the common case: the roster is usually
                 # 2 workers with disjoint stacks, and a round rarely has both active at once).
