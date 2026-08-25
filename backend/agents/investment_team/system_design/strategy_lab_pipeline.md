@@ -150,7 +150,7 @@ rather than assert on an unknown name. The rows:
 | `paper_trading_complete` | Paper trading finished successfully | `{ session_id, verdict, trade_count }` |
 | `paper_trading_skipped` | Paper trading did not run | `{ reason, detail? }` |
 | `paper_trading_failed` | Paper trading raised an exception (non-fatal) | `{ detail }` |
-| `complete` | Design attempt finished and the record assembled (emitted by `RecordAssemblyMixin`, before the finalize/persist step) | `{ record_id, is_winning, is_publishable, metrics, refinement_rounds, alignment_rounds, trades_aligned, phase_back_count }` — the short-circuit variant swaps in `short_circuit` |
+| `complete` | Design attempt finished and the record assembled (emitted by `RecordAssemblyMixin`, before the finalize/persist step) | Normal: `{ record_id, is_winning, is_publishable, metrics, refinement_rounds, alignment_rounds, trades_aligned, phase_back_count }`. Short-circuit (never reached a backtest): `{ record_id, is_winning: false, is_publishable: false, metrics, refinement_rounds, short_circuit: <status string>, phase_back_count }` — `alignment_rounds`/`trades_aligned` are omitted, not `false`, and `short_circuit` carries the short-circuit status string (e.g. `"failed: spec_unimplementable"`), not a boolean. |
 
 UI clients should treat unknown phase names as opaque and ignore them.
 

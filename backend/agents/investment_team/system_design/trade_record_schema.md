@@ -32,7 +32,7 @@ them uniformly.
 | `entry_order_type` | `str` | Order type used for entry. `market`, `limit`, `stop`, and `stop_limit` are live and each derives its own reference price in `RealisticExecutionModel.compute_fill_terms`. `trailing_stop` also appears, but is not a fifth reference-price rule and is not an entry type: `FillSimulator` rewrites it into a `STOP` at the ratcheted `effective_stop_price` before pricing, and it is used as a stop-loss child (an exit). |
 | `exit_order_type` | `str` | Order type used for exit — same semantics. |
 | `gross_pnl` | `float` | P/L before transaction costs: `shares × (exit_fill - entry_fill)` (sign-flipped for shorts). |
-| `net_pnl` | `float` | P/L after transaction costs, charged on entry and exit notional **separately**: `(entry_notional + exit_notional) × cost_bps/10000`. This is the canonical P/L used to drive `outcome`, `cumulative_pnl`, and aggregate metrics. |
+| `net_pnl` | `float` | P/L after transaction costs: `gross_pnl − tx_cost`, where `tx_cost = (entry_notional + exit_notional) × cost_bps/10000` (charged on entry and exit notional **separately**, then summed). This is the canonical P/L used to drive `outcome`, `cumulative_pnl`, and aggregate metrics. |
 | `return_pct` | `float` | Per-trade return in percent, **net** of costs and over entry notional: `net_pnl / (entry_fill_price × shares) × 100`. |
 | `hold_days` | `int` | Calendar days between `entry_date` and `exit_date` (floor of 1). |
 | `outcome` | `str` | `"win"` if `net_pnl > 0`, else `"loss"`. |
