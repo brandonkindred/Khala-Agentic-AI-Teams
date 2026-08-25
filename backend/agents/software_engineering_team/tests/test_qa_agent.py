@@ -185,20 +185,27 @@ def test_multiple_run_calls_on_same_instance_succeed() -> None:
 
 
 def test_user_prompt_contains_file_context_and_role_instructions() -> None:
-    """The user prompt carries both the file-context prefix (language + code
+    """The user prompt carries the file-context prefix (language + code
     under review) and the role instructions. Untrusted code must stay in the
-    user message, not be elevated to system-level instructions."""
+    user message, not be elevated to system-level instructions. The trusted
+    task_description is elevated out of the user prompt to a
+    CacheBreakpoint-marked system_prompt_content segment instead — see
+    ``test_qa_gate_keeps_file_context_in_user_prompt`` in
+    ``test_gate_cache_bp.py``."""
     prompt = QAExpertAgent._build_user_prompt(_input())
     # Role instructions are present
     assert "Review the code for bugs" in prompt
-    assert "**Task:**" in prompt
     # File-context prefix IS in the user prompt (untrusted code stays here)
     assert "def add(a, b)" in prompt
     assert "**Language:**" in prompt
+    # The trusted task description is no longer in the user prompt.
+    assert "**Task:**" not in prompt
 
 
-def test_user_prompt_includes_architecture_run_instructions_and_build_errors() -> None:
-    """Optional role-instruction sections are still in the user prompt."""
+def test_user_prompt_includes_run_instructions_and_build_errors() -> None:
+    """Optional role-instruction sections are still in the user prompt.
+    Architecture is elevated to the CacheBreakpoint system segment (see
+    ``test_gate_cache_bp.py``) and no longer appears here."""
     prompt = QAExpertAgent._build_user_prompt(
         _input(
             architecture=SystemArchitecture(overview="layered"),
@@ -206,11 +213,12 @@ def test_user_prompt_includes_architecture_run_instructions_and_build_errors() -
             build_errors="SyntaxError: bad",
         )
     )
-    assert "**Architecture:**" in prompt
     assert "**Run instructions:**" in prompt
     assert "**Build/compiler errors:**" in prompt
     # File-context prefix IS in the user prompt
     assert "def add(a, b)" in prompt
+    # The trusted architecture overview is no longer in the user prompt.
+    assert "**Architecture:**" not in prompt
 
 
 def test_qa_expert_agent_falls_back_on_validation_error() -> None:
