@@ -121,10 +121,13 @@ sequenceDiagram
 
             loop design-re-entry (bounded, on spec-implementability failure)
                 CycleWF->>Attempt: run_design_attempt_activity
-                Attempt->>LLM: design ↔ review → (custom code synthesis,<br/>if selected) → refinement → alignment →<br/>analysis (see generation_pipeline.md)
-                LLM-->>Attempt: spec, and code/critiques/narrative<br/>from the agent stages that call it
-                Attempt->>Attempt: compile_strategy() deterministically<br/>synthesizes code for the default DSL path<br/>(no LLM call)
+                Attempt->>LLM: design ↔ review (DesignAgent/DesignReviewAgent)
+                LLM-->>Attempt: converged spec
+                Attempt->>Attempt: compile_strategy() deterministically<br/>synthesizes code for the default DSL path<br/>(no LLM call), or CodeSynthesisAgent for<br/>a custom-code spec
                 Attempt->>Attempt: execute strategy_code in the<br/>sandboxed TradingService — trade ledger<br/>is engine output, not an LLM response
+                Attempt->>LLM: RefinementAgent (on a synthesis-gate<br/>or execution failure) → re-executes<br/>after each proposed fix
+                Attempt->>LLM: TradeAlignmentAgent (needs the<br/>produced trade ledger) → may re-execute<br/>a committed fix
+                Attempt->>LLM: AnalysisAgent (after the deterministic<br/>verification gates)
                 Attempt-->>CycleWF: record | reentry | skipped
             end
 
@@ -132,7 +135,7 @@ sequenceDiagram
             Note over BatchWF,CycleWF: asyncio.gather() barrier — every child in the<br/>wave settles before any of them is finalized
             loop finalize each settled cycle, in cycle-index order
                 BatchWF->>Finalize: finalize_cycle_record_activity
-                opt publishable winner
+                opt publishable winner AND paper_trading_enabled
                     Finalize->>PTA: run_session(strategy)
                     PTA-->>Finalize: PaperTradingSession
                 end

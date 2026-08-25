@@ -399,5 +399,5 @@ flowchart TB
     end
 
     SIE[SignalIntelligenceExpert<br/>once per batch] -.->|signal_brief| D
-    REC -->|is_publishable| PTA[PaperTradingAgent<br/>post-cycle, outside this activity]
+    REC -->|"is_publishable AND<br/>paper_trading_enabled"| PTA[PaperTradingAgent<br/>post-cycle, outside this activity]
 ```

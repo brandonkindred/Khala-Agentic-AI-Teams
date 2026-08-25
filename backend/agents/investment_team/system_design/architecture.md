@@ -51,7 +51,7 @@ flowchart TB
     end
 
     subgraph batch_agents[Batch-level Agents — investment_team/]
-      SIE[SignalIntelligenceExpert<br/>signal_intelligence_agent.py<br/>runs once per BATCH, not per cycle]
+      SIE[SignalIntelligenceExpert<br/>signal_intelligence_agent.py<br/>runs once per batch-workflow invocation,<br/>not per cycle — a mid-batch resume re-runs it]
       PTA[PaperTradingAgent<br/>paper_trading_agent.py<br/>runs post-cycle, never inside orchestrator.py]
     end
 
