@@ -120,22 +120,36 @@ class ConvergenceTracker:
     # Directives for ideation
     # ------------------------------------------------------------------
 
-    def get_diversity_directive(self, tail: int = 10) -> Optional[str]:
-        """Return a steering directive if asset-class distribution is skewed."""
-        if len(self._asset_class_history) < 3:
-            return None
+    def get_diversity_avoid_classes(self, tail: int = 10) -> Set[str]:
+        """Return the asset classes ``get_diversity_directive`` would tell the
+        designer to avoid — over-represented in the recent window (>40% share).
 
+        Single source of truth for the over-representation computation, shared
+        by :meth:`get_diversity_directive` (renders it as prompt text) and any
+        caller (e.g. a per-attempt asset-category pin) that needs to steer
+        *around* the same skew without re-deriving it from the raw history.
+
+        Postconditions: returns an empty set when fewer than 3 asset classes
+        have been recorded, or when no class exceeds the 40% share threshold.
+        """
+        if len(self._asset_class_history) < 3:
+            return set()
         recent = self._asset_class_history[-tail:]
         counts = Counter(recent)
         total = len(recent)
+        return {ac for ac, c in counts.items() if c / total > 0.4}
 
-        over_represented = [ac for ac, c in counts.items() if c / total > 0.4]
+    def get_diversity_directive(self, tail: int = 10) -> Optional[str]:
+        """Return a steering directive if asset-class distribution is skewed."""
+        over_represented = self.get_diversity_avoid_classes(tail)
         if not over_represented:
             return None
 
+        recent = self._asset_class_history[-tail:]
+        total = len(recent)
         return (
             f"MANDATORY: The last {total} strategies are heavily skewed toward "
-            f"{', '.join(over_represented)}. You MUST choose a DIFFERENT asset class. "
+            f"{', '.join(sorted(over_represented))}. You MUST choose a DIFFERENT asset class. "
             f"Consider: {', '.join(ac for ac in ['stocks', 'crypto', 'forex', 'commodities', 'futures'] if ac not in over_represented)}."
         )
 

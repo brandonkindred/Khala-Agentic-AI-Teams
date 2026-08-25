@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import random
 import uuid
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
@@ -81,6 +81,21 @@ def test_select_is_deterministic_with_a_seeded_rng() -> None:
 def test_select_raises_when_every_class_excluded() -> None:
     with pytest.raises(ValueError, match="no asset category remains"):
         select_asset_category(list(PROMPT_ASSET_CLASSES))
+
+
+def test_select_avoid_steers_away_from_over_represented_classes() -> None:
+    excluded = ["futures", "commodities"]  # allowed = {stocks, crypto, forex}
+    avoid = {"stocks", "crypto"}
+    for _ in range(20):
+        assert select_asset_category(excluded, avoid=avoid) == "forex"
+
+
+def test_select_avoid_falls_back_to_allowed_when_avoid_covers_everything() -> None:
+    # allowed = {forex} only; avoid also names forex — the pin must win
+    # rather than raising or silently picking something excluded.
+    excluded = ["stocks", "crypto", "futures", "commodities"]
+    for _ in range(10):
+        assert select_asset_category(excluded, avoid={"forex"}) == "forex"
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +200,9 @@ def _config() -> BacktestConfig:
     )
 
 
-def _spec_dict(asset_class: str = "forex") -> Dict[str, Any]:
+def _spec_dict(
+    asset_class: str = "forex", target_symbols: Optional[List[str]] = None
+) -> Dict[str, Any]:
     return {
         "asset_class": asset_class,
         "hypothesis": "RSI mean reversion on a small universe",
@@ -197,6 +214,7 @@ def _spec_dict(asset_class: str = "forex") -> Dict[str, Any]:
         "exit_rules": [StopLossRule(pct=0.03).model_dump()],
         "risk_limits": {},
         "speculative": False,
+        "target_symbols": target_symbols or [],
     }
 
 
@@ -349,6 +367,40 @@ def test_design_loop_enforces_asset_category_when_generation_ignores_pin(
     assert record.strategy.asset_class == "stocks"
 
 
+def test_design_loop_clears_stale_target_symbols_when_category_enforced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the enforcement backstop overwrites ``asset_class``, any explicit
+    ``target_symbols`` authored for the wrong category must be cleared too —
+    otherwise e.g. crypto tickers like "BTC-USD" would be honored verbatim
+    and fetched under the corrected (forex) asset class, a structurally
+    inconsistent request."""
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(
+        orch.design_agent,
+        "run",
+        lambda **_kw: (_spec_dict("crypto", target_symbols=["BTC-USD"]), "scripted"),
+    )
+    monkeypatch.setattr(
+        orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
+    )
+    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
+    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
+    _short_circuit_synthesis(monkeypatch)
+
+    # allowed = {forex} -> the design agent ignores the pin and returns
+    # crypto with explicit crypto symbols.
+    record = orch.run_cycle(
+        prior_records=[],
+        config=_config(),
+        exclude_asset_classes=["stocks", "crypto", "futures", "commodities"],
+    )
+
+    assert record.strategy.asset_class == "forex"
+    assert record.strategy.target_symbols == []
+
+
 def test_design_loop_enforces_asset_category_on_budget_exhausted_before_first_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -471,3 +523,107 @@ def test_design_loop_telemetry_includes_asset_category_on_success(
     ]
     assert design_loop_events
     assert design_loop_events[-1]["asset_category"] == "stocks"
+
+
+# ---------------------------------------------------------------------------
+# Reconciling the category pin with the convergence tracker's diversity
+# directive — the two steering mechanisms must not hand the design agent
+# contradictory "MANDATORY" instructions about which asset class to use.
+# ---------------------------------------------------------------------------
+
+
+def _skew_convergence_tracker_toward(orch: StrategyLabOrchestrator, asset_class: str) -> None:
+    for _ in range(5):
+        orch.convergence_tracker.record(
+            StrategySpec(
+                strategy_id=f"s-{uuid.uuid4().hex[:6]}",
+                authored_by="test",
+                asset_class=asset_class,
+                hypothesis="h",
+                signal_definition="sig",
+                timeframe="1d",
+                entry_rules=[
+                    EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0))
+                ],
+                exit_rules=[StopLossRule(pct=0.03)],
+                risk_limits={},
+                speculative=False,
+            ),
+            [],
+        )
+
+
+def test_design_loop_drops_diversity_directive_when_pin_forces_over_represented_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When only one category is allowed and it happens to be the class the
+    convergence tracker's diversity directive says to avoid, the pin must
+    win — the now-impossible-to-satisfy "MUST choose a DIFFERENT asset
+    class" directive must be dropped rather than left to contradict the
+    "only <category> is allowed" exclusion rule in the same prompt."""
+    orch = StrategyLabOrchestrator()
+    _skew_convergence_tracker_toward(orch, "stocks")
+    assert orch.convergence_tracker.get_diversity_avoid_classes() == {"stocks"}
+
+    captured: List[Dict[str, Any]] = []
+
+    def _run(**kwargs: Any) -> Tuple[Dict[str, Any], str]:
+        captured.append(kwargs)
+        return _spec_dict("stocks"), "scripted"
+
+    monkeypatch.setattr(orch.design_agent, "run", _run)
+    monkeypatch.setattr(
+        orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
+    )
+    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
+    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
+    _short_circuit_synthesis(monkeypatch)
+
+    # allowed = {stocks} only -> the pin forces stocks despite it being
+    # over-represented.
+    orch.run_cycle(
+        prior_records=[],
+        config=_config(),
+        exclude_asset_classes=["crypto", "forex", "futures", "commodities"],
+    )
+
+    assert len(captured) == 1
+    convergence_directives = captured[0]["convergence_directives"] or []
+    assert not any("You MUST choose a DIFFERENT asset class" in d for d in convergence_directives)
+
+
+def test_design_loop_keeps_diversity_directive_when_pin_avoids_over_represented_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the pin can honor the diversity directive (another allowed
+    category exists), the directive is preserved verbatim — only a genuine
+    conflict (tested above) drops it."""
+    orch = StrategyLabOrchestrator()
+    _skew_convergence_tracker_toward(orch, "stocks")
+    assert orch.convergence_tracker.get_diversity_avoid_classes() == {"stocks"}
+
+    captured: List[Dict[str, Any]] = []
+
+    def _run(**kwargs: Any) -> Tuple[Dict[str, Any], str]:
+        captured.append(kwargs)
+        return _spec_dict("forex"), "scripted"
+
+    monkeypatch.setattr(orch.design_agent, "run", _run)
+    monkeypatch.setattr(
+        orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
+    )
+    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
+    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
+    _short_circuit_synthesis(monkeypatch)
+
+    # allowed = {stocks, forex} -> the bias in select_asset_category can (and
+    # given the stub above, does) avoid the over-represented "stocks".
+    orch.run_cycle(
+        prior_records=[],
+        config=_config(),
+        exclude_asset_classes=["crypto", "futures", "commodities"],
+    )
+
+    assert len(captured) == 1
+    convergence_directives = captured[0]["convergence_directives"] or []
+    assert any("You MUST choose a DIFFERENT asset class" in d for d in convergence_directives)

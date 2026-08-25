@@ -225,7 +225,10 @@ def excluded_for_allowed(allowed: Optional[Iterable[str]]) -> List[str]:
 
 
 def select_asset_category(
-    exclude_asset_classes: Optional[Iterable[str]], *, rng: Optional[random.Random] = None
+    exclude_asset_classes: Optional[Iterable[str]],
+    *,
+    avoid: Optional[Iterable[str]] = None,
+    rng: Optional[random.Random] = None,
 ) -> str:
     """Randomly pick exactly one asset category for a design attempt.
 
@@ -236,6 +239,15 @@ def select_asset_category(
     inverse of :func:`excluded_for_allowed`, so this reconstructs the user's
     original ``allowed_asset_classes`` selection without needing it threaded
     through separately.
+
+    ``avoid`` (optional) names classes to steer away from when possible —
+    typically the convergence tracker's over-represented set
+    (``ConvergenceTracker.get_diversity_avoid_classes``), so a pin doesn't
+    land on the very class its own diversity directive tells the designer to
+    stop using. The bias is soft: when ``allowed - avoid`` is non-empty, the
+    choice is made from that narrowed set; otherwise (every allowed class is
+    also in ``avoid``, e.g. a single-category restriction) it falls back to
+    the full ``allowed`` set — the pin always wins over the bias.
 
     Preconditions:
       - ``exclude_asset_classes`` is ``None`` or an iterable of canonical
@@ -259,6 +271,11 @@ def select_asset_category(
             f"exclude_asset_classes={sorted(excluded_set)}"
         )
     chooser = rng or random
+    if avoid:
+        avoid_set = set(avoid)
+        preferred = [c for c in allowed if c not in avoid_set]
+        if preferred:
+            return chooser.choice(preferred)
     return chooser.choice(allowed)
 
 

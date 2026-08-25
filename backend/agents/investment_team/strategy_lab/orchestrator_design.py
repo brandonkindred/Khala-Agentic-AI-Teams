@@ -644,8 +644,20 @@ class DesignMixin:
         # ``allowed_asset_classes`` selection) keeps the prior free-choice
         # behavior — mixing categories is only a problem when the user
         # actually asked for a subset.
+        # The convergence tracker's diversity directive (below) separately
+        # tells the designer to avoid whichever asset class is over-
+        # represented in recent history. Bias the pin away from that same
+        # set so the two steering mechanisms don't contradict each other —
+        # see the ``directives`` filtering right after selection.
+        diversity_avoid_classes = (
+            self.convergence_tracker.get_diversity_avoid_classes()
+            if exclude_asset_classes
+            else set()
+        )
         selected_category: Optional[str] = (
-            select_asset_category(exclude_asset_classes) if exclude_asset_classes else None
+            select_asset_category(exclude_asset_classes, avoid=diversity_avoid_classes)
+            if exclude_asset_classes
+            else None
         )
         if selected_category is not None:
             category_prior_records = filter_records_by_asset_class(prior_records, selected_category)
@@ -656,11 +668,23 @@ class DesignMixin:
             category_prior_records = prior_records
             pinned_exclude_asset_classes = exclude_asset_classes
 
+        attempt_directives = directives
+        if selected_category is not None and selected_category in diversity_avoid_classes:
+            # The bias above couldn't avoid it (e.g. only one category is
+            # allowed and it happens to be over-represented) — the pin must
+            # win, so drop the now-impossible-to-satisfy diversity directive
+            # rather than hand the designer a self-contradictory prompt
+            # ("MUST choose a DIFFERENT asset class" alongside "MANDATORY
+            # EXCLUSION: only <selected_category> is allowed").
+            attempt_directives = [
+                d for d in directives if "You MUST choose a DIFFERENT asset class" not in d
+            ]
+
         try:
             strategy_dict, rationale = self.design_agent.run(
                 prior_records=category_prior_records,
                 signal_brief=signal_brief,
-                convergence_directives=directives or None,
+                convergence_directives=attempt_directives or None,
                 exclude_asset_classes=pinned_exclude_asset_classes,
                 regime_summary=regime_summary,
             )
@@ -1304,9 +1328,17 @@ class DesignMixin:
             or its normalized asset class already matches
             ``selected_category``.
           - Otherwise returns a copy of ``spec`` with ``asset_class``
-            overwritten to ``selected_category``, emits a ``design_repair``
-            event describing the correction, and records the change on
-            ``drift_collector`` when one is present.
+            overwritten to ``selected_category``. Non-empty
+            ``target_symbols`` is cleared in the same correction: an explicit
+            symbol list authored for the wrong category (e.g. ``BTC-USD`` on
+            a spec relabeled from crypto to forex) would otherwise be honored
+            verbatim by ``MarketDataService.resolve_strategy_symbols`` and
+            fetched under the *new* asset class, producing a structurally
+            inconsistent request. Clearing it falls back to that class's
+            default symbol universe (the same fallback an empty
+            ``target_symbols`` already triggers for every other spec).
+            Emits a ``design_repair`` event describing the correction(s) and
+            records the change on ``drift_collector`` when one is present.
         """
         if selected_category is None:
             return spec
@@ -1320,20 +1352,36 @@ class DesignMixin:
             selected_category,
         )
         prev_spec = spec.model_copy(deep=True)
-        spec = spec.model_copy(update={"asset_class": selected_category})
+        actions = [
+            {
+                "rule": "asset_category_pin",
+                "field": "asset_class",
+                "before": actual,
+                "after": selected_category,
+                "reason": "design output violated the category pinned for this attempt",
+            }
+        ]
+        updates: Dict[str, Any] = {"asset_class": selected_category}
+        if spec.target_symbols:
+            actions.append(
+                {
+                    "rule": "asset_category_pin",
+                    "field": "target_symbols",
+                    "before": list(spec.target_symbols),
+                    "after": [],
+                    "reason": (
+                        "explicit symbols were authored for the wrong asset class; "
+                        "cleared to fall back to the pinned category's default universe"
+                    ),
+                }
+            )
+            updates["target_symbols"] = []
+        spec = spec.model_copy(update=updates)
         emit(
             "design_repair",
             {
                 "round": review_round,
-                "actions": [
-                    {
-                        "rule": "asset_category_pin",
-                        "field": "asset_class",
-                        "before": actual,
-                        "after": selected_category,
-                        "reason": "design output violated the category pinned for this attempt",
-                    }
-                ],
+                "actions": actions,
                 "now_ready": True,
             },
         )
