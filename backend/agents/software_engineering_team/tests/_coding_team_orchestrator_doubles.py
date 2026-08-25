@@ -14,6 +14,9 @@ collecting it (same convention as those two modules).
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Dict, List
+
+import pytest
 
 GIT_UTILS = "shared.git.git_utils"
 
@@ -26,8 +29,13 @@ class DefaultGroomTaskMixin:
     """
 
     def run_groom_task(
-        self, task_id, task_title, task_description, task_dependencies, plan_context
-    ):
+        self,
+        task_id: str,
+        task_title: str,
+        task_description: str,
+        task_dependencies: List[str],
+        plan_context: str,
+    ) -> Dict[str, Any]:
         return {
             "acceptance_criteria": [],
             "out_of_scope": "",
@@ -50,7 +58,7 @@ class FakeWorktreeManager:
     test_coding_team_worktree_manager.py against WorktreeManager itself.
     """
 
-    def __init__(self, repo_path: Path, agent_ids) -> None:
+    def __init__(self, repo_path: Path, agent_ids: List[str]) -> None:
         self._paths = {aid: Path(repo_path) / f"_wt_{aid}" for aid in agent_ids}
         self.prepare_calls = 0
         self.cleanup_calls = 0
@@ -67,6 +75,19 @@ class FakeWorktreeManager:
         self.cleanup_calls += 1
 
 
-def patch_git(monkeypatch, diff: str = "", merge=(True, "ok")) -> None:
+def patch_git(
+    monkeypatch: pytest.MonkeyPatch, diff: str = "", merge: tuple[bool, str] = (True, "ok")
+) -> None:
+    """Patch ``shared.git.git_utils.branch_diff``/``merge_branch`` for the rest of the test.
+
+    Preconditions:
+        - ``merge`` is a ``(success, message)`` pair, matching ``merge_branch``'s own
+          return shape.
+    Postconditions:
+        - For the remainder of the test (``monkeypatch`` un-does this at teardown),
+          ``branch_diff(...)`` unconditionally returns ``diff`` and ``merge_branch(...)``
+          unconditionally returns ``merge``, regardless of the arguments either is called
+          with — no real git process is invoked.
+    """
     monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: diff)
     monkeypatch.setattr(f"{GIT_UTILS}.merge_branch", lambda *a, **k: merge)
