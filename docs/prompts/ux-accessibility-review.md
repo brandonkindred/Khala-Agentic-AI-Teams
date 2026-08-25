@@ -245,7 +245,11 @@ for primitive defects you deliberately chose not to pursue at all.
         signal from noise. Match the DISABLE ITSELF, which needs no prior knowledge
         of which rules are switched off:
         `grep -rnE "[A-Za-z'\"-]+: \{ enabled: false \}" src/app --include=*.spec.ts`
-        — that returns the disables and nothing else, across all four specs. Two
+        — that returns CANDIDATE disables across all four specs. Verify each hit
+        before counting it: the pattern matches any object key of that shape, so a
+        feature flag, harness option, or mock setting in a spec file can look
+        identical. A hit is an axe disable only if it is passed as the second
+        argument to `expectNoAxeViolations`, or is a hoisted const used there. Two
         recipes that look reasonable and are not: searching the rule names from the
         list above is CIRCULAR (a fifth spec disabling a rule nobody listed stays
         invisible, and that is precisely the case this axis exists to catch), and
@@ -518,10 +522,12 @@ D. STATE COVERAGE
    One generic error branch commonly serves several of these at once. The repo-wide
    idiom is an RxJS subscribe callback, not a `try`/`catch` — `error: (err) => {
    this.error = extractErrorDetail(err, 'Failed to load.'); … }`. Grep for `error: (`
-   to find those, but that grep alone misses a second RxJS form: several dashboards
-   put the same handling in a `catchError((err) => …)` operator instead, so grep
-   `catchError` too or you will read a page's primary list-load error branch as
-   absent. Literal `try`/`catch` around this helper does not occur. Note the REQUIRED
+   to find those, but that grep alone misses two more RxJS forms: the PAREN-LESS
+   arrow `error: err => { … }`, and the `catchError((err) => …)` operator several
+   dashboards use instead. Grep `error: (`, `error: err`, and `catchError`, or you
+   will read a page's primary list-load error branch as absent — the shared
+   team-assistant panel, composed into four teams' dashboards, uses the paren-less
+   form for exactly that branch. Literal `try`/`catch` around this helper does not occur. Note the REQUIRED
    second argument: that fallback string IS the component's per-state copy, and a
    sketch that omits it does not compile.
    Score such a branch against the global interceptor rather than in isolation, because
