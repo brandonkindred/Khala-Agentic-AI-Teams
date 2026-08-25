@@ -28,24 +28,9 @@ from software_engineering_team.coding_team_orchestrator import (
 from software_engineering_team.models import CodingTeamPlanInput
 from software_engineering_team.team_routing import _BACKEND_V2_STACK_SPEC
 
-GIT_UTILS = "shared.git.git_utils"
-
-
-class _DefaultGroomTaskMixin:
-    """Ungroomed-default ``run_groom_task``, mirroring the real fallback shape (see the
-    identical mixin in ``test_coding_team_orchestrator.py``)."""
-
-    def run_groom_task(
-        self, task_id, task_title, task_description, task_dependencies, plan_context
-    ):
-        return {
-            "acceptance_criteria": [],
-            "out_of_scope": "",
-            "description_enriched": task_description,
-            "priority": "medium",
-            "subtasks": [],
-            "task_dependencies": task_dependencies,
-        }
+from ._coding_team_orchestrator_doubles import DefaultGroomTaskMixin as _DefaultGroomTaskMixin
+from ._coding_team_orchestrator_doubles import FakeWorktreeManager as _FakeWorktreeManager
+from ._coding_team_orchestrator_doubles import patch_git as _patch_git
 
 
 class _TwoBackendTasksTechLead(_DefaultGroomTaskMixin):
@@ -80,30 +65,6 @@ class _TwoBackendTasksTechLead(_DefaultGroomTaskMixin):
         spec_content="",
     ):
         return {"approved": True, "reason": "", "requested_changes": []}
-
-
-class _FakeWorktreeManager:
-    """Drop-in for ``worktree_manager.WorktreeManager``: one distinct child directory per
-    agent id under the swarm's own tmp_path, no real git worktrees. Real worktree mechanics
-    are covered by test_coding_team_worktree_manager.py against WorktreeManager itself."""
-
-    def __init__(self, repo_path: Path, agent_ids) -> None:
-        self._paths = {aid: Path(repo_path) / f"_wt_{aid}" for aid in agent_ids}
-
-    def prepare(self) -> None:
-        for path in self._paths.values():
-            path.mkdir(parents=True, exist_ok=True)
-
-    def path_for(self, agent_id: str) -> Path:
-        return self._paths[agent_id]
-
-    def cleanup(self) -> None:
-        pass
-
-
-def _patch_git(monkeypatch, diff: str = "", merge=(True, "ok")) -> None:
-    monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: diff)
-    monkeypatch.setattr(f"{GIT_UTILS}.merge_branch", lambda *a, **k: merge)
 
 
 def _run_two_backend_tasks(
