@@ -197,7 +197,6 @@ class TestBuildExecutionBindingsFrontendParity:
             return {"files": {"app.tsx": "export default function App() {}"}, "summary": "done"}
 
         bindings = _build_test_bindings(
-            models=codegen_models,
             profile=FE_PROFILE,
             parse_files_and_summary=parse_files_and_summary,
         )

@@ -227,7 +227,8 @@ STACK_WIRING: Dict[Stack, StackWiring] = {
 # Bare per-stack module-level names for the six phase callables that must
 # stay individually monkeypatchable per stack (see StackWiring's docstring
 # above) -- five aliased directly from the stack profiles, plus run_deliver
-# (built via make_run_deliver below, not aliased from a profile).
+# (built via make_run_deliver at module level above, not aliased from a
+# profile).
 # ``run_workflow`` looks each of these up via ``globals()[f"_{stack}_<name>"]``
 # at call time rather than reading a precomputed StackWiring field, so a
 # test's ``monkeypatch.setattr`` on the bare name here is honored on the next
@@ -260,10 +261,14 @@ def _validate_stack(stack: str) -> None:
 
 class CodegenDevelopmentAgent(ConfigDrivenV2DevelopmentAgent):
     """
-    Codegen Development Agent: runs the 5-phase lifecycle (Pre-flight -> Planning ->
-    Execution -> Documentation -> Deliver) with per-microtask review gates embedded
-    in the Execution phase, for either the backend or frontend stack. Used by
-    CodegenTeamLead after it runs Setup.
+    Codegen Development Agent: runs everything after CodegenTeamLead's own Setup
+    phase in the module docstring's 7-phase list -- Planning, Execution (with the
+    Review and Problem Solving phases embedded as per-microtask gates rather than
+    separate top-level calls), Documentation, and Deliver -- for either the
+    backend or frontend stack. Before Planning, it also runs its own Pre-flight
+    check (verifying lint/test tooling is configured on the feature branch); this
+    is a check internal to this agent, distinct from CodegenTeamLead's Setup
+    phase, not a named member of the ``Phase`` enum.
 
     Subclasses :class:`ConfigDrivenV2DevelopmentAgent` and supplies the
     ``stack``'s :class:`V2TeamConfig` instance — the language default,

@@ -1,7 +1,7 @@
 """
 Codegen agent team — config-driven backend/frontend development team.
 
-Delivers backend (Java or Python) and frontend (TypeScript/Angular/React)
+Delivers backend (Java or Python) and frontend (Angular/React/Vue/TypeScript)
 tasks through the same 7-phase workflow: Setup -> Planning -> Execution ->
 Review -> Problem Solving -> Documentation -> Deliver, selected at
 construction time by a ``stack: Literal["backend", "frontend"]`` parameter
