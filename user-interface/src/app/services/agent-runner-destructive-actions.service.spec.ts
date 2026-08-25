@@ -1,5 +1,5 @@
 import { TestBed } from '@angular/core/testing';
-import { Observable, of, throwError } from 'rxjs';
+import { Observable, of, Subject, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import {
   AgentRunnerDestructiveActionsService,
@@ -122,6 +122,24 @@ describe('AgentRunnerDestructiveActionsService', () => {
       expect(service.deletingSavedInputId()).toBeNull();
       expect(notify.saved).not.toHaveBeenCalled();
     });
+
+    it('does not double-fire the API when called rapidly while a confirm is in flight', () => {
+      const confirm$ = new Subject<boolean>();
+      confirmFn.mockReturnValueOnce(confirm$.asObservable()); // first call: dialog still open
+      confirmFn.mockReturnValueOnce(of(false)); // rapid second call: guard short-circuits, matching ConfirmDestructiveService
+      runnerApi.deleteSavedInput.mockReturnValue(of({ id: 'id-1', status: 'deleted' }));
+
+      service.deleteSavedInput('blogging.writer', 'id-1', 'My Input');
+      service.deleteSavedInput('blogging.writer', 'id-1', 'My Input');
+
+      expect(confirmFn).toHaveBeenCalledTimes(2);
+      expect(runnerApi.deleteSavedInput).not.toHaveBeenCalled();
+
+      confirm$.next(true);
+      confirm$.complete();
+
+      expect(runnerApi.deleteSavedInput).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('tearDownSandbox', () => {
@@ -202,6 +220,24 @@ describe('AgentRunnerDestructiveActionsService', () => {
       expect(tornDown).toBe(false);
       expect(service.tearingDown()).toBe(false);
       expect(notify.saved).not.toHaveBeenCalled();
+    });
+
+    it('does not double-fire the API when called rapidly while a confirm is in flight', () => {
+      const confirm$ = new Subject<boolean>();
+      confirmFn.mockReturnValueOnce(confirm$.asObservable()); // first call: dialog still open
+      confirmFn.mockReturnValueOnce(of(false)); // rapid second call: guard short-circuits, matching ConfirmDestructiveService
+      runnerApi.teardown.mockReturnValue(of({ agent_id: 'agent-1', status: 'stopped' }));
+
+      service.tearDownSandbox('agent-1', 'Writer');
+      service.tearDownSandbox('agent-1', 'Writer');
+
+      expect(confirmFn).toHaveBeenCalledTimes(2);
+      expect(runnerApi.teardown).not.toHaveBeenCalled();
+
+      confirm$.next(true);
+      confirm$.complete();
+
+      expect(runnerApi.teardown).toHaveBeenCalledTimes(1);
     });
   });
 });
