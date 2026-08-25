@@ -26,9 +26,9 @@ them uniformly.
 | `entry_price` | `float` | **Legacy alias** for `entry_fill_price`. Kept for backward compatibility. |
 | `exit_price` | `float` | **Legacy alias** for `exit_fill_price`. Kept for backward compatibility. |
 | `entry_bid_price` | `float \| None` | Reference price at the entry bar, **before** slippage. Order-type dependent — for a market order this is the bar's **open**, not its close (see "Where it's produced"). |
-| `entry_fill_price` | `float \| None` | Actual filled price paid at entry, **after** slippage: `entry_bid_price × (1 + slippage_bps/10000)`, rounded to 4 dp below $10 and 2 dp at or above. |
-| `exit_bid_price` | `float \| None` | Reference price at the exit bar, **before** slippage. Not the raw close: on a partially-filled exit this is `weighted_avg_exit_bid_price`, the quantity-weighted mean of the per-slice reference prices. |
-| `exit_fill_price` | `float \| None` | Actual filled price received at exit, **after** slippage: `exit_bid_price × (1 − slippage_bps/10000)`, rounded the same way as entry. |
+| `entry_fill_price` | `float \| None` | Actual filled price paid at entry, **after** slippage: `entry_bid_price × (1 ± total_slip_bps/10000)` — **+** on a long entry (pay more), **−** on a short entry (receive less); `total_slip_bps = slippage_bps + extra_slip_bps`, where `extra_slip_bps` is an order-type adverse-selection add-on (`LIMIT`/`STOP_LIMIT` fills only, `0` otherwise — `FillSimulator._slippage_multipliers`); rounded to 4 dp below $10 and 2 dp at or above. |
+| `exit_bid_price` | `float \| None` | Reference price at the exit bar, **before** slippage. Not the raw close: on a partially-filled exit this is `weighted_avg_exit_bid_price`, the quantity-weighted mean of the per-slice reference prices — and a multi-slice exit can carry a different `extra_slip_bps` per slice. |
+| `exit_fill_price` | `float \| None` | Actual filled price received at exit, **after** slippage, with the sign flipped from entry: **−** on a long exit (receive less), **+** on a short exit (pay more); same `total_slip_bps` definition as `entry_fill_price`; rounded the same way as entry. |
 | `entry_order_type` | `str` | Order type used for entry. `market`, `limit`, `stop`, and `stop_limit` are live and each derives its own reference price in `RealisticExecutionModel.compute_fill_terms`. `trailing_stop` also appears, but is not a fifth reference-price rule and is not an entry type: `FillSimulator` rewrites it into a `STOP` at the ratcheted `effective_stop_price` before pricing, and it is used as a stop-loss child (an exit). |
 | `exit_order_type` | `str` | Order type used for exit — same semantics. |
 | `gross_pnl` | `float` | P/L before transaction costs: `shares × (exit_fill - entry_fill)` (sign-flipped for shorts). |
@@ -40,8 +40,10 @@ them uniformly.
 
 ## Bid vs fill — worked example
 
-Backtest config: `slippage_bps = 2`, `transaction_cost_bps = 5`. Simplified for
-illustration: uses each bar's close as its reference price throughout. In
+Backtest config: `slippage_bps = 2`, `transaction_cost_bps = 5`, a **long**
+market-order trade (`extra_slip_bps = 0` — that add-on only applies to
+`LIMIT`/`STOP_LIMIT` fills; a short trade flips both signs below). Simplified
+for illustration: uses each bar's close as its reference price throughout. In
 production the reference price is order-type-dependent (see "Where it's
 produced" below) — a market order's reference price is the bar's *open*, not
 its close.
