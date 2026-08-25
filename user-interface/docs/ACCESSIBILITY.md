@@ -6,7 +6,7 @@ The UI follows WCAG 2.2-oriented practices and Angular Material accessibility gu
 
 ## ARIA
 
-- **attr. prefix** – All ARIA attributes use `[attr.aria-*]` in templates (e.g. `[attr.aria-label]`, `[attr.aria-live]`) to avoid Angular binding issues.
+- **attr. prefix** – Use the `[attr.aria-*]` binding form for values computed at runtime (e.g. `[attr.aria-label]="'Cancel ' + job.label"`), where it avoids Angular's property-binding pitfalls. A constant value belongs in a plain attribute (`aria-label="Remove goal"`). Both forms are correct and both are in wide use; converting a correct static attribute to the bound form is a no-op refactor, not a fix.
 - **aria-label** – Buttons, icons, and controls have descriptive labels.
 - **aria-current** – Navigation items use `aria-current="page"` for the active route.
 - **aria-live** – Dynamic content (errors, status) uses `aria-live="polite"` for screen reader announcements.

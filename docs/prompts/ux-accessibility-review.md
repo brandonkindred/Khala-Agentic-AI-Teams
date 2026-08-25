@@ -16,15 +16,14 @@ repo-specific references are load-bearing elsewhere too. Adapt all of these:
 - §3 Review lenses — the named shared primitives and helpers (`stall-warning`,
   `defer-focus.ts`, the `--kh-*` tokens, …)
 - §7 House constraints — the whole section
-- §5 Output format — the Verification bullet names `expectNoAxeViolations`, and the
-  state table is pinned to the fourteen states of §3D
+- §5 Output format — the Verification bullet defers to §7's spec-selection rule, and
+  the state table is pinned to the fourteen states of §3D
 - §8 Do not report — the test-harness assumptions (`expectNoAxeViolations`, the SCSS
   contrast guard)
 
 What genuinely ports unchanged is the method: the five lenses, the state-disposition
 model, the SHAPE of the finding format and its severity rubric, and the noise-control
-rules. The finding format's Verification bullet still names this repo's harness, so
-swap that line with §5.
+rules — everything except the repo-specific lines listed above.
 
 ---
 
@@ -78,7 +77,8 @@ Out of scope (note it and move on, do not fix):
     recommendation produces an invalid declaration.
   - `user-interface/src/styles/scss-contrast-guard.spec.ts` — the static guard against
     hardcoded low-contrast text and suppressed focus outlines. Its allowlist is a
-    burndown list that is now EMPTY — every component moved onto the `--kh-*` tokens,
+    burndown list, and it is empty — read `BURNDOWN` in that spec to confirm it still
+    is. Every component moved onto the `--kh-*` tokens,
     the guard enforces across the whole UI, and its own docstring forbids adding
     entries to silence a failure. So do not expect a <TEAM> file on it, and never
     propose adding or removing an entry. One migration item IS still outstanding: the
@@ -102,10 +102,15 @@ Out of scope (note it and move on, do not fix):
     error/toast orchestration behind the agent-runner, strategy-lab, load-draft, and
     run-history destructive actions; the target for any hand-rolled destructive flow),
     `defer-focus.ts` (move focus after a re-render),
-    `extract-error-detail.ts` (`extractErrorDetail` — the repo-wide way to pull a
-    human-readable message out of an HTTP error for an inline error field, used at
-    ~190 call sites across ~70 files; recommend it rather than hand-rolled
-    `err?.error?.detail ?? …` chains when proposing error copy),
+    `extract-error-detail.ts` (`extractErrorDetail(err, fallback, options?)` — the
+    repo-wide way to pull a human-readable message out of an HTTP error for an inline
+    error field; grep `extractErrorDetail(` for the spread. Recommend it over
+    hand-rolled `err?.error?.detail ?? …` chains when proposing error copy, and carry
+    two conditions with the recommendation: `fallback` is REQUIRED, and it is where the
+    state-specific copy §3D asks for actually goes; and a FastAPI 422 array `detail`
+    is SKIPPED by default so the global interceptor can toast it instead, so a
+    component that opts out of that toast must pass `{ joinValidationArray: true }` or
+    it will show the fallback and drop every validation message),
     `result-count-announcement.ts` (live-region text for filtered lists),
     `latest-only.ts` (`LatestOnly` — monotonic "latest wins" guard so a slow response
     cannot overwrite a newer one; it replaces the hand-rolled `const seq = ++this.xSeq`
@@ -117,6 +122,20 @@ Out of scope (note it and move on, do not fix):
     "Build a custom X" when a shared X exists is itself a finding. This list is a
     starting point, not a census — `ls user-interface/src/app/shared/` before
     concluding no primitive exists.
+  - `user-interface/src/app/core/error-handler.interceptor.ts` — the global HTTP
+    error interceptor, registered app-wide in `app.config.ts`. Read it BEFORE scoring
+    the failure states in §3D, because it already differentiates most of them. It
+    toasts, by status: `0` → "Network error. Please check your connection and that the
+    API is running." — `status === 0` is what this repo's offline state looks like;
+    `401` → "Unauthorized. Please check your credentials."; `403` → "Access
+    forbidden."; `503` → the server's own `detail` verbatim, which is where a
+    backend-unconfigured message such as "Career profile storage requires Postgres…"
+    reaches the user; `400`/`422` → the joined validation messages; `404`, `500` and
+    the rest → a status-specific string. The snackbar opens with
+    `politeness: 'assertive'`, so it satisfies the HANDLED gate's announcement clause
+    on its own. A request opts OUT of all of it only by carrying `SKIP_ERROR_NOTIFY` in
+    its `HttpContext` — via `skipErrorNotify()` or `SKIP_NOTIFY_OPTIONS` — which a
+    handful of services do; grep those three names to find them.
   - Existing `*.a11y.spec.ts` files and `user-interface/src/app/testing/a11y.ts`
     (`expectNoAxeViolations`, with `color-contrast` disabled under jsdom). Coverage is
     narrower than it looks, in four independent ways, and ALL FOUR must hold before
@@ -145,12 +164,14 @@ Out of scope (note it and move on, do not fix):
         composition-level finding, confirm a fixture actually renders that composition
         and that multiplicity.
       * By per-spec rule disables — `expectNoAxeViolations(host, extraRules)` merges
-        caller-supplied disables on top of `color-contrast`, and specs use it:
+        caller-supplied disables on top of `color-contrast`, and four specs use it:
         `agent-studio-persona` turns off `page-has-heading-one` and `region`,
-        `job-listing-card` turns off `aria-required-parent`, `strategy-lab` disables
-        others inline. A rule a spec switched off is NOT guarded there however
-        thoroughly that state is rendered. Read the call's second argument, not just
-        the fixture.
+        `job-listing-card` turns off `aria-required-parent`, `job-profile-form` turns
+        off `aria-required-children`, and `strategy-lab` turns off `nested-interactive`
+        at every call. Re-derive that list rather than trusting it —
+        `grep -rn "enabled: false" --include=*.spec.ts user-interface/src/app` — since
+        a rule a spec switched off is NOT guarded there however thoroughly that state
+        is rendered. Read the call's second argument, not just the fixture.
     Read each spec's fixtures, its assertions, what element it audits, AND which rules
     it disables before excluding a finding, then spend your attention on the unrendered
     states, the unrendered compositions, the disabled rules, and what axe structurally
@@ -196,7 +217,7 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
    - Contrast and non-color signalling: text and UI-component contrast against the
      actual `--kh-surface-*` it sits on; status is never conveyed by hue alone (chips,
      graph edges, diff highlights, severity dots need text or shape too).
-   - Zoom and reflow — two separate AA criteria; cite the right one:
+   - Zoom, reflow, and text spacing — three separate AA criteria; cite the right one:
        * 1.4.4 Resize Text (AA) — text resizes to 200% without loss of content or
          functionality. A control clipped or cut off at 200% zoom is a 1.4.4 failure,
          NOT a 1.4.10 one, and 1.4.10's two-dimensional exception does not apply to it.
@@ -206,20 +227,30 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
          whether the two-dimensional layout is actually necessary before reporting: a
          wide data table scrolling inside its own container is compliant, a paragraph
          doing so is not.
-     Text-spacing overrides don't break layout.
+       * 1.4.12 Text Spacing (AA) — no loss of content or functionality when the
+         reader overrides line height to 1.5× the font size, paragraph spacing to 2×,
+         letter spacing to 0.12×, and word spacing to 0.16×. Fixed-height containers
+         that clip their overflow are the usual failure. This needs a running browser
+         with the overrides applied — report it labelled as such rather than inferring
+         it from a stylesheet.
    - Motion and timing, at the A/AA bar this review holds to, and only where the
      criterion actually applies. The summaries below are compressed, and so is
-     `backend/agents/accessibility_audit_team/wcag_criteria.py`. That table is
-     authoritative for a criterion's number, name, and LEVEL, and each entry also
-     carries `techniques` and `failures` ID lists — the fastest route into the
-     normative text, so follow them. What it does NOT carry is the full conditions: its
-     one-line descriptions keep some exceptions (2.5.8's "or have sufficient spacing",
-     3.3.8's "unless alternatives exist", 2.4.11's "not entirely") but drop others
-     entirely, and on 2.3.1 it states only the three-flash half, omitting the
-     below-threshold alternative. So use it to confirm number and level and to reach
-     the techniques; where a finding turns on a threshold, applicability condition, or
-     exception, check the criterion's own normative text rather than the table or this
-     summary.
+     `backend/agents/accessibility_audit_team/wcag_criteria.py`. For the criteria that
+     table does carry, its number, name, and LEVEL are reliable. Know its three limits
+     before leaning on it for anything else. COVERAGE — despite a docstring claiming
+     all of Level A, AA, and AAA, it holds 59 entries: complete for A and AA, but only
+     3 of WCAG 2.2's 31 AAA criteria. An AAA lookup normally misses, 2.3.3 (cited a few
+     lines below) among them, and absence from the table is not evidence a criterion
+     does not exist. CONDITIONS — its one-line descriptions keep some exceptions
+     (2.5.8's "or have sufficient spacing", 3.3.8's "unless alternatives exist",
+     2.4.11's "not entirely") but drop others entirely, and on 2.3.1 they state only
+     the three-flash half, omitting the below-threshold alternative. TECHNIQUE IDS —
+     each entry's `techniques` and `failures` lists are a fast route into the normative
+     text, but they are not verified: F109 is attached to 2.5.8, 3.3.8, AND 3.3.9, so
+     at least two of those three are wrong. Open a technique and confirm it addresses
+     the criterion you are citing before it goes in a finding. Where a finding turns on
+     a threshold, applicability condition, or exception — or on an AAA criterion at all
+     — go to the criterion's own normative text rather than the table or this summary.
        * 2.2.1 Timing Adjustable (A) — judge a time limit by its mechanism, not by
          whether the duration feels generous: a comfortable but fixed limit still
          fails. Passing takes ONE of three, and the thresholds are part of the
@@ -330,25 +361,40 @@ D. STATE COVERAGE
    The five failure states are a PARTITION, not overlapping labels — classify each
    observed failure into exactly one, in this order, so the same event does not appear
    in two rows:
-     - offline — no transport at all; the request never reached a server.
+     - offline — no transport at all; the request never reached a server. In this
+       repo that is `HttpErrorResponse.status === 0`.
      - permission-denied — the server answered, refusing on identity or authorization
        (401/403).
      - backend-unconfigured — the server answered, reporting the feature is not set up
        (missing provider, credential, or configuration) rather than refusing the user.
+       Typically a 503 whose `detail` names what is missing.
      - failed — the request SUCCEEDED and the domain operation or job it started then
        reached a terminal failed state. Work failed, not the call.
      - API-error — the residual: any other request failure (5xx, timeout, malformed or
        unparseable response). Reach for this only when none of the four above fits.
    One generic error branch commonly serves several of these at once. The repo-wide
-   idiom is an RxJS subscribe callback, not a `try`/`catch` — roughly 219 occurrences
-   of `error: (err) => { this.error = extractErrorDetail(err); … }`, and zero `catch`
-   blocks using that helper — so grep for `error: (` when locating these. One such
-   callback renders the same message for a 401, a 503, a network drop, and a
-   missing-provider response alike. Score that branch
-   per state, on whether ITS OUTPUT gives that state's user a way forward: a message
-   that reads "Failed to load" earns HANDLED for API-error and MISSING for
-   permission-denied and backend-unconfigured, because neither of those users learns
-   what to do. When one branch is MISSING for several states, file ONE finding naming
+   idiom is an RxJS subscribe callback, not a `try`/`catch` — `error: (err) => {
+   this.error = extractErrorDetail(err, 'Failed to load.'); … }`, with zero `catch`
+   blocks using that helper — so grep for `error: (` when locating these. Note the
+   REQUIRED second argument: that fallback string IS the component's per-state copy,
+   and a sketch that omits it does not compile.
+   Score such a branch against the global interceptor rather than in isolation, because
+   for most requests it is not the only thing the user receives:
+     - Request opted out of the toast (`SKIP_ERROR_NOTIFY` / `skipErrorNotify()` /
+       `SKIP_NOTIFY_OPTIONS`) — the inline branch is the whole story, and one callback
+       rendering the same message for a 401, a 503, a network drop, and a
+       missing-provider response is scored per state on whether ITS OUTPUT gives that
+       state's user a way forward. "Failed to load" earns HANDLED for API-error and
+       MISSING for permission-denied and backend-unconfigured, because neither of those
+       users learns what to do.
+     - Request did not opt out — the interceptor already distinguished 0 / 401 / 403 /
+       503 and announced it assertively, so a generic inline message is NOT by itself a
+       MISSING for those states. What still earns MISSING there is an inline message
+       that CONTRADICTS the toast — two explanations of one failure is its own finding
+       — or a state whose recovery needs an affordance a toast cannot offer: a sign-in
+       route for 401, a link to the setup the 503 names, a retry for offline. The
+       missing affordance is the finding, not the wording.
+   Either way, when one branch is MISSING for several states, file ONE finding naming
    every state it fails and the distinct copy or handling each needs — not one finding
    per state against the same line.
    Give every state exactly one disposition, and state which:
@@ -397,7 +443,10 @@ E. CONSISTENCY WITH THE DESIGN SYSTEM
      step count.
   4. Run the five lenses over each page and over the seams between pages.
   5. For each candidate finding, verify it against the source before reporting it: name
-     the file and line that proves it. If you cannot point at the code, either the
+     the file and line that proves it. Where the finding IS an absence, §3D's rule
+     governs instead — cite the nearest operation or conditional where the handling
+     would belong, say what is absent there, and back it with the scoped search that
+     found nothing. If you have neither a proving line nor an evidenced absence, the
      finding is wrong or it needs a running browser — say which.
   6. Deduplicate: collapse the same root cause across pages into one finding with
      multiple locations.
@@ -438,10 +487,10 @@ Then every finding, in ranked order:
     subtle. Do not invent an irrelevant token or attribute to satisfy the format.
   - **Cost**: S / M / L, plus blast radius (this page | this team | shared primitive).
   - **Verification**: how a reviewer proves it fixed — the assertion to add and the
-    spec to add it to (the one already calling `expectNoAxeViolations` for that
-    component if there is one, otherwise a new `<component>.component.a11y.spec.ts`),
-    or the manual walkthrough to run (keyboard, screen reader, 200% zoom for 1.4.4,
-    320 px for 1.4.10, real-browser contrast).
+    spec to add it to (choose that spec by §7's rule, which carries the exceptions; do
+    not re-derive it here), or the manual walkthrough to run (keyboard, screen reader,
+    200% zoom for 1.4.4, 320 px for 1.4.10, the four text-spacing overrides for 1.4.12,
+    real-browser contrast).
 
 Close with:
   - **Open questions** — anything that needs a product decision or a running browser.
@@ -464,17 +513,15 @@ Close with:
 
   - No new dependencies. Angular 19 standalone components, SCSS, existing `--kh-*`
     tokens, existing shared primitives.
-  - ARIA in templates — the two house documents disagree, so this prompt settles it.
-    `ACCESSIBILITY.md` says "All ARIA attributes use `[attr.aria-*]`"; `CONTRIBUTORS.md`
-    says "Use `[attr.aria-*]`, `aria-label`, `aria-live` where appropriate", and the
-    codebase follows the looser reading (159 static vs 132 bound `aria-label`). TREAT
-    BOTH FORMS AS CORRECT: a static value belongs in a plain attribute
-    (`aria-label="Remove goal"`), and the `[attr.aria-*]` binding form is for values
+  - ARIA in templates — BOTH FORMS ARE CORRECT, per `ACCESSIBILITY.md`'s "attr. prefix"
+    rule and `CONTRIBUTORS.md` alike, and both are in wide use (grep `aria-label=` and
+    `[attr.aria-label]`). A constant value belongs in a plain attribute
+    (`aria-label="Remove goal"`); the `[attr.aria-*]` binding form is for values
     computed at runtime, where it avoids Angular's property-binding pitfalls. Do not
     file a finding to convert a correct static attribute to the bound form — that is a
-    no-op refactor and the kind of style preference §8 forbids. If you think the
-    stricter `ACCESSIBILITY.md` wording should govern, raise it as a question in
-    §6 Open questions rather than filing per-attribute findings.
+    no-op refactor and the kind of style preference §8 forbids. If you think one form
+    should govern everywhere, raise it under §5's Open questions rather than filing
+    per-attribute findings.
   - Native semantics before ARIA; ARIA only where no native element does the job.
   - Design by Contract applies to any code you propose, per the repo-wide mandate in
     `CLAUDE.md` ("mandatory for all code and comments"): preconditions, postconditions,
@@ -486,9 +533,11 @@ Close with:
     already calls `expectNoAxeViolations` for that component, extend it rather than
     writing a new harness — usually a `.a11y.spec.ts`, but for `empty-state`,
     `dashboard-shell`, and `inline-banner` it is the ordinary `*.component.spec.ts`.
-    Most components have neither: only 29 spec files call the helper against ~160
+    Most components have neither — far fewer spec files call the helper than there are
     components, so for the majority the correct recommendation IS to create
-    `<component>.component.a11y.spec.ts`. Say which of the two you mean.
+    `<component>.component.a11y.spec.ts`. Count both before assuming otherwise
+    (`grep -rl expectNoAxeViolations` against `find -name '*.component.ts'`). Say which
+    of the two you mean.
   - Never reference an external issue tracker in code, comments, or docs.
 
 ## 8. Do not report
