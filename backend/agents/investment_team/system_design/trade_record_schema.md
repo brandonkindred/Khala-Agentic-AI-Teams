@@ -29,7 +29,7 @@ them uniformly.
 | `entry_fill_price` | `float \| None` | Actual filled price paid at entry, **after** slippage: `entry_bid_price × (1 + slippage_bps/10000)`, rounded to 4 dp below $10 and 2 dp at or above. |
 | `exit_bid_price` | `float \| None` | Reference price at the exit bar, **before** slippage. Not the raw close: on a partially-filled exit this is `weighted_avg_exit_bid_price`, the quantity-weighted mean of the per-slice reference prices. |
 | `exit_fill_price` | `float \| None` | Actual filled price received at exit, **after** slippage: `exit_bid_price × (1 − slippage_bps/10000)`, rounded the same way as entry. |
-| `entry_order_type` | `str` | Order type used for entry. `market`, `limit`, `stop`, `stop_limit`, and `trailing_stop` are all live and each derives its own reference price. |
+| `entry_order_type` | `str` | Order type used for entry. `market`, `limit`, `stop`, and `stop_limit` are live and each derives its own reference price in `RealisticExecutionModel.compute_fill_terms`. `trailing_stop` also appears, but is not a fifth reference-price rule and is not an entry type: `FillSimulator` rewrites it into a `STOP` at the ratcheted `effective_stop_price` before pricing, and it is used as a stop-loss child (an exit). |
 | `exit_order_type` | `str` | Order type used for exit — same semantics. |
 | `gross_pnl` | `float` | P/L before transaction costs: `shares × (exit_fill - entry_fill)` (sign-flipped for shorts). |
 | `net_pnl` | `float` | P/L after transaction costs, charged on entry and exit notional **separately**: `(entry_notional + exit_notional) × cost_bps/10000`. This is the canonical P/L used to drive `outcome`, `cumulative_pnl`, and aggregate metrics. |

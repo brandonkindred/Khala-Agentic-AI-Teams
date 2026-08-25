@@ -166,13 +166,24 @@ class PhaseTransition(BaseModel):
       - The event is immutable (Pydantic ``frozen=True``).
 
     Invariants:
+      - Both hashes are **boundary snapshots**: each records the spec/code as
+        of the moment its own transition fired. Neither is pinned for the
+        remainder of the attempt, so comparing hashes across two transitions
+        detects drift only where the carve-outs below do not apply.
       - ``spec_hash`` is stable from the ``DESIGN_REVIEW → CODE_SYNTHESIS``
-        transition onward for any given design attempt: the spec is frozen
-        post-design (with a tighten-only ``risk_limits`` carve-out documented
-        in ``_orchestrator_helpers._merge_risk_limits_tighten_only``).
+        transition onward for any given design attempt, with two carve-outs
+        that land on the following transition: a tighten-only ``risk_limits``
+        update (``_orchestrator_helpers._merge_risk_limits_tighten_only``),
+        and ``_synthesize_initial_code`` flipping ``requires_custom_code`` to
+        ``True`` on a ``CompilerError`` fallback (``hash_spec`` excludes only
+        ``strategy_code``, not ``requires_custom_code``).
       - ``code_hash`` is stable from the ``CODE_SYNTHESIS →
-        BACKTEST_AND_VERIFICATION`` transition onward for any given design
-        attempt: code is not regenerated past the synthesis loop.
+        BACKTEST_AND_VERIFICATION`` transition through the refinement loop,
+        but **not** through to the terminal transition: the trade-alignment
+        loop runs after that boundary and may commit a rewritten baseline
+        (``_commit_alignment_proposal``), which the terminal emit picks up
+        because it is reached with the post-alignment ``_DesignAttemptState``.
+        An alignment-driven rewrite is expected behaviour, not drift.
     """
 
     model_config = ConfigDict(frozen=True)

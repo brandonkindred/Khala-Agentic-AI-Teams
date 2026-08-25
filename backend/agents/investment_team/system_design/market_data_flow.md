@@ -627,6 +627,7 @@ from the *current* bar; the close is never used as a decision-time fill price:
 | **MARKET** | always | `bar.open` | `compute_fill_terms` `:241` |
 | **LIMIT** | long: `bar.low <= limit`; short: `bar.high >= limit` | `req.limit_price` exactly (the realistic model drops the legacy `min(bar.open, limit)` "free alpha") | `_limit_reference_price` `:290` |
 | **STOP** | long: `bar.high >= stop`; short: `bar.low <= stop` | long `max(bar.open, stop)`, short `min(bar.open, stop)` — gap-through honoured | `_stop_reference_price` `:305` |
+| **STOP_LIMIT** | two-stage: the stop must trigger, then the limit must be satisfiable on that bar | trigger-then-limit geometry; returns `None` (no fill) when a gap-through takes price past the limit | `stop_limit_reference_price` `:85` |
 
 **Step 2 — participation cap** (`_raw_participation` `:323`,
 `_qty_fraction_from_participation` `:344`). A single bar can't absorb an
@@ -636,8 +637,8 @@ unbounded order: `raw_participation = order_notional / (bar.volume · bar.close)
 remainder follows the run's `default_unfilled_policy` (backtest
 `REQUEUE_NEXT_BAR`, paper `DROP`).
 
-**Step 3 — LIMIT adverse-selection haircut** (`_adverse_selection_bps` `:365`;
-LIMIT only, requires `next_bar`). Models being picked off:
+**Step 3 — adverse-selection haircut** (`_adverse_selection_bps` `:365`;
+LIMIT **and** STOP_LIMIT, requires `next_bar`). Models being picked off:
 `signed_move_pct = (next_bar.close − bar.close) / bar.close`, scaled by the
 participation rate and capped at `adverse_selection_max_bps` (default 50).
 Returned as `extra_slip_bps`.
@@ -738,11 +739,11 @@ flowchart LR
 
 | Use case | Endpoint / entry | Data path |
 |---|---|---|
-| Run strategy-lab batch | `POST /strategy-lab/run` (`api/main.py:3024`) | context snapshot → ideation → backtest → (winner) paper trade |
-| Run backtest | `POST /backtests` (`:1506`) → `_run_real_data_backtest` (`:1907`) | `MarketDataService.fetch_multi_symbol_range` → `HistoricalReplayStream` → engine |
-| Run paper trade | `POST /strategy-lab/paper-trade` (`:4854`) | flag-off: recent OHLCV replay · flag-on: live `ProviderAdapter` stream |
-| Stop live session | `POST /strategy-lab/paper-trade/{id}/stop` (`:5471`) | sets `StopController` flag the run loop polls |
-| List providers | `GET /providers` (`:5638`) | `registry.describe_all()` |
+| Run strategy-lab batch | `POST /strategy-lab/run` | context snapshot → ideation → backtest → (winner) paper trade |
+| Run backtest | `POST /backtests` → `_run_real_data_backtest` | `MarketDataService.fetch_multi_symbol_range` → `HistoricalReplayStream` → engine |
+| Run paper trade | `POST /strategy-lab/paper-trade` | flag-off: recent OHLCV replay · flag-on: live `ProviderAdapter` stream |
+| Stop live session | `POST /strategy-lab/paper-trade/{id}/stop` | sets `StopController` flag the run loop polls |
+| List providers | `GET /providers` | `registry.describe_all()` |
 
 ---
 

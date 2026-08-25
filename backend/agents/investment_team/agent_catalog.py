@@ -21,7 +21,7 @@ CORE_AGENTS: List[AgentDefinition] = [
         role=(
             "LLM step that produces a versioned JSON brief (macro/micro themes, hypotheses, trade-structure hints) "
             "from prior Strategy Lab results, asset-class mix steering, and a free-tier market snapshot "
-            "(FX, optional FRED macro, optional crypto) before StrategyIdeationAgent runs."
+            "(FX, optional FRED macro, optional crypto) once per batch, before each cycle's DesignAgent runs."
         ),
         inputs=["prior StrategyLabRecord rows", "asset_class_mix_hint", "MarketLabContext"],
         outputs=["SignalIntelligenceBriefV1"],

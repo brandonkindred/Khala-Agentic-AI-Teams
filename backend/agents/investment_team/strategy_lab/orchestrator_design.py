@@ -1748,11 +1748,13 @@ class DesignMixin:
         )
 
         # ═══ Phase 4 → exit: BACKTEST_AND_VERIFICATION → ∅ ════════════
-        # Terminal transition out of the last named phase. ``to_phase``
-        # is ``None``; ``spec_hash``/``code_hash`` must match the values
-        # emitted on the previous two boundaries within this design
-        # attempt — the integration test in
-        # ``test_strategy_lab_phase_transitions.py`` asserts this.
+        # Terminal transition out of the last named phase. ``to_phase`` is
+        # ``None``. ``spec_hash`` matches the value emitted on the previous
+        # two boundaries; ``code_hash`` may differ from the synthesis-exit
+        # value, because ``state`` here is the post-alignment
+        # ``_DesignAttemptState`` and the trade-alignment loop may have
+        # committed a rewritten baseline (``_commit_alignment_proposal``).
+        # See ``PhaseTransition``'s Invariants in ``phases.py``.
         _emit_phase_transition(
             emit,
             from_phase=Phase.BACKTEST_AND_VERIFICATION,

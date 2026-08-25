@@ -363,8 +363,9 @@ best-effort, in-process, without going through that record —
 phase update it forwards through `_PROGRESS_PHASE_MAP` — the internal
 `designing`/`design_review`/`design_repair`/`coding`/`backtesting`/
 `aligning`/`analyzing`/`complete` names, collapsed onto the UI's
-four-entry stepper `ideating`/`coding`/`backtesting`/`analyzing`; an
-unmapped phase is not published at all) and `publish_run_event_activity`
+four-entry stepper `ideating`/`coding`/`backtesting`/`analyzing`. The
+orchestrator also emits `telemetry` and `phase_transition`, which are
+deliberately absent from the map and therefore never published) and `publish_run_event_activity`
 (the batch workflow's skipped/finalized/terminal events). Reconciliation
 doesn't depend on either direct-publish path, so a missed one is still
 caught up by the next poll. A polling fallback (`GET /strategy-lab/runs/{run_id}/status`)
@@ -404,10 +405,12 @@ model through `strategy_lab/agents/model_factory.py::get_strands_model`, which
 branches on `resolve_provider()`:
 
 - **`ollama` (the default)** — routes to `llm_service.strands_adapter`, which
-  resolves the client through the provider list. `LLM_BASE_URL`/`LLM_MODEL`
-  are **not** forwarded on this path (they feed only the log line and the
-  explicit-transport-timeout branch), so setting them has no effect on which
-  endpoint or model is used.
+  resolves the client through the provider list. `model_factory` does not
+  forward its own `resolve_model()`/`resolve_base_url()` values on this path,
+  but `LLM_MODEL`/`LLM_BASE_URL` still apply *downstream*: `llm_service.factory`
+  falls back to them whenever the selected provider-list entry leaves `model`
+  or `base_url` blank. So they behave exactly as the platform-wide rule says —
+  blank-entry defaults, not a provider selector.
 - **`bedrock`** — constructs a `BedrockModel` directly from `resolve_model()`,
   bypassing the provider list entirely. `LLM_MODEL` *is* live here.
 - **`dummy`** — **raises** (`"LLM_PROVIDER=dummy is not supported for Strands
@@ -464,7 +467,7 @@ alignment loops, and the ~20-gate `quality_gates/` catalog — are documented in
 | `STRATEGY_LAB_MARKET_DATA_PROVIDER` | Provider key (only `free_tier` is implemented) |
 | `STRATEGY_LAB_SIGNAL_EXPERT_ENABLED` | Toggles the signal-intelligence step |
 | `LLM_PROVIDER` | Must be `ollama` or `bedrock` for Strategy Lab's Strands agents — `dummy` and any other value raise (see §10). Platform-wide, only `dummy` is load-bearing |
-| `LLM_BASE_URL` / `LLM_MODEL` | Blank-provider-list-entry defaults. `LLM_MODEL` additionally selects the live model on the `bedrock` branch; neither is forwarded on the default `ollama` path (see §10) |
+| `LLM_BASE_URL` / `LLM_MODEL` | Blank-provider-list-entry defaults (applied by `llm_service.factory`). `LLM_MODEL` additionally selects the live model on the `bedrock` branch (see §10) |
 | `POSTGRES_HOST` (+ friends) | Enables job-service persistence (required for non-trivial use) |
 
 This table covers only the batch-level / market-data / platform vars this team

@@ -7,8 +7,9 @@ an assembled `StrategyLabRecord`. It complements, rather than duplicates,
 *outer* cycle phases and their SSE events. Note the two vocabularies: the
 orchestrator emits internal phase names (`designing`, `design_review`,
 `design_repair`, `coding`, `backtesting`, `aligning`, `analyzing`,
-`complete`), and `_PROGRESS_PHASE_MAP` collapses them onto the four-entry
-stepper a UI client actually receives — `ideating → coding → backtesting →
+`complete`, plus the deliberately-unmapped `telemetry` and
+`phase_transition`), and `_PROGRESS_PHASE_MAP` collapses the first eight onto
+the four-entry stepper a UI client actually receives — `ideating → coding → backtesting →
 analyzing` (an unmapped phase is not published at all). `fetching_data` is a
 `sub_phase` of `backtesting`, not a phase of its own. This document opens up
 what happens behind those — in particular everything inside "ideating" (the
@@ -89,18 +90,9 @@ driven rewrite, not drift. (The terminal emit is reached with the
 `_DesignAttemptState` built *after* the alignment loop, so it carries the
 committed rewrite.)
 
-> **Known doc/code discrepancy.** `phases.py`'s `PhaseTransition` docstring
-> states as an Invariant that `code_hash` "is stable from the `CODE_SYNTHESIS
-> → BACKTEST_AND_VERIFICATION` transition onward … code is not regenerated
-> past the synthesis loop", and the terminal emit site carries a comment
-> saying the hashes "must match the values emitted on the previous two
-> boundaries". Both predate `_commit_alignment_proposal` and are stricter than
-> the code actually is; the existing phase-transition tests don't catch it
-> because they assert `spec_hash` stability and the *synthesis-exit*
-> `code_hash`, never terminal-vs-synthesis equality. Treat this document as
-> describing observed behavior and those docstrings as the stale side — but
-> don't write a new assertion against either until someone reconciles them in
-> code.
+`PhaseTransition`'s own Invariants in `phases.py` state the same carve-outs;
+they previously asserted flat stability for both hashes, which predated
+`_commit_alignment_proposal`, and were corrected alongside this document.
 
 All four emission sites live in
 `orchestrator_design.py`, in phase order: `DESIGN → DESIGN_REVIEW`

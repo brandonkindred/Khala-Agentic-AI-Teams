@@ -51,7 +51,9 @@ with implementation detail for individual Strategy Lab capabilities:
   subscriber sees only the four `_PROGRESS_PHASE_MAP` targets
   (`ideating`/`coding`/`backtesting`/`analyzing`), and the `paper_trading*`
   rows reach no subscriber at all because `finalize_cycle_record_activity`
-  passes `on_phase=None`.
+  passes `on_phase=None`. The callback contract is also wider than that table:
+  `telemetry` and `phase_transition` are emitted too, and are deliberately
+  unmapped.
 - **[`generation_pipeline.md`](./generation_pipeline.md)** — what actually
   happens *inside* "ideating" and "backtest" above: the 4-phase contract, the
   design ↔ review loop, the compiled-DSL-vs-custom-code fork, the refinement

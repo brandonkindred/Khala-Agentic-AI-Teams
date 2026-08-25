@@ -220,10 +220,10 @@ flowchart TD
     G2 -- No --> G3{Gate 3<br/>ValidationReport<br/>complete &<br/>all required passed?}
     G3 -- No --> REV[outcome = revise<br/>gate: validation = fail]
     G3 -- Yes --> G4{Gate 4<br/>IPS.live_trading_enabled?}
-    G4 -- No --> PAP1[outcome = paper<br/>gate: ips_live = warn]
+    G4 -- No --> PAP1[outcome = paper<br/>gate: ips_permission = warn]
     G4 -- Yes --> G5{Gate 5<br/>IPS.human_approval_required_for_live<br/>&amp; human_live_approval?}
     G5 -- approval pending --> PAP2[outcome = paper<br/>gate: human_approval = warn]
-    G5 -- approval granted<br/>or not required --> LIVE[outcome = live<br/>gate: live_promote = pass]
+    G5 -- approval granted<br/>or not required --> LIVE[outcome = live<br/>gate: human_approval = pass]
 
     REJ1 --> ESC[[Enqueue to escalation queue<br/>priority=high<br/>orchestrator.py L113-117]]
     REJ2 --> ESC

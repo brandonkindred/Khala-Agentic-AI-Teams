@@ -122,13 +122,16 @@ between them under the current Temporal-only dispatch:
   `complete`) onto the UI's four-entry stepper — `ideating`, `coding`,
   `backtesting`, `analyzing`. An unmapped phase is not published at all.
 - `finalize_cycle_record_activity` calls `_finalize_strategy_lab_cycle_record`
-  with `on_phase=None`, so the `paper_trading*` and `complete` rows below
-  reach no subscriber on that path.
+  with `on_phase=None`, so the `paper_trading*` rows below reach no subscriber.
+  (`complete` is not emitted there — it comes from `RecordAssemblyMixin` inside
+  `run_design_attempt_activity`, and *is* published, relabelled `analyzing`.)
 
 So a subscriber sees only those four names. Note also that `fetching_data` is
 emitted as a `sub_phase` of `backtesting`
 (`emit("backtesting", {"sub_phase": "fetching_data"})`), not as a top-level
-phase. The rows:
+phase, and that `telemetry` and `phase_transition` are emitted as well —
+deliberately unmapped, so an `on_phase` implementation must tolerate them
+rather than assert on an unknown name. The rows:
 
 | Phase | When emitted | Data fields |
 |---|---|---|
@@ -140,7 +143,7 @@ phase. The rows:
 | `paper_trading_complete` | Paper trading finished successfully | `{ session_id, verdict, trade_count }` |
 | `paper_trading_skipped` | Paper trading did not run | `{ reason, detail? }` |
 | `paper_trading_failed` | Paper trading raised an exception (non-fatal) | `{ detail }` |
-| `complete` | Cycle fully persisted | `{ record_id, is_winning, is_publishable, metrics, paper_trading_status, paper_trading_verdict }` |
+| `complete` | Design attempt finished and the record assembled (emitted by `RecordAssemblyMixin`, before the finalize/persist step) | `{ record_id, is_winning, is_publishable, metrics, refinement_rounds, alignment_rounds, trades_aligned, phase_back_count }` — the short-circuit variant swaps in `short_circuit` |
 
 UI clients should treat unknown phase names as opaque and ignore them.
 

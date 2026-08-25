@@ -165,7 +165,7 @@ precondition falls back to `paper`.
 | 3 | Validation completeness & pass criteria | Any required check missing or failed | `revise` |
 | 4 | IPS live-trading permission | `ips.live_trading_enabled == False` | fall back to `paper` |
 | 5 | Human live approval | `ips.human_approval_required_for_live and not human_live_approval` | fall back to `paper` |
-| 6 | Promote to live | All gates pass | `live` |
+| 6 | Promote to live | All gates pass | `live` (recorded as `human_approval = pass`; there is no separate gate member for this step) |
 
 Every gate records a `GateCheckResult(gate, result, details)` in
 `PromotionDecision.gate_results` and the decision carries an `AuditContext`
@@ -414,10 +414,10 @@ the verification/publication decision is documented in
 
 | Enum | Values | Defined |
 |---|---|---|
-| `RiskTolerance` | `conservative`, `moderate_conservative`, `moderate`, `moderate_aggressive`, `aggressive` | [`models.py`](../models.py):72 |
-| `WorkflowMode` | `monitor_only`, `paper`, `live` | [`models.py`](../models.py):116 |
+| `RiskTolerance` | `low`, `medium`, `high`, `very_high` | [`models.py`](../models.py):72 |
+| `WorkflowMode` | `advisory`, `paper`, `live`, `monitor_only` | [`models.py`](../models.py):116 |
 | `PromotionStage` | `reject`, `revise`, `paper`, `live` | [`models.py`](../models.py):103 |
-| `PromotionGate` | `separation_of_duties`, `risk_veto`, `validation`, `ips_live`, `human_approval`, `live_promote` | [`models.py`](../models.py):123 |
+| `PromotionGate` | `separation_of_duties`, `risk_veto`, `validation`, `ips_permission`, `human_approval` — five members; the sixth checklist step ("promote to live") records `human_approval = pass` rather than a gate of its own | [`models.py`](../models.py):123 |
 | `GateResult` | `pass`, `fail`, `warn` | [`models.py`](../models.py):131 |
 | `AdvisorTopic` | `greeting`, `risk`, `horizon`, `income`, `net_worth`, `savings`, `tax`, `liquidity`, `goals`, `preferences`, `constraints`, `review` | [`models.py`](../models.py):85 |
 | `AdvisorSessionStatus` | `active`, `completed`, `abandoned` | [`models.py`](../models.py):79 |
