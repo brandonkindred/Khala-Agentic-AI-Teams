@@ -541,9 +541,24 @@ def test_ensure_repo_clone_lock_open_failure_reports_lock_error(tmp_path):
 
 
 def test_ensure_repo_clone_flock_failure_reports_lock_error(tmp_path):
-    """A flock failure surfaces as a lock error rather than escaping."""
+    """A flock failure surfaces as a lock error rather than escaping.
+
+    The flock mechanics now live in the shared ``flock_lock`` primitive
+    (``shared.concurrency.flock_lock``), not in this module directly, so the
+    patch target moved there — this module no longer imports ``fcntl``
+    itself. Patched via ``sys.modules`` rather than a dotted string path:
+    ``shared.concurrency``'s own ``__init__.py`` does ``from
+    shared.concurrency.flock_lock import flock_lock``, which — since the
+    imported name matches the submodule's own name — rebinds the
+    ``flock_lock`` *attribute* on the ``shared.concurrency`` package to the
+    function, shadowing the submodule; a dotted-string/attribute-chain
+    resolver can therefore land on either the module or the function
+    depending on import order elsewhere in the test session. ``sys.modules``
+    is the one lookup immune to that.
+    """
     repo = tmp_path / "checkout"
-    with patch(f"{_M}.fcntl.flock", side_effect=OSError("locked")):
+    flock_lock_module = sys.modules["shared.concurrency.flock_lock"]
+    with patch.object(flock_lock_module.fcntl, "flock", side_effect=OSError("locked")):
         err = _ensure_repo_clone(str(repo), "acme", "widget", "tok")
     assert err is not None
     assert "could not acquire clone lock" in err
