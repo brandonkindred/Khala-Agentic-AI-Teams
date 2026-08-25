@@ -157,8 +157,12 @@ class _AssignmentMixin:
               inputs, inherited unchanged since this is only ever called from there.
         Postconditions:
             - Returns False and makes no assignments unless every task in
-              ``remaining_ready`` resolves to the exact same non-empty set of matching
-              free agents, and that set has at least as many agents as there are tasks.
+              ``remaining_ready`` has a non-empty ``target_team`` and they all resolve to
+              the exact same non-empty set of matching free agents, and that set has at
+              least as many agents as there are tasks. The ``target_team`` requirement
+              covers every task, not merely the first: an untargeted task matches every
+              agent, so on an all-one-stack free pool it would otherwise resolve to the
+              same set as its same-stack batch-mates and be absorbed into them.
             - Returns True otherwise: every task in ``remaining_ready`` is attempted via
               ``self._try_assign`` against a least-recently-used-first ordering of the
               matching agents, with ``used_agents``/``assigned_tasks`` and
@@ -167,9 +171,12 @@ class _AssignmentMixin:
               simply leaves its lowest-priority excess agents unused this round — the size
               guard above guarantees there is never a task this method fails to attempt.
         """
-        first_team = remaining_ready[0].target_team
-        if not first_team:
+        # Every task, not just the first: an untargeted task matches *every* agent, so
+        # when the free pool is all one stack it resolves to the same set a same-stack
+        # targeted task does and would otherwise be silently absorbed into the batch.
+        if not all(task.target_team for task in remaining_ready):
             return False
+        first_team = remaining_ready[0].target_team
         matching_free = self._matching_free_agents(first_team, remaining_free)
         if not matching_free or len(matching_free) < len(remaining_ready):
             return False

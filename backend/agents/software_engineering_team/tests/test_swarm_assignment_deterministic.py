@@ -132,6 +132,37 @@ def test_untargeted_task_with_multiple_candidates_calls_llm(tmp_path):
     assert set(call["free_agents"]) == {"frontend_v2", "backend_v2"}
 
 
+def test_untargeted_task_anywhere_in_batch_calls_llm_regardless_of_order(tmp_path):
+    """An untargeted task must reach the Tech Lead no matter where it sits in the ready
+    batch. An untargeted task matches *every* agent, so when the free pool is all one
+    stack it resolves to the same agent set a same-stack targeted task does -- meaning a
+    homogeneity guard that only inspects the batch's first task would accept
+    [targeted, untargeted] as one same-stack batch and hard-assign the untargeted task
+    with no LLM call, while [untargeted, targeted] correctly falls through. Same inputs,
+    opposite behavior from list order alone; both orders must consult the Tech Lead,
+    since an unset target_team is exactly the case needing its judgment."""
+    for order in (("targeted", "untargeted"), ("untargeted", "targeted")):
+        tech_lead = _RecordingTechLead()
+        workers = [
+            StubWorker("backend_v2-1", stack_name="backend_v2"),
+            StubWorker("backend_v2-2", stack_name="backend_v2"),
+        ]
+        swarm, graph = _make_swarm(tmp_path, tech_lead, workers)
+        for task_id in order:
+            if task_id == "targeted":
+                graph.add_task(task_id, title="Targeted", target_team="backend_v2")
+            else:
+                graph.add_task(task_id, title="Untargeted")
+
+        swarm._assign_tasks(graph.get_tasks(), ["backend_v2-1", "backend_v2-2"])
+
+        assert len(tech_lead.assignment_calls) == 1, f"order={order}"
+        call = tech_lead.assignment_calls[0]
+        assert {t["id"] for t in call["ready_tasks"]} == {"targeted", "untargeted"}, (
+            f"order={order}"
+        )
+
+
 def test_two_tasks_targeting_the_same_team_calls_llm(tmp_path):
     """2 workers, 2 tasks both targeting the same team -> both tasks resolve to the same
     single candidate agent, which is itself an ambiguity (two tasks competing for one agent),
