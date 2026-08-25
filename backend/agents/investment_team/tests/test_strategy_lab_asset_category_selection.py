@@ -48,9 +48,11 @@ pytestmark = pytest.mark.strategy_lab_integration
 
 
 def test_select_returns_a_value_from_the_allowed_set() -> None:
+    excluded = ["stocks", "futures", "commodities"]
+    allowed = set(PROMPT_ASSET_CLASSES) - set(excluded)
     for _ in range(20):
-        picked = select_asset_category(["stocks", "futures", "commodities"])
-        assert picked in ("crypto", "forex")
+        picked = select_asset_category(excluded)
+        assert picked in allowed
 
 
 def test_select_none_exclude_picks_from_every_prompt_class() -> None:
@@ -62,8 +64,10 @@ def test_select_none_exclude_picks_from_every_prompt_class() -> None:
 
 
 def test_select_single_allowed_class_always_returns_it() -> None:
+    excluded = list(PROMPT_ASSET_CLASSES[:-1])
+    (single_allowed,) = PROMPT_ASSET_CLASSES[-1:]
     for _ in range(10):
-        assert select_asset_category(["stocks", "crypto", "futures", "commodities"]) == "forex"
+        assert select_asset_category(excluded) == single_allowed
 
 
 def test_select_is_deterministic_with_a_seeded_rng() -> None:
@@ -234,10 +238,12 @@ def test_design_loop_pins_single_category_and_scopes_prior_records(
 
     prior_records = [_record("forex"), _record("forex"), _record("stocks"), _record("crypto")]
 
+    events: List[Tuple[str, Dict[str, Any]]] = []
     orch.run_cycle(
         prior_records=prior_records,
         config=_config(),
         exclude_asset_classes=["stocks", "crypto", "futures", "commodities"],
+        on_phase=lambda phase, data: events.append((phase, data)),
     )
 
     assert len(captured) == 1
@@ -245,6 +251,14 @@ def test_design_loop_pins_single_category_and_scopes_prior_records(
     assert kwargs["exclude_asset_classes"] == ["stocks", "crypto", "futures", "commodities"]
     assert len(kwargs["prior_records"]) == 2
     assert all(r.strategy.asset_class == "forex" for r in kwargs["prior_records"])
+
+    design_loop_events = [
+        data
+        for phase, data in events
+        if phase == "telemetry" and data.get("scope") == "design_loop"
+    ]
+    assert design_loop_events
+    assert design_loop_events[-1]["asset_category"] == "forex"
 
 
 def test_design_loop_pins_one_of_several_allowed_categories(
@@ -273,11 +287,13 @@ def test_design_loop_pins_one_of_several_allowed_categories(
 
     prior_records = [_record("stocks"), _record("crypto"), _record("forex")]
 
+    events: List[Tuple[str, Dict[str, Any]]] = []
     # allowed = {stocks, crypto} -> exclude = {forex, futures, commodities}
     orch.run_cycle(
         prior_records=prior_records,
         config=_config(),
         exclude_asset_classes=["forex", "futures", "commodities"],
+        on_phase=lambda phase, data: events.append((phase, data)),
     )
 
     assert len(captured) == 1
@@ -288,6 +304,14 @@ def test_design_loop_pins_one_of_several_allowed_categories(
     (selected_category,) = allowed_in_prompt_classes
     assert selected_category in ("stocks", "crypto")
     assert all(r.strategy.asset_class == selected_category for r in kwargs["prior_records"])
+
+    design_loop_events = [
+        data
+        for phase, data in events
+        if phase == "telemetry" and data.get("scope") == "design_loop"
+    ]
+    assert design_loop_events
+    assert design_loop_events[-1]["asset_category"] == selected_category
 
 
 # ---------------------------------------------------------------------------
