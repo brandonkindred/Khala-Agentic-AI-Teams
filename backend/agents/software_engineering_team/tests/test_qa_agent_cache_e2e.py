@@ -20,10 +20,11 @@ call drives Strands' *forced tool-call* structured-output mechanism (see
 for the plain-text ``_text_message`` fake): the model must reply with a
 ``tool_use`` content block invoking a tool named after the output model class
 (``"QAOutput"``, see ``strands.tools.structured_output.structured_output_utils
-.convert_pydantic_to_tool_spec``), not a text block containing JSON. This
-module's ``_qa_tool_use_message`` scripts that tool_use block directly so the
-real ``ClaudeLLMClient`` -> ``LLMClientModel`` -> Strands ``Agent`` chain
-completes successfully, closing the gap left open there for QA specifically.
+.convert_pydantic_to_tool_spec``), not a text block containing JSON.
+``llm_client_fakes._tool_use_message`` scripts that tool_use block directly
+so the real ``ClaudeLLMClient`` -> ``LLMClientModel`` -> Strands ``Agent``
+chain completes successfully, closing the gap left open there for QA
+specifically.
 
 QA also carries its own whole-input ``ReviewResultCache`` (keyed on the full
 ``QAInput`` + resolved model, unrelated to Anthropic wire-level prompt
@@ -34,14 +35,13 @@ via ``QA_REVIEW_CACHE_SIZE=0`` so both calls are genuine.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import pytest
 from qa_agent.agent import QAExpertAgent
 from qa_agent.models import QAInput
 
-from llm_client_fakes import _make_claude_client
+from llm_client_fakes import _make_claude_client, _tool_use_message
 from llm_service import telemetry
 from llm_service.strands_adapter import LLMClientModel
 from shared.dev_models.models import SystemArchitecture
@@ -71,22 +71,14 @@ def _qa_input(code: str) -> QAInput:
     )
 
 
-def _qa_tool_use_message(
-    summary: str,
-    *,
-    cache_read_input_tokens: Optional[int] = None,
-    cache_creation_input_tokens: Optional[int] = None,
-) -> SimpleNamespace:
-    """Script a Strands forced-structured-output reply for ``QAOutput``.
+def _qa_output_payload(summary: str) -> Dict[str, Any]:
+    """Build a ``QAOutput``-shaped dict for a scripted tool-call ``input``.
 
-    A ``tool_use`` content block invoking a tool named ``"QAOutput"`` (the
-    output model's class name -- Strands' forced-structured-output
-    convention), matching what ``ClaudeLLMClient._content_from_message``
-    requires to detect a tool call (``kind == "tools"``) and what
-    ``LLMClientModel`` requires to hand Strands a completed
-    ``structured_output``.
+    QA-specific (the required/defaulted field set is ``QAOutput``'s, not a
+    generic fake concern), so it stays local rather than living in the
+    shared ``llm_client_fakes`` module alongside ``_tool_use_message``.
     """
-    payload: Dict[str, Any] = {
+    return {
         "bugs_found": [],
         "approved": True,
         "summary": summary,
@@ -97,16 +89,6 @@ def _qa_tool_use_message(
         "readme_content": "",
         "suggested_commit_message": "",
     }
-    usage_kwargs: Dict[str, int] = {"input_tokens": 11, "output_tokens": 7}
-    if cache_read_input_tokens is not None:
-        usage_kwargs["cache_read_input_tokens"] = cache_read_input_tokens
-    if cache_creation_input_tokens is not None:
-        usage_kwargs["cache_creation_input_tokens"] = cache_creation_input_tokens
-    return SimpleNamespace(
-        content=[SimpleNamespace(type="tool_use", id="toolu_qa_1", name="QAOutput", input=payload)],
-        stop_reason="tool_use",
-        usage=SimpleNamespace(**usage_kwargs),
-    )
 
 
 def test_second_qa_call_reads_nonzero_cache_after_first_call_writes_it(
@@ -119,13 +101,15 @@ def test_second_qa_call_reads_nonzero_cache_after_first_call_writes_it(
     monkeypatch.setenv("QA_REVIEW_CACHE_SIZE", "0")
     client, fake_messages = _make_claude_client(
         [
-            _qa_tool_use_message(
-                "Call A: no bugs.",
+            _tool_use_message(
+                "QAOutput",
+                _qa_output_payload("Call A: no bugs."),
                 cache_read_input_tokens=0,
                 cache_creation_input_tokens=512,
             ),
-            _qa_tool_use_message(
-                "Call B: no bugs.",
+            _tool_use_message(
+                "QAOutput",
+                _qa_output_payload("Call B: no bugs."),
                 cache_read_input_tokens=512,
                 cache_creation_input_tokens=0,
             ),
@@ -170,13 +154,15 @@ def test_qa_findings_unchanged_when_second_call_is_cache_served(
     monkeypatch.setenv("QA_REVIEW_CACHE_SIZE", "0")
     client, _fake_messages = _make_claude_client(
         [
-            _qa_tool_use_message(
-                "No bugs found.",
+            _tool_use_message(
+                "QAOutput",
+                _qa_output_payload("No bugs found."),
                 cache_read_input_tokens=0,
                 cache_creation_input_tokens=512,
             ),
-            _qa_tool_use_message(
-                "No bugs found.",
+            _tool_use_message(
+                "QAOutput",
+                _qa_output_payload("No bugs found."),
                 cache_read_input_tokens=512,
                 cache_creation_input_tokens=0,
             ),
