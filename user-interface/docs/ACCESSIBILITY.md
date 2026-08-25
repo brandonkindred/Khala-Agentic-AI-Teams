@@ -41,3 +41,12 @@ The UI follows WCAG 2.2-oriented practices and Angular Material accessibility gu
 - Run Lighthouse (Chrome DevTools) for accessibility audits.
 - Use axe DevTools for automated checks.
 - Test with a screen reader (e.g. NVDA, VoiceOver).
+
+## Reviewing a team's pages
+
+For a structured audit of one team's routed pages — WCAG 2.2 AA lenses, the fourteen
+per-page states and their dispositions, and a finding format that names a concrete
+mechanism — use the reusable prompt at
+[`docs/prompts/ux-accessibility-review.md`](../../docs/prompts/ux-accessibility-review.md).
+It records what the automated checks here do and do not guard, so a review spends its
+attention on what Lighthouse and axe structurally cannot see.

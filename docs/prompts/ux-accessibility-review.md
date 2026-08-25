@@ -16,11 +16,15 @@ repo-specific references are load-bearing elsewhere too. Adapt all of these:
 - §3 Review lenses — the named shared primitives and helpers (`stall-warning`,
   `defer-focus.ts`, the `--kh-*` tokens, …)
 - §7 House constraints — the whole section
-- §8 Do not report — the test-harness assumptions (`.a11y.spec.ts`,
-  `expectNoAxeViolations`, the SCSS contrast guard)
+- §5 Output format — the Verification bullet names `expectNoAxeViolations`, and the
+  state table is pinned to the fourteen states of §3D
+- §8 Do not report — the test-harness assumptions (`expectNoAxeViolations`, the SCSS
+  contrast guard)
 
 What genuinely ports unchanged is the method: the five lenses, the state-disposition
-model, the finding format and severity rubric, and the noise-control rules.
+model, the SHAPE of the finding format and its severity rubric, and the noise-control
+rules. The finding format's Verification bullet still names this repo's harness, so
+swap that line with §5.
 
 ---
 
@@ -67,13 +71,22 @@ Out of scope (note it and move on, do not fix):
     silent on the case.
   - `user-interface/src/theme.scss` — the `--kh-*` token set (surface, text, border,
     accent, focus-ring, semantic success/warning/error/info, spacing, radius, type
-    scale). Recommendations must name tokens, never raw hex.
+    scale). Recommendations must name tokens, never raw hex. Watch one prefix
+    collision: `--kh-text-*` covers BOTH colours (`-primary`, `-secondary`,
+    `-tertiary`, `-muted`, `-on-accent`) and the type scale (`-xs` … `-2xl`), so
+    `--kh-text-lg` is a font size, not a colour. Naming a size token in a colour
+    recommendation produces an invalid declaration.
   - `user-interface/src/styles/scss-contrast-guard.spec.ts` — the static guard against
     hardcoded low-contrast text and suppressed focus outlines. Its allowlist is a
-    burndown list that is now EMPTY by design — the migration onto `--kh-*` tokens
-    finished, the guard enforces across the whole UI, and its own docstring forbids
-    adding entries to silence a failure. So do not expect a <TEAM> file on it, and
-    never propose adding or removing an entry. Note also what the guard does NOT do:
+    burndown list that is now EMPTY — every component moved onto the `--kh-*` tokens,
+    the guard enforces across the whole UI, and its own docstring forbids adding
+    entries to silence a failure. So do not expect a <TEAM> file on it, and never
+    propose adding or removing an entry. One migration item IS still outstanding: the
+    guard deliberately does not yet ban `#fff`, because a few files still use
+    `color: #fff` directly and it "joins the set in the Phase-2 token sweep". A bare
+    `color: #fff` in a <TEAM> stylesheet is therefore queued debt, not a settled
+    choice — report it under design-system consistency. Note also what the guard does
+    NOT do:
     it pattern-matches banned hex literals and outline suppression in
     `src/app/**/*.scss`; it computes no contrast ratios, never pairs a foreground
     against a background, does not read token values, does not see `theme.scss`,
@@ -90,15 +103,16 @@ Out of scope (note it and move on, do not fix):
     run-history destructive actions; the target for any hand-rolled destructive flow),
     `defer-focus.ts` (move focus after a re-render),
     `extract-error-detail.ts` (`extractErrorDetail` — the repo-wide way to pull a
-    human-readable message out of an HTTP error for an inline error field, used by
-    ~70 call sites; recommend it rather than hand-rolled `err?.error?.detail ?? …`
-    chains when proposing error copy),
+    human-readable message out of an HTTP error for an inline error field, used at
+    ~190 call sites across ~70 files; recommend it rather than hand-rolled
+    `err?.error?.detail ?? …` chains when proposing error copy),
     `result-count-announcement.ts` (live-region text for filtered lists),
     `latest-only.ts` (`LatestOnly` — monotonic "latest wins" guard so a slow response
     cannot overwrite a newer one; it replaces the hand-rolled `const seq = ++this.xSeq`
     pattern, and is the mechanism to name for a refresh race or unstable ordering
-    across polls), `clamp.util.ts`, `number-format.ts`, `date-only.pipe.ts`
-    (truncation, number and date presentation), and
+    across polls), `clamp.util.ts` (integer clamp to a numeric `[min, max]` — NOT a
+    string truncator; do not reach for it on text), `number-format.ts` and
+    `date-only.pipe.ts` (number and date presentation), and
     `poll-while.ts` / `staleness.util.ts` (long-running job polling and staleness).
     "Build a custom X" when a shared X exists is itself a finding. This list is a
     starting point, not a census — `ls user-interface/src/app/shared/` before
@@ -195,13 +209,17 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
      Text-spacing overrides don't break layout.
    - Motion and timing, at the A/AA bar this review holds to, and only where the
      criterion actually applies. The summaries below are compressed, and so is
-     `backend/agents/accessibility_audit_team/wcag_criteria.py` — that table gives the
-     number, name, and LEVEL of each criterion and nothing more; its one-line
-     descriptions carry no applicability conditions and no exceptions, and on 2.3.1 it
-     states only the three-flash half. Use it to confirm a criterion's number and
-     level; do NOT treat it as the standard, and never let it override a condition
-     stated here. Where a finding turns on a threshold, condition, or exception, check
-     the criterion's own normative text before reporting.
+     `backend/agents/accessibility_audit_team/wcag_criteria.py`. That table is
+     authoritative for a criterion's number, name, and LEVEL, and each entry also
+     carries `techniques` and `failures` ID lists — the fastest route into the
+     normative text, so follow them. What it does NOT carry is the full conditions: its
+     one-line descriptions keep some exceptions (2.5.8's "or have sufficient spacing",
+     3.3.8's "unless alternatives exist", 2.4.11's "not entirely") but drop others
+     entirely, and on 2.3.1 it states only the three-flash half, omitting the
+     below-threshold alternative. So use it to confirm number and level and to reach
+     the techniques; where a finding turns on a threshold, applicability condition, or
+     exception, check the criterion's own normative text rather than the table or this
+     summary.
        * 2.2.1 Timing Adjustable (A) — judge a time limit by its mechanism, not by
          whether the duration feels generous: a comfortable but fixed limit still
          fails. Passing takes ONE of three, and the thresholds are part of the
@@ -321,9 +339,12 @@ D. STATE COVERAGE
        reached a terminal failed state. Work failed, not the call.
      - API-error — the residual: any other request failure (5xx, timeout, malformed or
        unparseable response). Reach for this only when none of the four above fits.
-   One generic catch branch commonly serves several of these at once — the repo-wide
-   `catch (err) => this.error = extractErrorDetail(err)` renders one message for a 401,
-   a 503, a network drop, and a missing-provider response alike. Score that branch
+   One generic error branch commonly serves several of these at once. The repo-wide
+   idiom is an RxJS subscribe callback, not a `try`/`catch` — roughly 219 occurrences
+   of `error: (err) => { this.error = extractErrorDetail(err); … }`, and zero `catch`
+   blocks using that helper — so grep for `error: (` when locating these. One such
+   callback renders the same message for a 401, a 503, a network drop, and a
+   missing-provider response alike. Score that branch
    per state, on whether ITS OUTPUT gives that state's user a way forward: a message
    that reads "Failed to load" earns HANDLED for API-error and MISSING for
    permission-denied and backend-unconfigured, because neither of those users learns
@@ -396,7 +417,9 @@ Open with:
     the nearest operation where handling would belong plus what is absent; for N/A,
     the justification).
     This is the audit the definition of done requires; a page whose table omits a
-    state is not finished. Each MISSING row is also a finding below.
+    state is not finished. Every MISSING row is represented among the findings below —
+    but per §3D, where one branch is MISSING for several states, that is ONE finding
+    naming every state it fails, not one finding per row.
 
 Then every finding, in ranked order:
 
@@ -415,9 +438,10 @@ Then every finding, in ranked order:
     subtle. Do not invent an irrelevant token or attribute to satisfy the format.
   - **Cost**: S / M / L, plus blast radius (this page | this team | shared primitive).
   - **Verification**: how a reviewer proves it fixed — the assertion to add and the
-    spec file to add it to (whichever one already calls `expectNoAxeViolations` for
-    that component), or the manual walkthrough to run (keyboard, screen reader,
-    200% zoom for 1.4.4, 320 px for 1.4.10, real-browser contrast).
+    spec to add it to (the one already calling `expectNoAxeViolations` for that
+    component if there is one, otherwise a new `<component>.component.a11y.spec.ts`),
+    or the manual walkthrough to run (keyboard, screen reader, 200% zoom for 1.4.4,
+    320 px for 1.4.10, real-browser contrast).
 
 Close with:
   - **Open questions** — anything that needs a product decision or a running browser.
@@ -440,12 +464,17 @@ Close with:
 
   - No new dependencies. Angular 19 standalone components, SCSS, existing `--kh-*`
     tokens, existing shared primitives.
-  - ARIA in templates: BOTH forms are sanctioned by `CONTRIBUTORS.md`, and the
-    codebase uses both heavily. A static value belongs in a plain attribute
-    (`aria-label="Remove goal"`); the `[attr.aria-*]` binding form is for values
+  - ARIA in templates — the two house documents disagree, so this prompt settles it.
+    `ACCESSIBILITY.md` says "All ARIA attributes use `[attr.aria-*]`"; `CONTRIBUTORS.md`
+    says "Use `[attr.aria-*]`, `aria-label`, `aria-live` where appropriate", and the
+    codebase follows the looser reading (159 static vs 132 bound `aria-label`). TREAT
+    BOTH FORMS AS CORRECT: a static value belongs in a plain attribute
+    (`aria-label="Remove goal"`), and the `[attr.aria-*]` binding form is for values
     computed at runtime, where it avoids Angular's property-binding pitfalls. Do not
     file a finding to convert a correct static attribute to the bound form — that is a
-    no-op refactor and the kind of style preference §8 forbids.
+    no-op refactor and the kind of style preference §8 forbids. If you think the
+    stricter `ACCESSIBILITY.md` wording should govern, raise it as a question in
+    §6 Open questions rather than filing per-attribute findings.
   - Native semantics before ARIA; ARIA only where no native element does the job.
   - Design by Contract applies to any code you propose, per the repo-wide mandate in
     `CLAUDE.md` ("mandatory for all code and comments"): preconditions, postconditions,
@@ -453,11 +482,13 @@ Close with:
     The narrower "public APIs" phrasing in `CONTRIBUTORS.md` describes what the
     software-engineering team enforces in generated code, and does not relax the
     repo-wide rule.
-  - Any behavior change needs test coverage (90% line-coverage floor). Prefer extending
-    whichever existing spec already calls `expectNoAxeViolations` for that component —
-    usually a `.a11y.spec.ts`, but for `empty-state`, `dashboard-shell`, and
-    `inline-banner` it is the ordinary `*.component.spec.ts` — over writing a new
-    harness.
+  - Any behavior change needs test coverage (90% line-coverage floor). Where a spec
+    already calls `expectNoAxeViolations` for that component, extend it rather than
+    writing a new harness — usually a `.a11y.spec.ts`, but for `empty-state`,
+    `dashboard-shell`, and `inline-banner` it is the ordinary `*.component.spec.ts`.
+    Most components have neither: only 29 spec files call the helper against ~160
+    components, so for the majority the correct recommendation IS to create
+    `<component>.component.a11y.spec.ts`. Say which of the two you mean.
   - Never reference an external issue tracker in code, comments, or docs.
 
 ## 8. Do not report
@@ -493,8 +524,9 @@ finding cites a file and line, or — for an absence — the nearest relevant lo
 plus what is missing there, or is explicitly marked as needing a browser; every
 recommendation names a concrete mechanism — an element, attribute, token, shared
 primitive, copy change, or component-logic change — rather than
-describing an intention; and the top 5 are ordered such that shipping only those
-removes the largest share of user pain.
+describing an intention; and the Top 5 — however many survived verification, which may
+be none — is ordered such that shipping only those removes the largest share of user
+pain.
 ```
 
 ---
