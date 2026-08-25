@@ -317,13 +317,16 @@ class CodegenDevelopmentAgent(ConfigDrivenV2DevelopmentAgent):
 
         Each microtask must pass Code Review, QA, and Security review before
         the next microtask can begin (see ``run_execution_with_review_gates``).
-        Build and lint gating is stack-specific: on the frontend stack, the
-        Code Review gate also runs build and lint checks and fails the
-        microtask on either (see ``run_microtask_review``); on the backend
-        stack, the Code Review gate covers code quality only — build/lint are
-        never checked per microtask there, only configured during setup (see
-        ``CodegenTeamLead.run_workflow``) and enforced separately, as a
-        CI-owned gate.
+        Build and lint gating within that loop is stack-specific: the
+        frontend's Code Review gate also runs build and lint checks and fails
+        the microtask on either (see ``run_microtask_review``); the backend's
+        Code Review gate covers code quality only, leaving build/lint
+        unchecked per microtask (see ``run_code_review_phase``). Separately,
+        when ``merge_to_development`` is True (the default, for both stacks),
+        a whole-repo pre-merge quality gate re-verifies build and lint once,
+        immediately before the merge, compensating for this endpoint having
+        no follow-up Tech Lead review (see
+        ``shared.deliver_utils.run_pre_merge_quality_gate``).
 
         Args:
             repo_path: Path to the checked-out repo the workflow writes into.
