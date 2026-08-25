@@ -21,9 +21,9 @@ CORE_AGENTS: List[AgentDefinition] = [
         role=(
             "LLM step that produces a versioned JSON brief (macro/micro themes, hypotheses, trade-structure hints) "
             "from prior Strategy Lab results, asset-class mix steering, and a free-tier market snapshot "
-            "(FX, optional FRED macro, optional crypto) once per batch workflow invocation, before each "
-            "cycle's DesignAgent runs — a mid-batch start_cycle_offset resume re-enters and re-runs it, so one "
-            "logical batch can see more than one brief."
+            "(FX, optional FRED macro, optional crypto) once per batch, before each cycle's DesignAgent runs — "
+            "a run with batch_count > 1 computes a fresh brief per batch by design, and a mid-batch "
+            "start_cycle_offset resume can additionally re-run it within one batch."
         ),
         inputs=["prior StrategyLabRecord rows", "asset_class_mix_hint", "MarketLabContext"],
         outputs=["SignalIntelligenceBriefV1"],
