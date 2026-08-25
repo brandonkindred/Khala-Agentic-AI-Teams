@@ -899,6 +899,8 @@ class TestCodegenDevelopmentAgent:
         assert "skip.ts" not in code
 
     def test_build_tool_runners(self):
+        """_build_tool_runners filters a frontend tool-agent map down to the
+        runnable (state-management, git-branch-management) subset."""
         from software_engineering_team.codegen_team.models import ToolAgentKind
         from software_engineering_team.codegen_team.orchestrator import CodegenDevelopmentAgent
         from software_engineering_team.codegen_team.tool_agents.frontend.state_management import (
