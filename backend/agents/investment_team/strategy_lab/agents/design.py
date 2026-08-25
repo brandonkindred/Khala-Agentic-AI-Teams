@@ -481,9 +481,11 @@ class DesignAgent:
         a reasoning pass followed by a formatting pass, via
         :func:`so.invoke_structured_with_schema`.
 
-        Pre: :func:`so.structured_output_available` is True (checked by the
-        caller, :meth:`_invoke_and_parse`); ``system_prompt`` / ``user_prompt``
-        are non-empty strings.
+        Pre: ``system_prompt`` / ``user_prompt`` are non-empty strings.
+        Structured-output availability is not a precondition of this call —
+        it is handled internally by :func:`so.try_structured_or_degrade`,
+        which returns ``None`` to signal degrade to the legacy path when
+        structured output is unavailable.
         Post: returns ``(finalized, prompt)``.
           * On success: ``finalized`` is the ``(parsed, rationale)`` tuple
             the caller should return immediately; ``prompt`` is
