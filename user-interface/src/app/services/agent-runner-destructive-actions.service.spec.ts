@@ -1,3 +1,4 @@
+import { EnvironmentInjector, createEnvironmentInjector } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { Observable, of, Subject, throwError } from 'rxjs';
 import { vi } from 'vitest';
@@ -238,6 +239,85 @@ describe('AgentRunnerDestructiveActionsService', () => {
       confirm$.complete();
 
       expect(runnerApi.teardown).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('lifecycle cleanup', () => {
+    let childInjector: EnvironmentInjector;
+
+    afterEach(() => {
+      try {
+        childInjector?.destroy();
+      } catch {
+        /* already destroyed by test */
+      }
+    });
+
+    // Provides the service on its own child EnvironmentInjector (mirroring a
+    // component-level provider) so destroying that injector fires the
+    // service's own DestroyRef, exercising takeUntilDestroyed independently
+    // of the shared TestBed module injector used by the other tests.
+    function createScopedService(): AgentRunnerDestructiveActionsService {
+      childInjector = createEnvironmentInjector(
+        [
+          AgentRunnerDestructiveActionsService,
+          { provide: ConfirmDestructiveService, useValue: { confirm: confirmFn } },
+          { provide: AgentConsoleApiService, useValue: runnerApi },
+          { provide: NotificationService, useValue: notify },
+        ],
+        TestBed.inject(EnvironmentInjector),
+      );
+      return childInjector.get(AgentRunnerDestructiveActionsService);
+    }
+
+    it('does not emit through savedInputDeleted$ or leave deletingSavedInputId stuck when destroyed before deleteSavedInput responds', () => {
+      const scoped = createScopedService();
+      mockDialogResult(true);
+      const inflight$ = new Subject<{ id: string; status: string }>();
+      runnerApi.deleteSavedInput.mockReturnValue(inflight$.asObservable());
+
+      const emitted: AgentTaggedEvent<string>[] = [];
+      scoped.savedInputDeleted$.subscribe((e) => emitted.push(e));
+
+      scoped.deleteSavedInput('blogging.writer', 'id-1', 'My Input');
+      expect(scoped.deletingSavedInputId()).toBe('id-1');
+
+      childInjector.destroy();
+
+      // finalize() still runs on teardown, so the loading signal resets
+      // even though the API call never emitted.
+      expect(scoped.deletingSavedInputId()).toBeNull();
+      expect(emitted).toEqual([]);
+      expect(notify.saved).not.toHaveBeenCalled();
+
+      // A late emission after destroy must have no observable effect —
+      // proves the subscription was actually torn down, not just pending.
+      inflight$.next({ id: 'id-1', status: 'deleted' });
+      expect(emitted).toEqual([]);
+      expect(notify.saved).not.toHaveBeenCalled();
+    });
+
+    it('does not emit through sandboxTornDown$ or leave tearingDown stuck when destroyed before tearDownSandbox responds', () => {
+      const scoped = createScopedService();
+      mockDialogResult(true);
+      const inflight$ = new Subject<{ agent_id: string; status: string }>();
+      runnerApi.teardown.mockReturnValue(inflight$.asObservable());
+
+      const emitted: AgentTaggedEvent[] = [];
+      scoped.sandboxTornDown$.subscribe((e) => emitted.push(e));
+
+      scoped.tearDownSandbox('agent-1', 'Writer');
+      expect(scoped.tearingDown()).toBe(true);
+
+      childInjector.destroy();
+
+      expect(scoped.tearingDown()).toBe(false);
+      expect(emitted).toEqual([]);
+      expect(notify.saved).not.toHaveBeenCalled();
+
+      inflight$.next({ agent_id: 'agent-1', status: 'stopped' });
+      expect(emitted).toEqual([]);
+      expect(notify.saved).not.toHaveBeenCalled();
     });
   });
 });
