@@ -154,7 +154,7 @@ def _stub_backtest_result() -> BacktestResult:
     )
 
 
-def _record(asset_class: str) -> StrategyLabRecord:
+def _record(asset_class: str, *, status: str = "completed") -> StrategyLabRecord:
     suffix = uuid.uuid4().hex[:6]
     strategy = StrategySpec(
         strategy_id=f"s-{suffix}",
@@ -177,7 +177,7 @@ def _record(asset_class: str) -> StrategyLabRecord:
         submitted_by="test",
         submitted_at=now,
         completed_at=now,
-        status="completed",
+        status=status,
         result=_stub_backtest_result(),
         notes=[],
         trades=[],
@@ -216,6 +216,40 @@ def test_filter_preserves_input_order() -> None:
     records = [_record("stocks") for _ in range(3)]
     out = filter_records_by_asset_class(records, "stocks")
     assert [r.lab_record_id for r in out] == [r.lab_record_id for r in records]
+
+
+def test_filter_excludes_a_spec_unimplementable_placeholder_coerced_to_the_category() -> None:
+    # A genuinely unsupported class (e.g. "bonds") is coerced to the
+    # schema-valid placeholder "stocks" so the short-circuit record can be
+    # persisted at all — it is not real stocks evidence and must not leak
+    # into a later stocks attempt's prior-results context or signal brief.
+    genuine = _record("stocks")
+    placeholder = _record("stocks", status="failed: spec_unimplementable")
+    out = filter_records_by_asset_class([genuine, placeholder], "stocks")
+    assert out == [genuine]
+
+
+def test_filter_excludes_every_non_executed_short_circuit_status() -> None:
+    non_executed_statuses = [
+        "failed: spec_unimplementable",
+        "failed: spec_validation",
+        "failed: code_synthesis",
+        "failed: design_not_ready",
+        "failed: design_stalled",
+        "failed: budget_exhausted",
+    ]
+    records = [_record("stocks", status=status) for status in non_executed_statuses]
+    assert filter_records_by_asset_class(records, "stocks") == []
+
+
+def test_filter_keeps_executed_but_losing_backtests() -> None:
+    # Distinct from the non-executed short-circuits: a real backtest that
+    # simply lost (or hit the refinement-round cap) ran against the genuine
+    # canonical class and is real evidence for that category.
+    losing = _record("stocks", status="failed")
+    capped = _record("stocks", status="failed: max_refinement_rounds")
+    out = filter_records_by_asset_class([losing, capped], "stocks")
+    assert out == [losing, capped]
 
 
 # ---------------------------------------------------------------------------

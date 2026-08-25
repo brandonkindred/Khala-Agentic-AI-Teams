@@ -352,22 +352,38 @@ def select_asset_category(
 def filter_records_by_asset_class(
     records: List[StrategyLabRecord], asset_class: str
 ) -> List[StrategyLabRecord]:
-    """Restrict prior records to those matching a single asset category.
+    """Restrict prior records to genuine, executed evidence for one asset category.
 
-    Used to scope the design agent's "prior strategy results" context to the
-    category selected for the current attempt (see
-    :func:`select_asset_category`), so it never reasons over hypotheses,
-    rationale, or performance data from unrelated asset categories.
+    Used to scope the design agent's "prior strategy results" context, and
+    the per-category signal brief, to the category selected for the current
+    attempt (see :func:`select_asset_category`), so neither ever reasons
+    over hypotheses, rationale, or performance data from unrelated asset
+    categories.
+
+    Non-executed short-circuits (see :data:`_NON_EXECUTED_BACKTEST_STATUSES`)
+    are excluded outright rather than trusted by their persisted
+    ``strategy.asset_class``: a pre-backtest exit for a genuinely unsupported
+    class (e.g. ``bonds``) coerces that field to a schema-valid placeholder
+    (``stocks``) so the record can be persisted at all, while the hypothesis
+    it carries is not actually stocks evidence. Matching on the coerced label
+    would launder that placeholder into a later stocks attempt's prior-results
+    context or signal brief as if it were real stocks history — the exact
+    cross-category contamination category-scoping exists to prevent.
 
     Preconditions:
       - ``records`` is a list of ``StrategyLabRecord``; ``asset_class`` is a
         canonical label (typically the output of :func:`select_asset_category`).
 
     Postconditions:
-      - Returns the subset of ``records`` whose (normalized) strategy asset
+      - Returns the subset of ``records`` that are executed
+        (:func:`_is_executed_record`) and whose (normalized) strategy asset
         class equals ``asset_class``, preserving input order.
     """
-    return [r for r in records if normalize_asset_class(r.strategy.asset_class) == asset_class]
+    return [
+        r
+        for r in records
+        if _is_executed_record(r) and normalize_asset_class(r.strategy.asset_class) == asset_class
+    ]
 
 
 def format_prior_results(records: List[StrategyLabRecord], *, max_records: int = 50) -> str:
