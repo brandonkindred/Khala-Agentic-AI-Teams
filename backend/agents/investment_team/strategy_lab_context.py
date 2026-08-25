@@ -280,6 +280,51 @@ def select_signal_brief(
     return briefs.get(asset_class)
 
 
+def allowed_asset_classes(exclude_asset_classes: Optional[List[str]]) -> frozenset:
+    """Recover the run's user-level allowed-category set from its exclusions.
+
+    The complement of ``exclude_asset_classes`` within
+    :data:`PROMPT_ASSET_CLASSES` — the exact inverse of
+    :func:`excluded_for_allowed`, so this reconstructs the user's original
+    ``allowed_asset_classes`` selection without needing it threaded through
+    separately. Entries are normalized through
+    :func:`normalize_asset_class_strict`, so an alias (``equity`` / ``fx``)
+    excludes the canonical class it names rather than silently matching
+    nothing and leaving that class selectable.
+
+    Single source of truth for this computation, shared by
+    :func:`select_asset_category` (which further narrows the result to make
+    one random pick) and any other caller that needs the same run-level
+    complement directly — e.g. constraining symbol-based class inference to
+    categories the user actually selected, rather than the narrower
+    per-attempt pin.
+
+    Preconditions:
+      - ``exclude_asset_classes`` is ``None``/empty (unrestricted run — every
+        category allowed) or a list of canonical class labels or known
+        aliases naming the categories the user did NOT select. Entries that
+        resolve to no known class are ignored.
+
+    Postconditions:
+      - Returns the complement within :data:`PROMPT_ASSET_CLASSES`. Never
+        empty: an exclusion covering every class degrades to the full menu
+        rather than returning nothing, matching :func:`asset_class_mix_hint`'s
+        defensive handling of the same internal-caller misuse — the API
+        boundary is what actually enforces a non-empty
+        ``allowed_asset_classes`` selection.
+    """
+    excluded_set = _canonical_subset(exclude_asset_classes)
+    allowed = frozenset(c for c in PROMPT_ASSET_CLASSES if c not in excluded_set)
+    if not allowed:
+        logger.warning(
+            "allowed_asset_classes: exclude_asset_classes=%s covers every category; "
+            "falling back to the full menu instead of failing the cycle.",
+            sorted(excluded_set),
+        )
+        return frozenset(PROMPT_ASSET_CLASSES)
+    return allowed
+
+
 def select_asset_category(
     exclude_asset_classes: Optional[List[str]],
     *,
@@ -290,14 +335,7 @@ def select_asset_category(
 
     Each design attempt must commit to a single asset category rather than
     leaving the designer free to mix strategies across every category the
-    user allowed. The allowed set is recovered as the complement of
-    ``exclude_asset_classes`` within :data:`PROMPT_ASSET_CLASSES` — the exact
-    inverse of :func:`excluded_for_allowed`, so this reconstructs the user's
-    original ``allowed_asset_classes`` selection without needing it threaded
-    through separately. Entries are normalized through
-    :func:`normalize_asset_class_strict`, so an alias (``equity`` / ``fx``)
-    excludes the canonical class it names rather than silently matching
-    nothing and leaving that class selectable.
+    user allowed. The allowed set is :func:`allowed_asset_classes`.
 
     ``avoid`` (optional) names classes to steer away from when possible —
     typically the convergence tracker's over-represented set
@@ -326,20 +364,8 @@ def select_asset_category(
         menu rather than raising, matching :func:`asset_class_mix_hint`'s
         defensive handling of the same internal-caller misuse.
     """
-    excluded_set = _canonical_subset(exclude_asset_classes)
-    allowed = [c for c in PROMPT_ASSET_CLASSES if c not in excluded_set]
-    if not allowed:
-        # Defensive: an exclusion covering every class leaves nothing to pin
-        # to. The API boundary already rejects an empty allowed-category
-        # selection, so this only guards against a misuse from internal
-        # callers — degrade to the full menu rather than crashing the whole
-        # cycle, mirroring ``asset_class_mix_hint``'s handling of the same input.
-        logger.warning(
-            "select_asset_category: exclude_asset_classes=%s covers every category; "
-            "falling back to the full menu instead of failing the cycle.",
-            sorted(excluded_set),
-        )
-        allowed = list(PROMPT_ASSET_CLASSES)
+    allowed_set = allowed_asset_classes(exclude_asset_classes)
+    allowed = [c for c in PROMPT_ASSET_CLASSES if c in allowed_set]
     chooser = rng or random
     avoid_set = _canonical_subset(avoid)
     if avoid_set:

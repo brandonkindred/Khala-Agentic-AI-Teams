@@ -217,7 +217,13 @@ def classify_symbol(symbol: str) -> Optional[str]:
         return "forex"
     if sym.endswith("=F"):
         return "futures"
-    if sym.endswith("-USD"):
+    # ``-USD`` is Yahoo's convention (see ``canonical_symbol``); ``-USDT``/
+    # ``-USDC`` are the other quote-currency suffixes that convention
+    # deliberately leaves unstripped, but they name crypto just as
+    # unambiguously — a target symbol like ``DOGE-USDT`` must not be treated
+    # as unclassified (and therefore silently allowed through an asset-class
+    # pin check) just because it isn't in ``CRYPTO_SYMBOLS`` or Yahoo-suffixed.
+    if sym.endswith(("-USD", "-USDT", "-USDC")):
         return "crypto"
     return None
 

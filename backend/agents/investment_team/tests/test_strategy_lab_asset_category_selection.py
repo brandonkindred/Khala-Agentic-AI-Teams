@@ -853,6 +853,17 @@ def test_readiness_pin_keeps_ambiguous_cross_asset_etfs() -> None:
     assert _pin_results(_readiness_spec("stocks", ["AAPL", "GLD", "QQQ"]), "stocks") == []
 
 
+def test_readiness_pin_criticals_on_a_non_yahoo_crypto_quote_suffix() -> None:
+    # A crypto ticker spelled with a non-Yahoo quote suffix (USDT/USDC,
+    # rather than classify_symbol's original -USD heuristic) must still be
+    # caught under a forex pin — not silently treated as an allowed
+    # cross-asset instrument just because it wasn't in any canonical list.
+    findings = _pin_results(_readiness_spec("forex", ["EURUSD=X", "DOGE-USDT"]), "forex")
+    assert len(findings) == 1
+    assert findings[0].rule_id == "asset_category:symbols"
+    assert "DOGE-USDT" in findings[0].details
+
+
 def test_readiness_pin_reports_class_alone_when_the_class_is_wrong() -> None:
     # The symbol check compares against the *declared* class, which is already
     # wrong — reporting both would be noise.

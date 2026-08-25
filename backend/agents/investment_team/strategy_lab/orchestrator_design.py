@@ -54,6 +54,7 @@ from ..models import (
 from ..signal_intelligence_models import SignalIntelligenceBriefV1
 from ..strategy_lab_context import (
     PROMPT_ASSET_CLASSES,
+    allowed_asset_classes,
     filter_records_by_asset_class,
     normalize_asset_class,
     normalize_asset_class_strict,
@@ -148,29 +149,6 @@ def _coerce_expectancy_forecast(raw: Any) -> Optional[ExpectancyForecast]:
     return None
 
 
-def _run_allowed_classes(exclude_asset_classes: Optional[List[str]]) -> frozenset:
-    """Recover the run's user-level allowed-category set from its exclusions.
-
-    Pre: ``exclude_asset_classes`` is ``None``/empty (unrestricted run — every
-    category allowed) or a list of canonical class labels / known aliases
-    naming the categories the user did NOT select.
-    Post: returns the complement within ``PROMPT_ASSET_CLASSES``, normalizing
-    aliases via ``normalize_asset_class_strict`` (an unresolvable entry is
-    ignored rather than silently excluding nothing). Never empty: a
-    caller-side data error that excludes every category still leaves the
-    full menu allowed here — the API boundary is what actually enforces a
-    non-empty ``allowed_asset_classes`` selection.
-    """
-    excluded: set[str] = set()
-    for raw in exclude_asset_classes or ():
-        try:
-            excluded.add(normalize_asset_class_strict(raw))
-        except ValueError:
-            continue
-    allowed = frozenset(c for c in PROMPT_ASSET_CLASSES if c not in excluded)
-    return allowed or frozenset(PROMPT_ASSET_CLASSES)
-
-
 def _infer_asset_class_from_symbols(
     target_symbols: List[str], *, allowed_classes: Optional[frozenset] = None
 ) -> Optional[str]:
@@ -179,9 +157,10 @@ def _infer_asset_class_from_symbols(
     Preconditions:
         ``target_symbols`` is a list of ticker strings (possibly empty).
         ``allowed_classes``, when given, is the run's user-level allowed
-        category set (see ``_run_allowed_classes``) — NOT the narrower
-        per-attempt pin, which excludes every class but the one attempt's
-        random pick and would defeat inference for its own sake.
+        category set (see ``strategy_lab_context.allowed_asset_classes``) —
+        NOT the narrower per-attempt pin, which excludes every class but the
+        one attempt's random pick and would defeat inference for its own
+        sake.
 
     Postconditions:
         Returns the one canonical class every *classifiable* symbol agrees on
@@ -283,7 +262,7 @@ def build_spec_from_dict(
     # stripping the "wrong" symbols down to an empty, pin-labeled spec.
     raw_asset_class = str(strategy_dict.get("asset_class") or "").strip()
     if not raw_asset_class:
-        allowed_classes = _run_allowed_classes(exclude_asset_classes)
+        allowed_classes = allowed_asset_classes(exclude_asset_classes)
         inferred = _infer_asset_class_from_symbols(
             strategy_dict.get("target_symbols") or [], allowed_classes=allowed_classes
         )
@@ -690,7 +669,14 @@ class DesignMixin:
         Pre: ``self.design_agent`` and ``self.design_review_agent`` are
         constructed; ``all_gate_results`` is the orchestrator's running
         gate list (the loop appends readiness findings via
-        ``self.record_gates``).
+        ``self.record_gates``). ``signal_briefs`` is either ``None`` or a
+        map from canonical asset-class label to the
+        :class:`SignalIntelligenceBriefV1` computed over that category's
+        prior records only; a category with no prior records is absent from
+        the map rather than mapped to an empty brief. The loop selects only
+        its own pinned category's entry via ``select_signal_brief`` — a
+        missing entry yields ``None`` for that attempt, never another
+        category's brief.
         Post: returns a :class:`_DesignLoopOutcome`. When ``ready=True``
         the caller may advance to code synthesis; when ``ready=False``
         the caller MUST short-circuit the cycle. The outcome is a value
@@ -1525,8 +1511,9 @@ class DesignMixin:
         Preconditions:
             ``resume_spec is None`` if and only if ``resume_design_context
             is None``.
-            ``signal_briefs`` is an optional map of allowed asset class ->
-            per-category signal-intelligence brief (see
+            ``signal_briefs`` is a required argument that may be ``None`` or
+            a map of allowed asset class -> per-category signal-intelligence
+            brief (see
             :func:`_compute_signal_brief_snapshot`). The attempt's
             ``_run_design_loop`` selects its own pinned category's entry via
             ``select_signal_brief``; a missing entry yields ``None`` for that
@@ -2130,6 +2117,11 @@ class DesignMixin:
         """Run the bounded design + review loop and gate entry to synthesis.
 
         Pre: ``all_gate_results`` is the running gate list for this attempt.
+        ``signal_briefs`` is either ``None`` or a map from canonical
+        asset-class label to the per-category ``SignalIntelligenceBriefV1``
+        (see ``_run_design_loop``'s docstring for the map's contract) —
+        forwarded verbatim to ``_run_design_loop``, which selects the
+        attempt's own pinned category's entry.
         Post: returns a ``_DesignPhaseResult``. When the loop did not reach
         readiness (round-cap / stall / LLM-budget), ``record`` carries the
         short-circuit ``StrategyLabRecord`` and the caller returns it. On

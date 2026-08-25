@@ -526,6 +526,15 @@ class StrategyLabOrchestrator(
           - ``prior_records`` is the (possibly empty) sequence of previously
             persisted ``StrategyLabRecord`` rows.
           - ``config`` is a constructed :class:`BacktestConfig`.
+          - ``signal_briefs``, when given, maps canonical asset-class label
+            (e.g. ``"stocks"``, ``"crypto"``) to the
+            :class:`SignalIntelligenceBriefV1` computed from that category's
+            prior records only (see ``_compute_signal_brief_snapshot``). A
+            category with no prior records is simply absent from the map,
+            not present with an empty brief. ``None`` (the default) means no
+            precomputed briefs are available for this cycle; forwarded
+            verbatim to ``_run_design_attempt``, which selects the pinned
+            category's own entry per attempt.
 
         Postconditions:
           - Returns a :class:`StrategyLabRecord` with the final result.

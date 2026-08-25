@@ -29,20 +29,40 @@ _SIGNAL_SYSTEM = (
     "Ground every hypothesis in the prior table or the snapshot when possible; state uncertainty clearly."
 )
 
-_SIGNAL_JSON_INSTRUCTIONS = """\
+
+def _signal_json_instructions(asset_class: Optional[str]) -> str:
+    """JSON-shape instructions for the signal brief, scoped when pinned to one category.
+
+    Preconditions: none.
+    Postconditions: returns the schema instructions with the same keys every
+    time; the ``pairing_guidance`` field's description asks the model to
+    blend across asset classes only when ``asset_class`` is ``None`` (a
+    run-wide, unscoped brief). With a category pinned, that phrasing would
+    directly contradict the ``## Scope`` block's "Do NOT reference ... any
+    other asset category" instruction a few lines above it in the same
+    prompt — so a pinned call gets an intra-category pairing description
+    instead.
+    """
+    pairing_guidance = (
+        f"how to pair/combine signals within {asset_class} only (e.g. correlated "
+        "symbols, complementary timeframes) — never a different asset class"
+        if asset_class is not None
+        else "how to blend signals / asset classes this batch"
+    )
+    return f"""\
 Return ONLY a JSON object with these keys (no markdown):
-{{
+{{{{
   "brief_version": 1,
   "macro_themes": ["short bullet", "..."],
   "micro_themes": ["..."],
   "high_value_signal_hypotheses": ["testable hypotheses tied to priors and/or snapshot"],
   "trade_structures_benefiting": ["e.g. pairs, spreads, options overlays — conceptual"],
-  "pairing_guidance": "how to blend signals / asset classes this batch",
+  "pairing_guidance": "{pairing_guidance}",
   "evidence_from_priors": "which prior rows or patterns you rely on, or 'none / first run'",
   "evidence_from_market_data": "which snapshot lines (FX, macro, crypto) you use, or 'none' if degraded/empty",
   "confidence": "low" | "medium" | "high",
   "unsupported_claims": ["optional list of things you cannot verify from inputs"]
-}}
+}}}}
 """
 
 
@@ -112,10 +132,13 @@ class SignalIntelligenceExpert:
             * When ``asset_class`` is given, the prompt names that category as
               the brief's sole subject and the diversity hint is narrowed to
               it, guiding the model to confine every theme and hypothesis to
-              the scoped category. A brief is injected verbatim into the
-              design prompt, so an unscoped one is how cross-category
-              evidence reaches a design attempt that is pinned to a single
-              category.
+              the scoped category.
+            * When ``asset_class`` is ``None``, the brief remains
+              cross-category and the diversity hint enumerates the full
+              menu. A brief is injected verbatim into the design prompt, so
+              this unscoped path must never be used for an attempt pinned to
+              a single category — only for callers that intentionally want a
+              broad, run-wide synthesis.
         """
         if asset_class is not None:
             assert asset_class in PROMPT_ASSET_CLASSES, (
@@ -159,7 +182,7 @@ prior evidence to {asset_class}.
 ## Market data snapshot (may be partial; not investment advice)
 {market_block}
 
-{_SIGNAL_JSON_INSTRUCTIONS}
+{_signal_json_instructions(asset_class)}
 """
 
         result = self._agent(prompt)

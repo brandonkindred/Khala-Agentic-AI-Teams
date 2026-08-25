@@ -1269,6 +1269,11 @@ def test_classify_symbol_unambiguous_cases() -> None:
     assert classify_symbol("BTC-USD") == "crypto"
     assert classify_symbol("AUDCHF=X") == "forex"
     assert classify_symbol("RTY=F") == "futures"
+    # Non-Yahoo crypto quote-currency suffixes canonical_symbol already
+    # recognizes (and deliberately leaves unstripped) — classify_symbol must
+    # not treat them as unclassified just because they aren't Yahoo-suffixed.
+    assert classify_symbol("DOGE-USDT") == "crypto"
+    assert classify_symbol("SOL-USDC") == "crypto"
 
 
 def test_classify_symbol_returns_none_for_ambiguous_or_unknown() -> None:

@@ -1429,10 +1429,10 @@ class SpecReadinessGate(GateResultsMixin):
     # thing standing between the mismatch and a readiness-clean spec.
     # ------------------------------------------------------------------
     def _check_asset_category_pin(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
+        out: List[QualityGateResult] = []
         pinned = ctx.pinned_asset_class
         if pinned is None:
-            return ()
-        out: List[QualityGateResult] = []
+            return out
         actual = normalize_asset_class(ctx.spec.asset_class)
         if actual != pinned:
             out.append(
@@ -1448,7 +1448,7 @@ class SpecReadinessGate(GateResultsMixin):
             )
             # The symbol check below compares against the *declared* class,
             # which is already wrong — reporting it too would be noise.
-            return tuple(out)
+            return out
         offcategory = sorted(
             {
                 sym
@@ -1468,7 +1468,7 @@ class SpecReadinessGate(GateResultsMixin):
                     rule_id="asset_category:symbols",
                 )
             )
-        return tuple(out)
+        return out
 
     # ------------------------------------------------------------------
     # Rule registry — declarative list iterated by ``validate``. Order is

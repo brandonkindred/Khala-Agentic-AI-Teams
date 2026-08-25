@@ -33,15 +33,20 @@ ASSET_CLASS_ONLY_STEERING_PHRASE = "You MUST choose a DIFFERENT asset class"
 
 
 def is_asset_class_steering_directive(directive: str) -> bool:
-    """True when ``directive`` demands a change of asset class and nothing else.
+    """True when ``directive`` contains the asset-class-only steering phrase.
 
-    A design attempt pinned to a single asset category cannot satisfy such an
-    instruction — the pin's exclusion list already forbids every other class —
-    so the caller drops it rather than handing the designer a prompt that
-    mandates both "use only X" and "use something other than X". Directives
-    that merely *include* an asset-class change among several satisfiable
-    alternatives (see :meth:`ConvergenceTracker.get_stall_directive`) are not
-    matched, and must survive the filter.
+    A design attempt pinned to a single asset category cannot satisfy an
+    asset-class-only instruction — the pin's exclusion list already forbids
+    every other class — so the caller drops such a directive rather than
+    handing the designer a prompt that mandates both "use only X" and "use
+    something other than X". This is a plain substring check, not a parse of
+    the directive's structure: it relies on :data:`ASSET_CLASS_ONLY_STEERING_PHRASE`
+    only ever appearing in the asset-class-only directive
+    (:meth:`ConvergenceTracker.get_diversity_directive`) and never in a
+    directive that offers other satisfiable alternatives (e.g.
+    :meth:`ConvergenceTracker.get_stall_directive`, whose wording
+    deliberately avoids the exact phrase) — it does not itself verify that
+    the directive contains nothing else.
 
     Preconditions:
       - ``directive`` is a string (a rendered convergence-tracker directive).
