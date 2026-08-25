@@ -21,13 +21,15 @@ flowchart LR
     E -->|market data OK| F[paper_trading_complete]
     E -->|no market data| S3[paper_trading_skipped<br/>reason=no_market_data]
     E -->|exception| X[paper_trading_failed]
-    F --> Z[complete]
-    S1 --> Z
-    S2 --> Z
-    S3 --> Z
-    S4 --> Z
-    X --> Z
 ```
+
+> **`complete` is not the terminal node of this flow.** It is emitted by
+> `RecordAssemblyMixin` at the end of the *design attempt* — i.e. before
+> `analyzing` hands off to the finalize step — so it fires **earlier** than
+> every `paper_trading*` event above, not after them. A client must not treat
+> `complete` as "paper trading finished": at that point
+> `paper_trading_status` / `paper_trading_verdict` are not yet set, which is
+> why they are absent from its payload in the table below.
 
 The `aligning` phase audits whether the executed trade ledger actually
 implements the strategy specification. Each iteration of the alignment
@@ -135,10 +137,10 @@ rather than assert on an unknown name. The rows:
 
 | Phase | When emitted | Data fields |
 |---|---|---|
-| `ideating` | Start of cycle; also on re-ideation retry. Reaches a subscriber as the `_PROGRESS_PHASE_MAP` target of `designing`/`design_review`/`design_repair` | `{ retry?, excluded? }` |
-| `fetching_data` | After ideation, before backtest. Emitted as `backtesting` with `sub_phase="fetching_data"`, never as a bare phase | `{ strategy: {asset_class, hypothesis}, retry? }` |
+| `ideating` | Start of cycle; also on re-ideation retry. Reaches a subscriber as the `_PROGRESS_PHASE_MAP` target of `designing`/`design_review`/`design_repair` | Whatever the underlying emit carries — e.g. `{ sub_phase: "started" }`, `{ sub_phase: "ready", rounds }`, `{ sub_phase: "started", round }`. There is no `retry`/`excluded` key. |
+| `fetching_data` | After ideation, before backtest. Emitted as `backtesting` with `sub_phase="fetching_data"`, never as a bare phase | `{ sub_phase: "fetching_data" }` — nothing else |
 | `aligning` | Trade-alignment audit and problem-solving loop | `{ sub_phase, alignment_round, trades_count?, issues_count?, issues_preview?, findings_count?, findings_preview?, changes_made?, predicted_aligned_after_fix? }` |
-| `analyzing` | After backtest, before narrative | `{ strategy, metrics }` |
+| `analyzing` | Around the narrative draft | `{ sub_phase: "draft" }`, then `{ sub_phase: "completed", is_winning }` |
 | `paper_trading` | Entering the paper-trading step (publishable winners only) | `{ strategy }` |
 | `paper_trading_complete` | Paper trading finished successfully | `{ session_id, verdict, trade_count }` |
 | `paper_trading_skipped` | Paper trading did not run | `{ reason, detail? }` |

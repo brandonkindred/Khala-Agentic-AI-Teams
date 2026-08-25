@@ -60,8 +60,10 @@ DESIGN → DESIGN_REVIEW → CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION
 
 All four fire on a fresh attempt. A **checkpoint-resumed** attempt is the
 exception: `_run_design_attempt` skips `_orchestrate_design_and_review`
-entirely when `resume_spec` is set, and that method owns both design-phase
-emits — so such an attempt's transition stream starts at `CODE_SYNTHESIS →
+entirely when `resume_spec` is set. Both design-phase emits are reached only
+through that call — `DESIGN_REVIEW → CODE_SYNTHESIS` directly inside it, and
+`DESIGN → DESIGN_REVIEW` transitively via `_run_design_loop` — so such an
+attempt's transition stream starts at `CODE_SYNTHESIS →
 BACKTEST_AND_VERIFICATION`. A consumer that derives a drift baseline from the
 first transition it sees must handle that case rather than assume boundary 2
 is present.
@@ -227,8 +229,8 @@ not repeated here.
 
 ## Refinement loop (still CODE_SYNTHESIS)
 
-Owned by `SynthesisMixin` (`orchestrator_synthesis.py`), `_run_synthesis_loop`
-(lines 286-590). Round 0 runs `SpecReadinessGate` at `phase="synthesis"`,
+Owned by `SynthesisMixin` (`_run_synthesis_loop` in
+`orchestrator_synthesis.py`). Round 0 runs `SpecReadinessGate` at `phase="synthesis"`,
 `CodeSafetyChecker`, `CodeConformanceGate`, and `PredicateConformanceGate`
 against the just-synthesized code; a `PredicateReachabilityProbe` checks
 whether the spec's predicates can actually fire against real market data
@@ -349,7 +351,7 @@ the table.
 | `realism/trade_clustering.py`: `TradeClusteringGate` | verification | Detects unrealistic trade clustering |
 | `realism/rule_firing.py`: `RuleFiringRateGate` | verification | Spec-rule firing-rate realism |
 | `convergence_tracker.py`: `ConvergenceTracker` | — <sup>d</sup> | Stall/diversity/failure directives fed into design prompts |
-| `universe_injection.py` | synthesis | Deterministic post-synthesis injection of the `UNIVERSE` constant |
+| `universe_injection.py` | — <sup>g</sup> | Deterministic post-synthesis injection of the `UNIVERSE` constant |
 | `models.py` | — | Shared `QualityGateResult` / `StrategyLabPhase` types (not a gate itself) |
 
 <sup>a</sup> Two methods, three call sites. `check_hypothesis_rules(spec,
@@ -370,6 +372,11 @@ so takes the `"synthesis"` default, emitting `zero_trade_repair_`-prefixed rows.
 <sup>c</sup> `check_fetch`/`check_trades` run at synthesis, where a critical
 failure fails the run closed before verification; `check_breadth` is a softer
 verification-phase check.
+
+<sup>g</sup> Not a gate in the stamping sense: `inject_universe_and_guard`
+is a pure AST source rewriter returning `str`. It emits no
+`QualityGateResult` and so carries no phase tag, even though it runs during
+synthesis.
 
 <sup>e</sup> `check()` runs its whole body inside
 `with self._using_phase("verification")`, so every finding it emits is stamped

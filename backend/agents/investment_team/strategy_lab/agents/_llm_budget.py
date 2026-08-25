@@ -1,6 +1,12 @@
-"""Per-cycle LLM-call budget for the Strategy Lab design phase.
+"""LLM-call budget for a Strategy Lab design attempt.
 
-The design phase can fan a single ``run_cycle`` into a large number of
+Despite the ``DESIGN`` in ``STRATEGY_LAB_DESIGN_MAX_LLM_CALLS``, the cap is
+**not** design-phase-only: ``use_budget`` wraps the whole
+``_run_design_attempt``, so refinement, trade-alignment and zero-trade repair
+charge against the same counter. See :class:`LLMCallBudget` for the full
+scope, including how it behaves across Temporal activity retries.
+
+A single ``run_cycle`` can fan into a large number of
 LLM round-trips: each design re-entry runs a bounded design ↔ review loop,
 and within each round the designer may parse-retry, self-review, and
 self-revise. Left uncapped, a non-converging spec drifting on a borderline
@@ -8,8 +14,8 @@ design burns a multiplicative number of calls before the deterministic
 ``design_not_ready`` short-circuit ever fires, which both wastes cloud
 spend and can exhaust rate-limited quotas mid-cycle.
 
-:class:`LLMCallBudget` is a plain counter threaded from ``run_cycle`` down
-to every design-phase ``agent(prompt)`` call site. Each site charges the
+:class:`LLMCallBudget` is a plain counter threaded down to every
+budget-charged ``agent(prompt)`` call site. Each site charges the
 budget *before* invoking the model; when the cap is reached the next charge
 raises :class:`DesignBudgetExhausted`, which the design loop translates into
 a structured ``status="failed: budget_exhausted"`` short-circuit.
@@ -20,9 +26,9 @@ import cycle.
 
 Charging is accessed through a single chokepoint — :func:`charge_active_budget`,
 backed by a context variable the orchestrator binds via :func:`use_budget`
-for the duration of the design phase. Agents call ``charge_active_budget()``
+for the duration of the design attempt. Agents call ``charge_active_budget()``
 right before every model invocation; they no longer thread a ``budget``
-argument through their signatures, so a new design-phase LLM call site only
+argument through their signatures, so a new charged LLM call site only
 has to make that one call to be covered by the cap.
 """
 
@@ -36,7 +42,8 @@ from typing import Iterator, Optional
 class DesignBudgetExhausted(Exception):
     """Raised by :meth:`LLMCallBudget.charge` when the per-cycle budget is hit.
 
-    Caught in ``_run_design_loop`` and translated to
+    Caught in ``_run_design_loop`` for design-phase trips, and in
+    ``orchestrator_design`` for trips from the later phases and translated to
     ``status="failed: budget_exhausted"``. Carries the configured ``limit``
     and the ``calls_made`` so far for diagnostics and the abort reason.
 
@@ -193,7 +200,7 @@ def active_budget() -> Optional[LLMCallBudget]:
 def charge_active_budget() -> None:
     """Charge the active budget for one imminent LLM call, if one is bound.
 
-    Single chokepoint for design-phase charging: every model invocation
+    Single chokepoint for budget charging: every model invocation
     calls this immediately before the call. A no-op when no budget is bound.
 
     Postconditions:

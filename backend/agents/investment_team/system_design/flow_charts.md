@@ -113,7 +113,7 @@ sequenceDiagram
     loop for each batch
         BatchWF->>SIE: compute_signal_brief_activity<br/>(dispatched unconditionally, once per batch —<br/>a mid-batch resume re-runs it, so later cycles<br/>in that batch can see a different brief)
         opt STRATEGY_LAB_SIGNAL_EXPERT_ENABLED (default true)
-            SIE->>LLM: complete_json
+            SIE->>LLM: Agent(prompt) — Strands path,<br/>not .complete_json
             LLM-->>SIE: SignalIntelligenceBriefV1
         end
         SIE-->>BatchWF: brief, or null +<br/>skipped_reason=signal_expert_disabled
@@ -184,10 +184,11 @@ sequenceDiagram
   outage surfaces as a null brief with `skipped_reason="provider_init_failed"`,
   not as an error. The `execute strategy_code` step fetches OHLCV through
   `MarketDataService` (see [`market_data_flow.md`](./market_data_flow.md)).
-- `_active_runs` is an in-memory read cache. The **GET** surfaces
-  (`/strategy-lab/runs`, `.../status`, `/strategy-lab/jobs`) call
-  `_reconcile_run_progress` first, so they recover from a restart or a stale
-  cache. The `resume` and `restart` endpoints do **not**: they read
+- `_active_runs` is an in-memory read cache. All four **GET** surfaces —
+  `/strategy-lab/runs`, `.../runs/{id}/status`, `/strategy-lab/jobs`, and
+  `.../runs/{id}/stream` (for its connect-time snapshot, via
+  `run_in_threadpool`) — call `_reconcile_run_progress` first, so they recover
+  from a restart or a stale cache. The `resume` and `restart` endpoints do **not**: they read
   `_get_run_state`'s process-local snapshot and compute the resume offset
   straight from its counters, so on a multi-replica deployment a resume can
   act on stale progress. Reconciliation also no-ops once the in-memory status

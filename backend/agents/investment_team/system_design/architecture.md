@@ -393,8 +393,11 @@ prompt-side data shape without destabilizing the backtester.
 
 ### 10. LLM access goes through the shared service
 
-Every agent takes an `LLMClient` from `backend/agents/llm_service/` and calls
-`.complete_json(...)`. Platform-wide, provider/base-URL/model resolve from the
+Most agents take an `LLMClient` from `backend/agents/llm_service/` and call
+`.complete_json(...)`. Strategy Lab's design/review/refinement agents and the
+`SignalIntelligenceExpert` are the exception — they build a Strands `Model`
+via `model_factory.get_strands_model` and are invoked as `Agent(prompt)`,
+which is why `LLM_PROVIDER=dummy` is not team-wide safe (see below). Platform-wide, provider/base-URL/model resolve from the
 Postgres-backed ordered provider list (`/llm-config` UI → `llm_provider_configs`)
 — per the root `CLAUDE.md`, the sole source of LLM resolution, with
 `LLM_PROVIDER=dummy` as the only env override.
@@ -405,12 +408,17 @@ model through `strategy_lab/agents/model_factory.py::get_strands_model`, which
 branches on `resolve_provider()`:
 
 - **`ollama` (the default)** — routes to `llm_service.strands_adapter`, which
-  resolves the client through the provider list. `model_factory` does not
-  forward its own `resolve_model()`/`resolve_base_url()` values on this path,
-  but `LLM_MODEL`/`LLM_BASE_URL` still apply *downstream*: `llm_service.factory`
-  falls back to them whenever the selected provider-list entry leaves `model`
-  or `base_url` blank. So they behave exactly as the platform-wide rule says —
-  blank-entry defaults, not a provider selector.
+  resolves the client through the provider list. On the normal (no explicit
+  `timeout`) call, `model_factory` does not forward its own
+  `resolve_model()`/`resolve_base_url()` values, but `LLM_MODEL`/`LLM_BASE_URL`
+  still apply *downstream*: `llm_service.factory` falls back to them whenever
+  the selected provider-list entry leaves `model` or `base_url` blank. So they
+  behave exactly as the platform-wide rule says — blank-entry defaults, not a
+  provider selector. One latent exception: if a caller passes an explicit
+  `timeout`, `model_factory` builds its own `OllamaLLMClient` from
+  `resolve_model()`/`resolve_base_url()` and hands it to the adapter, bypassing
+  the provider list's model/base-URL entirely. No production caller does this
+  today — but adding one would silently make `LLM_MODEL` authoritative.
 - **`bedrock`** — constructs a `BedrockModel` directly from `resolve_model()`,
   bypassing the provider list entirely. `LLM_MODEL` *is* live here.
 - **`dummy`** — **raises** (`"LLM_PROVIDER=dummy is not supported for Strands

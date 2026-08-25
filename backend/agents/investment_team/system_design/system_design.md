@@ -119,11 +119,12 @@ flowchart LR
   BatchWF -->|"progress writes<br/>(persist_run_state_activity)"| B9
   BatchWF --> EventBus
   L2 --> B7
-  L3 -->|"reconciles run progress<br/>before reading"| B7
+  L3 -->|"reconciles, then merges<br/>_active_runs + job rows"| B9
   L4 --> BatchWF
   L5 --> BatchWF
   L6 -->|"_active_runs first,<br/>job-service rows merged in"| B9
   L7 -->|"reconcile, then _active_runs;<br/>job service only as fallback"| B9
+  L8 -->|"reconciles for the<br/>connect-time snapshot"| B9
   L8 --> EventBus
   L9 --> B7
   L10 --> B7
