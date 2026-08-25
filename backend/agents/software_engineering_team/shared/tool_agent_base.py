@@ -203,9 +203,13 @@ def fill_review_prompt(template: str, *, task_description: str, code: str) -> st
     Preconditions:
         ``template``, ``task_description``, and ``code`` are strings.
     Postconditions:
-        Each known placeholder is replaced once with the corresponding value.
-        Inserted values are never re-scanned for placeholders or braces; other
-        ``{...}`` sequences in ``template`` are left unchanged.
+        Every occurrence of ``{task_description}``/``{code}`` in ``template``
+        (there may be more than one of either) is substituted with the
+        corresponding value in a single pass. Inserted values are never
+        re-scanned for placeholders or braces -- a value that itself contains
+        ``{code}``/``{task_description}`` or arbitrary ``{...}`` text is
+        copied through verbatim, not substituted again. Other ``{...}``
+        sequences already in ``template`` are left unchanged.
     """
     values = {"task_description": task_description, "code": code}
     return _REVIEW_PLACEHOLDER_RE.sub(lambda m: values[m.group(1)], template)
@@ -718,14 +722,18 @@ class BaseReviewToolAgent(LlmToolAgentBase):
             is present -- neither is safe to place in the system prompt (see
             :func:`build_shared_tool_agent_review_system_content`'s
             docstring), and the mere presence of a shared context is never
-            treated as a signal that it subsumes either. When
-            ``inp.shared_review_context`` is a non-empty list, it is passed
-            through as ``system_prompt_content`` on the LLM call (currently
-            never true for any production caller --
+            treated as a signal that it subsumes either. ``inp.shared_review_context``
+            (via ``getattr``, so missing on ``inp`` degrades to ``None`` rather
+            than raising) is always forwarded as the ``system_prompt_content``
+            keyword to :meth:`LlmToolAgentBase._cached_invoke_llm`, whatever
+            its value; a falsy value (``None`` or ``[]`` -- currently true for
+            every production caller, since
             :func:`build_shared_tool_agent_review_system_content` always
-            returns ``None``, see its docstring); when absent (e.g. direct
-            ``ToolAgentPhaseInput`` construction, as in most unit tests),
-            ``system_prompt_content`` is simply not passed.
+            returns ``None``, see its docstring) is treated downstream, in
+            :meth:`LlmToolAgentBase._invoke_llm`/``run_strands_agent``, as "no
+            system prompt for this call" rather than being passed on to the
+            Strands ``Agent`` -- it is never omitted from this method's own
+            call, only from what reaches the model.
         """
         if self.build_runner is not None:
             return self._build_review(inp)

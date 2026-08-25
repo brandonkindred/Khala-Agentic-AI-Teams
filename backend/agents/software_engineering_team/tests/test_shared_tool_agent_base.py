@@ -430,7 +430,7 @@ def test_build_code_text_empty_files_returns_empty_string():
     assert build_code_text({}) == ""
 
 
-def test_build_shared_review_system_content_always_none():
+def test_build_shared_tool_agent_review_system_content_always_none():
     """No field available to this call site is both shared-across-every-wired
     -tool-agent and safe to place in the (higher-priority) system prompt:
     current_files is repository-controlled, and task_description can
