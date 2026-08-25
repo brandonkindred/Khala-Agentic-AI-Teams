@@ -15,7 +15,9 @@ import pytest
 from software_engineering_team import pip_install_lock as pil
 
 
-def test_pip_install_lock_path_is_pure_and_stable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def test_pip_install_lock_path_is_pure_and_stable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
     first = pil.pip_install_lock_path()
     second = pil.pip_install_lock_path()
@@ -25,7 +27,9 @@ def test_pip_install_lock_path_is_pure_and_stable(monkeypatch: pytest.MonkeyPatc
     assert not first.exists()
 
 
-def test_pip_install_lock_path_not_repo_scoped(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def test_pip_install_lock_path_not_repo_scoped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """The lock guards the shared interpreter, not a per-repo/worktree resource."""
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
     assert pil.pip_install_lock_path() == pil.pip_install_lock_path()
@@ -33,7 +37,7 @@ def test_pip_install_lock_path_not_repo_scoped(monkeypatch: pytest.MonkeyPatch, 
 
 def test_pip_install_lock_excludes_concurrent_holders(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
+) -> None:
     """Two threads racing for the lock never observe overlapping critical sections."""
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
     active = 0
@@ -63,7 +67,9 @@ def test_pip_install_lock_excludes_concurrent_holders(
     assert max_active == 1
 
 
-def test_pip_install_lock_yields_when_open_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def test_pip_install_lock_yields_when_open_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """A lock-file open failure degrades to running the block unguarded, not raising."""
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
 
@@ -78,7 +84,9 @@ def test_pip_install_lock_yields_when_open_fails(monkeypatch: pytest.MonkeyPatch
     assert ran
 
 
-def test_pip_install_lock_yields_when_flock_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def test_pip_install_lock_yields_when_flock_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """A flock failure also degrades to running the block unguarded, not raising."""
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
 
