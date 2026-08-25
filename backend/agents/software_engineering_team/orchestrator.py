@@ -182,8 +182,9 @@ def _make_phase_job_updater(
           ``phase`` is not ``None`` (a ``phase`` kwarg passed in by the caller is
           dropped in favor of the forced value, so a caller-supplied ``phase``
           never collides with it); forwards all other remaining kwargs untouched;
-          and swallows all exceptions raised during the update, logging them via
-          ``logger.exception`` for observability — the updater itself never raises.
+          and logs (at warning level, with the job id and current trace id) then
+          discards any exception raised during the update (observability-only
+          updater — never raises).
     """
     assert isinstance(subprocess_key, str) and subprocess_key, subprocess_key
     assert isinstance(completed_key, str) and completed_key, completed_key
@@ -214,8 +215,13 @@ def _make_phase_job_updater(
                 update_job(job_id, phase=phase, **kwargs)
             else:
                 update_job(job_id, **kwargs)
-        except Exception:
-            logger.exception("Phase job updater failed for %s", job_id)
+        except Exception as exc:
+            logger.warning(
+                "Phase job updater failed for job %s: %s",
+                job_id,
+                exc,
+                extra={"trace_id": current_trace_id()},
+            )
 
     return _updater
 

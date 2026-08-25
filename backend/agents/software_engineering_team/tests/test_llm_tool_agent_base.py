@@ -284,8 +284,8 @@ def test_invoke_llm_wrapped_path_delegates_to_run_strands_agent(monkeypatch):
     wrapper_calls = []
     sentinel_factory = object()
 
-    def fake_run_strands_agent(agent_factory, model, prompt):
-        wrapper_calls.append((agent_factory, model, prompt))
+    def fake_run_strands_agent(agent_factory, model, prompt, *, system_prompt_content=None):
+        wrapper_calls.append((agent_factory, model, prompt, system_prompt_content))
         return "wrapped-result"
 
     monkeypatch.setattr("llm_service.strands_model.run_strands_agent", fake_run_strands_agent)
@@ -304,6 +304,31 @@ def test_invoke_llm_wrapped_path_delegates_to_run_strands_agent(monkeypatch):
     assert wrapper_calls[0][0] is sentinel_factory
     assert wrapper_calls[0][1] is model
     assert wrapper_calls[0][2] == "the prompt"
+    assert wrapper_calls[0][3] is None
+
+
+def test_invoke_llm_wrapped_path_forwards_system_prompt_content(monkeypatch):
+    """system_prompt_content passed to _invoke_llm reaches run_strands_agent unchanged."""
+    wrapper_calls = []
+    sentinel_factory = object()
+    sentinel_content = ["shared system segment"]
+
+    def fake_run_strands_agent(agent_factory, model, prompt, *, system_prompt_content=None):
+        wrapper_calls.append(system_prompt_content)
+        return "wrapped-result"
+
+    monkeypatch.setattr("llm_service.strands_model.run_strands_agent", fake_run_strands_agent)
+
+    class WrappedLike(LlmToolAgentBase):
+        use_run_strands_agent = True
+
+    agent = WrappedLike()
+    monkeypatch.setattr(type(agent), "_agent_factory", lambda self: sentinel_factory)
+
+    result = agent._invoke_llm(object(), "the prompt", system_prompt_content=sentinel_content)
+
+    assert result == "wrapped-result"
+    assert wrapper_calls == [sentinel_content]
 
 
 # ---------------------------------------------------------------------------
@@ -756,6 +781,38 @@ def test_cache_key_changes_with_agent_class():
     )
 
 
+def test_cache_key_changes_with_system_prompt_content():
+    """Same (class, model, prompt) but different system_prompt_content must not collide.
+
+    Prevents a real correctness bug: once shared/cacheable content (e.g. the
+    reviewed code) moves out of ``prompt`` and into ``system_prompt_content``,
+    two calls with identical ``prompt`` but different code would otherwise
+    collide in the cache and silently serve one call's result for the other's
+    code.
+    """
+    agent = _CacheDemoAgent()
+    model = _FakeModel("model-a")
+
+    key_none = agent._cache_key(model, "hello")
+    key_a = agent._cache_key(model, "hello", system_prompt_content=["code A"])
+    key_b = agent._cache_key(model, "hello", system_prompt_content=["code B"])
+
+    assert len({key_none, key_a, key_b}) == 3
+
+
+def test_cache_key_system_prompt_content_stable_for_cache_breakpoint_and_str():
+    """A CacheBreakpoint segment and an equal-text bare string hash identically."""
+    from llm_service import CacheBreakpoint
+
+    agent = _CacheDemoAgent()
+    model = _FakeModel("model-a")
+
+    key_breakpoint = agent._cache_key(model, "hello", system_prompt_content=[CacheBreakpoint("x")])
+    key_str = agent._cache_key(model, "hello", system_prompt_content=["x"])
+
+    assert key_breakpoint == key_str
+
+
 def test_cached_invoke_llm_hit_skips_llm_call(monkeypatch):
     factory = _patch_cache_demo_agent(monkeypatch)
     agent = _CacheDemoAgent()
@@ -787,6 +844,32 @@ def test_cached_invoke_llm_different_model_busts_cache(monkeypatch):
     agent._cached_invoke_llm(_FakeModel("model-b"), "hello")
 
     assert len(factory.calls) == 2
+
+
+def test_cached_invoke_llm_different_system_prompt_content_busts_cache(monkeypatch):
+    """Same (model, prompt) but different system_prompt_content must not share a cache entry."""
+    factory = _patch_cache_demo_agent(monkeypatch)
+    agent = _CacheDemoAgent()
+
+    agent._cached_invoke_llm(_FakeModel("model-a"), "hello", system_prompt_content=["code A"])
+    agent._cached_invoke_llm(_FakeModel("model-a"), "hello", system_prompt_content=["code B"])
+
+    assert len(factory.calls) == 2
+
+
+def test_cached_invoke_llm_same_system_prompt_content_hits_cache(monkeypatch):
+    factory = _patch_cache_demo_agent(monkeypatch)
+    agent = _CacheDemoAgent()
+
+    first = agent._cached_invoke_llm(
+        _FakeModel("model-a"), "hello", system_prompt_content=["shared code"]
+    )
+    second = agent._cached_invoke_llm(
+        _FakeModel("model-a"), "hello", system_prompt_content=["shared code"]
+    )
+
+    assert first == second == "resp:hello"
+    assert len(factory.calls) == 1
 
 
 def test_cached_invoke_llm_disabled_when_cache_namespace_unset(monkeypatch):

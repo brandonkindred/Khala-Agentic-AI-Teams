@@ -530,18 +530,29 @@ def test_pra_and_planning_updaters_rescale_progress(monkeypatch):
     written: list = []
     monkeypatch.setattr(se_orch, "update_job", lambda job_id, **kw: written.append(kw))
 
-    updater = se_orch._make_phase_job_updater(
+    pra_updater = se_orch._make_phase_job_updater(
+        "j1",
+        subprocess_key="analysis_subprocess",
+        completed_key="analysis_completed_phases",
+        phase_order=se_orch.PRA_PHASE_ORDER,
+        progress_band=se_orch.PROGRESS_BAND_PRODUCT_ANALYSIS,
+    )
+    pra_updater(progress=100, status_text="done")
+    assert written[-1]["progress"] == 15
+    assert written[-1]["status_text"] == "done"
+
+    planning_updater = se_orch._make_phase_job_updater(
         "j1",
         subprocess_key="planning_subprocess",
         completed_key="planning_completed_phases",
         phase_order=se_orch.PLANNING_PHASE_ORDER,
         progress_band=se_orch.PROGRESS_BAND_PLANNING,
     )
-    updater(progress=100, status_text="done")
+    planning_updater(progress=100, status_text="done")
     assert written[-1]["progress"] == 30
     assert written[-1]["status_text"] == "done"
 
-    updater(progress="garbage", status_text="odd")
+    planning_updater(progress="garbage", status_text="odd")
     assert "progress" not in written[-1]
     assert written[-1]["status_text"] == "odd"
 
@@ -674,8 +685,6 @@ def test_make_phase_job_updater_forced_phase_overrides_caller_kwarg(monkeypatch)
 
 def test_make_phase_job_updater_swallows_store_errors(monkeypatch, caplog):
     """update_job errors are swallowed (never raise) but logged for observability."""
-    import logging
-
     import software_engineering_team.orchestrator as se_orch
 
     forced_updater = se_orch._make_phase_job_updater(
@@ -691,7 +700,7 @@ def test_make_phase_job_updater_swallows_store_errors(monkeypatch, caplog):
         raise RuntimeError("store unavailable")
 
     monkeypatch.setattr(se_orch, "update_job", _raise)
-    with caplog.at_level(logging.ERROR, logger=se_orch.logger.name):
+    with caplog.at_level(logging.WARNING, logger=se_orch.logger.name):
         forced_updater(status_text="should not raise")
 
     assert "j-forced" in caplog.text
