@@ -823,6 +823,16 @@ def get_criteria_by_level(level: WCAGLevel) -> List[SuccessCriterion]:
 
 @functools.lru_cache(maxsize=8)
 def _get_criteria_by_level_cached(level: WCAGLevel) -> List[SuccessCriterion]:
+    """Cached body of ``get_criteria_by_level``, called only after validation.
+
+    Preconditions:
+        ``level`` is a ``WCAGLevel`` member — enforced by the caller before this
+        function is reached, so its argument is always hashable.
+
+    Postconditions:
+        Returns every entry at that level. See the module Invariants for the
+        cached, process-shared, unfrozen-entry contract this accessor shares.
+    """
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.level == level]
 
 
@@ -846,6 +856,16 @@ def get_criteria_by_principle(principle: WCAGPrinciple) -> List[SuccessCriterion
 
 @functools.lru_cache(maxsize=8)
 def _get_criteria_by_principle_cached(principle: WCAGPrinciple) -> List[SuccessCriterion]:
+    """Cached body of ``get_criteria_by_principle``, called only after validation.
+
+    Preconditions:
+        ``principle`` is a ``WCAGPrinciple`` member — enforced by the caller before
+        this function is reached, so its argument is always hashable.
+
+    Postconditions:
+        Returns every entry under that principle. See the module Invariants for
+        the cached, process-shared, unfrozen-entry contract this accessor shares.
+    """
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.principle == principle]
 
 
