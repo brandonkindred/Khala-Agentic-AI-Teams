@@ -9,51 +9,51 @@ For the container-level view of how this team fits into Khala, see
 ## Component diagram — API router
 
 How each endpoint reaches an agent or orchestrator call and which persistence
-bucket it reads/writes. Line numbers below are from
-[`api/main.py`](../api/main.py) and point at each route's path literal. That
-file changes often, so treat them as a starting offset, not a guarantee — the
-route path itself is the stable identifier to search for.
+bucket it reads/writes. Every route below is declared in
+[`api/main.py`](../api/main.py); grep the route path to find its handler. Line
+numbers are deliberately omitted here — that file changes several times a day,
+and the route path is a stable identifier that never goes stale.
 
 ```mermaid
 flowchart LR
   subgraph advisor_api[Advisor Endpoints]
-    E1["POST /advisor/sessions<br/>L5918"]
-    E2["POST /advisor/sessions/{id}/messages<br/>L5965"]
-    E3["GET /advisor/sessions/{id}<br/>L6031"]
-    E4["POST /advisor/sessions/{id}/complete<br/>L6055"]
-    E5["POST /profiles<br/>L1010"]
-    E6["GET /profiles/{user_id}<br/>L1102"]
-    E7["POST /proposals/create<br/>L1118"]
-    E8["GET /proposals/{id}<br/>L1157"]
-    E9["POST /proposals/{id}/validate<br/>L1174"]
-    E10["POST /memos<br/>L1859"]
+    E1["POST /advisor/sessions"]
+    E2["POST /advisor/sessions/{id}/messages"]
+    E3["GET /advisor/sessions/{id}"]
+    E4["POST /advisor/sessions/{id}/complete"]
+    E5["POST /profiles"]
+    E6["GET /profiles/{user_id}"]
+    E7["POST /proposals/create"]
+    E8["GET /proposals/{id}"]
+    E9["POST /proposals/{id}/validate"]
+    E10["POST /memos"]
   end
 
   subgraph shared_api[Shared Endpoints]
-    S1["POST /strategies<br/>L1227"]
-    S2["POST /strategies/{id}/validate<br/>L1278"]
-    S3["POST /backtests<br/>L1506"]
-    S4["GET /backtests<br/>L1648"]
-    S5["POST /promotions/decide<br/>L1674"]
-    S6["GET /workflow/status<br/>L1807"]
-    S7["GET /workflow/queues<br/>L1830"]
-    S8["GET /health<br/>L1004"]
+    S1["POST /strategies"]
+    S2["POST /strategies/{id}/validate"]
+    S3["POST /backtests"]
+    S4["GET /backtests"]
+    S5["POST /promotions/decide"]
+    S6["GET /workflow/status"]
+    S7["GET /workflow/queues"]
+    S8["GET /health"]
   end
 
   subgraph lab_api[Strategy Lab Endpoints]
-    L1["POST /strategy-lab/run<br/>L3024"]
-    L2["GET /strategy-lab/results<br/>L3098"]
-    L3["GET /strategy-lab/jobs<br/>L3142"]
-    L4["POST /strategy-lab/runs/{id}/resume<br/>L3310"]
-    L5["POST /strategy-lab/runs/{id}/restart<br/>L3565"]
-    L6["GET /strategy-lab/runs<br/>L4159"]
-    L7["GET /strategy-lab/runs/{id}/status<br/>L4259"]
-    L8["GET /strategy-lab/runs/{id}/stream<br/>L4300"]
-    L9["DELETE /strategy-lab/records/{id}<br/>L4450"]
-    L10["DELETE /strategy-lab/storage<br/>L4534"]
-    L11["POST /strategy-lab/paper-trade<br/>L4854"]
-    L12["GET /strategy-lab/paper-trade/results<br/>L5700"]
-    L13["GET /strategy-lab/paper-trade/{id}<br/>L5759"]
+    L1["POST /strategy-lab/run"]
+    L2["GET /strategy-lab/results"]
+    L3["GET /strategy-lab/jobs"]
+    L4["POST /strategy-lab/runs/{id}/resume"]
+    L5["POST /strategy-lab/runs/{id}/restart"]
+    L6["GET /strategy-lab/runs"]
+    L7["GET /strategy-lab/runs/{id}/status"]
+    L8["GET /strategy-lab/runs/{id}/stream"]
+    L9["DELETE /strategy-lab/records/{id}"]
+    L10["DELETE /strategy-lab/storage"]
+    L11["POST /strategy-lab/paper-trade"]
+    L12["GET /strategy-lab/paper-trade/results"]
+    L13["GET /strategy-lab/paper-trade/{id}"]
   end
 
   subgraph handlers[Agents & Orchestrator]
@@ -173,7 +173,7 @@ for traceability.
 
 ## Domain model — class diagram
 
-Core Pydantic models from [`models.py`](../models.py) (477 lines). Only the
+Core Pydantic models from [`models.py`](../models.py). Only the
 most important fields are shown; enums are in the lower block.
 
 ```mermaid

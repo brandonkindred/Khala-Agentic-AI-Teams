@@ -89,7 +89,7 @@ genuinely atomic conditional write. Cleanup on a finished attempt is best-effort
 between finishing an attempt and deleting its checkpoint leaves one orphaned checkpoint behind,
 which is inert clutter (a `design_attempt` index the run will never revisit again), not a
 correctness hazard — there is no reaper/TTL for it. See
-`system_design/adr/ADR-012-strategy-lab-design-attempt-checkpoint-contract.md` for the full
+the repo-root `system_design/adr/ADR-012-strategy-lab-design-attempt-checkpoint-contract.md` for the full
 contract and `RETRY_STATE_ISOLATION.md`'s "Intra-attempt checkpointing" section for how this
 composes with the existing attempt-to-attempt retry-isolation guarantee.
 
@@ -142,7 +142,7 @@ distinct indicator series is computed once instead of once per strategy, cutting
 wall-clock time proportional to indicator-parameter overlap in the design space. The cache key
 is fully determined by the indicator spec + symbol + timeframe + a content fingerprint of the
 bars, so a hit only changes *how* a value is produced, never *what* value is returned (key
-composition and the invalidation contract: `system_design/adr/ADR-012-batch-indicator-cache-key-and-invalidation.md`).
+composition and the invalidation contract: the repo-root `system_design/adr/ADR-012-batch-indicator-cache-key-and-invalidation.md`).
 Consultation is additionally gated: `IndicatorRegistry` consults the cache only when it was
 constructed with a real cache instance **and** a non-empty timeframe, and the bars carry a
 `symbol` and a `date` — the batch workflow supplies all of these per batch, while an ordinary
@@ -310,6 +310,16 @@ values floored to `1`). Each round audits the executed trades against the spec a
 asks the alignment agent to rewrite the strategy code, which is then re-executed for a fresh backtest.
 Reaching the cap logs a warning and leaves the trades as last audited — it does not raise or otherwise
 short-circuit the cycle, it just stops attempting further fixes.
+
+### STRATEGY_LAB_ALIGNMENT_NEAR_MISS_PCT
+Relative tolerance for the trade-alignment entry-signal check before a predicate miss counts as a
+hard failure (default `0.01` = 1%). Resolved by `_near_miss_pct()` in
+`quality_gates/alignment_checks.py`, not through `StrategyLabBudgetConfig`. When a miss falls
+within this tolerance, `TradeAlignmentAgent.adjudicate_near_miss` decides it with a single
+yes/no LLM call instead of failing the audit outright. Setting `0` **disables that adjudicator
+entirely** — every predicate miss becomes a hard fail, and no near-miss LLM call is made. Parsing
+is defensive: an unparseable value, a non-finite value, or a negative value logs a warning and
+falls back to the default.
 
 ### STRATEGY_LAB_SIZING_COHERENCE_TOLERANCE
 Relative tolerance for `SpecReadinessGate`'s position-sizing coherence rule (default `0.05` = 5%).

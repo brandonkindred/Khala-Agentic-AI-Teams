@@ -229,19 +229,15 @@ Owned by `AlignmentMixin` (`orchestrator_alignment.py`), after the strategy
 has produced a real trade ledger. Each round:
 
 1. **`DeterministicAlignmentChecker`** (`../strategy_lab/quality_gates/alignment_checks.py`)
-   evaluates the trade ledger against the structured `StrategySpec` across
-   seven per-rule checks: universe, side, sizing (±1%), stop-loss compliance,
-   take-profit compliance, entry-signal correlation, and — for specs with a
-   `SignalExitRule` where the engine didn't attribute the close to a
-   structured exit — signal-exit correlation (`_check_signal_exit`). Only
-   five of the seven can actually fail: `_check_stop_loss` and
-   `_check_take_profit` always record `passed=True, severity="info"` (a
-   stop/take-profit is a trigger, not a price cap — a fill past the nominal
-   threshold is expected market behavior, not a misalignment), so they never
-   drive the `aligned`/`misaligned` verdict; engine-side stop/take-profit
-   firing is instead verified deterministically by `ExitRuleConformanceGate`.
+   evaluates the trade ledger against the structured `StrategySpec`. The
+   seven per-rule checks, and which of them can actually drive the
+   `aligned`/`misaligned` verdict, are enumerated in
+   [`strategy_lab_pipeline.md`](./strategy_lab_pipeline.md) — the canonical
+   list, not repeated here. What matters for the loop: the checker is
+   deterministic and makes **no LLM call**, so a clean audit costs nothing.
    A near-miss on the entry-signal check (within
-   `STRATEGY_LAB_ALIGNMENT_NEAR_MISS_PCT`) routes to
+   `STRATEGY_LAB_ALIGNMENT_NEAR_MISS_PCT`, read in
+   `../strategy_lab/agents/alignment.py`) routes to
    `TradeAlignmentAgent.adjudicate_near_miss` — a single-shot yes/no call,
    not a full re-audit.
 2. If misaligned, `TradeAlignmentAgent.propose_code_fix` receives the
@@ -253,11 +249,8 @@ has produced a real trade ledger. Each round:
 Capped at `STRATEGY_LAB_MAX_ALIGNMENT_ROUNDS` (default 10); reaching the cap
 logs a warning and keeps the last-audited trades rather than failing the
 cycle. [`strategy_lab_pipeline.md`](./strategy_lab_pipeline.md) covers the same
-loop from the outside (the `aligning` phase and its sub-phase events) and
-summarizes the same seven checks, so the two overlap here by design — if the
-check set or the informational/failable split changes, both need editing,
-along with the round cap in
-[`../strategy_lab/README.md`](../strategy_lab/README.md).
+loop from the outside — the `aligning` phase, its sub-phase events, and the
+per-rule check list.
 
 ## Verification & publication decision (rest of BACKTEST_AND_VERIFICATION)
 

@@ -172,7 +172,8 @@ flowchart LR
 
 ## Profile requirement per use case
 
-Matches the authoritative list in [`../README.md`](../README.md):66-84.
+Matches the authoritative list under "HTTP endpoints — profile requirement" in
+[`../README.md`](../README.md).
 
 **Requires `user_id` / IPS loaded from store:**
 `POST /profiles`, `GET /profiles/{user_id}`,

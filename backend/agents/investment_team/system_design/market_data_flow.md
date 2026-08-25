@@ -342,7 +342,7 @@ class MarketDataStream(Protocol):                        # :39
     def __iter__(self) -> Iterator[StreamEvent]: ...     # synchronous generator
 ```
 
-`TradingService.run(stream, *, on_trade=None)` (`service.py`) consumes that
+`TradingService.run(stream, *, on_trade=None)` (`service.py:2351`) consumes that
 iterator one event at a time. It is **mode-agnostic** — it never knows whether
 the stream is historical or live. The mode layer decides which stream object to
 build:
@@ -551,7 +551,7 @@ of the whole document:
 4. **Pull into the engine** — `TradingService.run` drives a `while True` loop
    (in `TradingService.run`) that calls `event = next(event_iter, None)`
    **once per iteration, one bar at a time**, breaking on
-   `None`/`EndOfStreamEvent` (`:1396`). The engine never holds the whole series —
+   `None`/`EndOfStreamEvent`. The engine never holds the whole series —
    it only ever sees the current bar (plus a parent-side `next_bar` peek used by
    fills, never by the strategy).
 5. **Per bar** → submit prior-bar orders, simulate fills (§6), mark-to-market,
@@ -582,7 +582,7 @@ honour the same `StreamEvent` iterator contract.
 
 ## 6. How a bar drives the engine
 
-### 6.1 The unified run loop (`TradingService.run`, `service.py`)
+### 6.1 The unified run loop (`TradingService.run` `service.py:2351`)
 
 Per `BarEvent` (non-warm-up), the loop:
 
@@ -603,8 +603,8 @@ Per `BarEvent` (non-warm-up), the loop:
 ### 6.2 Fill-price-from-bar (`engine/execution_model.py` + `fill_simulator.py`)
 
 The default execution model is `RealisticExecutionModel`
-(`build_execution_model(name="realistic", participation_cap=0.10)`,
-`build_execution_model`, `engine/execution_model.py`). Each bar, for every
+(`build_execution_model` `engine/execution_model.py:407`, called as
+`build_execution_model(name="realistic", participation_cap=0.10)`). Each bar, for every
 working order, `compute_fill_terms(req, bar, next_bar)` returns a
 `FillTerms(reference_price, qty_fraction, extra_slip_bps)` in four steps,
 which the fill simulator then turns into money.
@@ -618,31 +618,32 @@ flowchart LR
   S4 --> MONEY[filled_qty → risk gate → capital check<br/>portfolio.open / partial_close + tx costs]
 ```
 
-**Step 1 — reference price from the incoming bar** (`:186-195`). The price comes
+**Step 1 — reference price from the incoming bar**
+(`RealisticExecutionModel` `execution_model.py:203`, `compute_fill_terms` `:235`). The price comes
 from the *current* bar; the close is never used as a decision-time fill price:
 
 | Order type | Fills on this bar when | Reference price | Code |
 |---|---|---|---|
-| **MARKET** | always | `bar.open` | `:187` |
-| **LIMIT** | long: `bar.low <= limit`; short: `bar.high >= limit` | `req.limit_price` exactly (the realistic model drops the legacy `min(bar.open, limit)` "free alpha") | `_limit_reference_price` `:232-245` |
-| **STOP** | long: `bar.high >= stop`; short: `bar.low <= stop` | long `max(bar.open, stop)`, short `min(bar.open, stop)` — gap-through honoured | `_stop_reference_price` `:247-260` |
+| **MARKET** | always | `bar.open` | `compute_fill_terms` `:241` |
+| **LIMIT** | long: `bar.low <= limit`; short: `bar.high >= limit` | `req.limit_price` exactly (the realistic model drops the legacy `min(bar.open, limit)` "free alpha") | `_limit_reference_price` `:290` |
+| **STOP** | long: `bar.high >= stop`; short: `bar.low <= stop` | long `max(bar.open, stop)`, short `min(bar.open, stop)` — gap-through honoured | `_stop_reference_price` `:305` |
 
-**Step 2 — participation cap** (`_raw_participation` `:266-285`,
-`_qty_fraction_from_participation` `:287-296`). A single bar can't absorb an
+**Step 2 — participation cap** (`_raw_participation` `:323`,
+`_qty_fraction_from_participation` `:344`). A single bar can't absorb an
 unbounded order: `raw_participation = order_notional / (bar.volume · bar.close)`;
 `qty_fraction = 1.0` if within `participation_cap` (default 10%) else
 `participation_cap / raw_participation` (missing volume → 0). The unfilled
 remainder follows the run's `default_unfilled_policy` (backtest
 `REQUEUE_NEXT_BAR`, paper `DROP`).
 
-**Step 3 — LIMIT adverse-selection haircut** (`_adverse_selection_bps`
-`:308-342`; LIMIT only, requires `next_bar`). Models being picked off:
+**Step 3 — LIMIT adverse-selection haircut** (`_adverse_selection_bps` `:365`;
+LIMIT only, requires `next_bar`). Models being picked off:
 `signed_move_pct = (next_bar.close − bar.close) / bar.close`, scaled by the
 participation rate and capped at `adverse_selection_max_bps` (default 50).
 Returned as `extra_slip_bps`.
 
 **Step 4 — slippage → actual fill price** (`fill_simulator.py`).
-`_slippage_multipliers(extra_slip_bps)` (`:451-466`) builds
+`_slippage_multipliers(extra_slip_bps)` (`fill_simulator.py:567`) builds
 `s = (slippage_bps + extra_slip_bps) / 10_000` and four multipliers —
 `long_entry = 1+s`, `long_exit = 1−s`, `short_entry = 1−s`, `short_exit = 1+s`
 (you always pay the spread). Then:
@@ -659,7 +660,7 @@ Returned as `extra_slip_bps`.
   `portfolio.record_pnl(net)`.
 
 `FillSimulatorConfig` defaults: `slippage_bps=2.0`, `transaction_cost_bps=5.0`
-(`engine/fill_simulator.py`).
+(`engine/fill_simulator.py:69`).
 
 > **Worked example** — long MARKET buy of 10 shares, `bar.open=100`,
 > `slippage_bps=2`, within the participation cap, no adverse haircut:
@@ -667,7 +668,7 @@ Returned as `extra_slip_bps`.
 > a bar that opens at 110 → `110 × 0.9998 = 109.978`. Transaction cost on the
 > round trip: `(1000.20 + 1099.78) × 5/10_000 ≈ 1.05`.
 
-> **Legacy `OptimisticExecutionModel`** (`:93`) keeps the old MARKET→`bar.open`,
+> **Legacy `OptimisticExecutionModel`** (`execution_model.py:145`) keeps the old MARKET→`bar.open`,
 > LIMIT-buy→`min(bar.open, limit)` "free alpha" rule for golden parity tests
 > only; it warns unless `KHALA_ALLOW_OPTIMISTIC_FILLS=1`.
 

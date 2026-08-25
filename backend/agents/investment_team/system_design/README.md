@@ -43,12 +43,14 @@ with implementation detail for individual Strategy Lab capabilities:
   (context snapshot, historical OHLCV, streaming registry), provider-selection
   precedence + geo-failover, how a source is retrieved and streamed into the
   engine, and the four-step fill-price-from-bar derivation.
-- **[`strategy_lab_pipeline.md`](./strategy_lab_pipeline.md)** — full per-cycle
-  pipeline shape (`ideating → fetching_data → backtest → aligning →
-  analyzing → paper_trading? → complete`, the cycle's own stage vocabulary —
-  the phase *events* a client receives are the narrower
-  `ideating`/`coding`/`backtesting`/`analyzing` set), the complete list of SSE
-  phase events, the winner gate, and the paper-trade skip/failure paths.
+- **[`strategy_lab_pipeline.md`](./strategy_lab_pipeline.md)** — the per-cycle
+  pipeline as a narrative of stages (ideate → fetch data → backtest → align →
+  analyze → optionally paper-trade), the winner gate, and the paper-trade
+  skip/failure paths. Its phase-event table is the *cycle-level* vocabulary,
+  including the `paper_trading*` events that only the thread-mode `on_phase`
+  callback emits — under Temporal-only dispatch a subscriber sees just the
+  four `_PROGRESS_PHASE_MAP` targets
+  (`ideating`/`coding`/`backtesting`/`analyzing`).
 - **[`generation_pipeline.md`](./generation_pipeline.md)** — what actually
   happens *inside* "ideating" and "backtest" above: the 4-phase contract, the
   design ↔ review loop, the compiled-DSL-vs-custom-code fork, the refinement

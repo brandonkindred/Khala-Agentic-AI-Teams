@@ -167,7 +167,7 @@ flowchart TB
   LabEP --> PDict
   SharedEP --> PDict
   BatchWF -->|"progress writes<br/>(persist_run_state_activity)"| RunStore
-  DesignAttempt -->|"design-attempt checkpoint<br/>(ADR-012)"| RunStore
+  DesignAttempt -->|"design-attempt checkpoint"| RunStore
   Finalize --> PDict
   PDict --> Buckets
   Buckets --> JS
@@ -318,10 +318,13 @@ inside a **single** activity, `run_design_attempt_activity`
 ([`strategy_lab/temporal/activities.py`](../strategy_lab/temporal/activities.py)),
 which is a thin wrapper around `StrategyLabOrchestrator._run_design_attempt`.
 Temporal durability therefore applies at the *attempt* granularity, not at
-each internal phase; an ADR-012 checkpoint taken at the design/synthesis
+each internal phase; a design-attempt checkpoint taken at the design/synthesis
 boundary inside that same activity lets a crash-and-retry resume past a
 completed design phase instead of re-paying for it (see
-[`../strategy_lab/README.md`](../strategy_lab/README.md#design-attempt-checkpointing)).
+[`../strategy_lab/README.md`](../strategy_lab/README.md#design-attempt-checkpointing),
+and the repo-root
+[`ADR-012-strategy-lab-design-attempt-checkpoint-contract.md`](../../../../system_design/adr/ADR-012-strategy-lab-design-attempt-checkpoint-contract.md)
+for the full contract).
 Once a cycle produces a record, `finalize_cycle_record_activity` runs the
 post-`run_cycle` tail — attaching the batch's signal brief and running
 `PaperTradingAgent` for publishable winners — delegating to the same
@@ -393,17 +396,23 @@ Postgres-backed ordered provider list (`/llm-config` UI → `llm_provider_config
 — per the root `CLAUDE.md`, the sole source of LLM resolution, with
 `LLM_PROVIDER=dummy` as the only env override.
 
-**Strategy Lab's Strands agents are an exception to that rule today.**
+**`LLM_PROVIDER` is load-bearing for Strategy Lab's Strands agents.**
 `DesignAgent`, `DesignReviewAgent`, and the shared agent runners build their
 model through `strategy_lab/agents/model_factory.py::get_strands_model`, which
-resolves via `llm_service.config`'s `resolve_provider()`/`resolve_base_url()`/
-`resolve_model()` — runtime config first, then the `LLM_PROVIDER` /
-`LLM_BASE_URL` / `LLM_MODEL` env vars. Two consequences worth knowing before
-you configure an environment: `LLM_PROVIDER=bedrock` constructs a
-`BedrockModel` directly, bypassing the provider list entirely; and
-`LLM_PROVIDER=dummy` **raises** for these agents rather than selecting a
-no-LLM harness (`"LLM_PROVIDER=dummy is not supported for Strands agents"`),
-so the platform-wide dry-run switch does not work here. Strategy Lab's own
+branches on `resolve_provider()`:
+
+- **`ollama` (the default)** — routes to `llm_service.strands_adapter`, which
+  resolves the client through the provider list. `LLM_BASE_URL`/`LLM_MODEL`
+  are **not** forwarded on this path (they feed only the log line and the
+  explicit-transport-timeout branch), so setting them has no effect on which
+  endpoint or model is used.
+- **`bedrock`** — constructs a `BedrockModel` directly from `resolve_model()`,
+  bypassing the provider list entirely. `LLM_MODEL` *is* live here.
+- **`dummy`** — **raises** (`"LLM_PROVIDER=dummy is not supported for Strands
+  agents"`), so the platform-wide dry-run switch does not work for this team.
+- anything else — raises as an unsupported provider.
+
+Strategy Lab's own
 agents route through an additional shared fault-tolerance envelope on top of
 this (`strategy_lab/agents/_llm_envelope.py` — per-call timeout, retries,
 backoff, total wall-time budget); see
@@ -452,8 +461,8 @@ alignment loops, and the ~20-gate `quality_gates/` catalog — are documented in
 | `STRATEGY_LAB_MARKET_DATA_CACHE_TTL_SEC` | Snapshot cache TTL (default 120.0) |
 | `STRATEGY_LAB_MARKET_DATA_PROVIDER` | Provider key (only `free_tier` is implemented) |
 | `STRATEGY_LAB_SIGNAL_EXPERT_ENABLED` | Toggles the signal-intelligence step |
-| `LLM_PROVIDER` | `ollama` or `bedrock` for Strategy Lab's Strands agents (`dummy` raises — see §10); platform-wide, only `dummy` is load-bearing |
-| `LLM_BASE_URL` / `LLM_MODEL` | Live base URL / model for the Strands agents via `model_factory`; elsewhere, blank-provider-list-entry defaults only |
+| `LLM_PROVIDER` | Must be `ollama` or `bedrock` for Strategy Lab's Strands agents — `dummy` and any other value raise (see §10). Platform-wide, only `dummy` is load-bearing |
+| `LLM_BASE_URL` / `LLM_MODEL` | Blank-provider-list-entry defaults. `LLM_MODEL` additionally selects the live model on the `bedrock` branch; neither is forwarded on the default `ollama` path (see §10) |
 | `POSTGRES_HOST` (+ friends) | Enables job-service persistence (required for non-trivial use) |
 
 This table covers only the batch-level / market-data / platform vars this team

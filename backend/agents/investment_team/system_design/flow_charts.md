@@ -157,7 +157,7 @@ sequenceDiagram
     end
 
     BatchWF->>RunStore: persist_run_state_activity — writes the terminal<br/>status: completed, completed_with_errors, or whatever<br/>external_terminal_status_activity reported between waves<br/>(cancelled / failed / interrupted)
-    BatchWF->>Bus: publish_run_event_activity (run_complete)
+    BatchWF->>Bus: publish_run_event_activity — terminal event shape from<br/>_terminal_sse_event: type=complete, type=cancelled,<br/>or type=error (failed / interrupted)
     Bus-->>Client: SSE event (close)
 ```
 
