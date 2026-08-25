@@ -158,9 +158,10 @@ for primitive defects you deliberately chose not to pursue at all.
     fallback when neither parses — `Bad request: ${statusText}`, which reads
     "Bad request: Bad Request" for an actual 400 but "Bad request: Unprocessable
     Entity" for a 422, since `statusText` is the transport's own reason phrase for
-    whichever status arrived. `404` → "Not found:" plus the RAW
-    REQUEST URL, which puts an internal API path in front of the user and is itself
-    reportable. `500` and the rest → a status-specific string. The snackbar opens with
+    whichever status arrived. `404` → "Not found:" plus `err.url` — the RESPONSE URL,
+    normally identical to the request URL, and itself reportable for putting an
+    internal API path in front of the user — falling back to `statusText` on the rare
+    response that carries no `url`. `500` and the rest → a status-specific string. The snackbar opens with
     `politeness: 'assertive'`, so it satisfies the HANDLED gate's announcement clause
     on its own.
     TWO ways a request escapes all of this, and both must be ruled out before you
@@ -207,9 +208,12 @@ for primitive defects you deliberately chose not to pursue at all.
         genuinely IS guarded in those states. That is the general shape: a disable is
         per CALL, not per spec, so read the call's second argument, not the file.
         Re-derive the census rather than trusting this list, but not with a bare
-        `grep -rn "enabled: false"` — most of those hits are service-mock fixture data
-        in specs that never call the helper. Search for the rule names, or for the
-        two-argument call shape `expectNoAxeViolations(<host>, {`.
+        `grep -rn "enabled: false"` — a bare majority of those hits are unrelated
+        service-mock fixture data (e.g. `of({ enabled: false, mcp_server_url: … })`),
+        and that noise sits inside the SAME spec files that call the helper heavily,
+        not only in specs that never call it — so filename alone will not separate
+        signal from noise. Search for the rule names, or for the two-argument call
+        shape `expectNoAxeViolations(<host>, {`.
     Read each spec's fixtures, its assertions, what element it audits, AND which rules
     it disables before excluding a finding, then spend your attention on the unrendered
     states, the unrendered compositions, the disabled rules, and what axe structurally
@@ -471,12 +475,14 @@ D. STATE COVERAGE
        between the four is not the disposition but the remedy each needs, which is
        what your one finding must spell out.
      - Request did not opt out — the interceptor already distinguished 0 / 401 / 403 /
-       503 and announced it assertively, so a generic inline message is NOT by itself a
-       MISSING for those states. What still earns MISSING there is an inline message
-       that CONTRADICTS the toast — two explanations of one failure is its own finding
-       — or a state whose recovery needs an affordance a toast cannot offer: a sign-in
-       route for 401, a link to the setup the 503 names, a retry for offline. The
-       missing affordance is the finding, not the wording.
+       503 for the other three states, AND separately distinguishes 400 / 422 / 404 /
+       500 (and the rest) for API-error, each with its own toast — so a generic inline
+       message is NOT by itself a MISSING for ANY of the four, API-error included.
+       What still earns MISSING there is an inline message that CONTRADICTS the toast
+       — two explanations of one failure is its own finding — or a state whose
+       recovery needs an affordance a toast cannot offer: a sign-in route for 401, a
+       link to the setup the 503 names, a retry for offline or a 5xx. The missing
+       affordance is the finding, not the wording.
    Either way, when one branch is MISSING for several states, file ONE finding naming
    every state it fails and the distinct copy or handling each needs — not one finding
    per state against the same line.
