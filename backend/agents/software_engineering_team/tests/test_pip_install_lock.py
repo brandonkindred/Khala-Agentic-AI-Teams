@@ -7,12 +7,24 @@ file can't be opened/flocked).
 
 from __future__ import annotations
 
+import sys
 import threading
 from pathlib import Path
 
 import pytest
 
 from software_engineering_team import pip_install_lock as pil
+
+# ``shared.concurrency``'s own __init__.py does ``from shared.concurrency.
+# flock_lock import flock_lock`` — since the imported name matches the
+# submodule's own name, this rebinds the ``flock_lock`` *attribute* on the
+# ``shared.concurrency`` package to the function, shadowing the submodule.
+# Any attribute-chain resolver (plain ``import x.y as name``, or the dotted
+# string form monkeypatch/mock accept) walks that same, possibly-shadowed
+# attribute rather than going straight to ``sys.modules`` — so which one it
+# resolves to can depend on import order elsewhere in the test session.
+# ``sys.modules`` is the one lookup immune to this.
+_flock_lock_module = sys.modules["shared.concurrency.flock_lock"]
 
 
 def test_pip_install_lock_path_is_pure_and_stable(
@@ -70,13 +82,18 @@ def test_pip_install_lock_excludes_concurrent_holders(
 def test_pip_install_lock_yields_when_open_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A lock-file open failure degrades to running the block unguarded, not raising."""
+    """A lock-file open failure degrades to running the block unguarded, not raising.
+
+    The ``open()`` call lives in the shared ``flock_lock`` primitive
+    (``shared.concurrency.flock_lock``), not in this module directly, so the
+    patch target is there.
+    """
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
 
     def _boom(*args, **kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(pil, "open", _boom, raising=False)
+    monkeypatch.setattr(_flock_lock_module, "open", _boom, raising=False)
 
     ran = False
     with pil.pip_install_lock():
@@ -87,15 +104,38 @@ def test_pip_install_lock_yields_when_open_fails(
 def test_pip_install_lock_yields_when_flock_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A flock failure also degrades to running the block unguarded, not raising."""
+    """A flock failure also degrades to running the block unguarded, not raising.
+
+    The ``fcntl.flock()`` call lives in the shared ``flock_lock`` primitive
+    (``shared.concurrency.flock_lock``), not in this module directly, so the
+    patch target is there.
+    """
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
 
     def _boom(*args, **kwargs):
         raise OSError("lock unavailable")
 
-    monkeypatch.setattr(pil.fcntl, "flock", _boom)
+    monkeypatch.setattr(_flock_lock_module.fcntl, "flock", _boom)
 
     ran = False
     with pil.pip_install_lock():
         ran = True
     assert ran
+
+
+def test_pip_install_lock_reraises_body_oserror_without_double_yield(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An OSError from the wrapped block itself must propagate, not be swallowed.
+
+    Regression guard: a naive ``try: with flock_lock(...): yield / except
+    OSError`` implementation would also catch an OSError raised by the
+    caller's own code inside the ``with`` block (mistaking it for a lock-
+    acquisition failure) and then call ``yield`` a second time, which is
+    invalid for a generator-based context manager.
+    """
+    monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
+
+    with pytest.raises(OSError, match="caller failure"):
+        with pil.pip_install_lock():
+            raise OSError("caller failure")

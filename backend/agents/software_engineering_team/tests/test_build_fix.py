@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 
@@ -27,6 +28,20 @@ from software_engineering_team.build_fix import (
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+@contextmanager
+def _spy_lock(events: list[str]) -> Iterator[None]:
+    """A ``pip_install_lock`` stand-in that records enter/exit into ``events``.
+
+    Shared by every test below that asserts ``pip_install_lock`` spans a
+    particular sequence of install/pytest calls — each test supplies its own
+    ``events`` list via a closure, e.g.
+    ``monkeypatch.setattr("...pip_install_lock", lambda: _spy_lock(events))``.
+    """
+    events.append("lock_enter")
+    yield
+    events.append("lock_exit")
 
 
 def test_backend_code_v2_catches_syntax_error(tmp_path: Path) -> None:
@@ -107,13 +122,9 @@ def test_run_build_verification_backend_lock_spans_install_and_pytest(
         ),
     )
 
-    @contextmanager
-    def _spy_lock():
-        events.append("lock_enter")
-        yield
-        events.append("lock_exit")
-
-    monkeypatch.setattr("software_engineering_team.build_fix.pip_install_lock", _spy_lock)
+    monkeypatch.setattr(
+        "software_engineering_team.build_fix.pip_install_lock", lambda: _spy_lock(events)
+    )
 
     success, error_output = _run_build_verification(tmp_path, "backend", "task-lock")
 
@@ -150,13 +161,9 @@ def test_try_build_fix_lock_spans_install_and_pytest(
         ),
     )
 
-    @contextmanager
-    def _spy_lock():
-        events.append("lock_enter")
-        yield
-        events.append("lock_exit")
-
-    monkeypatch.setattr("software_engineering_team.build_fix.pip_install_lock", _spy_lock)
+    monkeypatch.setattr(
+        "software_engineering_team.build_fix.pip_install_lock", lambda: _spy_lock(events)
+    )
 
     success, error_output = _try_build_fix_one_at_a_time(tmp_path, "backend", "task-lock")
 
@@ -350,13 +357,9 @@ def test_run_post_fix_build_verification_backend_pytest_holds_lock(
         lambda project_dir, python_exe=None: events.append("pytest") or pytest_result,
     )
 
-    @contextmanager
-    def _spy_lock():
-        events.append("lock_enter")
-        yield
-        events.append("lock_exit")
-
-    monkeypatch.setattr("software_engineering_team.build_fix.pip_install_lock", _spy_lock)
+    monkeypatch.setattr(
+        "software_engineering_team.build_fix.pip_install_lock", lambda: _spy_lock(events)
+    )
 
     result = _run_post_fix_build_verification(tmp_path, "backend")
 
@@ -400,13 +403,9 @@ def test_run_post_fix_build_verification_reinstalls_requirements_under_lock(
         lambda project_dir, python_exe=None: events.append("pytest") or pytest_result,
     )
 
-    @contextmanager
-    def _spy_lock():
-        events.append("lock_enter")
-        yield
-        events.append("lock_exit")
-
-    monkeypatch.setattr("software_engineering_team.build_fix.pip_install_lock", _spy_lock)
+    monkeypatch.setattr(
+        "software_engineering_team.build_fix.pip_install_lock", lambda: _spy_lock(events)
+    )
 
     result = _run_post_fix_build_verification(tmp_path, "backend")
 
