@@ -50,39 +50,49 @@ def test_import_bootstraps_se_team_dir_on_syspath() -> None:
 
 
 def test_build_team_lead_routes_frontend(monkeypatch) -> None:
-    import software_engineering_team.frontend_code_v2_team as fe
+    import software_engineering_team.codegen_team as codegen
 
     captured: dict = {}
 
     class _FakeLead:
-        def __init__(self, llm):
+        def __init__(self, llm, stack):
             captured["llm"] = llm
+            captured["stack"] = stack
 
-    monkeypatch.setattr(fe, "FrontendCodeV2TeamLead", _FakeLead)
+    monkeypatch.setattr(codegen, "CodegenTeamLead", _FakeLead)
     lead = SECodeEngineProvider().build_implementation_team_lead("frontend", "L")
     assert isinstance(lead, _FakeLead)
     assert captured["llm"] == "L"
+    assert captured["stack"] == "frontend"
 
 
 def test_build_team_lead_routes_backend(monkeypatch) -> None:
-    import software_engineering_team.backend_code_v2_team as be
+    import software_engineering_team.codegen_team as codegen
+
+    captured: dict = {}
 
     class _FakeLead:
-        def __init__(self, llm):
-            self.llm = llm
+        def __init__(self, llm, stack):
+            captured["llm"] = llm
+            captured["stack"] = stack
 
-    monkeypatch.setattr(be, "BackendCodeV2TeamLead", _FakeLead)
+    monkeypatch.setattr(codegen, "CodegenTeamLead", _FakeLead)
     lead = SECodeEngineProvider().build_implementation_team_lead("backend", "L")
     assert isinstance(lead, _FakeLead)
-    assert lead.llm == "L"
+    assert captured["llm"] == "L"
+    assert captured["stack"] == "backend"
 
 
-def test_build_team_lead_unknown_kind_raises_keyerror() -> None:
+def test_build_team_lead_unknown_kind_raises_valueerror() -> None:
     """An unrecognised ``team_kind`` violates the documented precondition and
-    must surface as a caller bug (``KeyError``), not silently resolve to
-    either team -- matches this repo's DbC convention of never coercing a
-    precondition violation."""
-    with pytest.raises(KeyError):
+    must surface as a caller bug (``ValueError``, raised by
+    ``CodegenTeamLead``'s own ``stack`` precondition check via
+    ``_validate_stack``), not silently resolve to either stack -- matches
+    this repo's DbC convention of never coercing a precondition violation.
+    ``ValueError`` rather than ``AssertionError`` since ``stack`` is external
+    input crossing a boundary from outside static-type enforcement, and
+    ``assert`` is stripped under ``python -O``."""
+    with pytest.raises(ValueError, match="stack must be one of"):
         SECodeEngineProvider().build_implementation_team_lead("mobile", "L")
 
 

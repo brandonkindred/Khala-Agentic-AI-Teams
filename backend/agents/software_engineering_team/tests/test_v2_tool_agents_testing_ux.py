@@ -6,7 +6,7 @@ import json
 
 
 def _fe_phase_input(**kwargs):
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         Phase,
         ToolAgentPhaseInput,
     )
@@ -25,7 +25,7 @@ def _fe_phase_input(**kwargs):
 
 
 def _be_phase_input(**kwargs):
-    from software_engineering_team.backend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         Phase,
         ToolAgentPhaseInput,
     )
@@ -44,7 +44,7 @@ def _be_phase_input(**kwargs):
 
 
 def _fe_issue(**kwargs):
-    from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
+    from software_engineering_team.codegen_team.models import ReviewIssue
 
     base = dict(source="qa", severity="medium", description="d", file_path="", recommendation="")
     base.update(kwargs)
@@ -52,7 +52,7 @@ def _fe_issue(**kwargs):
 
 
 def _be_issue(**kwargs):
-    from software_engineering_team.backend_code_v2_team.models import ReviewIssue
+    from software_engineering_team.codegen_team.models import ReviewIssue
 
     base = dict(source="qa", severity="medium", description="d", file_path="", recommendation="")
     base.update(kwargs)
@@ -85,7 +85,7 @@ def _patch(monkeypatch, mod, response="", raise_exc=None):
 
 class TestFETestingQA:
     def _agent(self):
-        from software_engineering_team.frontend_code_v2_team.tool_agents.testing_qa import (
+        from software_engineering_team.codegen_team.tool_agents.frontend.testing_qa import (
             agent as mod,
         )
 
@@ -124,7 +124,7 @@ class TestFETestingQA:
 
 class TestFEUxUsability:
     def _agent(self):
-        from software_engineering_team.frontend_code_v2_team.tool_agents.ux_usability import (
+        from software_engineering_team.codegen_team.tool_agents.frontend.ux_usability import (
             agent as mod,
         )
 
@@ -235,14 +235,14 @@ class TestTestingQACollapse:
     # ``__new__`` to skip ``__init__`` (which would resolve a Strands model and
     # need an LLM). This mirrors the other tool-agent tests in this module.
     def _be_agent(self):
-        from software_engineering_team.backend_code_v2_team.tool_agents.testing_qa.agent import (
+        from software_engineering_team.codegen_team.tool_agents.backend.testing_qa.agent import (
             TestingQAToolAgent,
         )
 
         return TestingQAToolAgent.__new__(TestingQAToolAgent)
 
     def _fe_agent(self):
-        from software_engineering_team.frontend_code_v2_team.tool_agents.testing_qa.agent import (
+        from software_engineering_team.codegen_team.tool_agents.frontend.testing_qa.agent import (
             TestingQAToolAgent,
         )
 

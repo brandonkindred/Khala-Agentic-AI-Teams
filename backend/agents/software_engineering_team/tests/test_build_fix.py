@@ -8,7 +8,9 @@ ng build, plus unit tests for ``_collect_project_files``,
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 
@@ -26,6 +28,20 @@ from software_engineering_team.build_fix import (
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+@contextmanager
+def _spy_lock(events: list[str]) -> Iterator[None]:
+    """A ``pip_install_lock`` stand-in that records enter/exit into ``events``.
+
+    Shared by every test below that asserts ``pip_install_lock`` spans a
+    particular sequence of install/pytest calls — each test supplies its own
+    ``events`` list via a closure, e.g.
+    ``monkeypatch.setattr("...pip_install_lock", lambda: _spy_lock(events))``.
+    """
+    events.append("lock_enter")
+    yield
+    events.append("lock_exit")
 
 
 def test_backend_code_v2_catches_syntax_error(tmp_path: Path) -> None:
@@ -71,6 +87,89 @@ def test_backend_code_v2_passes_on_valid_python(tmp_path: Path) -> None:
 
     assert success is True
     assert error_output == ""
+
+
+def test_run_build_verification_backend_lock_spans_install_and_pytest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``pip_install_lock`` must stay held across both the install and the pytest run.
+
+    Releasing it between the two would let a second worker's install mutate
+    site-packages while this worker's pytest is still importing from it —
+    exactly the race the lock exists to prevent.
+    """
+    _write(tmp_path / "app.py", "x = 1\n")
+    _write(tmp_path / "requirements.txt", "pytest\n")
+    _write(tmp_path / "tests" / "test_app.py", "def test_ok():\n    assert True\n")
+
+    events: list[str] = []
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_python_syntax_check",
+        lambda project_dir: CommandResult(success=True, exit_code=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_command",
+        lambda *a, **kw: (
+            events.append("install")
+            or CommandResult(success=True, exit_code=0, stdout="", stderr="")
+        ),
+    )
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_pytest",
+        lambda project_dir, python_exe=None: (
+            events.append("pytest")
+            or CommandResult(success=True, exit_code=0, stdout="ok", stderr="")
+        ),
+    )
+
+    monkeypatch.setattr(
+        "software_engineering_team.build_fix.pip_install_lock", lambda: _spy_lock(events)
+    )
+
+    success, error_output = _run_build_verification(tmp_path, "backend", "task-lock")
+
+    assert success is True
+    assert error_output == ""
+    assert events == ["lock_enter", "install", "pytest", "lock_exit"]
+
+
+def test_try_build_fix_lock_spans_install_and_pytest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same guarantee as above, for the ``_try_build_fix_one_at_a_time`` call site."""
+    _write(tmp_path / "app.py", "x = 1\n")
+    _write(tmp_path / "requirements.txt", "pytest\n")
+    _write(tmp_path / "tests" / "test_app.py", "def test_ok():\n    assert True\n")
+
+    events: list[str] = []
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_python_syntax_check",
+        lambda project_dir: CommandResult(success=True, exit_code=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_command",
+        lambda *a, **kw: (
+            events.append("install")
+            or CommandResult(success=True, exit_code=0, stdout="", stderr="")
+        ),
+    )
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_pytest",
+        lambda project_dir, python_exe=None: (
+            events.append("pytest")
+            or CommandResult(success=True, exit_code=0, stdout="ok", stderr="")
+        ),
+    )
+
+    monkeypatch.setattr(
+        "software_engineering_team.build_fix.pip_install_lock", lambda: _spy_lock(events)
+    )
+
+    success, error_output = _try_build_fix_one_at_a_time(tmp_path, "backend", "task-lock")
+
+    assert success is True
+    assert error_output == ""
+    assert events == ["lock_enter", "install", "pytest", "lock_exit"]
 
 
 def test_safe_repair_write_path_rejects_traversal(tmp_path: Path) -> None:
@@ -230,6 +329,88 @@ def test_run_post_fix_build_verification_backend_runs_pytest_when_tests_exist(
 
     assert result is pytest_result
     assert calls == ["syntax", "pytest"]
+
+
+def test_run_post_fix_build_verification_backend_pytest_holds_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every repair-loop rerun of pytest must hold ``pip_install_lock`` too.
+
+    ``_run_post_fix_build_verification`` runs once per LLM repair-loop
+    iteration; releasing the lock around its pytest call would let a
+    concurrent worker's install mutate site-packages mid test-collection —
+    flagged by review on PR #7194.
+    """
+    _write(tmp_path / "app.py", "x = 1\n")
+    _write(tmp_path / "tests" / "test_app.py", "def test_ok():\n    assert True\n")
+
+    syntax_ok = type("R", (), {"success": True})()
+    pytest_result = type("R", (), {"success": True})()
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_python_syntax_check",
+        lambda project_dir: syntax_ok,
+    )
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_pytest",
+        lambda project_dir, python_exe=None: events.append("pytest") or pytest_result,
+    )
+
+    monkeypatch.setattr(
+        "software_engineering_team.build_fix.pip_install_lock", lambda: _spy_lock(events)
+    )
+
+    result = _run_post_fix_build_verification(tmp_path, "backend")
+
+    assert result is pytest_result
+    assert events == ["lock_enter", "pytest", "lock_exit"]
+
+
+def test_run_post_fix_build_verification_reinstalls_requirements_under_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A concurrent worker's install in between repair-loop reruns must not stick.
+
+    ``_run_post_fix_build_verification`` didn't reinstall ``requirements.txt``
+    before its pytest rerun, so if a different worker held the lock between
+    this project's own earlier install and this rerun (installing its own,
+    different dependency set), this project's pytest would run against the
+    wrong environment — flagged by review on PR #7194. The reinstall must
+    happen inside the same lock acquisition as the pytest call.
+    """
+    _write(tmp_path / "app.py", "x = 1\n")
+    _write(tmp_path / "requirements.txt", "pytest\n")
+    _write(tmp_path / "tests" / "test_app.py", "def test_ok():\n    assert True\n")
+
+    syntax_ok = type("R", (), {"success": True})()
+    pytest_result = type("R", (), {"success": True})()
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_python_syntax_check",
+        lambda project_dir: syntax_ok,
+    )
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_command",
+        lambda *a, **kw: (
+            events.append("install")
+            or CommandResult(success=True, exit_code=0, stdout="", stderr="")
+        ),
+    )
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_pytest",
+        lambda project_dir, python_exe=None: events.append("pytest") or pytest_result,
+    )
+
+    monkeypatch.setattr(
+        "software_engineering_team.build_fix.pip_install_lock", lambda: _spy_lock(events)
+    )
+
+    result = _run_post_fix_build_verification(tmp_path, "backend")
+
+    assert result is pytest_result
+    assert events == ["lock_enter", "install", "pytest", "lock_exit"]
 
 
 def test_execute_llm_repair_attempt_writes_parsed_files(
