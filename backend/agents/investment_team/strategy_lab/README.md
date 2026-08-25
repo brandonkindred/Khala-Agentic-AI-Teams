@@ -53,17 +53,21 @@ monitor worker liveness (e.g. Temporal Web's task-queue pollers view), not rely 
 One design attempt (`run_design_attempt_activity`) can run up to `_DESIGN_ATTEMPT_TIMEOUT` (2
 hours) before it produces a record. `use_budget(budget)` wraps the *entire* `_run_design_attempt`
 call — design+review, refinement, trade-alignment, and zero-trade repair all draw against
-one shared `STRATEGY_LAB_DESIGN_MAX_LLM_CALLS` ceiling. `RefinementAgent`,
-`TradeAlignmentAgent`, and `ZeroTradeRepairAgent` each route through
-`run_single_shot_agent(..., charge=True)` against whichever budget `use_budget` has made
-active for that call. The ceiling is 120 at the documented default (spanning all
+one shared `STRATEGY_LAB_DESIGN_MAX_LLM_CALLS` ceiling. `TradeAlignmentAgent` and
+`ZeroTradeRepairAgent` each route through `run_single_shot_agent(..., charge=True)` against
+whichever budget `use_budget` has made active for that call; `RefinementAgent` charges the
+same active budget through a different path (`try_structured_or_degrade` /
+`run_json_with_parse_retry`, `_structured_output.py`/`_agent_runner.py`), not
+`run_single_shot_agent`. The ceiling is 120 at the documented default (spanning all
 re-entries — see that variable's own entry below for the distinct, larger 540-call figure it
 exists to cap: the *uncapped* worst-case multiplicative demand computed by
 `worst_case_design_llm_calls()`, which only models the design/review portion). The ceiling
 covers every budget-charged call across the whole attempt, **not** design-phase calls alone —
-only `CodeSynthesisAgent.run` and `AnalysisAgent`'s calls are explicit `charge=False` exceptions
-(custom-code synthesis and the final narrative), so a successful attempt's total LLM round-trip
-count can still exceed 120, just not from the budget-charged calls this cap governs. A durable checkpoint
+`CodeSynthesisAgent.run`, `AnalysisAgent`'s calls, and `DesignReviewAgent`'s legacy-fallback
+path (`_invoke_legacy`) are the explicit `charge=False` exceptions (custom-code synthesis,
+the final narrative, and a rarely-taken legacy review path), so a successful attempt's total
+LLM round-trip count can still exceed 120, just not from the budget-charged calls this cap
+governs. A durable checkpoint
 taken at the design/synthesis boundary — where the design + review phase hands its `spec`/
 `rationale`/`design_context` off to code synthesis — means a worker crash partway through an
 attempt resumes past that design phase on the next (Temporal-granted) retry instead of

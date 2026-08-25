@@ -51,7 +51,7 @@ flowchart TB
     end
 
     subgraph batch_agents[Batch-level Agents — investment_team/]
-      SIE[SignalIntelligenceExpert<br/>signal_intelligence_agent.py<br/>runs once per batch-workflow invocation,<br/>not per cycle — a mid-batch resume re-runs it]
+      SIE[SignalIntelligenceExpert<br/>signal_intelligence_agent.py<br/>runs once per batch, not per cycle —<br/>a multi-batch run sees a fresh brief each<br/>batch by design; a mid-batch resume can<br/>also re-run it within one batch]
       PTA[PaperTradingAgent<br/>paper_trading_agent.py<br/>runs post-cycle, never inside orchestrator.py]
     end
 
@@ -61,7 +61,7 @@ flowchart TB
     end
 
     subgraph worker[Strategy Lab Dispatch — Temporal-only]
-      BatchWF[StrategyLabBatchWorkflow<br/>strategy_lab/temporal/workflows.py<br/>wave/batch fan-out, 1 signal-brief call per<br/>batch-workflow invocation — a mid-batch<br/>resume re-enters that batch and re-runs it]
+      BatchWF[StrategyLabBatchWorkflow<br/>strategy_lab/temporal/workflows.py<br/>wave/batch fan-out, 1 signal-brief call at the<br/>top of every batch — also re-run mid-batch<br/>on a start_cycle_offset resume]
       CycleWF[StrategyLabCycleWorkflow<br/>child workflow per cycle<br/>outer design-re-entry loop only]
       DesignAttempt["run_design_attempt_activity<br/>runs StrategyLabOrchestrator._run_design_attempt VERBATIM:<br/>design+review → synthesis → refinement/alignment →<br/>verification/analysis → record assembly — all in ONE activity"]
       Finalize[finalize_cycle_record_activity<br/>signal-brief attach + paper-trade + persist]
@@ -69,7 +69,7 @@ flowchart TB
     end
 
     subgraph persistence[Persistence]
-      PDict[_PersistentDict<br/>dict-like wrapper<br/>api/main.py L85]
+      PDict[_PersistentDict<br/>dict-like wrapper<br/>api/main.py — search for<br/>class _PersistentDict]
       Buckets[(_profiles, _proposals,<br/>_strategies, _validations,<br/>_backtests, _strategy_lab_records,<br/>_paper_trading_sessions,<br/>_advisor_sessions)]
       RunStore[(investment_strategy_lab_runs<br/>run-state store — direct JobServiceClient,<br/>bypasses _PersistentDict)]
     end
@@ -284,16 +284,20 @@ been removed, and `run_strategy_lab` / `resume_strategy_lab_run` /
 `restart_strategy_lab_run` now dispatch exclusively through
 `_dispatch_strategy_lab_run` ([`strategy_lab/orchestrator_api.py`](../strategy_lab/orchestrator_api.py),
 imported into `api/main.py`), which starts
-the durable `StrategyLabBatchWorkflow` — a parent workflow that, for each
-*batch-workflow invocation* of a given batch, refreshes a
-**per-batch signal-intelligence brief** (one `compute_signal_brief_activity`
-call via `SignalIntelligenceExpert`, shared by every cycle started from that
-invocation — not recomputed per cycle). This is not an absolute per-batch
-guarantee across a resume: `start_cycle_offset` can land mid-batch, in which
-case the resumed invocation re-runs `compute_signal_brief_activity` (which
-reads all currently-persisted records) before starting the batch's remaining
-cycles, so a resumed batch's later cycles can see a different brief than its
-already-completed earlier cycles. The workflow then fans that
+the durable `StrategyLabBatchWorkflow` — a parent workflow that refreshes a
+**per-batch signal-intelligence brief** at the top of every batch iteration
+(one `compute_signal_brief_activity` call via `SignalIntelligenceExpert` per
+`batch_idx`, shared by every cycle within that one batch — not recomputed
+per cycle). A single workflow invocation with `batch_count > 1` therefore
+computes a fresh brief for each batch by design (each later batch sees every
+strategy from the batches before it, per the brief's own "batch N sees
+batches 1..N-1" framing) — this is normal, not a resume artifact. A mid-batch
+resume via `start_cycle_offset` is a separate case where even one batch's
+own brief can be recomputed mid-flight: the resumed invocation re-runs
+`compute_signal_brief_activity` (which reads all currently-persisted
+records) before starting that batch's remaining cycles, so cycles within
+what looks like a single logical batch can still see different briefs if a
+resume landed inside it. The workflow then fans that
 batch's cycles out as `StrategyLabCycleWorkflow` **child workflows**,
 reproducing the old thread-mode per-wave concurrency on Temporal's
 `strategy-lab-queue`
@@ -338,16 +342,17 @@ via `_load_run_from_job_service`.
 subscribes to a per-run topic in
 [`api/job_event_bus.py`](../api/job_event_bus.py) (queue-per-subscriber
 fan-out) and drains it as an HTTP SSE stream to the Angular UI. Since the
-Temporal migration (§7), most workflow/activity progress doesn't push into
-this bus directly — it persists to the durable job-service record instead,
-and the connect-time snapshot is reconciled live from that record via
-`_reconcile_run_progress`, so a client always sees current progress at
-connect time and on each subsequent poll. The one exception is
-`run_design_attempt_activity`'s own progress callback, which does call
-`job_event_bus.publish` directly as a best-effort, in-process side channel
-for sub-cycle phase updates (design/synthesis/refinement) — reconciliation
-doesn't depend on it, so a missed direct publish is still caught up by the
-next poll. A polling fallback (`GET /strategy-lab/runs/{run_id}/status`)
+Temporal migration (§7), progress reaches this bus two ways: most of it
+persists to the durable job-service record first, with the connect-time
+snapshot reconciled live from that record via `_reconcile_run_progress` so
+a client always sees current progress at connect time and on each
+subsequent poll; separately, two call sites publish directly and
+best-effort, in-process, without going through that record —
+`run_design_attempt_activity`'s own progress callback (sub-cycle phase
+updates: design/synthesis/refinement) and `publish_run_event_activity`
+(the batch workflow's skipped/finalized/terminal events). Reconciliation
+doesn't depend on either direct-publish path, so a missed one is still
+caught up by the next poll. A polling fallback (`GET /strategy-lab/runs/{run_id}/status`)
 exposes the same reconciled data and is what the UI relies on for updates
 mid-stream.
 
