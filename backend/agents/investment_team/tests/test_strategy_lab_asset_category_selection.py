@@ -401,15 +401,26 @@ def test_design_loop_enforces_asset_category_when_correction_also_fails(
     """When even the corrective regeneration still violates the pin, the
     deterministic relabel backstop (``_enforce_selected_asset_category``)
     is the bounded last resort — the pin is guaranteed to hold within one
-    extra LLM call, never an unbounded retry loop."""
+    extra LLM call, never an unbounded retry loop.
+
+    Critically, the fallback must relabel the *original* pre-regeneration
+    ``(spec, rationale)`` pair, not the discarded regeneration attempt: the
+    designer's ``revise`` stub below returns a *different* rationale
+    ("revised", for a still-wrong "crypto" spec) than the original ``run``
+    call ("scripted", for "forex") — if the fallback paired the relabeled
+    ("stocks") spec with the discarded "revised" rationale, the persisted
+    record would narrate crypto next to a stocks label, reproducing the
+    exact "wrong thesis" bug this whole mechanism exists to prevent.
+    """
     orch = StrategyLabOrchestrator()
 
-    # The design agent always returns "forex" — including from `revise`,
-    # simulating a designer that ignores both the MANDATORY EXCLUSION
-    # instruction and the explicit corrective critique.
     monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict("forex"), "scripted"))
+    # The corrective regeneration also violates the pin, and with a
+    # *different* wrong category than the original — simulating a designer
+    # that ignores both the MANDATORY EXCLUSION instruction and the
+    # explicit corrective critique.
     monkeypatch.setattr(
-        orch.design_agent, "revise", lambda *_a, **_kw: (_spec_dict("forex"), "revised")
+        orch.design_agent, "revise", lambda *_a, **_kw: (_spec_dict("crypto"), "revised")
     )
     monkeypatch.setattr(
         orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
@@ -418,7 +429,7 @@ def test_design_loop_enforces_asset_category_when_correction_also_fails(
     monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
     _short_circuit_synthesis(monkeypatch)
 
-    # allowed = {stocks} -> exclude everything else, including forex.
+    # allowed = {stocks} -> exclude everything else, including forex/crypto.
     record = orch.run_cycle(
         prior_records=[],
         config=_config(),
@@ -426,6 +437,7 @@ def test_design_loop_enforces_asset_category_when_correction_also_fails(
     )
 
     assert record.strategy.asset_class == "stocks"
+    assert record.strategy_rationale == "scripted"
 
 
 def test_design_loop_clears_stale_target_symbols_when_category_enforced(
@@ -526,6 +538,95 @@ def test_design_loop_enforces_asset_category_when_correction_trips_budget(
 
     assert record.backtest.status == "failed: budget_exhausted"
     assert record.strategy.asset_class == "stocks"
+
+
+def test_reconcile_asset_category_forwards_mechanical_repair_count_to_budget_exhaustion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A budget trip inside the corrective ``revise`` call must annotate the
+    exception with the caller's real accumulated ``mechanical_repair_count``
+    (e.g. repairs already applied earlier in the same design-review round),
+    not a hardcoded 0 — otherwise persisted budget-exhausted telemetry
+    under-reports repairs that already happened this cycle. Exercised as a
+    direct unit test (rather than through ``run_cycle``) since manufacturing
+    a real mechanical repair plus a mid-loop pin violation plus a budget
+    trip through the full pipeline would require an elaborate multi-round
+    setup for a fix that is purely about one forwarded argument."""
+    from investment_team.strategy_lab.agents._llm_budget import DesignBudgetExhausted
+
+    orch = StrategyLabOrchestrator()
+    spec = orch._build_spec_from_dict(_spec_dict("forex"), strategy_id="test-strat")
+
+    def _revise(*_a: Any, **_kw: Any) -> Tuple[Dict[str, Any], str]:
+        raise DesignBudgetExhausted(1, 1)
+
+    monkeypatch.setattr(orch.design_agent, "revise", _revise)
+
+    with pytest.raises(DesignBudgetExhausted) as exc_info:
+        orch._reconcile_asset_category(
+            spec,
+            "scripted",
+            selected_category="stocks",
+            review_round=1,
+            emit=lambda *_a, **_kw: None,
+            drift_collector=None,
+            config=_config(),
+            strategy_id="test-strat",
+            all_gate_results=[],
+            mechanical_repair_count=2,
+        )
+
+    assert exc_info.value.mechanical_repair_count == 2
+
+
+def test_reconcile_asset_category_records_readiness_gates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The success-path readiness validation must be appended to
+    ``all_gate_results`` via ``record_gates``, not just used locally to
+    compute the ``design_repair`` event's ``now_ready`` flag — otherwise the
+    persisted record's ``quality_gate_results`` and the convergence tracker
+    silently miss this gate's findings for the attempt."""
+    orch = StrategyLabOrchestrator()
+    spec = orch._build_spec_from_dict(_spec_dict("forex"), strategy_id="test-strat")
+
+    monkeypatch.setattr(
+        orch.design_agent, "revise", lambda *_a, **_kw: (_spec_dict("stocks"), "regenerated")
+    )
+
+    all_gate_results: List[Any] = []
+    orch._reconcile_asset_category(
+        spec,
+        "scripted",
+        selected_category="stocks",
+        review_round=1,
+        emit=lambda *_a, **_kw: None,
+        drift_collector=None,
+        config=_config(),
+        strategy_id="test-strat",
+        all_gate_results=all_gate_results,
+    )
+
+    assert all_gate_results
+
+
+def test_enforce_selected_asset_category_records_readiness_gates() -> None:
+    """Same ``record_gates`` requirement for the deterministic-relabel
+    backstop — its own fresh readiness validation must also land in
+    ``all_gate_results``, not only feed the emitted event's ``now_ready``."""
+    orch = StrategyLabOrchestrator()
+    spec = orch._build_spec_from_dict(_spec_dict("forex"), strategy_id="test-strat")
+
+    all_gate_results: List[Any] = []
+    orch._enforce_selected_asset_category(
+        spec,
+        selected_category="stocks",
+        review_round=1,
+        emit=lambda *_a, **_kw: None,
+        drift_collector=None,
+        config=_config(),
+        all_gate_results=all_gate_results,
+    )
+
+    assert all_gate_results
 
 
 def test_design_loop_enforces_asset_category_after_revise(

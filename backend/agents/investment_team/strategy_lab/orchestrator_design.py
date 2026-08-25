@@ -698,6 +698,7 @@ class DesignMixin:
                 drift_collector=drift_collector,
                 config=config,
                 strategy_id=strategy_id,
+                all_gate_results=all_gate_results,
             )
 
             # ═══ Phase 1 → 2 transition: DESIGN → DESIGN_REVIEW ═══════════
@@ -757,6 +758,7 @@ class DesignMixin:
                 emit=emit,
                 drift_collector=drift_collector,
                 config=config,
+                all_gate_results=all_gate_results,
             )
             emit(
                 "designing",
@@ -977,6 +979,8 @@ class DesignMixin:
                 drift_collector=drift_collector,
                 config=config,
                 strategy_id=strategy_id,
+                all_gate_results=all_gate_results,
+                mechanical_repair_count=mechanical_repair_count,
             )
 
         loop_telemetry = _design_loop_telemetry_summary(
@@ -1312,6 +1316,8 @@ class DesignMixin:
         drift_collector: Optional[_DriftCollector],
         config: BacktestConfig,
         strategy_id: str,
+        all_gate_results: List[QualityGateResult],
+        mechanical_repair_count: int = 0,
     ) -> Tuple[StrategySpec, str]:
         """Correct a category-pin violation by regenerating the spec, not
         just relabeling it.
@@ -1331,19 +1337,30 @@ class DesignMixin:
         Preconditions:
           - ``selected_category`` is ``None`` or one of
             :data:`PROMPT_ASSET_CLASSES`.
+          - ``mechanical_repair_count`` is the caller's real running count
+            (``0`` when called before any repair could have fired, e.g. the
+            pre-loop call site) — forwarded verbatim to
+            :func:`_annotate_budget_exhaustion` on a budget trip so
+            persisted telemetry never under-reports repairs that already
+            happened this cycle.
 
         Postconditions:
           - Returns ``(spec, rationale)`` unchanged when ``selected_category``
             is ``None`` or ``spec``'s normalized asset class already matches.
           - Otherwise calls ``self.design_agent.revise`` once with a
             corrective critique. If the regenerated spec matches
-            ``selected_category``, returns it (with its new rationale) and
-            emits a ``design_repair`` event. If the regeneration itself
-            still violates the pin, falls back to
-            :meth:`_enforce_selected_asset_category` (deterministic
-            relabel) on the regenerated spec as a bounded last resort — this
-            method never retries the LLM more than once, so the pin is
-            always satisfied deterministically within one extra call.
+            ``selected_category``, returns it (with its new rationale),
+            appends the fresh readiness validation to ``all_gate_results``
+            via :meth:`record_gates`, emits a ``design_repair`` event, and
+            records the change on ``drift_collector`` when one is present.
+          - If the regeneration itself still violates the pin, the
+            regenerated draft is discarded entirely — falls back to
+            :meth:`_enforce_selected_asset_category` on the *original*
+            ``(spec, rationale)`` pair, not the also-mismatched regenerated
+            one, so the persisted spec and its rationale never narrate two
+            different asset classes. This method never retries the LLM more
+            than once, so the pin is always satisfied deterministically
+            within one extra call.
           - Propagates :class:`DesignBudgetExhausted` (annotated with the
             pre-regeneration ``spec``/``rationale`` so a trip here still
             yields a well-formed short-circuit record via the caller's
@@ -1379,32 +1396,44 @@ class DesignMixin:
                 )
             ],
         )
-        prev_spec = spec.model_copy(deep=True)
         try:
             strategy_dict, new_rationale = self.design_agent.revise(
                 spec, correction, prior_critiques=None, skip_self_review=False
             )
         except DesignBudgetExhausted as exc:
-            _annotate_budget_exhaustion(exc, spec, rationale=rationale, mechanical_repair_count=0)
+            _annotate_budget_exhaustion(
+                exc, spec, rationale=rationale, mechanical_repair_count=mechanical_repair_count
+            )
             raise
         regenerated = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
         regenerated_actual = normalize_asset_class(regenerated.asset_class)
         if regenerated_actual != selected_category:
-            # The corrective revision itself still violated the pin — fall
-            # back to the deterministic relabel rather than spending more
-            # budget chasing convergence; the invariant must hold either way.
+            # The corrective revision itself still violated the pin (with a
+            # *different* wrong class than the original, in the general
+            # case). Discard it and relabel the original (spec, rationale)
+            # pair instead of `regenerated` — that pair is the one already
+            # returned to (or received from) the caller, so falling back to
+            # it never pairs a corrected label with a still-mismatched
+            # narrative the way relabeling `regenerated` would.
+            logger.warning(
+                "Corrective regeneration also violated the pin (still %r); falling back to a "
+                "deterministic relabel of the pre-regeneration draft.",
+                regenerated_actual,
+            )
             spec = self._enforce_selected_asset_category(
-                regenerated,
+                spec,
                 selected_category=selected_category,
                 review_round=review_round,
                 emit=emit,
                 drift_collector=drift_collector,
                 config=config,
+                all_gate_results=all_gate_results,
             )
-            return spec, new_rationale
+            return spec, rationale
         readiness_results = self.spec_readiness_gate.validate(
             regenerated, phase="design", backtest_config=config
         )
+        self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
         emit(
             "design_repair",
             {
@@ -1425,7 +1454,7 @@ class DesignMixin:
             drift_collector.record_spec_change(
                 phase="design",
                 agent="AssetCategoryEnforcement",
-                before_spec=prev_spec,
+                before_spec=spec.model_copy(deep=True),
                 after_spec=regenerated,
                 reason="regenerated to match the category pinned for this design attempt",
             )
@@ -1440,6 +1469,7 @@ class DesignMixin:
         emit: PhaseCallback,
         drift_collector: Optional[_DriftCollector],
         config: BacktestConfig,
+        all_gate_results: List[QualityGateResult],
     ) -> StrategySpec:
         """Deterministically pin ``spec.asset_class`` to the category selected
         for this design attempt.
@@ -1475,9 +1505,10 @@ class DesignMixin:
             default symbol universe (the same fallback an empty
             ``target_symbols`` already triggers for every other spec).
             Emits a ``design_repair`` event — ``now_ready`` reflects a fresh
-            :attr:`spec_readiness_gate` validation of the corrected spec, not
-            an assumption — and records the change on ``drift_collector``
-            when one is present.
+            :attr:`spec_readiness_gate` validation of the corrected spec,
+            appended to ``all_gate_results`` via :meth:`record_gates` (not
+            just used locally to compute ``now_ready``) — and records the
+            change on ``drift_collector`` when one is present.
         """
         if selected_category is None:
             return spec
@@ -1519,6 +1550,7 @@ class DesignMixin:
         readiness_results = self.spec_readiness_gate.validate(
             spec, phase="design", backtest_config=config
         )
+        self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
         emit(
             "design_repair",
             {
