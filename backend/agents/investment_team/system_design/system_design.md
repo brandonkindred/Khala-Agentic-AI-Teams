@@ -221,8 +221,10 @@ classDiagram
       +target_symbols: List~str~
       +risk_limits: RiskLimits
       +speculative: bool
-      +requires_custom_code: bool
       +strategy_code?: str
+      +requires_redesign: bool
+      +requires_custom_code: bool
+      +unparsed_rules: List~str~
       +expectancy_forecast?: ExpectancyForecast
       +audit: AuditContext
     }
@@ -287,6 +289,7 @@ classDiagram
     class SpecRevision {
       +phase: str
       +agent: str
+      +timestamp: str
       +before_hash: str
       +after_hash: str
       +diff: str
@@ -296,6 +299,7 @@ classDiagram
     class CodeRevision {
       +phase: str
       +agent: str
+      +timestamp: str
       +before_hash: str
       +after_hash: str
       +diff: str
