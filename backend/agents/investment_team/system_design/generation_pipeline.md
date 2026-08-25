@@ -58,16 +58,23 @@ All four fire, in order, on a fresh attempt that reaches the terminal
 transition — but a consumer must treat the emitted set as **the prefix of
 phases actually reached**, not a fixed count, for two independent reasons:
 
-- **Front-truncated.** A design-phase short-circuit can stop the stream
-  after the first transition or before any transition at all.
-  `_run_design_loop` calls `DesignAgent.run()` before its own
-  `DESIGN → DESIGN_REVIEW` emit, so a `DesignBudgetExhausted` trip on that
-  very first call yields **zero** transitions for the attempt.
-  `_orchestrate_design_and_review` emits `DESIGN_REVIEW → CODE_SYNTHESIS`
-  only when the design ↔ review loop reaches readiness; a round-cap
-  (`design_not_ready`), a stall (`design_stalled`), or a later budget trip
-  (`budget_exhausted`) instead returns a short-circuit record right after
-  the first transition, so the stream can also stop at exactly one.
+- **Truncated mid-attempt.** A short-circuit at any point before the
+  terminal transition stops the stream at whatever prefix was reached when
+  it fired:
+  - `_run_design_loop` calls `DesignAgent.run()` before its own
+    `DESIGN → DESIGN_REVIEW` emit, so a `DesignBudgetExhausted` trip on
+    that very first call yields **zero** transitions.
+  - `_orchestrate_design_and_review` emits `DESIGN_REVIEW → CODE_SYNTHESIS`
+    only when the design ↔ review loop reaches readiness; a round-cap
+    (`design_not_ready`), a stall (`design_stalled`), or a later budget
+    trip instead returns a short-circuit record right after the first
+    transition — exactly **one**.
+  - `_orchestrate_refinement_and_alignment` wraps the refinement loop, the
+    `CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION` emit, and the alignment
+    loop in a single `except DesignBudgetExhausted` handler. A trip during
+    refinement (before that emit) leaves exactly **two** transitions; a
+    trip during alignment (after that emit, since alignment runs later in
+    the same `try`) leaves exactly **three**.
 - **Front-skipped.** A **checkpoint-resumed** attempt is a distinct case:
   `_run_design_attempt` skips `_orchestrate_design_and_review` entirely when
   `resume_spec` is set, so both design-phase emits (only reachable through
@@ -75,8 +82,9 @@ phases actually reached**, not a fixed count, for two independent reasons:
   BACKTEST_AND_VERIFICATION`.
 
 A consumer that derives a drift baseline from the first transition it sees
-must handle all three cases (empty, one-transition, and resumed) rather than
-assume boundary 1 or 2 is present.
+must handle every prefix length from zero through three, plus the distinct
+checkpoint-resumed shape, rather than assume any particular boundary is
+present.
 
 Each transition emits a `PhaseTransition` event (`class PhaseTransition`,
 `phases.py`) carrying `from_phase`, `to_phase`, a 64-char SHA-256 `spec_hash`
