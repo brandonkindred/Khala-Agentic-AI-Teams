@@ -372,19 +372,23 @@ def test_design_loop_pins_one_of_several_allowed_categories(
 # ---------------------------------------------------------------------------
 
 
-def test_design_loop_drops_offcategory_symbols_from_a_relabeled_regeneration(
+def test_design_loop_rejects_a_relabeled_regeneration_with_wholesale_offcategory_symbols(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A matching ``asset_class`` on the regenerated spec is NOT proof of a
     genuine rebuild. ``_REVISION_USER_TEMPLATE`` instructs the designer to
     "preserve every aspect of the spec that was NOT criticised", so the common
     partial-compliance outcome is a spec relabeled to the pinned category that
-    still carries the wrong category's tickers. Nothing downstream rejects
-    that — ``resolve_strategy_symbols`` honors a non-empty ``target_symbols``
-    verbatim (mismatch is only a logged warning) and no readiness rule checks
-    symbol-vs-class — so those tickers would be fetched and backtested under
-    the pinned label, persisting the exact out-of-category record this whole
-    mechanism exists to prevent, on the primary success path."""
+    still carries the wrong category's tickers verbatim.
+
+    When EVERY named symbol is off-category, silently clearing
+    ``target_symbols`` to ``[]`` is itself a laundering hazard: an empty list
+    falls back to the pinned class's full DEFAULT universe, so a crypto-themed
+    hypothesis would silently backtest against unrelated stock tickers and
+    persist as a readiness-clean stocks strategy. The mechanical repair
+    therefore declines to touch a wholesale mismatch, readiness Rule 11's
+    symbol critical stays live, and the round must keep demanding a genuine
+    rebuild rather than accepting the relabel-only response."""
     orch = StrategyLabOrchestrator()
 
     monkeypatch.setattr(
@@ -392,16 +396,16 @@ def test_design_loop_drops_offcategory_symbols_from_a_relabeled_regeneration(
         "run",
         lambda **_kw: (_spec_dict("crypto", target_symbols=["BTC-USD", "ETH-USD"]), "scripted"),
     )
-    # The corrective revise flips only asset_class and copies the crypto
-    # tickers through verbatim.
-    monkeypatch.setattr(
-        orch.design_agent,
-        "revise",
-        lambda *_a, **_kw: (
-            _spec_dict("stocks", target_symbols=["BTC-USD", "ETH-USD"]),
-            "relabeled",
-        ),
+    # First revise: relabels asset_class but copies the crypto tickers through
+    # verbatim (partial compliance) -- must NOT be accepted. Second revise: a
+    # genuine rebuild with on-category symbols -- must converge.
+    revise_responses = iter(
+        [
+            (_spec_dict("stocks", target_symbols=["BTC-USD", "ETH-USD"]), "relabeled-only"),
+            (_spec_dict("stocks", target_symbols=["AAPL", "MSFT"]), "genuinely rebuilt"),
+        ]
     )
+    monkeypatch.setattr(orch.design_agent, "revise", lambda *_a, **_kw: next(revise_responses))
     monkeypatch.setattr(
         orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
     )
@@ -417,9 +421,9 @@ def test_design_loop_drops_offcategory_symbols_from_a_relabeled_regeneration(
     )
 
     assert record.strategy.asset_class == "stocks"
-    # The crypto tickers must not survive onto a stocks-labeled spec; clearing
-    # them falls back to the stocks default universe.
-    assert record.strategy.target_symbols == []
+    # The relabel-only response was rejected; the eventual genuine rebuild's
+    # on-category symbols are what actually persisted.
+    assert record.strategy.target_symbols == ["AAPL", "MSFT"]
 
 
 def test_design_loop_keeps_ambiguous_symbols_when_correcting_category(
@@ -847,6 +851,28 @@ def test_repair_is_idempotent_under_a_pin() -> None:
     assert twice.spec is once.spec
 
 
+def test_repair_does_not_empty_target_symbols_on_a_wholesale_mismatch() -> None:
+    from investment_team.strategy_lab.mechanical_repair import repair_spec
+    from investment_team.strategy_lab.quality_gates.spec_readiness import SpecReadinessGate
+
+    # asset_class correctly matches the pin, but EVERY named symbol is
+    # off-category -- not "a stray ticker" but evidence the whole named
+    # universe contradicts the declared class. Stripping to [] would fall
+    # back to the pinned class's full default universe, silently laundering
+    # a crypto-themed hypothesis into a backtest over unrelated stock
+    # tickers. Must leave target_symbols untouched so Rule 11's symbol
+    # critical stays live and forces a real rebuild instead.
+    spec = _readiness_spec("stocks", ["BTC", "ETH"])
+    out = repair_spec(spec, pinned_asset_class="stocks")
+    assert out.spec.target_symbols == ["BTC", "ETH"]
+    assert out.actions == []
+
+    results = SpecReadinessGate().validate(spec, phase="design", pinned_asset_class="stocks")
+    findings = [r for r in results if (r.rule_id or "").startswith("asset_category:")]
+    assert [f.rule_id for f in findings] == ["asset_category:symbols"]
+    assert findings[0].severity == "critical"
+
+
 def test_repair_never_rewrites_asset_class() -> None:
     from investment_team.strategy_lab.mechanical_repair import repair_spec
 
@@ -1049,6 +1075,56 @@ def test_build_spec_inferred_offpin_class_trips_readiness_rule_11() -> None:
     pin_findings = [r for r in results if (r.rule_id or "").startswith("asset_category:")]
     assert [f.rule_id for f in pin_findings] == ["asset_category:pin"]
     assert pin_findings[0].severity == "critical"
+
+
+def test_build_spec_inference_never_names_a_globally_excluded_class() -> None:
+    from investment_team.strategy_lab.orchestrator_design import build_spec_from_dict
+
+    # User allowed only stocks+crypto (excluded forex/futures/commodities).
+    # Attempt is pinned to stocks. Payload omits asset_class but names
+    # unambiguous FOREX tickers -- a globally excluded class. Inference must
+    # decline (fall back to the pin) rather than persist a record labeled
+    # with a category the user explicitly ruled out, even on a failed/
+    # unconverged attempt.
+    payload = _spec_dict(target_symbols=["EURUSD=X", "GBPUSD=X"])
+    payload.pop("asset_class")
+    spec = build_spec_from_dict(
+        payload,
+        strategy_id="s1",
+        default_asset_class="stocks",
+        exclude_asset_classes=["forex", "futures", "commodities"],
+    )
+    assert spec.asset_class == "stocks"
+
+
+def test_build_spec_inference_still_fires_for_an_allowed_nonpin_class() -> None:
+    from investment_team.strategy_lab.orchestrator_design import build_spec_from_dict
+
+    # User allowed stocks+crypto+forex; attempt pinned to stocks. Payload
+    # omits asset_class but names unambiguous CRYPTO tickers. Crypto IS in
+    # the user's allowed set (just not this attempt's pin), so inference
+    # should still fire -- Rule 11 catches the true mismatch and forces a
+    # rebuild, same as the unconstrained case.
+    payload = _spec_dict(target_symbols=["BTC", "ETH"])
+    payload.pop("asset_class")
+    spec = build_spec_from_dict(
+        payload,
+        strategy_id="s1",
+        default_asset_class="stocks",
+        exclude_asset_classes=["futures", "commodities"],
+    )
+    assert spec.asset_class == "crypto"
+
+
+def test_build_spec_inference_unconstrained_when_exclude_is_none() -> None:
+    from investment_team.strategy_lab.orchestrator_design import build_spec_from_dict
+
+    payload = _spec_dict(target_symbols=["AAPL", "MSFT"])
+    payload.pop("asset_class")
+    spec = build_spec_from_dict(
+        payload, strategy_id="s1", default_asset_class="crypto", exclude_asset_classes=None
+    )
+    assert spec.asset_class == "stocks"
 
 
 def test_build_spec_preserves_an_authored_offpin_asset_class() -> None:

@@ -2967,6 +2967,45 @@ def test_compute_signal_brief_snapshot_disabled_returns_skip(monkeypatch):
     assert storage == {"skipped": True, "skipped_reason": "signal_expert_disabled"}
 
 
+def test_compute_signal_brief_snapshot_skips_categories_with_no_prior_records(monkeypatch):
+    """A category with zero prior records has nothing for the expert to
+    analyze -- calling it anyway would be a paid LLM round-trip for generic
+    market commentary, up to len(allowed) times on a run's first batch. Must
+    skip the expert call entirely and record a ``no_prior_records`` marker."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_strategy_lab_signal_expert_enabled", lambda: True)
+    monkeypatch.setattr(api_main, "_snapshot_prior_records", lambda: [])
+
+    class _FakeProvider:
+        def fetch_context(self, request):
+            from investment_team.market_lab_data import MarketLabContext
+
+            return MarketLabContext(
+                fetched_at="2024-01-01T00:00:00Z", degraded=False, sources_used=["x"]
+            )
+
+        def close(self):
+            pass
+
+    calls = {"n": 0}
+
+    class _FakeExpert:
+        def produce_signal_brief(self, prior_records, market_ctx, *, asset_class=None):
+            calls["n"] += 1
+            raise AssertionError("must not be called for an empty-evidence category")
+
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _FakeProvider)
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
+
+    briefs, storage = api_main._compute_signal_brief_snapshot("SPY", None)
+
+    assert briefs == {}
+    assert calls["n"] == 0
+    for entry in storage["by_asset_class"].values():
+        assert entry == {"skipped": True, "skipped_reason": "no_prior_records"}
+
+
 def test_compute_signal_brief_snapshot_fails_open_on_provider_init_failure(monkeypatch):
     """Fail-open must cover FreeTierMarketDataProvider() construction itself,
     not just the body of expert.produce_signal_brief -- a provider that
@@ -3079,7 +3118,68 @@ def test_compute_signal_brief_snapshot_success_survives_provider_close_failure(m
         def produce_signal_brief(self, prior_records, market_ctx, *, asset_class=None):
             return _FakeBrief()
 
-    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    def _prior_record(asset_class: str):
+        from investment_team.models import (
+            BacktestConfig,
+            BacktestRecord,
+            BacktestResult,
+            StrategyLabRecord,
+            StrategySpec,
+        )
+
+        strat = StrategySpec(
+            strategy_id=f"strat-{asset_class}",
+            authored_by="x",
+            asset_class=asset_class,
+            hypothesis="h",
+            signal_definition="s",
+            timeframe="1d",
+        )
+        result = BacktestResult(
+            total_return_pct=1.0,
+            annualized_return_pct=1.0,
+            volatility_pct=10.0,
+            sharpe_ratio=1.0,
+            max_drawdown_pct=5.0,
+            win_rate_pct=40.0,
+            profit_factor=1.0,
+            calmar_ratio=0.0,
+            deflated_sharpe=0.0,
+            sortino_ratio=0.0,
+        )
+        bt = BacktestRecord(
+            backtest_id=f"bt-{asset_class}",
+            strategy_id=strat.strategy_id,
+            strategy=strat,
+            config=BacktestConfig(start_date="2024-01-01", end_date="2024-02-01"),
+            submitted_by="x",
+            submitted_at="2024-01-01T00:00:00Z",
+            completed_at="2024-01-01T01:00:00Z",
+            result=result,
+            trades=[],
+        )
+        return StrategyLabRecord(
+            lab_record_id=f"lab-{asset_class}",
+            strategy=strat,
+            backtest=bt,
+            is_winning=False,
+            strategy_rationale="r",
+            analysis_narrative="n",
+            created_at="2024-01-01T01:00:00Z",
+        )
+
+    # One prior record per allowed category -- a signal brief has nothing to
+    # analyze (and is skipped entirely) for a category with zero records, so
+    # this seeds the evidence the expert-call path under test actually needs.
+    monkeypatch.setattr(
+        api_main,
+        "_snapshot_prior_records",
+        lambda *, reverse=False: [
+            _prior_record("stocks"),
+            _prior_record("futures"),
+            _prior_record("commodities"),
+        ],
+    )
     monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _FakeProvider)
     monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
 

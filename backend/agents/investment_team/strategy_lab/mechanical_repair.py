@@ -19,12 +19,18 @@ mechanical repairs, exposed via :func:`repair_spec`:
 * **Asset-category pin, symbol half** (readiness Rule 11): when the caller
   passes ``pinned_asset_class`` and the spec *already declares* that class,
   drop any ``target_symbols`` entry that unambiguously belongs to a different
-  class. The class half of Rule 11 — a spec declaring the *wrong* category —
-  is deliberately **not** repaired here: rewriting ``asset_class`` in place
-  would relabel a crypto strategy as a stocks one while leaving crypto logic
-  intact, which is precisely the cross-category contamination the pin exists
-  to prevent. That violation stays a readiness critical so the design loop's
-  own ``revise`` round rebuilds the strategy for the pinned category.
+  class — but only when at least one symbol survives the drop. Stripping
+  *every* symbol is left unrepaired (Rule 11's critical stays live): an
+  empty result would fall back to the pinned class's full default universe,
+  silently laundering a hypothesis whose entire named universe contradicts
+  its own declared class into a readiness-clean backtest over unrelated
+  tickers. The class half of Rule 11 — a spec declaring the *wrong*
+  category — is deliberately **not** repaired here either: rewriting
+  ``asset_class`` in place would relabel a crypto strategy as a stocks one
+  while leaving crypto logic intact, which is precisely the cross-category
+  contamination the pin exists to prevent. Both violations stay a readiness
+  critical so the design loop's own ``revise`` round rebuilds the strategy
+  for the pinned category.
 
 The custom-code decision is a separate, *readiness-gated* concern handled by
 :func:`select_code_path`: it trial-compiles a spec and, on :class:`CompilerError`,
@@ -189,7 +195,19 @@ def repair_spec(
             for sym in spec.target_symbols
             if (cls := classify_symbol(sym)) is None or cls == pinned_asset_class
         ]
-        if len(kept) != len(spec.target_symbols):
+        # Only repair a MINORITY mismatch — at least one symbol must survive.
+        # Stripping every symbol is not "a stray ticker"; it means the whole
+        # explicit universe contradicts the declared class, which is the same
+        # mislabeling signal ``build_spec_from_dict``'s symbol-inference guards
+        # against on the omitted-``asset_class`` path. An empty result falls
+        # back to the pinned class's FULL default universe — silently
+        # laundering an (e.g.) crypto-themed hypothesis into a backtest over
+        # unrelated stock tickers, recorded as a valid, readiness-clean
+        # strategy. Leaving ``target_symbols`` untouched here instead keeps
+        # readiness Rule 11's symbol critical alive, so the round routes
+        # through a real critique and a full rebuild rather than a silent
+        # mechanical erasure.
+        if kept and len(kept) != len(spec.target_symbols):
             actions.append(
                 RepairAction(
                     rule="asset_category_pin_symbols",

@@ -1527,14 +1527,19 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @activity.defn(name="strategy_lab_compute_signal_brief")
-def compute_signal_brief_activity(params: Dict[str, Any]) -> Dict[str, Any]:
+def compute_signal_brief_activity(params: Any) -> Dict[str, Any]:
     """Build one per-batch signal brief per allowed asset category.
 
     Preconditions:
         ``params`` carries ``benchmark_symbol`` (the run's benchmark ticker)
         and optionally ``exclude_asset_classes`` (the complement of the user's
         ``allowed_asset_classes`` selection). A bare string is also accepted
-        for a workflow-history replay predating the params dict.
+        for a workflow-history replay predating the params dict — typed
+        ``Any`` rather than ``Dict[str, Any]`` deliberately: Temporal's
+        payload converter uses the parameter's type hint to decode the
+        argument, and a ``Dict``-typed hint risks rejecting a bare-string
+        payload from an in-flight run recorded by a pre-deploy worker before
+        this function body's ``isinstance`` branch ever runs.
     Postconditions:
         Returns ``{"signal_briefs": {<asset_class>: <SignalIntelligenceBriefV1
         JSON dump>, ...}, "signal_brief_storage": <dict>}`` — the JSON-shaped

@@ -2451,13 +2451,17 @@ def _finalize_strategy_lab_cycle_record(
     Postconditions:
         Returns the same ``record`` with its ``signal_intelligence_brief`` set
         to *its own asset category's* entry from ``signal_brief_storage``
-        (when given, it was empty, and that category's entry is present) —
-        never the whole multi-category ``signal_brief_storage`` blob, which
-        the strategy-card UI cannot render (it expects one flat brief, not a
-        map keyed by category) and which would attribute every other
-        category's brief to this one record. A ``signal_brief_storage`` that
-        isn't a per-category map (the disabled/degraded skip marker) is
-        stored as-is, matching pre-per-category behavior. Also resolves its
+        (when given, it was empty, and that category's entry is present AND
+        is actual brief content rather than a ``{"skipped": True, ...}``
+        marker) — never the whole multi-category ``signal_brief_storage``
+        blob, which the strategy-card UI cannot render (it expects one flat
+        brief, not a map keyed by category) and which would attribute every
+        other category's brief to this one record. A category with no prior
+        records, or whose brief computation failed, leaves the field unset
+        rather than storing the marker as if it were brief content. A
+        top-level ``signal_brief_storage`` that isn't a per-category map (the
+        disabled/degraded skip marker) is stored as-is, matching
+        pre-per-category behavior. Also resolves its
         ``paper_trading_*`` fields — ``skipped`` for non-winning /
         non-publishable / disabled / no-code / no-data cases, ``completed`` on
         success, ``failed`` (non-fatal) on a paper-trading error. The record is
@@ -2485,7 +2489,14 @@ def _finalize_strategy_lab_cycle_record(
         by_class = signal_brief_storage.get("by_asset_class")
         if isinstance(by_class, dict):
             own_brief = by_class.get(normalize_asset_class(record.strategy.asset_class))
-            if own_brief is not None:
+            # A per-category entry that itself failed or was skipped (no
+            # prior records, expert error) is a ``{"skipped": True, ...}``
+            # marker, not brief content — the strategy card renders whatever
+            # is here as brief fields, so storing the marker verbatim would
+            # display "skipped"/"skipped_reason"/"error" as if they were
+            # macro themes. Leave the field unset instead; there is genuinely
+            # no brief for this record to show.
+            if isinstance(own_brief, dict) and not own_brief.get("skipped"):
                 record.signal_intelligence_brief = own_brief
         else:
             # Disabled/degraded skip marker (e.g. {"skipped": True, ...}) —
@@ -2595,8 +2606,11 @@ def _compute_signal_brief_snapshot(
     a restricted run. Each brief here sees only its own category's records, so
     every category is analyzed independently.
 
-    Cost is bounded by the number of *allowed* categories (at most
-    ``len(PROMPT_ASSET_CLASSES)``) and paid once per batch, not per cycle.
+    Cost is bounded by the number of *allowed* categories with at least one
+    prior record (at most ``len(PROMPT_ASSET_CLASSES)``) and paid once per
+    batch, not per cycle — a category with zero prior records (e.g. every
+    category on a run's first batch) is skipped rather than billed for an
+    evidence-free call; see the loop body.
 
     Preconditions:
         * ``benchmark_symbol`` is the run's benchmark ticker.
@@ -2673,6 +2687,19 @@ def _compute_signal_brief_snapshot(
         for asset_class in allowed:
             # Each category is analyzed over ONLY its own prior records.
             category_records = filter_records_by_asset_class(prior_for_brief, asset_class)
+            if not category_records:
+                # Nothing to analyze yet (e.g. every category on a run's
+                # first batch) -- the expert's whole value is synthesizing
+                # prior results, so an empty-evidence call would just be a
+                # paid LLM round-trip for generic market commentary. Skip it
+                # rather than pay up to len(allowed) calls for zero signal;
+                # the design loop already treats a missing brief as "no
+                # signal section" (see ``select_signal_brief``).
+                by_class[asset_class] = {
+                    "skipped": True,
+                    "skipped_reason": "no_prior_records",
+                }
+                continue
             try:
                 t0 = datetime.now(tz=timezone.utc)
                 brief = expert.produce_signal_brief(

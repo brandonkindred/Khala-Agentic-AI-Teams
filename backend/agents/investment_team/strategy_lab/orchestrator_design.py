@@ -148,24 +148,60 @@ def _coerce_expectancy_forecast(raw: Any) -> Optional[ExpectancyForecast]:
     return None
 
 
-def _infer_asset_class_from_symbols(target_symbols: List[str]) -> Optional[str]:
+def _run_allowed_classes(exclude_asset_classes: Optional[List[str]]) -> frozenset:
+    """Recover the run's user-level allowed-category set from its exclusions.
+
+    Pre: ``exclude_asset_classes`` is ``None``/empty (unrestricted run — every
+    category allowed) or a list of canonical class labels / known aliases
+    naming the categories the user did NOT select.
+    Post: returns the complement within ``PROMPT_ASSET_CLASSES``, normalizing
+    aliases via ``normalize_asset_class_strict`` (an unresolvable entry is
+    ignored rather than silently excluding nothing). Never empty: a
+    caller-side data error that excludes every category still leaves the
+    full menu allowed here — the API boundary is what actually enforces a
+    non-empty ``allowed_asset_classes`` selection.
+    """
+    excluded: set[str] = set()
+    for raw in exclude_asset_classes or ():
+        try:
+            excluded.add(normalize_asset_class_strict(raw))
+        except ValueError:
+            continue
+    allowed = frozenset(c for c in PROMPT_ASSET_CLASSES if c not in excluded)
+    return allowed or frozenset(PROMPT_ASSET_CLASSES)
+
+
+def _infer_asset_class_from_symbols(
+    target_symbols: List[str], *, allowed_classes: Optional[frozenset] = None
+) -> Optional[str]:
     """Infer a single asset class from explicit ``target_symbols``, if unambiguous.
 
     Preconditions:
         ``target_symbols`` is a list of ticker strings (possibly empty).
+        ``allowed_classes``, when given, is the run's user-level allowed
+        category set (see ``_run_allowed_classes``) — NOT the narrower
+        per-attempt pin, which excludes every class but the one attempt's
+        random pick and would defeat inference for its own sake.
 
     Postconditions:
         Returns the one canonical class every *classifiable* symbol agrees on
         (``classify_symbol`` returns ``None`` for cross-asset ETFs like
         ``GLD``/``QQQ`` — those are ignored, not treated as a vote). Returns
-        ``None`` when there are no classifiable symbols, or when they name
-        more than one class — an ambiguous or empty signal must not override
-        the caller's default.
+        ``None`` when there are no classifiable symbols, when they name more
+        than one class, or — when ``allowed_classes`` is given — when the
+        one class they agree on is not in it: a class the user globally
+        excluded must never be inferred and persisted (even on a failed
+        record), only a class outside *this attempt's* pin but still within
+        the user's selection is fair game, since Rule 11 will correctly
+        route that back into a rebuild for the pinned category.
     """
     classified = {c for c in (classify_symbol(s) for s in target_symbols) if c is not None}
-    if len(classified) == 1:
-        return next(iter(classified))
-    return None
+    if len(classified) != 1:
+        return None
+    inferred = next(iter(classified))
+    if allowed_classes is not None and inferred not in allowed_classes:
+        return None
+    return inferred
 
 
 def build_spec_from_dict(
@@ -173,6 +209,7 @@ def build_spec_from_dict(
     *,
     strategy_id: str,
     default_asset_class: str = "stocks",
+    exclude_asset_classes: Optional[List[str]] = None,
 ) -> "StrategySpec":
     """Construct a ``StrategySpec`` from a design-agent JSON payload.
 
@@ -200,6 +237,11 @@ def build_spec_from_dict(
     signal would silently launder a differently-themed hypothesis into the
     pinned category once the mismatched symbols are mechanically stripped by
     ``repair_spec`` — exactly the mislabeling this function exists to refuse.
+    The inference itself is constrained to ``exclude_asset_classes``'s
+    complement (the user's actual selection, not the narrower per-attempt
+    pin) — a class the user globally excluded is never inferred, so a
+    failed/unconverged record can never persist labeled with a category the
+    run was never allowed to touch.
 
     ``default_asset_class`` is the category the caller's design attempt is
     pinned to. Filling an *omitted* field from the pin (when the symbols
@@ -241,7 +283,10 @@ def build_spec_from_dict(
     # stripping the "wrong" symbols down to an empty, pin-labeled spec.
     raw_asset_class = str(strategy_dict.get("asset_class") or "").strip()
     if not raw_asset_class:
-        inferred = _infer_asset_class_from_symbols(strategy_dict.get("target_symbols") or [])
+        allowed_classes = _run_allowed_classes(exclude_asset_classes)
+        inferred = _infer_asset_class_from_symbols(
+            strategy_dict.get("target_symbols") or [], allowed_classes=allowed_classes
+        )
         raw_asset_class = inferred or default_asset_class
     asset_class = normalize_asset_class(raw_asset_class)
     # A missing/blank asset_class is the documented default, which
@@ -754,7 +799,10 @@ class DesignMixin:
                 regime_summary=category_regime_summary,
             )
             spec = self._build_spec_from_dict(
-                strategy_dict, strategy_id=strategy_id, default_asset_class=selected_category
+                strategy_dict,
+                strategy_id=strategy_id,
+                default_asset_class=selected_category,
+                exclude_asset_classes=exclude_asset_classes,
             )
             # No post-hoc correction here: a spec that came back off-category
             # is caught by readiness Rule 11 on the very first round below and
@@ -785,6 +833,7 @@ class DesignMixin:
                 emit=emit,
                 drift_collector=drift_collector,
                 selected_category=selected_category,
+                exclude_asset_classes=exclude_asset_classes,
             )
         except DesignBudgetExhausted as exc:
             # Per-cycle LLM-call budget hit mid-design. Surface whatever
@@ -804,7 +853,10 @@ class DesignMixin:
             # back to a defaults spec so the audit record is still well-formed.
             if spec is None:
                 spec = self._build_spec_from_dict(
-                    {}, strategy_id=strategy_id, default_asset_class=selected_category
+                    {},
+                    strategy_id=strategy_id,
+                    default_asset_class=selected_category,
+                    exclude_asset_classes=exclude_asset_classes,
                 )
             # The spec is left exactly as the designer produced it, even when
             # it is off-pin. This exit is a *failure* record
@@ -875,6 +927,7 @@ class DesignMixin:
         emit: PhaseCallback,
         drift_collector: Optional[_DriftCollector],
         selected_category: str,
+        exclude_asset_classes: Optional[List[str]] = None,
     ) -> Tuple[StrategySpec, str, bool, str, Dict[str, Any]]:
         """Run the bounded readiness → review → revise rounds.
 
@@ -1030,6 +1083,7 @@ class DesignMixin:
                 drift_collector=drift_collector,
                 skip_self_review=False,
                 default_asset_class=selected_category,
+                exclude_asset_classes=exclude_asset_classes,
             )
 
         loop_telemetry = _design_loop_telemetry_summary(
@@ -1318,6 +1372,7 @@ class DesignMixin:
         drift_collector: Optional[_DriftCollector],
         skip_self_review: bool = False,
         default_asset_class: str = "stocks",
+        exclude_asset_classes: Optional[List[str]] = None,
     ) -> Tuple[StrategySpec, str]:
         """Revise the spec from the round's critique, flagging regressions.
 
@@ -1356,7 +1411,10 @@ class DesignMixin:
             )
             raise
         spec = self._build_spec_from_dict(
-            strategy_dict, strategy_id=strategy_id, default_asset_class=default_asset_class
+            strategy_dict,
+            strategy_id=strategy_id,
+            default_asset_class=default_asset_class,
+            exclude_asset_classes=exclude_asset_classes,
         )
         if drift_collector is not None:
             drift_collector.record_spec_change(
@@ -1374,6 +1432,7 @@ class DesignMixin:
         *,
         strategy_id: str,
         default_asset_class: str = "stocks",
+        exclude_asset_classes: Optional[List[str]] = None,
     ) -> StrategySpec:
         """Thin instance wrapper over :func:`build_spec_from_dict`.
 
@@ -1382,7 +1441,10 @@ class DesignMixin:
         can be unit-tested without instantiating the orchestrator.
         """
         return build_spec_from_dict(
-            strategy_dict, strategy_id=strategy_id, default_asset_class=default_asset_class
+            strategy_dict,
+            strategy_id=strategy_id,
+            default_asset_class=default_asset_class,
+            exclude_asset_classes=exclude_asset_classes,
         )
 
     def _run_design_attempt(

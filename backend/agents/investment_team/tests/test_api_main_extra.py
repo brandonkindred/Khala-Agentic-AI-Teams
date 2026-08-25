@@ -3309,6 +3309,30 @@ def test_finalize_stores_degraded_skip_marker_as_is(monkeypatch: pytest.MonkeyPa
     assert result.signal_intelligence_brief == storage
 
 
+def test_finalize_never_attaches_a_skip_marker_as_brief_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A per-category entry that is itself a ``{"skipped": True, ...}``
+    marker (no prior records, or that category's expert call failed) is not
+    brief content -- the strategy card renders whatever is stored here as
+    brief fields, so storing the marker verbatim would display
+    "skipped"/"skipped_reason"/"error" as if they were macro themes."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "_strategies", {})
+    monkeypatch.setattr(api_main, "_backtests", {})
+
+    record = _make_finalize_test_record("lab-brief-skip-marker-own-category")  # asset_class="equities"
+    storage = {
+        "by_asset_class": {"stocks": {"skipped": True, "skipped_reason": "no_prior_records"}}
+    }
+
+    result = api_main._finalize_strategy_lab_cycle_record(record, signal_brief_storage=storage)
+
+    assert result.signal_intelligence_brief is None
+
+
 def test_finalize_leaves_brief_unset_when_records_category_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

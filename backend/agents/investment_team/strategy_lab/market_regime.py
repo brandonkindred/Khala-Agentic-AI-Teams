@@ -45,12 +45,21 @@ FetchOHLCV = Callable[[str, str, int], List[OHLCVBar]]
 
 # Representative liquid benchmark per asset class the designer may choose. Kept
 # small and extensible — one fetch per entry, cheap under the content-hashed
-# market-data cache. ``forex``/``futures``/``commodities`` are omitted for now:
-# a single-symbol regime proxy for those classes is less meaningful, and the
-# lab's design space is dominated by stocks and crypto.
+# market-data cache. Each pick matches the same class's default entry
+# elsewhere in the codebase (``symbols.py``'s ``FOREX_SYMBOLS`` /
+# ``FUTURES_SYMBOLS`` / ``COMMODITY_SYMBOLS`` all lead with the identical
+# ticker), so the regime read and the backtest's own default universe agree
+# on "the" representative instrument per class. All five classes are covered
+# so a design attempt pinned to any of them still gets a ``## Market Regime``
+# section — ``filter_regime_summary`` narrows the cross-class summary down to
+# the pinned class alone, so an entry missing here means that pin's regime
+# section renders blank, not merely unfiltered.
 _DEFAULT_BENCHMARKS: dict[str, str] = {
     "stocks": "SPY",
     "crypto": "BTC-USD",
+    "forex": "EURUSD=X",
+    "futures": "ES=F",
+    "commodities": "GLD",
 }
 
 # Lookback (calendar days requested) — enough to warm up a 200-period SMA and
