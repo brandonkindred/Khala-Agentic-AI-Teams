@@ -275,9 +275,15 @@ class LlmToolAgentBase:
             (e.g. ``CacheBreakpoint``).
 
         Postconditions:
-            Returns a stable hex digest: identical (class, model, prompt,
-            system_prompt_content) always yields the same key; any change to
-            any of the four changes the key.
+            Returns a stable hex digest keyed on (class, model, prompt, and
+            ``system_prompt_content`` normalized to each segment's text --
+            ``seg`` itself when a string, else ``seg.text``). Two
+            ``system_prompt_content`` lists with the same segment texts
+            produce the same key even if the segment objects (e.g. distinct
+            ``CacheBreakpoint`` instances) differ by identity -- this is
+            intentional content-based, not object-identity, keying. A change
+            to any segment's text, to the prompt, to the model, or to the
+            class changes the key.
         """
         from llm_service.strands_model import model_fingerprint  # noqa: PLC0415
 

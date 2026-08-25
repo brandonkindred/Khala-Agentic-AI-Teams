@@ -971,16 +971,16 @@ def _run_tool_agents_review(
 ) -> None:
     """Run each wired tool agent's ``review`` and fold its output into issues.
 
-    Builds one ``shared_review_context`` (a ``CacheBreakpoint``-wrapped system
-    segment carrying ``task_description``, or ``None`` when it is empty) via
-    ``tool_agent_base.build_shared_tool_agent_review_system_content``, and
-    attaches it to the single ``phase_inp`` every wired agent's ``review()``
-    call below shares -- so all of them reuse the identical cache-marked
-    segment for this microtask instead of each re-sending an uncached copy.
-    ``current_files`` (the code under review) deliberately stays out of this
-    segment -- it is untrusted, repository-controlled content and must remain
-    in each agent's user prompt, never the system prompt; see
-    ``build_shared_tool_agent_review_system_content``'s docstring.
+    Calls ``tool_agent_base.build_shared_tool_agent_review_system_content``
+    and attaches its result to the single ``phase_inp`` every wired agent's
+    ``review()`` call below shares, via ``ToolAgentPhaseInput.shared_review_context``.
+    That builder currently always returns ``None``: neither ``current_files``
+    (the code under review) nor ``task_description`` (which can originate
+    from an externally-authored GitHub issue body) is safe to place in the
+    higher-priority system prompt -- see that function's docstring for the
+    full rationale. The plumbing is kept in place (rather than removed) for a
+    genuinely internal, run-wide-trusted field that may become available to
+    this call site in the future.
 
     Preconditions:
         - ``tool_agents`` is ``None`` or a ``{ToolAgentKind: agent}`` mapping.

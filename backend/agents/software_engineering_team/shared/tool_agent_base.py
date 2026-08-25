@@ -158,36 +158,43 @@ def build_shared_tool_agent_review_system_content(
     task_description: str,
 ) -> Optional[List[Any]]:
     """Once-per-microtask ``CacheBreakpoint`` system segment shared by every wired
-    tool agent's ``review()`` call for that microtask.
+    tool agent's ``review()`` call for that microtask -- currently always ``None``.
 
     Mirrors ``code_review_agent/chunk_reviewer.py``'s
-    ``_build_shared_review_prefix`` and ``qa_agent.agent._build_qa_shared_review_prefix``
-    (the already-landed sibling step of this same parent issue): only
-    internal, non-repository-controlled metadata belongs in a cached system
-    segment. ``task_description`` qualifies; the reviewed code does not --
+    ``_build_shared_review_prefix``: only internal, non-externally-controlled
+    metadata belongs in a cached system segment --
     ``system_prompt_assembly.build_system_prompt_with_content``'s own contract
     is explicit that "untrusted content (code under review,
     repository-controlled text) must remain in the user message". Promoting
-    reviewed code to the system prompt would hand adversarial content embedded
-    in that code (a classic prompt-injection vector security/QA review agents
-    exist to catch) elevated priority over the reviewer's own instructions,
-    which this design keeps in the (lower-privilege) user message instead --
-    see :meth:`BaseReviewToolAgent.review`. Callers build this once (see
-    ``shared/v2_review.py::_run_tool_agents_review``) and pass the same result
-    to every agent's ``review()`` call, so a Claude-backed run serves a
-    provider-side cache hit on every call after the first.
+    untrusted content to the system prompt would hand adversarial instructions
+    embedded in it (a classic prompt-injection vector security/QA review
+    agents exist to catch) elevated priority over the reviewer's own
+    instructions, which stay in the (lower-privilege) user message instead --
+    see :meth:`BaseReviewToolAgent.review`.
 
-    Preconditions: ``task_description`` is a str (possibly empty).
-    Postconditions: returns ``None`` when ``task_description`` is empty
-        (nothing to cache); otherwise returns a single-element list containing
-        one ``CacheBreakpoint`` wrapping the task description.
+    ``task_description`` does not qualify as trusted: unlike the
+    already-landed ``qa_agent``/``security_agent`` sibling step's
+    ``_build_qa_shared_review_prefix`` (which cache-marks task description and
+    architecture, treating both as "internal, non-repository-controlled"),
+    this family's ``task_description`` can originate directly from an
+    externally-authored GitHub issue body (see
+    ``github_source/issue_to_plan.py``) -- i.e. it is adversary-controllable
+    the same way reviewed code is, just from a different source. There is
+    therefore currently no field available to this function that is both (a)
+    identical across every wired tool agent's call for one microtask and (b)
+    safe to place in the higher-priority system role, so this always returns
+    ``None``. The function, the ``ToolAgentPhaseInput.shared_review_context``
+    field, and the ``system_prompt_content`` plumbing through
+    :meth:`LlmToolAgentBase._invoke_llm`/``run_strands_agent`` are kept in
+    place for a genuinely internal, run-wide-trusted field (e.g. an
+    architecture overview sourced from internal specs, not from task text)
+    should one become available to this call site in the future.
+
+    Preconditions: ``task_description`` is a str (accepted for interface
+        parity with callers; unused).
+    Postconditions: always returns ``None``.
     """
-    if not task_description:
-        return None
-
-    from llm_service import CacheBreakpoint  # noqa: PLC0415
-
-    return [CacheBreakpoint(f"**Task:** {task_description}")]
+    return None
 
 
 def fill_review_prompt(template: str, *, task_description: str, code: str) -> str:
@@ -706,15 +713,16 @@ class BaseReviewToolAgent(LlmToolAgentBase):
             open to the exact same ``_invoke_llm`` call this method used
             before caching existed, so the fallback taxonomy above (skip/fail
             summaries, the ``ValueError`` case) is unaffected by cache state.
-            When ``inp.shared_review_context`` is a non-empty list (built once
-            per microtask by ``shared/v2_review.py::_run_tool_agents_review``
-            via :func:`build_shared_tool_agent_review_system_content`), the
+            When ``inp.shared_review_context`` is a non-empty list, the
             rendered prompt omits ``task_description`` (carried instead by the
             shared, cache-marked system segment) and that segment is passed as
             ``system_prompt_content``; when absent (e.g. direct
-            ``ToolAgentPhaseInput`` construction, as in most unit tests),
-            behavior is unchanged from before this parameter existed. ``code``
-            is always rendered into the user prompt regardless of
+            ``ToolAgentPhaseInput`` construction, as in most unit tests, and
+            currently every production caller too --
+            :func:`build_shared_tool_agent_review_system_content` always
+            returns ``None``, see its docstring), behavior is unchanged from
+            before this parameter existed. ``code`` is always rendered into
+            the user prompt regardless of
             ``shared_review_context`` -- untrusted, repository-controlled
             content (the code under review) never moves to the system prompt;
             see :func:`build_shared_tool_agent_review_system_content`.

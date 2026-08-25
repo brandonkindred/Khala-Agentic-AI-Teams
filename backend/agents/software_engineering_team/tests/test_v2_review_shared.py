@@ -446,13 +446,14 @@ def test_run_review_threads_repo_path_into_tool_agents(tmp_path: Path) -> None:
     assert captured["repo_path"] == str(tmp_path)
 
 
-def test_run_review_shared_review_context_built_once_and_reused_across_tool_agents(
+def test_run_review_shared_review_context_none_for_every_tool_agent(
     tmp_path: Path,
 ) -> None:
-    """Every wired tool agent in one review pass must receive the identical
-    shared_review_context object -- the once-per-microtask cache-marked
-    segment, not a fresh copy rebuilt per agent."""
-    from llm_service import CacheBreakpoint
+    """Every wired tool agent in one review pass receives shared_review_context
+    == None: build_shared_tool_agent_review_system_content always returns None
+    today (neither current_files nor task_description is safe to place in the
+    system prompt -- see that function's docstring), and this must hold
+    consistently across every tool agent in the same call, not just some."""
     from software_engineering_team.backend_code_v2_team.models import (
         ToolAgentKind,
         ToolAgentPhaseOutput,
@@ -484,48 +485,7 @@ def test_run_review_shared_review_context_built_once_and_reused_across_tool_agen
     )
 
     assert len(captured) == 2
-    contexts = [ctx for _, ctx in captured]
-    assert contexts[0] is contexts[1]
-    assert len(contexts[0]) == 1
-    assert isinstance(contexts[0][0], CacheBreakpoint)
-    # Only the (internal, non-repository-controlled) task description is
-    # cache-marked; the reviewed code must never appear here -- see
-    # build_shared_tool_agent_review_system_content's docstring.
-    assert contexts[0][0].text == "**Task:** desc"
-
-
-def test_run_review_shared_review_context_none_when_task_description_blank(
-    tmp_path: Path,
-) -> None:
-    """No task description -> shared_review_context is None, not an empty list."""
-    from software_engineering_team.backend_code_v2_team.models import (
-        ToolAgentKind,
-        ToolAgentPhaseOutput,
-    )
-
-    config = _build_config()
-    captured: list = []
-    good = MagicMock()
-    good.review.side_effect = lambda phase_inp: (
-        captured.append(phase_inp.shared_review_context)
-        or ToolAgentPhaseOutput(issues=[], recommendations=[])
-    )
-
-    blank_task = SimpleNamespace(
-        id="t1", title="T", description="", requirements="reqs", acceptance_criteria=["AC"]
-    )
-    run_review(
-        config=config,
-        llm=DummyLLMClient(),
-        task=blank_task,
-        execution_result=_execution_result({"x.py": "code"}),
-        repo_path=tmp_path,
-        tool_agents={ToolAgentKind.TESTING_QA: good},
-        language="python",
-        **_noop_runners(),
-    )
-
-    assert captured == [None]
+    assert [ctx for _, ctx in captured] == [None, None]
 
 
 def test_run_review_raw_issue_count_from_llm_fallback(tmp_path: Path) -> None:
