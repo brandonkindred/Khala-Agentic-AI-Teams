@@ -1021,18 +1021,20 @@ class ConfigDrivenV2DevelopmentAgent(BaseV2DevelopmentAgent):
     base and supply their team-specific ``V2TeamConfig`` instance.
 
     Invariants: ``self.config`` is set once at construction and never
-    reassigned; every property and the ``conventions_for``, ``_stack_profile``,
-    ``_read_repo_code``, ``_detect_tooling``, ``build_task_requirements``, and
-    ``_validate_tool_agents`` methods below are pure reads through it (or
-    through the ``StackProfile`` it composes), so two instances built from the
-    same config always agree. The ``_build_tool_agents`` hook and
-    ``_build_and_validate_tool_agents`` orchestrator are deliberate
-    construction points and not pure reads. This deliberately widens
-    ``BaseV2DevelopmentAgent``'s two-attribute ``__new__``-construction
-    contract: a ``__new__``-constructed instance of this subclass
-    specifically (bypassing ``__init__``) must also set ``self.config`` —
-    the base class's ``llm``/``_repo_context_cache`` pair is necessary but
-    not sufficient here, since the pure-read properties and methods above
+    reassigned; every config-derived property/method below (``default_language``,
+    ``conventions_for``, ``tool_agent_kinds``, ``extra_review_clause``,
+    ``_stack_profile``, ``_read_repo_code``, ``_detect_tooling``,
+    ``build_task_requirements``, ``_validate_tool_agents``) is a pure read
+    through it (or through the ``StackProfile`` it composes), so two
+    instances built from the same config always agree. The tool-agent
+    builder hook (``_build_tool_agents``) and its wrapper
+    (``_build_and_validate_tool_agents``) are deliberately excluded because
+    they perform construction and validation side effects, not pure reads.
+    This deliberately widens ``BaseV2DevelopmentAgent``'s two-attribute
+    ``__new__``-construction contract: a ``__new__``-constructed instance of
+    this subclass specifically (bypassing ``__init__``) must also set
+    ``self.config`` — the base class's ``llm``/``_repo_context_cache`` pair
+    is necessary but not sufficient here, since the pure-read members above
     read ``self.config``.
     """
 
