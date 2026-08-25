@@ -236,13 +236,14 @@ classDiagram
       +summary: str
     }
     class BacktestConfig {
-      +start_date: date
-      +end_date: date
+      +start_date: str
+      +end_date: str
       +initial_capital: float
-      +benchmark: str
-      +rebalance: str
-      +costs_bps: float
+      +benchmark_symbol: str
+      +rebalance_frequency: str
+      +transaction_cost_bps: float
       +slippage_bps: float
+      +risk_free_rate?: float
     }
     class BacktestResult {
       +total_return_pct: float
@@ -353,13 +354,17 @@ classDiagram
     }
     class PaperTradingSession {
       +session_id: str
-      +strategy_id: str
+      +lab_record_id: str
+      +strategy: StrategySpec
       +status: PaperTradingStatus
-      +verdict: PaperTradingVerdict
-      +start_date: date
-      +end_date: date
-      +result: BacktestResult
-      +comparison: PaperTradingComparison
+      +verdict?: PaperTradingVerdict
+      +initial_capital: float
+      +current_capital: float
+      +trades: List~TradeRecord~
+      +data_period_start: str
+      +data_period_end: str
+      +result?: BacktestResult
+      +comparison?: PaperTradingComparison
     }
     class PaperTradingComparison {
       +backtest_sharpe: float
@@ -368,9 +373,11 @@ classDiagram
       +analysis: str
     }
     class AuditContext {
-      +snapshot_id: str
+      +data_snapshot_id: str
       +assumptions: List~str~
-      +agent_version: str
+      +calc_artifacts: List~str~
+      +gate_trace: List~str~
+      +agent_versions: Dict~str, str~
     }
 
     InvestmentProfile --> IPS : wraps
@@ -419,7 +426,7 @@ the verification/publication decision is documented in
 | `PromotionStage` | `reject`, `revise`, `paper`, `live` | [`models.py`](../models.py):103 |
 | `PromotionGate` | `separation_of_duties`, `risk_veto`, `validation`, `ips_permission`, `human_approval` — five members; the sixth checklist step ("promote to live") records `human_approval = pass` rather than a gate of its own | [`models.py`](../models.py):123 |
 | `GateResult` | `pass`, `fail`, `warn` | [`models.py`](../models.py):131 |
-| `AdvisorTopic` | `greeting`, `risk`, `horizon`, `income`, `net_worth`, `savings`, `tax`, `liquidity`, `goals`, `preferences`, `constraints`, `review` | [`models.py`](../models.py):85 |
+| `AdvisorTopic` | `greeting`, `risk_tolerance`, `time_horizon`, `income`, `net_worth`, `savings`, `tax`, `liquidity`, `goals`, `preferences`, `constraints`, `trading_preferences`, `review` (13) | [`models.py`](../models.py):85 |
 | `AdvisorSessionStatus` | `active`, `completed`, `abandoned` | [`models.py`](../models.py):79 |
 | `PaperTradingStatus` | `running`, `completed`, `failed` (legacy), plus live-mode `opening`, `warming_up`, `live` | [`models.py`](../models.py):1198 |
 | `PaperTradingVerdict` | `ready_for_live`, `not_performant` | [`models.py`](../models.py):1210 |

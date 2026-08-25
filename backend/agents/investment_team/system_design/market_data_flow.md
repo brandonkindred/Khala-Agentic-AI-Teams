@@ -666,8 +666,9 @@ Returned as `extra_slip_bps`.
 > **Worked example** — long MARKET buy of 10 shares, `bar.open=100`,
 > `slippage_bps=2`, within the participation cap, no adverse haircut:
 > `s = 2/10_000 = 0.0002` → entry `fill_price = 100 × 1.0002 = 100.02`. Exiting on
-> a bar that opens at 110 → `110 × 0.9998 = 109.978`. Transaction cost on the
-> round trip: `(1000.20 + 1099.78) × 5/10_000 ≈ 1.05`.
+> a bar that opens at 110 → `round(110 × 0.9998, 2) = 109.98` (fills are
+> rounded before storage, per Step 4's `dp` rule). Transaction cost on the
+> round trip: `(1000.20 + 1099.80) × 5/10_000 ≈ 1.05`.
 
 > **Legacy `OptimisticExecutionModel`** (`execution_model.py:145`) keeps the old MARKET→`bar.open`,
 > LIMIT-buy→`min(bar.open, limit)` "free alpha" rule for golden parity tests

@@ -1682,8 +1682,10 @@ class DesignMixin:
 
         Pre: the refinement + alignment loops have settled the run state;
         ``state`` carries the settled ``spec``/``code``/``trades``/``metrics``
-        for this design attempt (``state.code`` is unused here — verification
-        and analysis never touch the strategy source).
+        for this design attempt. Verification and analysis never *inspect*
+        the strategy source, but ``state.code`` is still load-bearing: it is
+        hashed into the terminal ``PhaseTransition`` below, and is the value
+        that carries any alignment-committed rewrite.
         Post: returns ``(metrics, is_winning, is_publishable,
         publishability_skip_reason, narrative)``. Increments the
         convergence trial counter (one per refinement round, plus the first),
@@ -1749,12 +1751,14 @@ class DesignMixin:
 
         # ═══ Phase 4 → exit: BACKTEST_AND_VERIFICATION → ∅ ════════════
         # Terminal transition out of the last named phase. ``to_phase`` is
-        # ``None``. ``spec_hash`` matches the value emitted on the previous
-        # two boundaries; ``code_hash`` may differ from the synthesis-exit
-        # value, because ``state`` here is the post-alignment
-        # ``_DesignAttemptState`` and the trade-alignment loop may have
-        # committed a rewritten baseline (``_commit_alignment_proposal``).
-        # See ``PhaseTransition``'s Invariants in ``phases.py``.
+        # ``None``. Neither hash is guaranteed to match every earlier
+        # boundary: ``spec_hash`` can differ from the ``DESIGN_REVIEW →
+        # CODE_SYNTHESIS`` value via the synthesis-phase carve-outs, and
+        # ``code_hash`` can differ from the synthesis-exit value because
+        # ``state`` here is the post-alignment ``_DesignAttemptState`` and
+        # the trade-alignment loop may have committed a rewritten baseline
+        # (``_commit_alignment_proposal``). See ``PhaseTransition``'s
+        # Invariants in ``phases.py`` for the full carve-out list.
         _emit_phase_transition(
             emit,
             from_phase=Phase.BACKTEST_AND_VERIFICATION,

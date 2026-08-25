@@ -171,12 +171,19 @@ class PhaseTransition(BaseModel):
         remainder of the attempt, so comparing hashes across two transitions
         detects drift only where the carve-outs below do not apply.
       - ``spec_hash`` is stable from the ``DESIGN_REVIEW → CODE_SYNTHESIS``
-        transition onward for any given design attempt, with two carve-outs
-        that land on the following transition: a tighten-only ``risk_limits``
-        update (``_orchestrator_helpers._merge_risk_limits_tighten_only``),
-        and ``_synthesize_initial_code`` flipping ``requires_custom_code`` to
-        ``True`` on a ``CompilerError`` fallback (``hash_spec`` excludes only
-        ``strategy_code``, not ``requires_custom_code``).
+        transition onward for any given design attempt, with three carve-outs
+        that all land on the following transition (they occur inside the
+        synthesis loop, before the ``CODE_SYNTHESIS →
+        BACKTEST_AND_VERIFICATION`` emit):
+          1. a tighten-only ``risk_limits`` update from refinement
+             (``_orchestrator_helpers._merge_risk_limits_tighten_only``);
+          2. a zero-trade repair committing a whitelisted ``risk_limits``
+             update verbatim (``zero_trade_repair._apply_zero_trade_spec_updates``)
+             — note this path has **no** tighten-only guard, so a proposed
+             loosening is accepted as-is;
+          3. ``_synthesize_initial_code`` flipping ``requires_custom_code``
+             to ``True`` on a ``CompilerError`` fallback (``hash_spec``
+             excludes only ``strategy_code``, not ``requires_custom_code``).
       - ``code_hash`` is stable from the ``CODE_SYNTHESIS →
         BACKTEST_AND_VERIFICATION`` transition through the refinement loop,
         but **not** through to the terminal transition: the trade-alignment

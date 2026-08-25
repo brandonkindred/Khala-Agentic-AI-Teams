@@ -65,10 +65,8 @@ rather than duplicated in this table; none of them require a user profile.
 
 `strategy_ideation_agent.py`'s `StrategyIdeationAgent` is **vestigial** — it
 still ships, with its own test suite, but has no production caller: the
-generation pipeline above superseded it. `agent_catalog.py` still describes
-the signal brief as produced "before `StrategyIdeationAgent` runs", which is
-stale for the same reason. Neither is part of any live flow, which is why
-they appear in no diagram in `system_design/`.
+generation pipeline above superseded it. That is why it appears in no diagram
+in `system_design/`.
 
 ### HTTP endpoints — profile requirement
 

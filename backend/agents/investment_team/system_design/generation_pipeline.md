@@ -22,7 +22,7 @@ activity**, `run_design_attempt_activity`
 ([`../strategy_lab/temporal/activities.py`](../strategy_lab/temporal/activities.py):935),
 a thin wrapper around
 `StrategyLabOrchestrator._run_design_attempt`
-([`../strategy_lab/orchestrator_design.py`](../strategy_lab/orchestrator_design.py):1209-1452).
+(`_run_design_attempt` in [`../strategy_lab/orchestrator_design.py`](../strategy_lab/orchestrator_design.py)).
 That activity's own scope ends at record assembly: it returns the assembled
 `StrategyLabRecord` (JSON-dumped) to the calling `StrategyLabCycleWorkflow`
 as `{"kind": "record", "record": ...}` — it does **not** persist that record
@@ -58,54 +58,61 @@ enum every attempt moves through, in order:
 DESIGN → DESIGN_REVIEW → CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION
 ```
 
-Each transition emits a `PhaseTransition` event (`phases.py`:148-184) carrying
-`from_phase`, `to_phase`, a 64-char SHA-256 `spec_hash` (`hash_spec`,
-`phases.py`:64-93 — canonical-JSON of the spec, deliberately excluding
-`strategy_code`) and a 64-char SHA-256 `code_hash` (`hash_code`,
-`phases.py`:96-109). This is a drift-detection mechanism: both hashes are
-**boundary snapshots** taken at the moment their transition fires, not a
-value pinned for the rest of the attempt. `spec_hash` is frozen post-design
-apart from two carve-outs, both of which land between `DESIGN_REVIEW →
-CODE_SYNTHESIS` and the following transition: `hash_spec` includes
-`risk_limits`, and the refinement loop that runs before the `CODE_SYNTHESIS →
-BACKTEST_AND_VERIFICATION` transition may accept a tighten-only `risk_limits`
-update (`_apply_updates`); separately, `_synthesize_initial_code`
-(`_synthesize_initial_code`, `../strategy_lab/orchestrator.py`) tries
-`compile_strategy(spec)` first and, on a
-`CompilerError` the mechanical-repair pre-flight didn't already catch, flips
-`spec.requires_custom_code` to `True` before falling back to
-`CodeSynthesisAgent` — and `hash_spec` excludes only `strategy_code`, not
-`requires_custom_code`. Either carve-out means that next transition's
-`spec_hash` can legitimately differ from the one recorded at
-`DESIGN_REVIEW → CODE_SYNTHESIS`. From there the value is stable through the
-terminal transition, since the trade-alignment loop's own `_apply_updates`
-call never carries `risk_limits` updates (and `requires_custom_code` isn't
-touched again after synthesis). `code_hash` is unchanged from `CODE_SYNTHESIS →
-BACKTEST_AND_VERIFICATION` through the refinement loop that precedes that
-transition, but the trade-alignment loop that follows it can still commit a
-rewritten baseline (`_commit_alignment_proposal`), so the terminal
-transition's `code_hash` can legitimately differ from the one recorded at
-`CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION` — that's an accepted, alignment-
-driven rewrite, not drift. (The terminal emit is reached with the
-`_DesignAttemptState` built *after* the alignment loop, so it carries the
-committed rewrite.)
+Each transition emits a `PhaseTransition` event (`class PhaseTransition`,
+`phases.py`) carrying `from_phase`, `to_phase`, a 64-char SHA-256 `spec_hash`
+(`hash_spec` — canonical-JSON of the spec, deliberately excluding
+`strategy_code`) and a 64-char SHA-256 `code_hash` (`hash_code`).
 
-`PhaseTransition`'s own Invariants in `phases.py` state the same carve-outs;
-they previously asserted flat stability for both hashes, which predated
-`_commit_alignment_proposal`, and were corrected alongside this document.
+This is a drift-detection mechanism, and the key thing to understand is that
+**both hashes are boundary snapshots** — each records state as of the moment
+its own transition fires, not a value pinned for the rest of the attempt.
+Comparing two boundaries detects drift only where none of the carve-outs
+below applies.
 
-All four emission sites live in
-`orchestrator_design.py`, in phase order: `DESIGN → DESIGN_REVIEW`
-(642-649), `DESIGN_REVIEW → CODE_SYNTHESIS` (1960-1967),
-`CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION` (1577-1584), and the terminal
-`BACKTEST_AND_VERIFICATION → None` (1756-1763) — the mixin that owns the
-whole-attempt sequencer emits every transition, even though the phases
-themselves execute across all five mixins (below).
+`spec_hash` is frozen post-design apart from **three** carve-outs, all of
+which occur inside the synthesis loop and therefore land on the
+`CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION` boundary:
+
+1. the refinement loop accepting a **tighten-only** `risk_limits` update
+   (`_apply_updates` → `_merge_risk_limits_tighten_only`);
+2. a **zero-trade repair** committing a whitelisted `risk_limits` update
+   (`_apply_zero_trade_spec_updates`, `../strategy_lab/zero_trade_repair.py`).
+   Unlike (1) this path has **no** tighten-only guard — it assigns the
+   proposed value verbatim, so a *loosening* is accepted as-is;
+3. `_synthesize_initial_code` (`../strategy_lab/orchestrator.py`) flipping
+   `spec.requires_custom_code` to `True` on a `CompilerError` the
+   mechanical-repair pre-flight didn't catch — and `hash_spec` excludes only
+   `strategy_code`, not `requires_custom_code`.
+
+From there `spec_hash` is stable through the terminal transition: the
+trade-alignment loop's own `_apply_updates` call never carries `risk_limits`
+updates, and `requires_custom_code` isn't touched again after synthesis.
+
+`code_hash` is unchanged from `CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION`
+through the refinement loop that precedes it, but the trade-alignment loop
+that *follows* it can commit a rewritten baseline
+(`_commit_alignment_proposal`), so the terminal transition's `code_hash` can
+legitimately differ — the terminal emit is reached with the
+`_DesignAttemptState` built after the alignment loop, so it carries that
+rewrite. An alignment-driven rewrite is expected behaviour, not drift.
+
+`PhaseTransition`'s own `Invariants` block states the same carve-outs. It
+previously asserted flat stability for both hashes — which predated
+`_commit_alignment_proposal` and the zero-trade repair path — and was
+corrected alongside this document.
+
+All four emission sites live in `orchestrator_design.py` and are the only
+`_emit_phase_transition(...)` call sites in the package; in phase order they
+are `DESIGN → DESIGN_REVIEW`, `DESIGN_REVIEW → CODE_SYNTHESIS`,
+`CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION`, and the terminal
+`BACKTEST_AND_VERIFICATION → None`. The mixin that owns the whole-attempt
+sequencer emits every transition, even though the phases themselves execute
+across all five mixins (below).
 
 ## Design ↔ review loop (DESIGN → DESIGN_REVIEW)
 
 Owned by `DesignMixin` (`orchestrator_design.py`). One round branches on
-readiness (`_review_and_handle_critique`, `orchestrator_design.py`:1046):
+readiness (`_review_and_handle_critique`, `orchestrator_design.py`):
 
 ```
 DesignAgent.run/.revise → SpecReadinessGate (phase="design")
@@ -137,7 +144,8 @@ a `DesignReviewAgent` LLM call.
   cost an LLM round. Two stages: unconditionally, coercing an intraday
   timeframe on an asset class with no intraday data and clamping
   `risk_limits.max_position_pct` to the shared ceiling; then, **only on a
-  readiness-clean spec** (`orchestrator_design.py`:983-984), a trial
+  readiness-clean spec** (the `deterministic_ready` guard in
+  `orchestrator_design.py`), a trial
   `compile_strategy()` call that promotes a spec to
   `requires_custom_code=True` on `CompilerError` (or, inversely, demotes an
   over-elected custom-code spec back to the compiled path when it turns out
@@ -149,7 +157,7 @@ a `DesignReviewAgent` LLM call.
 - **`SpecReadinessGate`** (`../strategy_lab/quality_gates/spec_readiness.py`) is the
   deterministic implementability check — sizing-coherence math, timeframe
   validity, DSL completeness — invoked at `phase="design"`
-  (`orchestrator_design.py`:918) and re-checked at synthesis round 0.
+  (in `orchestrator_design.py`) and re-checked at synthesis round 0.
 - **`DesignReviewAgent`** (`../strategy_lab/agents/design_review.py`) reviews
   the spec plus the readiness gate's findings and emits a `SpecCritique` — it
   never revises the spec or writes code itself, only critiques.
@@ -337,7 +345,7 @@ the table.
 
 <sup>a</sup> Two methods, three call sites. `check_hypothesis_rules(spec,
 phase="design")` is the hypothesis-vs-rules consistency check feeding
-`DesignReviewAgent` (`orchestrator_design.py:1082`). `validate(spec)` runs
+`DesignReviewAgent` (`orchestrator_design.py`). `validate(spec)` runs
 pre-synthesis (`orchestrator_synthesis.py:203`, defaulting to the same
 `phase="design"`), and again on a repaired spec at `zero_trade_repair.py:509`
 tagged `phase="synthesis"`. Readiness is a different gate — `SpecReadinessGate`,
@@ -389,7 +397,7 @@ attempt's, and from a Temporal activity retry of the same attempt.
 [`architecture.md`](./architecture.md)§11 for the summary table and the link
 to [`../strategy_lab/MIXIN_BOUNDARIES.md`](../strategy_lab/MIXIN_BOUNDARIES.md)
 for full boundary rationale). The whole-attempt sequence,
-`_run_design_attempt` (`orchestrator_design.py`:1209-1452), calls across all
+`_run_design_attempt` (`orchestrator_design.py`), calls across all
 five in order:
 
 ```
