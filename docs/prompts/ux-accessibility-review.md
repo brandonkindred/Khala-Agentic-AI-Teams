@@ -252,10 +252,10 @@ for primitive defects you deliberately chose not to pursue at all.
         not only in specs that never call it — so filename alone will not separate
         signal from noise. Match the DISABLE ITSELF, which needs no prior knowledge
         of which rules are switched off:
-        `grep -rnE "[A-Za-z'\"-]+: \{ enabled: false \}" user-interface/src/app
-        --include=*.spec.ts` (run from the repository root, like every other path in
-        this prompt — a bare `src/app` exits 2 with `No such file or directory`, and
-        an empty census reads exactly like "nothing is disabled")
+        `grep -rnE "[A-Za-z'\"-]+: \{ enabled: false \}" user-interface/src/app --include=*.spec.ts`
+        (run from the repository root, like every other path in this prompt — a bare
+        `src/app` exits 2 with `No such file or directory`, and an empty census reads
+        exactly like "nothing is disabled")
         — that returns CANDIDATE disables across all four specs. Verify each hit
         before counting it: the pattern matches any object key of that shape, so a
         feature flag, harness option, or mock setting in a spec file can look
@@ -764,8 +764,10 @@ Close with:
     also matches the `a11y.ts` helper itself and two prose files that merely name the
     function, inflating the numerator with documentation.
   - Never reference an external issue tracker in code, comments, or docs. Issue
-    numbers belong in pull-request bodies and nowhere else — and there they are
-    required, via `Closes #N`, on any PR that implements one of these findings.
+    numbers belong in pull-request bodies and nowhere else — and there, this repo's
+    `CLAUDE.md` requires every PR to close its linked issue with GitHub's auto-close
+    keyword syntax; use that syntax as `CLAUDE.md` states it rather than repeating
+    its notation here.
 
 ## 8. Do not report
 
