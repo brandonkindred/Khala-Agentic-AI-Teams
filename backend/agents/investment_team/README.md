@@ -27,11 +27,13 @@ flowchart LR
     SL[POST /strategy-lab/run]
     SIG[SignalIntelligenceExpert<br/>once per batch]
     GP[Generation pipeline<br/>Design ↔ Review → Synthesis →<br/>Alignment → Verification]
+    LabRec[(StrategyLabRecord<br/>+ paper trading)]
     ST[POST /strategies]
     BT[POST /backtests]
     SL --> SIG
     MD --> SIG
     SIG --> GP
+    GP --> LabRec
     ST --> BT
   end
   IPS --> PG[PolicyGuardianAgent]

@@ -338,12 +338,18 @@ via `_load_run_from_job_service`.
 subscribes to a per-run topic in
 [`api/job_event_bus.py`](../api/job_event_bus.py) (queue-per-subscriber
 fan-out) and drains it as an HTTP SSE stream to the Angular UI. Since the
-Temporal migration (§7), the workflow/activities don't push into this bus
-directly — the connect-time snapshot is instead reconciled live from the
-durable job-service record via `_reconcile_run_progress`, so a client always
-sees current progress at connect time and on each subsequent poll. A polling
-fallback (`GET /strategy-lab/runs/{run_id}/status`) exposes the same
-reconciled data and is what the UI relies on for updates mid-stream.
+Temporal migration (§7), most workflow/activity progress doesn't push into
+this bus directly — it persists to the durable job-service record instead,
+and the connect-time snapshot is reconciled live from that record via
+`_reconcile_run_progress`, so a client always sees current progress at
+connect time and on each subsequent poll. The one exception is
+`run_design_attempt_activity`'s own progress callback, which does call
+`job_event_bus.publish` directly as a best-effort, in-process side channel
+for sub-cycle phase updates (design/synthesis/refinement) — reconciliation
+doesn't depend on it, so a missed direct publish is still caught up by the
+next poll. A polling fallback (`GET /strategy-lab/runs/{run_id}/status`)
+exposes the same reconciled data and is what the UI relies on for updates
+mid-stream.
 
 ### 9. Market data is tiered by free vs pay
 
