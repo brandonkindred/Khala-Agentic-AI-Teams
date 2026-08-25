@@ -349,6 +349,35 @@ def test_design_loop_enforces_asset_category_when_generation_ignores_pin(
     assert record.strategy.asset_class == "stocks"
 
 
+def test_design_loop_enforces_asset_category_on_budget_exhausted_before_first_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the LLM-call budget trips before ``DesignAgent.run`` ever
+    returns a spec, ``_run_design_loop`` falls back to a defaults spec built
+    from ``{}`` — which defaults ``asset_class`` to "stocks". That fallback
+    bypasses the per-response enforcement below the ``design_agent.run``/
+    ``revise`` calls, so the short-circuit record must still be corrected to
+    the category pinned for this attempt before it is persisted."""
+    from investment_team.strategy_lab.agents._llm_budget import DesignBudgetExhausted
+
+    orch = StrategyLabOrchestrator()
+
+    def _run(**_kw: Any) -> Tuple[Dict[str, Any], str]:
+        raise DesignBudgetExhausted(1, 1)
+
+    monkeypatch.setattr(orch.design_agent, "run", _run)
+
+    # allowed = {forex} -> exclude everything else.
+    record = orch.run_cycle(
+        prior_records=[],
+        config=_config(),
+        exclude_asset_classes=["stocks", "crypto", "futures", "commodities"],
+    )
+
+    assert record.backtest.status == "failed: budget_exhausted"
+    assert record.strategy.asset_class == "forex"
+
+
 def test_design_loop_enforces_asset_category_after_revise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

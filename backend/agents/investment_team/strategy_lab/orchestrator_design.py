@@ -717,6 +717,19 @@ class DesignMixin:
             # back to a defaults spec so the audit record is still well-formed.
             if spec is None:
                 spec = self._build_spec_from_dict({}, strategy_id=strategy_id)
+            # The defaults spec above (and ``latest_spec`` from a trip mid-
+            # revision) bypass the per-response enforcement below the
+            # ``design_agent.run``/``revise`` calls — without this, a
+            # budget-exhausted short-circuit record could persist an
+            # ``asset_class`` outside the category pinned for this attempt
+            # (e.g. the defaults spec always defaults to "stocks").
+            spec = self._enforce_selected_asset_category(
+                spec,
+                selected_category=selected_category,
+                review_round=len(critique_history),
+                emit=emit,
+                drift_collector=drift_collector,
+            )
             emit(
                 "designing",
                 {
