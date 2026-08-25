@@ -446,6 +446,59 @@ def test_run_review_threads_repo_path_into_tool_agents(tmp_path: Path) -> None:
     assert captured["repo_path"] == str(tmp_path)
 
 
+def test_run_review_shared_review_context_none_for_every_tool_agent(
+    tmp_path: Path,
+) -> None:
+    """Every wired tool agent in one review pass receives shared_review_context
+    == None: build_shared_tool_agent_review_system_content always returns None
+    today (neither current_files nor task_description is safe to place in the
+    system prompt -- see that function's docstring), and this must hold
+    consistently across every tool agent in the same call, not just some.
+
+    Uses a tiny local stand-in for the tool-agent "kind" (dict key) instead of
+    importing the real backend_code_v2_team.models.ToolAgentKind:
+    _run_tool_agents_review's fold step (_fold_tool_agent_output) only ever
+    accesses kind.value, and dict keys must be hashable (SimpleNamespace is
+    not), so a real per-team enum buys nothing here and only adds an
+    unrelated, heavy import."""
+
+    class _Kind:
+        def __init__(self, value):
+            self.value = value
+
+    config = _build_config()
+    captured: list = []
+
+    def _capture(kind_name):
+        kind = _Kind(kind_name)
+        agent = MagicMock()
+        agent.review.side_effect = lambda phase_inp: (
+            captured.append((kind_name, phase_inp.shared_review_context))
+            or SimpleNamespace(issues=[], recommendations=[])
+        )
+        return kind, agent
+
+    qa_kind, qa_agent = _capture("qa")
+    security_kind, security_agent = _capture("security")
+
+    run_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        tool_agents={
+            qa_kind: qa_agent,
+            security_kind: security_agent,
+        },
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert len(captured) == 2
+    assert [ctx for _, ctx in captured] == [None, None]
+
+
 def test_run_review_raw_issue_count_from_llm_fallback(tmp_path: Path) -> None:
     """run_review forwards the LLM fallback's pre-grounding raw_issue_count onto
     ReviewResult via _code_review_step's _ReviewStepResult return value."""
