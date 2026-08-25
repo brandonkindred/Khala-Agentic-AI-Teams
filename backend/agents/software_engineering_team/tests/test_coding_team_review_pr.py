@@ -832,6 +832,8 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
         AsyncMock(return_value=mock_client)
     )
 
+    monkeypatch.setattr(api_main, "stash_github_token", lambda j, t: None, raising=False)
+
     # Install a fake engine provider so no LLM stack loads. The PR-review path
     # calls provider.run_pr_code_review(...) via coding_team.engine_provider; the
     # monkeypatched module global auto-reverts after the test.
