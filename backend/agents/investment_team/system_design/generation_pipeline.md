@@ -288,13 +288,13 @@ invokes it:
 
 | Gate / file | Phase | Purpose |
 |---|---|---|
-| `strategy_validator.py`: `StrategySpecValidator` | design (hypothesis/rules check feeding `DesignReviewAgent` when a round is deterministically ready) and pre-synthesis | Deterministic field-level validation of `StrategySpec` |
+| `strategy_validator.py`: `StrategySpecValidator` | design (default `phase` for both the design-loop readiness check and the pre-synthesis call at `orchestrator_synthesis.py:203`) and synthesis (`zero_trade_repair.py:509` tags its re-validation of a repaired spec `phase="synthesis"`) | Deterministic field-level validation of `StrategySpec` |
 | `spec_readiness.py`: `SpecReadinessGate` | design, re-checked at synthesis round 0 | The implementability gate that decides design-loop readiness (sizing coherence, timeframe validity, DSL completeness) |
 | `code_safety.py` (+ `code_safety_ast.py`): `CodeSafetyChecker` | synthesis, and verification (alignment-proposal re-check) | AST + regex safety scan of generated strategy Python |
 | `code_conformance/gate.py` (+ `ast_helpers.py`): `CodeConformanceGate` | synthesis | Deterministic spec→code conformance, incl. custom-code faithfulness checks |
 | `predicate_conformance.py` (+ `predicate_conformance_fixtures.py`, `conformance_bars.py`): `PredicateConformanceGate` | synthesis, re-checked at verification | Pre-execution predicate-conformance shadow check against synthetic bars |
 | `predicate_reachability.py`: `PredicateReachabilityProbe` | synthesis | Pre-backtest, data-driven check that spec predicates can actually fire |
-| `backtest_anomaly.py`: `BacktestAnomalyDetector` | synthesis (per-round), verification (fallback) | Threshold-based anomaly detection over backtest results |
+| `backtest_anomaly.py`: `BacktestAnomalyDetector` | synthesis (per-round, `orchestrator_synthesis.py:938`), verification (unconditionally after every trade-alignment round, `orchestrator_alignment.py:653`; and again as the walk-forward-failure fallback recheck, `orchestrator_verification.py:357`) | Threshold-based anomaly detection over backtest results |
 | `alignment_checks.py`: `DeterministicAlignmentChecker` | trade-alignment loop | The seven per-rule trade-alignment checks described above |
 | `acceptance_gate.py`: `AcceptanceGate` | verification | Composite walk-forward acceptance (deflated Sharpe, IS/OOS degradation, OOS trade count, regime-conditional pass) |
 | `exit_rule_conformance.py`: `ExitRuleConformanceGate` | verification | Deterministic conformance of engine-enforced exits to `spec.exit_rules` |
@@ -304,7 +304,7 @@ invokes it:
 | `realism/regime_coverage.py`: `RegimeCoverageGate` | verification | Coverage across market regimes |
 | `realism/trade_clustering.py`: `TradeClusteringGate` | verification | Detects unrealistic trade clustering |
 | `realism/rule_firing.py`: `RuleFiringRateGate` | verification | Spec-rule firing-rate realism |
-| `convergence_tracker.py`: `ConvergenceTracker` | cross-cycle (batch-level) | Stall/diversity/failure directives fed into design prompts |
+| `convergence_tracker.py`: `ConvergenceTracker` | recorded per-attempt inside `RecordAssemblyMixin` (`orchestrator_record_assembly.py:276` and `:399`, i.e. within the same `run_design_attempt_activity` activity as everything else); directives it derives are what carry *across* cycles, not the `record()` call itself | Stall/diversity/failure directives fed into design prompts |
 | `universe_injection.py` | synthesis | Deterministic post-synthesis injection of the `UNIVERSE` constant |
 | `models.py` | — | Shared `QualityGateResult` / `StrategyLabPhase` types (not a gate itself) |
 
