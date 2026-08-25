@@ -17,32 +17,39 @@ from .models import QualityGateResult
 
 logger = logging.getLogger(__name__)
 
-# The asset-class-steering sentences this tracker embeds in its directives.
-# Owned here (rather than duplicated as string literals at the consumer) so a
-# reword cannot silently break the pin's suppression filter: both the text and
-# the predicate that recognises it live in this one place.
-#   [0] -> get_diversity_directive   [1] -> get_stall_directive
-ASSET_CLASS_STEERING_PHRASES: tuple[str, ...] = (
-    "You MUST choose a DIFFERENT asset class",
-    "Try a fundamentally different trading thesis, asset class, or indicator combination",
-)
+# The sentence :meth:`ConvergenceTracker.get_diversity_directive` embeds to
+# demand a change of asset class. Owned here (rather than duplicated as a string
+# literal at the consumer) so a reword cannot silently break the pin's
+# suppression filter: both the text and the predicate that recognises it live in
+# this one place.
+#
+# Deliberately does NOT cover ``get_stall_directive``. That directive offers
+# three alternatives — "a fundamentally different trading thesis, asset class,
+# or indicator combination" — two of which a pinned attempt can satisfy, so
+# suppressing it would strip a pinned run of all anti-repetition steering. And
+# a pinned run is *more* prone to stalling, since the pin also scopes the
+# designer's prior-results context to a single category.
+ASSET_CLASS_ONLY_STEERING_PHRASE = "You MUST choose a DIFFERENT asset class"
 
 
 def is_asset_class_steering_directive(directive: str) -> bool:
-    """True when ``directive`` instructs the designer to change asset class.
+    """True when ``directive`` demands a change of asset class and nothing else.
 
-    A design attempt pinned to a single asset category cannot satisfy any such
+    A design attempt pinned to a single asset category cannot satisfy such an
     instruction — the pin's exclusion list already forbids every other class —
-    so the caller drops these rather than handing the designer a prompt that
-    mandates both "use only X" and "use something other than X".
+    so the caller drops it rather than handing the designer a prompt that
+    mandates both "use only X" and "use something other than X". Directives
+    that merely *include* an asset-class change among several satisfiable
+    alternatives (see :meth:`ConvergenceTracker.get_stall_directive`) are not
+    matched, and must survive the filter.
 
     Preconditions:
       - ``directive`` is a string (a rendered convergence-tracker directive).
     Postconditions:
-      - Returns ``True`` iff any entry of
-        :data:`ASSET_CLASS_STEERING_PHRASES` occurs in ``directive``.
+      - Returns ``True`` iff :data:`ASSET_CLASS_ONLY_STEERING_PHRASE` occurs in
+        ``directive``.
     """
-    return any(phrase in directive for phrase in ASSET_CLASS_STEERING_PHRASES)
+    return ASSET_CLASS_ONLY_STEERING_PHRASE in directive
 
 
 class ConvergenceTracker:
@@ -181,8 +188,9 @@ class ConvergenceTracker:
         Postconditions:
           - Returns ``None`` when no class is over-represented; otherwise a
             directive naming the over-represented classes in alphabetical
-            order and containing :data:`ASSET_CLASS_STEERING_PHRASES`\\ [0], so
-            :func:`is_asset_class_steering_directive` recognises it.
+            order and containing :data:`ASSET_CLASS_ONLY_STEERING_PHRASE`, so
+            :func:`is_asset_class_steering_directive` recognises it and a
+            pinned attempt suppresses it as unsatisfiable.
         """
         over_represented = self.get_diversity_avoid_classes(tail)
         if not over_represented:
@@ -192,7 +200,7 @@ class ConvergenceTracker:
         total = len(recent)
         return (
             f"MANDATORY: The last {total} strategies are heavily skewed toward "
-            f"{', '.join(sorted(over_represented))}. {ASSET_CLASS_STEERING_PHRASES[0]}. "
+            f"{', '.join(sorted(over_represented))}. {ASSET_CLASS_ONLY_STEERING_PHRASE}. "
             f"Consider: {', '.join(ac for ac in ['stocks', 'crypto', 'forex', 'commodities', 'futures'] if ac not in over_represented)}."
         )
 
@@ -211,18 +219,25 @@ class ConvergenceTracker:
     def get_stall_directive(self) -> Optional[str]:
         """Return a directive if the tracker detects convergence.
 
+        Deliberately offers three alternatives rather than demanding an
+        asset-class change alone, so it stays satisfiable — and therefore
+        survives the suppression filter — under a single-category pin, where
+        anti-repetition steering matters most (the pin also narrows the
+        designer's prior-results context to one category).
+
         Preconditions: none.
         Postconditions:
           - Returns ``None`` unless :meth:`is_stalled`; otherwise a directive
-            containing :data:`ASSET_CLASS_STEERING_PHRASES`\\ [1], so
-            :func:`is_asset_class_steering_directive` recognises it as
-            asset-class steering that a single-category pin must suppress.
+            that does NOT contain
+            :data:`ASSET_CLASS_ONLY_STEERING_PHRASE`, so
+            :func:`is_asset_class_steering_directive` leaves it in place.
         """
         if not self.is_stalled():
             return None
         return (
             "WARNING: Strategy ideation is converging — recent strategies are too similar. "
-            f"MANDATORY: {ASSET_CLASS_STEERING_PHRASES[1]}."
+            "MANDATORY: Try a fundamentally different trading thesis, asset class, "
+            "or indicator combination."
         )
 
     # ------------------------------------------------------------------

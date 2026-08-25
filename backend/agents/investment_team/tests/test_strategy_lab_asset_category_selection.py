@@ -922,21 +922,21 @@ def test_design_loop_drops_diversity_directive_when_pin_forces_over_represented_
     assert not any("You MUST choose a DIFFERENT asset class" in d for d in convergence_directives)
 
 
-def test_design_loop_also_drops_the_stall_directive_when_pinned(
+def test_design_loop_keeps_the_stall_directive_when_pinned(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``get_stall_directive`` carries the same "try a fundamentally different
-    ... asset class" mandate as the diversity one, and is equally impossible to
-    satisfy under a pin — a pinned attempt's exclusion list already forbids
-    every other class. Both must be suppressed, not just the diversity one."""
-    from investment_team.strategy_lab.quality_gates.convergence_tracker import (
-        ASSET_CLASS_STEERING_PHRASES,
-    )
-
+    """The stall directive offers three alternatives — a different thesis,
+    asset class, OR indicator combination — two of which a pinned attempt can
+    satisfy, so it must survive the suppression filter. Dropping it would
+    strip anti-repetition steering from exactly the runs most prone to
+    stalling: a pinned run also has its prior-results context narrowed to one
+    category, and ``is_stalled`` stays true until the designer varies, so a
+    suppressed directive would be regenerated and re-dropped every cycle with
+    the stall never recovering."""
     orch = StrategyLabOrchestrator()
     monkeypatch.setattr(orch.convergence_tracker, "is_stalled", lambda: True)
     stall_directive = orch.convergence_tracker.get_stall_directive()
-    assert stall_directive is not None and ASSET_CLASS_STEERING_PHRASES[1] in stall_directive
+    assert stall_directive is not None
 
     captured: List[Dict[str, Any]] = []
 
@@ -960,6 +960,38 @@ def test_design_loop_also_drops_the_stall_directive_when_pinned(
 
     assert len(captured) == 1
     convergence_directives = captured[0]["convergence_directives"] or []
-    assert not any(
-        phrase in d for d in convergence_directives for phrase in ASSET_CLASS_STEERING_PHRASES
+    assert any("indicator combination" in d for d in convergence_directives)
+
+
+def test_unsupported_asset_class_is_not_mislabeled_as_a_pin_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``build_spec_from_dict`` raises the same ``SpecImplementabilityError``
+    type for an unsupported ``asset_class`` (a "bonds" typo). That is a
+    different failure from a category-pin non-convergence and must keep its own
+    reporting — relabeling it would mis-attribute every typo-redesign in the
+    fleet to this feature. Exercised on an UNRESTRICTED run, where no pin is
+    even active."""
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict("bonds"), "scripted"))
+    _short_circuit_synthesis(monkeypatch)
+
+    events: List[Tuple[str, Dict[str, Any]]] = []
+    record = orch.run_cycle(
+        prior_records=[],
+        config=_config(),
+        exclude_asset_classes=None,
+        on_phase=lambda phase, data: events.append((phase, data)),
     )
+
+    assert record.backtest.status == "failed: spec_unimplementable"
+    design_loop_events = [
+        data
+        for phase, data in events
+        if phase == "telemetry" and data.get("scope") == "design_loop"
+    ]
+    assert not any(
+        data.get("stop_reason") == "asset_category_unconverged" for data in design_loop_events
+    )
+    assert (record.loop_telemetry or {}).get("stop_reason") != "asset_category_unconverged"

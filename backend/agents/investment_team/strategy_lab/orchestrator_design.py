@@ -740,7 +740,14 @@ class DesignMixin:
             # and no critiques even when real review rounds ran. Attach the audit
             # bundle from the state this frame still holds, and emit the loop
             # summary the raise skipped, before re-raising.
-            if exc.design_context is None:
+            #
+            # Keyed on the explicit marker, NOT on the exception type: the same
+            # type is raised by ``build_spec_from_dict`` for an unsupported
+            # ``asset_class`` (a ``bonds`` typo), which is a different failure
+            # and must keep its own reporting rather than being relabeled as a
+            # category-pin non-convergence — that would mis-attribute every
+            # typo-redesign in the fleet to this feature.
+            if getattr(exc, "asset_category_unconverged", False) and exc.design_context is None:
                 pin_telemetry = _design_loop_telemetry_summary(
                     ledger, len(critique_history), "asset_category_unconverged"
                 )
@@ -1490,13 +1497,20 @@ class DesignMixin:
             logger.warning(
                 "%s Re-entering design instead of persisting a mismatched spec.", evidence
             )
-            raise SpecImplementabilityError(
+            pin_error = SpecImplementabilityError(
                 evidence,
                 failure_phase="design",
                 last_spec=regenerated,
                 last_code="",
                 drift_collector=drift_collector,
             )
+            # Marks this as a category-pin non-convergence specifically, so
+            # ``_run_design_loop``'s handler can attach the design-loop audit
+            # bundle without also claiming every other design-phase
+            # ``SpecImplementabilityError`` (e.g. an unsupported ``asset_class``
+            # from ``build_spec_from_dict``) was a pin failure.
+            pin_error.asset_category_unconverged = True
+            raise pin_error
         readiness_results = self.spec_readiness_gate.validate(
             regenerated, phase="design", backtest_config=config
         )
@@ -1605,19 +1619,29 @@ class DesignMixin:
         ]
         updates: Dict[str, Any] = {"asset_class": selected_category}
         if spec.target_symbols:
-            actions.append(
-                {
-                    "rule": "asset_category_pin",
-                    "field": "target_symbols",
-                    "before": list(spec.target_symbols),
-                    "after": [],
-                    "reason": (
-                        "explicit symbols were authored for the wrong asset class; "
-                        "cleared to fall back to the pinned category's default universe"
-                    ),
-                }
-            )
-            updates["target_symbols"] = []
+            # Drop only the tickers that unambiguously belong to another class,
+            # matching ``_reconcile_asset_category``. Clearing the list wholesale
+            # would also discard cross-asset ETFs that are perfectly valid under
+            # the pinned class, and an emptied list makes the readiness gate
+            # below manufacture a "hypothesis names unreachable symbols" critical
+            # that is then recorded into ``all_gate_results`` and counted by the
+            # convergence tracker's failure modes — fabricating a repeated
+            # ``spec_readiness`` failure that would steer later design prompts.
+            kept = strip_offcategory_symbols(list(spec.target_symbols), selected_category)
+            if kept != list(spec.target_symbols):
+                actions.append(
+                    {
+                        "rule": "asset_category_pin",
+                        "field": "target_symbols",
+                        "before": list(spec.target_symbols),
+                        "after": kept,
+                        "reason": (
+                            "symbols authored for the wrong asset class were dropped so the "
+                            "fetch matches the pinned category"
+                        ),
+                    }
+                )
+                updates["target_symbols"] = kept
         spec = spec.model_copy(update=updates)
         readiness_results = self.spec_readiness_gate.validate(
             spec, phase="design", backtest_config=config
