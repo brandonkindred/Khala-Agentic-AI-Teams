@@ -386,7 +386,7 @@ flowchart TB
         CS -->|yes: compiled DSL| SYN
         CS -->|CompilerError:<br/>requires_custom_code=True| CSA[CodeSynthesisAgent]
         CSA --> SYN
-        SYN[Synthesis gates:<br/>CodeSafety · CodeConformance ·<br/>PredicateConformance · Reachability]
+        SYN[Synthesis gates:<br/>CodeSafety · CodeConformance ·<br/>PredicateConformance · Reachability ·<br/>TargetSymbolCoverage]
         SYN -->|fail| RF[RefinementAgent]
         RF --> SYN
         SYN -->|pass| BT[Execute in sandbox<br/>→ trade ledger]
