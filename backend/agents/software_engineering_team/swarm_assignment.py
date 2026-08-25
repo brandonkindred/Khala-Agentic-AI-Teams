@@ -12,7 +12,7 @@ import logging
 from typing import List, Optional
 
 from software_engineering_team.models import Task, TaskStatus
-from software_engineering_team.team_routing import _target_matches_agent
+from software_engineering_team.team_routing import _target_matches_agent, _team_key
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +41,31 @@ class _AssignmentMixin:
 
     def _try_assign(self, task_id: str, agent_id: str) -> bool:
         """Assign a task to an agent, swallowing transient errors so one bad assignment
-        cannot abort the whole assignment round. Returns True only on a real placement."""
+        cannot abort the whole assignment round. Returns True only on a real placement.
+
+        Every assignment path in this mixin (pinned reservation, the deterministic fast
+        paths, the Tech-Lead proposals, and the trailing guardrail loop) places tasks
+        through here, which is why the least-recently-used bookkeeping that
+        ``_try_homogeneous_target_assign`` ranks by is recorded here rather than in that
+        one path: an agent occupied by a task is equally unavailable however it was
+        placed, so a ranking that only counted fast-path placements would treat an agent
+        that just finished other work as though it had been idle all along.
+
+        Postconditions:
+            - On a successful placement, ``self._agent_last_placed[agent_id]`` is set to
+              the current ``self._placement_ordinal`` and that ordinal is incremented, so
+              later placements always compare as more recent. A failed or raising
+              placement leaves both untouched.
+        """
         try:
-            return bool(self.graph.assign_task_to_agent(task_id, agent_id))
+            placed = bool(self.graph.assign_task_to_agent(task_id, agent_id))
         except Exception as exc:  # noqa: BLE001 - keep assigning the remaining ready tasks
             logger.warning("Failed to assign task %s to agent %s: %s", task_id, agent_id, exc)
             return False
+        if placed:
+            self._agent_last_placed[agent_id] = self._placement_ordinal
+            self._placement_ordinal += 1
+        return placed
 
     def _pinned_agent_for(self, task: Task) -> Optional[str]:
         """The agent this task's feature branch is pinned to, or None if unpinned.
@@ -140,10 +159,11 @@ class _AssignmentMixin:
 
         A pool larger than its task batch (e.g. one ready task, two free same-stack
         agents) picks the least-recently-used matching agent(s) first, ranked by
-        ``self._homogeneous_last_used`` (agent_id -> the ``self._homogeneous_assign_ordinal``
-        value at its last placement here; an agent with no entry ranks oldest, ahead of any
-        placed agent). Ranking by per-agent placement history — not a positional offset
-        into whichever candidate list happens to be live this round — is what keeps this
+        ``self._agent_last_placed`` (agent_id -> the ``self._placement_ordinal`` value at
+        its last placement through ``_try_assign``, which every assignment path in this
+        mixin goes through; an agent with no entry ranks oldest, ahead of any placed
+        agent). Ranking by per-agent placement history — not a positional offset into
+        whichever candidate list happens to be live this round — is what keeps this
         correct as the free/busy set churns: an index/offset rotation desyncs the moment
         the candidate list's *membership* (not just its length) changes between calls,
         which can silently starve an agent indefinitely even though it's free every round
@@ -165,16 +185,19 @@ class _AssignmentMixin:
               same set as its same-stack batch-mates and be absorbed into them.
             - Returns True otherwise: every task in ``remaining_ready`` is attempted via
               ``self._try_assign`` against a least-recently-used-first ordering of the
-              matching agents, with ``used_agents``/``assigned_tasks`` and
-              ``self._homogeneous_last_used``/``self._homogeneous_assign_ordinal`` updated
-              in place for each successful placement. A pool larger than the task batch
-              simply leaves its lowest-priority excess agents unused this round — the size
-              guard above guarantees there is never a task this method fails to attempt.
+              matching agents, with ``used_agents``/``assigned_tasks`` updated in place for
+              each successful placement (``_try_assign`` records the LRU bookkeeping
+              itself). A pool larger than the task batch simply leaves its lowest-priority
+              excess agents unused this round — the size guard above guarantees there is
+              never a task this method fails to attempt.
         """
         # Every task, not just the first: an untargeted task matches *every* agent, so
         # when the free pool is all one stack it resolves to the same set a same-stack
         # targeted task does and would otherwise be silently absorbed into the batch.
-        if not all(task.target_team for task in remaining_ready):
+        # Test the normalized key, not raw truthiness — _team_key collapses a
+        # whitespace/punctuation-only label to "", which matches every agent exactly the
+        # way None does, so such a task is untargeted despite being truthy in Python.
+        if not all(_team_key(task.target_team) for task in remaining_ready):
             return False
         first_team = remaining_ready[0].target_team
         matching_free = self._matching_free_agents(first_team, remaining_free)
@@ -186,15 +209,13 @@ class _AssignmentMixin:
             if set(self._matching_free_agents(task.target_team, remaining_free)) != matching_set:
                 return False
 
-        last_used = self._homogeneous_last_used
-        ordered_free = sorted(matching_free, key=lambda aid: last_used.get(aid, -1))
+        last_placed = self._agent_last_placed
+        ordered_free = sorted(matching_free, key=lambda aid: last_placed.get(aid, -1))
 
         for task, agent_id in zip(remaining_ready, ordered_free):
             if self._try_assign(task.id, agent_id):
                 used_agents.add(agent_id)
                 assigned_tasks.add(task.id)
-                last_used[agent_id] = self._homogeneous_assign_ordinal
-                self._homogeneous_assign_ordinal += 1
         return True
 
     def _try_deterministic_assign(
@@ -225,10 +246,14 @@ class _AssignmentMixin:
             - ``used_agents`` and ``assigned_tasks`` already reflect this round's pinned-task
               reservation (``_reserve_pinned_tasks``) and nothing else.
         Postconditions:
-            - Returns False and makes no assignments if there is no remaining, unpinned ready
-              task or free agent to place, if any such task has zero or more than one matching
-              free agent, or if two such tasks would resolve to the same agent — callers must
-              then fall through to the unchanged Tech-Lead LLM path.
+            - Returns False and makes no assignments when neither path applies: there is no
+              remaining unpinned ready task or free agent to place; the batch is not
+              homogeneous (see ``_try_homogeneous_target_assign`` for that path's own
+              conditions); *and*, in the per-task fallback, some task has zero or more than
+              one matching free agent, or two tasks would resolve to the same agent —
+              callers must then fall through to the unchanged Tech-Lead LLM path. Note that
+              "more than one matching free agent" is disqualifying only in that fallback;
+              it is precisely the case the homogeneous path exists to place.
             - Returns True when the mapping is unambiguous (directly, or via the homogeneous
               fast path); in that case every task in ``remaining_ready`` is attempted via
               ``self._try_assign`` (regardless of whether the attempt succeeds), with

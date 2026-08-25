@@ -163,6 +163,26 @@ def test_untargeted_task_anywhere_in_batch_calls_llm_regardless_of_order(tmp_pat
         )
 
 
+def test_blank_target_team_is_treated_as_untargeted(tmp_path):
+    """A ``target_team`` of only whitespace/punctuation is truthy in Python but normalizes
+    to ``""`` through ``_team_key`` -- and an empty key matches *every* agent. Such a task
+    names no real stack, so it must reach the Tech Lead rather than being silently placed
+    on whichever agent happens to sort first: with a mixed free pool that would commit it
+    to an arbitrary stack with no judgment applied."""
+    for blank in (" ", "   ", "---", "_"):
+        tech_lead = _RecordingTechLead()
+        workers = [
+            StubWorker("backend_v2-1", stack_name="backend_v2"),
+            StubWorker("frontend_v2-1", stack_name="frontend_v2"),
+        ]
+        swarm, graph = _make_swarm(tmp_path, tech_lead, workers)
+        graph.add_task("t1", title="Blank target", target_team=blank)
+
+        swarm._assign_tasks(graph.get_tasks(), ["backend_v2-1", "frontend_v2-1"])
+
+        assert len(tech_lead.assignment_calls) == 1, f"target_team={blank!r}"
+
+
 def test_two_tasks_targeting_the_same_team_calls_llm(tmp_path):
     """2 workers, 2 tasks both targeting the same team -> both tasks resolve to the same
     single candidate agent, which is itself an ambiguity (two tasks competing for one agent),
@@ -352,7 +372,7 @@ def test_homogeneous_assign_no_starvation_under_shifting_three_agent_membership(
     offset keeps landing on the other two instead. Drives _try_homogeneous_target_assign
     directly across exactly that shifting-membership sequence and proves every agent that
     keeps coming up free eventually gets used -- ranking by per-agent placement history
-    (self._homogeneous_last_used), not list position, is what makes this hold."""
+    (self._agent_last_placed), not list position, is what makes this hold."""
     tech_lead = _RecordingTechLead()
     workers = [
         StubWorker("a1", stack_name="backend_v2"),
@@ -451,7 +471,33 @@ def test_homogeneous_assign_partial_failure_only_advances_the_successful_agent(t
     assert used_agents == {"backend_v2-1"}
     assert graph.get_task("t1").assigned_agent_id == "backend_v2-1"
     assert graph.get_task("t2").assigned_agent_id is None
-    assert swarm._homogeneous_last_used == {"backend_v2-1": 0}
+    assert swarm._agent_last_placed == {"backend_v2-1": 0}
+
+
+def test_lru_ranking_counts_placements_from_every_path(tmp_path):
+    """The fairness ranking must reflect *every* placement, not only the ones the
+    homogeneous fast path itself makes. A task placed by pinned reservation (or by the
+    Tech-Lead or guardrail paths) occupies its agent just as much, so an agent that has
+    just finished such a task must not outrank one that has done no work at all."""
+    tech_lead = _RecordingTechLead()
+    workers = [
+        StubWorker("b1", stack_name="backend_v2"),
+        StubWorker("b2", stack_name="backend_v2"),
+    ]
+    swarm, graph = _make_swarm(tmp_path, tech_lead, workers)
+    graph.add_task("t1", title="Pinned", target_team="backend_v2")
+    graph.update_task("t1", feature_branch="feature/t1", feature_branch_agent_id="b1")
+
+    # Round 1: placed by _reserve_pinned_tasks -- never touches the fast path.
+    swarm._assign_tasks(graph.get_tasks(), ["b1", "b2"])
+    assert graph.get_task("t1").assigned_agent_id == "b1"
+
+    # Round 2: b1 just finished a task and b2 has done nothing, so b2 is the fair pick.
+    graph.mark_branch_merged("t1")
+    graph.add_task("t2", title="Next", target_team="backend_v2")
+    swarm._assign_tasks(swarm._find_ready_tasks(), swarm._find_free_agents())
+
+    assert graph.get_task("t2").assigned_agent_id == "b2"
 
 
 def test_try_homogeneous_target_assign_returns_false_when_candidate_sets_differ(tmp_path):
