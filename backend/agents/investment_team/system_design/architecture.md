@@ -63,7 +63,7 @@ flowchart TB
     subgraph worker[Strategy Lab Dispatch — Temporal-only]
       BatchWF[StrategyLabBatchWorkflow<br/>strategy_lab/temporal/workflows.py<br/>wave/batch fan-out, 1 signal-brief call<br/>per batch — see §7]
       CycleWF[StrategyLabCycleWorkflow<br/>child workflow per cycle<br/>outer design-re-entry loop only]
-      DesignAttempt["run_design_attempt_activity<br/>runs StrategyLabOrchestrator._run_design_attempt VERBATIM:<br/>design+review → synthesis → refinement/alignment →<br/>verification/analysis → record assembly — all in ONE activity"]
+      DesignAttempt["run_design_attempt_activity<br/>runs StrategyLabOrchestrator._run_design_attempt unmodified:<br/>design+review → synthesis → refinement/alignment →<br/>verification/analysis → record assembly — all in ONE activity"]
       Finalize[finalize_cycle_record_activity<br/>signal-brief attach + paper-trade + persist]
       EventBus[job_event_bus.py<br/>SSE fan-out + job-service reconciliation]
     end
@@ -318,8 +318,11 @@ per-attempt pipeline — design ↔ review, code synthesis, refinement, trade
 alignment, verification, analysis, and record assembly — runs unmodified
 inside a **single** activity, `run_design_attempt_activity`
 ([`strategy_lab/temporal/activities.py`](../strategy_lab/temporal/activities.py)),
-which is a thin wrapper around `StrategyLabOrchestrator._run_design_attempt`.
-Temporal durability therefore applies at the *attempt* granularity, not at
+which is a thin wrapper around `StrategyLabOrchestrator._run_design_attempt` —
+"thin" meaning the pipeline logic inside that call is untouched; the wrapper
+itself adds cooperative-cancellation heartbeating, checkpoint-based state
+reseeding, and mapping any non-control-flow exception to Temporal's
+`ApplicationError`. Temporal durability therefore applies at the *attempt* granularity, not at
 each internal phase; a design-attempt checkpoint taken at the design/synthesis
 boundary inside that same activity lets a crash-and-retry resume past a
 completed design phase instead of re-paying for it (see
