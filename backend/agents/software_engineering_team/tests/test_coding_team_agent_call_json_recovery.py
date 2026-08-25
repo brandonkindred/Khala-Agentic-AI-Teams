@@ -132,6 +132,20 @@ def test_tier3_non_dict_result_is_rejected() -> None:
         _agent_call_json(agent, "p")
 
 
+def test_tier2_non_dict_result_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``extract_json_object`` is documented and typed to return only ``Dict[str, Any]`` or
+    ``None``, but ``_agent_call_json`` must not trust that contract blindly: if tier 2 ever
+    returns a non-dict (e.g. a list), it must be rejected the same way tier 3's non-dict
+    results already are, rather than leaking past the function's own dict contract."""
+    import software_engineering_team.tech_lead_agent.agent as tl_mod
+
+    monkeypatch.setattr(
+        tl_mod, "extract_json_object", lambda text, required_keys=None: ["not", "a", "dict"]
+    )
+    with pytest.raises(json.JSONDecodeError):
+        _agent_call_json(_FakeAgent("irrelevant, extract_json_object is mocked"), "p")
+
+
 def test_tier3_anchor_mismatch_is_rejected() -> None:
     """A reply containing only unrelated prose-wrapped JSON (e.g. a stray usage/token
     report) is correctly declined by tier 2's anchor check. Tier 3's

@@ -19,7 +19,7 @@ This module collapses the pattern to one definition.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, List, Optional
 
 from llm_service import get_strands_model
 
@@ -155,7 +155,13 @@ def resolve_text_mode_strands_model(llm: Any) -> Any:
     return resolve_strands_model(llm, response_format="text")
 
 
-def run_strands_agent(agent_factory: Callable[..., Any], model: Any, prompt: str) -> str:
+def run_strands_agent(
+    agent_factory: Callable[..., Any],
+    model: Any,
+    prompt: str,
+    *,
+    system_prompt_content: Optional[List[Any]] = None,
+) -> str:
     """Run a one-shot Strands agent on ``prompt`` and return its stripped text.
 
     The single definition of the build-agent → stringify → strip incantation,
@@ -164,12 +170,23 @@ def run_strands_agent(agent_factory: Callable[..., Any], model: Any, prompt: str
     one place instead of being copied at both call sites.
 
     Preconditions:
-        ``agent_factory(model=model)`` returns a callable accepting ``prompt``.
+        ``agent_factory(model=model)`` (or ``agent_factory(model=model,
+        system_prompt=system_prompt_content)`` when ``system_prompt_content``
+        is given) returns a callable accepting ``prompt``.
     Postconditions:
         Returns ``str(agent(prompt)).strip()``; any exception raised while
-        building or running the agent propagates to the caller.
+        building or running the agent propagates to the caller. When
+        ``system_prompt_content`` is falsy (the default), the agent is built
+        exactly as before this parameter existed (``agent_factory(model=model)``),
+        so existing callers are unaffected. When truthy, it is passed verbatim
+        as the agent's ``system_prompt`` -- callers are responsible for
+        wrapping any cache-eligible segment in a ``CacheBreakpoint`` before
+        passing it here (see ``llm_service.CacheBreakpoint``).
     """
-    return str(agent_factory(model=model)(prompt)).strip()
+    agent_kwargs: dict = {"model": model}
+    if system_prompt_content:
+        agent_kwargs["system_prompt"] = system_prompt_content
+    return str(agent_factory(**agent_kwargs)(prompt)).strip()
 
 
 @dataclass(frozen=True)

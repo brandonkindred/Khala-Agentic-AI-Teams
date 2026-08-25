@@ -38,6 +38,23 @@ def test_adapt_planning_result_success_with_handoff() -> None:
     assert out.assumptions == ["Web-first"]
 
 
+def test_adapt_planning_result_propagates_resolved_questions() -> None:
+    """resolved_questions from handoff_package flow through to PlanningAdapterResult unchanged."""
+    resolved = [{"question_text": "Which auth provider?", "answer": "OAuth via Google."}]
+    result = {
+        "success": True,
+        "handoff_package": {
+            "validated_spec_content": "Spec content.",
+            "prd_content": "PRD content.",
+            "client_context": {"success_criteria": []},
+            "summary": "Handoff complete.",
+            "resolved_questions": resolved,
+        },
+    }
+    out = adapt_planning_result(result, spec_title="Project")
+    assert out.resolved_questions == resolved
+
+
 def test_adapt_planning_result_raises_when_success_false() -> None:
     """adapt_planning_result raises ValueError when result.success is False or missing."""
     with pytest.raises(ValueError, match="Workflow failed"):
