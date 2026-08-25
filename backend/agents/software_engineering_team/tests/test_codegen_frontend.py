@@ -879,7 +879,28 @@ class TestFrontendDocAgentDeprecated:
 
 
 class TestCodegenDevelopmentAgent:
+    def test_read_repo_code(self, tmp_path):
+        """Integration check that the production FRONTEND_CONFIG/PROFILE actually
+        excludes node_modules -- the synthetic config tests in
+        test_v2_config_orchestrator.py only prove that an arbitrary configured
+        exclusion is honored, not that node_modules is one of them. Mirrors
+        test_codegen_backend.py::TestCodegenDevelopmentAgent.test_read_repo_code
+        for the frontend stack."""
+        from software_engineering_team.codegen_team.orchestrator import CodegenDevelopmentAgent
+
+        (tmp_path / "app.ts").write_text("export const x = 1;")
+        (tmp_path / "readme.md").write_text("# Readme")
+        (tmp_path / "node_modules").mkdir()
+        (tmp_path / "node_modules" / "skip.ts").write_text("// do not include")
+        agent = CodegenDevelopmentAgent(MagicMock(), "frontend")
+        code = agent._read_repo_code(tmp_path)
+        assert "app.ts" in code
+        assert "export const x = 1;" in code
+        assert "skip.ts" not in code
+
     def test_build_tool_runners(self):
+        """_build_tool_runners filters a frontend tool-agent map down to the
+        runnable (state-management, git-branch-management) subset."""
         from software_engineering_team.codegen_team.models import ToolAgentKind
         from software_engineering_team.codegen_team.orchestrator import CodegenDevelopmentAgent
         from software_engineering_team.codegen_team.tool_agents.frontend.state_management import (

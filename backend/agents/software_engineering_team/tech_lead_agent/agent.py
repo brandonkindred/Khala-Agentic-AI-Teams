@@ -156,6 +156,9 @@ def _agent_call_json(
              anchored on ``required_keys`` with correct last-candidate-wins
              handling of an echoed format example. This tier recovers the vast
              majority of prose-/fence-wrapped replies without ever reaching tier 3.
+             Its result is validated as a ``dict`` before being accepted (mirroring
+             tier 3's own validation below); a non-``dict`` result is treated as a
+             parse failure and raises ``json.JSONDecodeError``.
           3. The canonical ``extract_json_from_response`` as a final fallback, so
              this call site still benefits from any recovery capability unique to
              it. Tiers 1-2 exist specifically so well-formed or salvageable JSON
@@ -186,6 +189,8 @@ def _agent_call_json(
         pass
     recovered = extract_json_object(raw, required_keys=required_keys)
     if recovered is not None:
+        if not isinstance(recovered, dict):
+            raise json.JSONDecodeError("extract_json_object returned a non-dict object", raw, 0)
         return recovered
     expected_keys = frozenset(required_keys) if required_keys is not None else None
     try:

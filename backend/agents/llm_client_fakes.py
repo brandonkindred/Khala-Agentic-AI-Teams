@@ -11,7 +11,7 @@ standard agents ``pythonpath`` -- mirroring ``job_service_client_fake.py``'s
 established pattern -- any team's tests can pull them in with a single
 one-liner::
 
-    from llm_client_fakes import _make_claude_client, _text_message
+    from llm_client_fakes import _make_claude_client, _text_message, _tool_use_message
 
 Leading underscores on the symbols mark them as test-only doubles, not a
 public API; the module itself has no leading underscore so it is importable
@@ -57,6 +57,52 @@ def _text_message(
         usage_kwargs["cache_creation_input_tokens"] = cache_creation_input_tokens
     return SimpleNamespace(
         content=[SimpleNamespace(type="text", text=text)],
+        stop_reason=stop_reason,
+        usage=SimpleNamespace(**usage_kwargs),
+    )
+
+
+def _tool_use_message(
+    name,
+    tool_input,
+    *,
+    tool_id="toolu_1",
+    stop_reason="tool_use",
+    input_tokens=11,
+    output_tokens=7,
+    cache_read_input_tokens=None,
+    cache_creation_input_tokens=None,
+):
+    """Script a forced tool-call reply -- e.g. Strands' structured-output
+    tool-forcing (the tool ``name`` is the output model's class name) or an
+    ordinary tool invocation. Mirrors ``_text_message``'s cache-token kwarg
+    handling; the content-block shape mirrors
+    ``llm_service/tests/test_claude_client.py``'s private ``_tool_message``,
+    centralized here (with cache-token scripting added) so teams outside
+    ``llm_service`` don't need to reach into its private ``tests/`` package.
+
+    Preconditions:
+        ``name`` is the tool name the scripted reply invokes (for forced
+        structured output, the output model's class name); ``tool_input`` is
+        the dict the tool call carries as its arguments.
+
+    Postconditions:
+        Returns a ``SimpleNamespace`` shaped like an Anthropic SDK message
+        whose sole content block is a ``tool_use`` invocation of ``name``
+        with ``input=tool_input`` -- the same fake-message shape
+        :func:`_text_message` returns for a text reply, so both drop into
+        ``_SequentialFakeMessages``/``_make_claude_client`` interchangeably.
+        ``usage`` carries ``cache_read_input_tokens``/
+        ``cache_creation_input_tokens`` only when the corresponding kwarg is
+        not ``None``, matching :func:`_text_message`'s convention.
+    """
+    usage_kwargs = {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    if cache_read_input_tokens is not None:
+        usage_kwargs["cache_read_input_tokens"] = cache_read_input_tokens
+    if cache_creation_input_tokens is not None:
+        usage_kwargs["cache_creation_input_tokens"] = cache_creation_input_tokens
+    return SimpleNamespace(
+        content=[SimpleNamespace(type="tool_use", id=tool_id, name=name, input=tool_input)],
         stop_reason=stop_reason,
         usage=SimpleNamespace(**usage_kwargs),
     )
@@ -126,6 +172,7 @@ def _make_claude_client(messages: List[Any]):
 __all__ = [
     "_FakeStreamCtx",
     "_text_message",
+    "_tool_use_message",
     "_SequentialFakeMessages",
     "_build_claude_client",
     "_make_claude_client",

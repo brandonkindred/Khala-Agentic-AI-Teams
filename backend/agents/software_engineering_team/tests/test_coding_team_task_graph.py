@@ -45,6 +45,37 @@ def test_assign_task_to_agent_one_per_agent() -> None:
     assert tg.get_task_for_agent("agent-a").id == "t2"
 
 
+def test_same_stack_agent_ids_hold_independent_tasks() -> None:
+    """A widened roster gives one stack multiple agent_ids (e.g. backend_v2-1,
+    backend_v2-2); the one-active-task invariant must be enforced per agent_id, not per
+    stack -- both same-stack agents hold independent tasks at once, and a third task
+    cannot be assigned to either while it's still busy, but the *other* same-stack agent
+    is unaffected."""
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task("t1", title="T1")
+    tg.add_task("t2", title="T2")
+    tg.add_task("t3", title="T3")
+
+    assert tg.assign_task_to_agent("t1", "backend_v2-1") is True
+    assert tg.assign_task_to_agent("t2", "backend_v2-2") is True
+    assert tg.get_task_for_agent("backend_v2-1").id == "t1"
+    assert tg.get_task_for_agent("backend_v2-2").id == "t2"
+
+    # Both agents are busy with independent, unmerged tasks -- neither can take t3.
+    assert tg.assign_task_to_agent("t3", "backend_v2-1") is False
+    assert tg.assign_task_to_agent("t3", "backend_v2-2") is False
+    assert tg.get_task_for_agent("backend_v2-1").id == "t1"
+    assert tg.get_task_for_agent("backend_v2-2").id == "t2"
+
+    # Freeing one same-stack agent does not affect the other's active task.
+    tg.mark_branch_merged("t1")
+    assert tg.get_task_for_agent("backend_v2-1") is None
+    assert tg.get_task_for_agent("backend_v2-2").id == "t2"
+    assert tg.assign_task_to_agent("t3", "backend_v2-1") is True
+    assert tg.get_task_for_agent("backend_v2-1").id == "t3"
+    assert tg.get_task_for_agent("backend_v2-2").id == "t2"
+
+
 def test_assign_task_to_agent_deps_satisfied() -> None:
     """assign_task_to_agent allows assignment only when dependencies are merged."""
     tg = TaskGraphService(job_id="j1")
