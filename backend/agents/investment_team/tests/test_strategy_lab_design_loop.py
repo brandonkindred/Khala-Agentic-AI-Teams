@@ -543,7 +543,7 @@ def test_design_max_llm_calls_env_parsing(monkeypatch: pytest.MonkeyPatch) -> No
 # this payload must restrict the run to forex — otherwise the payload's
 # asset_class contradicts the pin and readiness Rule 11 (correctly) rejects it
 # before the mechanical repairs under test are ever reached.
-_FOREX_ONLY = ["stocks", "crypto", "futures", "commodities"]
+_EXCLUDE_ALL_BUT_FOREX = ["stocks", "crypto", "futures", "commodities"]
 
 
 def _mechanical_spec_dict() -> Dict[str, Any]:
@@ -597,7 +597,7 @@ def test_mechanical_only_spec_reaches_ready_with_zero_revise(
 
     events: list = []
     record = orch.run_cycle(
-        exclude_asset_classes=_FOREX_ONLY,
+        exclude_asset_classes=_EXCLUDE_ALL_BUT_FOREX,
         prior_records=[],
         config=_config(),
         on_phase=lambda phase, data: events.append((phase, data)),
@@ -687,10 +687,16 @@ def test_mechanical_repair_then_substantive_critical_still_revises(
 def test_revise_always_requests_self_review_when_round_is_clean(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Even when a round's readiness gate passes and no mechanical repair
-    fires, ``_run_design_review_rounds`` still calls ``DesignAgent.revise``
-    with ``skip_self_review=False`` — the incoming spec's cleanliness says
-    nothing about the revision the LLM is about to produce."""
+    """The deterministic ``SpecReadinessGate`` passing (no critical, no
+    mechanical repair fired) is a distinct thing from the *round* being
+    ready: a readiness-clean spec still reaches the LLM reviewer, which can
+    independently decline it on design-quality grounds — exactly what this
+    test's stubbed ``design_review_agent.run`` does on round 0
+    (``SpecCritique(ready=False, ...)``), triggering the real ``revise``
+    call under test. ``_run_design_review_rounds`` calls it with
+    ``skip_self_review=False`` regardless: the incoming spec's readiness-gate
+    cleanliness says nothing about whether the LLM's upcoming revision will
+    be clean."""
     orch = StrategyLabOrchestrator()
 
     monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict(), "scripted"))
@@ -758,7 +764,7 @@ def test_revise_does_not_skip_self_review_when_mechanical_repair_fires(
     _force_synthesis_skip(monkeypatch, orch, _VALID_CODE)
     _short_circuit_synthesis(monkeypatch)
 
-    orch.run_cycle(prior_records=[], config=_config(), exclude_asset_classes=_FOREX_ONLY)
+    orch.run_cycle(prior_records=[], config=_config(), exclude_asset_classes=_EXCLUDE_ALL_BUT_FOREX)
 
     assert len(revise_calls) == 1
     assert revise_calls[0]["skip_self_review"] is False
@@ -998,7 +1004,7 @@ def test_budget_exhaustion_after_repair_preserves_repaired_spec(
 
     monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _market_must_not_run)
 
-    record = orch.run_cycle(prior_records=[], config=_config(), exclude_asset_classes=_FOREX_ONLY)
+    record = orch.run_cycle(prior_records=[], config=_config(), exclude_asset_classes=_EXCLUDE_ALL_BUT_FOREX)
 
     assert record.backtest.status == "failed: budget_exhausted"
     # The repaired spec is preserved (forex/1h/40% draft → 1d/25% after repair).

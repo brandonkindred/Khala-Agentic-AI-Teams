@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import random
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
@@ -100,14 +101,22 @@ def test_select_normalizes_aliases_in_the_exclusion() -> None:
 
 
 def test_select_ignores_a_bare_string_rather_than_iterating_characters() -> None:
-    """``str`` is itself iterable, so a bare string must not be character-
-    iterated into a meaningless exclusion set that silently inverts the
-    caller's intent."""
-    # No character of "stocks" resolves to a class, so nothing is excluded and
-    # every category stays selectable — but crucially the function must not
-    # crash or treat {'s','t','o','c','k'} as meaningful.
-    picked = select_asset_category(["stocks"])
-    assert picked in PROMPT_ASSET_CLASSES and picked != "stocks"
+    """``str`` is itself iterable, so a genuinely bare string (not a list
+    containing one) must not be character-iterated into a meaningless
+    exclusion set that silently inverts the caller's intent.
+
+    Regression test: an earlier version of this test passed ``["stocks"]`` —
+    a well-formed one-item list — which exercises ordinary exclusion (each
+    call site actually excludes "stocks", for the mundane reason that it's a
+    valid list item) and cannot catch a character-iteration bug at all.
+    """
+    # No character of "stocks" resolves to a class, so nothing is excluded
+    # and every category — including "stocks" itself — stays selectable; the
+    # invariant under test is that the function doesn't crash or treat
+    # {'s', 't', 'o', 'c', 'k'} as meaningful exclusions.
+    for _ in range(20):
+        picked = select_asset_category("stocks")  # type: ignore[arg-type]
+        assert picked in PROMPT_ASSET_CLASSES
 
 
 def test_select_avoid_steers_away_from_over_represented_classes() -> None:
@@ -146,8 +155,6 @@ def _stub_backtest_result() -> BacktestResult:
 
 
 def _record(asset_class: str) -> StrategyLabRecord:
-    from investment_team.api.main import _now
-
     suffix = uuid.uuid4().hex[:6]
     strategy = StrategySpec(
         strategy_id=f"s-{suffix}",
@@ -161,7 +168,7 @@ def _record(asset_class: str) -> StrategyLabRecord:
         risk_limits={},
         speculative=False,
     )
-    now = _now()
+    now = datetime.now(timezone.utc).isoformat()
     backtest = BacktestRecord(
         backtest_id=f"bt-{suffix}",
         strategy_id=strategy.strategy_id,
@@ -303,7 +310,7 @@ def test_design_loop_pins_single_category_and_scopes_prior_records(
         if phase == "telemetry" and data.get("scope") == "design_loop"
     ]
     assert design_loop_events
-    assert design_loop_events[-1]["asset_category"] == "forex"
+    assert design_loop_events[-1].get("asset_category") == "forex"
 
 
 def test_design_loop_pins_one_of_several_allowed_categories(
@@ -360,7 +367,7 @@ def test_design_loop_pins_one_of_several_allowed_categories(
         if phase == "telemetry" and data.get("scope") == "design_loop"
     ]
     assert design_loop_events
-    assert design_loop_events[-1]["asset_category"] == selected_category
+    assert design_loop_events[-1].get("asset_category") == selected_category
 
 
 # ---------------------------------------------------------------------------
@@ -599,7 +606,7 @@ def test_design_loop_telemetry_includes_asset_category_on_success(
         if phase == "telemetry" and data.get("scope") == "design_loop"
     ]
     assert design_loop_events
-    assert design_loop_events[-1]["asset_category"] == "stocks"
+    assert design_loop_events[-1].get("asset_category") == "stocks"
 
 
 # ---------------------------------------------------------------------------
@@ -665,7 +672,7 @@ def test_design_loop_drops_diversity_directive_when_pin_forces_over_represented_
     )
 
     assert len(captured) == 1
-    convergence_directives = captured[0]["convergence_directives"] or []
+    convergence_directives = captured[0].get("convergence_directives") or []
     assert not any("You MUST choose a DIFFERENT asset class" in d for d in convergence_directives)
 
 
@@ -706,7 +713,7 @@ def test_design_loop_keeps_the_stall_directive_when_pinned(
     )
 
     assert len(captured) == 1
-    convergence_directives = captured[0]["convergence_directives"] or []
+    convergence_directives = captured[0].get("convergence_directives") or []
     assert any("indicator combination" in d for d in convergence_directives)
 
 

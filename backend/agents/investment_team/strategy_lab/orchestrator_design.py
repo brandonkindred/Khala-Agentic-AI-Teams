@@ -937,6 +937,16 @@ class DesignMixin:
         :class:`CritiqueLedger` the caller owns, so the budget-exhaustion
         handler in :meth:`_run_design_loop` can still read the counters
         accumulated for the rounds completed before a charge failed.
+        ``selected_category`` is the single asset class this design attempt
+        is pinned to (from :func:`select_asset_category`), passed to the
+        readiness gate as ``pinned_asset_class`` so Rule 11 rejects a spec
+        whose ``asset_class`` — or whose ``target_symbols`` — drift off that
+        category. ``exclude_asset_classes`` is the *user's* excluded classes
+        (the complement of their run-start ``allowed_asset_classes``
+        selection, not the narrower per-attempt pin), threaded through to
+        every spec-building call so an omitted ``asset_class`` inferred from
+        symbols (see ``_infer_asset_class_from_symbols``) can never land on a
+        category the user excluded from the run entirely.
         Post: returns ``(spec, rationale, ready, stop_reason, loop_telemetry)``
         — the final candidate spec, its latest rationale, whether the
         reviewer marked it ready on the most recent round, the reason the
@@ -1505,6 +1515,14 @@ class DesignMixin:
         Preconditions:
             ``resume_spec is None`` if and only if ``resume_design_context
             is None``.
+            ``signal_briefs`` is an optional map of allowed asset class ->
+            per-category signal-intelligence brief (see
+            :func:`_compute_signal_brief_snapshot`). The attempt's
+            ``_run_design_loop`` selects its own pinned category's entry via
+            ``select_signal_brief``; a missing entry yields ``None`` for that
+            category (the design prompt omits its signal section) rather
+            than substituting another category's brief. An excluded category
+            must never appear in the map.
         """
         if (resume_spec is None) != (resume_design_context is None):
             raise ValueError(

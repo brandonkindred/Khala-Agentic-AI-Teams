@@ -2349,6 +2349,18 @@ def _run_one_strategy_lab_cycle(
     does not implement any of that logic itself.
 
     Args:
+        precomputed_signal_briefs: Optional per-category signal-brief map
+            (asset class -> brief), produced once per batch by
+            :func:`_compute_signal_brief_snapshot` and forwarded verbatim to
+            :meth:`StrategyLabOrchestrator.run_cycle` as its ``signal_briefs``
+            argument. The design attempt selects its own pinned category's
+            entry; a missing entry (or ``None``) means no brief for that
+            category. When ``None``, the cycle runs with no signal brief at
+            all (the direct/test-caller path).
+        signal_brief_storage: The same batch's raw storage dict (paired with
+            ``precomputed_signal_briefs``), forwarded to
+            :func:`_finalize_strategy_lab_cycle_record` so it can attach the
+            record's own category's entry to ``signal_intelligence_brief``.
         prior_records: Precomputed prior-record snapshot, supplied by the wave
             driver so the whole table isn't re-read + re-parsed per concurrent
             cycle. Precondition: it must reflect pre-wave state (the caller reads
@@ -5321,7 +5333,7 @@ def _apply_paper_trading_failure(
 
 
 def _fail_paper_trading_session(
-    session_id: str, error: str, divergence_analysis: str = None
+    session_id: str, error: str, divergence_analysis: Optional[str] = None
 ) -> None:
     """Mark a paper-trading session ``failed`` (best-effort, idempotent).
 

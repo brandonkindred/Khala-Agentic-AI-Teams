@@ -1390,10 +1390,21 @@ class SpecReadinessGate(GateResultsMixin):
     # readiness critical remains, a spec outside the pinned category can never
     # reach code synthesis: the restriction is enforced, not merely requested.
     #
-    # The symbol half is deliberately separated from the class half: an
-    # on-category spec carrying a stray off-category ticker is a *mechanical*
-    # defect that ``mechanical_repair.repair_spec`` strips deterministically
-    # before the reviewer runs, exactly as it does for Rules 7 and 8.
+    # The symbol half is deliberately separated from the class half, and is
+    # checked here even though ``mechanical_repair.repair_spec`` ALSO strips
+    # off-category symbols — the two are not redundant, they cover disjoint
+    # cases. A *minority* mismatch (most symbols on-category, a stray one or
+    # two aren't) is the mechanical case repair_spec handles deterministically
+    # before the reviewer runs, the same way it handles Rules 7 and 8. A
+    # *wholesale* mismatch (every named symbol is off-category) is not a
+    # stray ticker but evidence the whole named universe contradicts the
+    # declared class; repair_spec deliberately leaves it untouched (stripping
+    # to an empty list would fall back to the pinned class's full default
+    # universe, silently laundering the mismatch instead of surfacing it).
+    # This check is what catches that wholesale case: it fires unconditionally
+    # on any off-category symbol, so if repair_spec already handled a minority
+    # mismatch this never sees one; if it didn't (wholesale), this is the only
+    # thing standing between the mismatch and a readiness-clean spec.
     # ------------------------------------------------------------------
     def _check_asset_category_pin(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
         pinned = ctx.pinned_asset_class

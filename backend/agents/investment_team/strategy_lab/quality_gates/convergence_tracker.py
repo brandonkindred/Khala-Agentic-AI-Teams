@@ -154,6 +154,21 @@ class ConvergenceTracker:
     # Directives for ideation
     # ------------------------------------------------------------------
 
+    def _recent_asset_class_history(self, tail: int) -> List[str]:
+        """The windowed slice both diversity methods key their computation on.
+
+        Pre: none beyond the type constraint.
+        Post: the last ``tail`` entries of ``_asset_class_history``, or the
+        full history when ``tail <= 0`` (matching the ``[-0:]``-returns-
+        everything pitfall documented on the two callers). Centralising this
+        one-line slice keeps ``get_diversity_avoid_classes`` and
+        ``get_diversity_directive`` from independently recomputing the same
+        window — and risking drift between them — every time either is called.
+        """
+        if tail > 0:
+            return self._asset_class_history[-tail:]
+        return list(self._asset_class_history)
+
     def get_diversity_avoid_classes(self, tail: int = 10) -> Set[str]:
         """Return the asset classes ``get_diversity_directive`` would tell the
         designer to avoid — over-represented in the recent window (>40% share).
@@ -174,7 +189,7 @@ class ConvergenceTracker:
         """
         if len(self._asset_class_history) < 3:
             return set()
-        recent = self._asset_class_history[-tail:] if tail > 0 else list(self._asset_class_history)
+        recent = self._recent_asset_class_history(tail)
         counts = Counter(recent)
         total = len(recent)
         return {ac for ac, c in counts.items() if c / total > 0.4}
@@ -196,8 +211,7 @@ class ConvergenceTracker:
         if not over_represented:
             return None
 
-        recent = self._asset_class_history[-tail:] if tail > 0 else list(self._asset_class_history)
-        total = len(recent)
+        total = len(self._recent_asset_class_history(tail))
         return (
             f"MANDATORY: The last {total} strategies are heavily skewed toward "
             f"{', '.join(sorted(over_represented))}. {ASSET_CLASS_ONLY_STEERING_PHRASE}. "
