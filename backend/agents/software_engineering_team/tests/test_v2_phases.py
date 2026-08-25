@@ -40,11 +40,11 @@ def _patch_autospec(monkeypatch, module, name: str, *, return_value=None, side_e
 
 
 def test_fe_documentation_phase_no_agent() -> None:
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ExecutionResult,
         PlanningResult,
     )
-    from software_engineering_team.frontend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.frontend.profile import (
         run_documentation_phase,
     )
 
@@ -61,12 +61,12 @@ def test_fe_documentation_phase_no_agent() -> None:
 
 
 def test_fe_documentation_phase_missing_methods() -> None:
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ExecutionResult,
         PlanningResult,
         ToolAgentKind,
     )
-    from software_engineering_team.frontend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.frontend.profile import (
         run_documentation_phase,
     )
 
@@ -84,12 +84,12 @@ def test_fe_documentation_phase_missing_methods() -> None:
 
 
 def test_fe_documentation_phase_clean_review(tmp_path: Path) -> None:
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ExecutionResult,
         PlanningResult,
         ToolAgentKind,
     )
-    from software_engineering_team.frontend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.frontend.profile import (
         run_documentation_phase,
     )
 
@@ -110,12 +110,12 @@ def test_fe_documentation_phase_clean_review(tmp_path: Path) -> None:
 
 
 def test_fe_documentation_phase_fixes_issues(tmp_path: Path) -> None:
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ExecutionResult,
         PlanningResult,
         ToolAgentKind,
     )
-    from software_engineering_team.frontend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.frontend.profile import (
         run_documentation_phase,
     )
 
@@ -125,7 +125,7 @@ def test_fe_documentation_phase_fixes_issues(tmp_path: Path) -> None:
         # First call: 1 issue, second: 0 issues
         if state["i"] == 0:
             state["i"] += 1
-            from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
+            from software_engineering_team.codegen_team.models import ReviewIssue
 
             return SimpleNamespace(issues=[ReviewIssue(description="fix-readme")])
         return SimpleNamespace(issues=[])
@@ -148,12 +148,12 @@ def test_fe_documentation_phase_fixes_issues(tmp_path: Path) -> None:
 
 
 def test_fe_documentation_phase_review_exception(tmp_path) -> None:
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ExecutionResult,
         PlanningResult,
         ToolAgentKind,
     )
-    from software_engineering_team.frontend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.frontend.profile import (
         run_documentation_phase,
     )
 
@@ -173,19 +173,19 @@ def test_fe_documentation_phase_review_exception(tmp_path) -> None:
 
 
 def test_fe_documentation_phase_problem_solve_exception(tmp_path) -> None:
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ExecutionResult,
         PlanningResult,
         ToolAgentKind,
     )
-    from software_engineering_team.frontend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.frontend.profile import (
         run_documentation_phase,
     )
 
     def boom(_):
         raise RuntimeError("ps broke")
 
-    from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
+    from software_engineering_team.codegen_team.models import ReviewIssue
 
     fake_doc = SimpleNamespace(
         review=lambda inp: SimpleNamespace(issues=[ReviewIssue(description="i1")]),
@@ -203,13 +203,13 @@ def test_fe_documentation_phase_problem_solve_exception(tmp_path) -> None:
 
 
 def test_fe_documentation_phase_problem_solve_no_files(tmp_path) -> None:
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ExecutionResult,
         PlanningResult,
         ReviewIssue,
         ToolAgentKind,
     )
-    from software_engineering_team.frontend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.frontend.profile import (
         run_documentation_phase,
     )
 
@@ -235,13 +235,13 @@ def test_fe_documentation_phase_problem_solve_no_files(tmp_path) -> None:
 
 
 def test_be_documentation_phase_no_agent() -> None:
-    from software_engineering_team.backend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ExecutionResult as _Exec,
     )
-    from software_engineering_team.backend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         PlanningResult as _Plan,
     )
-    from software_engineering_team.backend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.backend.profile import (
         run_documentation_phase,
     )
 
@@ -262,7 +262,9 @@ def test_be_documentation_phase_no_agent() -> None:
 
 
 def test_fe_deliver_no_files_returns_empty_summary(tmp_path: Path) -> None:
-    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.orchestrator import (
+        _frontend_run_deliver as run_deliver,
+    )
 
     result = run_deliver(task_id="t1", repo_path=tmp_path, files={}, summary="")
     assert result.merged is False
@@ -271,8 +273,10 @@ def test_fe_deliver_no_files_returns_empty_summary(tmp_path: Path) -> None:
 
 
 def test_fe_deliver_git_agent_success(tmp_path: Path) -> None:
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.orchestrator import (
+        _frontend_run_deliver as run_deliver,
+    )
 
     class _GitAgent:
         def deliver(self, inp):
@@ -295,8 +299,10 @@ def test_fe_deliver_git_agent_success(tmp_path: Path) -> None:
 
 
 def test_fe_deliver_other_tool_agent_appends_files(tmp_path: Path) -> None:
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.orchestrator import (
+        _frontend_run_deliver as run_deliver,
+    )
 
     class _DocsAgent:
         def deliver(self, inp):
@@ -323,8 +329,10 @@ def test_fe_deliver_other_tool_agent_appends_files(tmp_path: Path) -> None:
 
 
 def test_fe_deliver_tool_agent_exception_isolated(tmp_path: Path, monkeypatch) -> None:
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.orchestrator import (
+        _frontend_run_deliver as run_deliver,
+    )
 
     class _ExplodingDocs:
         def deliver(self, inp):
@@ -352,8 +360,10 @@ def test_fe_deliver_tool_agents_empty_files_skip_git_agent_merge(
 ) -> None:
     """Empty tool-agent delivery skips Git agent work in merge mode."""
     from shared.git import git_utils
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.orchestrator import (
+        _frontend_run_deliver as run_deliver,
+    )
 
     class _DocsAgent:
         def deliver(self, inp):
@@ -392,8 +402,10 @@ def test_fe_deliver_tool_agents_empty_files_skip_git_agent_merge(
 
 def test_fe_deliver_git_agent_failure_falls_through_to_inline(tmp_path: Path, monkeypatch) -> None:
     from shared.git import git_utils
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.orchestrator import (
+        _frontend_run_deliver as run_deliver,
+    )
     from software_engineering_team.shared import repo_writer
 
     class _BadGit:
@@ -422,7 +434,9 @@ def test_fe_deliver_git_agent_failure_falls_through_to_inline(tmp_path: Path, mo
 def test_fe_deliver_inline_create_branch_fails(tmp_path: Path, monkeypatch) -> None:
     """Frontend inline delivery reports feature-branch creation failures."""
     from shared.git import git_utils
-    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.orchestrator import (
+        _frontend_run_deliver as run_deliver,
+    )
 
     _patch_autospec(monkeypatch, git_utils, "create_feature_branch", return_value=(False, "no perms"))
     _patch_autospec(monkeypatch, git_utils, "checkout_branch", return_value=(True, ""))
@@ -435,7 +449,9 @@ def test_fe_deliver_inline_create_branch_fails(tmp_path: Path, monkeypatch) -> N
 def test_fe_deliver_inline_write_fails(tmp_path: Path, monkeypatch) -> None:
     """Frontend inline delivery reports write failures after branch creation."""
     from shared.git import git_utils
-    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.orchestrator import (
+        _frontend_run_deliver as run_deliver,
+    )
     from software_engineering_team.shared import repo_writer
 
     _patch_autospec(monkeypatch, git_utils, "create_feature_branch", return_value=(True, "feature/x"))
@@ -450,7 +466,9 @@ def test_fe_deliver_inline_write_fails(tmp_path: Path, monkeypatch) -> None:
 def test_fe_deliver_inline_merge_fails(tmp_path: Path, monkeypatch) -> None:
     """Frontend inline delivery aborts and reports merge failures."""
     from shared.git import git_utils
-    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.orchestrator import (
+        _frontend_run_deliver as run_deliver,
+    )
     from software_engineering_team.shared import repo_writer
 
     _patch_autospec(monkeypatch, git_utils, "create_feature_branch", return_value=(True, "feature/x"))
@@ -470,7 +488,9 @@ def test_fe_deliver_inline_quality_gate_blocks_merge(tmp_path: Path, monkeypatch
     verifier fails -- before this gate existed, the merge always proceeded
     once the commit succeeded."""
     from shared.git import git_utils
-    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.orchestrator import (
+        _frontend_run_deliver as run_deliver,
+    )
     from software_engineering_team.shared import repo_writer
 
     _patch_autospec(monkeypatch, git_utils, "create_feature_branch", return_value=(True, "feature/x"))
@@ -505,8 +525,10 @@ def test_fe_deliver_dispatches_real_git_agent_with_quality_gate_fields(
     if build_verifier/build_verify_label/linting_tool_agent/lint_agent_type
     were removed from frontend_code_v2_team.models.ToolAgentPhaseInput.
     """
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.orchestrator import (
+        _frontend_run_deliver as run_deliver,
+    )
     from software_engineering_team.shared import tool_agent_git_branch as tab_mod
     from software_engineering_team.shared.tool_agent_git_branch import (
         GitBranchManagementToolAgent,
@@ -554,7 +576,9 @@ def test_fe_deliver_dispatches_real_git_agent_with_quality_gate_fields(
 def test_fe_deliver_inline_happy_path(tmp_path: Path, monkeypatch) -> None:
     """Frontend inline delivery exercises branch creation, write, merge, and cleanup."""
     from shared.git import git_utils
-    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.orchestrator import (
+        _frontend_run_deliver as run_deliver,
+    )
     from software_engineering_team.shared import repo_writer
 
     create_mock = _patch_autospec(
@@ -584,7 +608,9 @@ def test_fe_deliver_inline_happy_path(tmp_path: Path, monkeypatch) -> None:
 def test_fe_deliver_handoff_branch_does_not_merge(tmp_path: Path, monkeypatch) -> None:
     """merge_to_development=False prepares a branch for external Tech Lead review."""
     from shared.git import git_utils
-    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.orchestrator import (
+        _frontend_run_deliver as run_deliver,
+    )
     from software_engineering_team.shared import repo_writer
 
     _patch_autospec(monkeypatch, git_utils, "create_feature_branch", return_value=(True, "feature/x"))
@@ -617,7 +643,9 @@ def test_fe_deliver_handoff_branch_does_not_merge(tmp_path: Path, monkeypatch) -
 def test_fe_deliver_sanitizes_task_id_for_branch_names(tmp_path: Path, monkeypatch) -> None:
     """Task IDs with invalid git characters are slugified before branch creation."""
     from shared.git import git_utils
-    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.orchestrator import (
+        _frontend_run_deliver as run_deliver,
+    )
     from software_engineering_team.shared import repo_writer
 
     create_mock = _patch_autospec(
@@ -646,8 +674,10 @@ def test_fe_deliver_sanitizes_task_id_for_branch_names(tmp_path: Path, monkeypat
 def test_fe_deliver_handoff_with_tool_agent_appends_files(tmp_path: Path, monkeypatch) -> None:
     """Tool-agent output is included when handoff mode bypasses the Git agent."""
     from shared.git import git_utils
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.orchestrator import (
+        _frontend_run_deliver as run_deliver,
+    )
     from software_engineering_team.shared import repo_writer
 
     class _DocsAgent:
@@ -700,8 +730,10 @@ def test_fe_deliver_handoff_with_tool_agents_no_files_skips_branch(
     tmp_path: Path, monkeypatch
 ) -> None:
     from shared.git import git_utils
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.orchestrator import (
+        _frontend_run_deliver as run_deliver,
+    )
 
     class _DocsAgent:
         def deliver(self, inp):
@@ -728,7 +760,9 @@ def test_fe_deliver_handoff_with_tool_agents_no_files_skips_branch(
 
 def test_fe_deliver_handoff_create_branch_fails(tmp_path: Path, monkeypatch) -> None:
     from shared.git import git_utils
-    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.orchestrator import (
+        _frontend_run_deliver as run_deliver,
+    )
 
     _patch_autospec(monkeypatch, git_utils, "create_feature_branch", return_value=(False, "no perms"))
     checkout_mock = _patch_autospec(
@@ -750,7 +784,9 @@ def test_fe_deliver_handoff_create_branch_fails(tmp_path: Path, monkeypatch) -> 
 
 def test_fe_deliver_handoff_commit_fails_cleans_created_branch(tmp_path: Path, monkeypatch) -> None:
     from shared.git import git_utils
-    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.orchestrator import (
+        _frontend_run_deliver as run_deliver,
+    )
     from software_engineering_team.shared import repo_writer
 
     _patch_autospec(monkeypatch, git_utils, "create_feature_branch", return_value=(True, "feature/x"))
@@ -817,7 +853,9 @@ def test_be_deliver_handoff_restores_development_on_checkout_failure(
     tmp_path: Path, monkeypatch, caplog
 ) -> None:
     from shared.git import git_utils
-    from software_engineering_team.backend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.orchestrator import (
+        _backend_run_deliver as run_deliver,
+    )
     from software_engineering_team.shared import repo_writer
 
     _assert_restores_development_on_existing_branch_checkout_failure(
@@ -829,7 +867,9 @@ def test_fe_deliver_handoff_restores_development_on_checkout_failure(
     tmp_path: Path, monkeypatch, caplog
 ) -> None:
     from shared.git import git_utils
-    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.orchestrator import (
+        _frontend_run_deliver as run_deliver,
+    )
     from software_engineering_team.shared import repo_writer
 
     _assert_restores_development_on_existing_branch_checkout_failure(
@@ -840,7 +880,9 @@ def test_fe_deliver_handoff_restores_development_on_checkout_failure(
 def test_be_deliver_inline_happy_path(tmp_path: Path, monkeypatch) -> None:
     """Backend inline delivery exercises branch creation, write, merge, and cleanup."""
     from shared.git import git_utils
-    from software_engineering_team.backend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.orchestrator import (
+        _backend_run_deliver as run_deliver,
+    )
     from software_engineering_team.shared import repo_writer
 
     create_mock = _patch_autospec(
@@ -879,8 +921,10 @@ def test_be_deliver_dispatches_real_git_agent_with_quality_gate_fields(
     tests, forwarding tests that replace ``run_deliver`` entirely), so it
     needs its own direct coverage.
     """
-    from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.backend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.orchestrator import (
+        _backend_run_deliver as run_deliver,
+    )
     from software_engineering_team.shared import tool_agent_git_branch as tab_mod
     from software_engineering_team.shared.tool_agent_git_branch import (
         GitBranchManagementToolAgent,
@@ -928,7 +972,9 @@ def test_be_deliver_dispatches_real_git_agent_with_quality_gate_fields(
 def test_be_deliver_sanitizes_task_id_for_branch_names(tmp_path: Path, monkeypatch) -> None:
     """Backend delivery uses the same branch-safe task-id slug as frontend."""
     from shared.git import git_utils
-    from software_engineering_team.backend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.orchestrator import (
+        _backend_run_deliver as run_deliver,
+    )
     from software_engineering_team.shared import repo_writer
 
     create_mock = _patch_autospec(
@@ -958,7 +1004,9 @@ def test_be_deliver_sanitizes_task_id_for_branch_names(tmp_path: Path, monkeypat
 def test_be_deliver_handoff_branch_does_not_merge(tmp_path: Path, monkeypatch) -> None:
     """Backend deliver supports the same branch handoff mode."""
     from shared.git import git_utils
-    from software_engineering_team.backend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.orchestrator import (
+        _backend_run_deliver as run_deliver,
+    )
     from software_engineering_team.shared import repo_writer
 
     _patch_autospec(
@@ -994,8 +1042,10 @@ def test_be_deliver_handoff_with_tool_agents_no_files_skips_branch(
     tmp_path: Path, monkeypatch
 ) -> None:
     from shared.git import git_utils
-    from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.backend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.orchestrator import (
+        _backend_run_deliver as run_deliver,
+    )
 
     class _DocsAgent:
         def deliver(self, inp):
@@ -1025,8 +1075,10 @@ def test_be_deliver_tool_agents_empty_files_skip_git_agent_merge(
 ) -> None:
     """Backend merge mode does not call the Git agent when tool agents produce no files."""
     from shared.git import git_utils
-    from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.backend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.orchestrator import (
+        _backend_run_deliver as run_deliver,
+    )
 
     class _DocsAgent:
         def deliver(self, inp):
@@ -1066,7 +1118,9 @@ def test_be_deliver_tool_agents_empty_files_skip_git_agent_merge(
 def test_be_deliver_handoff_write_fails_cleans_created_branch(tmp_path: Path, monkeypatch) -> None:
     """A failed handoff write restores development and deletes the fresh branch."""
     from shared.git import git_utils
-    from software_engineering_team.backend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.codegen_team.orchestrator import (
+        _backend_run_deliver as run_deliver,
+    )
     from software_engineering_team.shared import repo_writer
 
     _patch_autospec(

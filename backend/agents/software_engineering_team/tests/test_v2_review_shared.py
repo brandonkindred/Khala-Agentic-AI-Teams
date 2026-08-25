@@ -368,7 +368,7 @@ def test_run_review_log_summary_branch(tmp_path: Path, caplog) -> None:
 
 def test_run_review_tool_agents_recommendations_and_raise(tmp_path: Path) -> None:
     """Tool agents contribute issues + recommendation issues; a raising agent is skipped."""
-    from software_engineering_team.backend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
@@ -420,7 +420,7 @@ def test_run_review_threads_repo_path_into_tool_agents(tmp_path: Path) -> None:
     (and the pre-collapse backend/frontend implementations) gave full-review tool
     agents — losing it silently drops repository context in the full Review phase.
     """
-    from software_engineering_team.backend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
@@ -1063,7 +1063,7 @@ def test_microtask_qa_and_security_hooks_without_cache_param_still_work(tmp_path
 def test_microtask_tool_agents_no_context_variant(tmp_path: Path) -> None:
     """Microtask tool agents fold issues + recommendation issues with the no-context
     (frontend-style) config: ``source`` is ``kind.value`` verbatim and rec is blank."""
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
@@ -1096,7 +1096,7 @@ def test_microtask_tool_agents_no_context_variant(tmp_path: Path) -> None:
 
 def test_microtask_tool_agent_raises_is_skipped(tmp_path: Path) -> None:
     """A raising microtask tool agent is logged and skipped (failure_context path)."""
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.models import ToolAgentKind
 
     config = _build_config()
     raising = MagicMock()
@@ -1120,7 +1120,7 @@ def test_microtask_tool_agent_cache_hit_skips_second_call(tmp_path: Path) -> Non
     """A second run_microtask_review call with byte-identical inputs and a
     shared tool_agent_cache reuses the first call's result -- the seam that
     closes the CR-gate-vs-QA/Security-gate residual 2x duplication."""
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.models import ToolAgentKind
     from software_engineering_team.shared.agent_review import AgentReviewCache
     from software_engineering_team.shared.v2_models import ReviewIssue as _RI
 
@@ -1161,7 +1161,7 @@ def test_microtask_tool_agent_cache_misses_on_changed_files(tmp_path: Path) -> N
     """Different ``files`` (the ``current_files`` the cache key is hashed
     from) between two calls busts the cache -- a batch-fix between the CR
     gate's call and the QA gate's call must recompute for real."""
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.models import ToolAgentKind
     from software_engineering_team.shared.agent_review import AgentReviewCache
     from software_engineering_team.shared.v2_models import ReviewIssue as _RI
 
@@ -1198,7 +1198,7 @@ def test_microtask_tool_agent_cache_misses_on_changed_files(tmp_path: Path) -> N
 def test_microtask_tool_agent_cache_none_default_is_unchanged_passthrough(tmp_path: Path) -> None:
     """Omitting tool_agent_cache (the default) preserves today's unconditional-call
     behavior -- every existing caller that doesn't opt in is unaffected."""
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.models import ToolAgentKind
     from software_engineering_team.shared.v2_models import ReviewIssue as _RI
 
     calls = {"n": 0}
@@ -1237,7 +1237,7 @@ def test_microtask_tool_agent_malformed_output_is_never_cached_and_stays_contain
     the first call or the retry -- and must not be cached (so the second call
     is a live retry, not a cache-hit), meaning every call retries live instead
     of replaying the same failure forever."""
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.models import ToolAgentKind
     from software_engineering_team.shared.agent_review import AgentReviewCache
 
     calls = {"n": 0}

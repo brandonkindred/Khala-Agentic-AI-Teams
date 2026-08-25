@@ -14,7 +14,7 @@ import pytest
 
 
 def _fe_microtask():
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         Microtask,
         ToolAgentKind,
     )
@@ -23,7 +23,7 @@ def _fe_microtask():
 
 
 def _fe_phase_input(**kwargs):
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         Phase,
         ToolAgentPhaseInput,
     )
@@ -42,7 +42,7 @@ def _fe_phase_input(**kwargs):
 
 
 def _fe_tool_input():
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentInput
+    from software_engineering_team.codegen_team.models import ToolAgentInput
 
     return ToolAgentInput(
         microtask=_fe_microtask(),
@@ -54,7 +54,7 @@ def _fe_tool_input():
 
 
 def _fe_review_issue(**kwargs):
-    from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
+    from software_engineering_team.codegen_team.models import ReviewIssue
 
     base = dict(
         source="build_specialist",
@@ -73,7 +73,7 @@ def _fe_review_issue(**kwargs):
 
 
 def _be_microtask():
-    from software_engineering_team.backend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         Microtask,
         ToolAgentKind,
     )
@@ -82,7 +82,7 @@ def _be_microtask():
 
 
 def _be_phase_input(**kwargs):
-    from software_engineering_team.backend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         Phase,
         ToolAgentPhaseInput,
     )
@@ -101,7 +101,7 @@ def _be_phase_input(**kwargs):
 
 
 def _be_tool_input():
-    from software_engineering_team.backend_code_v2_team.models import ToolAgentInput
+    from software_engineering_team.codegen_team.models import ToolAgentInput
 
     return ToolAgentInput(
         microtask=_be_microtask(),
@@ -112,7 +112,7 @@ def _be_tool_input():
 
 
 def _be_review_issue(**kwargs):
-    from software_engineering_team.backend_code_v2_team.models import ReviewIssue
+    from software_engineering_team.codegen_team.models import ReviewIssue
 
     base = dict(
         source="build_specialist",
@@ -249,7 +249,7 @@ class TestFEGitBranchManagement:
 
 class TestFEBuildSpecialist:
     def _agent(self):
-        from software_engineering_team.frontend_code_v2_team.tool_agents.build_specialist import (
+        from software_engineering_team.codegen_team.tool_agents.frontend.build_specialist import (
             agent as mod,
         )
 
@@ -351,7 +351,7 @@ class TestFEBuildSpecialist:
 
 class TestBEBuildSpecialist:
     def _agent(self):
-        from software_engineering_team.backend_code_v2_team.tool_agents.build_specialist import (
+        from software_engineering_team.codegen_team.tool_agents.backend.build_specialist import (
             agent as mod,
         )
 

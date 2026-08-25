@@ -178,7 +178,7 @@ class TestBuildProductionReviewKwargs:
 #   a) The team-lead class (deferred import inside the function body).
 #   b) The review-kwargs helper.
 #
-# (a) is patched at its canonical module, e.g. ``frontend_code_v2_team.FrontendCodeV2TeamLead``.
+# (a) is patched at its canonical module, ``codegen_team.CodegenTeamLead``.
 # (b) For temporal/activities.py: ``build_production_review_kwargs_in_process`` is
 #     imported inside the function body, so we patch it on the shared module object.
 # ---------------------------------------------------------------------------
@@ -218,9 +218,9 @@ class TestFrontendImplPassesReviewAgents:
 
         monkeypatch.setenv("LLM_PROVIDER", "dummy")
         with (
-            # activities.py: ``from software_engineering_team.frontend_code_v2_team import ...``
+            # activities.py: ``from software_engineering_team.codegen_team import CodegenTeamLead``
             patch(
-                "software_engineering_team.frontend_code_v2_team.FrontendCodeV2TeamLead",
+                "software_engineering_team.codegen_team.CodegenTeamLead",
                 return_value=fake_team_lead,
             ),
             patch.object(pra, "build_production_review_kwargs_in_process", return_value=review_kwargs),
@@ -279,9 +279,9 @@ class TestBackendImplPassesReviewAgents:
 
         monkeypatch.setenv("LLM_PROVIDER", "dummy")
         with (
-            # activities.py: ``from software_engineering_team.backend_code_v2_team import ...``
+            # activities.py: ``from software_engineering_team.codegen_team import CodegenTeamLead``
             patch(
-                "software_engineering_team.backend_code_v2_team.BackendCodeV2TeamLead",
+                "software_engineering_team.codegen_team.CodegenTeamLead",
                 return_value=fake_team_lead,
             ),
             patch.object(pra, "build_production_review_kwargs_in_process", return_value=review_kwargs),

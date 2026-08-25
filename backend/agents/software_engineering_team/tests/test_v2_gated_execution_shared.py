@@ -36,7 +36,7 @@ import pytest
 
 from llm_service.clients.dummy import DummyLLMClient
 from shared.dev_models.models import SystemArchitecture
-from software_engineering_team.backend_code_v2_team import models as be_models
+from software_engineering_team.codegen_team import models as be_models
 from software_engineering_team.shared.phases import execution as execution_mod
 from software_engineering_team.shared.phases.execution import (
     _WAVE_EXECUTION_CONCURRENCY,

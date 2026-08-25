@@ -6,9 +6,8 @@ review clause, conventions map), the config-driven ``_read_repo_code``/
 ``_detect_tooling`` overrides, and a full mocked run of the inherited
 ``_run_development_workflow`` proving the base actually drives the v2
 pipeline end-to-end from config-sourced data. A parity test at the bottom
-proves the base can faithfully hold ``backend_code_v2_team``'s real
-``PROFILE``/``ToolAgentKind`` values without touching that team's own
-``orchestrator.py`` (still Step 3's job, not this one).
+proves the base can faithfully hold the codegen team's real backend
+``PROFILE``/``ToolAgentKind`` values via ``STACK_CONFIGS["backend"]``.
 """
 
 from __future__ import annotations
@@ -20,15 +19,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from shared.dev_models.models import Task, TaskStatus, TaskType
-
-# Transitional import, pending Step 3 (a separate, dependent issue): this
-# shared test suite reaches into backend_code_v2_team's public orchestrator
-# module only for TestBackendConfigParity's real-value fidelity check below.
-# Once Step 3 re-expresses backend_code_v2_team.orchestrator as a thin
-# instance of ConfigDrivenV2DevelopmentAgent, this parity class either moves
-# into that team's own test tree or is deleted as redundant with its tests.
-from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-from software_engineering_team.backend_code_v2_team.orchestrator import BackendDevelopmentAgent
+from software_engineering_team.codegen_team.models import ToolAgentKind
+from software_engineering_team.codegen_team.orchestrator import STACK_CONFIGS
 from software_engineering_team.shared.phases.execution import ReviewDependencies
 from software_engineering_team.shared.stack_profile import StackProfile
 from software_engineering_team.shared.v2_models import Phase
@@ -334,31 +326,26 @@ class TestFullPipelineRun:
 
 
 class TestBackendConfigParity:
-    """Proves ``ConfigDrivenV2DevelopmentAgent`` can faithfully hold
-    ``backend_code_v2_team``'s real config values (mirroring
-    ``test_v2_team_config.py::TestBackendParity``) without this base being
-    wired into that team's own ``orchestrator.py`` yet.
+    """Proves ``ConfigDrivenV2DevelopmentAgent`` can faithfully hold the
+    codegen team's real backend config values (mirroring
+    ``test_v2_team_config.py::TestBackendParity``).
 
-    Reads the real profile via ``BackendDevelopmentAgent.PROFILE`` (a public
-    class attribute of the team's public ``orchestrator`` module) rather than
-    backend_code_v2_team's private ``phases._profile`` submodule directly --
-    the identical live object either way (``orchestrator.py`` sets
-    ``PROFILE = PROFILE`` from that same import), so parity stays real
+    Reads the real profile via ``STACK_CONFIGS["backend"].stack_profile`` --
+    the codegen team's public ``orchestrator`` module export -- rather than
+    reaching into ``stacks.backend.profile`` directly, so parity stays real
     (no hardcoded copy to drift out of sync) without this shared test suite
-    reaching into another team's private internals.
+    reaching into the stack's private internals.
 
     Deliberately narrow in scope: it checks fidelity to backend's *real*
     values (which have no extra review clause and conventions only for
     ``"java"``/``"_default"``), not general merge/delegation behavior --
     that is already covered against synthetic configs by
     ``TestBuildTaskRequirements`` and ``TestConfigDrivenAxes`` above.
-    Transitional pending Step 3 (see the import comment above); expected to
-    move or be deleted once that lands.
     """
 
     def _build(self) -> ConfigDrivenV2DevelopmentAgent:
         config = V2TeamConfig(
-            stack_profile=BackendDevelopmentAgent.PROFILE,
+            stack_profile=STACK_CONFIGS["backend"].stack_profile,
             tool_agent_kinds=frozenset(k.value for k in ToolAgentKind),
             extra_review_clause="",
             output_template_path_prefixes=("backend/", "./backend/"),
@@ -380,7 +367,7 @@ class TestBackendConfigParity:
     def test_conventions_for_java_matches_backend_profile(self):
         assert self._build().conventions_for(
             "java"
-        ) == BackendDevelopmentAgent.PROFILE.conventions_for("java")
+        ) == STACK_CONFIGS["backend"].stack_profile.conventions_for("java")
 
     def test_conventions_for_unlisted_language_falls_back_to_backend_default(self):
         """Backend's real profile only defines ``java``/``_default`` -- a
@@ -388,27 +375,24 @@ class TestBackendConfigParity:
         the real profile's ``_default`` entry, not an empty/synthetic one."""
         assert self._build().conventions_for(
             "python"
-        ) == BackendDevelopmentAgent.PROFILE.conventions_for("python")
+        ) == STACK_CONFIGS["backend"].stack_profile.conventions_for("python")
         assert self._build().conventions_for(
             "python"
-        ) == BackendDevelopmentAgent.PROFILE.conventions_for("_default")
+        ) == STACK_CONFIGS["backend"].stack_profile.conventions_for("_default")
 
 
 class TestFrontendConfigParity:
-    """Proves ``ConfigDrivenV2DevelopmentAgent`` can faithfully hold
-    ``frontend_code_v2_team``'s real config values (mirroring
+    """Proves ``ConfigDrivenV2DevelopmentAgent`` can faithfully hold the
+    codegen team's real frontend config values (mirroring
     ``TestBackendConfigParity`` above and
     ``test_v2_team_config.py::TestFrontendParity``).
 
-    Reads the stack profile via ``FrontendDevelopmentAgent.PROFILE`` (a public
-    class attribute of the team's public ``orchestrator`` module) rather than
-    frontend_code_v2_team's private ``phases._profile`` submodule directly --
-    the identical live object either way (``orchestrator.py`` sets
-    ``PROFILE = PROFILE`` from that same import), so parity stays real
-    (no hardcoded copy to drift out of sync). The extra review clause
-    (``_ACCESSIBILITY_VERIFY_NOTE``) isn't exposed through that public
-    surface, so it is imported directly from ``phases._profile`` below --
-    the one deliberate reach into that team's private internals.
+    Reads the stack profile via ``STACK_CONFIGS["frontend"].stack_profile`` --
+    the codegen team's public ``orchestrator`` module export -- so parity
+    stays real (no hardcoded copy to drift out of sync). The extra review
+    clause (``_ACCESSIBILITY_VERIFY_NOTE``) isn't exposed through that public
+    surface, so it is imported directly from ``stacks.frontend.profile``
+    below -- the one deliberate reach into that stack's private internals.
 
     Deliberately narrow in scope: it checks fidelity to frontend's *real*
     values (which have an extra review clause and conventions only for
@@ -418,18 +402,15 @@ class TestFrontendConfigParity:
     """
 
     def _build(self) -> ConfigDrivenV2DevelopmentAgent:
-        from software_engineering_team.frontend_code_v2_team.models import (
+        from software_engineering_team.codegen_team.models import (
             ToolAgentKind as FrontendToolAgentKind,
         )
-        from software_engineering_team.frontend_code_v2_team.orchestrator import (
-            FrontendDevelopmentAgent,
-        )
-        from software_engineering_team.frontend_code_v2_team.phases._profile import (
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
             _ACCESSIBILITY_VERIFY_NOTE,
         )
 
         config = V2TeamConfig(
-            stack_profile=FrontendDevelopmentAgent.PROFILE,
+            stack_profile=STACK_CONFIGS["frontend"].stack_profile,
             tool_agent_kinds=frozenset(
                 k.value for k in FrontendToolAgentKind if k is not FrontendToolAgentKind.GENERAL
             ),
@@ -450,7 +431,7 @@ class TestFrontendConfigParity:
         assert self._build().default_language == "typescript"
 
     def test_tool_agent_kinds_match_frontend_enum(self):
-        from software_engineering_team.frontend_code_v2_team.models import (
+        from software_engineering_team.codegen_team.models import (
             ToolAgentKind as FrontendToolAgentKind,
         )
 
@@ -461,7 +442,7 @@ class TestFrontendConfigParity:
         assert agent.tool_agent_kinds == expected
 
     def test_extra_review_clause_is_accessibility_note(self):
-        from software_engineering_team.frontend_code_v2_team.phases._profile import (
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
             _ACCESSIBILITY_VERIFY_NOTE,
         )
 
@@ -479,27 +460,19 @@ class TestFrontendConfigParity:
     def test_conventions_for_typescript_falls_back_to_default(self):
         """Frontend's real profile only defines ``_default`` -- ``typescript``
         is not a separate key, so it must resolve through the ``_default`` entry."""
-        from software_engineering_team.frontend_code_v2_team.orchestrator import (
-            FrontendDevelopmentAgent,
-        )
-
         assert self._build().conventions_for(
             "typescript"
-        ) == FrontendDevelopmentAgent.PROFILE.conventions_for("typescript")
+        ) == STACK_CONFIGS["frontend"].stack_profile.conventions_for("typescript")
         assert self._build().conventions_for(
             "typescript"
-        ) == FrontendDevelopmentAgent.PROFILE.conventions_for("_default")
+        ) == STACK_CONFIGS["frontend"].stack_profile.conventions_for("_default")
 
     def test_conventions_for_unknown_language_falls_back_to_frontend_default(self):
         """An unlisted language (e.g. ``python``) must still resolve through
         the real profile's ``_default`` entry, not an empty/synthetic one."""
-        from software_engineering_team.frontend_code_v2_team.orchestrator import (
-            FrontendDevelopmentAgent,
-        )
-
         assert self._build().conventions_for(
             "python"
-        ) == FrontendDevelopmentAgent.PROFILE.conventions_for("python")
+        ) == STACK_CONFIGS["frontend"].stack_profile.conventions_for("python")
         assert self._build().conventions_for(
             "python"
-        ) == FrontendDevelopmentAgent.PROFILE.conventions_for("_default")
+        ) == STACK_CONFIGS["frontend"].stack_profile.conventions_for("_default")
