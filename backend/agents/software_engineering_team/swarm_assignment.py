@@ -124,8 +124,21 @@ class _AssignmentMixin:
         return assigned
 
     def _matching_free_agents(self, target_team: Optional[str], candidates: List[str]) -> List[str]:
-        """Agents in ``candidates`` whose team matches ``target_team``, in ``candidates``'
-        order (any agent matches a falsy ``target_team`` — see ``_target_matches_agent``)."""
+        """Agents in ``candidates`` whose team can execute a task targeting ``target_team``.
+
+        Preconditions:
+            - ``candidates`` holds agent ids; ids absent from ``self.agent_team_keys`` are
+              matched on the id itself (the same defaulting every other match site here
+              uses), so an unknown id is never silently dropped.
+        Postconditions:
+            - Returns a new list preserving ``candidates`` order, filtered by
+              ``_target_matches_agent``. A ``target_team`` that normalizes to an empty team
+              key (``None``, ``""``, or a whitespace/punctuation-only label — see
+              ``_team_key``) matches every agent, so the result is every candidate; callers
+              that must treat such a task as untargeted have to test the normalized key
+              themselves rather than infer it from this result.
+            - Never mutates ``candidates`` or any swarm state.
+        """
         return [
             agent_id
             for agent_id in candidates
@@ -175,6 +188,9 @@ class _AssignmentMixin:
               pools (unpinned/unassigned ready tasks; free agents not yet used this round)
               — the same precondition ``_try_deterministic_assign`` documents for its own
               inputs, inherited unchanged since this is only ever called from there.
+            - ``remaining_ready`` is non-empty (the caller returns early otherwise). The
+              size guard below relies on this to reject an empty matching-agent pool, and
+              the first task is read directly to seed the batch's team.
         Postconditions:
             - Returns False and makes no assignments unless every task in
               ``remaining_ready`` has a non-empty ``target_team`` and they all resolve to
@@ -201,7 +217,9 @@ class _AssignmentMixin:
             return False
         first_team = remaining_ready[0].target_team
         matching_free = self._matching_free_agents(first_team, remaining_free)
-        if not matching_free or len(matching_free) < len(remaining_ready):
+        # Covers an empty pool too: remaining_ready is non-empty by precondition, so a
+        # zero-length matching_free always trips this.
+        if len(matching_free) < len(remaining_ready):
             return False
 
         matching_set = set(matching_free)
