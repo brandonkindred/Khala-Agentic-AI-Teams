@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import fcntl
 import functools
 import json
 import logging
@@ -34,6 +33,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
+from shared.concurrency import flock_lock
 from shared.postgres import bounded_probe
 from software_engineering_team.clone_workspace import (
     PER_ISSUE_DIR_TEMPLATE,
@@ -1606,9 +1606,7 @@ class FileOutOfScopeIssuesBody(BaseModel):
     The GitHub token is injected server-side (never sent by the browser).
     """
 
-    proposal_ids: list[str] = Field(
-        description="Composite ids of the form 'job_id:proposal_id'."
-    )
+    proposal_ids: list[str] = Field(description="Composite ids of the form 'job_id:proposal_id'.")
     owner: str = Field(description="Repository owner.")
     repo: str = Field(description="Repository name.")
 
@@ -2653,20 +2651,16 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, pla
     # lock lives beside the checkout so it survives the coding team's post-success
     # rmtree of repo_path.
     lock_path = clone_lock_path(path)
-    try:
-        lock_file = open(lock_path, "w", encoding="utf-8")  # noqa: SIM115 - closed in the finally below
-    except OSError as e:
-        return f"could not acquire clone lock for {owner}/{repo}: {e}"
-    try:
+    with contextlib.ExitStack() as stack:
         try:
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            # Isolates a lock-acquisition failure (open()/flock() inside
+            # flock_lock's __enter__) from anything _clone_or_fetch() itself
+            # might raise: only the former should produce the "could not
+            # acquire clone lock" message below.
+            stack.enter_context(flock_lock(lock_path))
         except OSError as e:
             return f"could not acquire clone lock for {owner}/{repo}: {e}"
         return _clone_or_fetch()
-    finally:
-        with contextlib.suppress(OSError):
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
-        lock_file.close()
 
 
 def _require_coding_team_url() -> str:
