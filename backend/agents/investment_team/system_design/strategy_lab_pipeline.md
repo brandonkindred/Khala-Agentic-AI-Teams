@@ -129,20 +129,30 @@ between them under the current Temporal-only dispatch:
   `complete`) onto the UI's four-entry stepper — `ideating`, `coding`,
   `backtesting`, `analyzing`. An unmapped phase is not published at all.
 - `finalize_cycle_record_activity` calls `_finalize_strategy_lab_cycle_record`
-  with `on_phase=None`, so the `paper_trading*` rows below reach no subscriber.
+  with `on_phase=None`. That shared function (also used by the thread-mode
+  path below) is where every `paper_trading*` emit lives, so under
+  Temporal-only dispatch those calls become no-ops and the rows reach no
+  subscriber; they are genuinely live — not merely reserved names — when
+  `_run_one_strategy_lab_cycle` (thread mode) supplies a real `on_phase`.
   (`complete` is not emitted there — it comes from `RecordAssemblyMixin` inside
   `run_design_attempt_activity`, and *is* published, relabelled `analyzing`.)
 
-So a subscriber sees only those four names. Note also that `fetching_data` is
-emitted as a `sub_phase` of `backtesting`
+So a Temporal-dispatched subscriber sees only those four names. Note also
+that `fetching_data` is emitted as a `sub_phase` of `backtesting`
 (`emit("backtesting", {"sub_phase": "fetching_data"})`), not as a top-level
 phase, and that `telemetry` and `phase_transition` are emitted as well —
 deliberately unmapped, so an `on_phase` implementation must tolerate them
-rather than assert on an unknown name. The rows:
+rather than assert on an unknown name. The rows below document the raw
+internal `on_phase(phase, data)` payload — the contract every
+`_run_design_attempt` caller sees — not the further-filtered wire event a
+live SSE subscriber gets: `_design_attempt_progress_checkpoint`
+(`temporal/activities.py`) additionally whitelists `data`'s keys to
+`_PROGRESS_EVENT_FIELDS` before publishing, which drops fields like
+`rounds`/`round` shown below.
 
 | Phase | When emitted | Data fields |
 |---|---|---|
-| `ideating` | Start of cycle; also on re-ideation retry. Reaches a subscriber as the `_PROGRESS_PHASE_MAP` target of `designing`/`design_review`/`design_repair` | Whatever the underlying emit carries — e.g. `{ sub_phase: "started" }`, `{ sub_phase: "ready", rounds }`, `{ sub_phase: "started", round }`. There is no `retry`/`excluded` key. |
+| `ideating` | Start of cycle; also on re-ideation retry. Reaches a subscriber as the `_PROGRESS_PHASE_MAP` target of `designing`/`design_review`/`design_repair` | The internal emit's payload — e.g. `{ sub_phase: "started" }`, `{ sub_phase: "ready", rounds }`, `{ sub_phase: "started", round }`. There is no `retry`/`excluded` key. `rounds`/`round` are dropped by the wire-event field whitelist noted above. |
 | `fetching_data` | After ideation, before backtest. Emitted as `backtesting` with `sub_phase="fetching_data"`, never as a bare phase | `{ sub_phase: "fetching_data" }` — nothing else |
 | `aligning` | Trade-alignment audit and problem-solving loop | `{ sub_phase, alignment_round, trades_count?, issues_count?, issues_preview?, findings_count?, findings_preview?, changes_made?, predicted_aligned_after_fix? }` |
 | `analyzing` | Around the narrative draft | `{ sub_phase: "draft" }`, then `{ sub_phase: "completed", is_winning }` |

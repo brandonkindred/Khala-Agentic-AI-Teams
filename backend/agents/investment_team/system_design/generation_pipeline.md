@@ -489,7 +489,7 @@ flowchart TB
         RF --> SYN
         SYN -->|pass| BT[Execute in sandbox<br/>→ trade ledger]
         BT --> POST{Post-execution, still synthesis phase:<br/>TargetSymbolCoverage.check_trades<br/>— critical?}
-        POST -->|critical: coverage| SCX[Synthesis round budget<br/>exhausted → short-circuit]
+        POST -->|critical: coverage| SCX[Critical coverage failure<br/>→ short-circuit]
         POST -->|clean| EV{critical anomaly<br/>or zero trades?}
         EV -->|ENTRY_WITH_NO_EXIT| REDES[SpecImplementabilityError<br/>→ phase back to DESIGN]
         EV -->|other zero-trade,<br/>market data available| ZTRA[ZeroTradeRepairAgent]
