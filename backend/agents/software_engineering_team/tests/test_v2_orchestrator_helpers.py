@@ -11,7 +11,7 @@ import pytest
 from software_engineering_team.codegen_team.orchestrator import CodegenDevelopmentAgent
 
 
-def test_be_build_tool_agents():
+def test_backend_build_tool_agents():
     from software_engineering_team.codegen_team.models import ToolAgentKind
     from software_engineering_team.codegen_team.orchestrator import _build_backend_tool_agents
 
@@ -23,12 +23,12 @@ def test_be_build_tool_agents():
     assert ToolAgentKind.BUILD_SPECIALIST in agents
 
 
-def test_be_development_agent_init():
+def test_backend_development_agent_init():
     a = CodegenDevelopmentAgent(llm_client=MagicMock(), stack="backend")
     assert a.llm is not None
 
 
-def test_be_development_agent_build_tool_runners():
+def test_backend_development_agent_build_tool_runners():
     a = CodegenDevelopmentAgent(llm_client=MagicMock(), stack="backend")
 
     class _WithRun:
@@ -114,7 +114,7 @@ def test_fe_development_agent_init():
 # one is present, and the team lead builds/reuses the cache per resolved repo.
 
 
-def _be_dev_agent():
+def _backend_dev_agent():
     return CodegenDevelopmentAgent(llm_client=MagicMock(), stack="backend")
 
 
@@ -126,10 +126,10 @@ def _fe_dev_agent():
     return CodegenDevelopmentAgent(llm_client=MagicMock(), stack="frontend")
 
 
-def test_be_read_existing_code_uses_threaded_cache(tmp_path: Path):
+def test_backend_read_existing_code_uses_threaded_cache(tmp_path: Path):
     """With a cache threaded in, _read_existing_code delegates to it (no fresh walk)."""
     (tmp_path / "x.py").write_text("X = 1")
-    a = _be_dev_agent()
+    a = _backend_dev_agent()
     cache = MagicMock()
     a._repo_context_cache = cache
 
@@ -139,10 +139,10 @@ def test_be_read_existing_code_uses_threaded_cache(tmp_path: Path):
     assert out is cache.read.return_value
 
 
-def test_be_read_existing_code_fresh_walk_without_cache(tmp_path: Path):
+def test_backend_read_existing_code_fresh_walk_without_cache(tmp_path: Path):
     """With no cache, _read_existing_code falls back to the fresh budgeted walk."""
     (tmp_path / "x.py").write_text("X = 1")
-    a = _be_dev_agent()
+    a = _backend_dev_agent()
     assert a._repo_context_cache is None
     out = a._read_existing_code(tmp_path)
     assert "x.py" in out
@@ -167,7 +167,7 @@ def test_fe_read_existing_code_fresh_walk_without_cache(tmp_path: Path):
     assert "x.ts" in out
 
 
-def test_be_team_lead_repo_context_cache_is_lazy_and_reused(tmp_path: Path):
+def test_backend_team_lead_repo_context_cache_is_lazy_and_reused(tmp_path: Path):
     """The team lead builds one cache per resolved repo and reuses it across calls."""
     from software_engineering_team.codegen_team.orchestrator import (
         CodegenTeamLead,
@@ -247,11 +247,14 @@ def test_fe_detect_tooling_rejects_placeholder_and_unparseable(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_be_detect_tooling_nothing_configured(tmp_path: Path):
-    assert CodegenDevelopmentAgent(MagicMock(), "backend")._detect_tooling(tmp_path) == (False, False)
+def test_backend_detect_tooling_nothing_configured(tmp_path: Path):
+    assert CodegenDevelopmentAgent(MagicMock(), "backend")._detect_tooling(tmp_path) == (
+        False,
+        False,
+    )
 
 
-def test_be_detect_tooling_ruff_toml_and_pytest_ini(tmp_path: Path):
+def test_backend_detect_tooling_ruff_toml_and_pytest_ini(tmp_path: Path):
     (tmp_path / "ruff.toml").write_text("")
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
@@ -259,7 +262,7 @@ def test_be_detect_tooling_ruff_toml_and_pytest_ini(tmp_path: Path):
     assert has_lint and has_test
 
 
-def test_be_detect_tooling_pyproject_blocks(tmp_path: Path):
+def test_backend_detect_tooling_pyproject_blocks(tmp_path: Path):
     """A pyproject.toml carrying [tool.ruff] + [tool.pytest] blocks satisfies both."""
     (tmp_path / "tests").mkdir()
     (tmp_path / "pyproject.toml").write_text(
@@ -269,14 +272,14 @@ def test_be_detect_tooling_pyproject_blocks(tmp_path: Path):
     assert has_lint and has_test
 
 
-def test_be_detect_tooling_tests_dir_required_for_test(tmp_path: Path):
+def test_backend_detect_tooling_tests_dir_required_for_test(tmp_path: Path):
     """Lint alone (ruff.toml) without a tests dir reports lint=True, test=False."""
     (tmp_path / "ruff.toml").write_text("")
     has_lint, has_test = CodegenDevelopmentAgent(MagicMock(), "backend")._detect_tooling(tmp_path)
     assert has_lint and not has_test
 
 
-def test_be_detect_tooling_flake8_satisfies_lint(tmp_path: Path):
+def test_backend_detect_tooling_flake8_satisfies_lint(tmp_path: Path):
     (tmp_path / ".flake8").write_text("[flake8]")
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
@@ -284,7 +287,7 @@ def test_be_detect_tooling_flake8_satisfies_lint(tmp_path: Path):
     assert has_lint and has_test
 
 
-def test_be_detect_tooling_setup_cfg_flake8_section_satisfies_lint(tmp_path: Path):
+def test_backend_detect_tooling_setup_cfg_flake8_section_satisfies_lint(tmp_path: Path):
     """A ``[flake8]`` section in ``setup.cfg`` counts as lint config — a common
     flake8 location the file-name-only ``.flake8`` probe would miss (false
     negative)."""
@@ -295,7 +298,7 @@ def test_be_detect_tooling_setup_cfg_flake8_section_satisfies_lint(tmp_path: Pat
     assert has_lint and has_test
 
 
-def test_be_detect_tooling_setup_cfg_without_flake8_section_is_not_lint(tmp_path: Path):
+def test_backend_detect_tooling_setup_cfg_without_flake8_section_is_not_lint(tmp_path: Path):
     """A ``setup.cfg`` with no ``[flake8]`` section does not satisfy lint — the
     probe keys off the section header, not the file's mere presence."""
     (tmp_path / "setup.cfg").write_text("[metadata]\nname=app\n")
@@ -305,7 +308,7 @@ def test_be_detect_tooling_setup_cfg_without_flake8_section_is_not_lint(tmp_path
     assert not has_lint and has_test
 
 
-def test_be_detect_tooling_ignores_commented_out_section_headers(tmp_path: Path):
+def test_backend_detect_tooling_ignores_commented_out_section_headers(tmp_path: Path):
     """A section header inside a comment (``# [tool.ruff]``) is not treated as
     real config — the line-anchored probe skips comment lines, so a
     commented-out block no longer produces a false positive."""
@@ -319,7 +322,7 @@ def test_be_detect_tooling_ignores_commented_out_section_headers(tmp_path: Path)
     assert not has_lint and has_test
 
 
-def test_be_detect_tooling_matches_indented_section_header(tmp_path: Path):
+def test_backend_detect_tooling_matches_indented_section_header(tmp_path: Path):
     """A section header with leading whitespace still matches — stripping the
     line before the prefix check keeps real (lightly indented) config working."""
     (tmp_path / "pyproject.toml").write_text("  [tool.ruff]\n  line-length = 120\n")
@@ -344,7 +347,7 @@ def _toml_parser_available() -> bool:
 
 
 @pytest.mark.skipif(not _toml_parser_available(), reason="no tomllib/tomli parser available")
-def test_be_detect_tooling_toml_multiline_string_header_not_a_false_positive(tmp_path: Path):
+def test_backend_detect_tooling_toml_multiline_string_header_not_a_false_positive(tmp_path: Path):
     """A ``[tool.ruff]`` line that lives inside a multi-line string value in
     ``pyproject.toml`` (not a real table) must NOT satisfy the lint pre-flight —
     the ``toml_has_section`` parse sees it is a string, not a table, closing the
