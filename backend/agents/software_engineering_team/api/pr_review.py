@@ -504,21 +504,29 @@ def _pr_review_admission(owner: str, repo: str, pr_number: int):
 
 async def _start_pr_review_temporal(job_id: str, request: ReviewPrRequest, token: str) -> None:
     """
-    Dispatches a PR review job to Temporal.
+    Dispatches an asynchronous PR review job to Temporal in the background.
     """
     client = await get_temporal_client()
     
-    # Configurable workflow routing per best practices
+    # 1. SECURITY FIX: Stash the token in a secure cache (DO NOT send to Temporal!)
+    _main.stash_github_token(job_id, token) 
+    
     workflow_name = os.environ.get("TEMPORAL_PR_REVIEW_WORKFLOW", "CodeReviewWorkflow")
     task_queue = os.environ.get("TEMPORAL_CODE_REVIEW_QUEUE", "code_review-queue")
 
-    await client.start_workflow(
-        workflow_name, 
-        args=[job_id, request, token],
-        id=f"pr-review-{job_id}",
-        task_queue=task_queue, 
-    )
+    # 2. CONTRACT FIX: CodeReviewWorkflow expects a single dictionary
+    review_input = {
+        "job_id": job_id,
+        "request": request.model_dump() if hasattr(request, "model_dump") else request.dict()
+    }
 
+    # 3. Dispatch fire-and-forget (Token is omitted from args!)
+    await client.start_workflow(
+        workflow_name,
+        args=[review_input],
+        id=f"pr-review-{job_id}",
+        task_queue=task_queue,
+    )
 
 def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
     """Background hook: review the PR, posting exactly one comment per finding.
