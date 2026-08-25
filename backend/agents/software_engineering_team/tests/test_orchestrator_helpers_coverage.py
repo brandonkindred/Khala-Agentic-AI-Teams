@@ -530,18 +530,29 @@ def test_pra_and_planning_updaters_rescale_progress(monkeypatch):
     written: list = []
     monkeypatch.setattr(se_orch, "update_job", lambda job_id, **kw: written.append(kw))
 
-    updater = se_orch._make_phase_job_updater(
+    pra_updater = se_orch._make_phase_job_updater(
+        "j1",
+        subprocess_key="analysis_subprocess",
+        completed_key="analysis_completed_phases",
+        phase_order=se_orch.PRA_PHASE_ORDER,
+        progress_band=se_orch.PROGRESS_BAND_PRODUCT_ANALYSIS,
+    )
+    pra_updater(progress=100, status_text="done")
+    assert written[-1]["progress"] == 15
+    assert written[-1]["status_text"] == "done"
+
+    planning_updater = se_orch._make_phase_job_updater(
         "j1",
         subprocess_key="planning_subprocess",
         completed_key="planning_completed_phases",
         phase_order=se_orch.PLANNING_PHASE_ORDER,
         progress_band=se_orch.PROGRESS_BAND_PLANNING,
     )
-    updater(progress=100, status_text="done")
+    planning_updater(progress=100, status_text="done")
     assert written[-1]["progress"] == 30
     assert written[-1]["status_text"] == "done"
 
-    updater(progress="garbage", status_text="odd")
+    planning_updater(progress="garbage", status_text="odd")
     assert "progress" not in written[-1]
     assert written[-1]["status_text"] == "odd"
 
