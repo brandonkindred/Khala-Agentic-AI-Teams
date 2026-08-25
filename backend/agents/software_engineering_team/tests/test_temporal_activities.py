@@ -759,11 +759,10 @@ def test_execute_coding_team_activity_stays_on_block_pause_strategy(
     )
 
 
-def test_temporal_pra_and_planning_updaters_are_the_shared_band_factories(monkeypatch) -> None:
-    """The Temporal activities must use the same updater factories as the thread
-    path so sub-agent 0-100 progress is rescaled onto the phase bands — a raw
-    pass-through updater lets the bar sprint to 100 during planning and collapse
-    at the coding handoff."""
+def test_pra_and_planning_band_factories_rescale_progress(monkeypatch) -> None:
+    """The shared phase updater factories rescale sub-agent 0-100 progress onto
+    the PRA and planning bands when called through the same entry points the
+    Temporal activities import."""
     import software_engineering_team.orchestrator as se_orch
 
     written: list = []
