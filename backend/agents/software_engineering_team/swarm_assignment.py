@@ -104,6 +104,56 @@ class _AssignmentMixin:
                 assigned.add(task.id)
         return assigned
 
+    def _try_homogeneous_target_assign(
+        self,
+        remaining_ready: List[Task],
+        remaining_free: List[str],
+        used_agents: set[str],
+        assigned_tasks: set[str],
+    ) -> bool:
+        """Fan a batch of same-``target_team`` tasks out across same-stack free agents,
+        bypassing the Tech-Lead LLM, when there's no contention for those agents.
+
+        A roster with multiple workers per stack lets one ``target_team`` legitimately
+        match 2+ free ``agent_id``s of the same stack — that is not real ambiguity
+        requiring the Tech Lead's judgment, it's several interchangeable workers able to
+        take several interchangeable tasks. Real ambiguity is a *choice* between different
+        stacks (untargeted tasks) or genuine contention (more same-team tasks than matching
+        free agents, which needs prioritization). This only ever fires for the narrow,
+        unambiguous "N same-stack tasks, >=N same-stack free agents" shape; every other
+        shape (mixed/untargeted tasks, or contention) is left to the caller's existing
+        strict one-candidate-per-task logic.
+
+        Postconditions:
+            - Returns False and makes no assignments unless every task in
+              ``remaining_ready`` shares the same non-empty ``target_team`` and at least
+              that many free agents match it.
+            - Returns True otherwise: matching free agents are paired to tasks 1:1 in list
+              order via ``self._try_assign``, with ``used_agents``/``assigned_tasks``
+              updated in place for each successful placement. Any excess tasks beyond the
+              matching-agent pool are left unassigned for a later round.
+        """
+        target_teams = {t.target_team for t in remaining_ready}
+        if len(target_teams) != 1:
+            return False
+        target_team = next(iter(target_teams))
+        if not target_team:
+            return False
+
+        matching_free = [
+            agent_id
+            for agent_id in remaining_free
+            if _target_matches_agent(target_team, self.agent_team_keys.get(agent_id, agent_id))
+        ]
+        if len(matching_free) < len(remaining_ready):
+            return False
+
+        for task, agent_id in zip(remaining_ready, matching_free):
+            if self._try_assign(task.id, agent_id):
+                used_agents.add(agent_id)
+                assigned_tasks.add(task.id)
+        return True
+
     def _try_deterministic_assign(
         self,
         ready: List[Task],
@@ -114,12 +164,14 @@ class _AssignmentMixin:
         """Assign every still-unassigned ready task via pure ``target_team`` matching,
         bypassing the Tech-Lead LLM call, when the mapping is unambiguous.
 
-        Reuses ``_target_matches_agent`` (the same predicate the LLM-path guardrails use) to
-        find each remaining task's candidate agents among the remaining free agents. The
-        mapping is unambiguous only when every remaining task has exactly one candidate and no
-        two tasks share the same candidate — this also covers the trivial "one free agent, one
-        ready task" case, since an untargeted task matches any agent and a single remaining
-        free agent is then its sole candidate.
+        Tries ``_try_homogeneous_target_assign`` first (same-team tasks, no contention for
+        the matching same-stack agents), then falls back to matching each remaining task
+        to its candidate agents among the remaining free agents via
+        ``_target_matches_agent`` (the same predicate the LLM-path guardrails use). That
+        fallback mapping is unambiguous only when every remaining task has exactly one
+        candidate and no two tasks share the same candidate — this also covers the trivial
+        "one free agent, one ready task" case, since an untargeted task matches any agent
+        and a single remaining free agent is then its sole candidate.
 
         A pinned task whose pinned agent isn't free this round is excluded from this pool
         entirely rather than treated as a candidate for some other free agent: only
@@ -134,9 +186,10 @@ class _AssignmentMixin:
               task or free agent to place, if any such task has zero or more than one matching
               free agent, or if two such tasks would resolve to the same agent — callers must
               then fall through to the unchanged Tech-Lead LLM path.
-            - Returns True only when the mapping is unambiguous; in that case every remaining,
-              unpinned ready task is attempted via ``self._try_assign``, with ``used_agents``
-              and ``assigned_tasks`` updated in place for each successful placement, and no LLM
+            - Returns True when the mapping is unambiguous (directly, or via the homogeneous
+              fast path); in that case every remaining, unpinned ready task placed by that
+              path is attempted via ``self._try_assign``, with ``used_agents`` and
+              ``assigned_tasks`` updated in place for each successful placement, and no LLM
               call is made.
         """
         remaining_ready = [
@@ -145,6 +198,11 @@ class _AssignmentMixin:
         remaining_free = [a for a in free_agents if a not in used_agents]
         if not remaining_ready or not remaining_free:
             return False
+
+        if self._try_homogeneous_target_assign(
+            remaining_ready, remaining_free, used_agents, assigned_tasks
+        ):
+            return True
 
         agent_for_task: dict[str, str] = {}
         for task in remaining_ready:

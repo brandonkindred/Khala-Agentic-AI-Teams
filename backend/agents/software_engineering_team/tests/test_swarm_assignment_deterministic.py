@@ -44,9 +44,9 @@ class _RecordingTechLead:
 class StubWorker:
     """Minimal duck-typed implementation worker; ``_assign_tasks`` never calls run_implement."""
 
-    def __init__(self, agent_id: str) -> None:
+    def __init__(self, agent_id: str, stack_name: str | None = None) -> None:
         self.agent_id = agent_id
-        self.stack_spec = StackSpec(name=agent_id, tools_services=[])
+        self.stack_spec = StackSpec(name=stack_name or agent_id, tools_services=[])
 
 
 def _make_swarm(tmp_path, tech_lead, workers):
@@ -225,6 +225,95 @@ def test_try_deterministic_assign_returns_false_on_duplicate_candidate(tmp_path)
     assert result is False
     assert used_agents == set()
     assert assigned_tasks == set()
+
+
+def test_multiple_same_stack_free_agents_all_reported_free(tmp_path):
+    """A widened roster with 2 free same-stack agents and 1 busy same-stack agent ->
+    ``_find_free_agents`` reports both free agents, not just the first-listed one."""
+    tech_lead = _RecordingTechLead()
+    workers = [
+        StubWorker("backend_v2-1", stack_name="backend_v2"),
+        StubWorker("backend_v2-2", stack_name="backend_v2"),
+        StubWorker("backend_v2-3", stack_name="backend_v2"),
+    ]
+    swarm, graph = _make_swarm(tmp_path, tech_lead, workers)
+    graph.add_task("busy", title="Busy")
+    graph.assign_task_to_agent("busy", "backend_v2-1")
+
+    assert swarm._find_free_agents() == ["backend_v2-2", "backend_v2-3"]
+
+
+def test_homogeneous_targeted_tasks_fan_out_without_llm(tmp_path):
+    """2 ready tasks targeting the same stack, 2 free same-stack agents -> both are
+    assigned one-per-agent without an LLM call, proving the second-listed agent is a
+    real candidate too, not just the first-listed one."""
+    tech_lead = _RecordingTechLead()
+    workers = [
+        StubWorker("backend_v2-1", stack_name="backend_v2"),
+        StubWorker("backend_v2-2", stack_name="backend_v2"),
+    ]
+    swarm, graph = _make_swarm(tmp_path, tech_lead, workers)
+    graph.add_task("t1", title="First", target_team="backend_v2")
+    graph.add_task("t2", title="Second", target_team="backend_v2")
+
+    swarm._assign_tasks(graph.get_tasks(), ["backend_v2-1", "backend_v2-2"])
+
+    assert tech_lead.assignment_calls == []
+    assert graph.get_task("t1").assigned_agent_id == "backend_v2-1"
+    assert graph.get_task("t2").assigned_agent_id == "backend_v2-2"
+
+
+def test_homogeneous_targeted_tasks_with_contention_still_calls_llm(tmp_path):
+    """3 tasks target the same stack but only 1 matching free agent exists -> genuine
+    contention (which task should win the scarce worker) still needs the Tech Lead."""
+    tech_lead = _RecordingTechLead()
+    workers = [
+        StubWorker("backend_v2-1", stack_name="backend_v2"),
+        StubWorker("frontend_v2-1", stack_name="frontend_v2"),
+    ]
+    swarm, graph = _make_swarm(tmp_path, tech_lead, workers)
+    graph.add_task("t1", title="First", target_team="backend_v2")
+    graph.add_task("t2", title="Second", target_team="backend_v2")
+    graph.add_task("t3", title="Third", target_team="backend_v2")
+
+    swarm._assign_tasks(graph.get_tasks(), ["backend_v2-1", "frontend_v2-1"])
+
+    assert len(tech_lead.assignment_calls) == 1
+    call = tech_lead.assignment_calls[0]
+    assert {t["id"] for t in call["ready_tasks"]} == {"t1", "t2", "t3"}
+
+
+def test_same_stack_workers_both_do_work_across_rounds_no_starvation(tmp_path):
+    """2 same-stack tasks, 2 same-stack workers fan out fairly in round 1 (both used, no
+    LLM call). A later-arriving third same-stack task then sits TO_DO while both workers
+    are busy, and is placed on whichever worker frees up *first* -- here backend_v2-2, the
+    second-listed one -- proving assignment isn't hard-coded to always prefer
+    backend_v2-1 and that no worker is starved across rounds."""
+    tech_lead = _RecordingTechLead()
+    workers = [
+        StubWorker("backend_v2-1", stack_name="backend_v2"),
+        StubWorker("backend_v2-2", stack_name="backend_v2"),
+    ]
+    swarm, graph = _make_swarm(tmp_path, tech_lead, workers)
+    graph.add_task("t1", title="First", target_team="backend_v2")
+    graph.add_task("t2", title="Second", target_team="backend_v2")
+
+    swarm._assign_tasks(graph.get_tasks(), swarm._find_free_agents())
+    assert graph.get_task("t1").assigned_agent_id == "backend_v2-1"
+    assert graph.get_task("t2").assigned_agent_id == "backend_v2-2"
+
+    # A third same-stack task arrives once both workers are already busy.
+    graph.add_task("t3", title="Third", target_team="backend_v2")
+    swarm._assign_tasks(swarm._find_ready_tasks(), swarm._find_free_agents())
+    assert graph.get_task("t3").status.value == "to_do"
+
+    # backend_v2-2's task merges first this round -- the freed-up (second-listed) agent
+    # gets the next task.
+    graph.mark_branch_merged("t2")
+    swarm._assign_tasks(swarm._find_ready_tasks(), swarm._find_free_agents())
+
+    assert graph.get_task("t3").assigned_agent_id == "backend_v2-2"
+    assert tech_lead.assignment_calls == []
 
 
 def test_try_deterministic_assign_returns_false_when_nothing_remains(tmp_path):
