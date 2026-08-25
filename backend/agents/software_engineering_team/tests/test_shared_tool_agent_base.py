@@ -485,12 +485,18 @@ def test_review_with_shared_context_passes_it_as_system_prompt_content(monkeypat
     assert factory.build_kwargs[0]["system_prompt"] == shared_ctx
 
 
-def test_review_with_shared_context_excludes_task_description_from_user_prompt(monkeypatch):
-    """The rendered user prompt must not re-embed task_description when a shared
-    (already-cached) system segment already carries it -- otherwise the
-    per-agent call still re-sends and re-bills the task text."""
+def test_review_with_shared_context_still_sends_task_description_in_user_prompt(monkeypatch):
+    """Regression guard: the mere presence of a shared_review_context must
+    never be treated as a signal that it subsumes task_description. A future
+    genuinely trusted shared segment (e.g. an architecture overview) would
+    have nothing to do with the task text -- blanking task_description
+    whenever *any* shared context is present would silently drop the review
+    requirements from every wired tool agent's prompt the moment such a
+    segment is introduced. task_description must always reach the LLM via
+    the user prompt, regardless of what (if anything) shared_review_context
+    carries."""
     seen: list[str] = []
-    task = "UNIQUE_TASK_DESCRIPTION_NOT_IN_USER_PROMPT"
+    task = "UNIQUE_TASK_DESCRIPTION_MUST_STAY_IN_USER_PROMPT"
 
     class _Capture:
         def __call__(self, prompt):
@@ -504,7 +510,9 @@ def test_review_with_shared_context_excludes_task_description_from_user_prompt(m
 
     from llm_service import CacheBreakpoint
 
-    shared_ctx = [CacheBreakpoint(f"**Task:** {task}")]
+    # An unrelated shared segment, standing in for a future genuinely
+    # trusted field -- deliberately does NOT mention the task at all.
+    shared_ctx = [CacheBreakpoint("**Architecture:** some internal overview")]
     agent.review(
         _Input(
             current_files={"a.ts": "code"}, task_description=task, shared_review_context=shared_ctx
@@ -512,7 +520,7 @@ def test_review_with_shared_context_excludes_task_description_from_user_prompt(m
     )
 
     assert len(seen) == 1
-    assert task not in seen[0]
+    assert task in seen[0]
 
 
 def test_review_with_shared_context_still_sends_code_in_user_prompt(monkeypatch):

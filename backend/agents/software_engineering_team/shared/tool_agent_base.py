@@ -713,19 +713,19 @@ class BaseReviewToolAgent(LlmToolAgentBase):
             open to the exact same ``_invoke_llm`` call this method used
             before caching existed, so the fallback taxonomy above (skip/fail
             summaries, the ``ValueError`` case) is unaffected by cache state.
-            When ``inp.shared_review_context`` is a non-empty list, the
-            rendered prompt omits ``task_description`` (carried instead by the
-            shared, cache-marked system segment) and that segment is passed as
-            ``system_prompt_content``; when absent (e.g. direct
-            ``ToolAgentPhaseInput`` construction, as in most unit tests, and
-            currently every production caller too --
+            Both ``task_description`` and ``code`` are always rendered into
+            the user prompt, regardless of whether ``inp.shared_review_context``
+            is present -- neither is safe to place in the system prompt (see
+            :func:`build_shared_tool_agent_review_system_content`'s
+            docstring), and the mere presence of a shared context is never
+            treated as a signal that it subsumes either. When
+            ``inp.shared_review_context`` is a non-empty list, it is passed
+            through as ``system_prompt_content`` on the LLM call (currently
+            never true for any production caller --
             :func:`build_shared_tool_agent_review_system_content` always
-            returns ``None``, see its docstring), behavior is unchanged from
-            before this parameter existed. ``code`` is always rendered into
-            the user prompt regardless of
-            ``shared_review_context`` -- untrusted, repository-controlled
-            content (the code under review) never moves to the system prompt;
-            see :func:`build_shared_tool_agent_review_system_content`.
+            returns ``None``, see its docstring); when absent (e.g. direct
+            ``ToolAgentPhaseInput`` construction, as in most unit tests),
+            ``system_prompt_content`` is simply not passed.
         """
         if self.build_runner is not None:
             return self._build_review(inp)
@@ -749,19 +749,21 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         # Single-pass substitution of the two known placeholders. Values are
         # never re-scanned, so task text/code may contain braces or the
         # placeholder tokens themselves without corruption or duplication.
-        # `code` is always rendered here -- the reviewed code is untrusted,
-        # repository-controlled content and must never move to the
-        # (higher-privilege) system prompt; only `task_description` is
-        # eligible to be hoisted into the shared cached segment.
+        # Both `task_description` and `code` are always rendered here,
+        # regardless of whether a shared_review_context is present: neither
+        # is safe to place in the (higher-privilege) system prompt (see
+        # build_shared_tool_agent_review_system_content's docstring), and
+        # presence of a shared context must never be treated as a signal that
+        # it subsumes task_description -- a future genuinely trusted segment
+        # (e.g. an architecture overview) would have nothing to do with the
+        # task text, and blanking it here would silently drop the review
+        # requirements from every wired tool agent's prompt.
         shared_system_content = getattr(inp, "shared_review_context", None)
-        if shared_system_content:
-            prompt = fill_review_prompt(self.review_prompt, task_description="", code=code_text)
-        else:
-            prompt = fill_review_prompt(
-                self.review_prompt,
-                task_description=inp.task_description or "N/A",
-                code=code_text,
-            )
+        prompt = fill_review_prompt(
+            self.review_prompt,
+            task_description=inp.task_description or "N/A",
+            code=code_text,
+        )
         status, result = self._call_with_single_fallback(
             lambda: self._cached_invoke_llm(
                 model, prompt, system_prompt_content=shared_system_content
