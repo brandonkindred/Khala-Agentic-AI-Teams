@@ -288,3 +288,133 @@ def test_design_loop_pins_one_of_several_allowed_categories(
     (selected_category,) = allowed_in_prompt_classes
     assert selected_category in ("stocks", "crypto")
     assert all(r.strategy.asset_class == selected_category for r in kwargs["prior_records"])
+
+
+# ---------------------------------------------------------------------------
+# Deterministic backstop: the design agent's prompt-only exclusion rule is
+# not itself a guarantee the LLM honors it. ``_enforce_selected_asset_category``
+# must correct a mismatched ``asset_class`` after both the initial generation
+# and any ``revise`` round, so a strategy can never persist in a category the
+# user did not select for this attempt.
+# ---------------------------------------------------------------------------
+
+
+def test_design_loop_enforces_asset_category_when_generation_ignores_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orch = StrategyLabOrchestrator()
+
+    # The design agent always returns "forex" regardless of the category
+    # actually pinned for this attempt (the LLM ignoring the MANDATORY
+    # EXCLUSION instruction in the prompt).
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict("forex"), "scripted"))
+    monkeypatch.setattr(
+        orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
+    )
+    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
+    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
+    _short_circuit_synthesis(monkeypatch)
+
+    # allowed = {stocks} -> exclude everything else, including forex.
+    record = orch.run_cycle(
+        prior_records=[],
+        config=_config(),
+        exclude_asset_classes=["forex", "crypto", "futures", "commodities"],
+    )
+
+    assert record.strategy.asset_class == "stocks"
+
+
+def test_design_loop_enforces_asset_category_after_revise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The enforcement backstop applies after a ``revise`` round too, not
+    only the initial generation — closing the gap where a mid-loop revision
+    could otherwise drift the spec's asset class away from the category
+    pinned for this attempt."""
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict("stocks"), "scripted"))
+
+    review_calls = iter(
+        [
+            SpecCritique(ready=False, rationale="round-0"),
+            SpecCritique(ready=True, rationale="round-1 ok"),
+        ]
+    )
+    monkeypatch.setattr(orch.design_review_agent, "run", lambda *_a, **_kw: next(review_calls))
+    # revise() drifts the asset_class to "forex" even though "stocks" is pinned.
+    monkeypatch.setattr(
+        orch.design_agent, "revise", lambda *_a, **_kw: (_spec_dict("forex"), "revised")
+    )
+    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
+    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
+    _short_circuit_synthesis(monkeypatch)
+
+    record = orch.run_cycle(
+        prior_records=[],
+        config=_config(),
+        exclude_asset_classes=["forex", "crypto", "futures", "commodities"],
+    )
+
+    assert record.strategy.asset_class == "stocks"
+
+
+def test_design_loop_leaves_matching_asset_class_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No spurious correction (and no ``design_repair`` telemetry) when the
+    design agent already honors the pinned category."""
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict("stocks"), "scripted"))
+    monkeypatch.setattr(
+        orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
+    )
+    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
+    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
+    _short_circuit_synthesis(monkeypatch)
+
+    events: List[Tuple[str, Dict[str, Any]]] = []
+    record = orch.run_cycle(
+        prior_records=[],
+        config=_config(),
+        exclude_asset_classes=["forex", "crypto", "futures", "commodities"],
+        on_phase=lambda phase, data: events.append((phase, data)),
+    )
+
+    assert record.strategy.asset_class == "stocks"
+    assert not any(phase == "design_repair" for phase, _ in events)
+
+
+def test_design_loop_telemetry_includes_asset_category_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live ``on_phase`` telemetry consumers see ``asset_category`` on the
+    ``scope=design_loop`` summary event for a normal (non-budget-exhausted)
+    exit — not only in the persisted record's design context."""
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict("stocks"), "scripted"))
+    monkeypatch.setattr(
+        orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
+    )
+    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
+    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
+    _short_circuit_synthesis(monkeypatch)
+
+    events: List[Tuple[str, Dict[str, Any]]] = []
+    orch.run_cycle(
+        prior_records=[],
+        config=_config(),
+        exclude_asset_classes=["forex", "crypto", "futures", "commodities"],
+        on_phase=lambda phase, data: events.append((phase, data)),
+    )
+
+    design_loop_events = [
+        data
+        for phase, data in events
+        if phase == "telemetry" and data.get("scope") == "design_loop"
+    ]
+    assert design_loop_events
+    assert design_loop_events[-1]["asset_category"] == "stocks"

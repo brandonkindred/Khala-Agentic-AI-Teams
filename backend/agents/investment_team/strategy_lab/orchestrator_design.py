@@ -631,18 +631,30 @@ class DesignMixin:
         stop_reason = "budget_exhausted"
         loop_telemetry: Dict[str, Any] = {}
 
-        # Pin this attempt to exactly one asset category, randomly chosen from
-        # the categories the user allowed at run start (recovered as the
-        # complement of ``exclude_asset_classes`` — see
+        # When the user restricted generation to a subset of categories
+        # (``exclude_asset_classes`` non-empty — the complement of their
+        # ``allowed_asset_classes`` selection), pin this attempt to exactly
+        # one of the allowed categories, randomly chosen (see
         # ``select_asset_category``). Scoping ``prior_records`` to that
         # category keeps the designer from reasoning over prior strategies,
         # performance, and rationale belonging to unrelated categories, and
         # pinning ``exclude_asset_classes`` to every other class hard-forces
         # the design agent onto the selected one instead of leaving it free
-        # to pick among every allowed class.
-        selected_category = select_asset_category(exclude_asset_classes)
-        category_prior_records = filter_records_by_asset_class(prior_records, selected_category)
-        pinned_exclude_asset_classes = [c for c in PROMPT_ASSET_CLASSES if c != selected_category]
+        # to pick among every allowed class. An unrestricted run (no
+        # ``allowed_asset_classes`` selection) keeps the prior free-choice
+        # behavior — mixing categories is only a problem when the user
+        # actually asked for a subset.
+        selected_category: Optional[str] = (
+            select_asset_category(exclude_asset_classes) if exclude_asset_classes else None
+        )
+        if selected_category is not None:
+            category_prior_records = filter_records_by_asset_class(prior_records, selected_category)
+            pinned_exclude_asset_classes = [
+                c for c in PROMPT_ASSET_CLASSES if c != selected_category
+            ]
+        else:
+            category_prior_records = prior_records
+            pinned_exclude_asset_classes = exclude_asset_classes
 
         try:
             strategy_dict, rationale = self.design_agent.run(
@@ -653,6 +665,13 @@ class DesignMixin:
                 regime_summary=regime_summary,
             )
             spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
+            spec = self._enforce_selected_asset_category(
+                spec,
+                selected_category=selected_category,
+                review_round=-1,
+                emit=emit,
+                drift_collector=drift_collector,
+            )
 
             # ═══ Phase 1 → 2 transition: DESIGN → DESIGN_REVIEW ═══════════
             # The initial DesignAgent invocation has produced a spec draft;
@@ -678,6 +697,7 @@ class DesignMixin:
                 ledger=ledger,
                 emit=emit,
                 drift_collector=drift_collector,
+                selected_category=selected_category,
             )
         except DesignBudgetExhausted as exc:
             # Per-cycle LLM-call budget hit mid-design. Surface whatever
@@ -715,7 +735,8 @@ class DesignMixin:
                 "budget_exhausted",
                 getattr(exc, "mechanical_repair_count", 0),
             )
-            budget_telemetry["asset_category"] = selected_category
+            if selected_category is not None:
+                budget_telemetry["asset_category"] = selected_category
             # Mirror the normal-exit path: emit the per-cycle ``design_loop``
             # summary so live ``on_phase`` consumers see the stop reason and
             # ledger totals on budget-exhausted cycles too, not just per-round
@@ -732,7 +753,6 @@ class DesignMixin:
                 loop_telemetry=budget_telemetry,
             )
 
-        loop_telemetry["asset_category"] = selected_category
         return _DesignLoopOutcome(
             spec=spec,
             rationale=rationale,
@@ -756,6 +776,7 @@ class DesignMixin:
         ledger: CritiqueLedger,
         emit: PhaseCallback,
         drift_collector: Optional[_DriftCollector],
+        selected_category: Optional[str],
     ) -> Tuple[StrategySpec, str, bool, str, Dict[str, Any]]:
         """Run the bounded readiness → review → revise rounds.
 
@@ -906,10 +927,19 @@ class DesignMixin:
                 drift_collector=drift_collector,
                 skip_self_review=skip_self_review,
             )
+            spec = self._enforce_selected_asset_category(
+                spec,
+                selected_category=selected_category,
+                review_round=review_round,
+                emit=emit,
+                drift_collector=drift_collector,
+            )
 
         loop_telemetry = _design_loop_telemetry_summary(
             ledger, len(critique_history), stop_reason, mechanical_repair_count
         )
+        if selected_category is not None:
+            loop_telemetry["asset_category"] = selected_category
         emit("telemetry", {"scope": "design_loop", **loop_telemetry})
         return spec, rationale, ready, stop_reason, loop_telemetry
 
@@ -1226,6 +1256,83 @@ class DesignMixin:
         can be unit-tested without instantiating the orchestrator.
         """
         return build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
+
+    def _enforce_selected_asset_category(
+        self,
+        spec: StrategySpec,
+        *,
+        selected_category: Optional[str],
+        review_round: int,
+        emit: PhaseCallback,
+        drift_collector: Optional[_DriftCollector],
+    ) -> StrategySpec:
+        """Deterministically pin ``spec.asset_class`` to the category selected
+        for this design attempt.
+
+        The design/review prompts instruct the LLM to use only
+        ``selected_category`` (see ``select_asset_category`` in
+        ``_run_design_loop``, and the "MANDATORY EXCLUSION" rule appended to
+        every prompt), but neither the initial generation nor a ``revise``
+        round is guaranteed to honor a prompt-only instruction. This is the
+        deterministic backstop: a strategy must never persist in an asset
+        category the user did not select for this attempt, so a mismatched
+        output is corrected here rather than trusted, mirroring the
+        deterministic mechanical-repair pattern
+        (:func:`..mechanical_repair.repair_spec`) already used elsewhere in
+        this loop for other structural violations.
+
+        Preconditions:
+          - ``selected_category`` is ``None`` (no category restriction is
+            active for this attempt — an unconstrained run, see
+            ``_run_design_loop``) or one of :data:`PROMPT_ASSET_CLASSES`.
+
+        Postconditions:
+          - Returns ``spec`` unchanged when ``selected_category`` is ``None``
+            or its normalized asset class already matches
+            ``selected_category``.
+          - Otherwise returns a copy of ``spec`` with ``asset_class``
+            overwritten to ``selected_category``, emits a ``design_repair``
+            event describing the correction, and records the change on
+            ``drift_collector`` when one is present.
+        """
+        if selected_category is None:
+            return spec
+        actual = normalize_asset_class(spec.asset_class)
+        if actual == selected_category:
+            return spec
+        logger.warning(
+            "Design agent emitted asset_class=%r outside the category %r pinned for this "
+            "design attempt; overwriting to enforce the user's category selection.",
+            spec.asset_class,
+            selected_category,
+        )
+        prev_spec = spec.model_copy(deep=True)
+        spec = spec.model_copy(update={"asset_class": selected_category})
+        emit(
+            "design_repair",
+            {
+                "round": review_round,
+                "actions": [
+                    {
+                        "rule": "asset_category_pin",
+                        "field": "asset_class",
+                        "before": actual,
+                        "after": selected_category,
+                        "reason": "design output violated the category pinned for this attempt",
+                    }
+                ],
+                "now_ready": True,
+            },
+        )
+        if drift_collector is not None:
+            drift_collector.record_spec_change(
+                phase="design",
+                agent="AssetCategoryEnforcement",
+                before_spec=prev_spec,
+                after_spec=spec,
+                reason="asset_class overwritten to match the category pinned for this design attempt",
+            )
+        return spec
 
     def _run_design_attempt(
         self,
