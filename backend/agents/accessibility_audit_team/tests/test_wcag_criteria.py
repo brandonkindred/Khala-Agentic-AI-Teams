@@ -463,3 +463,36 @@ def test_accessors_reject_a_precondition_violation():
         get_criterion(111)
     with pytest.raises(AssertionError):
         get_guideline_criteria(2.4)
+
+
+def test_2_3_1_description_states_both_flash_alternatives():
+    """2.3.1 is satisfied by EITHER staying under the flash-count limit OR the flash
+    being below the general/red thresholds — a string fix, so only a test that reads
+    ``.description`` guards it from regressing silently.
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Asserts both alternatives are present; does not mutate the table.
+    """
+    description = get_criterion("2.3.1").description
+    assert "three times" in description, "the flash-count alternative is missing"
+    assert "threshold" in description.lower(), "the below-threshold alternative is missing"
+
+
+def test_3_2_6_description_tests_relative_order_not_visual_location():
+    """3.2.6 tests a help mechanism's ORDER relative to other page content, not its
+    on-screen position — the two are different claims, and the wrong one describes a
+    different (stricter, visually-anchored) requirement than the criterion states.
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Asserts the order-based wording and the absence of the superseded
+        location-based wording; does not mutate the table.
+    """
+    description = get_criterion("3.2.6").description
+    assert "relative order" in description
+    assert "consistent location across pages" not in description
