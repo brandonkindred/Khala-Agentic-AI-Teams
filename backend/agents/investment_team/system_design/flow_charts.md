@@ -131,7 +131,10 @@ sequenceDiagram
                 opt execution error, anomaly, or zero-trade result
                     Attempt->>LLM: RefinementAgent, or<br/>ZeroTradeRepairAgent for a zero-trade<br/>result — either may trigger a re-execution
                 end
-                Attempt->>LLM: TradeAlignmentAgent (needs the<br/>produced trade ledger) → may re-execute<br/>a committed fix
+                Attempt->>Attempt: DeterministicAlignmentChecker audits the<br/>trade ledger — a clean pass synthesizes the<br/>report locally, no LLM call
+                opt near-miss adjudication or a misaligned fix
+                    Attempt->>LLM: TradeAlignmentAgent<br/>(adjudicate_near_miss, or<br/>propose_code_fix — may re-execute<br/>a committed fix)
+                end
                 Attempt->>LLM: AnalysisAgent (after the deterministic<br/>verification gates)
                 Attempt-->>CycleWF: record | reentry | skipped
             end

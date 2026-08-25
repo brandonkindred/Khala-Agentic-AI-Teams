@@ -392,11 +392,13 @@ flowchart TB
         D[DesignAgent] --> RG1{SpecReadinessGate<br/>phase=design}
         RG1 -->|readiness-clean| DR[DesignReviewAgent]
         RG1 -->|readiness-critical:<br/>reviewer skipped| D
-        DR -->|ready| CS
+        DR -->|ready| RC{spec already<br/>requires_custom_code?}
         DR -->|not ready| D
+        RC -->|yes: no compile attempt| CSA[CodeSynthesisAgent]
+        RC -->|no| CS
         CS{compile_strategy<br/>succeeds?}
         CS -->|yes: compiled DSL| SYN
-        CS -->|CompilerError:<br/>requires_custom_code=True| CSA[CodeSynthesisAgent]
+        CS -->|CompilerError:<br/>requires_custom_code=True| CSA
         CSA --> SYN
         SYN[Synthesis gates:<br/>CodeSafety · CodeConformance ·<br/>PredicateConformance · Reachability ·<br/>TargetSymbolCoverage]
         SYN -->|fail| RF[RefinementAgent]
