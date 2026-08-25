@@ -151,7 +151,7 @@ def process_spec(repo_path: Path, use_cache: bool = True) -> Optional[dict]:
 
 The Software Engineering team enforces these rules in generated code; contributors should align with them:
 
-- **Design by Contract:** Preconditions, postconditions, invariants on public APIs
+- **Design by Contract:** Preconditions, postconditions, invariants — documented under those headers. `CLAUDE.md` makes this mandatory repo-wide for every function, method, and module; this team enforces it in the code it generates.
 - **SOLID:** Single responsibility, Open/Closed, Liskov, Interface segregation, Dependency inversion
 - **Documentation:** Comment blocks on classes/methods: purpose, usage, constraints
 - **Test coverage:** Minimum 85% where applicable

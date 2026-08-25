@@ -15,7 +15,11 @@ Preconditions: none — the table is a module-level literal, built at import.
 
 Postconditions: ``WCAG_22_CRITERIA`` maps each success-criterion number to the
 ``SuccessCriterion`` describing it; every accessor returns entries drawn from
-it and never mutates it.
+it and never mutates it. ``SuccessCriterion`` is not frozen, and every accessor
+— ``get_criterion`` included — hands back the stored instance rather than a
+copy, so callers must treat the entries themselves as read-only: mutating one
+(``get_criterion("2.5.8").failures.append(...)``) corrupts the table for the
+whole process.
 
 Invariants:
   - Each key equals its entry's ``sc`` field.

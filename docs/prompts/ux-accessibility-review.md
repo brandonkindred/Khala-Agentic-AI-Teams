@@ -91,17 +91,24 @@ for primitive defects you deliberately chose not to pursue at all.
     PREFIX `#111`–`#777` or `#888`–`#eee` — anchored on the first three digits only,
     so `#777fff` and `#eee000` are banned too even though neither is a grey; do not
     read the ban as "greys". (b) Four named literals (`#484f58`, `#6e7681`,
-    `#71717a`, `#8b949e`). (c) Opaque-black `rgb()`/`rgba()`. (d) Those same values
-    appearing as a `var()` FALLBACK — `color: var(--kh-text-secondary, #6e7681)` is
-    banned, which matters because `var(--token, #hex)` is this codebase's dominant
-    idiom, so a remediation you propose in that form can fail CI. Everything else
+    `#71717a`, `#8b949e`). (c) Black-channel `rgb()`/`rgba()` — the pattern stops at
+    the third zero and never reads alpha, so `rgba(0,0,0,0.6)` is banned too, not
+    just opaque black. (d) The HEX families of (a) and (b) — NOT (c) — appearing as a
+    `var()` FALLBACK: `color: var(--kh-text-secondary, #6e7681)` is banned, which
+    matters because `var(--token, #hex)` is this codebase's dominant idiom, so a
+    remediation you propose in that form can fail CI. An rgba fallback
+    (`var(--x, rgba(0,0,0,.5))`) slips through, since the fallback patterns
+    interpolate the hex alternations only. Everything else
     passes, including `color: #000`. Token drift is therefore NOT a solved problem and lens E has real
     work — around 90 raw-hex `color:` declarations across some 28 distinct values sit
     in `src/app` today, `#fff` only a handful of them. Measure it yourself with
     `grep -rhoE 'color: *#[0-9a-fA-F]{3,6}' user-interface/src/app --include=*.scss`
     rather than assuming CI caught it — approximate, since `grep -E` cannot express
     the guard's `(?<![-\w])` anchor and so would also count a `background-color` or
-    `border-color` (there are none today), nor match an 8-digit alpha hex. Its `BURNDOWN` allowlist IS empty, and its
+    `border-color` (there are none today). And `{3,6}` does not MISS an 8-digit alpha
+    hex — it matches the first six digits and reports a value absent from the source,
+    so widen the quantifier if any appear (none do today).
+    Its `BURNDOWN` allowlist IS empty, and its
     docstring forbids adding entries to silence a failure, so never propose adding or
     removing one. `#fff` is the single gap the spec documents explicitly ("joins the
     set in the Phase-2 token sweep"), which makes a bare `color: #fff` queued debt
@@ -231,14 +238,18 @@ for primitive defects you deliberately chose not to pursue at all.
         service-mock fixture data (e.g. `of({ enabled: false, mcp_server_url: … })`),
         and that noise sits inside the SAME spec files that call the helper heavily,
         not only in specs that never call it — so filename alone will not separate
-        signal from noise. Search for the rule NAMES — that is the only recipe that
-        finds every site. Do NOT search for the two-argument call shape
-        `expectNoAxeViolations(<host>, {`: two of the four specs hoist their disables
-        into a module-level const and pass it by name
-        (`expectNoAxeViolations(fixture.nativeElement, cardExtraRules)`), so that
-        shape silently misses them and you would conclude those rules are enforced
-        when they are switched off — the exact false negative this axis exists to
-        prevent. When a call's second argument is an identifier, resolve it.
+        signal from noise. Match the DISABLE ITSELF, which needs no prior knowledge
+        of which rules are switched off:
+        `grep -rnE "[A-Za-z'\"-]+: \{ enabled: false \}" src/app --include=*.spec.ts`
+        — that returns the disables and nothing else, across all four specs. Two
+        recipes that look reasonable and are not: searching the rule names from the
+        list above is CIRCULAR (a fifth spec disabling a rule nobody listed stays
+        invisible, and that is precisely the case this axis exists to catch), and
+        searching the two-argument call shape `expectNoAxeViolations(<host>, {`
+        misses the two specs that hoist their disables into a module-level const and
+        pass it by name (`expectNoAxeViolations(fixture.nativeElement,
+        cardExtraRules)`). Whichever you use, when a call's second argument is an
+        identifier, resolve it before concluding anything.
     Read each spec's fixtures, its assertions, what element it audits, AND which rules
     it disables before excluding a finding, then spend your attention on the unrendered
     states, the unrendered compositions, the disabled rules, and what axe structurally
@@ -426,14 +437,13 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
        * Accessible Authentication (Minimum) (3.3.8, AA) — no step of an
          authentication process may require a cognitive function test (remembering a
          password, transcribing characters, solving a puzzle) unless THAT STEP itself
-         provides one of FOUR exceptions — scope matters, an exception available
-         elsewhere in the flow does not cover a step that offers none, so a login that
-         supports password managers followed by a six-box one-digit-per-field TOTP
-         step still fails at the TOTP step: an alternative authentication method
+         provides one of FOUR exceptions: an alternative authentication method
          exists, a mechanism assists (a password manager, paste support), the test is
-         to RECOGNIZE OBJECTS
-         (an image-selection CAPTCHA), or the test is to identify NON-TEXT CONTENT THE
-         USER PROVIDED. The last two are commonly missed and make an image CAPTCHA or
+         to RECOGNIZE OBJECTS (an image-selection CAPTCHA), or the test is to identify
+         NON-TEXT CONTENT THE USER PROVIDED.
+         Scope matters — an exception available elsewhere in the flow does not cover
+         a step that offers none, so a login that supports password managers followed
+         by a six-box one-digit-per-field TOTP step still fails AT THE TOTP STEP. The last two are commonly missed and make an image CAPTCHA or
          a "confirm the photo you uploaded" step compliant, not a blocker. This one is
          inside the AA bar and easy to miss: check it on any credential-entry or
          connect-an-account surface.
@@ -520,9 +530,12 @@ D. STATE COVERAGE
        none of them one, so it is MISSING for permission-denied, backend-unconfigured,
        offline AND API-error alike — the HANDLED gate below puts all four in the
        recoverability list, and a dead end fails it whichever state produced it.
-       Nothing was announced either, since there is no toast on this path. What varies
-       between the four is not the disposition but the remedy each needs, which is
-       what your one finding must spell out.
+       Check the announcement clause separately rather than assuming it failed: there
+       is no toast on this path, but an inline `role="alert"` region announces on its
+       own, and 22 templates use exactly that against zero bare
+       `aria-live="assertive"`. Only where neither a toast nor an alert region fires
+       is the state unannounced. What varies between the four is not the disposition
+       but the remedy each needs, which is what your one finding must spell out.
      - Request did not opt out — the interceptor already distinguished 0 / 401 / 403 /
        503 for the other three states, AND separately distinguishes 400 / 422 / 404 /
        500 (and the rest) for API-error, each with its own toast — so a generic inline
@@ -644,7 +657,10 @@ Then every finding, in ranked order:
     real-browser contrast).
 
 Close with:
-  - **Open questions** — anything that needs a product decision or a running browser.
+  - **Open questions** — anything that needs a PRODUCT decision, or a browser check
+    you could not narrow to a location at all. NOT a home for browser-dependent
+    findings generally: per the Location bullet above, a real AA failure you can
+    point at stays a ranked finding marked `— needs browser`.
   - **Out of scope, noted** — backend or shared-primitive issues you deliberately
     did not pursue.
 

@@ -38,12 +38,14 @@ LEVEL_A_WCAG_22 = {
     "3.1.1",
     "3.2.1",
     "3.2.2",
+    "3.2.6",
     "3.3.1",
     "3.3.2",
     "3.3.7",
-    "3.2.6",
     "4.1.2",
 }
+# WCAG 2.2 has 31 Level AAA criteria; this table deliberately carries only these.
+LEVEL_AAA_PRESENT = {"2.4.12", "2.4.13", "3.3.9"}
 LEVEL_AA_WCAG_22 = {
     "1.2.4",
     "1.2.5",
@@ -122,11 +124,6 @@ def test_get_criteria_by_level_aa():
     assert len(level_aa) > 0
 
 
-def test_get_criteria_by_level_aaa():
-    level_aaa = [sc for sc in WCAG_22_CRITERIA.values() if sc.level == WCAGLevel.AAA]
-    assert len(level_aaa) >= 0  # may be empty in minimal data
-
-
 def test_get_criteria_by_principle_perceivable():
     perceivable = [
         sc for sc in WCAG_22_CRITERIA.values() if sc.principle == WCAGPrinciple.PERCEIVABLE
@@ -196,7 +193,24 @@ def test_level_aaa_is_deliberately_partial():
     Postconditions:
         Asserts the AAA set; does not mutate the table.
     """
-    assert {sc.sc for sc in get_criteria_by_level(WCAGLevel.AAA)} == {"2.4.12", "2.4.13", "3.3.9"}
+    assert {sc.sc for sc in get_criteria_by_level(WCAGLevel.AAA)} == LEVEL_AAA_PRESENT
+
+
+def test_keys_match_their_criterion_number():
+    """Every dict key equals its entry's ``sc`` field — a module invariant.
+
+    A copy-pasted entry keyed "1.4.14" whose body still says sc="1.4.13" passes the
+    membership tests (they read ``sc.sc``, not the key) while ``get_criterion``
+    returns a criterion that misreports itself to ``map_wcag``.
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Asserts the key/field agreement; does not mutate the table.
+    """
+    mismatched = {k: v.sc for k, v in WCAG_22_CRITERIA.items() if k != v.sc}
+    assert mismatched == {}, f"keys disagreeing with their sc field: {mismatched}"
 
 
 def test_f109_only_on_accessible_authentication():
