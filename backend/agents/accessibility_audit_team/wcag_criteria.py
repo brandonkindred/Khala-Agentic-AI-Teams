@@ -377,7 +377,10 @@ WCAG_22_CRITERIA: Dict[str, SuccessCriterion] = {
         principle=WCAGPrinciple.OPERABLE,
         guideline="2.3",
         guideline_name="Seizures and Physical Reactions",
-        description="Content does not contain anything that flashes more than three times per second.",
+        description=(
+            "Content does not flash more than three times in any one second period, or the "
+            "flash is below the general flash and red flash thresholds."
+        ),
         techniques=["G15", "G19", "G176"],
         failures=["F23"],
     ),
@@ -782,13 +785,15 @@ def get_criterion(sc: str) -> Optional[SuccessCriterion]:
     """Get a success criterion by its number.
 
     Preconditions:
-        ``sc`` is a criterion number such as "1.1.1"; unknown values are not an error.
+        ``sc`` is a ``str`` criterion number such as "1.1.1". Unknown values are not
+        an error and yield ``None``; a non-``str`` is a caller bug and raises.
 
     Postconditions:
         Returns the stored ``SuccessCriterion``, or None if absent (4.1.1 always
         misses — WCAG 2.2 removed it). The instance is shared and not frozen, so
         callers must not mutate it.
     """
+    assert isinstance(sc, str), f"sc must be a str criterion number, got {type(sc).__name__}"
     return WCAG_22_CRITERIA.get(sc)
 
 
@@ -797,13 +802,16 @@ def get_criteria_by_level(level: WCAGLevel) -> List[SuccessCriterion]:
     """Get all success criteria for a given conformance level.
 
     Preconditions:
-        ``level`` is a ``WCAGLevel`` member.
+        ``level`` is a ``WCAGLevel`` member. A bare string such as "AA" is a caller
+        bug and raises rather than returning an empty list, which would read as a
+        genuine absence of criteria at that level.
 
     Postconditions:
         Returns every entry at that level.
         The returned list is the cached, process-shared object — treat it as
         read-only. Entries are shared ``SuccessCriterion`` instances, never copies.
     """
+    assert isinstance(level, WCAGLevel), f"level must be a WCAGLevel, got {type(level).__name__}"
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.level == level]
 
 
@@ -812,13 +820,17 @@ def get_criteria_by_principle(principle: WCAGPrinciple) -> List[SuccessCriterion
     """Get all success criteria for a given principle.
 
     Preconditions:
-        ``principle`` is a ``WCAGPrinciple`` member.
+        ``principle`` is a ``WCAGPrinciple`` member. A bare string is a caller bug and
+        raises rather than returning an empty list.
 
     Postconditions:
         Returns every entry under that principle.
         The returned list is the cached, process-shared object — treat it as
         read-only. Entries are shared ``SuccessCriterion`` instances, never copies.
     """
+    assert isinstance(principle, WCAGPrinciple), (
+        f"principle must be a WCAGPrinciple, got {type(principle).__name__}"
+    )
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.principle == principle]
 
 
@@ -883,11 +895,15 @@ def get_guideline_criteria(guideline: str) -> List[SuccessCriterion]:
     """Get all success criteria for a given guideline number (e.g., '2.4').
 
     Preconditions:
-        ``guideline`` is a guideline number such as "2.4"; unknown values yield [].
+        ``guideline`` is a ``str`` guideline number such as "2.4". Unknown values
+        yield ``[]``; a non-``str`` is a caller bug and raises.
 
     Postconditions:
         Returns every entry under that guideline.
         Builds a fresh list per call (uncached), but the entries themselves are
         shared ``SuccessCriterion`` instances — treat them as read-only.
     """
+    assert isinstance(guideline, str), (
+        f"guideline must be a str guideline number, got {type(guideline).__name__}"
+    )
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.guideline == guideline]

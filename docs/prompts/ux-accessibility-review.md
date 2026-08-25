@@ -79,7 +79,11 @@ for primitive defects you deliberately chose not to pursue at all.
     silent on the case.
   - `user-interface/src/theme.scss` — the `--kh-*` token set (surface, text, border,
     accent, focus-ring, semantic success/warning/error/info, spacing, radius, type
-    scale). Recommendations must name tokens, never raw hex. Watch one prefix
+    scale, font, shadow, transition, glass). Recommendations must name tokens, never
+    raw hex. That list is a starting point, not a census — enumerate the live families
+    with `grep -oE '\-\-kh-[a-z0-9]+' user-interface/src/theme.scss | sort -u` before
+    concluding a token does not exist and recommending a literal, which is the lens-E
+    drift this section exists to prevent. Watch one prefix
     collision: `--kh-text-*` covers BOTH colours (`-primary`, `-secondary`,
     `-tertiary`, `-muted`, `-on-accent`) and the type scale (`-xs` … `-2xl`), so
     `--kh-text-lg` is a font size, not a colour. Naming a size token in a colour
@@ -350,8 +354,8 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
      not evidence a criterion does not exist. It is NOT a source for conditions: its
      one-line descriptions keep some exceptions (2.5.8's "or have sufficient spacing",
      3.3.8's "unless alternatives exist", 2.4.11's "not entirely") and drop others
-     entirely, and on 2.3.1 they state only the three-flash half, omitting the
-     below-threshold alternative. Its `techniques` and `failures` lists are pointers
+     entirely — 2.2.1 reads "Users can turn off, adjust, or extend time limits" and
+     names none of the five exceptions that make an un-adjustable limit conformant. Its `techniques` and `failures` lists are pointers
      into the W3C technique catalogue, not a checked mapping — open a technique and
      confirm it addresses the criterion you are citing before it goes in a finding.
      Where a finding turns on a threshold, applicability condition, or exception — or
@@ -547,8 +551,11 @@ D. STATE COVERAGE
    arrow `error: err => { … }`, and the `catchError((err) => …)` operator several
    dashboards use instead. Grep `error: (`, `error: err`, and `catchError`, or you
    will read a page's primary list-load error branch as absent — the shared
-   team-assistant panel, composed into four teams' dashboards, uses the paren-less
-   form for exactly that branch. Literal `try`/`catch` around this helper does not occur. Note the REQUIRED
+   team-assistant panel, composed into a dozen teams' dashboards, uses the paren-less
+   form for exactly that branch. Count its reach before you size a finding against it
+   (`grep -rln "app-team-assistant-chat" user-interface/src/app --include=*.html`) —
+   it is one of the widest-reaching primitives in the app, so a defect there is not a
+   <TEAM>-local finding. Literal `try`/`catch` around this helper does not occur. Note the REQUIRED
    second argument: that fallback string IS the component's per-state copy, and a
    sketch that omits it does not compile.
    Score such a branch against the global interceptor rather than in isolation, because
@@ -735,9 +742,11 @@ Close with:
   - Design by Contract applies to any code you propose, per the repo-wide mandate in
     `CLAUDE.md` ("mandatory for all code and comments"): preconditions, postconditions,
     and invariants documented in the docstring, enforced rather than silently coerced.
-    The narrower "public APIs" phrasing in `CONTRIBUTORS.md` describes what the
-    software-engineering team enforces in generated code, and does not relax the
-    repo-wide rule.
+    `CONTRIBUTORS.md` restates the same rule under the software-engineering team's
+    conventions, scoped to the code that team generates; it does not relax the
+    repo-wide one. Documenting a precondition is only half of it — an unenforced
+    `Preconditions:` section lets a violation return a plausible-looking empty result
+    instead of raising, so check for the enforcement, not just the docstring.
   - Any behavior change needs test coverage (90% line-coverage floor). Where a spec
     already calls `expectNoAxeViolations` for that component, extend it rather than
     writing a new harness — usually a `.a11y.spec.ts`, but for `empty-state`,
@@ -745,8 +754,11 @@ Close with:
     Most components have neither — far fewer spec files call the helper than there are
     components, so for the majority the correct recommendation IS to create
     `<component>.component.a11y.spec.ts`. Count both before assuming otherwise
-    (`grep -rl expectNoAxeViolations` against `find -name '*.component.ts'`). Say which
-    of the two you mean.
+    (`grep -rl expectNoAxeViolations user-interface/src/app --include=*.spec.ts`
+    against `find user-interface/src/app -name '*.component.ts'`). Say which of the two
+    you mean, and keep both scoped: run unscoped from the repository root, the first
+    also matches the `a11y.ts` helper itself and two prose files that merely name the
+    function, inflating the numerator with documentation.
   - Never reference an external issue tracker in code, comments, or docs. Issue
     numbers belong in pull-request bodies and nowhere else — and there they are
     required, via `Closes #N`, on any PR that implements one of these findings.
