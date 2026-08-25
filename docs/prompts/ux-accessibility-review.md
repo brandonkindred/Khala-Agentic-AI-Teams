@@ -123,9 +123,10 @@ for primitive defects you deliberately chose not to pursue at all.
     hand-rolled `err?.error?.detail ?? …` chains when proposing error copy, and carry
     two conditions with the recommendation. First, `fallback` is REQUIRED, and it is
     where the state-specific copy §3D asks for actually goes. Second, an ARRAY
-    `detail` — FastAPI's validation shape, which arrives on 400 as well as 422 — is
-    SKIPPED unless `{ joinValidationArray: true }` is passed, so the global
-    interceptor can toast it instead. A component that opts out of that toast and
+    `detail` — FastAPI's automatic 422 validation-error shape — is SKIPPED unless
+    `{ joinValidationArray: true }` is passed, so the global interceptor can toast it
+    instead. Every manual `400` raise in this backend passes a plain string `detail`;
+    the array shape is a 422-only artifact here, so do not expect it on a 400. A component that opts out of that toast and
     omits the option does NOT fall through to your fallback: the helper returns
     `err.message` first and Angular always populates it, so the inline field renders
     the raw `Http failure response for http://…: 422 Unprocessable Entity`. That is a
@@ -154,7 +155,10 @@ for primitive defects you deliberately chose not to pursue at all.
     degrades to a generic "Service temporarily unavailable", which names nothing and
     leaves backend-unconfigured MISSING. `400`/`422` → one of three outcomes: a string
     `detail` verbatim, the joined messages from an array `detail`, or a content-free
-    "Bad request: Bad Request" when neither parses. `404` → "Not found:" plus the RAW
+    fallback when neither parses — `Bad request: ${statusText}`, which reads
+    "Bad request: Bad Request" for an actual 400 but "Bad request: Unprocessable
+    Entity" for a 422, since `statusText` is the transport's own reason phrase for
+    whichever status arrived. `404` → "Not found:" plus the RAW
     REQUEST URL, which puts an internal API path in front of the user and is itself
     reportable. `500` and the rest → a status-specific string. The snackbar opens with
     `politeness: 'assertive'`, so it satisfies the HANDLED gate's announcement clause

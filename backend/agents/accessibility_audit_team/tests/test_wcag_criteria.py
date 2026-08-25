@@ -5,6 +5,7 @@ from accessibility_audit_team.wcag_criteria import (
     SuccessCriterion,
     WCAGLevel,
     WCAGPrinciple,
+    get_criteria_by_level,
 )
 
 
@@ -98,13 +99,14 @@ def test_parsing_criterion_absent():
 
 
 def test_level_a_count_matches_wcag_22():
-    """WCAG 2.2 defines 31 Level A criteria; a 32nd means a removed one crept back.
+    """WCAG 2.2 (as of this table's last sync) defines 31 Level A criteria; a 32nd
+    means a removed criterion crept back in, or the table needs updating for a new
+    WCAG revision that added or reclassified one.
 
     Preconditions: none.
     Postconditions: asserts the count; does not mutate the table.
     """
-    level_a = [sc for sc in WCAG_22_CRITERIA.values() if sc.level == WCAGLevel.A]
-    assert len(level_a) == 31
+    assert len(get_criteria_by_level(WCAGLevel.A)) == 31
 
 
 def test_f109_only_on_accessible_authentication():
