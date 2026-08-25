@@ -104,13 +104,11 @@ describe('AgentRunnerComponent', () => {
     getInputSchema: ReturnType<typeof vi.fn>;
     ensureWarm: ReturnType<typeof vi.fn>;
     getSandbox: ReturnType<typeof vi.fn>;
-    teardown: ReturnType<typeof vi.fn>;
     invoke: ReturnType<typeof vi.fn>;
     listSamples: ReturnType<typeof vi.fn>;
     getSample: ReturnType<typeof vi.fn>;
     listSavedInputs: ReturnType<typeof vi.fn>;
     createSavedInput: ReturnType<typeof vi.fn>;
-    deleteSavedInput: ReturnType<typeof vi.fn>;
     listRuns: ReturnType<typeof vi.fn>;
     getRun: ReturnType<typeof vi.fn>;
     deleteRun: ReturnType<typeof vi.fn>;
@@ -134,13 +132,11 @@ describe('AgentRunnerComponent', () => {
       getInputSchema: vi.fn().mockReturnValue(throwError(() => new Error('no schema'))),
       ensureWarm: vi.fn().mockReturnValue(of(warmHandle)),
       getSandbox: vi.fn().mockReturnValue(of(coldHandle)),
-      teardown: vi.fn().mockReturnValue(of({ agent_id: 'blogging.writer', status: 'stopped' })),
       invoke: vi.fn(),
       listSamples: vi.fn().mockReturnValue(of([])),
       getSample: vi.fn(),
       listSavedInputs: vi.fn().mockReturnValue(of([])),
       createSavedInput: vi.fn(),
-      deleteSavedInput: vi.fn(),
       listRuns: vi.fn().mockReturnValue(of([])),
       getRun: vi.fn(),
       deleteRun: vi.fn(),
