@@ -182,7 +182,8 @@ def _make_phase_job_updater(
           ``phase`` is not ``None`` (a ``phase`` kwarg passed in by the caller is
           dropped in favor of the forced value, so a caller-supplied ``phase``
           never collides with it); forwards all other remaining kwargs untouched;
-          and swallows all exceptions raised during the update (observability-only
+          and logs (at warning level, with the job id and current trace id) then
+          discards any exception raised during the update (observability-only
           updater — never raises).
     """
     assert isinstance(subprocess_key, str) and subprocess_key, subprocess_key
@@ -214,8 +215,13 @@ def _make_phase_job_updater(
                 update_job(job_id, phase=phase, **kwargs)
             else:
                 update_job(job_id, **kwargs)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Phase job updater failed for job %s: %s",
+                job_id,
+                exc,
+                extra={"trace_id": current_trace_id()},
+            )
 
     return _updater
 
@@ -429,6 +435,12 @@ def _run_architecture_for_planning(
           ``client_context["tech_constraints"]`` (the ``ClientContext.tech_constraints``
           gathered during Planning intake/discovery) when present and non-empty, falling
           back to ``_DEFAULT_TECHNOLOGY_PREFERENCES`` otherwise.
+        - ``project_overview`` is constructed via ``build_project_overview(prd_content,
+          client_context)`` (the shared Planning/SE helper) and passed to
+          ``ArchitectureInput.project_overview``.
+        - ``features_and_functionality_doc`` passed to the architecture agent is
+          ``project_overview["features_and_functionality_doc"]``, normalized to ``None``
+          when falsy.
     Invariants:
         - Never propagates an exception into the Planning workflow.
     """
