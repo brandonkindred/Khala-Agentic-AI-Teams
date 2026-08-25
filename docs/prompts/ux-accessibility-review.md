@@ -171,7 +171,11 @@ for primitive defects you deliberately chose not to pursue at all.
     error interceptor, registered app-wide in `app.config.ts`. Read it BEFORE scoring
     the failure states in §3D, because it already differentiates most of them. It
     toasts, by status: `0` → "Network error. Please check your connection and that the
-    API is running." — `status === 0` is what this repo's offline state looks like;
+    API is running." — note that this copy deliberately hedges: `status === 0` means the
+    response never arrived, but it does NOT establish that the USER is offline. Angular
+    reports 0 for a refused connection, DNS or TLS failure, an aborted request and a
+    CORS rejection too, so the cause may equally be a backend that is down or
+    misconfigured. §3D says how to classify it;
     `401` → "Unauthorized. Please check your credentials."; `403` → "Access
     forbidden."; `503` → the server's own `detail`, but ONLY when that is a non-empty
     string. That is where a backend-unconfigured message such as "Career profile
@@ -244,7 +248,10 @@ for primitive defects you deliberately chose not to pursue at all.
         not only in specs that never call it — so filename alone will not separate
         signal from noise. Match the DISABLE ITSELF, which needs no prior knowledge
         of which rules are switched off:
-        `grep -rnE "[A-Za-z'\"-]+: \{ enabled: false \}" src/app --include=*.spec.ts`
+        `grep -rnE "[A-Za-z'\"-]+: \{ enabled: false \}" user-interface/src/app
+        --include=*.spec.ts` (run from the repository root, like every other path in
+        this prompt — a bare `src/app` exits 2 with `No such file or directory`, and
+        an empty census reads exactly like "nothing is disabled")
         — that returns CANDIDATE disables across all four specs. Verify each hit
         before counting it: the pattern matches any object key of that shape, so a
         feature flag, harness option, or mock setting in a spec file can look
@@ -508,8 +515,22 @@ D. STATE COVERAGE
    The five failure states are a PARTITION, not overlapping labels — classify each
    observed failure into exactly one, in this order, so the same event does not appear
    in two rows:
-     - offline — no transport at all; the request never reached a server. In this
-       repo that is `HttpErrorResponse.status === 0`.
+     - offline — the USER's connection is down, established as such. `HttpErrorResponse.
+       status === 0` is NOT sufficient evidence: it means only that no response arrived,
+       and a refused connection, DNS or TLS failure, an aborted request or a CORS
+       rejection all produce it. Score offline only where the page reads independent
+       evidence — `navigator.onLine`, or an `online`/`offline` event listener. NOTHING in
+       this app does, so on current code a bare status-0 branch never earns this row;
+       it falls through to API-error below. The repo already reads it that way: the
+       interceptor's own text asks the user to check the API as well as the connection,
+       and the two components that branch on 0 explicitly (`branding-chat.component.ts:78`
+       `isUnreachableError`, `startup-advisor-dashboard.component.ts:129`) group it with
+       404 and name the BACKEND. Where the page's recovery advice differs by cause —
+       retry versus check the service — a status-0 branch that cannot tell them apart is
+       itself the finding. This partition classifies an OBSERVED failure; it does not
+       remove `offline` from the fourteen-state table. A user can still be offline, so
+       the row is still scored — on whether the page gives THAT user a way forward — and
+       on current code the honest answer for most pages is MISSING, not NOT APPLICABLE.
      - permission-denied — the server answered, refusing on identity or authorization
        (401/403).
      - backend-unconfigured — the server answered, reporting the feature is not set up
@@ -549,10 +570,14 @@ D. STATE COVERAGE
        through `[attr.role]`. Only where neither a toast nor an alert region fires
        is the state unannounced. What varies between the four is not the disposition
        but the remedy each needs, which is what your one finding must spell out.
-     - Request did not opt out — the interceptor already distinguished 0 / 401 / 403 /
-       503 for the other three states, AND separately distinguishes 400 / 422 / 404 /
-       500 (and the rest) for API-error, each with its own toast — so a generic inline
-       message is NOT by itself a MISSING for ANY of the four, API-error included.
+     - Request did not opt out — the interceptor already toasted something specific to
+       the STATUS: 401 / 403 for permission-denied, a `detail`-bearing 503 for
+       backend-unconfigured, a distinct network-error string for 0, and 400 / 422 / 404 /
+       500 (and the rest) for API-error — so a generic inline message is NOT by itself a
+       MISSING for ANY of the four, API-error included. Note that the 0 toast is
+       status-specific but not STATE-specific: per the partition above it does not
+       establish offline, so it settles the announcement question without settling
+       which state the user is actually in.
        What still earns MISSING there is an inline message that CONTRADICTS the toast
        — two explanations of one failure is its own finding — or a state whose
        recovery needs an affordance a toast cannot offer: a sign-in route for 401, a
