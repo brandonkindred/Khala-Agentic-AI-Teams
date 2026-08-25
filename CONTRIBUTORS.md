@@ -154,7 +154,7 @@ The Software Engineering team enforces these rules in generated code; contributo
 - **Design by Contract:** Preconditions, postconditions, invariants — documented under those headers. `CLAUDE.md` makes this mandatory repo-wide for every function, method, and module; this team enforces it in the code it generates.
 - **SOLID:** Single responsibility, Open/Closed, Liskov, Interface segregation, Dependency inversion
 - **Documentation:** Comment blocks on classes/methods: purpose, usage, constraints
-- **Test coverage:** Minimum 85% where applicable
+- **Test coverage:** Minimum 90% line coverage — `CLAUDE.md` sets this as a hard floor for backend and frontend alike, and CI enforces it.
 - **Git:** Work on `development` branch; Conventional Commits for messages
 
 ### TypeScript / Angular (UI)

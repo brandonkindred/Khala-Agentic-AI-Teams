@@ -95,8 +95,10 @@ for primitive defects you deliberately chose not to pursue at all.
     the third zero and never reads alpha, so `rgba(0,0,0,0.6)` is banned too, not
     just opaque black. (d) The HEX families of (a) and (b) — NOT (c) — appearing as a
     `var()` FALLBACK: `color: var(--kh-text-secondary, #6e7681)` is banned, which
-    matters because `var(--token, #hex)` is this codebase's dominant idiom, so a
-    remediation you propose in that form can fail CI. An rgba fallback
+    matters because a hex fallback is easy to reach for when writing a remediation
+    and would fail CI. It is not the house form: bare `var(--token)` outnumbers
+    `var(--token, #hex)` by roughly five to one, and the bare form is what to
+    recommend. An rgba fallback
     (`var(--x, rgba(0,0,0,.5))`) slips through, since the fallback patterns
     interpolate the hex alternations only. Everything else
     passes, including `color: #000`. Token drift is therefore NOT a solved problem and lens E has real
@@ -532,8 +534,9 @@ D. STATE COVERAGE
        recoverability list, and a dead end fails it whichever state produced it.
        Check the announcement clause separately rather than assuming it failed: there
        is no toast on this path, but an inline `role="alert"` region announces on its
-       own, and 22 templates use exactly that against zero bare
-       `aria-live="assertive"`. Only where neither a toast nor an alert region fires
+       own — 18 templates carry a literal `role="alert"` (22 occurrences) against
+       zero bare `aria-live="assertive"`, and `inline-banner` sets the role
+       dynamically via `[attr.role]`, so a literal grep undercounts. Only where neither a toast nor an alert region fires
        is the state unannounced. What varies between the four is not the disposition
        but the remedy each needs, which is what your one finding must spell out.
      - Request did not opt out — the interceptor already distinguished 0 / 401 / 403 /

@@ -6,7 +6,9 @@ from accessibility_audit_team.wcag_criteria import (
     WCAGLevel,
     WCAGPrinciple,
     get_criteria_by_level,
+    get_criteria_by_principle,
     get_criterion,
+    get_level_a_aa_criteria,
 )
 
 # The complete WCAG 2.2 Level A and AA sets. 4.1.1 Parsing is absent from Level A
@@ -133,14 +135,36 @@ def test_get_criteria_by_principle_perceivable():
 
 
 def test_get_criteria_by_principle_operable():
-    operable = [sc for sc in WCAG_22_CRITERIA.values() if sc.principle == WCAGPrinciple.OPERABLE]
-    assert len(operable) >= 0
+    """Every Principle 2 criterion is reachable through the shipped accessor.
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Asserts the accessor agrees with the table; does not mutate the table.
+    """
+    expected = {sc.sc for sc in WCAG_22_CRITERIA.values() if sc.principle == WCAGPrinciple.OPERABLE}
+    assert {sc.sc for sc in get_criteria_by_principle(WCAGPrinciple.OPERABLE)} == expected
+    assert expected, "Principle 2 must not be empty"
 
 
 def test_get_level_a_aa_criteria_excludes_aaa():
-    a_and_aa = [sc for sc in WCAG_22_CRITERIA.values() if sc.level in (WCAGLevel.A, WCAGLevel.AA)]
-    for sc in a_and_aa:
-        assert sc.level != WCAGLevel.AAA
+    """The shipped accessor returns exactly Level A plus Level AA.
+
+    Filtering the table inline and asserting the result excludes AAA is true by
+    construction and cannot catch a regression in ``get_level_a_aa_criteria`` — the
+    accessor ``build_coverage_matrix`` depends on. Compare against the pinned sets
+    instead.
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Asserts the accessor's membership; does not mutate the table.
+    """
+    returned = {sc.sc for sc in get_level_a_aa_criteria()}
+    assert returned == LEVEL_A_WCAG_22 | LEVEL_AA_WCAG_22
+    assert all(sc.level != WCAGLevel.AAA for sc in get_level_a_aa_criteria())
 
 
 def test_criterion_is_success_criterion_instance():
