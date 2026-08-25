@@ -6,7 +6,13 @@ import { MatSnackBar } from '@angular/material/snack-bar';
 import { Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { AgentConsoleApiService } from '../../../../services/agent-console-api.service';
+import { AgentRunnerDestructiveActionsService } from '../../../../services/agent-runner-destructive-actions.service';
+import { ConfirmDestructiveService } from '../../../../shared/confirm-destructive.service';
 import { NotificationService } from '../../../../core/notification.service';
+import {
+  createAgentRunnerDestructiveActionsServiceStub,
+  type AgentRunnerDestructiveActionsServiceStub,
+} from '../../../../testing/agent-runner-destructive-actions-service.stub';
 import type { AgentDetail, AgentSummary } from '../../../../models/agent-catalog.model';
 import type { InvokeEnvelope, SandboxHandle } from '../../../../models/agent-runner.model';
 import type { RunRecord, RunSummary, SavedInput } from '../../../../models/agent-history.model';
@@ -118,7 +124,10 @@ describe('AgentRunnerComponent', () => {
   let fixture: ComponentFixture<AgentRunnerComponent>;
   let component: AgentRunnerComponent;
 
-  const setup = async (apiOverrides: Partial<ApiMock> = {}) => {
+  const setup = async (
+    apiOverrides: Partial<ApiMock> = {},
+    destructiveActionsStub?: AgentRunnerDestructiveActionsServiceStub,
+  ) => {
     TestBed.resetTestingModule();
     api = {
       listAgents: vi.fn().mockReturnValue(of([writerSummary])),
@@ -151,6 +160,19 @@ describe('AgentRunnerComponent', () => {
     });
     TestBed.overrideProvider(MatDialog, { useValue: { open: dialogOpen } });
     TestBed.overrideProvider(MatSnackBar, { useValue: { open: snackBarOpen } });
+    // AgentRunnerDestructiveActionsService is provided in AgentRunnerComponent's
+    // own component-level `providers` array, not at module scope — reaching it
+    // requires overrideComponent, not overrideProvider.
+    if (destructiveActionsStub) {
+      TestBed.overrideComponent(AgentRunnerComponent, {
+        set: {
+          providers: [
+            ConfirmDestructiveService,
+            { provide: AgentRunnerDestructiveActionsService, useValue: destructiveActionsStub },
+          ],
+        },
+      });
+    }
     await TestBed.compileComponents();
 
     fixture = TestBed.createComponent(AgentRunnerComponent);
@@ -408,36 +430,58 @@ describe('AgentRunnerComponent', () => {
   });
 
   describe('saved inputs — delete', () => {
-    beforeEach(() => selectWriter());
+    let destructiveActionsService: AgentRunnerDestructiveActionsServiceStub;
+
+    beforeEach(async () => {
+      destructiveActionsService = createAgentRunnerDestructiveActionsServiceStub();
+      await setup({}, destructiveActionsService);
+      selectWriter();
+    });
 
     it('does nothing for an id with no match', () => {
       component.deleteSavedInput('missing', new Event('click'));
-      expect(dialogOpen).not.toHaveBeenCalled();
+      expect(destructiveActionsService.deleteSavedInput).not.toHaveBeenCalled();
     });
 
-    it('does nothing when the user cancels the confirm', () => {
+    it('delegates to destructiveActionsService and leaves state untouched until it emits', () => {
       component.savedInputs.set([savedInput]);
-      dialogOpen.mockReturnValue({ afterClosed: () => of(false) });
-
-      component.deleteSavedInput(savedInput.id, new Event('click'));
-
-      expect(api.deleteSavedInput).not.toHaveBeenCalled();
-      expect(component.savedInputs()).toEqual([savedInput]);
-    });
-
-    it('removes the row and clears the picker when it was selected', () => {
-      component.savedInputs.set([savedInput]);
-      component.selectedPickerValue.set(`saved:${savedInput.id}`);
-      dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
-      api.deleteSavedInput.mockReturnValue(of({ id: savedInput.id, status: 'deleted' }));
       const event = new Event('click');
       const stopSpy = vi.spyOn(event, 'stopPropagation');
 
       component.deleteSavedInput(savedInput.id, event);
 
       expect(stopSpy).toHaveBeenCalled();
+      expect(destructiveActionsService.deleteSavedInput).toHaveBeenCalledWith(
+        'blogging.writer',
+        savedInput.id,
+        savedInput.name,
+      );
+      expect(component.savedInputs()).toEqual([savedInput]);
+    });
+
+    it('removes the row and clears the picker when savedInputDeleted$ emits for the selected row', () => {
+      component.savedInputs.set([savedInput]);
+      component.selectedPickerValue.set(`saved:${savedInput.id}`);
+
+      destructiveActionsService.savedInputDeleted$.next({ agentId: 'blogging.writer', payload: savedInput.id });
+
       expect(component.savedInputs()).toEqual([]);
       expect(component.selectedPickerValue()).toBeNull();
+    });
+
+    it('ignores a savedInputDeleted$ emission for a different agent', () => {
+      component.savedInputs.set([savedInput]);
+      component.selectedPickerValue.set(`saved:${savedInput.id}`);
+
+      destructiveActionsService.savedInputDeleted$.next({ agentId: 'other.agent', payload: savedInput.id });
+
+      expect(component.savedInputs()).toEqual([savedInput]);
+      expect(component.selectedPickerValue()).toBe(`saved:${savedInput.id}`);
+    });
+
+    it('surfaces destructiveError when errors$ emits for the selected agent', () => {
+      destructiveActionsService.errors$.next({ agentId: 'blogging.writer', message: 'delete failed' });
+      expect(component.destructiveError()).toBe('delete failed');
     });
   });
 
@@ -487,11 +531,9 @@ describe('AgentRunnerComponent', () => {
       vi.useRealTimers();
     });
 
-    it('is a no-op to warm/teardown when no agent is selected', () => {
+    it('warmSandbox is a no-op when no agent is selected', () => {
       component.warmSandbox();
-      component.tearDownSandbox();
       expect(api.ensureWarm).not.toHaveBeenCalled();
-      expect(api.teardown).not.toHaveBeenCalled();
     });
 
     it('warmSandbox sets the sandbox handle and clears the polling flag', () => {
@@ -512,53 +554,77 @@ describe('AgentRunnerComponent', () => {
       expect(component.sandboxPolling()).toBe(false);
     });
 
-    it('tearDownSandbox does nothing when the user cancels the confirm', () => {
-      selectWriter();
-      dialogOpen.mockReturnValue({ afterClosed: () => of(false) });
-      component.tearDownSandbox();
-      expect(api.teardown).not.toHaveBeenCalled();
-    });
+    describe('tearDownSandbox — destructive actions delegation', () => {
+      let destructiveActionsService: AgentRunnerDestructiveActionsServiceStub;
 
-    it('tearDownSandbox marks the sandbox cold on confirm', () => {
-      selectWriter();
-      component.warmSandbox();
-      expect(component.sandbox()).toEqual(warmHandle);
-
-      dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
-      api.teardown.mockReturnValue(of({ agent_id: coldHandle.agent_id, status: 'cold' }));
-      component.tearDownSandbox();
-
-      expect(api.teardown).toHaveBeenCalledWith(coldHandle.agent_id);
-      expect(component.sandbox()).toEqual({ ...coldHandle, status: 'cold', url: null });
-    });
-
-    it('tearDownSandbox sets a fallback cold handle when sandbox is null on confirm', () => {
-      api.getSandbox.mockReturnValue(throwError(() => new Error('down')));
-      selectWriter();
-      expect(component.sandbox()).toBeNull();
-      dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
-
-      expect(() => component.tearDownSandbox()).not.toThrow();
-
-      expect(component.sandbox()).toEqual({
-        agent_id: 'blogging.writer',
-        team: '',
-        status: 'cold',
-        url: null,
-        service_name: '',
-        container_name: '',
-        host_port: 0,
+      beforeEach(async () => {
+        destructiveActionsService = createAgentRunnerDestructiveActionsServiceStub();
+        await setup({}, destructiveActionsService);
       });
-    });
 
-    it('tearDownSandbox surfaces an error on failure', () => {
-      selectWriter();
-      dialogOpen.mockReturnValue({ afterClosed: () => of(true) });
-      api.teardown.mockReturnValue(throwError(() => ({ error: { detail: 'teardown failed' } })));
+      it('is a no-op when no agent is selected', () => {
+        component.tearDownSandbox();
+        expect(destructiveActionsService.tearDownSandbox).not.toHaveBeenCalled();
+      });
 
-      component.tearDownSandbox();
+      it('delegates to destructiveActionsService and leaves the sandbox untouched until it emits', () => {
+        selectWriter();
+        component.warmSandbox();
+        expect(component.sandbox()).toEqual(warmHandle);
 
-      expect(component.destructiveError()).toBe('teardown failed');
+        component.tearDownSandbox();
+
+        expect(destructiveActionsService.tearDownSandbox).toHaveBeenCalledWith('blogging.writer', 'Writer');
+        expect(component.sandbox()).toEqual(warmHandle);
+      });
+
+      it('marks the sandbox cold when sandboxTornDown$ emits for an existing handle', () => {
+        selectWriter();
+        component.warmSandbox();
+        expect(component.sandbox()).toEqual(warmHandle);
+
+        destructiveActionsService.sandboxTornDown$.next({ agentId: 'blogging.writer', payload: undefined });
+
+        expect(component.sandbox()).toEqual({ ...coldHandle, status: 'cold', url: null });
+      });
+
+      it('sets a fallback cold handle when sandboxTornDown$ emits with no existing sandbox', async () => {
+        destructiveActionsService = createAgentRunnerDestructiveActionsServiceStub();
+        await setup(
+          { getSandbox: vi.fn().mockReturnValue(throwError(() => new Error('down'))) },
+          destructiveActionsService,
+        );
+        selectWriter();
+        expect(component.sandbox()).toBeNull();
+
+        destructiveActionsService.sandboxTornDown$.next({ agentId: 'blogging.writer', payload: undefined });
+
+        expect(component.sandbox()).toEqual({
+          agent_id: 'blogging.writer',
+          team: '',
+          status: 'cold',
+          url: null,
+          service_name: '',
+          container_name: '',
+          host_port: 0,
+        });
+      });
+
+      it('ignores a sandboxTornDown$ emission for a different agent', () => {
+        selectWriter();
+        component.warmSandbox();
+        expect(component.sandbox()).toEqual(warmHandle);
+
+        destructiveActionsService.sandboxTornDown$.next({ agentId: 'other.agent', payload: undefined });
+
+        expect(component.sandbox()).toEqual(warmHandle);
+      });
+
+      it('surfaces destructiveError when errors$ emits for the selected agent', () => {
+        selectWriter();
+        destructiveActionsService.errors$.next({ agentId: 'blogging.writer', message: 'teardown failed' });
+        expect(component.destructiveError()).toBe('teardown failed');
+      });
     });
   });
 
