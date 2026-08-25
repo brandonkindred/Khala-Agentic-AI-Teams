@@ -14,12 +14,15 @@ repo-specific references are load-bearing elsewhere too. Adapt all of these:
 - §1 Scope — the route file (`user-interface/src/app/app.routes.ts`)
 - §2 Context to load first — the whole section
 - §3 Review lenses — the named shared primitives and helpers (`stall-warning`,
-  `defer-focus.ts`, the `--kh-*` tokens, …)
+  `defer-focus.ts`, the `--kh-*` tokens, …), and §3A's paragraph on
+  `backend/agents/accessibility_audit_team/wcag_criteria.py`, a Khala backend file
+  that does not exist elsewhere — drop it and send the reviewer straight to the
+  specification
 - §7 House constraints — the whole section
 - §5 Output format — the Verification bullet defers to §7's spec-selection rule, and
   the state table is pinned to the fourteen states of §3D
-- §8 Do not report — the test-harness assumptions (`expectNoAxeViolations`, the SCSS
-  contrast guard)
+- §8 Do not report — the `expectNoAxeViolations` harness assumptions (the SCSS
+  contrast guard is a §2 item, covered by adapting that section whole)
 
 What genuinely ports unchanged is the method: the five lenses, the state-disposition
 model, the SHAPE of the finding format and its severity rubric, and the noise-control
@@ -59,9 +62,15 @@ Out of scope (note it and move on, do not fix):
   - Backend APIs, agent behavior, and response shapes — unless a UI barrier is
     unfixable without an API change, in which case state exactly what the API must
     return.
-  - Global nav, theming, and shared components as a whole. A defect in a shared
-    primitive is a single finding filed against that primitive, not repeated per page.
+  - Global nav and theming as a whole.
   - Visual taste. "I'd have used a different accent" is not a finding.
+
+Shared primitives are the one case that crosses the line, so route them explicitly. A
+defect <TEAM>'s usage creates is IN scope and filed normally. A defect internal to the
+primitive itself is still a FINDING, not a note-and-move-on: file it ONCE against the
+primitive with `shared primitive` as its blast radius, however many <TEAM> pages it
+reaches, because one fix clears it across every team. Reserve "Out of scope, noted"
+for primitive defects you deliberately chose not to pursue at all.
 
 ## 2. Context to load first (do not skip — findings that ignore this are noise)
 
@@ -75,25 +84,31 @@ Out of scope (note it and move on, do not fix):
     `-tertiary`, `-muted`, `-on-accent`) and the type scale (`-xs` … `-2xl`), so
     `--kh-text-lg` is a font size, not a colour. Naming a size token in a colour
     recommendation produces an invalid declaration.
-  - `user-interface/src/styles/scss-contrast-guard.spec.ts` — the static guard against
-    hardcoded low-contrast text and suppressed focus outlines. Its allowlist is a
-    burndown list, and it is empty — read `BURNDOWN` in that spec to confirm it still
-    is. Every component moved onto the `--kh-*` tokens,
-    the guard enforces across the whole UI, and its own docstring forbids adding
-    entries to silence a failure. So do not expect a <TEAM> file on it, and never
-    propose adding or removing an entry. One migration item IS still outstanding: the
-    guard deliberately does not yet ban `#fff`, because a few files still use
-    `color: #fff` directly and it "joins the set in the Phase-2 token sweep". A bare
-    `color: #fff` in a <TEAM> stylesheet is therefore queued debt, not a settled
-    choice — report it under design-system consistency. Note also what the guard does
-    NOT do:
-    it pattern-matches banned hex literals and outline suppression in
-    `src/app/**/*.scss`; it computes no contrast ratios, never pairs a foreground
-    against a background, does not read token values, does not see `theme.scss`,
-    `styles.scss`, or inline template styles, and deliberately still permits `#fff`.
-    A real contrast failure — a `--kh-text-*` on the wrong `--kh-surface-*`, or a
+  - `user-interface/src/styles/scss-contrast-guard.spec.ts` — a regex lint over
+    `src/app/**/*.scss` for a shortlist of low-contrast text colours and for
+    suppressed focus outlines. Read what it actually bans before crediting it with
+    anything: NOT hex literals as a class, but repeated-digit greys `#111`–`#777` and
+    `#888`–`#eee`, four named literals (`#484f58`, `#6e7681`, `#71717a`, `#8b949e`),
+    and opaque-black `rgb()`/`rgba()`. Everything else passes, including
+    `color: #000`. Token drift is therefore NOT a solved problem and lens E has real
+    work — around 90 raw-hex `color:` declarations across some 28 distinct values sit
+    in `src/app` today, `#fff` only a handful of them. Measure it yourself with
+    `grep -rhoE 'color: *#[0-9a-fA-F]{3,6}' user-interface/src/app --include=*.scss`
+    rather than assuming CI caught it. Its `BURNDOWN` allowlist IS empty, and its
+    docstring forbids adding entries to silence a failure, so never propose adding or
+    removing one. `#fff` is the single gap the spec documents explicitly ("joins the
+    set in the Phase-2 token sweep"), which makes a bare `color: #fff` queued debt
+    rather than a settled choice — but it is one unbanned value among many, not the
+    only one.
+    What the guard does NOT do: it computes no contrast ratios, never pairs a
+    foreground against a background, does not read token values, and does not see
+    `theme.scss`, `styles.scss`, or inline template styles.
+    So a real contrast failure — a `--kh-text-*` on the wrong `--kh-surface-*`, or a
     hardcoded `color: #fff` on a light chip — is caught by NEITHER this guard NOR the
-    jsdom axe run, so it remains fully reportable.
+    jsdom axe run. Report it, LABELLED as needing a browser, the same way §3A handles
+    1.4.12: name the foreground/background pairing and the `file:line`, and say a
+    real-browser measurement is required. The ratio itself cannot be settled from
+    source; the suspicious pairing can.
   - `user-interface/src/app/shared/` — existing primitives to reuse before inventing
     anything: `dashboard-shell`, `empty-state`, `error-message`, `inline-banner`,
     `loading-spinner`, `stall-warning`, `confirm-dialog` / `confirm-destructive.service`,
@@ -106,16 +121,21 @@ Out of scope (note it and move on, do not fix):
     repo-wide way to pull a human-readable message out of an HTTP error for an inline
     error field; grep `extractErrorDetail(` for the spread. Recommend it over
     hand-rolled `err?.error?.detail ?? …` chains when proposing error copy, and carry
-    two conditions with the recommendation: `fallback` is REQUIRED, and it is where the
-    state-specific copy §3D asks for actually goes; and a FastAPI 422 array `detail`
-    is SKIPPED by default so the global interceptor can toast it instead, so a
-    component that opts out of that toast must pass `{ joinValidationArray: true }` or
-    it will show the fallback and drop every validation message),
+    two conditions with the recommendation. First, `fallback` is REQUIRED, and it is
+    where the state-specific copy §3D asks for actually goes. Second, an ARRAY
+    `detail` — FastAPI's validation shape, which arrives on 400 as well as 422 — is
+    SKIPPED unless `{ joinValidationArray: true }` is passed, so the global
+    interceptor can toast it instead. A component that opts out of that toast and
+    omits the option does NOT fall through to your fallback: the helper returns
+    `err.message` first and Angular always populates it, so the inline field renders
+    the raw `Http failure response for http://…: 422 Unprocessable Entity`. That is a
+    worse defect than generic copy — it leaks an internal URL — so score it as one),
     `result-count-announcement.ts` (live-region text for filtered lists),
     `latest-only.ts` (`LatestOnly` — monotonic "latest wins" guard so a slow response
-    cannot overwrite a newer one; it replaces the hand-rolled `const seq = ++this.xSeq`
-    pattern, and is the mechanism to name for a refresh race or unstable ordering
-    across polls), `clamp.util.ts` (integer clamp to a numeric `[min, max]` — NOT a
+    cannot overwrite a newer one; it is the intended replacement for the hand-rolled
+    `const seq = ++this.xSeq` pattern, which still survives in several components —
+    grep `++this.` and file what you find under the reuse rule below. Name `LatestOnly`
+    for a refresh race or unstable ordering across polls), `clamp.util.ts` (integer clamp to a numeric `[min, max]` — NOT a
     string truncator; do not reach for it on text), `number-format.ts` and
     `date-only.pipe.ts` (number and date presentation), and
     `poll-while.ts` / `staleness.util.ts` (long-running job polling and staleness).
@@ -128,14 +148,25 @@ Out of scope (note it and move on, do not fix):
     toasts, by status: `0` → "Network error. Please check your connection and that the
     API is running." — `status === 0` is what this repo's offline state looks like;
     `401` → "Unauthorized. Please check your credentials."; `403` → "Access
-    forbidden."; `503` → the server's own `detail` verbatim, which is where a
-    backend-unconfigured message such as "Career profile storage requires Postgres…"
-    reaches the user; `400`/`422` → the joined validation messages; `404`, `500` and
-    the rest → a status-specific string. The snackbar opens with
+    forbidden."; `503` → the server's own `detail`, but ONLY when that is a non-empty
+    string. That is where a backend-unconfigured message such as "Career profile
+    storage requires Postgres…" reaches the user; where it is absent the toast
+    degrades to a generic "Service temporarily unavailable", which names nothing and
+    leaves backend-unconfigured MISSING. `400`/`422` → one of three outcomes: a string
+    `detail` verbatim, the joined messages from an array `detail`, or a content-free
+    "Bad request: Bad Request" when neither parses. `404` → "Not found:" plus the RAW
+    REQUEST URL, which puts an internal API path in front of the user and is itself
+    reportable. `500` and the rest → a status-specific string. The snackbar opens with
     `politeness: 'assertive'`, so it satisfies the HANDLED gate's announcement clause
-    on its own. A request opts OUT of all of it only by carrying `SKIP_ERROR_NOTIFY` in
-    its `HttpContext` — via `skipErrorNotify()` or `SKIP_NOTIFY_OPTIONS` — which a
-    handful of services do; grep those three names to find them.
+    on its own.
+    TWO ways a request escapes all of this, and both must be ruled out before you
+    apply §3D's did-not-opt-out branch. It carries `SKIP_ERROR_NOTIFY` in its
+    `HttpContext` (via `skipErrorNotify()` or `SKIP_NOTIFY_OPTIONS` — grep those three
+    names), OR it never reaches `HttpClient` at all: `fetch()` and
+    `new EventSource(…)` bypass the interceptor entirely, and several streaming and
+    job-progress services use them. A bypassing request carries no `HttpContext`, so
+    the three-name grep will not surface it — grep those two calls too. Either way
+    there is no toast, so score its states as if it had opted out.
   - Existing `*.a11y.spec.ts` files and `user-interface/src/app/testing/a11y.ts`
     (`expectNoAxeViolations`, with `color-contrast` disabled under jsdom). Coverage is
     narrower than it looks, in four independent ways, and ALL FOUR must hold before
@@ -168,10 +199,13 @@ Out of scope (note it and move on, do not fix):
         `agent-studio-persona` turns off `page-has-heading-one` and `region`,
         `job-listing-card` turns off `aria-required-parent`, `job-profile-form` turns
         off `aria-required-children`, and `strategy-lab` turns off `nested-interactive`
-        at every call. Re-derive that list rather than trusting it —
-        `grep -rn "enabled: false" --include=*.spec.ts user-interface/src/app` — since
-        a rule a spec switched off is NOT guarded there however thoroughly that state
-        is rendered. Read the call's second argument, not just the fixture.
+        on FEWER THAN HALF of its calls — the rest are bare, so `nested-interactive`
+        genuinely IS guarded in those states. That is the general shape: a disable is
+        per CALL, not per spec, so read the call's second argument, not the file.
+        Re-derive the census rather than trusting this list, but not with a bare
+        `grep -rn "enabled: false"` — most of those hits are service-mock fixture data
+        in specs that never call the helper. Search for the rule names, or for the
+        two-argument call shape `expectNoAxeViolations(<host>, {`.
     Read each spec's fixtures, its assertions, what element it audits, AND which rules
     it disables before excluding a finding, then spend your attention on the unrendered
     states, the unrendered compositions, the disabled rules, and what axe structurally
@@ -198,9 +232,9 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
      named "Scan Cancel"). Word ORDER RELATIVE TO ADDED CONTEXT is not a conformance
      matter: "Backtest run 42 — Cancel" contains "Cancel" and conforms, even though
      the visible label does not come first. Containment is the test.
-     Icon-only buttons carry an accessible name — `aria-label` for a static one,
-     `[attr.aria-label]` where the value is computed; form fields are programmatically
-     associated with labels, hints, and errors.
+     Icon-only buttons carry an accessible name; form fields are programmatically
+     associated with labels, hints, and errors. Which ARIA form to use is
+     `ACCESSIBILITY.md`'s call — see §7.
    - Keyboard: every interaction reachable and operable without a pointer; no traps;
      tab order matches visual order; no positive `tabindex`; custom widgets implement
      the expected key bindings; visible focus ring survives (`--kh-focus-ring`).
@@ -219,12 +253,19 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
      graph edges, diff highlights, severity dots need text or shape too).
    - Zoom, reflow, and text spacing — three separate AA criteria; cite the right one:
        * 1.4.4 Resize Text (AA) — text resizes to 200% without loss of content or
-         functionality. A control clipped or cut off at 200% zoom is a 1.4.4 failure,
-         NOT a 1.4.10 one, and 1.4.10's two-dimensional exception does not apply to it.
-       * 1.4.10 Reflow (AA) — content presented at 320 CSS px wide without horizontal
-         scrolling, EXCEPT for the parts that genuinely require a two-dimensional
-         layout for meaning or use (data tables, task graphs, Mermaid diagrams). Test
-         whether the two-dimensional layout is actually necessary before reporting: a
+         functionality, EXCEPT captions and images of text. A control clipped or cut
+         off at 200% zoom is a 1.4.4 failure, NOT a 1.4.10 one, and 1.4.10's
+         two-dimensional exception does not apply to it.
+       * 1.4.10 Reflow (AA) — the test is NOT "no horizontal scrollbar". It is that
+         content can be presented WITHOUT LOSS OF INFORMATION OR FUNCTIONALITY and
+         without requiring scrolling in TWO dimensions: at 320 CSS px width for
+         vertically scrolling content, and at 256 CSS px height for horizontally
+         scrolling content. Both halves matter. A layout that reaches 320 px by
+         HIDING controls fails on the loss clause even with no horizontal scrollbar,
+         and a single-direction horizontal scroller does not fail merely for scrolling
+         horizontally. The exception covers the parts that genuinely require a
+         two-dimensional layout for usage or meaning (data tables, task graphs,
+         Mermaid diagrams) — test whether it is actually necessary before reporting: a
          wide data table scrolling inside its own container is compliant, a paragraph
          doing so is not.
        * 1.4.12 Text Spacing (AA) — no loss of content or functionality when the
@@ -235,22 +276,20 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
          it from a stylesheet.
    - Motion and timing, at the A/AA bar this review holds to, and only where the
      criterion actually applies. The summaries below are compressed, and so is
-     `backend/agents/accessibility_audit_team/wcag_criteria.py`. For the criteria that
-     table does carry, its number, name, and LEVEL are reliable. Know its three limits
-     before leaning on it for anything else. COVERAGE — despite a docstring claiming
-     all of Level A, AA, and AAA, it holds 59 entries: complete for A and AA, but only
-     3 of WCAG 2.2's 31 AAA criteria. An AAA lookup normally misses, 2.3.3 (cited a few
-     lines below) among them, and absence from the table is not evidence a criterion
-     does not exist. CONDITIONS — its one-line descriptions keep some exceptions
-     (2.5.8's "or have sufficient spacing", 3.3.8's "unless alternatives exist",
-     2.4.11's "not entirely") but drop others entirely, and on 2.3.1 they state only
-     the three-flash half, omitting the below-threshold alternative. TECHNIQUE IDS —
-     each entry's `techniques` and `failures` lists are a fast route into the normative
-     text, but they are not verified: F109 is attached to 2.5.8, 3.3.8, AND 3.3.9, so
-     at least two of those three are wrong. Open a technique and confirm it addresses
-     the criterion you are citing before it goes in a finding. Where a finding turns on
-     a threshold, applicability condition, or exception — or on an AAA criterion at all
-     — go to the criterion's own normative text rather than the table or this summary.
+     `backend/agents/accessibility_audit_team/wcag_criteria.py`. That table is a
+     convenience index for confirming a criterion's number, name, and level: complete
+     for Level A and AA, and deliberately partial at AAA (3 of 31), so an AAA lookup
+     usually misses — 2.3.3, cited a few lines below, among them. Absence from it is
+     not evidence a criterion does not exist. It is NOT a source for conditions: its
+     one-line descriptions keep some exceptions (2.5.8's "or have sufficient spacing",
+     3.3.8's "unless alternatives exist", 2.4.11's "not entirely") and drop others
+     entirely, and on 2.3.1 they state only the three-flash half, omitting the
+     below-threshold alternative. Its `techniques` and `failures` lists are pointers
+     into the W3C technique catalogue, not a checked mapping — open a technique and
+     confirm it addresses the criterion you are citing before it goes in a finding.
+     Where a finding turns on a threshold, applicability condition, or exception — or
+     on an AAA criterion at all — go to the criterion's own normative text rather than
+     the table or this summary.
        * 2.2.1 Timing Adjustable (A) — judge a time limit by its mechanism, not by
          whether the duration feels generous: a comfortable but fixed limit still
          fails. Passing takes ONE of three, and the thresholds are part of the
@@ -280,19 +319,27 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
          faster but sub-threshold effect is compliant, so check the threshold before
          reporting.
      Honouring
-     `prefers-reduced-motion` is 2.3.3, which is AAA — worth recommending as an
-     enhancement on a decorative entrance animation, but never reported as an AA
-     failure merely because the media query is absent.
+     `prefers-reduced-motion` maps to 2.3.3 Animation from Interactions, which is
+     AAA — but 2.3.3 covers only motion a USER'S INTERACTION initiates. Motion the
+     PAGE starts on its own is 2.2.2 territory, at Level A, and therefore reportable
+     when it meets 2.2.2's conditions above (automatic, more than five seconds, in
+     parallel with other content). So classify by what starts the animation before
+     picking a criterion: a scroll- or hover-triggered parallax is 2.3.3 and an
+     enhancement; a page-initiated entrance animation is 2.2.2 and a failure only once
+     it passes five seconds. Never report a missing `prefers-reduced-motion` query as
+     an AA failure on its own.
    - WCAG 2.2 additions specifically:
        * Target size (2.5.8) is a size-OR-spacing rule, not a flat floor: a target
          passes at 24×24 CSS px, or under one of the criterion's own carve-outs. Check
          these before flagging, and say which one you checked — naming an exception is
          not the same as meeting it:
-           - Spacing — undersized targets positioned so a 24 px circle centred on each
-             intersects NEITHER another target (its actual bounding box, which is how
-             a full-size neighbour counts) NOR the circle around another undersized
-             target. Checking circle-to-circle alone wrongly exempts a small control
-             sitting against a full-size one.
+           - Spacing — undersized targets positioned so that a circle of 24 CSS px
+             DIAMETER, centred on the BOUNDING BOX of each undersized target,
+             intersects NEITHER another target NOR the circle around another
+             undersized target. Diameter, not radius: reading it as a radius doubles
+             the clearance and manufactures failures. A full-size neighbour counts by
+             its own bounding box, so checking circle-to-circle alone wrongly exempts
+             a small control sitting against a full-size one.
            - Inline — the target sits IN A SENTENCE, or its size is constrained by the
              line-height of surrounding non-target text. A control merely styled
              inline does not qualify: a compact toolbar action still owes 24×24 or the
@@ -317,15 +364,30 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
          itself require dragging — a second drag gesture does not satisfy this, since
          dragging is already single-pointer. Essential dragging, and behaviour set by
          the user agent and not modified by the author, are excepted.
-       * Redundant Entry (3.3.7, A) — information the user already entered is
-         auto-populated or offered for selection rather than demanded again.
-       * Consistent Help (3.2.6, A) — where a help mechanism exists, it sits in a
-         consistent place across pages.
+       * Redundant Entry (3.3.7, A) — information the user already entered, or that
+         was provided to them, and that is required again IN THE SAME PROCESS, is
+         auto-populated or offered for selection rather than demanded again. Scope and
+         exceptions both matter: re-entry across two DIFFERENT processes is out of
+         scope entirely, and the criterion excepts re-entry that is essential, that is
+         required for the SECURITY of the content (so a password or API-key
+         confirmation field passes), or where the earlier value is no longer valid.
+       * Consistent Help (3.2.6, A) — where one of the criterion's help mechanisms
+         (contact details, a contact mechanism, a self-help option, an automated
+         contact mechanism) is repeated across a set of pages, it occurs IN THE SAME
+         ORDER RELATIVE TO OTHER PAGE CONTENT — that is DOM/serialized order, not
+         pixel position — unless the user initiated the change. A help link visually
+         repositioned at a breakpoint but unmoved in the DOM passes; one moved in the
+         DOM fails even if it looks the same.
        * Accessible Authentication (Minimum) (3.3.8, AA) — no step of an
          authentication process may require a cognitive function test (remembering a
-         password, transcribing characters, solving a puzzle) unless an alternative
-         exists, or a mechanism assists. This one is inside the AA bar and easy to
-         miss: check it on any credential-entry or connect-an-account surface.
+         password, transcribing characters, solving a puzzle) unless one of FOUR
+         exceptions applies: an alternative authentication method exists, a mechanism
+         assists (a password manager, paste support), the test is to RECOGNIZE OBJECTS
+         (an image-selection CAPTCHA), or the test is to identify NON-TEXT CONTENT THE
+         USER PROVIDED. The last two are commonly missed and make an image CAPTCHA or
+         a "confirm the photo you uploaded" step compliant, not a blocker. This one is
+         inside the AA bar and easy to miss: check it on any credential-entry or
+         connect-an-account surface.
 
 B. INTERACTION COST
    - Count the clicks, keystrokes, page transitions, and decisions in the primary task.
@@ -358,6 +420,16 @@ D. STATE COVERAGE
    same as giving a returning user with zero or filtered-out results a way forward),
    and first load and refresh differ (a refresh that silently blanks already-rendered
    content is a defect that a correct first-load spinner hides).
+   Two of the fourteen are easy to mis-scope, so they are defined here:
+     - partial — some of the requested content arrived and some did not: a page that
+       renders three of five panels because one call failed, or a list truncated by an
+       interrupted fetch. The distinguishing question is whether the user can tell
+       WHAT is missing. Rendering the successful part and staying silent about the
+       rest is the failure mode.
+     - stale-data — what is on screen is real but no longer current: polling stopped,
+       a refresh failed and the previous render stayed up, or the tab was
+       backgrounded. The distinguishing question is whether the user can tell HOW OLD
+       the view is; `staleness.util.ts` is the mechanism for saying so.
    The five failure states are a PARTITION, not overlapping labels — classify each
    observed failure into exactly one, in this order, so the same event does not appear
    in two rows:
@@ -374,19 +446,26 @@ D. STATE COVERAGE
        unparseable response). Reach for this only when none of the four above fits.
    One generic error branch commonly serves several of these at once. The repo-wide
    idiom is an RxJS subscribe callback, not a `try`/`catch` — `error: (err) => {
-   this.error = extractErrorDetail(err, 'Failed to load.'); … }`, with zero `catch`
-   blocks using that helper — so grep for `error: (` when locating these. Note the
-   REQUIRED second argument: that fallback string IS the component's per-state copy,
-   and a sketch that omits it does not compile.
+   this.error = extractErrorDetail(err, 'Failed to load.'); … }`. Grep for `error: (`
+   to find those, but that grep alone misses a second RxJS form: several dashboards
+   put the same handling in a `catchError((err) => …)` operator instead, so grep
+   `catchError` too or you will read a page's primary list-load error branch as
+   absent. Literal `try`/`catch` around this helper does not occur. Note the REQUIRED
+   second argument: that fallback string IS the component's per-state copy, and a
+   sketch that omits it does not compile.
    Score such a branch against the global interceptor rather than in isolation, because
    for most requests it is not the only thing the user receives:
      - Request opted out of the toast (`SKIP_ERROR_NOTIFY` / `skipErrorNotify()` /
-       `SKIP_NOTIFY_OPTIONS`) — the inline branch is the whole story, and one callback
-       rendering the same message for a 401, a 503, a network drop, and a
-       missing-provider response is scored per state on whether ITS OUTPUT gives that
-       state's user a way forward. "Failed to load" earns HANDLED for API-error and
-       MISSING for permission-denied and backend-unconfigured, because neither of those
-       users learns what to do.
+       `SKIP_NOTIFY_OPTIONS`), or bypassed the interceptor via `fetch`/`EventSource` —
+       the inline branch is the whole story, and one callback rendering the same
+       message for a 401, a 503, and a network drop is scored per state on whether ITS
+       OUTPUT gives that state's user a way forward. A bare "Failed to load" gives
+       none of them one, so it is MISSING for permission-denied, backend-unconfigured,
+       offline AND API-error alike — the HANDLED gate below puts all four in the
+       recoverability list, and a dead end fails it whichever state produced it.
+       Nothing was announced either, since there is no toast on this path. What varies
+       between the four is not the disposition but the remedy each needs, which is
+       what your one finding must spell out.
      - Request did not opt out — the interceptor already distinguished 0 / 401 / 403 /
        503 and announced it assertively, so a generic inline message is NOT by itself a
        MISSING for those states. What still earns MISSING there is an inline message
@@ -397,7 +476,12 @@ D. STATE COVERAGE
    Either way, when one branch is MISSING for several states, file ONE finding naming
    every state it fails and the distinct copy or handling each needs — not one finding
    per state against the same line.
-   Give every state exactly one disposition, and state which:
+   Give every state exactly one disposition, and state which. Decide in this order,
+   so MISSING and NOT APPLICABLE cannot both be argued from the same empty search:
+   first ask whether the page can ENTER the state at all — if nothing in its
+   operations or branches can reach it, or it hands the state elsewhere, that is NOT
+   APPLICABLE and the enquiry ends. Only for a state the page CAN enter do you ask
+   whether it is handled, and an empty search then means MISSING:
      - HANDLED — the UI is (1) rendered at all; (2) recoverable from, where the state
        represents a failure or interruption (partial, failed, stalled, stale-data,
        permission-denied, backend-unconfigured, offline, API-error) — a stated way
@@ -461,10 +545,13 @@ Open with:
     when fewer survive verification, and none is a valid result; never pad this list
     by duplicating or inventing findings to reach five.
   - **State dispositions** — one table per routed page, a row per state, covering all
-    fourteen from §3D. Columns: state | HANDLED / MISSING / N/A | evidence (the
-    `file:line` of the handled branch; for MISSING, either the incorrect branch or
-    the nearest operation where handling would belong plus what is absent; for N/A,
-    the justification).
+    fourteen from §3D. Columns: state | HANDLED / MISSING / N/A | evidence. The
+    evidence bar is §3D's, unrelaxed — a cell is not a lighter form of a finding: the
+    `file:line` of the handled branch; for MISSING, either the incorrect branch or the
+    nearest operation where handling would belong PLUS what is absent PLUS the scoped
+    search that found nothing; for N/A, the handoff code or the demonstration from the
+    page's own operations that it cannot enter the state. An N/A asserted without one
+    of those two is itself a gap, in the table exactly as in the findings.
     This is the audit the definition of done requires; a page whose table omits a
     state is not finished. Every MISSING row is represented among the findings below —
     but per §3D, where one branch is MISSING for several states, that is ONE finding
@@ -474,7 +561,12 @@ Then every finding, in ranked order:
 
   ### <ID: A11Y-n | FLOW-n | CLARITY-n | STATE-n | SYSTEM-n> — <short title>
   - **Severity**: Blocker | High | Medium | Low
-  - **Location**: `path/to/file.html:120-134` (+ other locations for the same cause)
+  - **Location**: `path/to/file.html:120-134` (+ other locations for the same cause).
+    A finding that needs a browser to confirm still names the file and the element or
+    rule it is about, and adds `— needs browser` after the range; never invent a line
+    number, and never demote a real AA failure to Open questions just because its
+    confirmation is manual. Open questions is for what needs a PRODUCT decision, or a
+    browser check you could not narrow to a location at all.
   - **What the user hits**: a concrete scenario naming the user and their tool
     ("a screen-reader user tabs to Cancel Scan; after the row is removed, focus is on
     body and nothing is announced")
@@ -513,15 +605,12 @@ Close with:
 
   - No new dependencies. Angular 19 standalone components, SCSS, existing `--kh-*`
     tokens, existing shared primitives.
-  - ARIA in templates — BOTH FORMS ARE CORRECT, per `ACCESSIBILITY.md`'s "attr. prefix"
-    rule and `CONTRIBUTORS.md` alike, and both are in wide use (grep `aria-label=` and
-    `[attr.aria-label]`). A constant value belongs in a plain attribute
-    (`aria-label="Remove goal"`); the `[attr.aria-*]` binding form is for values
-    computed at runtime, where it avoids Angular's property-binding pitfalls. Do not
-    file a finding to convert a correct static attribute to the bound form — that is a
-    no-op refactor and the kind of style preference §8 forbids. If you think one form
-    should govern everywhere, raise it under §5's Open questions rather than filing
-    per-attribute findings.
+  - ARIA in templates — follow `ACCESSIBILITY.md`'s "attr. prefix" rule as written:
+    a constant value goes in a plain attribute, a computed one in `[attr.aria-*]`.
+    BOTH ARE CORRECT and both are in wide use, so do not file a finding to convert a
+    correct static attribute to the bound form — that is a no-op refactor and the kind
+    of style preference §8 forbids. If you think one form should govern everywhere,
+    raise it under §5's Open questions rather than filing per-attribute findings.
   - Native semantics before ARIA; ARIA only where no native element does the job.
   - Design by Contract applies to any code you propose, per the repo-wide mandate in
     `CLAUDE.md` ("mandatory for all code and comments"): preconditions, postconditions,
@@ -538,7 +627,9 @@ Close with:
     `<component>.component.a11y.spec.ts`. Count both before assuming otherwise
     (`grep -rl expectNoAxeViolations` against `find -name '*.component.ts'`). Say which
     of the two you mean.
-  - Never reference an external issue tracker in code, comments, or docs.
+  - Never reference an external issue tracker in code, comments, or docs. Issue
+    numbers belong in pull-request bodies and nowhere else — and there they are
+    required, via `Closes #N`, on any PR that implements one of these findings.
 
 ## 8. Do not report
 
@@ -567,7 +658,9 @@ Close with:
 
 ## 9. Definition of done
 
-You are finished when: every routed <TEAM> page carries a stated disposition —
+You are finished when: the primary task walkthrough is written out with its step
+count, so every interaction-cost finding has a baseline to measure against; every
+routed <TEAM> page carries a stated disposition —
 handled, missing, or evidenced not-applicable — for all fourteen states in §3D; every
 finding cites a file and line, or — for an absence — the nearest relevant location
 plus what is missing there, or is explicitly marked as needing a browser; every
@@ -583,7 +676,13 @@ pain.
 ## Usage notes
 
 - **One team per run.** The prompt trades breadth for specificity; running it across
-  all 23 teams at once collapses it into a generic checklist.
+  every team at once collapses it into a generic checklist.
+- **Teams are not a partition of the UI.** Do not derive the run list from the backend
+  `TEAM_CONFIGS`: several routed pages (`cognition`, `integrations`, `llm-config`,
+  `llm-usage`, the root dashboard, and others) belong to no team in it, and at least
+  one configured team has no routed page at all. Enumerate from
+  `user-interface/src/app/app.routes.ts` and assign every route to a run, or pages get
+  reviewed by nobody.
 - **Browser-dependent checks** — real contrast against composited surfaces, 200% zoom
   reflow, and actual screen-reader output — cannot be settled from source alone. The
   prompt requires those to be labelled rather than guessed, so the labelled set is the

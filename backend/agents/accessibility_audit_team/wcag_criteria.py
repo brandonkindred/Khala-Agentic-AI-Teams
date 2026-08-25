@@ -1,8 +1,15 @@
 """
 WCAG 2.2 Success Criteria definitions.
 
-Provides structured access to all WCAG 2.2 Level A, AA, and AAA
-success criteria for accessibility auditing.
+Provides structured access to WCAG 2.2 success criteria for accessibility
+auditing. Coverage is complete for Level A (31) and Level AA (24); Level AAA
+is partial (3 of 31), so an AAA lookup usually misses. Absence from this table
+is not evidence that a criterion does not exist — check the specification.
+
+Descriptions are one-line summaries and drop applicability conditions and
+exceptions; ``techniques`` and ``failures`` are pointers into the W3C
+technique catalogue, not a normative mapping. Any judgement that turns on a
+threshold, condition, or exception must go to the criterion's own text.
 """
 
 import functools
@@ -536,7 +543,6 @@ WCAG_22_CRITERIA: Dict[str, SuccessCriterion] = {
         guideline_name="Input Modalities",
         description="Targets are at least 24x24 CSS pixels or have sufficient spacing.",
         techniques=["C42"],
-        failures=["F109"],
         new_in_22=True,
     ),
     # Principle 3: Understandable
@@ -703,17 +709,9 @@ WCAG_22_CRITERIA: Dict[str, SuccessCriterion] = {
     ),
     # Principle 4: Robust
     # Guideline 4.1 Compatible
-    "4.1.1": SuccessCriterion(
-        sc="4.1.1",
-        name="Parsing",
-        level=WCAGLevel.A,
-        principle=WCAGPrinciple.ROBUST,
-        guideline="4.1",
-        guideline_name="Compatible",
-        description="Elements have complete start and end tags, are nested correctly, and have unique IDs.",
-        techniques=["G134", "G192", "H74", "H75", "H88", "H93", "H94"],
-        failures=["F17", "F62", "F70", "F77"],
-    ),
+    # 4.1.1 Parsing is deliberately absent: WCAG 2.2 removed it. Markup defects it
+    # once covered are reported under the criterion they actually affect (usually
+    # 4.1.2 Name, Role, Value or 1.3.1 Info and Relationships).
     "4.1.2": SuccessCriterion(
         sc="4.1.2",
         name="Name, Role, Value",

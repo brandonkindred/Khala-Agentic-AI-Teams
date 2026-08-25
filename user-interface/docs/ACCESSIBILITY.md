@@ -6,10 +6,10 @@ The UI follows WCAG 2.2-oriented practices and Angular Material accessibility gu
 
 ## ARIA
 
-- **attr. prefix** – Use the `[attr.aria-*]` binding form for values computed at runtime (e.g. `[attr.aria-label]="'Cancel ' + job.label"`), where it avoids Angular's property-binding pitfalls. A constant value belongs in a plain attribute (`aria-label="Remove goal"`). Both forms are correct and both are in wide use; converting a correct static attribute to the bound form is a no-op refactor, not a fix.
+- **attr. prefix** – A constant value belongs in a plain attribute (`aria-label="Remove goal"`). To bind a value computed at runtime, use `[attr.aria-*]` (e.g. `[attr.aria-label]="'Cancel ' + job.label"`) — that is the binding form Angular supports for ARIA attributes, and the plain `[aria-*]` form is not used anywhere in this codebase. Both the static attribute and the `[attr.aria-*]` binding are correct; converting a correct static attribute to the bound form is a no-op refactor, not a fix.
 - **aria-label** – Buttons, icons, and controls have descriptive labels.
 - **aria-current** – Navigation items use `aria-current="page"` for the active route.
-- **aria-live** – Dynamic content (errors, status) uses `aria-live="polite"` for screen reader announcements.
+- **aria-live** – Dynamic content uses a live region for screen-reader announcements. Status and progress updates are `polite`, so they queue behind whatever the user is reading. Errors interrupt: the global error toast opens `assertive` deliberately, because polite announcements of a failure are routinely missed. Match that split in components — `polite` for status, `assertive` for a failure the user must act on.
 - **role** – Main content has `role="main"`; alerts use `role="alert"`.
 
 ## Keyboard Navigation
@@ -48,5 +48,8 @@ For a structured audit of one team's routed pages — WCAG 2.2 AA lenses, the fo
 per-page states and their dispositions, and a finding format that names a concrete
 mechanism — use the reusable prompt at
 [`docs/prompts/ux-accessibility-review.md`](../../docs/prompts/ux-accessibility-review.md).
-It records what the automated checks here do and do not guard, so a review spends its
-attention on what Lighthouse and axe structurally cannot see.
+It records what the jsdom unit harness (`expectNoAxeViolations`) and the SCSS contrast
+lint do and do not guard, so a review spends its attention on what they structurally
+cannot see. Those blind spots are not the same as Lighthouse's or axe DevTools': a
+browser tool measures the contrast and geometry jsdom cannot, so the prompt complements
+the tooling above rather than replacing it — run both.
