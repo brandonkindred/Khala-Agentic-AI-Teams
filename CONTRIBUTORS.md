@@ -162,7 +162,7 @@ The Software Engineering team enforces these rules in generated code; contributo
 - **Style:** Follow Angular style guide and project `tsconfig`/lint rules.
 - **Components:** Prefer standalone components. Use `@Input()` / `@Output()` for data flow.
 - **Services:** One service per API. Use `HttpClient` with typed interfaces.
-- **Accessibility:** Use `[attr.aria-*]`, `aria-label`, `aria-live` where appropriate. See [user-interface/docs/ACCESSIBILITY.md](user-interface/docs/ACCESSIBILITY.md).
+- **Accessibility:** Give controls accessible names and announce dynamic content; plain `aria-*` attributes and `[attr.aria-*]` bindings are both correct. See [user-interface/docs/ACCESSIBILITY.md](user-interface/docs/ACCESSIBILITY.md) for which to use where.
 
 ### Commit Messages
 

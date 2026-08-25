@@ -87,10 +87,15 @@ for primitive defects you deliberately chose not to pursue at all.
   - `user-interface/src/styles/scss-contrast-guard.spec.ts` — a regex lint over
     `src/app/**/*.scss` for a shortlist of low-contrast text colours and for
     suppressed focus outlines. Read what it actually bans before crediting it with
-    anything: NOT hex literals as a class, but repeated-digit greys `#111`–`#777` and
-    `#888`–`#eee`, four named literals (`#484f58`, `#6e7681`, `#71717a`, `#8b949e`),
-    and opaque-black `rgb()`/`rgba()`. Everything else passes, including
-    `color: #000`. Token drift is therefore NOT a solved problem and lens E has real
+    anything: NOT hex literals as a class, but four families. (a) A repeated-digit
+    PREFIX `#111`–`#777` or `#888`–`#eee` — anchored on the first three digits only,
+    so `#777fff` and `#eee000` are banned too even though neither is a grey; do not
+    read the ban as "greys". (b) Four named literals (`#484f58`, `#6e7681`,
+    `#71717a`, `#8b949e`). (c) Opaque-black `rgb()`/`rgba()`. (d) Those same values
+    appearing as a `var()` FALLBACK — `color: var(--kh-text-secondary, #6e7681)` is
+    banned, which matters because `var(--token, #hex)` is this codebase's dominant
+    idiom, so a remediation you propose in that form can fail CI. Everything else
+    passes, including `color: #000`. Token drift is therefore NOT a solved problem and lens E has real
     work — around 90 raw-hex `color:` declarations across some 28 distinct values sit
     in `src/app` today, `#fff` only a handful of them. Measure it yourself with
     `grep -rhoE 'color: *#[0-9a-fA-F]{3,6}' user-interface/src/app --include=*.scss`
@@ -125,8 +130,14 @@ for primitive defects you deliberately chose not to pursue at all.
     where the state-specific copy §3D asks for actually goes. Second, an ARRAY
     `detail` — FastAPI's automatic 422 validation-error shape — is SKIPPED unless
     `{ joinValidationArray: true }` is passed, so the global interceptor can toast it
-    instead. Every manual `400` raise in this backend passes a plain string `detail`;
-    the array shape is a 422-only artifact here, so do not expect it on a 400. A component that opts out of that toast and
+    instead. No manual raise in this backend passes a literal ARRAY `detail`, so that
+    shape is a 422 automatic-validation artifact here. But the option is NOT a
+    general fix: it rescues arrays only, and this backend does raise DICT details
+    (`detail={"error": "planning_failed", …}`, on a 422 and on a status-passthrough
+    4xx). A dict falls past the option straight to the `err.message` branch, so a
+    component that passes `joinValidationArray` is still exposed. The trigger is
+    "detail is not a non-empty string", not "detail is an array" — check the shape
+    the endpoint actually raises. A component that opts out of that toast and
     omits the option does NOT fall through to your fallback: the helper returns
     `err.message` first and Angular always populates it, so the inline field renders
     the raw `Http failure response for http://…: 422 Unprocessable Entity`. That is a
@@ -161,7 +172,13 @@ for primitive defects you deliberately chose not to pursue at all.
     whichever status arrived. `404` → "Not found:" plus `err.url` — the RESPONSE URL,
     normally identical to the request URL, and itself reportable for putting an
     internal API path in front of the user — falling back to `statusText` on the rare
-    response that carries no `url`. `500` and the rest → a status-specific string. The snackbar opens with
+    response that carries no `url`. `500` and the rest → a status-specific PREFIX
+    ("Server error: ", "Error 502: ") followed by the server's detail — but when the
+    body is not parseable JSON (a gateway HTML page, a proxy error, a bare traceback)
+    that tail falls through to `err.message`, so the toast renders the same raw
+    `Http failure response for http://…` URL leak described above. Treat a 5xx whose
+    body the API does not control as leaking, not as "status-specific".
+    The snackbar opens with
     `politeness: 'assertive'`, so it satisfies the HANDLED gate's announcement clause
     on its own.
     TWO ways a request escapes all of this, and both must be ruled out before you
@@ -212,8 +229,14 @@ for primitive defects you deliberately chose not to pursue at all.
         service-mock fixture data (e.g. `of({ enabled: false, mcp_server_url: … })`),
         and that noise sits inside the SAME spec files that call the helper heavily,
         not only in specs that never call it — so filename alone will not separate
-        signal from noise. Search for the rule names, or for the two-argument call
-        shape `expectNoAxeViolations(<host>, {`.
+        signal from noise. Search for the rule NAMES — that is the only recipe that
+        finds every site. Do NOT search for the two-argument call shape
+        `expectNoAxeViolations(<host>, {`: two of the four specs hoist their disables
+        into a module-level const and pass it by name
+        (`expectNoAxeViolations(fixture.nativeElement, cardExtraRules)`), so that
+        shape silently misses them and you would conclude those rules are enforced
+        when they are switched off — the exact false negative this axis exists to
+        prevent. When a call's second argument is an identifier, resolve it.
     Read each spec's fixtures, its assertions, what element it audits, AND which rules
     it disables before excluding a finding, then spend your attention on the unrendered
     states, the unrendered compositions, the disabled rules, and what axe structurally
@@ -260,8 +283,11 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
      actual `--kh-surface-*` it sits on; status is never conveyed by hue alone (chips,
      graph edges, diff highlights, severity dots need text or shape too).
    - Zoom, reflow, and text spacing — three separate AA criteria; cite the right one:
-       * 1.4.4 Resize Text (AA) — text resizes to 200% without loss of content or
-         functionality, EXCEPT captions and images of text. A control clipped or cut
+       * 1.4.4 Resize Text (AA) — text resizes WITHOUT ASSISTIVE TECHNOLOGY up to
+         200% without loss of content or functionality, EXCEPT captions and images of
+         text. The "without assistive technology" clause is load-bearing: "the user
+         can run a screen magnifier" does NOT satisfy it, so do not accept that as
+         the mechanism. A control clipped or cut
          off at 200% zoom is a 1.4.4 failure, NOT a 1.4.10 one, and 1.4.10's
          two-dimensional exception does not apply to it.
        * 1.4.10 Reflow (AA) — the test is NOT "no horizontal scrollbar". It is that
@@ -276,9 +302,14 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
          Mermaid diagrams) — test whether it is actually necessary before reporting: a
          wide data table scrolling inside its own container is compliant, a paragraph
          doing so is not.
-       * 1.4.12 Text Spacing (AA) — no loss of content or functionality when the
-         reader overrides line height to 1.5× the font size, paragraph spacing to 2×,
-         letter spacing to 0.12×, and word spacing to 0.16×. Fixed-height containers
+       * 1.4.12 Text Spacing (AA) — in content using a markup language that supports
+         these properties, no loss of content or functionality when the reader sets
+         ALL of them and changes NO OTHER style property: line height to AT LEAST
+         1.5× the font size, spacing FOLLOWING paragraphs to at least 2×, letter
+         spacing to at least 0.12×, word spacing to at least 0.16×. They are minimums,
+         not exact values. The criterion excepts human languages and scripts that do
+         not use one or more of these properties, so do not report a word- or
+         letter-spacing failure on a CJK surface without checking that first. Fixed-height containers
          that clip their overflow are the usual failure. This needs a running browser
          with the overrides applied — report it labelled as such rather than inferring
          it from a stylesheet.
@@ -353,7 +384,9 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
              inline does not qualify: a compact toolbar action still owes 24×24 or the
              spacing test.
            - Equivalent — the same function is reachable from another control on the
-             same page that does meet the size.
+             same page that MEETS THIS CRITERION. Note "meets the criterion", not
+             "meets the size": an alternate control that itself passes via the
+             spacing test or another carve-out is a valid Equivalent defence.
            - User-agent control — the size is set by the user agent and unmodified by
              the author.
            - Essential — a particular presentation is essential or legally required.
@@ -380,17 +413,23 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
          required for the SECURITY of the content (so a password or API-key
          confirmation field passes), or where the earlier value is no longer valid.
        * Consistent Help (3.2.6, A) — where one of the criterion's help mechanisms
-         (contact details, a contact mechanism, a self-help option, an automated
-         contact mechanism) is repeated across a set of pages, it occurs IN THE SAME
+         (HUMAN contact details, a HUMAN contact mechanism, a self-help option, a
+         FULLY AUTOMATED contact mechanism — the human/automated split is normative,
+         so a support chat staffed by people and a chatbot are different mechanisms,
+         not one repeated one) is repeated across a set of pages, it occurs IN THE SAME
          ORDER RELATIVE TO OTHER PAGE CONTENT — that is DOM/serialized order, not
          pixel position — unless the user initiated the change. A help link visually
          repositioned at a breakpoint but unmoved in the DOM passes; one moved in the
          DOM fails even if it looks the same.
        * Accessible Authentication (Minimum) (3.3.8, AA) — no step of an
          authentication process may require a cognitive function test (remembering a
-         password, transcribing characters, solving a puzzle) unless one of FOUR
-         exceptions applies: an alternative authentication method exists, a mechanism
-         assists (a password manager, paste support), the test is to RECOGNIZE OBJECTS
+         password, transcribing characters, solving a puzzle) unless THAT STEP itself
+         provides one of FOUR exceptions — scope matters, an exception available
+         elsewhere in the flow does not cover a step that offers none, so a login that
+         supports password managers followed by a six-box one-digit-per-field TOTP
+         step still fails at the TOTP step: an alternative authentication method
+         exists, a mechanism assists (a password manager, paste support), the test is
+         to RECOGNIZE OBJECTS
          (an image-selection CAPTCHA), or the test is to identify NON-TEXT CONTENT THE
          USER PROVIDED. The last two are commonly missed and make an image CAPTCHA or
          a "confirm the photo you uploaded" step compliant, not a blocker. This one is
@@ -437,7 +476,14 @@ D. STATE COVERAGE
      - stale-data — what is on screen is real but no longer current: polling stopped,
        a refresh failed and the previous render stayed up, or the tab was
        backgrounded. The distinguishing question is whether the user can tell HOW OLD
-       the view is; `staleness.util.ts` is the mechanism for saying so.
+       the view is. Do not reach for `staleness.util.ts` by default: it reads a JOB's
+       server-stamped `last_activity_at`, so it measures job-side activity (which
+       keeps advancing while the browser view is frozen) and returns nothing at all
+       for a once-fetched list like `llm-config` or `integrations`. It fits only a
+       job-backed view — and §3B already assigns it to the STALLED state, so naming
+       it here risks conflating two states this section insists are distinct. For
+       every other page the recommendation is a rendered fetched-at timestamp or an
+       explicit refresh affordance, not this helper.
    The five failure states are a PARTITION, not overlapping labels — classify each
    observed failure into exactly one, in this order, so the same event does not appear
    in two rows:
@@ -616,11 +662,15 @@ Close with:
   - No new dependencies. Angular 19 standalone components, SCSS, existing `--kh-*`
     tokens, existing shared primitives.
   - ARIA in templates — follow `ACCESSIBILITY.md`'s "attr. prefix" rule as written:
-    a constant value goes in a plain attribute, a computed one in `[attr.aria-*]`.
-    BOTH ARE CORRECT and both are in wide use, so do not file a finding to convert a
-    correct static attribute to the bound form — that is a no-op refactor and the kind
-    of style preference §8 forbids. If you think one form should govern everywhere,
-    raise it under §5's Open questions rather than filing per-attribute findings.
+    it states a preference for NEW code (plain attribute for a constant,
+    `[attr.aria-*]` for a computed value) and explicitly declines to enforce it
+    retroactively. BOTH ARE CORRECT and both are in wide use — dozens of existing
+    templates bind a constant through `[attr.aria-*]` — so file no finding for a
+    conversion in EITHER direction; that is a no-op refactor and the kind of style
+    preference §8 forbids. If you think one form should govern everywhere, raise it
+    under §5's Open questions rather than filing per-attribute findings.
+    For an interrupting announcement follow the same file's `aria-live` rule: prefer
+    `role="alert"`, and never pair it with `aria-live="assertive"` on one element.
   - Native semantics before ARIA; ARIA only where no native element does the job.
   - Design by Contract applies to any code you propose, per the repo-wide mandate in
     `CLAUDE.md` ("mandatory for all code and comments"): preconditions, postconditions,
@@ -672,12 +722,16 @@ You are finished when: the primary task walkthrough is written out with its step
 count, so every interaction-cost finding has a baseline to measure against; every
 routed <TEAM> page carries a stated disposition —
 handled, missing, or evidenced not-applicable — for all fourteen states in §3D; every
-finding cites a file and line, or — for an absence — the nearest relevant location
-plus what is missing there, or is explicitly marked as needing a browser; every
+finding cites a file and line, or — for an absence — meets §3D's evidence bar in
+full (the nearest relevant location, what is missing there, AND the scoped search
+that found nothing), or is explicitly marked as needing a browser; every
 recommendation names a concrete mechanism — an element, attribute, token, shared
 primitive, copy change, or component-logic change — rather than
 describing an intention; and the Top 5 — however many survived verification, which may
-be none — is ordered such that shipping only those removes the largest share of user
+be none — is ordered by §4 step 7's rank, (user impact × frequency) ÷ effort, which
+is what "highest leverage" in §5 means; where that ordering and "removes the most
+user pain" disagree, the rank governs and you say so in one line. Shipping the Top 5
+should remove the largest share of user
 pain.
 ```
 

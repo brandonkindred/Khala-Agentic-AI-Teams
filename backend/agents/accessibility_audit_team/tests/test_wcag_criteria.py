@@ -6,6 +6,7 @@ from accessibility_audit_team.wcag_criteria import (
     WCAGLevel,
     WCAGPrinciple,
     get_criteria_by_level,
+    get_criterion,
 )
 
 
@@ -92,28 +93,48 @@ def test_criterion_is_success_criterion_instance():
 def test_parsing_criterion_absent():
     """4.1.1 Parsing was removed in WCAG 2.2, so this 2.2 table must not carry it.
 
-    Preconditions: none.
-    Postconditions: asserts the lookup misses; does not mutate the table.
+    Exercises the shipped ``get_criterion`` rather than a local shim, since that is
+    the accessor production code (``tools/standards/map_wcag.py``) calls.
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Asserts the lookup misses; does not mutate the table.
     """
-    assert _get_criterion("4.1.1") is None
+    assert get_criterion("4.1.1") is None
 
 
-def test_level_a_count_matches_wcag_22():
-    """WCAG 2.2 (as of this table's last sync) defines 31 Level A criteria; a 32nd
-    means a removed criterion crept back in, or the table needs updating for a new
-    WCAG revision that added or reclassified one.
+def test_level_counts_match_wcag_22():
+    """Pin all three coverage counts the module docstring states.
 
-    Preconditions: none.
-    Postconditions: asserts the count; does not mutate the table.
+    WCAG 2.2 defines 31 Level A and 24 Level AA criteria, and this table carries
+    both sets complete. It carries 3 of the 31 Level AAA criteria by choice. A
+    count that drifts in either direction means a criterion was dropped, added, or
+    mis-levelled — the assertion messages name the criteria so the diff is visible
+    without hand-diffing a 58-entry table.
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Asserts the three counts; does not mutate the table.
     """
-    assert len(get_criteria_by_level(WCAGLevel.A)) == 31
+    for level, expected in ((WCAGLevel.A, 31), (WCAGLevel.AA, 24), (WCAGLevel.AAA, 3)):
+        numbers = sorted(sc.sc for sc in get_criteria_by_level(level))
+        assert len(numbers) == expected, (
+            f"Level {level.value}: expected {expected}, got {len(numbers)}: {numbers}"
+        )
 
 
 def test_f109_only_on_accessible_authentication():
     """F109 fails 3.3.8 and 3.3.9 only; it is not a target-size failure technique.
 
-    Preconditions: none.
-    Postconditions: asserts the attachment set; does not mutate the table.
+    Preconditions:
+        None.
+
+    Postconditions:
+        Asserts the attachment set; does not mutate the table.
     """
     carriers = {sc.sc for sc in WCAG_22_CRITERIA.values() if "F109" in sc.failures}
     assert carriers == {"3.3.8", "3.3.9"}

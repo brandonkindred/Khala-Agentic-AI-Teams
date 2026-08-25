@@ -10,6 +10,20 @@ Descriptions are one-line summaries and drop applicability conditions and
 exceptions; ``techniques`` and ``failures`` are pointers into the W3C
 technique catalogue, not a normative mapping. Any judgement that turns on a
 threshold, condition, or exception must go to the criterion's own text.
+
+Preconditions: none — the table is a module-level literal, built at import.
+
+Postconditions: ``WCAG_22_CRITERIA`` maps each success-criterion number to the
+``SuccessCriterion`` describing it; every accessor returns entries drawn from
+it and never mutates it.
+
+Invariants:
+  - Each key equals its entry's ``sc`` field.
+  - Level A holds 31 entries and Level AA holds 24 — the complete WCAG 2.2
+    sets. Level AAA is partial (3 of 31) by choice, not by omission-as-bug.
+  - 4.1.1 Parsing is absent: WCAG 2.2 removed it.
+  - Accessors returning lists hand back a cached list object; callers must
+    treat it as read-only.
 """
 
 import functools
@@ -543,6 +557,7 @@ WCAG_22_CRITERIA: Dict[str, SuccessCriterion] = {
         guideline_name="Input Modalities",
         description="Targets are at least 24x24 CSS pixels or have sufficient spacing.",
         techniques=["C42"],
+        failures=[],
         new_in_22=True,
     ),
     # Principle 3: Understandable
