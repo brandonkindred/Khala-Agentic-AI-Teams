@@ -89,8 +89,8 @@ Out of scope (note it and move on, do not fix):
     "Build a custom X" when a shared X exists is itself a finding.
   - Existing `*.a11y.spec.ts` files and `user-interface/src/app/testing/a11y.ts`
     (`expectNoAxeViolations`, with `color-contrast` disabled under jsdom). Coverage is
-    narrower than it looks, in two independent ways, and BOTH must hold before you
-    treat anything as guarded:
+    narrower than it looks, in three independent ways, and ALL THREE must hold before
+    you treat anything as guarded:
       * By state — a spec guards only the states its fixtures render. One that mounts
         empty listings, jobs, and runs audits the empty state and nothing else, so the
         populated, active-job, and error branches are unaudited even for defects axe
@@ -104,8 +104,19 @@ Out of scope (note it and move on, do not fix):
         guard and browser axe cover it instead) and everything interaction-dependent:
         focus restoration after a mutation, live-region announcements, keyboard
         sequences, reflow at 320 px and 200%, and target size or spacing.
-    Read each spec's fixtures AND its assertions before excluding a finding, then spend
-    your attention on the unrendered states and on what axe structurally cannot see.
+      * By scope — `expectNoAxeViolations` runs `axe(host, …)` on the element it is
+        given, and the specs pass a single component instance (`fixture.nativeElement`)
+        or a sub-element. Nothing outside that subtree is audited: sibling components,
+        a second instance of the same component, and the page shell are all absent. So
+        a defect that exists only in the routed composition is unguarded even when the
+        component's own spec renders the same state — duplicate ARIA ids across
+        repeated instances, landmark and heading structure across the page, and
+        `aria-labelledby` pointing at an id outside the component. Before excluding a
+        composition-level finding, confirm a fixture actually renders that composition
+        and that multiplicity.
+    Read each spec's fixtures, its assertions, AND what element it audits before
+    excluding a finding, then spend your attention on the unrendered states, the
+    unrendered compositions, and what axe structurally cannot see.
 
 ## 3. Review lenses
 
