@@ -124,14 +124,25 @@ class _AssignmentMixin:
         shape (mixed/untargeted tasks, or contention) is left to the caller's existing
         strict one-candidate-per-task logic.
 
+        A batch smaller than its matching-agent pool (e.g. one ready task, two free
+        same-stack agents) rotates which agent starts the pairing, tracked per
+        ``target_team`` in ``self._homogeneous_assign_cursor``. Without this, repeated
+        small batches would always pair starting from ``remaining_free``'s fixed
+        roster-order prefix -- i.e. the same first-listed agent every round -- even
+        though every free same-stack agent is an equally valid candidate: a stack with
+        2+ workers would then only ever exercise the first one whenever demand never
+        exceeds a single task at a time.
+
         Postconditions:
             - Returns False and makes no assignments unless every task in
               ``remaining_ready`` shares the same non-empty ``target_team`` and at least
               that many free agents match it.
-            - Returns True otherwise: matching free agents are paired to tasks 1:1 in list
-              order via ``self._try_assign``, with ``used_agents``/``assigned_tasks``
-              updated in place for each successful placement. Any excess tasks beyond the
-              matching-agent pool are left unassigned for a later round.
+            - Returns True otherwise: matching free agents, rotated by this team's
+              cursor, are paired to tasks 1:1 via ``self._try_assign``, with
+              ``used_agents``/``assigned_tasks`` updated in place for each successful
+              placement. Any excess tasks beyond the matching-agent pool are left
+              unassigned for a later round. The cursor advances by the number of
+              successful placements, wrapping modulo the matching-agent count.
         """
         target_teams = {t.target_team for t in remaining_ready}
         if len(target_teams) != 1:
@@ -148,10 +159,20 @@ class _AssignmentMixin:
         if len(matching_free) < len(remaining_ready):
             return False
 
-        for task, agent_id in zip(remaining_ready, matching_free):
+        cursor_by_team = getattr(self, "_homogeneous_assign_cursor", None)
+        if cursor_by_team is None:
+            cursor_by_team = {}
+            self._homogeneous_assign_cursor = cursor_by_team
+        start = cursor_by_team.get(target_team, 0) % len(matching_free)
+        rotated_free = matching_free[start:] + matching_free[:start]
+
+        placed = 0
+        for task, agent_id in zip(remaining_ready, rotated_free):
             if self._try_assign(task.id, agent_id):
                 used_agents.add(agent_id)
                 assigned_tasks.add(task.id)
+                placed += 1
+        cursor_by_team[target_team] = (start + placed) % len(matching_free)
         return True
 
     def _try_deterministic_assign(

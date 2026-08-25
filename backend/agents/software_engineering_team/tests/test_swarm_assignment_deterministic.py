@@ -283,6 +283,37 @@ def test_homogeneous_targeted_tasks_with_contention_still_calls_llm(tmp_path):
     assert {t["id"] for t in call["ready_tasks"]} == {"t1", "t2", "t3"}
 
 
+def test_homogeneous_single_task_batches_rotate_across_free_agents(tmp_path):
+    """Sequential single-task batches, with both same-stack agents free every round (the
+    prior task always merges before the next one arrives), rotate which agent starts the
+    pairing instead of always preferring the first-listed one -- proving a stack with 2+
+    workers isn't permanently reduced to using only the first whenever demand never
+    actually reaches contention."""
+    tech_lead = _RecordingTechLead()
+    workers = [
+        StubWorker("backend_v2-1", stack_name="backend_v2"),
+        StubWorker("backend_v2-2", stack_name="backend_v2"),
+    ]
+    swarm, graph = _make_swarm(tmp_path, tech_lead, workers)
+
+    assigned_agents = []
+    for i in range(4):
+        task_id = f"t{i}"
+        graph.add_task(task_id, title=f"Task {i}", target_team="backend_v2")
+        swarm._assign_tasks([graph.get_task(task_id)], ["backend_v2-1", "backend_v2-2"])
+        assigned_agents.append(graph.get_task(task_id).assigned_agent_id)
+        graph.mark_branch_merged(task_id)
+
+    assert tech_lead.assignment_calls == []
+    assert set(assigned_agents) == {"backend_v2-1", "backend_v2-2"}
+    assert assigned_agents == [
+        "backend_v2-1",
+        "backend_v2-2",
+        "backend_v2-1",
+        "backend_v2-2",
+    ]
+
+
 def test_same_stack_workers_both_do_work_across_rounds_no_starvation(tmp_path):
     """2 same-stack tasks, 2 same-stack workers fan out fairly in round 1 (both used, no
     LLM call). A later-arriving third same-stack task then sits TO_DO while both workers
