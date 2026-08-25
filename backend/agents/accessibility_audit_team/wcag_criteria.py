@@ -647,7 +647,10 @@ WCAG_22_CRITERIA: Dict[str, SuccessCriterion] = {
         principle=WCAGPrinciple.UNDERSTANDABLE,
         guideline="3.2",
         guideline_name="Predictable",
-        description="If help mechanisms exist, they are in a consistent location across pages.",
+        description=(
+            "If a help mechanism exists on multiple pages, it occurs in the same "
+            "relative order to other page content, unless the user changed it."
+        ),
         techniques=["G220"],
         failures=[],
         new_in_22=True,
@@ -797,7 +800,6 @@ def get_criterion(sc: str) -> Optional[SuccessCriterion]:
     return WCAG_22_CRITERIA.get(sc)
 
 
-@functools.lru_cache(maxsize=8)
 def get_criteria_by_level(level: WCAGLevel) -> List[SuccessCriterion]:
     """Get all success criteria for a given conformance level.
 
@@ -808,14 +810,22 @@ def get_criteria_by_level(level: WCAGLevel) -> List[SuccessCriterion]:
 
     Postconditions:
         Returns every entry at that level.
-        The returned list is the cached, process-shared object — treat it as
-        read-only. Entries are shared ``SuccessCriterion`` instances, never copies.
+        See the module Invariants for the cached, process-shared, unfrozen-entry
+        contract shared by every ``lru_cache``-decorated accessor here.
     """
+    # Validate BEFORE the cached call: lru_cache hashes its argument to build the
+    # cache key before the wrapped body runs, so an unhashable `level` would
+    # otherwise surface as an opaque TypeError from inside functools instead of
+    # this documented AssertionError.
     assert isinstance(level, WCAGLevel), f"level must be a WCAGLevel, got {type(level).__name__}"
-    return [sc for sc in WCAG_22_CRITERIA.values() if sc.level == level]
+    return _get_criteria_by_level_cached(level)
 
 
 @functools.lru_cache(maxsize=8)
+def _get_criteria_by_level_cached(level: WCAGLevel) -> List[SuccessCriterion]:
+    return [sc for sc in WCAG_22_CRITERIA.values() if sc.level == level]
+
+
 def get_criteria_by_principle(principle: WCAGPrinciple) -> List[SuccessCriterion]:
     """Get all success criteria for a given principle.
 
@@ -825,12 +835,17 @@ def get_criteria_by_principle(principle: WCAGPrinciple) -> List[SuccessCriterion
 
     Postconditions:
         Returns every entry under that principle.
-        The returned list is the cached, process-shared object — treat it as
-        read-only. Entries are shared ``SuccessCriterion`` instances, never copies.
+        See the module Invariants for the cached, process-shared, unfrozen-entry
+        contract shared by every ``lru_cache``-decorated accessor here.
     """
     assert isinstance(principle, WCAGPrinciple), (
         f"principle must be a WCAGPrinciple, got {type(principle).__name__}"
     )
+    return _get_criteria_by_principle_cached(principle)
+
+
+@functools.lru_cache(maxsize=8)
+def _get_criteria_by_principle_cached(principle: WCAGPrinciple) -> List[SuccessCriterion]:
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.principle == principle]
 
 
@@ -842,9 +857,8 @@ def get_level_a_aa_criteria() -> List[SuccessCriterion]:
         None.
 
     Postconditions:
-        Returns the complete WCAG 2.2 Level A and AA sets, and no AAA entry.
-        The returned list is the cached, process-shared object — treat it as
-        read-only. Entries are shared ``SuccessCriterion`` instances, never copies.
+        Returns the complete WCAG 2.2 Level A and AA sets, and no AAA entry. See
+        the module Invariants for this accessor's cache-sharing contract.
     """
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.level in (WCAGLevel.A, WCAGLevel.AA)]
 
@@ -857,9 +871,8 @@ def get_new_in_22_criteria() -> List[SuccessCriterion]:
         None.
 
     Postconditions:
-        Returns every entry flagged ``new_in_22``.
-        The returned list is the cached, process-shared object — treat it as
-        read-only. Entries are shared ``SuccessCriterion`` instances, never copies.
+        Returns every entry flagged ``new_in_22``. See the module Invariants for
+        this accessor's cache-sharing contract.
     """
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.new_in_22]
 
@@ -872,9 +885,8 @@ def get_new_in_21_criteria() -> List[SuccessCriterion]:
         None.
 
     Postconditions:
-        Returns every entry flagged ``new_in_21``.
-        The returned list is the cached, process-shared object — treat it as
-        read-only. Entries are shared ``SuccessCriterion`` instances, never copies.
+        Returns every entry flagged ``new_in_21``. See the module Invariants for
+        this accessor's cache-sharing contract.
     """
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.new_in_21]
 

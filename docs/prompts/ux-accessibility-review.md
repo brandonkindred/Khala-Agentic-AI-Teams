@@ -355,7 +355,8 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
      one-line descriptions keep some exceptions (2.5.8's "or have sufficient spacing",
      3.3.8's "unless alternatives exist", 2.4.11's "not entirely") and drop others
      entirely — 2.2.1 reads "Users can turn off, adjust, or extend time limits" and
-     names none of the five exceptions that make an un-adjustable limit conformant. Its `techniques` and `failures` lists are pointers
+     names none of the three exceptions (real-time, essential, beyond twenty hours)
+     that make an un-adjustable limit conformant. Its `techniques` and `failures` lists are pointers
      into the W3C technique catalogue, not a checked mapping — open a technique and
      confirm it addresses the criterion you are citing before it goes in a finding.
      Where a finding turns on a threshold, applicability condition, or exception — or
@@ -527,9 +528,12 @@ D. STATE COVERAGE
        this app does, so on current code a bare status-0 branch never earns this row;
        it falls through to API-error below. The repo already reads it that way: the
        interceptor's own text asks the user to check the API as well as the connection,
-       and the two components that branch on 0 explicitly (`branding-chat.component.ts:78`
-       `isUnreachableError`, `startup-advisor-dashboard.component.ts:129`) group it with
-       404 and name the BACKEND. Where the page's recovery advice differs by cause —
+       and the two components that branch on 0 explicitly group it with 404 and name the
+       BACKEND rather than the connection — `branding-chat.component.ts`'s
+       `isUnreachableError` predicate, and `startup-advisor-dashboard.component.ts`'s
+       inline `err?.status === 0 || err?.status === 404` (`grep -rn "status === 0"
+       user-interface/src/app --include=*.ts` finds both current call sites; a line
+       number here would rot on the first unrelated edit above either declaration). Where the page's recovery advice differs by cause —
        retry versus check the service — a status-0 branch that cannot tell them apart is
        itself the finding. This partition classifies an OBSERVED failure; it does not
        remove `offline` from the fourteen-state table. A user can still be offline, so

@@ -88,6 +88,14 @@ def test_wcag_22_criteria_is_nonempty():
 
 
 def test_get_criterion_known_id():
+    """A known criterion number resolves to its stored entry.
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Asserts the returned entry's identity; does not mutate the table.
+    """
     sc = get_criterion("1.1.1")
     assert sc is not None
     assert sc.sc == "1.1.1"
@@ -95,6 +103,14 @@ def test_get_criterion_known_id():
 
 
 def test_get_criterion_unknown_returns_none():
+    """An unknown criterion number is not an error; it returns None.
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Asserts the None return; does not mutate the table.
+    """
     assert get_criterion("9.9.9") is None
 
 
@@ -127,34 +143,91 @@ def test_criterion_techniques_is_list():
     assert isinstance(sc.techniques, list)
 
 
-def test_get_criteria_by_principle_perceivable():
-    """Every Principle 1 criterion is reachable through the shipped accessor.
+def test_get_criteria_by_principle_matches_the_specification():
+    """Every criterion is reachable through its principle, pinned by membership.
+
+    Filtering the table inline and asserting the accessor against that same filter is
+    true by construction and cannot catch a regression — the tautology the level
+    tests were rewritten to avoid. Pin explicit sets instead, covering all four
+    principles; the previous version of this test only checked two.
 
     Preconditions:
         None.
 
     Postconditions:
-        Asserts the accessor agrees with the table; does not mutate the table.
+        Asserts each accessor's membership; does not mutate the table.
     """
-    expected = {
-        sc.sc for sc in WCAG_22_CRITERIA.values() if sc.principle == WCAGPrinciple.PERCEIVABLE
+    expected_by_principle = {
+        WCAGPrinciple.PERCEIVABLE: {
+            "1.1.1",
+            "1.2.1",
+            "1.2.2",
+            "1.2.3",
+            "1.2.4",
+            "1.2.5",
+            "1.3.1",
+            "1.3.2",
+            "1.3.3",
+            "1.3.4",
+            "1.3.5",
+            "1.4.1",
+            "1.4.2",
+            "1.4.3",
+            "1.4.4",
+            "1.4.5",
+            "1.4.10",
+            "1.4.11",
+            "1.4.12",
+            "1.4.13",
+        },
+        WCAGPrinciple.OPERABLE: {
+            "2.1.1",
+            "2.1.2",
+            "2.1.4",
+            "2.2.1",
+            "2.2.2",
+            "2.3.1",
+            "2.4.1",
+            "2.4.2",
+            "2.4.3",
+            "2.4.4",
+            "2.4.5",
+            "2.4.6",
+            "2.4.7",
+            "2.4.11",
+            "2.4.12",
+            "2.4.13",
+            "2.5.1",
+            "2.5.2",
+            "2.5.3",
+            "2.5.4",
+            "2.5.7",
+            "2.5.8",
+        },
+        WCAGPrinciple.UNDERSTANDABLE: {
+            "3.1.1",
+            "3.1.2",
+            "3.2.1",
+            "3.2.2",
+            "3.2.3",
+            "3.2.4",
+            "3.2.6",
+            "3.3.1",
+            "3.3.2",
+            "3.3.3",
+            "3.3.4",
+            "3.3.7",
+            "3.3.8",
+            "3.3.9",
+        },
+        WCAGPrinciple.ROBUST: {"4.1.2", "4.1.3"},
     }
-    assert {sc.sc for sc in get_criteria_by_principle(WCAGPrinciple.PERCEIVABLE)} == expected
-    assert expected, "Principle 1 must not be empty"
-
-
-def test_get_criteria_by_principle_operable():
-    """Every Principle 2 criterion is reachable through the shipped accessor.
-
-    Preconditions:
-        None.
-
-    Postconditions:
-        Asserts the accessor agrees with the table; does not mutate the table.
-    """
-    expected = {sc.sc for sc in WCAG_22_CRITERIA.values() if sc.principle == WCAGPrinciple.OPERABLE}
-    assert {sc.sc for sc in get_criteria_by_principle(WCAGPrinciple.OPERABLE)} == expected
-    assert expected, "Principle 2 must not be empty"
+    assert set(expected_by_principle) == set(WCAGPrinciple), "a principle is missing from this test"
+    assert set().union(*expected_by_principle.values()) == set(WCAG_22_CRITERIA), (
+        "a criterion is missing from every principle set above"
+    )
+    for principle, expected in expected_by_principle.items():
+        assert {sc.sc for sc in get_criteria_by_principle(principle)} == expected, principle
 
 
 def test_get_level_a_aa_criteria_excludes_aaa():
