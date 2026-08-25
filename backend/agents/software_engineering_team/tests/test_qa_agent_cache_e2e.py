@@ -1,6 +1,6 @@
 """End-to-end proof that QA's CacheBreakpoint-marked shared review prefix
 (``qa_agent.agent._build_qa_shared_review_prefix`` -- ``task_description`` +
-``architecture.overview``, see PR #7191) actually pays off across two
+``architecture.overview``) actually pays off across two
 ``QAExpertAgent.run()`` calls sharing one microtask: a real second call reads
 a non-zero ``cache_read_tokens`` off the identical system-level prefix, and
 QA findings are unchanged whether or not a call was cache-served.

@@ -80,6 +80,21 @@ def _tool_use_message(
     ``llm_service/tests/test_claude_client.py``'s private ``_tool_message``,
     centralized here (with cache-token scripting added) so teams outside
     ``llm_service`` don't need to reach into its private ``tests/`` package.
+
+    Preconditions:
+        ``name`` is the tool name the scripted reply invokes (for forced
+        structured output, the output model's class name); ``tool_input`` is
+        the dict the tool call carries as its arguments.
+
+    Postconditions:
+        Returns a ``SimpleNamespace`` shaped like an Anthropic SDK message
+        whose sole content block is a ``tool_use`` invocation of ``name``
+        with ``input=tool_input`` -- the same fake-message shape
+        :func:`_text_message` returns for a text reply, so both drop into
+        ``_SequentialFakeMessages``/``_make_claude_client`` interchangeably.
+        ``usage`` carries ``cache_read_input_tokens``/
+        ``cache_creation_input_tokens`` only when the corresponding kwarg is
+        not ``None``, matching :func:`_text_message`'s convention.
     """
     usage_kwargs = {"input_tokens": input_tokens, "output_tokens": output_tokens}
     if cache_read_input_tokens is not None:

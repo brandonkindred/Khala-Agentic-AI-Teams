@@ -1,7 +1,7 @@
 """End-to-end regression proof that ``security_agent`` never gets Anthropic
 wire-level prompt caching.
 
-Unlike ``qa_agent`` (see ``test_qa_agent_cache_e2e.py`` / PR #7191),
+Unlike ``qa_agent`` (see ``test_qa_agent_cache_e2e.py``),
 ``CybersecurityExpertAgent.run`` calls ``run_single_shot_review`` ->
 ``LLMClient.complete_json`` directly rather than going through the
 Strands/``LLMClientModel`` adapter -- and every ``complete_json``
