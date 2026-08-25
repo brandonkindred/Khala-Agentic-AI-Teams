@@ -37,7 +37,6 @@ from ...symbols import (
     STOCK_SYMBOLS,
     classify_symbol,
 )
-from ..exceptions import OrchestratorContractError
 from ..executor.predicate_evaluator import compare
 from ..spec_dsl import (
     INDICATOR_OUTPUT_RANGES,
@@ -658,7 +657,18 @@ class SpecReadinessGate(GateResultsMixin):
             # module constructs itself), a bare ``assert`` is unsafe for this
             # one: it is also stripped under ``-O``/``PYTHONOPTIMIZE``, so use
             # the same non-optimizable contract-violation exception the rest
-            # of the strategy lab uses for caller misuse.
+            # of the strategy lab uses for caller misuse. Imported locally
+            # rather than at module level: this package is re-imported by the
+            # temporalio workflow sandbox (via ``StrategyLabCycleWorkflow``'s
+            # ``convergence_tracker_from_wire`` call), and ``..exceptions``
+            # transitively imports ``llm_service``, whose ``config`` module
+            # calls ``threading.Lock()`` at import time -- restricted inside
+            # the sandbox. ``validate()`` itself only ever runs from the
+            # orchestrator inside an unsandboxed activity, so this import
+            # never actually executes in workflow code, only its module-level
+            # placement would have.
+            from ..exceptions import OrchestratorContractError
+
             raise OrchestratorContractError(
                 f"pinned_asset_class must be a canonical PROMPT_ASSET_CLASSES member or "
                 f"None, got {pinned_asset_class!r}"
