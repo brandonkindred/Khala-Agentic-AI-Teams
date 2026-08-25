@@ -233,8 +233,9 @@ def _create_review_job_sync(request: ReviewPrRequest, pr_url: str) -> str:
 async def post_review_pr(request: ReviewPrRequest) -> ReviewPrResponse:
     """Start a code-reviewer-agent review of an open GitHub pull request.
 
-    Reads the PR diff via the GitHub API (no checkout), runs the SE code-review
-    agent over the changed files, and posts one PR review with inline comments.
+    Fetches the PR diff, creates a job, records the review start time, and 
+    dispatches a Temporal workflow that will asynchronously run the SE 
+    code-review agent and post the PR review with inline comments.
 
     Preconditions:
         - A GitHub token is configured (request body or ``GITHUB_TOKEN``).
