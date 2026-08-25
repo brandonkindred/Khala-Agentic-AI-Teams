@@ -1,8 +1,9 @@
 """
 Unit tests for :class:`V2TeamConfig` — construction, immutability, and
 parity against each code-v2 team's real ``ToolAgentKind``/``PROFILE``/
-accessibility-clause values — independent of any orchestrator consumption
-(none exists yet; see the class docstring). ``StackProfile``'s own
+accessibility-clause values, at the dataclass level rather than through the
+orchestrator (orchestrator-level property/consumption tests live in
+``test_v2_config_orchestrator.py``). ``StackProfile``'s own
 construction/invariant/frozen behavior is covered in full by
 ``test_stack_profile.py``; this module includes one targeted test showing
 that the ``"_default"`` invariant is enforced by ``StackProfile`` before
@@ -16,44 +17,31 @@ import dataclasses
 
 import pytest
 
-from software_engineering_team.shared.stack_profile import StackProfile
 from software_engineering_team.shared.v2_team_config import V2TeamConfig
 
-
-def _make_stack_profile(
-    default_language: str = "python", conventions_by_language: dict | None = None
-) -> StackProfile:
-    """Minimal synthetic ``StackProfile`` for tests that don't need a real team's."""
-    return StackProfile(
-        name="test",
-        default_language=default_language,
-        planning_language_label="Language",
-        planning_progress_label="language",
-        conventions_by_language=conventions_by_language or {"_default": "PY"},
-        has_language_conventions=True,
-        build_verify_label="test_code_v2",
-        detect_language=lambda _p, _t: default_language,
-        repo_extensions=frozenset({".py"}),
-        repo_exclude_dirs=frozenset({".git"}),
-        repo_max_chars=1000,
-        detect_tooling=lambda _p: (True, True),
-    )
-
+from ._v2_config_fixtures import make_stack_profile as _make_stack_profile
 
 _CONFIG_KWARGS = dict(
     stack_profile=_make_stack_profile(),
     tool_agent_kinds=frozenset({"security", "testing_qa"}),
     extra_review_clause="",
+    output_template_path_prefixes=("backend/", "./backend/"),
+    output_template_allowed_languages=("python", "java"),
+    output_template_coerce_unknown=True,
 )
 
 
 def test_construction_round_trips_all_fields():
     """Every constructor argument is readable back off the instance unchanged."""
     config = V2TeamConfig(**_CONFIG_KWARGS)
+    assert config.stack_profile is _CONFIG_KWARGS["stack_profile"]
     assert config.stack_profile.default_language == "python"
     assert config.stack_profile.conventions_by_language == {"_default": "PY"}
     assert config.tool_agent_kinds == frozenset({"security", "testing_qa"})
     assert config.extra_review_clause == ""
+    assert config.output_template_path_prefixes == ("backend/", "./backend/")
+    assert config.output_template_allowed_languages == ("python", "java")
+    assert config.output_template_coerce_unknown is True
 
 
 def test_frozen_instance_rejects_attribute_assignment():
@@ -91,18 +79,21 @@ class TestBackendParity:
 
     def _build(self) -> V2TeamConfig:
         """Compose the team's real, already-constructed PROFILE — not a copy of its fields."""
-        from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-        from software_engineering_team.backend_code_v2_team.phases._profile import PROFILE
+        from software_engineering_team.codegen_team.orchestrator import STACK_CONFIGS
+        from software_engineering_team.codegen_team.stacks.backend.profile import PROFILE
 
         return V2TeamConfig(
             stack_profile=PROFILE,
-            tool_agent_kinds=frozenset(k.value for k in ToolAgentKind),
+            tool_agent_kinds=STACK_CONFIGS["backend"].tool_agent_kinds,
             extra_review_clause="",
+            output_template_path_prefixes=("backend/", "./backend/"),
+            output_template_allowed_languages=("python", "java"),
+            output_template_coerce_unknown=True,
         )
 
     def test_stack_profile_is_the_real_team_profile(self):
         """Composition, not copying: the same PROFILE object, not an equal one."""
-        from software_engineering_team.backend_code_v2_team.phases._profile import PROFILE
+        from software_engineering_team.codegen_team.stacks.backend.profile import PROFILE
 
         assert self._build().stack_profile is PROFILE
 
@@ -111,12 +102,12 @@ class TestBackendParity:
         assert self._build().stack_profile.default_language == "python"
 
     def test_tool_agent_kinds_match_enum_members(self):
-        """The tool-agent registry mirrors every ToolAgentKind member backend defines."""
-        from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
+        """The tool-agent registry mirrors backend's real ToolAgentKind subset."""
+        from software_engineering_team.codegen_team.orchestrator import STACK_CONFIGS
 
         config = self._build()
-        assert config.tool_agent_kinds == frozenset(k.value for k in ToolAgentKind)
-        assert len(config.tool_agent_kinds) == 9
+        assert config.tool_agent_kinds == STACK_CONFIGS["backend"].tool_agent_kinds
+        assert len(config.tool_agent_kinds) == 8
         assert "data_engineering" in config.tool_agent_kinds
 
     def test_conventions_by_language_matches_profile(self):
@@ -135,19 +126,30 @@ class TestFrontendParity:
 
     def _build(self) -> V2TeamConfig:
         """Compose the team's real, already-constructed PROFILE — not a copy of its fields."""
-        from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
-        from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
-        from software_engineering_team.frontend_code_v2_team.phases._profile import PROFILE
+        from software_engineering_team.codegen_team.orchestrator import STACK_CONFIGS
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
+            _ACCESSIBILITY_VERIFY_NOTE,
+            PROFILE,
+        )
 
         return V2TeamConfig(
             stack_profile=PROFILE,
-            tool_agent_kinds=frozenset(k.value for k in ToolAgentKind),
-            extra_review_clause=review_mod._ACCESSIBILITY_VERIFY_NOTE,
+            tool_agent_kinds=STACK_CONFIGS["frontend"].tool_agent_kinds,
+            extra_review_clause=_ACCESSIBILITY_VERIFY_NOTE,
+            output_template_path_prefixes=("frontend/", "./frontend/"),
+            output_template_allowed_languages=(
+                "angular",
+                "react",
+                "vue",
+                "typescript",
+                "javascript",
+            ),
+            output_template_coerce_unknown=False,
         )
 
     def test_stack_profile_is_the_real_team_profile(self):
         """Composition, not copying: the same PROFILE object, not an equal one."""
-        from software_engineering_team.frontend_code_v2_team.phases._profile import PROFILE
+        from software_engineering_team.codegen_team.stacks.frontend.profile import PROFILE
 
         assert self._build().stack_profile is PROFILE
 
@@ -156,12 +158,12 @@ class TestFrontendParity:
         assert self._build().stack_profile.default_language == "typescript"
 
     def test_tool_agent_kinds_match_enum_members(self):
-        """The tool-agent registry mirrors every ToolAgentKind member frontend defines."""
-        from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+        """The tool-agent registry mirrors frontend's real ToolAgentKind subset."""
+        from software_engineering_team.codegen_team.orchestrator import STACK_CONFIGS
 
         config = self._build()
-        assert config.tool_agent_kinds == frozenset(k.value for k in ToolAgentKind)
-        assert len(config.tool_agent_kinds) == 16
+        assert config.tool_agent_kinds == STACK_CONFIGS["frontend"].tool_agent_kinds
+        assert len(config.tool_agent_kinds) == 15
         assert "accessibility" in config.tool_agent_kinds
 
     def test_conventions_by_language_matches_profile(self):
@@ -171,8 +173,10 @@ class TestFrontendParity:
 
     def test_extra_review_clause_is_accessibility_note(self):
         """Frontend's extra review clause is the real accessibility-verification note."""
-        from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
+        from software_engineering_team.codegen_team.stacks.frontend.profile import (
+            _ACCESSIBILITY_VERIFY_NOTE,
+        )
 
         config = self._build()
-        assert config.extra_review_clause == review_mod._ACCESSIBILITY_VERIFY_NOTE
+        assert config.extra_review_clause == _ACCESSIBILITY_VERIFY_NOTE
         assert config.extra_review_clause != ""

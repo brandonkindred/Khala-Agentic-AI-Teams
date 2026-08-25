@@ -15,6 +15,7 @@ import type {
   SalesPipelineJobListItem,
   SalesPipelineStatusResponse,
 } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 const JOBS_POLL_MS = 15000;
 const STATUS_POLL_MS = 10000;
@@ -70,7 +71,7 @@ export class SalesDashboardComponent implements OnInit, OnDestroy {
               this.listError = null;
             }),
             catchError((err) => {
-              this.listError = err?.error?.detail ?? err?.message ?? 'Failed to load jobs';
+              this.listError = extractErrorDetail(err, 'Failed to load jobs');
               return of([] as SalesPipelineJobListItem[]);
             }),
           ),
@@ -145,7 +146,7 @@ export class SalesDashboardComponent implements OnInit, OnDestroy {
         this.refreshTrigger$.next();
       },
       error: (err) => {
-        this.listError = err?.error?.detail ?? err?.message ?? 'Failed to delete job';
+        this.listError = extractErrorDetail(err, 'Failed to delete job');
       },
     });
   }
@@ -161,7 +162,7 @@ export class SalesDashboardComponent implements OnInit, OnDestroy {
       },
       error: (err) => {
         this.cancelling = false;
-        this.statusError = err?.error?.detail ?? err?.message ?? 'Failed to cancel job';
+        this.statusError = extractErrorDetail(err, 'Failed to cancel job');
       },
     });
   }
@@ -176,7 +177,7 @@ export class SalesDashboardComponent implements OnInit, OnDestroy {
           this.api.getPipelineStatus(jobId).pipe(
             catchError((err) => {
               this.statusError =
-                err?.error?.detail ?? err?.message ?? 'Failed to load job status';
+                extractErrorDetail(err, 'Failed to load job status');
               return of<SalesPipelineStatusResponse | null>(null);
             }),
           ),

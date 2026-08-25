@@ -167,6 +167,39 @@ def test_numeric_pre_existing_is_rejected_by_strict_bool() -> None:
         ChunkReviewIssueLLM.model_validate({"description": "d", "pre_existing": 1})
 
 
+def test_numeric_omission_is_rejected_by_strict_bool() -> None:
+    """``omission`` is ``StrictBool`` for the same reason as ``pre_existing``
+    (see ``test_numeric_pre_existing_is_rejected_by_strict_bool``): a stray
+    numeric value must never be silently coerced into an affirmative flag."""
+    with pytest.raises(ValidationError):
+        ChunkReviewIssueLLM.model_validate({"description": "d", "omission": 1})
+
+
+def test_omission_flag_round_trips_true() -> None:
+    """A model-set ``omission: true`` survives schema validation unchanged
+    when paired with ``pre_existing: false`` (the only valid combination --
+    see ``test_omission_and_pre_existing_both_true_is_rejected``)."""
+    issue = ChunkReviewIssueLLM.model_validate(
+        {"description": "d", "omission": True, "pre_existing": False}
+    )
+    assert issue.omission is True
+    assert issue.pre_existing is False
+
+
+def test_omission_and_pre_existing_both_true_is_rejected() -> None:
+    """``omission=True`` and ``pre_existing=True`` together is
+    self-contradictory: an omission is by definition in-scope for this
+    change (see ``CodeReviewIssue.omission``'s canonical wording).
+    ``_omission_implies_in_scope`` rejects the combination, driving
+    ``complete_validated``'s corrective retry the same way
+    ``_require_approval_consistent_with_issues`` does for a contradictory
+    ``approved``/``issues`` pair."""
+    with pytest.raises(ValidationError):
+        ChunkReviewIssueLLM.model_validate(
+            {"description": "d", "omission": True, "pre_existing": True}
+        )
+
+
 def test_empty_top_level_response_is_rejected() -> None:
     """An empty top-level response (a fully truncated reply) is rejected: all
     four fields are required, so this is a schema-validation failure rather
@@ -336,7 +369,8 @@ def test_issue_defaults_match_current_hand_rolled_fallbacks() -> None:
     assert issue.start_line is None
     assert issue.description == ""
     assert issue.suggestion == ""
-    assert issue.pre_existing is False
+    assert issue.pre_existing is True
+    assert issue.omission is False
 
 
 def test_json_schema_renders_for_generate_structured() -> None:

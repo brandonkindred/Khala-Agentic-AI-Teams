@@ -8,6 +8,8 @@ import type {
   CodeReviewTranscript,
   CreateReviewIssuesRequest,
   CreateReviewIssuesResponse,
+  FileOutOfScopeIssuesRequest,
+  FileOutOfScopeIssuesResponse,
   GitHubConfigResponse,
   GitHubConfigUpdate,
   GitHubIssueItem,
@@ -19,6 +21,7 @@ import type {
   MediumConfigResponse,
   MediumConfigUpdate,
   MediumSessionImportBody,
+  OutOfScopeProposalsResponse,
   RunGitHubIssueRequest,
   RunGitHubIssueResponse,
   RunPrReviewRequest,
@@ -277,5 +280,36 @@ export class IntegrationsApiService {
   /** POST /api/integrations/tradingview/test — probe the stored MCP server for reachability. */
   testTradingViewConnection(): Observable<TradingViewTestResponse> {
     return this.http.post<TradingViewTestResponse>(`${this.baseUrl}/tradingview/test`, {}, this.SKIP_NOTIFY);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Out-of-scope issue proposals
+  // ---------------------------------------------------------------------------
+
+  /**
+   * GET /api/integrations/github/reviews/out-of-scope-issues — all unfiled
+   * out-of-scope issue proposals across code reviews for a repository.
+   */
+  getOutOfScopeIssues(owner: string, repo: string): Observable<OutOfScopeProposalsResponse> {
+    return this.http.get<OutOfScopeProposalsResponse>(
+      `${this.baseUrl}/github/reviews/out-of-scope-issues`,
+      { params: { owner, repo } },
+    );
+  }
+
+  /**
+   * POST /api/integrations/github/reviews/out-of-scope-issues/file — file
+   * selected proposals as enhanced GitHub issues with duplicate detection.
+   */
+  fileOutOfScopeIssues(
+    owner: string,
+    repo: string,
+    proposalIds: string[],
+  ): Observable<FileOutOfScopeIssuesResponse> {
+    const body: FileOutOfScopeIssuesRequest = { proposal_ids: proposalIds, owner, repo };
+    return this.http.post<FileOutOfScopeIssuesResponse>(
+      `${this.baseUrl}/github/reviews/out-of-scope-issues/file`,
+      body,
+    );
   }
 }

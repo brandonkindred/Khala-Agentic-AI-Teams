@@ -10,6 +10,7 @@ serialization round-trip, the branch_diff helper, and the final status line.
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -29,6 +30,7 @@ from software_engineering_team.models import (
     TaskStatus,
 )
 from software_engineering_team.shared.team_lead_base import TeamLeadSharedState
+from software_engineering_team.swarm_review import serialize_review_cache
 from software_engineering_team.task_graph import TaskGraphService
 from software_engineering_team.team_routing import (
     _BACKEND_V2_STACK_SPEC,
@@ -168,7 +170,7 @@ class _FakeWorktreeManager:
         self.cleanup_calls += 1
 
 
-def _make_swarm(tmp_path, tech_lead, workers, *, spec_content=""):
+def _make_swarm(tmp_path, tech_lead, workers, *, spec_content="", restored_review_cache=None):
     graph = TaskGraphService(job_id="j1")
     swarm = CodingTeamSwarm(
         tech_lead=tech_lead,
@@ -178,6 +180,7 @@ def _make_swarm(tmp_path, tech_lead, workers, *, spec_content=""):
         agent_ids=[w.agent_id for w in workers],
         llm_getter=lambda key: None,
         spec_content=spec_content,
+        restored_review_cache=restored_review_cache,
     )
     # Real worktree creation is exercised in test_worktree_manager.py; give these
     # stub-worker tests a git-free stand-in instead (see _FakeWorktreeManager).
@@ -372,6 +375,84 @@ def test_swarm_completes_when_dependency_fails(tmp_path, monkeypatch):
 
 
 # ----------------------------------------------------- review-verdict cache (_review_verdict_cache)
+
+
+def test_export_review_cache_empty_when_nothing_reviewed_yet(tmp_path):
+    """export_review_cache() on a freshly-constructed swarm (no reviews run) returns []."""
+    swarm, _graph = _make_swarm(tmp_path, StubTechLead(approved=True), [StubWorker("a1")])
+    assert swarm.export_review_cache() == []
+
+
+def test_coding_team_swarm_init_fresh_run_empty_review_cache(tmp_path):
+    """Preconditions: no restored_review_cache passed (default None), matching a fresh job.
+    Postconditions: _review_verdict_cache is {} — no regression vs. pre-restore behavior.
+    """
+    swarm, _graph = _make_swarm(tmp_path, StubTechLead(approved=True), [StubWorker("a1")])
+    assert swarm._review_verdict_cache == {}
+
+
+def test_coding_team_swarm_init_restores_valid_review_cache(tmp_path):
+    """Preconditions: restored_review_cache is a well-formed serialize_review_cache() output.
+    Postconditions: _review_verdict_cache is seeded with the deserialized entries, keyed by
+      task_id, with (cache_key, verdict) tuple values.
+    """
+    serialized = [{"task_id": "t1", "cache_key": "ck1", "verdict": {"approved": True}}]
+    swarm, _graph = _make_swarm(
+        tmp_path, StubTechLead(approved=True), [StubWorker("a1")], restored_review_cache=serialized
+    )
+    assert swarm._review_verdict_cache == {"t1": ("ck1", {"approved": True})}
+
+
+def test_coding_team_swarm_init_corrupt_review_cache_degrades_to_empty(tmp_path):
+    """Preconditions: restored_review_cache is malformed (wrong type / missing/invalid fields).
+    Postconditions: _review_verdict_cache is {} — construction never raises on bad input.
+    """
+    for bad in (
+        "not-a-list",
+        {"task_id": "t1"},
+        [{"task_id": "t1"}],
+        [{"task_id": 1, "cache_key": "c", "verdict": {}}],
+    ):
+        swarm, _graph = _make_swarm(
+            tmp_path, StubTechLead(approved=True), [StubWorker("a1")], restored_review_cache=bad
+        )
+        assert swarm._review_verdict_cache == {}
+
+
+def test_coding_team_swarm_init_review_cache_lock_always_fresh(tmp_path):
+    """Preconditions: two swarms constructed, one fresh and one with a restored cache.
+    Postconditions: _review_verdict_cache_lock is a distinct, unlocked threading.Lock instance
+      on each — never shared/restored from storage.
+    """
+    swarm_a, _graph_a = _make_swarm(tmp_path, StubTechLead(approved=True), [StubWorker("a1")])
+    swarm_b, _graph_b = _make_swarm(
+        tmp_path,
+        StubTechLead(approved=True),
+        [StubWorker("a1")],
+        restored_review_cache=[
+            {"task_id": "t1", "cache_key": "ck1", "verdict": {"approved": True}}
+        ],
+    )
+    assert isinstance(swarm_a._review_verdict_cache_lock, type(threading.Lock()))
+    assert swarm_a._review_verdict_cache_lock is not swarm_b._review_verdict_cache_lock
+    assert not swarm_a._review_verdict_cache_lock.locked()
+    assert not swarm_b._review_verdict_cache_lock.locked()
+
+
+def test_export_review_cache_matches_serialize_review_cache_of_live_cache(tmp_path, monkeypatch):
+    """export_review_cache() returns exactly serialize_review_cache(_review_verdict_cache)."""
+    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 20)
+    _patch_git(monkeypatch, diff="some diff")
+    tech_lead = StubTechLead(approved=True)
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+
+    swarm._review_and_merge(lambda **kw: None)
+
+    assert swarm._review_verdict_cache  # sanity: a verdict was actually cached
+    assert swarm.export_review_cache() == serialize_review_cache(swarm._review_verdict_cache)
 
 
 def test_identical_diff_reuses_cached_verdict_without_second_review_call(tmp_path, monkeypatch):
@@ -1011,6 +1092,9 @@ def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
             }
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
 
@@ -1068,6 +1152,9 @@ def test_terminal_status_write_survives_slow_pending_graph_persist(tmp_path, mon
             }
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
 
@@ -1133,6 +1220,9 @@ def test_failed_background_persist_write_is_retried_at_round_boundary(tmp_path, 
             }
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         aborted = False
 
         def __init__(self, *a, **k):
@@ -1215,6 +1305,9 @@ def test_status_write_survives_concurrent_worker_graph_mutation(tmp_path, monkey
     mutation_enqueued = threading.Event()
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         aborted = False
 
         def __init__(self, *a, **k):
@@ -1318,6 +1411,9 @@ def test_background_graph_write_after_pause_carries_pause_phase_not_stale_coding
     mutation_enqueued = threading.Event()
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         aborted = False
 
         def __init__(self, *a, **k):
@@ -1407,6 +1503,9 @@ def test_failed_direct_write_does_not_leak_into_background_graph_persist(tmp_pat
             }
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         aborted = False
 
         def __init__(self, *a, **k):
@@ -1792,7 +1891,11 @@ def test_pinned_agent_reserved_before_unrelated_tech_lead_assignment(tmp_path):
     unrelated task's assignment in the same response can never claim it first and starve the
     pinned task — even when the Tech Lead's own (wrong) proposal for the pinned task is listed
     before a proposal that would otherwise legitimately claim the pinned agent for something
-    else."""
+    else.
+
+    Two unpinned, untargeted tasks (rather than one) are left in play after the pinned task is
+    reserved, so the round stays ambiguous for the deterministic fast path (two candidates each)
+    and this exercises the Tech-Lead LLM path the test is actually about."""
 
     class AdversarialOrderingTL(StubTechLead):
         def run_assignments(self, agent_ids, ready_tasks, free_agents):
@@ -1806,20 +1909,22 @@ def test_pinned_agent_reserved_before_unrelated_tech_lead_assignment(tmp_path):
                 ]
             }
 
-    workers = [StubWorker("frontend_v2"), StubWorker("backend_v2")]
+    workers = [StubWorker("frontend_v2"), StubWorker("backend_v2"), StubWorker("devops")]
     swarm, graph = _make_swarm(tmp_path, AdversarialOrderingTL(approved=True), workers)
     graph.add_task("pinned_task", title="Pinned")
     graph.update_task(
         "pinned_task", feature_branch="feature/pinned", feature_branch_agent_id="backend_v2"
     )
     graph.add_task("other_task", title="Other")
+    graph.add_task("third_task", title="Third")
 
-    swarm._assign_tasks(graph.get_tasks(), ["frontend_v2", "backend_v2"])
+    swarm._assign_tasks(graph.get_tasks(), ["frontend_v2", "backend_v2", "devops"])
 
     assert graph.get_task("pinned_task").assigned_agent_id == "backend_v2"
     # other_task lost the race for backend_v2 and stays unassigned this round rather than
     # starving the pinned task — it will be picked up once an agent frees up.
     assert graph.get_task("other_task").assigned_agent_id is None
+    assert graph.get_task("third_task").assigned_agent_id is None
 
 
 def test_assignment_normalizes_backend_owned_target_aliases(tmp_path):
@@ -2543,6 +2648,9 @@ def test_resume_from_snapshot_skips_planning(tmp_path, monkeypatch):
     captured: Dict[str, Any] = {}
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
             captured["graph"] = self.graph
@@ -2608,6 +2716,9 @@ def test_fresh_run_persists_stack_specs(tmp_path, monkeypatch):
             }
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
 
@@ -2655,6 +2766,9 @@ def test_fresh_run_defaults_missing_task_id(tmp_path, monkeypatch):
     captured: Dict[str, TaskGraphService] = {}
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
             captured["graph"] = self.graph
@@ -2705,6 +2819,9 @@ def test_fresh_run_preserves_falsy_task_id(tmp_path, monkeypatch):
     captured: Dict[str, TaskGraphService] = {}
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
             captured["graph"] = self.graph
@@ -2778,6 +2895,9 @@ def test_task_creation_grooms_every_task_after_planning(tmp_path, monkeypatch):
     captured: Dict[str, Any] = {}
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             captured["graph"] = k["graph"]
             call_order.append("swarm_built")
@@ -2852,6 +2972,9 @@ def test_task_creation_grooming_failure_falls_back_for_that_task_only(
     captured: Dict[str, Any] = {}
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             captured["graph"] = k["graph"]
 
@@ -2926,6 +3049,9 @@ def test_groom_fanout_runs_concurrently(tmp_path, monkeypatch):
     captured: Dict[str, Any] = {}
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             captured["graph"] = k["graph"]
 
@@ -2988,6 +3114,9 @@ def test_groomed_acceptance_criteria_reaches_code_review(tmp_path, monkeypatch):
     captured: Dict[str, Any] = {}
 
     class CapturingSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             captured["graph"] = k["graph"]
 
@@ -3110,6 +3239,9 @@ def test_status_is_completed_when_no_failures(tmp_path, monkeypatch):
             }
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
 
@@ -3496,6 +3628,9 @@ def test_whole_job_already_complete_when_all_resolved_without_changes(tmp_path, 
             }
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
 
@@ -3545,6 +3680,9 @@ def test_not_already_complete_when_a_task_is_left_non_terminal(tmp_path, monkeyp
             }
 
     class StubSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             self.graph = k["graph"]
 
@@ -3617,6 +3755,9 @@ def test_planning_already_complete_short_circuits_swarm(tmp_path, monkeypatch):
             }
 
     class ExplodingSwarm:
+        def export_review_cache(self):
+            return []
+
         def __init__(self, *a, **k):
             raise AssertionError("swarm must not be built when the work is already complete")
 
@@ -3744,6 +3885,9 @@ def test_orchestrator_does_not_stamp_activity_and_terminal_clears(tmp_path, monk
             return {"tasks": [], "stacks": [{"name": "backend", "tools_services": []}]}
 
     class _NoopSwarm:
+        def export_review_cache(self):
+            return []
+
         aborted = False
 
         def __init__(self, **kw):
@@ -3949,6 +4093,9 @@ def test_orchestrator_writes_job_progress_through_coding_phase(tmp_path, monkeyp
             }
 
     class _MergingSwarm:
+        def export_review_cache(self):
+            return []
+
         aborted = False
 
         def __init__(self, **kw):
@@ -4003,6 +4150,9 @@ def test_orchestrator_resume_never_regresses_progress(tmp_path, monkeypatch):
     ]
 
     class _NoopSwarm:
+        def export_review_cache(self):
+            return []
+
         aborted = False
 
         def __init__(self, **kw):
@@ -4906,33 +5056,46 @@ def test_single_review_exception_is_contained_and_fails_task_once(tmp_path, monk
 # --------------------------------------------------------------------------- resume / retry_failed
 
 
-def _seed_snapshot_with_failed_task() -> Dict[str, Any]:
+def _seed_snapshot_with_failed_task(*, review_verdict_cache=None) -> Dict[str, Any]:
     """Build a persisted job record (as a prior run leaves it) whose task graph has one FAILED task.
 
     The snapshot is produced from a real graph so its shape matches what ``graph.restore`` expects.
+    ``review_verdict_cache``, when given, mirrors what a real persist_sync call would have written
+    (see ``test_coding_team_review_cache_integration.py``) so resume tests can assert it reaches
+    the reconstructed swarm unchanged.
     """
     src = TaskGraphService(job_id="resume-job")
     src.add_task("t1", title="Backend task")
     src.update_task("t1", status=TaskStatus.FAILED)
     snap = src.snapshot()
-    return {
+    record: Dict[str, Any] = {
         "repo_path": "/tmp/resume-repo",
         "task_graph_snapshot": snap["tasks"],
         "agent_task_map": snap["agent_task_map"],
         "stack_specs": orch_mod._DEFAULT_STACK_SPECS,
     }
+    if review_verdict_cache is not None:
+        record["review_verdict_cache"] = review_verdict_cache
+    return record
 
 
-def _run_resume_capturing_graph(tmp_path, monkeypatch, *, retry_failed: bool):
+def _run_resume_capturing_graph(
+    tmp_path, monkeypatch, *, retry_failed: bool, review_verdict_cache=None
+):
     """Drive run_coding_team_orchestrator down the resume branch with the swarm stubbed to a no-op,
-    returning the graph it built so the test can inspect task statuses after resume handling."""
-    record = _seed_snapshot_with_failed_task()
+    returning the graph it built and the ``restored_review_cache`` kwarg the stub swarm received,
+    so tests can inspect both task statuses and cache-restore wiring after resume handling."""
+    record = _seed_snapshot_with_failed_task(review_verdict_cache=review_verdict_cache)
     record["repo_path"] = str(tmp_path)
     captured: Dict[str, Any] = {}
 
     class _StubSwarm:
-        def __init__(self, *, graph, **kwargs):
+        def export_review_cache(self):
+            return []
+
+        def __init__(self, *, graph, restored_review_cache=None, **kwargs):
             captured["graph"] = graph
+            captured["restored_review_cache"] = restored_review_cache
             self.aborted = False
 
         def run(self, *args, **kwargs):
@@ -4952,16 +5115,29 @@ def _run_resume_capturing_graph(tmp_path, monkeypatch, *, retry_failed: bool):
         engine_provider=object(),
         retry_failed=retry_failed,
     )
-    return captured["graph"]
+    return captured
 
 
 def test_resume_retry_failed_true_demotes_failed(tmp_path, monkeypatch):
     """retry_failed=True demotes a snapshot's terminal FAILED task back to TO_DO on resume."""
-    graph = _run_resume_capturing_graph(tmp_path, monkeypatch, retry_failed=True)
-    assert graph.get_task("t1").status == TaskStatus.TO_DO
+    captured = _run_resume_capturing_graph(tmp_path, monkeypatch, retry_failed=True)
+    assert captured["graph"].get_task("t1").status == TaskStatus.TO_DO
 
 
 def test_resume_default_preserves_failed(tmp_path, monkeypatch):
     """The default resume (retry_failed=False) preserves a snapshot's FAILED task as terminal."""
-    graph = _run_resume_capturing_graph(tmp_path, monkeypatch, retry_failed=False)
-    assert graph.get_task("t1").status == TaskStatus.FAILED
+    captured = _run_resume_capturing_graph(tmp_path, monkeypatch, retry_failed=False)
+    assert captured["graph"].get_task("t1").status == TaskStatus.FAILED
+
+
+def test_resume_retry_failed_threads_review_cache_from_snapshot(tmp_path, monkeypatch):
+    """retry_failed=True resume both demotes the FAILED task AND threads the snapshot's
+    review_verdict_cache field into CodingTeamSwarm(restored_review_cache=...) unchanged — the
+    retry-demotion path and the cache-restore path are wired independently and both must fire on
+    the same resume."""
+    seeded_cache = [{"task_id": "t1", "cache_key": "k1", "verdict": {"approved": True}}]
+    captured = _run_resume_capturing_graph(
+        tmp_path, monkeypatch, retry_failed=True, review_verdict_cache=seeded_cache
+    )
+    assert captured["graph"].get_task("t1").status == TaskStatus.TO_DO
+    assert captured["restored_review_cache"] == seeded_cache

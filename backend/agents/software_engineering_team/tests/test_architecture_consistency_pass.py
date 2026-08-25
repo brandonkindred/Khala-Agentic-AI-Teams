@@ -30,13 +30,30 @@ from code_review_agent.false_positive_filter import CodebaseIndex
 from code_review_agent.models import CodeReviewInput, CodeReviewIssue
 from tests.submission_pass_two_call_client import (
     SubmissionPassTwoCallClient,
+    wire_run_agent_via_reasoning_for_test_clients,
     wire_run_agent_via_reasoning_with_raw,
 )
 
 from llm_service.clients.dummy import DummyLLMClient
 from shared.dev_models.models import ArchitectureComponent, SystemArchitecture
 
-pytest_plugins = ["tests.submission_pass_two_call_client"]
+
+@pytest.fixture(autouse=True)
+def _wire_submission_pass_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route the submission-pass runner's ``run_agent_via_reasoning`` through the
+    two-call test stub for every test in this module.
+
+    File-scoped (a plain module-level fixture, not a ``pytest_plugins``
+    registration): a fixture defined directly in a test module only applies to
+    that module's own tests, so this cannot leak into sibling test files under
+    pytest-xdist the way a ``pytest_plugins`` registration would (each xdist
+    worker collects the whole test tree, so a session-wide plugin's autouse
+    fixtures would otherwise apply to every test the worker runs).
+    """
+    import code_review_agent.submission_pass_runner as runner_mod
+
+    wire_run_agent_via_reasoning_for_test_clients(monkeypatch, runner_mod)
+
 
 # Unique anchor in this pass's user prompt (never the system prompt -- a
 # DummyLLMClient subclass must branch on the user prompt only, matching the
@@ -434,7 +451,8 @@ def test_coerce_finding_carries_through_pre_existing_tag() -> None:
     path to route an architecture/refactor finding about a field, function, or
     class this submission did NOT add or modify to a human-review proposal
     instead of a blocking PR comment) survives conversion, tolerates string
-    encodings, and defaults False when absent -- mirrors
+    encodings, and defaults True when absent (uncertain findings are treated
+    as out-of-scope) -- mirrors
     side_effect_impact_pass._coerce_finding's identical convention."""
     tagged_true = _coerce_finding(
         {"category": "architecture", "description": "d1", "pre_existing": True}
@@ -450,8 +468,69 @@ def test_coerce_finding_carries_through_pre_existing_tag() -> None:
         True,
         True,
         False,
+        True,
+    ]
+
+
+def test_coerce_finding_carries_through_omission_tag() -> None:
+    """The model's optional omission tag (the positive signal for "this
+    change should have added or modified file X but didn't", distinct from
+    pre_existing) survives conversion, tolerates string encodings, and
+    defaults False when absent -- mirrors
+    test_coerce_finding_carries_through_pre_existing_tag and
+    side_effect_impact_pass._coerce_finding's identical convention."""
+    tagged_true = _coerce_finding(
+        {"category": "architecture", "description": "d1", "omission": True}
+    )
+    tagged_str = _coerce_finding(
+        {"category": "architecture", "description": "d2", "omission": "true"}
+    )
+    tagged_false_str = _coerce_finding(
+        {"category": "refactor", "description": "d3", "omission": "false"}
+    )
+    untagged = _coerce_finding({"category": "refactor", "description": "d4"})
+    assert [f.omission for f in (tagged_true, tagged_str, tagged_false_str, untagged)] == [
+        True,
+        True,
+        False,
         False,
     ]
+
+
+def test_coerce_finding_reconciles_contradictory_raw_tags() -> None:
+    """A raw finding tagging both omission and pre_existing true (a
+    self-contradictory reply that CodeReviewIssue would otherwise reject via
+    _omission_implies_in_scope) is reconciled here rather than raised:
+    omission wins, so the constructed issue is in-scope. Keeps
+    _coerce_finding's documented "never raises on malformed input"
+    contract intact."""
+    finding = _coerce_finding(
+        {
+            "category": "architecture",
+            "description": "contradictory tags",
+            "omission": True,
+            "pre_existing": True,
+        }
+    )
+    assert finding is not None
+    assert finding.omission is True
+    assert finding.pre_existing is False
+
+
+def test_architecture_finding_llm_rejects_omission_and_pre_existing_both_true() -> None:
+    """ArchitectureConsistencyFindingLLM's own schema-level validator
+    rejects the self-contradictory combination too, independent of
+    _coerce_finding's runtime reconciliation (see the class's
+    _omission_implies_in_scope docstring for why: not currently exercised
+    by the hand-rolled parsing path, but kept self-enforcing for any future
+    caller that validates against it directly)."""
+    from code_review_agent.models import ArchitectureConsistencyFindingLLM
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        ArchitectureConsistencyFindingLLM.model_validate(
+            {"category": "architecture", "description": "d", "omission": True, "pre_existing": True}
+        )
 
 
 def test_coerce_finding_coerces_line_and_unknown_severity() -> None:
@@ -697,6 +776,39 @@ def test_finds_and_returns_new_findings_tags_pre_existing() -> None:
     )
     assert len(result) == 1
     assert result[0].pre_existing is True
+
+
+def test_finds_and_returns_new_findings_tags_omission() -> None:
+    """End-to-end: a finding the model tags omission=true carries that tag
+    all the way through to the returned CodeReviewIssue -- mirrors
+    test_finds_and_returns_new_findings_tags_pre_existing, proving
+    ArchitectureConsistencyFindingLLM.omission actually reaches
+    CodeReviewIssue.omission via _coerce_finding, not just the schema."""
+
+    class _FindingsClient(SubmissionPassTwoCallClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in self.latest_reasoning_prompt():
+                return {
+                    "findings": [
+                        {
+                            "severity": "medium",
+                            "category": "architecture",
+                            "file_path": "app/main.py",
+                            "description": "the change should have added a migration module",
+                            "suggestion": "add app/migrations/xyz.py",
+                            "pre_existing": False,
+                            "omission": True,
+                        }
+                    ]
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = find_architecture_and_redundancy_issues(
+        _FindingsClient(), _input(architecture=_arch())
+    )
+    assert len(result) == 1
+    assert result[0].omission is True
+    assert result[0].pre_existing is False
 
 
 def test_finds_and_returns_new_findings_with_pre_numbered_input() -> None:

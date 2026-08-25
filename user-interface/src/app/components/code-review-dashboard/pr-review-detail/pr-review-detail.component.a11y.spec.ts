@@ -66,6 +66,7 @@ describe('PrReviewDetailComponent a11y', () => {
         comment_findings: 1,
         event: 'REQUEST_CHANGES',
         severity_counts: { critical: 1, high: 0, medium: 2 },
+        systemic_findings: [{ title: 't', description: 'd', related_locations: [] }],
       },
     });
     const fixture = await createFixture({ reviews: [completed] });
@@ -73,6 +74,9 @@ describe('PrReviewDetailComponent a11y', () => {
     // Guard: don't pass axe vacuously against an empty DOM.
     expect(host.querySelector('.cr-pull-detail')).toBeTruthy();
     expect(host.querySelectorAll('.cr-reviews-table tbody tr').length).toBe(1);
+    // Also guard that the systemic-findings button is actually present, so
+    // axe exercises it (a missing aria-label would otherwise go unchecked).
+    expect(host.querySelector('.cr-chip--systemic')).toBeTruthy();
     await expectNoAxeViolations(host);
   }, 15000);
 

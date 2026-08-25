@@ -5,7 +5,7 @@ conventions for the analogous single-shot whole-input cache: a
 ``_CountingClient`` counts LLM invocations so a hit (no call) can be
 distinguished from a miss (a call). Every devops_team specialist that makes
 its own single-shot LLM call shares one implementation
-(``software_engineering_team.shared.review_result_cache``, also used by
+(``shared.cache.pydantic_cache``, also used by
 ``qa_agent`` and ``security_agent``), so the two representative agents below
 — ``InfrastructureAsCodeAgent`` (design-phase, wired through the shared
 ``DevOpsSingleShotAgent.run()``) and ``DevSecOpsReviewAgent`` (review-phase,
@@ -18,9 +18,10 @@ calls the LLM. Design-phase agents (``InfrastructureAsCodeAgent``,
 ``CICDPipelineAgent``, etc.) are wired through ``DevOpsSingleShotAgent.run()``
 in ``_agent_template.py``, which resolves ``get_shared_cache`` itself, so
 their seam is ``_agent_template.get_shared_cache``. ``DevSecOpsReviewAgent``
-resolves and holds its own ``get_shared_cache`` at its own call site instead,
-so its seam is ``devsecops_agent_mod.get_shared_cache`` — matching
-``test_qa_agent_cache.py``'s convention of patching ``agent_mod.get_shared_cache``.
+delegates to the shared ``ReviewResultCache`` (like ``qa_agent`` and
+``security_agent``), whose own ``get_shared_cache`` call is the seam, so tests
+patch ``review_cache_mod.get_shared_cache`` — matching
+``test_qa_agent_cache.py``'s convention.
 
 The caches themselves are cleared around every test by the autouse
 ``_reset_devops_llm_caches`` fixture in ``conftest.py``, so tests do not
@@ -37,6 +38,7 @@ from llm_service.clients.dummy import DummyLLMClient
 from llm_service.strands_model import model_fingerprint
 from shared.cache import MemoryBackend, get_shared_cache, reset_shared_cache_state
 from shared.cache import factory as factory_mod
+from shared.cache import pydantic_cache as cache_mod
 from software_engineering_team.devops_team import _agent_template
 from software_engineering_team.devops_team.cicd_pipeline_agent import (
     CICDPipelineAgent,
@@ -66,7 +68,7 @@ from software_engineering_team.devops_team.task_clarifier import (
     DevOpsTaskClarifierAgent,
     DevOpsTaskClarifierInput,
 )
-from software_engineering_team.shared import review_result_cache as cache_mod
+from software_engineering_team.shared import review_result_cache as review_cache_mod
 
 
 class _CountingClient(DummyLLMClient):
@@ -257,7 +259,7 @@ def test_devsecops_redis_unavailable_falls_back_to_memory_cache(
     monkeypatch.setattr(factory_mod, "_build_redis_client", lambda: None)
     reset_shared_cache_state()
     try:
-        namespace = cache_mod.cache_namespace_for(DevSecOpsReviewAgent.CACHE_NAMESPACE)
+        namespace = devsecops_agent_mod._REVIEW_CACHE._namespace()
         assert isinstance(get_shared_cache(namespace), MemoryBackend)
 
         client = _CountingClient(_DEVSECOPS_CLEAN_RESPONSE)
@@ -276,7 +278,7 @@ def test_devsecops_redis_unavailable_falls_back_to_memory_cache(
 def test_devsecops_cache_backend_error_falls_open_to_correct_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(devsecops_agent_mod, "get_shared_cache", lambda namespace: _RaisingCache())
+    monkeypatch.setattr(review_cache_mod, "get_shared_cache", lambda namespace: _RaisingCache())
 
     client = _CountingClient(_DEVSECOPS_CLEAN_RESPONSE)
     agent = DevSecOpsReviewAgent(client)
@@ -304,8 +306,8 @@ def test_devsecops_fallback_result_is_never_cached() -> None:
     result = agent.run(input_data)
     assert result.approved is False
 
-    key = cache_mod.build_review_cache_key(input_data, model_fingerprint(agent._model))
-    cache = get_shared_cache(cache_mod.cache_namespace_for(DevSecOpsReviewAgent.CACHE_NAMESPACE))
+    key = cache_mod.build_model_cache_key(input_data, model_fingerprint(agent._model))
+    cache = get_shared_cache(devsecops_agent_mod._REVIEW_CACHE._namespace())
     assert cache.get(key) is None
 
 
@@ -323,7 +325,7 @@ def test_devsecops_cache_disabled_via_env_is_passthrough(monkeypatch: pytest.Mon
 
 # ---------------------------------------------------------------------------
 # Lighter hit/miss coverage for the remaining six specialist agents -- each
-# exercises the same shared ``review_result_cache`` helper already given full
+# exercises the same shared ``pydantic_cache`` helper already given full
 # fail-open/corrupt-entry/disabled-cache coverage above.
 # ---------------------------------------------------------------------------
 

@@ -155,14 +155,14 @@ def test_build_review_prompt_rejects_unknown_profile() -> None:
 def test_migrated_constants_match_service_output() -> None:
     """Equivalence guard: the team prompt constants are exactly what the
     service builds, so the legacy text the existing tests parse is unchanged."""
-    from software_engineering_team.backend_code_v2_team.prompts import (
+    from software_engineering_team.codegen_team.stacks.backend.prompts import (
         SECURITY_TOOL_AGENT_REVIEW_PROMPT as backend_prompt,
+    )
+    from software_engineering_team.codegen_team.stacks.frontend.prompts import (
+        SECURITY_TOOL_AGENT_REVIEW_PROMPT as frontend_prompt,
     )
     from software_engineering_team.devops_team.devsecops_review_agent.prompts import (
         DEVSECOPS_REVIEW_PROMPT,
-    )
-    from software_engineering_team.frontend_code_v2_team.prompts import (
-        SECURITY_TOOL_AGENT_REVIEW_PROMPT as frontend_prompt,
     )
 
     assert backend_prompt == build_review_prompt(SecurityProfile.CODE, focus=CODE_BACKEND_FOCUS)

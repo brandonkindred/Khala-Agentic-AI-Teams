@@ -157,7 +157,7 @@ _ARCHITECTURE_CONSISTENCY_BODY = """You are a Senior Software Architect running 
 
 2. **Cross-codebase redundancy** (`category: "refactor"`) — the changed code re-implements a capability that ALREADY EXISTS elsewhere in the repository (a second job queue, a second HTTP client wrapper, a second auth check, a second implementation of the same helper). Before flagging this, you MUST confirm the existing capability actually exists elsewhere in the repository and does the same thing — `search_codebase` only searches this submission, so it cannot by itself confirm or rule out something existing outside it. Use `find_references(symbol)` for the candidate name (function, class, or a distinctive term) to find it in the wider repository plus its enclosing construct, or `list_files()`/`read_file()` when you need to confirm a whole file/module exists. Never flag redundancy from a guess or from the finding text alone. Cite the exact file/function that already provides the capability.
 
-**Tagging `pre_existing`:** you are shown the complete current content of every changed file, which can include unrelated, untouched fields/functions/classes that merely live in a file this submission also changed elsewhere — an architecture contradiction (1) or cross-codebase redundancy (2) can be about such pre-existing code just as easily as about code this submission actually added or modified. For EVERY finding, tag `"pre_existing"`: set it `true` when the specific field/function/class/construct the finding is about looks untouched by this submission's actual work (e.g. it sits well away from any edited region, or surrounding code shows no sign it was added or modified by this change), and `false` when it looks like part of what this submission added or changed. Because you cannot see history, this is a best-effort judgment, not a certainty — when genuinely unsure, prefer `false` (report it as tied to this submission) rather than guessing `true` and having a real architecture violation silently routed away from review.
+**Tagging `pre_existing`:** you are shown the complete current content of every changed file, which can include unrelated, untouched fields/functions/classes that merely live in a file this submission also changed elsewhere — an architecture contradiction (1) or cross-codebase redundancy (2) can be about such pre-existing code just as easily as about code this submission actually added or modified. For EVERY finding, tag `"pre_existing"`: set it `true` when the specific field/function/class/construct the finding is about looks untouched by this submission's actual work (e.g. it sits well away from any edited region, or surrounding code shows no sign it was added or modified by this change), and `false` when it looks like part of what this submission added or changed. Because you cannot see history, this is a best-effort judgment, not a certainty — when genuinely unsure, set `pre_existing: true` — do not guess a finding into scope: the downstream posting gate is change-map-driven (`is_within_diff` + `omission`), so the `pre_existing` tag alone does not control whether a finding is posted. This tagging guidance does not cover a finding that the change SHOULD have added or modified a file/construct but did not — that is not an architecture contradiction or redundancy finding at all, but if you encounter one, tag it `"omission": true` and `"pre_existing": false` instead (rare for this pass's two categories; `"omission"` defaults to `false`).
 
 **Hard rules:**
 - Every finding must be tool-verified: you actually read the architecture document section and/or the existing code you are citing, not inferred from naming alone.
@@ -170,7 +170,7 @@ _SUBMISSION_PASS_PROSE_INSTRUCTION = (
     "\n\n**Output format:**\n"
     "Answer in structured prose (not JSON). For each finding you would report, "
     "state severity, category, file_path, line (when applicable), description, "
-    "suggestion, and pre_existing.\n"
+    "suggestion, pre_existing, and omission.\n"
 )
 
 _ARCHITECTURE_CONSISTENCY_OUTPUT_FORMAT = """
@@ -185,6 +185,7 @@ Return a single JSON object with exactly one key:
   - "description": string — the specific contradiction or duplication, citing the architecture statement or existing code you verified
   - "suggestion": string — a concrete fix (e.g. which existing helper/module to reuse instead, or how to align with the stated boundary)
   - "pre_existing": boolean — see the tagging guidance above. Required for every finding.
+  - "omission": boolean — true when this finding is actually a required add/modify the change did not make (see the tagging guidance above). Defaults to false; rare for this pass's categories.
 
 Return `{"findings": []}` when you find nothing in either category. Do not add any key other than "findings".
 """
@@ -240,7 +241,7 @@ _SIDE_EFFECT_IMPACT_SECTION_B_AND_TAGGING = """
 **B. `category: "documentation"` — a docstring/comment that does not match the implementation (the lower-severity, always-actionable half).**
 Separately, flag when the function's CURRENT implementation does not match what its OWN docstring/comments claim it does — a documentation/implementation mismatch, visible entirely from this submission's own content, regardless of whether this diff introduced it. This is a documentation-accuracy finding, NOT a side effect: emit it under `category: "documentation"`. It needs no caller search — the mismatch is provable from the function and its own docstring alone.
 
-**Tagging `pre_existing`:** you are shown whole files, which in PR-review mode can include unrelated, untouched functions that merely live in a file this submission also changed elsewhere — a `side-effects` caller-impact finding (A) can be about such an unrelated, already-broken caller relationship just as easily as a `documentation` finding (B) can be about an unrelated, already-wrong docstring. For EVERY finding from either A or B, tag `"pre_existing"`: set it `true` when the function(s) the finding is about — the callee for a caller-impact finding, the mismatched function for a documentation finding — look untouched by this submission's actual work (e.g. surrounding code, imports, or the rest of the file show no sign they were added or modified), and `false` when they look like part of what this submission changed. Because you cannot see history, this is a best-effort judgment, not a certainty — when genuinely unsure, prefer `false` (report it as tied to this submission) rather than guessing `true` and having a real regression silently routed away from review."""
+**Tagging `pre_existing`:** you are shown whole files, which in PR-review mode can include unrelated, untouched functions that merely live in a file this submission also changed elsewhere — a `side-effects` caller-impact finding (A) can be about such an unrelated, already-broken caller relationship just as easily as a `documentation` finding (B) can be about an unrelated, already-wrong docstring. For EVERY finding from either A or B, tag `"pre_existing"`: set it `true` when the function(s) the finding is about — the callee for a caller-impact finding, the mismatched function for a documentation finding — look untouched by this submission's actual work (e.g. surrounding code, imports, or the rest of the file show no sign they were added or modified), and `false` when they look like part of what this submission changed. Because you cannot see history, this is a best-effort judgment, not a certainty — when genuinely unsure, set `pre_existing: true` — do not guess a finding into scope: the downstream posting gate is change-map-driven (`is_within_diff` + `omission`), so the `pre_existing` tag alone does not control whether a finding is posted. This tagging guidance does not cover a finding that the change SHOULD have added or modified a file/function but did not — that is neither a caller-impact nor a documentation-mismatch finding, but if you encounter one, tag it `"omission": true` and `"pre_existing": false` instead (rare for this pass's two categories; `"omission"` defaults to `false`)."""
 
 _SIDE_EFFECT_IMPACT_HARD_RULES_WITH_MUTATION_EXCEPTION = """
 
@@ -337,6 +338,7 @@ Return a single JSON object with exactly one key:
   - "description": string — for "side-effects": the function's current behavior and the specific caller file/line and assumption that breaks; for "documentation": the exact discrepancy between the docstring/comment and what the code actually does
   - "suggestion": string — a concrete fix (e.g. update the caller, or correct the docstring to match the implementation)
   - "pre_existing": boolean — see the tagging guidance above. Required for every finding.
+  - "omission": boolean — true when this finding is actually a required add/modify the change did not make (see the tagging guidance above). Defaults to false; rare for this pass's categories.
 
 Return `{"findings": []}` when you find nothing. Do not add any key other than "findings".
 """
@@ -388,6 +390,7 @@ Return a single JSON object with exactly two keys — one per part above. Never 
   - "description": string — the specific contradiction or duplication, citing the architecture statement or existing code you verified
   - "suggestion": string — a concrete fix (e.g. which existing helper/module to reuse instead, or how to align with the stated boundary)
   - "pre_existing": boolean — see Part 1's tagging guidance above. Required for every architecture_findings entry.
+  - "omission": boolean — see Part 1's tagging guidance above. Defaults to false; rare for Part 1's categories.
 - "side_effect_findings": a list of objects in Part 2's finding shape, each with:
   - "severity": "critical" | "high" | "medium" | "low" | "info"
   - "category": "side-effects" (a real caller-breaking side effect) or "documentation" (a docstring/comment vs implementation mismatch)
@@ -396,6 +399,7 @@ Return a single JSON object with exactly two keys — one per part above. Never 
   - "description": string — for "side-effects": the function's current behavior and the specific caller file/line and assumption that breaks; for "documentation": the exact discrepancy between the docstring/comment and what the code actually does
   - "suggestion": string — a concrete fix (e.g. update the caller, or correct the docstring to match the implementation)
   - "pre_existing": boolean — see Part 2's tagging guidance above. Required for every side_effect_findings entry.
+  - "omission": boolean — see Part 2's tagging guidance above. Defaults to false; rare for Part 2's categories.
 
 An empty list for either key (or both) is a valid and expected outcome when that part finds nothing — it is never a failure. Return `{"architecture_findings": [], "side_effect_findings": []}` when neither part finds anything. Do not add any key other than "architecture_findings"/"side_effect_findings".
 """
@@ -665,4 +669,41 @@ SCOPE_CLASSIFY_FORMATTING_INSTRUCTIONS = (
     "Include exactly one entry per finding, using the finding's index. Set "
     'in_scope to true for IN SCOPE, false for OUT OF SCOPE, and "unknown" when '
     "you genuinely cannot decide. Do not omit entries."
+)
+
+
+# ---------------------------------------------------------------------------
+# Systemic / cross-cutting synthesis pass (systemic_synthesis.py) — a single
+# best-effort LLM call over a PR review's already in-scope, already-deduped
+# findings, looking for a shared root cause spanning two or more of them.
+# ---------------------------------------------------------------------------
+
+SYSTEMIC_SYNTHESIS_SYSTEM_PROMPT = (
+    "You are a principal engineer doing a final pass over a pull request's code "
+    "review findings. Every finding below is already confirmed independently "
+    "true and in scope for this pull request — do not re-judge, restate, or "
+    "second-guess any individual finding.\n\n"
+    "Your only job is to spot SYSTEMIC / CROSS-CUTTING patterns: two or more "
+    "findings that share one underlying root cause or design flaw — the same "
+    "kind of mistake repeated across several call sites, or conceptually "
+    "similar issues in different functions/files that point at one broken "
+    "invariant or missing abstraction. A rough grouping by similarity is "
+    "provided as a hint, but also look ACROSS groups: the same underlying "
+    "problem can surface as differently-worded findings in unrelated files.\n\n"
+    "Only report a pattern you can genuinely ground in two or more of the "
+    "findings given. Do not invent a problem that is not evidenced by them. "
+    "If nothing in this finding set is truly cross-cutting, say so by "
+    "returning an empty list — that is the common, correct answer, not a "
+    "failure."
+)
+
+SYSTEMIC_SYNTHESIS_FORMATTING_INSTRUCTIONS = (
+    "Reply with a single JSON object and nothing else, in exactly this shape:\n"
+    '{"systemic_findings": [{"title": "<short headline>", '
+    '"description": "<the shared root cause, in 1-3 sentences>", '
+    '"finding_indices": [<int>, <int>, ...]}]}\n'
+    "Each entry's finding_indices must list at least two of the given finding "
+    "indices that evidence the pattern. Omit an entry entirely rather than "
+    'invent one. Return {"systemic_findings": []} when no genuine '
+    "cross-cutting pattern exists."
 )

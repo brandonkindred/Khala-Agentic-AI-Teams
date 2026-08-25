@@ -1,6 +1,6 @@
 # Agent Registry
 
-Discovery substrate for the **Agent Console** (UI at `/agent-console`).
+Discovery substrate for the **Agent Studio** (UI at `/agent-studio`).
 
 Loads declarative per-agent manifests from
 `backend/agents/<team>/agent_console/manifests/*.yaml` and serves them as
@@ -44,7 +44,7 @@ for the locked precedence contract.
 Historically, Khala had a flat, team-level roster in
 [`unified_api/config.py`](../../../unified_api/config.py) and no structured
 metadata for individual specialist agents. `AGENT_ANATOMY.md` prescribed a
-contract in prose but nothing queried it. The Agent Console needed a way to
+contract in prose but nothing queried it. Agent Studio needed a way to
 browse, describe, and (eventually) invoke every agent in the system — the
 registry is that substrate.
 

@@ -28,8 +28,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from strands import Agent
 
-from llm_service.interface import LLMSemanticExhaustionError
-
 from ...models import StrategyLabRecord
 from ...signal_intelligence_agent import brief_to_prompt_block
 from ...signal_intelligence_models import SignalIntelligenceBriefV1
@@ -39,7 +37,6 @@ from ...strategy_lab_context import (
     format_prior_results,
 )
 from ..budget_config import StrategyLabBudgetConfig
-from ..exceptions import StrategyLabLLMError
 from ..market_regime import RegimeSummary, regime_to_prompt_block
 from . import _structured_output as so
 from ._agent_runner import run_json_with_parse_retry
@@ -388,6 +385,7 @@ class DesignAgent:
         critique: "SpecCritique",
         prior_critiques: Optional[List["SpecCritique"]] = None,
         regression_notice: str = "",
+        skip_self_review: bool = False,
     ) -> Tuple[Dict[str, Any], str]:
         """Revise ``prior_spec`` to address every issue raised in ``critique``.
 
@@ -401,6 +399,13 @@ class DesignAgent:
         "do not reintroduce these" instruction so the loop escalates a
         regression rather than silently oscillating on it. Empty by default
         so existing callers are unaffected.
+
+        ``skip_self_review`` (optional, default ``False``) is forwarded
+        verbatim to :meth:`_with_self_review`. The decision logic for when to
+        set it lives with the caller (the orchestrator's design ↔ review
+        loop), not here: it is a fast path for a revision the caller already
+        knows is structurally clean, and skips the internal self-review LLM
+        call entirely when ``True``.
 
         The accumulated external lineage (``prior_critiques``, which already
         includes the current ``critique``) is forwarded into the internal
@@ -435,6 +440,7 @@ class DesignAgent:
             rationale,
             prior_critiques=prior_critiques,
             regression_notice=regression_notice,
+            skip_self_review=skip_self_review,
         )
 
     def _invoke_and_parse(self, system_prompt: str, user_prompt: str) -> Tuple[Dict[str, Any], str]:
@@ -462,12 +468,9 @@ class DesignAgent:
         It degrades to ``_legacy_parse_retry_loop`` (a single-call path) on
         either pass's ``schema_forced`` semantic exhaustion.
         """
-        structured_available = so.structured_output_available()
-        prompt = user_prompt
-        if structured_available:
-            finalized, prompt = self._structured_preflight(system_prompt, user_prompt)
-            if finalized is not None:
-                return finalized
+        finalized, prompt = self._structured_preflight(system_prompt, user_prompt)
+        if finalized is not None:
+            return finalized
 
         return self._legacy_parse_retry_loop(system_prompt, prompt, user_prompt)
 
@@ -526,26 +529,18 @@ class DesignAgent:
         # appends ``_REASONING_USER_PROMPT_SUFFIX`` to this same ``user_prompt``
         # for its internal reasoning-pass call only, re-asserting prose-only
         # last (see that constant's docstring in ``_structured_output.py``).
-        try:
-            parsed = so.invoke_structured_with_schema(
-                "strategy_design",
-                system_prompt,
-                user_prompt,
-                phase="design_generate_structured",
-                schema=DESIGN_SPEC_SCHEMA,
-                charge=True,
-                objective="strategy design (structured)",
-                logger=logger,
-                reasoning_system_prompt=so.build_reasoning_system_prompt(system_prompt),
-            )
-        except StrategyLabLLMError as exc:
-            cause = exc.cause
-            if not (isinstance(cause, LLMSemanticExhaustionError) and cause.schema_forced):
-                raise
-            logger.warning(
-                "structured design decode starved (schema_forced); degrading to "
-                "unconstrained parse-retry loop."
-            )
+        parsed = so.try_structured_or_degrade(
+            "strategy_design",
+            DESIGN_SPEC_SCHEMA,
+            system_prompt,
+            user_prompt,
+            so.build_reasoning_system_prompt(system_prompt),
+            phase="design_generate_structured",
+            charge=True,
+            objective="strategy design (structured)",
+            logger=logger,
+        )
+        if parsed is None:
             return None, user_prompt
 
         try:
@@ -558,10 +553,6 @@ class DesignAgent:
             )
             return None, _build_correction_prompt(user_prompt, exc)
 
-        logger.info(
-            "strategy_lab structured_output outcome=succeeded "
-            "agent=strategy_design phase=design_generate_structured",
-        )
         return finalized, user_prompt
 
     def _legacy_parse_retry_loop(
@@ -642,6 +633,7 @@ class DesignAgent:
         *,
         prior_critiques: Optional[List["SpecCritique"]] = None,
         regression_notice: str = "",
+        skip_self_review: bool = False,
     ) -> Tuple[Dict[str, Any], str]:
         """Audit a freshly emitted spec and self-revise (then re-audit) if needed.
 
@@ -656,13 +648,19 @@ class DesignAgent:
         "do not reintroduce" block (empty on the :meth:`run` path); it is
         threaded into the self-revision prompt so a self-revision cannot undo
         a prior-round defect the regression machinery is keeping fixed.
+        ``skip_self_review`` is a caller-controlled fast path for specs
+        already known to be structurally clean (the decision logic for
+        when to set it lives with the caller, not here): when ``True`` the
+        method returns immediately, making no LLM call at all — not even
+        :meth:`_self_review`.
         Post: returns ``(strategy_dict, rationale)`` — either the input
-        unchanged (self-review disabled, the spec is already ready, or a
-        best-effort failure) or a self-revised spec. Whenever a self-revision
-        fires, the revised spec has been re-audited through self-review at
-        least once. Never raises except :class:`DesignBudgetExhausted`, which
-        propagates so the cycle can stop; the external review loop is still
-        authoritative — this is purely an internal pre-flight.
+        unchanged (``skip_self_review`` requested, self-review disabled,
+        the spec is already ready, or a best-effort failure) or a
+        self-revised spec. Whenever a self-revision fires, the revised spec
+        has been re-audited through self-review at least once. Never raises
+        except :class:`DesignBudgetExhausted`, which propagates so the
+        cycle can stop; the external review loop is still authoritative —
+        this is purely an internal pre-flight.
         Invariant: at most ``_design_self_revision_rounds()`` self-revisions
         fire per call, each followed by a re-audit; the loop cannot run
         unbounded.
@@ -676,6 +674,9 @@ class DesignAgent:
         introduced a *new* contradiction that then reached the external
         reviewer unchecked.
         """
+        if skip_self_review:
+            return strategy_dict, rationale
+
         if not _design_self_review_enabled():
             return strategy_dict, rationale
 
@@ -800,36 +801,18 @@ class DesignAgent:
                 logger=logger,
             )
 
-        if so.structured_output_available():
-            try:
-                parsed = so.invoke_structured_with_schema(
-                    "strategy_design",
-                    _get_self_review_system_prompt(),
-                    user_prompt,
-                    phase="design_self_review_structured",
-                    schema=CRITIQUE_SCHEMA,
-                    charge=True,
-                    objective="strategy design review (structured)",
-                    logger=logger,
-                    reasoning_system_prompt=so.build_reasoning_system_prompt(
-                        _get_self_review_system_prompt()
-                    ),
-                )
-            except StrategyLabLLMError as exc:
-                cause = exc.cause
-                if not (isinstance(cause, LLMSemanticExhaustionError) and cause.schema_forced):
-                    raise
-                logger.warning(
-                    "structured design self-review decode starved (schema_forced); "
-                    "degrading to the legacy single-shot call."
-                )
-                parsed = _invoke_legacy()
-            else:
-                logger.info(
-                    "strategy_lab structured_output outcome=succeeded "
-                    "agent=strategy_design phase=design_self_review_structured",
-                )
-        else:
+        parsed = so.try_structured_or_degrade(
+            "strategy_design",
+            CRITIQUE_SCHEMA,
+            _get_self_review_system_prompt(),
+            user_prompt,
+            so.build_reasoning_system_prompt(_get_self_review_system_prompt()),
+            phase="design_self_review_structured",
+            charge=True,
+            objective="strategy design review (structured)",
+            logger=logger,
+        )
+        if parsed is None:
             parsed = _invoke_legacy()
         # Self-review tolerates advisory warnings on an otherwise-ready
         # verdict: the self-review LLM routinely flags minor notes as
@@ -927,7 +910,11 @@ def _build_correction_prompt(user_prompt: str, exc: "StrategySpecParseError") ->
     failed for this specific reason; reissue the corrected JSON."
     """
     cause = exc.__cause__ or exc
-    payload = exc.payload if isinstance(exc.payload, str) else json.dumps(exc.payload, indent=2, default=str)
+    payload = (
+        exc.payload
+        if isinstance(exc.payload, str)
+        else json.dumps(exc.payload, indent=2, default=str)
+    )
     return _CORRECTION_PREAMBLE.format(
         field=exc.field,
         payload=payload,

@@ -22,25 +22,18 @@ output contract).
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional
+from typing import Dict
 
 from strands import Agent
 
-from llm_service import get_strands_model
+from llm_service import CacheBreakpoint, get_strands_model
 from llm_service.strands_model import model_fingerprint, resolve_strands_model
-from shared.cache import get_shared_cache
 from software_engineering_team.shared.persona_agent_base import run_structured_persona
-from software_engineering_team.shared.review_result_cache import (
-    build_review_cache_key,
-    cache_capacity_for,
-    cache_namespace_for,
-    clear_review_cache_namespace,
-    get_cached_review_result,
-    set_cached_review_result,
-)
+from software_engineering_team.shared.review_prompt_utils import build_file_context_prefix
+from software_engineering_team.shared.review_result_cache import ReviewResultCache
 from software_engineering_team.shared.security_service import derive_approved
 
-from .models import QAInput, QAOutput
+from .models import AcceptanceEvidenceModel, QAInput, QAOutput
 from .prompts import (
     QA_PROMPT,
     QA_PROMPT_ACCEPTANCE_EVIDENCE,
@@ -60,32 +53,17 @@ _CACHE_LABEL = "QA"
 # chunk-level *policy*: every genuine outcome is cached regardless of
 # ``approved`` (see ``run()``'s ``is_fallback`` guard below), since this is a
 # single atomic call with no reduce phase to short-circuit. The shared
-# policy itself lives in
-# ``software_engineering_team.shared.review_result_cache``, imported above
-# (also used by security_agent's analogous cache); this module supplies only
-# its own namespace stem, env var, capacity default, and output model.
-# Backed by shared.cache (Redis, falls open to an in-process store). Base
-# stem; ``_review_cache_namespace()`` appends build id.
+# ``ReviewResultCache`` (also used by security_agent's analogous cache)
+# supplies the get/put/clear policy; this module supplies only its own
+# namespace stem, env var, capacity default, and output model.
 DEFAULT_REVIEW_CACHE_SIZE = 256  # QA_REVIEW_CACHE_SIZE, floor 0
-_REVIEW_CACHE_NAMESPACE = "qa:review:v1"
-
-
-def _review_cache_namespace() -> str:
-    """Shared-cache namespace for QA review results (includes build id)."""
-    return cache_namespace_for(_REVIEW_CACHE_NAMESPACE)
-
-
-def _review_cache_size() -> int:
-    """Resolve the review cache capacity from the environment.
-
-    Postconditions:
-        - Returns ``QA_REVIEW_CACHE_SIZE`` parsed as an int, clamped to a
-          floor of 0: an unset or unparseable value falls back to
-          ``DEFAULT_REVIEW_CACHE_SIZE``, a negative value clamps to 0. An
-          explicit or clamped-to 0 disables the cache — every ``run()`` call
-          re-invokes the model, matching pre-cache behavior.
-    """
-    return cache_capacity_for("QA_REVIEW_CACHE_SIZE", DEFAULT_REVIEW_CACHE_SIZE)
+_REVIEW_CACHE: ReviewResultCache[QAOutput] = ReviewResultCache(
+    namespace_stem="qa:review:v1",
+    env_var="QA_REVIEW_CACHE_SIZE",
+    default_capacity=DEFAULT_REVIEW_CACHE_SIZE,
+    label=_CACHE_LABEL,
+    output_model=QAOutput,
+)
 
 
 def clear_review_cache() -> None:
@@ -102,35 +80,83 @@ def clear_review_cache() -> None:
           forcing a cold review. Intended for tests and for callers that
           must force a cold review.
     """
-    clear_review_cache_namespace(_CACHE_LABEL, lambda: get_shared_cache(_review_cache_namespace()))
+    _REVIEW_CACHE.clear()
 
 
-def _review_cache_key(input_data: QAInput, model_fp: str) -> str:
-    """Hash of the whole QA input plus the resolved review model.
+def _build_qa_file_context_prefix(input_data: QAInput) -> list[str]:
+    """Render the microtask file context (language + code) as a stable prefix.
 
-    The qa_agent analogue of ``code_review_agent.mapping._submission_
-    fingerprint`` (same key design, per the caching contract this module
-    implements): keys the entire ``QAInput`` — code, language, task
-    description, architecture, build errors, request mode, acceptance
-    criteria, tool results — so any reviewed-file byte change naturally
-    busts the key with no explicit invalidation logic. ``QAInput`` carries no
-    per-invocation id field (no ``job_id``/``task_id``/``microtask_id``), so
-    nothing needs to be excluded before hashing.
+    Positioned ahead of ``_build_qa_role_instructions``'s output in the
+    assembled user prompt (reorder/isolation only; no cache marking here).
+    Only called from the non-``acceptance_evidence`` branch of
+    ``_build_user_prompt``, whose caller has already excluded the
+    evidence-mapping mode (that mode carries no code under review).
+
+    Preconditions:
+        - ``input_data`` is a valid ``QAInput`` with ``code`` set.
+
+    Postconditions:
+        - Returns non-empty prompt lines: the language line, then the code
+          fence around ``input_data.code``. Never raises or transforms the code.
+    """
+    return build_file_context_prefix(input_data.language, input_data.code)
+
+
+def _build_qa_shared_review_prefix(input_data: QAInput) -> list[str]:
+    """Render QA's trusted, non-code shared context as a stable prefix.
+
+    Mirrors ``code_review_agent.chunk_reviewer._build_shared_review_prefix``:
+    only internal, non-repository-controlled metadata belongs here (task
+    description, architecture overview) — never the code under review, which
+    stays in the user message (see ``_build_qa_file_context_prefix``). Both
+    fields, when present, are stable across every chunk/piece of one
+    microtask's QA review and across a fix->re-review retry for that
+    microtask, so this is attached to the ``Agent``'s system content as a
+    single ``CacheBreakpoint``-marked segment in :meth:`QAExpertAgent.run`
+    rather than embedded in the user-turn prompt.
 
     Preconditions:
         - ``input_data`` is a valid ``QAInput``.
-        - ``model_fp`` is the value returned by
-          ``llm_service.strands_model.model_fingerprint(resolved_model)``,
-          where ``resolved_model`` is the Strands model this
-          ``QAExpertAgent`` instance uses for the review (its ``self._model``
-          — this is a free function, so there is no ``self`` here).
 
     Postconditions:
-        - Returns a hex digest that changes whenever any input field or the
-          resolved model changes, and is stable (``sort_keys``) across calls
-          in a process, so a byte-identical resubmission is recognized.
+        - Returns the task-description line (when ``input_data.task_description``
+          is truthy) followed by the architecture-overview line (when
+          ``input_data.architecture`` is set) — in that fixed order. Returns
+          ``[]`` when both are empty/``None``. Never raises.
     """
-    return build_review_cache_key(input_data, model_fp)
+    parts: list[str] = []
+    if input_data.task_description:
+        parts.append(f"**Task:** {input_data.task_description}")
+    if input_data.architecture:
+        parts.append(f"**Architecture:** {input_data.architecture.overview}")
+    return parts
+
+
+def _build_qa_role_instructions(input_data: QAInput) -> list[str]:
+    """Render the QA-specific review instructions that follow the file-context prefix.
+
+    Preconditions:
+        - ``input_data`` is a valid ``QAInput``.
+
+    Postconditions:
+        - Returns non-empty prompt lines: the schema-hint sentence, then run
+          instructions and build errors when each is present — in that fixed
+          order. Never raises. Does not include ``task_description`` or
+          ``architecture`` — those are rendered separately by
+          ``_build_qa_shared_review_prefix`` for the ``CacheBreakpoint``
+          system segment.
+    """
+    parts = [
+        "",
+        "Review the code for bugs and produce structured JSON with "
+        "fields: bugs_found, test_plan, unit_tests, integration_tests, "
+        "readme_content, summary, live_test_notes, suggested_commit_message.",
+    ]
+    if input_data.run_instructions:
+        parts.append(f"**Run instructions:** {input_data.run_instructions}")
+    if input_data.build_errors:
+        parts.append(f"**Build/compiler errors:**\n```\n{input_data.build_errors}\n```")
+    return parts
 
 
 class QAExpertAgent:
@@ -195,12 +221,9 @@ class QAExpertAgent:
             mode,
         )
 
-        capacity = _review_cache_size()
-        cache_key: Optional[str] = None
-        if capacity > 0:
-            cache_key = _review_cache_key(input_data, model_fingerprint(self._model))
-            cache = get_shared_cache(_review_cache_namespace())
-            cached_result = get_cached_review_result(_CACHE_LABEL, cache, cache_key, QAOutput)
+        model_fp = model_fingerprint(self._model)
+        if _REVIEW_CACHE.capacity() > 0:
+            cached_result = _REVIEW_CACHE.get(input_data, model_fp)
             if cached_result is not None:
                 logger.info(
                     "QA: review cache hit; skipping LLM call (approved=%s)",
@@ -209,6 +232,12 @@ class QAExpertAgent:
                 return cached_result
 
         user_prompt = self._build_user_prompt(input_data)
+
+        system_prompt_content = None
+        if mode != "acceptance_evidence":
+            shared_parts = _build_qa_shared_review_prefix(input_data)
+            if shared_parts:
+                system_prompt_content = [CacheBreakpoint("\n".join(shared_parts))]
 
         is_fallback = False
 
@@ -261,6 +290,7 @@ class QAExpertAgent:
         # breaks the forced-tool-choice mechanism used by
         # ``structured_output_model`` on the second call. Construction is
         # cheap — it just wraps the cached model + system_prompt.
+
         result = run_structured_persona(
             model=self._model,
             system_prompt=self._system_prompts[mode],
@@ -269,6 +299,7 @@ class QAExpertAgent:
             fallback_factory=_fallback,
             agent_factory=Agent,
             on_success=_finalize,
+            system_prompt_content=system_prompt_content,
         )
 
         logger.info(
@@ -277,9 +308,8 @@ class QAExpertAgent:
             result.approved,
         )
 
-        if cache_key is not None and not is_fallback:
-            cache = get_shared_cache(_review_cache_namespace())
-            set_cached_review_result(_CACHE_LABEL, cache, cache_key, result, capacity=capacity)
+        if not is_fallback:
+            _REVIEW_CACHE.put(input_data, model_fp, result)
 
         return result
 
@@ -307,13 +337,30 @@ class QAExpertAgent:
         """Assemble the user-facing prompt.
 
         The persona (``QA_PROMPT`` and its mode-specific addendum) lives on
-        the Strands ``Agent``'s system prompt, so the user prompt only
-        carries the code under review and its context. An explicit schema
-        hint (``bugs_found``, ``test_plan``, ...) makes the expected output
-        shape unambiguous for the LLM.
+        the Strands ``Agent``'s system prompt. In the default/fix_build/
+        write_tests modes the user prompt carries only the file-context
+        prefix (language + code under review, see
+        ``_build_qa_file_context_prefix``) followed by the explicit schema
+        hint (``bugs_found``, ``test_plan``, ...) and remaining per-gate
+        instructions (run instructions, build errors — see
+        ``_build_qa_role_instructions``). The file-context prefix stays in
+        the user message (rather than being elevated to system content)
+        because it is untrusted repository content. The trusted, non-code
+        task description and architecture overview are instead supplied
+        separately as a ``CacheBreakpoint``-marked ``system_prompt_content``
+        segment to ``run_structured_persona`` (see
+        ``_build_qa_shared_review_prefix``, built in :meth:`run`) — they are
+        no longer part of this returned string.
+
+        In ``acceptance_evidence`` mode no code is included; the prompt
+        instead carries the acceptance criteria and tool/test results so the
+        model can map evidence back to criteria.
 
         Preconditions: ``input_data`` is a valid :class:`QAInput`.
-        Postconditions: returns a non-empty str. In ``acceptance_evidence`` mode
+        Postconditions: returns a non-empty str. In non-``acceptance_evidence``
+        modes the returned string contains the code under review followed by
+        role instructions and schema hints; it no longer contains the task
+        description or architecture overview. In ``acceptance_evidence`` mode
         the prompt names the acceptance-evidence output fields
         (``quality_gates``/``acceptance_trace``/``validation_evidence``) and
         carries the criteria and tool results instead of the code under review.
@@ -332,36 +379,16 @@ class QAExpertAgent:
                 )
                 or "(none provided)"
             )
+            fields_text = ", ".join(AcceptanceEvidenceModel.model_fields.keys())
             return (
                 "Interpret the tool/test results below and map the evidence back to the "
-                "acceptance criteria. Produce structured JSON with fields: approved, "
-                "quality_gates, acceptance_trace, validation_evidence, summary.\n\n"
+                f"acceptance criteria. Produce structured JSON with fields: {fields_text}.\n\n"
                 f"**Acceptance criteria:**\n{criteria_text}\n\n"
                 f"**Tool results:**\n{tool_results_text}"
             )
 
-        parts = [
-            "Review the following code for bugs and produce structured JSON with "
-            "fields: bugs_found, test_plan, unit_tests, integration_tests, "
-            "readme_content, summary, live_test_notes, suggested_commit_message.",
-            "",
-            f"**Language:** {input_data.language}",
-        ]
-        if input_data.task_description:
-            parts.append(f"**Task:** {input_data.task_description}")
-        parts.extend(
-            [
-                "**Code to review:**",
-                "```",
-                input_data.code,
-                "```",
-            ]
-        )
-        if input_data.architecture:
-            parts.append(f"**Architecture:** {input_data.architecture.overview}")
-        if input_data.run_instructions:
-            parts.append(f"**Run instructions:** {input_data.run_instructions}")
-        if input_data.build_errors:
-            parts.append(f"**Build/compiler errors:**\n```\n{input_data.build_errors}\n```")
-
+        # File-context prefix (language + code under review) stays in the user
+        # message — it is untrusted repository content and must not be
+        # elevated to system-level instructions.
+        parts = _build_qa_file_context_prefix(input_data) + _build_qa_role_instructions(input_data)
         return "\n".join(parts)

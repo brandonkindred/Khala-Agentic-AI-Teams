@@ -2,7 +2,8 @@
 
 Seven specialist agents produce governance fragments in parallel. Each is a
 terminal node — there is no compositor; the orchestrator's Phase-5
-``merge_fn`` (``_merge_phase5_fragments``) assembles their typed fragments
+``merge_fn`` (``functools.partial`` binding ``_merge_named_fragments`` to
+``_PHASE5_NODE_MERGE``, ``require_all=True``) assembles their typed fragments
 into a unified ``GovernanceOutput`` in Python.
 """
 
@@ -36,7 +37,8 @@ def build_phase5_graph() -> Graph:
 
     All seven nodes are both entry points and terminal nodes — they run in
     parallel and have no edges between them. There is no fan-in node: the
-    orchestrator's Phase-5 ``merge_fn`` (``_merge_phase5_fragments``)
+    orchestrator's Phase-5 ``merge_fn`` (``functools.partial`` binding
+    ``_merge_named_fragments`` to ``_PHASE5_NODE_MERGE``, ``require_all=True``)
     assembles their typed ``structured_output`` fragments into a single
     ``GovernanceOutput`` deterministically in Python.
 
@@ -47,7 +49,8 @@ def build_phase5_graph() -> Graph:
         Returns a built ``Graph`` whose seven specialist nodes are all both
         entry points and terminal nodes, running in parallel with no edges
         between them. There is no fan-in node; the orchestrator's Phase-5
-        ``merge_fn`` (``_merge_phase5_fragments``) assembles their typed
+        ``merge_fn`` (``functools.partial`` binding ``_merge_named_fragments``
+        to ``_PHASE5_NODE_MERGE``, ``require_all=True``) assembles their typed
         ``structured_output`` fragments into a single ``GovernanceOutput``
         outside the graph.
     """

@@ -462,8 +462,11 @@ def _build_entry_client(
         model = entry.model or llm_config.resolve_claude_model(agent_key)
         return _build_claude_concrete(model, entry.api_key, timeout, on_reasoning, rate_limit_max_retries)
     elif entry.provider == "runpod":
-        model = entry.model or llm_config.resolve_model(agent_key)
-        return _build_runpod_concrete(model, entry.base_url, timeout, on_reasoning, rate_limit_max_retries, entry.api_key)
+        # RunPod serverless endpoints serve a single pre-configured model; the
+        # model field in requests is accepted by vLLM regardless of the value
+        # when only one model is loaded. Use "auto" as a no-op placeholder.
+        model = entry.model or "auto"
+        return _build_runpod_concrete(model, entry.base_url.strip(), timeout, on_reasoning, rate_limit_max_retries, entry.api_key)
     model = (model_override or "").strip() or entry.model or llm_config.resolve_model(agent_key)
     base_url = entry.base_url or llm_config.resolve_base_url()
     # The entry carries its own key (empty → no Authorization header, i.e. a local

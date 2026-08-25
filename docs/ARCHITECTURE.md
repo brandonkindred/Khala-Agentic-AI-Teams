@@ -131,7 +131,7 @@ flowchart TB
 
     subgraph execGroup [Execution]
         backendAgent["Backend Expert"]
-        backendV2Team["Backend-Code-V2 Team\n(standalone 5-phase)"]
+        backendV2Team["Backend-Code-V2 Team\n(config-driven 7-phase)"]
         frontendAgent["Frontend Expert"]
         devopsTeam["DevOps Team Lead"]
     end
@@ -244,7 +244,7 @@ On agent crash, the Repair Agent analyzes the traceback and applies fixes. If th
 
 ## 5b. Backend-Code-V2 Team Workflow
 
-The **backend-code-v2** agent team is a standalone, experimental backend development team that operates independently from `BackendExpertAgent`. It uses a **three-layer architecture**: a Backend Tech Lead Agent runs Setup then delegates to a Backend Development Agent, which runs the 5-phase cycle and consults **tool agents in every phase**. No code from `backend_agent/` is imported or reused.
+The **backend-code-v2** agent team is a config-driven backend development team that operates independently from `BackendExpertAgent`. It uses a **three-layer architecture**: a Backend Tech Lead Agent runs Setup then delegates to a Backend Development Agent, which runs the remaining 6 phases (7 total including Setup) and consults **tool agents in every phase**. No code from `backend_agent/` is imported or reused.
 
 ```mermaid
 flowchart TB
@@ -263,8 +263,9 @@ flowchart TB
         DAExecution["Execution\n(delegate to tool agents)"]
         DAReview["Review\n(build, lint, coverage, UAT)"]
         DAProblemSolving["Problem-solving\n(root-cause, fix loop)"]
+        DADocumentation["Documentation\n(docstrings/README/API docs)"]
         DADeliver["Deliver\n(commit to branch)"]
-        DAPlanning --> DAExecution --> DAReview --> DAProblemSolving --> DADeliver
+        DAPlanning --> DAExecution --> DAReview --> DAProblemSolving --> DADocumentation --> DADeliver
     end
 
     subgraph toolGrid ["Tool Agents (participate in all phases)"]
@@ -272,8 +273,9 @@ flowchart TB
         DataEng["DataEng"]
         Auth["Auth"]
         ApiOA["API/OpenAPI"]
-        CICD["CI/CD"]
-        Container["Container"]
+        Testing["Testing/QA"]
+        Security["Security"]
+        Documentation["Documentation"]
         GitBranch["Git branch mgmt"]
         BuildSpec["Build Specialist"]
     end
@@ -282,28 +284,28 @@ flowchart TB
     devAgent -->|"each phase consults"| toolGrid
 ```
 
-- **Layer 1 — Backend Tech Lead Agent**: Runs the **Setup** phase (git init if needed, README with project title, rename master→main, create `development` branch), then delegates the 5-phase development cycle to the Backend Development Agent.
-- **Layer 2 — Backend Development Agent**: Owns Planning (microtask decomposition, language detection), Execution (tool agents + LLM fallback), Review (build, lint, QA, security, code review), Problem-solving (fix loop), and Deliver (feature branch, commit, merge to `development`). The review/fix loop runs up to 5 iterations.
-- **Layer 3 — Tool agents**: Data Engineering, API/OpenAPI, Auth, CI/CD, Containerization, **Git branch management**, and **Build Specialist** agents each implement `plan()`, `execute()`, `review()`, `problem_solve()`, and `deliver()`, so they participate in every phase. The **Git branch management** agent creates a feature branch off `development` at the start of Execution, commits changes after each iteration ("commit along the way"), and in Deliver merges the feature branch back into `development`. The **Build Specialist** (stub) is intended to assist when the project doesn't build; it can be wired to the existing build verifier or a dedicated build-fix flow.
+- **Layer 1 — Backend Tech Lead Agent**: Runs the **Setup** phase (git init if needed, README with project title, rename master→main, create `development` branch), then delegates the remaining 6-phase cycle to the Backend Development Agent (7 phases total).
+- **Layer 2 — Backend Development Agent**: Owns Planning (microtask decomposition, language detection), Execution (tool agents + LLM fallback), Review (build, lint, QA, security, code review), Documentation (docstrings/README/API docs, self-review loop), and Deliver (feature branch, commit, merge to `development`), with Review looping back to Execution via Problem-solving (fix loop) when issues are found. The review/fix loop runs up to 5 iterations.
+- **Layer 3 — Tool agents**: Data Engineering, API/OpenAPI, Auth, Testing/QA, Security, Documentation, **Git branch management**, and **Build Specialist** agents each implement `plan()`, `execute()`, `review()`, `problem_solve()`, and `deliver()`, so they participate in every phase. The **Git branch management** agent creates a feature branch off `development` at the start of Execution, commits changes after each iteration ("commit along the way"), and in Deliver merges the feature branch back into `development`. The **Build Specialist** (stub) is intended to assist when the project doesn't build; it can be wired to the existing build verifier or a dedicated build-fix flow.
 
 The team supports both Python and Java (auto-detected). Quality gate agents (QA, Security, Code Review) are passed in by the main orchestrator and invoked during Review.
 
 **API endpoints:**
-- `POST /backend-code-v2/run` — Submit a task and repo path; starts Setup then the 5-phase workflow in a background thread.
+- `POST /backend-code-v2/run` — Submit a task and repo path; starts the 7-phase workflow (Setup, Planning, Execution, Review, Documentation, Deliver, plus the conditional Problem-solving loop) in a background thread.
 - `GET /backend-code-v2/status/{job_id}` — Returns current phase (including `setup`), completed phases, progress percentage, and microtask status.
 
 ---
 
 ## 5c. Frontend-Code-V2 Team Workflow
 
-The **frontend-code-v2** agent team is a standalone, experimental frontend development team that does **not** import or reuse any code from `frontend_team/` or `feature_agent/`. It mirrors the backend-code-v2 **three-layer architecture**: a Frontend Tech Lead Agent runs Setup then delegates to a Frontend Development Agent, which runs the 5-phase cycle and consults **tool agents in every phase**.
+The **frontend-code-v2** agent team is a config-driven consumer of the shared v2 phase pipeline: `phases/_profile.py` composes a `StackProfile`/`V2TeamConfig` and binds the same shared, generic phase implementations (`shared/v2_orchestrator.py`, `shared/v2_phase_bindings.py`, `shared/v2_execution_bindings.py`, `shared/v2_review_bindings.py`, and `shared/phases/{setup,execution,review,documentation,planning,deliver}.py`) that backend-code-v2 also runs, parameterized differently. Only `phases/_profile.py` and a thin `phases/problem_solving.py` wrapper remain as real per-team files. It mirrors the backend-code-v2 **three-layer architecture**: a Frontend Tech Lead Agent runs Setup then delegates to a Frontend Development Agent, which runs the remaining phases (7 total) and consults **tool agents in every phase**.
 
-- **Layer 1 — Frontend Tech Lead Agent**: Runs **Setup** (git init if needed, README, development branch), then delegates the 5-phase cycle to the Frontend Development Agent.
-- **Layer 2 — Frontend Development Agent**: Planning (microtask decomposition; stack inferred as Angular/React/TypeScript/JavaScript), Execution (tool agents + LLM fallback), Review (build, lint, QA, security, code review), Problem-solving (fix loop), Deliver (feature branch, commit, merge to `development`). Review/fix loop runs up to 5 iterations.
-- **Layer 3 — Tool agents**: State Management, Auth, API/OpenAPI, CI/CD, Containerization, Documentation, Testing/QA, Security, **Git branch management**, UI Design, Branding/Theme, UX/Usability, Accessibility, **Build Specialist**, Linter. Each participates in plan, execute, review, problem_solve, and deliver. Git branch management creates a feature branch off `development`, commits along the way, and merges in Deliver.
+- **Layer 1 — Frontend Tech Lead Agent**: Runs **Setup** (git init if needed, README, development branch), then delegates the remaining 6-phase cycle to the Frontend Development Agent.
+- **Layer 2 — Frontend Development Agent**: Planning (microtask decomposition; stack inferred as Angular/React/TypeScript/JavaScript), Execution (tool agents + LLM fallback), Review (build, lint, QA, security, code review), Documentation (component docs, Storybook, README updates, self-review loop), Deliver (feature branch, commit, merge to `development`), with Review looping back to Execution via Problem-solving (fix loop) when issues are found. Review/fix loop runs up to 5 iterations.
+- **Layer 3 — Tool agents**: State Management, Auth, API/OpenAPI, Architecture, Documentation, Testing/QA, Security, **Git branch management**, UI Design, Branding/Theme, UX/Usability, Accessibility, Performance, **Build Specialist**, Linter. Each participates in plan, execute, review, problem_solve, and deliver. Git branch management creates a feature branch off `development`, commits along the way, and merges in Deliver.
 
 **API endpoints:**
-- `POST /frontend-code-v2/run` — Submit a task and repo path; starts Setup then the 6-phase workflow (setup + 5-phase cycle) in a background thread.
+- `POST /frontend-code-v2/run` — Submit a task and repo path; starts the 7-phase workflow (Setup, Planning, Execution, Review, Documentation, Deliver, plus the conditional Problem-solving loop) in a background thread.
 - `GET /frontend-code-v2/status/{job_id}` — Returns current phase (including `setup`), completed phases, progress percentage, and microtask status.
 
 The Software Engineering UI dashboard includes a **Frontend Developer (v2)** tab with a run form and job-status panel; the main orchestrator supports assignee **frontend-code-v2** (task_parsing and a dedicated frontend_code_v2_queue + worker).
@@ -555,7 +557,7 @@ flowchart TB
 
 ```mermaid
 sequenceDiagram
-    actor Op as Operator / Agent Console
+    actor Op as Operator / Product Delivery
     participant PD as product_delivery API
     participant PO as ProductOwnerAgent
     participant SP as SprintPlannerAgent
@@ -596,7 +598,7 @@ sequenceDiagram
 The contracts below describe the *intended* self-healing behavior for whenever the release hook is (re)wired. The hook is not currently invoked by the SE pipeline — see "Known limitations".
 
 1. **Non-fatal release hook** — the integration point wraps `ReleaseManagerAgent.ship()` in `try/except` so agent exceptions never fail the SE job; instead a `release-manager-error` feedback item would be opened with the exception text and `job_id`, visible to operators reviewing feedback before the next groom.
-2. **Sprint-scoped feedback as queryable signal** — every Integration-phase failure promoted by the hook carries `sprint_id`, so it surfaces in `GET /api/product-delivery/feedback?product_id=…&status=open` (and the Agent Console Feedback tab). `POST /groom` itself only reads story rows today — it does not consume feedback automatically — so triaging the new feedback into stories (e.g. via the Feedback tab's "link to story" action) is what feeds the next backlog pass.
+2. **Sprint-scoped feedback as queryable signal** — every Integration-phase failure promoted by the hook carries `sprint_id`, so it surfaces in `GET /api/product-delivery/feedback?product_id=…&status=open` (and the Product Delivery Feedback tab). `POST /groom` itself only reads story rows today — it does not consume feedback automatically — so triaging the new feedback into stories (e.g. via the Feedback tab's "link to story" action) is what feeds the next backlog pass.
 
 ### Known limitations
 
@@ -639,7 +641,7 @@ The layers, each documented in depth in `backend/agents/agent_cognition/README.m
 - **Rules** (`rules/`): `store.py` (rules + proposals CRUD; `approve` applies add/retire/amend deterministically), `enforcement.py` + `predicate.py` (fixed-allowlist DSL for precondition / postcondition / `forbid_tool` gates), `reflection.py` (LLM-derived proposals carrying versioned `(summary_id, version)` evidence — **never activates without approval**), `seed_packs.py` (day-one guardrails installed lazily on first invoke).
 - **Tools** (`tools/`): `binding.py` resolves manifest `cognition.tools` ids to handlers tagged by execution site; `runner.py` brokers the tool loop, gating each call against enforced rules pre-dispatch and emitting a trusted out-of-band audit.
 - **Invoke gate & facade** (`invoke_gate.py`, `context.py`, `invoke_context.py`): the run-once idempotency ledger (`claim_run`/`complete_run`/replay), lazy rollup catch-up, context load, and the marker-wrapped `{input, cognition}` ↔ `{output, cognition_writeback}` envelope consumed by the shim and the invoke proxy.
-- **Operator HITL surface**: `/api/cognition/...` routes (`unified_api/routes/cognition.py`) and the Angular **Cognition** panel in the Agent Console back the approve/reject review flow.
+- **Operator HITL surface**: `/api/cognition/...` routes (`unified_api/routes/cognition.py`) and the Angular **Cognition** page (`/cognition`) back the approve/reject review flow.
 
 Per-agent config travels in the manifest `CognitionSpec` block (`agent_platform/registry/models.py`); the Agentic team stamps it onto generated agents and their runtime renders the advisory rules + digest into each LLM call. Operability and tuning env vars (`AGENT_COGNITION_SCHEDULER_INTERVAL_S`, retention, digest budget, `LLM_MODEL_cognition`, writeback cap, ledger TTL) are documented under "Configuration & operability" in `backend/agents/agent_cognition/README.md` and in `docs/ENV_VARS.md`.
 
@@ -668,7 +670,7 @@ flowchart TB
     SWTeam --> swCLI["agent_implementations/"]
     SWTeam --> swAdapter["planning_adapter.py\n(handoff → ProductRequirements)"]
     SWTeam --> swBackend["backend_agent/"]
-    SWTeam --> swBackendV2["backend_code_v2_team/\n(standalone 5-phase team,\n3 tool agents)"]
+    SWTeam --> swBackendV2["codegen_team/\n(config-driven 7-phase team,\nstack: backend|frontend, backend has\n8 tool agents; both stacks share one\nphase implementation via shared/v2_team_config.py)"]
     SWTeam --> swFrontend["frontend_team/\n(12 agents)"]
     SWTeam --> swDevops["devops_team/\n(9 agents + 5 tool agents)"]
     SWTeam --> swQuality["quality_gates/"]

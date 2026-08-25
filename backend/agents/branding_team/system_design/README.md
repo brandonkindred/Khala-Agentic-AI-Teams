@@ -19,6 +19,7 @@ and internal structure.
 | [`system_design.md`](./system_design.md) | Detailed system design: module layout, domain model, state machines, API surface, persistence, LLM integration, runtime modes, configuration. |
 | [`use_cases.md`](./use_cases.md) | Actors and numbered use cases with triggers, preconditions, main flows, and entry-point endpoints. |
 | [`flow_charts.md`](./flow_charts.md) | Operational flow and sequence diagrams for every runtime path (5-phase pipeline, sync run, session Q&A, chat, phase-gated approvals, agency lifecycle, adapters, Temporal). |
+| [`phase_dependency_analysis.md`](./phase_dependency_analysis.md) | Evidence-based analysis of which upstream phase(s) each of the 37 agent system prompts actually references — the basis for populating `_PhaseSpec.context_phases` in `orchestrator.py`. |
 
 ## Source files referenced across these documents
 

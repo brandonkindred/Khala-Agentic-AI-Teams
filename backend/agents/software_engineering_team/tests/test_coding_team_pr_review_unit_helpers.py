@@ -333,6 +333,45 @@ class TestDiffFirstFocusUnit:
         assert "diff-first" in lower or "what this pull request changes" in lower
         assert "enclosing" in lower
 
+    def test_note_references_change_surface_markers_as_evidence(self) -> None:
+        """The note tells the reviewer to use the +/space change-surface
+        marker column as evidence for what this change touched, matching the
+        markers github_source.pr_review_mapping/change_surface actually
+        render."""
+        result = pr_review._diff_first_focus("")
+        assert "change-surface markers" in result
+        assert "leading `+` on added/modified lines" in result
+
+    def test_note_does_not_default_uncertain_findings_toward_posting(self) -> None:
+        """An uncertain finding must be tagged pre_existing: true, not
+        defaulted to false -- the tag is no longer biased toward posting."""
+        result = pr_review._diff_first_focus("")
+        assert "Default false" not in result
+        assert "uncertain" in result.lower()
+        assert "never defaults toward posting" in result
+
+    def test_note_does_not_treat_every_shown_line_as_in_scope(self) -> None:
+        """The focus note must NOT instruct the reviewer to treat every shown
+        line as in scope (the old leaky contract). Instead, it must instruct
+        a diff-first approach: surrounding/unchanged code is context, only
+        added/modified lines are the primary target."""
+        result = pr_review._diff_first_focus("")
+        lower = result.lower()
+        # Must NOT say every shown line is in scope.
+        assert "every shown line" not in lower
+        assert "all lines are in scope" not in lower
+        assert "all shown lines" not in lower
+        # MUST say surrounding/unchanged code is context, not a target.
+        assert "context" in lower
+        assert "surrounding" in lower or "unchanged" in lower
+
+    def test_note_requires_positive_evidence_for_in_scope_tagging(self) -> None:
+        """The tagging instruction must require positive evidence (change-surface
+        marker) before a finding is tagged as in-scope (pre_existing: false)."""
+        result = pr_review._diff_first_focus("")
+        assert "positive evidence" in result
+        assert "pre_existing: false" in result
+
 
 # ---------------------------------------------------------------------------
 # _review_author
@@ -645,7 +684,7 @@ class TestRunReviewerUnit:
         assert provider.calls[0]["pre_numbered"] is False
         assert provider.calls[0]["files"] == {"a.py": "content"}
 
-    def test_surface_plus_hunk_files_two_prenumbred_calls(self, monkeypatch) -> None:
+    def test_surface_plus_hunk_files_two_pre_numbered_calls(self, monkeypatch) -> None:
         self._patch_collaborators(monkeypatch)
         surface_out = _FakeOutput(["s"], "s", "")
         hunk_out = _FakeOutput(["h"], "", "h")

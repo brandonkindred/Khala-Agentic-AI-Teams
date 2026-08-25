@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from code_review_agent import mapping
-from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE, CODE_TO_REVIEW_HEADER
+from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE
 from code_review_agent.chunking import _bisect_segment
 from code_review_agent.coordinator import (
     MAX_CODE_REVIEW_ISSUES,
@@ -54,6 +54,12 @@ from code_review_agent.models import (
 )
 from pydantic import ValidationError
 from strands.models.model import Model
+from tests.chunk_review_prompt_routing import (
+    is_chunk_map_reasoning_prompt as _is_chunk_map_reasoning_prompt,
+)
+from tests.chunk_review_prompt_routing import (
+    is_formatting_pass_prompt as _is_formatting_pass_prompt,
+)
 
 from llm_service import (
     LLMClient,
@@ -75,11 +81,6 @@ _LATE_NOTIFY_GRACE_PERIOD_S = 0.1
 # Headroom under the map-chunk char budget so near-cap files cannot pack into
 # one chunk (forces separate map units in multi-file recovery/parallelism tests).
 _MAP_CHUNK_SEPARATION_HEADROOM = 2_000
-
-
-def _is_chunk_map_reasoning_prompt(prompt: str) -> bool:
-    """True when ``prompt`` is the map-phase chunk reasoning user message."""
-    return CODE_TO_REVIEW_HEADER in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -233,11 +234,18 @@ def test_input_with_empty_files_dict_raises() -> None:
 
 
 class _ScriptedClient(DummyLLMClient):
-    """Returns a different canned response on each ``complete_json`` call.
+    """Returns a different canned response on each chunk's formatting-pass
+    ``complete_json`` call.
 
     Used to simulate the coordinator dispatching to multiple chunks and
     each chunk getting its own LLM response. Thread-safe: map calls may run
-    in parallel.
+    in parallel. Both the reasoning pass (reached via the Strands Agent's
+    ``chat()`` delegation) and the formatting pass (a direct ``complete_json``
+    call from ``run_agent_via_reasoning``) land on ``complete_json`` now, so
+    only the formatting-pass call (identified by
+    ``_is_formatting_pass_prompt``) advances the scripted response cursor
+    -- the reasoning-pass call instead gets the inherited dummy default,
+    whose prose is discarded once wrapped for formatting.
     """
 
     def __init__(self, responses: list[dict[str, Any]]) -> None:
@@ -256,6 +264,15 @@ class _ScriptedClient(DummyLLMClient):
         think: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        if not _is_formatting_pass_prompt(prompt):
+            return super().complete_json(
+                prompt,
+                temperature=temperature,
+                system_prompt=system_prompt,
+                tools=tools,
+                think=think,
+                **kwargs,
+            )
         with self._lock:
             if self._idx < len(self._responses):
                 resp = self._responses[self._idx]
@@ -447,19 +464,20 @@ def test_chunk_prompt_includes_component_and_decision_text() -> None:
     from shared.dev_models.models import ArchitectureComponent, SystemArchitecture
 
     class _PromptCapturingClient(DummyLLMClient):
-        """Records prompts; lock-guarded for parallel map/tail callers."""
+        """Records prompts; lock-guarded for parallel map/tail callers. Both
+        the reasoning pass (reached via the Strands Agent's ``chat()``
+        delegation) and the formatting pass now land on ``complete_json``, so
+        recording happens there instead of a separate ``complete`` override.
+        """
 
         def __init__(self) -> None:
             super().__init__()
             self.prompts: list[str] = []
             self._lock = threading.Lock()
 
-        def complete(self, prompt: str, **kwargs: Any) -> str:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             with self._lock:
                 self.prompts.append(prompt)
-            return super().complete(prompt, **kwargs)
-
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     arch = SystemArchitecture(
@@ -618,18 +636,19 @@ def test_code_review_agent_uses_coordinator_when_code_exceeds_limit() -> None:
     from code_review_agent.chunk_reviewer import CODE_TO_REVIEW_HEADER
 
     class _MapCounter(DummyLLMClient):
-        """Counts per-chunk map-phase reviews (prompts carrying the code header)."""
+        """Counts per-chunk map-phase reviews (prompts carrying the code
+        header). The reasoning pass now lands on ``complete_json`` (via the
+        Strands Agent's ``chat()`` delegation), so this counts there instead
+        of a separate ``complete`` override -- the formatting pass's prompt
+        wraps the reasoning prose and never carries the raw code header."""
 
         def __init__(self) -> None:
             super().__init__()
             self.map_calls = 0
 
-        def complete(self, prompt: str, **kwargs: Any) -> str:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             if CODE_TO_REVIEW_HEADER in prompt:
                 self.map_calls += 1
-            return super().complete(prompt, **kwargs)
-
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             return super().complete_json(prompt, **kwargs)
 
     # Multi-line so the splitter can break it at line boundaries into >1 chunk
@@ -1187,7 +1206,13 @@ class _SelectiveRaiser(DummyLLMClient):
     """Raises for prompts containing a marker; otherwise delegates to Dummy.
 
     Records every prompt so tests can count map calls. Thread-safe for use
-    with concurrent tail-pass execution.
+    with concurrent tail-pass execution. Both the reasoning pass (reached via
+    the Strands Agent's ``chat()`` delegation) and the formatting pass (a
+    direct ``complete_json`` call from ``run_agent_via_reasoning``) land on
+    ``complete_json`` now -- the marker only ever appears in the reasoning
+    prompt (the raw code chunk), so gating the raise on "not a formatting
+    pass" (``--- ANALYSIS`` absent) keeps this from ever misfiring on a
+    formatting-pass prompt.
     """
 
     def __init__(self, marker: str, exc: Exception | None = None) -> None:
@@ -1197,21 +1222,24 @@ class _SelectiveRaiser(DummyLLMClient):
         self.prompts: list[str] = []
         self._lock = threading.Lock()
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        with self._lock:
-            self.prompts.append(prompt)
-            if self.marker in prompt:
-                raise self.exc
-        return super().complete(prompt, **kwargs)
-
     def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         with self._lock:
             self.prompts.append(prompt)
+            if self.marker in prompt and not _is_formatting_pass_prompt(prompt):
+                raise self.exc
         return super().complete_json(prompt, **kwargs)
 
 
 class _FailNTimes(DummyLLMClient):
-    """Fails the first ``n`` chunk-map reasoning passes, then succeeds."""
+    """Fails the first ``n`` chunk-map reasoning passes, then succeeds.
+
+    The reasoning pass now lands on ``complete_json`` (via the Strands
+    Agent's ``chat()`` delegation), so this checks
+    ``_is_chunk_map_reasoning_prompt`` directly on the ``complete_json``
+    prompt instead of a separate ``complete`` override -- the formatting
+    pass's prompt never carries the code-to-review header, so it is
+    naturally excluded.
+    """
 
     def __init__(self, n: int) -> None:
         super().__init__()
@@ -1219,17 +1247,51 @@ class _FailNTimes(DummyLLMClient):
         self.prompts: list[str] = []
         self._lock = threading.Lock()
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         if _is_chunk_map_reasoning_prompt(prompt):
             with self._lock:
                 self.prompts.append(prompt)
                 if self.remaining > 0:
                     self.remaining -= 1
                     raise _bisecting_failure("transient")
-        return super().complete(prompt, **kwargs)
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         return super().complete_json(prompt, **kwargs)
+
+
+def _delegate_chat_via_complete_json(
+    delegate: Any, messages: list, *, tools: list | None = None, **kwargs: Any
+) -> Any:
+    """Shared ``chat()``-to-``complete_json`` bridge for a wrapped-``DummyLLMClient``
+    delegate (see ``_HalfTimingDummyDelegate``/``_MultiFileFirstCallFailsDelegate``,
+    which both define an explicit ``chat`` override for the same reason and
+    otherwise differ only in their ``complete_json`` per-half/per-path hooks).
+
+    Preconditions:
+        ``delegate`` exposes ``complete_json`` (its own override) and ``_inner``
+        (a real ``DummyLLMClient``, used for the tooled-call passthrough).
+
+    Postconditions:
+        A tooled call (chunk review never passes tools) degrades unchanged to
+        ``delegate._inner.chat(...)``. Otherwise extracts the system/user
+        prompt from ``messages`` and routes to ``delegate.complete_json(...)``,
+        JSON-serializing the result when ``response_format="text"`` was
+        requested (matching the real ``DummyLLMClient.chat()`` contract).
+    """
+    if tools:
+        return delegate._inner.chat(messages, tools=tools, **kwargs)
+    system_prompt = None
+    user_prompt = ""
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        if m.get("role") == "system":
+            system_prompt = m.get("content")
+        elif m.get("role") == "user":
+            user_prompt = m.get("content") or ""
+    response_format = kwargs.pop("response_format", "json")
+    data = delegate.complete_json(user_prompt, system_prompt=system_prompt, tools=None, **kwargs)
+    if response_format == "text":
+        return json.dumps(data) if isinstance(data, dict) else str(data)
+    return data
 
 
 class _HalfTimingDummyDelegate:
@@ -1252,9 +1314,24 @@ class _HalfTimingDummyDelegate:
 
     def __getattr__(self, name: str) -> Any:
         # Forward anything not overridden below (get_max_context_tokens,
-        # update_config, get_config, structured_output, stream, chat, ...) to
+        # update_config, get_config, structured_output, stream, ...) to
         # the real DummyLLMClient — _NonDummyLLMClient calls those directly.
         return getattr(self._inner, name)
+
+    def chat(self, messages: list, *, tools: list | None = None, **kwargs: Any) -> Any:
+        """Explicit override so the reasoning pass's ``self.complete_json(...)``
+        call (inside ``DummyLLMClient.chat()``) binds to THIS delegate's own
+        override -- ``__getattr__`` forwarding would instead hand back the
+        real inner ``DummyLLMClient``'s bound ``chat`` method, whose internal
+        ``self.complete_json(...)`` call binds to the inner client and
+        bypasses this delegate's per-half timing/failure hooks entirely.
+        Chunk review never passes tools (``tools=[]``), so the real
+        ``chat()``'s tool-call branches are never exercised here and are not
+        reproduced; a tooled call still degrades to the inner client. See
+        ``_delegate_chat_via_complete_json`` for the shared parsing/routing
+        logic this shares with ``_MultiFileFirstCallFailsDelegate.chat``.
+        """
+        return _delegate_chat_via_complete_json(self, messages, tools=tools, **kwargs)
 
     def _half_review_response(self, key: str) -> dict[str, Any]:
         return {
@@ -1273,7 +1350,21 @@ class _HalfTimingDummyDelegate:
             "spec_compliance_notes": "",
         }
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        # Both the reasoning pass (reached via the Strands Agent's ``chat()``
+        # delegation) and the formatting pass (a direct ``complete_json`` call
+        # from ``run_agent_via_reasoning``) land here now. The formatting pass
+        # is identified by ``_is_formatting_pass_prompt`` (it carries the
+        # "--- ANALYSIS" wrapper), while any reasoning prompt never carries
+        # that marker -- so the pass is identified by content, not by call
+        # order (concurrent halves interleave calls).
+        if _is_formatting_pass_prompt(prompt):
+            with self._lock:
+                key = self._pending_half
+                self._pending_half = None
+            if key is not None:
+                return self._half_review_response(key)
+            return self._inner.complete_json(prompt, **kwargs)
         is_chunk_review = _is_chunk_map_reasoning_prompt(prompt)
         has_a, has_b = "### a.py ###" in prompt, "### b.py ###" in prompt
         if is_chunk_review and has_a and has_b:
@@ -1286,13 +1377,6 @@ class _HalfTimingDummyDelegate:
             with self._lock:
                 self.intervals[key] = (start, end)
                 self._pending_half = key
-        return self._inner.complete(prompt, **kwargs)
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-        key = self._pending_half
-        if key is not None:
-            self._pending_half = None
-            return self._half_review_response(key)
         return self._inner.complete_json(prompt, **kwargs)
 
 
@@ -1320,7 +1404,22 @@ class _MultiFileFirstCallFailsDelegate:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
+    def chat(self, messages: list, *, tools: list | None = None, **kwargs: Any) -> Any:
+        """See ``_HalfTimingDummyDelegate.chat`` for why this explicit
+        override is required: ``__getattr__`` forwarding would otherwise hand
+        back the inner ``DummyLLMClient``'s bound ``chat``, whose internal
+        ``self.complete_json(...)`` call bypasses this delegate's per-path
+        bisect/concurrency hooks for the reasoning pass. See
+        ``_delegate_chat_via_complete_json`` for the shared parsing/routing
+        logic this shares with ``_HalfTimingDummyDelegate.chat``."""
+        return _delegate_chat_via_complete_json(self, messages, tools=tools, **kwargs)
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        # The reasoning pass now lands here too (via the Strands Agent's
+        # ``chat()`` delegation). A path marker only ever appears in a
+        # reasoning-pass prompt (the raw code chunk) -- the formatting pass
+        # wraps the reasoning prose instead -- so this needs no additional
+        # pass-discrimination gate.
         is_chunk_review = _is_chunk_map_reasoning_prompt(prompt)
         path = next((p for p in self._paths if f"### {p} ###" in prompt), None)
         if is_chunk_review and path is not None:
@@ -1335,9 +1434,6 @@ class _MultiFileFirstCallFailsDelegate:
             self._release.wait(timeout=5)
             with self._lock:
                 self.current -= 1
-        return self._inner.complete(prompt, **kwargs)
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         return self._inner.complete_json(prompt, **kwargs)
 
 
@@ -1356,7 +1452,12 @@ class _TimedDummyHalfClient(DummyLLMClient):
         self.intervals: dict[str, tuple[float, float]] = {}
         self._pending_half: str | None = None
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        # Both passes land on ``complete_json`` now; the formatting pass is
+        # identified by ``_is_formatting_pass_prompt``.
+        if _is_formatting_pass_prompt(prompt):
+            self._pending_half = None
+            return super().complete_json(prompt, **kwargs)
         is_chunk_review = _is_chunk_map_reasoning_prompt(prompt)
         has_a, has_b = "### a.py ###" in prompt, "### b.py ###" in prompt
         if is_chunk_review and has_a and has_b:
@@ -1369,11 +1470,6 @@ class _TimedDummyHalfClient(DummyLLMClient):
             with self._lock:
                 self.intervals[key] = (start, end)
                 self._pending_half = key
-        return super().complete(prompt, **kwargs)
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-        if self._pending_half is not None:
-            self._pending_half = None
         return super().complete_json(prompt, **kwargs)
 
 
@@ -1386,14 +1482,11 @@ def test_failing_multi_segment_chunk_bisects_and_recovers() -> None:
             super().__init__()
             self.calls = 0
 
-        def complete(self, prompt: str, **kwargs: Any) -> str:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             if _is_chunk_map_reasoning_prompt(prompt):
                 self.calls += 1
                 if "### a.py ###" in prompt and "### b.py ###" in prompt:
                     raise LLMSemanticExhaustionError("no content")
-            return super().complete(prompt, **kwargs)
-
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             return super().complete_json(prompt, **kwargs)
 
     client = _FailOnCombined()
@@ -1442,7 +1535,7 @@ def test_transient_failure_in_bisected_child_recovers() -> None:
             self.a_failures = 0
             self.calls = 0
 
-        def complete(self, prompt: str, **kwargs: Any) -> str:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             if _is_chunk_map_reasoning_prompt(prompt):
                 self.calls += 1
                 if "### a.py ###" in prompt and "### b.py ###" in prompt:
@@ -1454,9 +1547,6 @@ def test_transient_failure_in_bisected_child_recovers() -> None:
                 ):
                     self.a_failures += 1
                     raise _bisecting_failure("transient child hiccup")
-            return super().complete(prompt, **kwargs)
-
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             return super().complete_json(prompt, **kwargs)
 
     client = _FailCombinedAndChildOnce()
@@ -1653,12 +1743,9 @@ def test_semantic_exhaustion_multi_file_still_separates_files(monkeypatch) -> No
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
 
     class _FailWhenBadPresent(DummyLLMClient):
-        def complete(self, prompt: str, **kwargs: Any) -> str:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             if _is_chunk_map_reasoning_prompt(prompt) and "### bad.py ###" in prompt:
                 raise LLMSemanticExhaustionError("no content", retry_thinking_level=False)
-            return super().complete(prompt, **kwargs)
-
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             return super().complete_json(prompt, **kwargs)
 
     result = run_coordinator(
@@ -1691,14 +1778,11 @@ def test_semantic_exhaustion_without_ladder_still_gets_same_input_retry() -> Non
             super().__init__()
             self._map_reasoning_attempts = 0
 
-        def complete(self, prompt: str, **kwargs: Any) -> str:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             if _is_chunk_map_reasoning_prompt(prompt):
                 self._map_reasoning_attempts += 1
                 if self._map_reasoning_attempts == 1:
                     raise LLMSemanticExhaustionError("reasoning only")
-            return super().complete(prompt, **kwargs)
-
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             return super().complete_json(prompt, **kwargs)
 
     client = _FailOnceNoLadder()
@@ -2491,15 +2575,12 @@ def test_parallel_map_failure_does_not_wait_for_inflight_reviews(fail_first: boo
             super().__init__()
             self.slow_finished = False
 
-        def complete(self, prompt: str, **kwargs: Any) -> str:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             if "FAILME" in prompt:
                 raise LLMRateLimitError("429")
             if _is_chunk_map_reasoning_prompt(prompt):
                 release.wait(timeout=10)
                 self.slow_finished = True
-            return super().complete(prompt, **kwargs)
-
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             return super().complete_json(prompt, **kwargs)
 
     llm_probe = DummyLLMClient()
@@ -2536,14 +2617,11 @@ def test_sequential_map_failure_does_not_start_later_chunk(monkeypatch) -> None:
             super().__init__()
             self.saw_second = False
 
-        def complete(self, prompt: str, **kwargs: Any) -> str:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             if "FAILME" in prompt:
                 raise LLMRateLimitError("429")
             if _is_chunk_map_reasoning_prompt(prompt) and "SECONDCHUNK" in prompt:
                 self.saw_second = True
-            return super().complete(prompt, **kwargs)
-
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             return super().complete_json(prompt, **kwargs)
 
     llm_probe = DummyLLMClient()
@@ -2639,7 +2717,7 @@ def test_small_diff_does_not_over_provision_workers(monkeypatch) -> None:
     state = {"current": 0, "peak": 0}
 
     class _ConcurrencyProbe(DummyLLMClient):
-        def complete(self, prompt: str, **kwargs: Any) -> str:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             if _is_chunk_map_reasoning_prompt(prompt):
                 with lock:
                     state["current"] += 1
@@ -2647,9 +2725,6 @@ def test_small_diff_does_not_over_provision_workers(monkeypatch) -> None:
                 time.sleep(0.05)
                 with lock:
                     state["current"] -= 1
-            return super().complete(prompt, **kwargs)
-
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             return super().complete_json(prompt, **kwargs)
 
     llm_probe = DummyLLMClient()
@@ -2828,10 +2903,11 @@ def test_documentation_category_survives_chunk_output_validation() -> None:
     assert issues[0].category == "documentation"
 
 
-def test_pre_existing_tag_is_carried_through_and_defaults_false() -> None:
+def test_pre_existing_tag_is_carried_through_and_defaults_true() -> None:
     """The optional ``pre_existing`` tag (used by the PR-review path to route a
     finding to an issue proposal instead of a PR comment) survives conversion,
-    tolerates string encodings, and defaults False when absent."""
+    tolerates string encodings, and defaults True when absent (uncertain
+    findings are treated as out-of-scope rather than guessed into scope)."""
     seg = FileSegment(path="a.py", content="x = 1\ny = 2\nz = 3", total_lines=3)
     chunk = ReviewChunk(segments=[seg])
     issues = _issues_from_chunk_output(
@@ -2843,7 +2919,54 @@ def test_pre_existing_tag_is_carried_through_and_defaults_false() -> None:
             {"description": "untagged", "line": 1},
         ],
     )
-    assert [i.pre_existing for i in issues] == [True, True, False, False]
+    assert [i.pre_existing for i in issues] == [True, True, False, True]
+
+
+def test_omission_tag_is_carried_through_and_defaults_false() -> None:
+    """The optional ``omission`` tag (the positive signal for "this change
+    should have added or modified file X but didn't", distinct from
+    ``pre_existing``) survives conversion, tolerates string encodings, and
+    defaults False when absent -- mirrors
+    ``test_pre_existing_tag_is_carried_through_and_defaults_true``."""
+    seg = FileSegment(path="a.py", content="x = 1\ny = 2\nz = 3", total_lines=3)
+    chunk = ReviewChunk(segments=[seg])
+    issues = _issues_from_chunk_output(
+        chunk,
+        [
+            {"description": "tagged bool", "line": 1, "omission": True},
+            {"description": "tagged str", "line": 2, "omission": "true"},
+            {"description": "tagged false str", "line": 3, "omission": "false"},
+            {"description": "untagged", "line": 1},
+        ],
+    )
+    assert [i.omission for i in issues] == [True, True, False, False]
+
+
+def test_omission_and_pre_existing_both_true_is_rejected_on_construction() -> None:
+    """``CodeReviewIssue`` rejects the self-contradictory combination
+    directly, not just via LLM-schema validation: an omission is by
+    definition in-scope for this change (see ``omission``'s Field
+    description), so any caller constructing both True is a bug."""
+    with pytest.raises(ValidationError):
+        CodeReviewIssue(description="d", omission=True, pre_existing=True)
+
+
+def test_issues_from_chunk_output_reconciles_contradictory_raw_tags() -> None:
+    """A raw LLM dict tagging both ``omission`` and ``pre_existing`` true
+    (a self-contradictory reply that ``CodeReviewIssue`` would otherwise
+    reject via ``_omission_implies_in_scope``) is reconciled at this
+    boundary rather than raised: ``omission`` wins, so the constructed
+    issue is in-scope. This keeps ``_issues_from_chunk_output``'s documented
+    "never raises on malformed output" contract intact."""
+    seg = FileSegment(path="a.py", content="x = 1", total_lines=1)
+    chunk = ReviewChunk(segments=[seg])
+    issues = _issues_from_chunk_output(
+        chunk,
+        [{"description": "contradictory tags", "line": 1, "omission": True, "pre_existing": True}],
+    )
+    assert len(issues) == 1
+    assert issues[0].omission is True
+    assert issues[0].pre_existing is False
 
 
 _NO_OP_SUGGESTIONS = [
@@ -2959,6 +3082,28 @@ def test_coerce_bool_recognizes_truthy_tokens_only() -> None:
     assert _coerce_bool(1) is False
 
 
+def test_coerce_scope_tags_reconciles_omission_and_pre_existing() -> None:
+    """_coerce_scope_tags is the single shared reconciliation helper for the
+    pre_existing/omission pair, used by chunking._issues_from_chunk_output,
+    architecture_consistency_pass._coerce_finding, and
+    side_effect_impact_pass._coerce_finding: each coerces via _coerce_bool,
+    omission wins when both raw tags are true, and pre_existing defaults True
+    when absent (uncertain findings treated as out-of-scope)."""
+    from code_review_agent.chunking import _coerce_scope_tags
+
+    # Absent pre_existing defaults True (uncertain ⇒ out-of-scope).
+    assert _coerce_scope_tags({}) == (True, False)
+    assert _coerce_scope_tags({"pre_existing": True}) == (True, False)
+    assert _coerce_scope_tags({"pre_existing": False}) == (False, False)
+    assert _coerce_scope_tags({"omission": True}) == (False, True)
+    # omission wins over a contradictory pre_existing tag.
+    assert _coerce_scope_tags({"pre_existing": True, "omission": True}) == (False, True)
+    # String encodings tolerated the same way _coerce_bool tolerates them.
+    assert _coerce_scope_tags({"pre_existing": "true", "omission": "yes"}) == (False, True)
+    # Explicitly false pre_existing is honored.
+    assert _coerce_scope_tags({"pre_existing": "false"}) == (False, False)
+
+
 def test_validate_line_absolute_numbering_has_no_overlap_ambiguity() -> None:
     """Partial segments are rendered with original line-number prefixes, so a
     citation is absolute by construction: a segment whose absolute range
@@ -3031,18 +3176,26 @@ def test_rejecting_chunk_with_only_a_summary_degrades_instead_of_blocking() -> N
     cap = compute_code_review_map_chunk_chars(llm_probe)
 
     class _RejectBWithSummaryOnly(DummyLLMClient):
+        """Both the reasoning pass (reached via the Strands Agent's ``chat()``
+        delegation) and the formatting pass land on ``complete_json`` now.
+        The reasoning-pass call returns the marker as raw prose (identified
+        by the absence of the "--- ANALYSIS" formatting wrapper); the
+        formatting-pass call then finds that marker in its own
+        ``wrap_with_analysis_delimiters``-wrapped prompt, mirroring how the
+        marker used to flow from ``complete`` into ``complete_json``.
+        """
+
         _B_MARKER = "B_CHUNK_REJECT_SUMMARY_ONLY"
 
-        def complete(self, prompt: str, **kwargs: Any) -> str:
-            if (
-                _is_chunk_map_reasoning_prompt(prompt)
-                and "### b.py ###" in prompt
-                and "### a.py ###" not in prompt
-            ):
-                return self._B_MARKER
-            return super().complete(prompt, **kwargs)
-
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        def complete_json(self, prompt: str, **kwargs: Any) -> Any:
+            if not _is_formatting_pass_prompt(prompt):
+                if (
+                    _is_chunk_map_reasoning_prompt(prompt)
+                    and "### b.py ###" in prompt
+                    and "### a.py ###" not in prompt
+                ):
+                    return self._B_MARKER
+                return super().complete_json(prompt, **kwargs)
             if self._B_MARKER in prompt:
                 return {
                     "approved": False,
@@ -3089,18 +3242,21 @@ def test_silent_rejection_never_borrows_an_approving_chunks_summary() -> None:
     cap = compute_code_review_map_chunk_chars(llm_probe)
 
     class _SilentRejectB(DummyLLMClient):
+        """See ``_RejectBWithSummaryOnly`` above for why the marker now
+        flows through a single ``complete_json`` override instead of a
+        separate ``complete``/``complete_json`` pair."""
+
         _B_MARKER = "B_CHUNK_SILENT_REJECT"
 
-        def complete(self, prompt: str, **kwargs: Any) -> str:
-            if (
-                _is_chunk_map_reasoning_prompt(prompt)
-                and "### b.py ###" in prompt
-                and "### a.py ###" not in prompt
-            ):
-                return self._B_MARKER
-            return super().complete(prompt, **kwargs)
-
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        def complete_json(self, prompt: str, **kwargs: Any) -> Any:
+            if not _is_formatting_pass_prompt(prompt):
+                if (
+                    _is_chunk_map_reasoning_prompt(prompt)
+                    and "### b.py ###" in prompt
+                    and "### a.py ###" not in prompt
+                ):
+                    return self._B_MARKER
+                return super().complete_json(prompt, **kwargs)
             if self._B_MARKER in prompt:
                 return {
                     "approved": False,
@@ -3153,20 +3309,17 @@ def test_no_stale_progress_reports_after_map_failure() -> None:
             super().__init__()
             self.slow_finished = threading.Event()
 
-        def complete(self, prompt: str, **kwargs: Any) -> str:
-            if not _is_chunk_map_reasoning_prompt(prompt):
-                return super().complete(prompt, **kwargs)
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            if _is_formatting_pass_prompt(prompt) or not _is_chunk_map_reasoning_prompt(prompt):
+                return super().complete_json(prompt, **kwargs)
             if "FAILME" in prompt:
                 assert slow_started.wait(timeout=10), "slow chunk must start first"
                 raise LLMRateLimitError("429")
             slow_started.set()
             release.wait(timeout=10)
-            result = super().complete(prompt, **kwargs)
+            result = super().complete_json(prompt, **kwargs)
             self.slow_finished.set()
             return result
-
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-            return super().complete_json(prompt, **kwargs)
 
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
@@ -3298,11 +3451,8 @@ def test_language_is_threaded_into_every_chunk_prompt() -> None:
             super().__init__()
             self.prompts: list[str] = []
 
-        def complete(self, prompt: str, **kwargs: Any) -> str:
-            self.prompts.append(prompt)
-            return super().complete(prompt, **kwargs)
-
         def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            self.prompts.append(prompt)
             return super().complete_json(prompt, **kwargs)
 
     client = _Recorder()
@@ -3328,11 +3478,8 @@ def test_user_decisions_thread_through_coordinator_to_chunk_prompt() -> None:
             super().__init__()
             self.prompts: list[str] = []
 
-        def complete(self, prompt: str, **kwargs: Any) -> str:
-            self.prompts.append(prompt)
-            return super().complete(prompt, **kwargs)
-
         def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            self.prompts.append(prompt)
             return super().complete_json(prompt, **kwargs)
 
     client = _Recorder()
@@ -3366,12 +3513,9 @@ class _RecordingClient(DummyLLMClient):
         self.prompts: list[str] = []
         self._lock = threading.Lock()
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         with self._lock:
             self.prompts.append(prompt)
-        return super().complete(prompt, **kwargs)
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         return super().complete_json(prompt, **kwargs)
 
 
@@ -3850,6 +3994,87 @@ def test_spec_compliance_single_pass_failure_falls_back_to_per_chunk_notes(monke
         "failed synthesize_spec_compliance must leave single_pass_spec_notes as None "
         "so _merge_narrative falls back to per-chunk notes"
     )
+
+
+def test_run_spec_compliance_single_pass_flag_off_skips_call(monkeypatch) -> None:
+    """``_run_spec_compliance_single_pass`` in isolation: ``spec_compliance_single_pass=False``
+    returns ``None`` without ever calling ``synthesize_spec_compliance``."""
+    import code_review_agent.coordinator as coord
+
+    spec_calls: list = []
+    monkeypatch.setattr(
+        coord,
+        "synthesize_spec_compliance",
+        lambda *args, **kwargs: spec_calls.append((args, kwargs)),
+    )
+
+    result = coord._run_spec_compliance_single_pass(
+        llm=DummyLLMClient(),
+        input_data=CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+        deduped=[],
+        spec_compliance_single_pass=False,
+    )
+
+    assert result is None
+    assert spec_calls == []
+
+
+def test_run_spec_compliance_single_pass_flag_on_calls_synthesis(monkeypatch) -> None:
+    """``spec_compliance_single_pass=True`` calls ``synthesize_spec_compliance`` exactly
+    once with the ``deduped`` issues passed straight through, and returns its result."""
+    import code_review_agent.coordinator as coord
+
+    issue = CodeReviewIssue(
+        severity="high",
+        category="logic",
+        file_path="a.py",
+        line=1,
+        description="finding",
+    )
+
+    spec_calls: list = []
+
+    def _spec_spy(*args, **kwargs):
+        spec_calls.append((args, kwargs))
+        return "SPEC_GAP_MARKER: missing validation."
+
+    monkeypatch.setattr(coord, "synthesize_spec_compliance", _spec_spy)
+
+    dummy_llm = DummyLLMClient()
+    input_data = CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t")
+    result = coord._run_spec_compliance_single_pass(
+        llm=dummy_llm,
+        input_data=input_data,
+        deduped=[issue],
+        spec_compliance_single_pass=True,
+    )
+
+    assert result == "SPEC_GAP_MARKER: missing validation."
+    assert len(spec_calls) == 1
+    call_args, call_kwargs = spec_calls[0]
+    assert call_args == (dummy_llm,), "llm must be forwarded to synthesize_spec_compliance"
+    assert call_kwargs["input_data"] is input_data
+    assert call_kwargs["issues"] == [issue]
+
+
+def test_run_spec_compliance_single_pass_failure_returns_none(monkeypatch) -> None:
+    """A raising ``synthesize_spec_compliance`` is caught and logged, not propagated;
+    the helper returns ``None`` so the caller falls back to per-chunk notes."""
+    import code_review_agent.coordinator as coord
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("spec-compliance single pass exploded")
+
+    monkeypatch.setattr(coord, "synthesize_spec_compliance", _boom)
+
+    result = coord._run_spec_compliance_single_pass(
+        llm=DummyLLMClient(),
+        input_data=CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+        deduped=[],
+        spec_compliance_single_pass=True,
+    )
+
+    assert result is None
 
 
 def test_skip_tail_passes_short_circuits_with_no_llm_calls() -> None:

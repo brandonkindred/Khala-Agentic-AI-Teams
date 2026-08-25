@@ -1,11 +1,11 @@
-"""Tests for output_templates parsers in backend_code_v2_team and frontend_code_v2_team."""
+"""Tests for output_templates parsers bound in backend_code_v2_team and frontend_code_v2_team."""
 
 from __future__ import annotations
 
 import pytest
 
-from software_engineering_team.backend_code_v2_team import output_templates as be_tmpl
-from software_engineering_team.frontend_code_v2_team import output_templates as fe_tmpl
+from software_engineering_team.codegen_team.stacks.backend import profile as be_tmpl
+from software_engineering_team.codegen_team.stacks.frontend import profile as fe_tmpl
 
 
 @pytest.mark.parametrize("tmpl", [be_tmpl, fe_tmpl], ids=["backend", "frontend"])

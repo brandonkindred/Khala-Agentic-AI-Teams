@@ -20,18 +20,19 @@ verdict (``in_scope=None``) so a caller can fall back to the free heuristic.
 :func:`classify_scope` never raises and always returns a verdict positionally
 aligned 1:1 with its input.
 
-Relationship to :mod:`scope_filter` and status:
-    This is a lightweight, standalone building block — it is **not yet wired
-    into the coordinator's tail-pass pipeline**, so it currently emits no
-    verdicts into a live review and cannot conflict with any other pass. The
-    existing :func:`scope_filter.apply_scope_verification` remains the wired-in
-    scope pass: it is heavier (a tool-grounded reasoning agent using the
-    added/modified/deleted line maps) and tags findings ``pre_existing``. This
-    module instead does one bounded ``complete_json`` call per file batch and
-    returns a structured :class:`ScopeClassification`. Reconciling the two into
-    a single wired-in source of scope truth is deliberately left to the
-    follow-up work that integrates this pass; until then the caller owns which
-    verdict it consumes.
+Relationship to :mod:`scope_filter`:
+    Historically, this module's verdicts were the primary signal
+    :mod:`api.pr_review`'s ``_partition_review_issues`` used (behind the
+    now-removed ``CODE_REVIEW_SCOPE_LLM_PASS`` flag) to split a review's
+    findings into PR-scoped comments vs. pre-existing-issue proposals, with
+    :mod:`scope_filter`'s ``pre_existing`` tag as the fallback and
+    ``is_within_diff`` as a deterministic override. That posting gate is now
+    purely change-map-driven (``is_within_diff`` against the PR's
+    added/modified lines, plus the ``omission`` signal): it does not call
+    :func:`classify_scope` or consult either pass's verdict at all. This
+    module (and the ``classify_issue_scope`` provider method that wraps it)
+    is currently unwired from the live PR-review pipeline; it is kept in
+    case a future consumer needs it.
 
 Model resolution mirrors the sibling verification passes
 (:func:`false_positive_filter.filter_false_positives`,

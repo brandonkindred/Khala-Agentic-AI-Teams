@@ -383,7 +383,13 @@ class ChunkReviewOutput(BaseModel):
 
 
 class CodeReviewIssue(BaseModel):
-    """A single issue found during code review."""
+    """A single issue found during code review.
+
+    Invariants:
+        - Never both ``omission=True`` and ``pre_existing=True`` (see
+          ``_omission_implies_in_scope``): an omission is by definition
+          in-scope for this change.
+    """
 
     severity: str = Field(
         default="high",
@@ -426,17 +432,54 @@ class CodeReviewIssue(BaseModel):
         description="Concrete suggestion for how to fix the issue",
     )
     pre_existing: bool = Field(
-        default=False,
+        default=True,
         description="True when this issue is a bug in code the change under review did NOT add or "
         "modify — a pre-existing defect in unrelated, unchanged code — rather than a defect the "
-        "change introduced. Documented in every profile's output schema, but only the PR-review "
-        "flow (api/pr_review.py) actually acts on it: a finding tagged true is routed to a "
-        "GitHub-issue proposal for a human to review instead of being posted as a PR comment, "
-        "unless the finding's own file/line proves it sits on a line this PR actually added (that "
-        "override, plus a finding naming a file outside this PR's diff entirely, are handled "
-        "deterministically — see api/pr_review.py::_partition_review_issues for why a missing "
-        "file/module is deliberately NOT treated as pre-existing). Default False.",
+        "change introduced. Documented in every profile's output schema, and produced by the "
+        "upstream scope-tagging pass (`_tag_review_issues_for_scope` / "
+        "`scope_filter.apply_scope_verification`) as a signal for downstream consumers, but the "
+        "PR-review posting gate (api/pr_review.py::_partition_review_issues) no longer consults "
+        "it directly: eligibility there is determined by `is_within_diff(changed_by_path)` and "
+        "`omission` alone, so a finding tagged true still posts as a PR comment when its own "
+        "file/line proves it sits on a line this PR actually added, while one on unchanged "
+        "context or a file outside this PR's diff becomes a GitHub-issue proposal regardless of "
+        "this tag. Default True (uncertain findings are treated as out-of-scope rather than "
+        "guessed into scope).",
     )
+    omission: bool = Field(
+        default=False,
+        description="True when this issue is a required add/modify the change under review did "
+        "NOT make — e.g. the task/spec called for a new or updated file/module and the change "
+        "left it out — as distinct from `pre_existing` (a bug in code the change did not touch). "
+        "An omission always pairs with `pre_existing=False`: it stays in scope for this change, "
+        "it just was not delivered -- enforced by `_omission_implies_in_scope` below, not merely "
+        "documented. Populated by chunk-review and auxiliary-pass coercion from the model's own "
+        "tag (see `chunking._issues_from_chunk_output`, "
+        "`architecture_consistency_pass._coerce_finding`, "
+        "`side_effect_impact_pass._coerce_finding`); consumed by "
+        "`api/pr_review.py::_partition_review_issues`, which treats an omission as always "
+        "in-scope regardless of diff membership, even when its file is outside the diff. "
+        "Default False.",
+    )
+
+    @model_validator(mode="after")
+    def _omission_implies_in_scope(self) -> "CodeReviewIssue":
+        """Reject a finding tagged as both an omission and pre-existing.
+
+        Preconditions:
+            - Callers constructing this model directly (e.g. `_merge_group`,
+              chunk-review/auxiliary-pass coercion) must resolve any raw tag
+              conflict from untrusted LLM input BEFORE calling the
+              constructor -- this validator enforces the invariant, it does
+              not repair a conflicting caller-supplied pair.
+
+        Postconditions:
+            - Raises ``ValueError`` when ``omission`` and ``pre_existing``
+              are both True. Never raises otherwise.
+        """
+        if self.omission and self.pre_existing:
+            raise ValueError("omission=True requires pre_existing=False")
+        return self
 
 
 # Public: the canonical severity vocabulary for this engine. Other agents that
@@ -480,9 +523,9 @@ _ChunkReviewIssueCategory = Literal[
 class ChunkReviewIssueLLM(BaseModel):
     """Narrow LLM-authored shape for one issue in a chunk-review response.
 
-    Schema for ``chunk_reviewer._run_chunk_review`` to validate replies via
-    ``llm_service.complete_validated`` (see ``llm_service``'s README, "When to use which
-    entrypoint"). This is the raw per-issue shape the model is asked to
+    Schema for ``chunk_reviewer._parse_chunk_review_response`` to validate
+    replies via ``ChunkReviewLLMResponse.model_validate``. This is the raw
+    per-issue shape the model is asked to
     emit — distinct from the persisted :class:`CodeReviewIssue`, which
     additionally range-validates ``line``/``start_line`` against the cited
     file segment and resolves ``file_path`` against the chunk. That
@@ -492,10 +535,11 @@ class ChunkReviewIssueLLM(BaseModel):
     ``severity``/``category`` are typed as the exact enumerated sets the
     review prompt asks for (mirrors ``chunking._VALID_SEVERITIES``/
     ``_VALID_CATEGORIES``) instead of a free string with silent fallback
-    coercion: an out-of-set value now fails schema validation and drives
-    ``complete_validated``'s one correction retry, rather than being
-    silently rewritten to "high"/"general" as today's hand-rolled parsing
-    does in ``chunking._issues_from_chunk_output``.
+    coercion: an out-of-set value now fails schema validation and raises
+    ``LLMSchemaValidationError``, which the coordinator's chunk-level
+    recovery in ``mapping.py`` handles, rather than being silently
+    rewritten to "high"/"general" as today's hand-rolled parsing does in
+    ``chunking._issues_from_chunk_output``.
 
     ``pre_existing`` is ``StrictBool``, not plain ``bool``: Pydantic's
     default lax coercion would accept a numeric ``1``/``0`` (or "yes"/"no",
@@ -505,8 +549,15 @@ class ChunkReviewIssueLLM(BaseModel):
     truthy string counts there, and a bare number is always false, to stop
     a stray numeric value from being misread as an affirmative flag.
     ``StrictBool`` keeps that policy intact by rejecting non-bool input
-    outright (driving ``complete_validated``'s corrective retry) instead of
-    silently coercing it before it ever reaches that downstream check.
+    outright (raising ``LLMSchemaValidationError``) instead of silently
+    coercing it before it ever reaches that downstream check.
+
+    ``omission`` is likewise ``StrictBool``, for the identical rationale.
+
+    Postconditions:
+        - ``omission`` defaults to ``False`` when the model omits the field
+          from its reply — an absent field is never misread as an
+          affirmative omission signal.
     """
 
     severity: CodeReviewIssueSeverity = Field(
@@ -550,30 +601,64 @@ class ChunkReviewIssueLLM(BaseModel):
         description="Concrete suggestion for how to fix the issue",
     )
     pre_existing: StrictBool = Field(
-        default=False,
+        default=True,
         description="True when this issue is a bug in code the change under review did NOT add or "
         "modify — a pre-existing defect in unrelated, unchanged code — rather than a defect the "
-        "change introduced. Default False.",
+        "change introduced. This tag is informational for attribution; it does not drive posting "
+        "scope — the downstream gate is change-map-driven (is_within_diff + omission). "
+        "Default True (uncertain findings are treated as out-of-scope rather than guessed "
+        "into scope).",
     )
+    omission: StrictBool = Field(
+        default=False,
+        description="True when this issue is a required add/modify the change did NOT make — "
+        "e.g. the task/spec required a new or updated file/module and the change omitted it — as "
+        "opposed to a bug in code the change touched or an unrelated pre-existing defect. "
+        "Distinct from `pre_existing`: an omission always pairs with `pre_existing: false` (it is "
+        "in-scope for this change, just not delivered), never `pre_existing: true` -- enforced by "
+        "`_omission_implies_in_scope` below. Default False.",
+    )
+
+    @model_validator(mode="after")
+    def _omission_implies_in_scope(self) -> "ChunkReviewIssueLLM":
+        """Reject an issue tagged as both an omission and pre-existing.
+
+        Mirrors ``CodeReviewIssue._omission_implies_in_scope``. Raising here
+        (rather than silently repairing) fails ``ChunkReviewLLMResponse``
+        validation and raises ``LLMSchemaValidationError`` the same way
+        ``_require_approval_consistent_with_issues`` does for a
+        contradictory ``approved``/``issues`` pair -- the coordinator's
+        chunk-level recovery (``mapping.py``) is the retry layer for a
+        rejected reply.
+
+        Postconditions:
+            - Raises ``ValueError`` when ``omission`` and ``pre_existing``
+              are both True. Never raises otherwise.
+        """
+        if self.omission and self.pre_existing:
+            raise ValueError("omission=True requires pre_existing=False")
+        return self
 
 
 class ChunkReviewLLMResponse(BaseModel):
     """Narrow LLM-authored shape for one chunk-review call's response.
 
-    ``chunk_reviewer._run_chunk_review`` validates every chunk-review reply
-    against this model via ``llm_service.complete_validated``, replacing the
-    hand-rolled ``.get()``/``str()``/``bool()`` coercions the reviewer used to
-    apply to a raw ``complete_json_with_continuation`` reply.
+    ``chunk_reviewer._parse_chunk_review_response`` validates every
+    chunk-review reply against this model via
+    ``ChunkReviewLLMResponse.model_validate``, replacing the hand-rolled
+    ``.get()``/``str()``/``bool()`` coercions the reviewer used to apply to a
+    raw ``complete_json_with_continuation`` reply.
 
     All four fields are required, not defaulted: the chunk-review prompt's
-    own output-contract reminder (``FINAL_OUTPUT_CONTRACT_NOTE`` in
-    chunk_reviewer.py) explicitly tells the model to always emit exactly
-    these four keys, so a reply missing one is a truncated/malformed
+    own output-contract reminder explicitly tells the model to always emit
+    exactly these four keys, so a reply missing one is a truncated/malformed
     response, not a legitimately empty field. Defaulting them here would
     reproduce the hand-parser's permissive ``.get(..., default)`` fallbacks
     in the one place meant to demonstrate the opposite — a missing field
-    must fail validation and drive ``complete_validated``'s corrective
-    retry, not silently look like a clean, empty-issue approval.
+    must fail validation and raise ``LLMSchemaValidationError``, not
+    silently look like a clean, empty-issue approval. No local corrective
+    retry: the coordinator's chunk-level recovery (``mapping.py``) is the
+    retry layer for a rejected reply.
 
     ``approved`` must agree with whether the issues list carries an
     actionable critical/high finding, in both directions -- exactly the
@@ -586,9 +671,10 @@ class ChunkReviewLLMResponse(BaseModel):
     baseless rejection to an approval, or a contradictory approval to a
     rejection) rather than letting a malformed LLM reply be a schema
     failure. Enforcing the same rule here means that reply instead fails
-    validation and drives ``complete_validated``'s corrective retry — giving
-    the model a chance to correct itself — rather than always being
-    silently absorbed by the coordinator's safety net.
+    validation and raises ``LLMSchemaValidationError`` — the coordinator's
+    chunk-level recovery (``mapping.py``) is the retry layer for a
+    rejected reply, rather than the reply being silently absorbed by the
+    coordinator's safety net.
     """
 
     approved: bool = Field(
@@ -652,8 +738,10 @@ class ArchitectureConsistencyFindingLLM(BaseModel):
 
     Mirrors the fields ``architecture_consistency_pass._coerce_finding``
     actually populates on ``CodeReviewIssue`` — severity, category,
-    file_path, line, description, suggestion, and ``pre_existing`` — typed
-    as an enumerated schema in the same style as :class:`ChunkReviewIssueLLM`.
+    file_path, line, description, suggestion, ``pre_existing``, and
+    ``omission`` — typed as an enumerated schema in the same style as
+    :class:`ChunkReviewIssueLLM`. ``omission`` is also ``StrictBool`` and
+    enforced by this class's own ``_omission_implies_in_scope`` validator.
     Intentionally omits ``start_line``: that pass's own ``_coerce_finding``
     never populates it (its prompt's output format has no multi-line-anchor
     field). This is the intended shape for the merged prompt's Part 1 output
@@ -690,14 +778,45 @@ class ArchitectureConsistencyFindingLLM(BaseModel):
         "align with the stated boundary)",
     )
     pre_existing: StrictBool = Field(
-        default=False,
+        default=True,
         description="True when this issue is about a field, function, class, or other construct "
         "the change under review did NOT add or modify — a pre-existing contradiction/duplication "
         "in unrelated, unchanged code that merely lives in a file this submission also touched — "
         "rather than a defect the change introduced (mirrors CodeReviewIssue.pre_existing's "
         "canonical wording). Per the merged prompt's Part 1 tagging guidance, that means the "
-        "specific construct the finding is about looks untouched by this submission's actual work.",
+        "specific construct the finding is about looks untouched by this submission's actual work. "
+        "This tag is informational for attribution; it does not drive posting scope — the "
+        "downstream gate is change-map-driven (is_within_diff + omission). Default True "
+        "(uncertain findings are treated as out-of-scope rather than guessed into scope).",
     )
+    omission: StrictBool = Field(
+        default=False,
+        description="True when this finding is actually a required add/modify the change did NOT "
+        "make (mirrors CodeReviewIssue.omission's canonical wording), rather than an architecture "
+        "contradiction or cross-codebase redundancy in existing content — expected to be rare for "
+        "this pass's two categories, but the field exists for cross-schema consistency with "
+        "ChunkReviewIssueLLM/SideEffectImpactFindingLLM. Always pairs with `pre_existing: false` "
+        "when set -- enforced by `_omission_implies_in_scope` below. Default False.",
+    )
+
+    @model_validator(mode="after")
+    def _omission_implies_in_scope(self) -> "ArchitectureConsistencyFindingLLM":
+        """Reject a finding tagged as both an omission and pre-existing.
+
+        Mirrors ``CodeReviewIssue._omission_implies_in_scope``. Not
+        currently exercised at runtime -- the in-process merged pass
+        coerces/validates per-half findings via ``architecture_consistency_pass``'s
+        hand-rolled parsing helpers rather than model-validating this class
+        directly (see the class docstring) -- but keeps the contract
+        self-enforcing for any future caller that does validate against it.
+
+        Postconditions:
+            - Raises ``ValueError`` when ``omission`` and ``pre_existing``
+              are both True. Never raises otherwise.
+        """
+        if self.omission and self.pre_existing:
+            raise ValueError("omission=True requires pre_existing=False")
+        return self
 
 
 class SideEffectImpactFindingLLM(BaseModel):
@@ -707,13 +826,16 @@ class SideEffectImpactFindingLLM(BaseModel):
 
     Mirrors the fields ``side_effect_impact_pass._coerce_finding`` actually
     populates on ``CodeReviewIssue`` — severity, category, file_path, line,
-    description, suggestion, and ``pre_existing``. ``pre_existing`` is
-    ``StrictBool`` here (matching :class:`ChunkReviewIssueLLM`'s rationale),
-    which is stricter than the current pass's ``chunking._coerce_bool``:
-    a bare numeric ``1``/``0`` or a string token is rejected at validation
-    time and drives ``complete_validated``'s corrective retry, rather than
-    being silently coerced to ``False`` (or a truthy string to ``True``) as
-    ``_coerce_bool`` does today. Intentionally omits ``start_line``: that
+    description, suggestion, ``pre_existing``, and ``omission``.
+    ``pre_existing`` is ``StrictBool`` here (matching
+    :class:`ChunkReviewIssueLLM`'s rationale), which is stricter than the
+    current pass's ``chunking._coerce_bool``: a bare numeric ``1``/``0`` or a
+    string token is rejected at validation time and drives
+    ``complete_validated``'s corrective retry, rather than being silently
+    coerced to ``False`` (or a truthy string to ``True``) as ``_coerce_bool``
+    does today. ``omission`` is likewise ``StrictBool`` and enforced by this
+    class's own ``_omission_implies_in_scope`` validator. Intentionally omits
+    ``start_line``: that
     pass's own ``_coerce_finding`` never populates it either (its prompt's
     output format has no multi-line-anchor field). This is the intended shape for the
     merged prompt's Part 2 output contract. The in-process merged pass currently
@@ -749,13 +871,44 @@ class SideEffectImpactFindingLLM(BaseModel):
         "implementation)",
     )
     pre_existing: StrictBool = Field(
-        default=False,
+        default=True,
         description="True when this issue is a bug in code the change under review did NOT add "
         "or modify — a pre-existing defect in unrelated, unchanged code — rather than a defect "
         "the change introduced (mirrors CodeReviewIssue.pre_existing's canonical wording). Per "
         "the merged prompt's Part 2 tagging guidance, that means the function(s) the finding is "
-        "about look untouched by this submission's actual work.",
+        "about look untouched by this submission's actual work. This tag is informational for "
+        "attribution; it does not drive posting scope — the downstream gate is change-map-driven "
+        "(is_within_diff + omission). Default True (uncertain findings are treated as "
+        "out-of-scope rather than guessed into scope).",
     )
+    omission: StrictBool = Field(
+        default=False,
+        description="True when this finding is actually a required add/modify the change did NOT "
+        "make (mirrors CodeReviewIssue.omission's canonical wording), rather than a caller-impact "
+        "side effect or documentation mismatch in existing content — expected to be rare for this "
+        "pass's two categories, but the field exists for cross-schema consistency with "
+        "ChunkReviewIssueLLM/ArchitectureConsistencyFindingLLM. Always pairs with `pre_existing: "
+        "false` when set -- enforced by `_omission_implies_in_scope` below. Default False.",
+    )
+
+    @model_validator(mode="after")
+    def _omission_implies_in_scope(self) -> "SideEffectImpactFindingLLM":
+        """Reject a finding tagged as both an omission and pre-existing.
+
+        Mirrors ``CodeReviewIssue._omission_implies_in_scope``. Not
+        currently exercised at runtime -- the in-process merged pass
+        coerces/validates per-half findings via ``side_effect_impact_pass``'s
+        hand-rolled parsing helpers rather than model-validating this class
+        directly (see the class docstring) -- but keeps the contract
+        self-enforcing for any future caller that does validate against it.
+
+        Postconditions:
+            - Raises ``ValueError`` when ``omission`` and ``pre_existing``
+              are both True. Never raises otherwise.
+        """
+        if self.omission and self.pre_existing:
+            raise ValueError("omission=True requires pre_existing=False")
+        return self
 
 
 class MergedArchitectureSideEffectResponse(BaseModel):

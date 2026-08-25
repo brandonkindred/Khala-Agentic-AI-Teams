@@ -7,11 +7,8 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from llm_service.interface import LLMSemanticExhaustionError
-
 from ...models import BacktestResult, StrategySpec
 from ..budget_config import StrategyLabBudgetConfig
-from ..exceptions import StrategyLabLLMError
 from . import _structured_output as so
 from ._agent_runner import run_json_with_parse_retry
 from ._llm_budget import charge_active_budget
@@ -235,36 +232,19 @@ class RefinementAgent:
         "continue from what you emitted".
         """
         structured_available = so.structured_output_available()
-        if structured_available:
-            try:
-                result = so.invoke_structured_with_schema(
-                    "strategy_refinement",
-                    system_prompt,
-                    user_prompt,
-                    phase="refinement_structured",
-                    schema=REFINEMENT_SCHEMA,
-                    charge=True,
-                    objective="strategy refinement (structured)",
-                    logger=logger,
-                    reasoning_system_prompt=so.build_reasoning_system_prompt(system_prompt),
-                )
-            except StrategyLabLLMError as exc:
-                cause = exc.cause
-                if not (isinstance(cause, LLMSemanticExhaustionError) and cause.schema_forced):
-                    raise
-                logger.warning(
-                    "structured refinement decode starved (schema_forced) for "
-                    "failure_phase=%s; degrading to unconstrained parse-retry loop.",
-                    failure_phase,
-                )
-            else:
-                logger.info(
-                    "strategy_lab structured_output outcome=succeeded "
-                    "agent=strategy_refinement phase=refinement_structured "
-                    "failure_phase=%s",
-                    failure_phase,
-                )
-                return result
+        result = so.try_structured_or_degrade(
+            "strategy_refinement",
+            REFINEMENT_SCHEMA,
+            system_prompt,
+            user_prompt,
+            so.build_reasoning_system_prompt(system_prompt),
+            phase="refinement_structured",
+            charge=True,
+            objective="strategy refinement (structured)",
+            logger=logger,
+        )
+        if result is not None:
+            return result
 
         retries = StrategyLabBudgetConfig.from_env().refinement_parse_retries
         attempt_box = {"n": 0}

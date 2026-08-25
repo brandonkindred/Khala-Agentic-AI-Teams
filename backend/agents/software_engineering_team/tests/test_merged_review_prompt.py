@@ -128,13 +128,14 @@ def test_merged_schema_round_trips_both_finding_types():
     assert isinstance(parsed.side_effect_findings[0], SideEffectImpactFindingLLM)
 
 
-def test_architecture_finding_schema_pre_existing_defaults_false():
+def test_architecture_finding_schema_pre_existing_defaults_true():
     """``pre_existing`` is optional on an architecture/refactor finding (like
-    its side-effect counterpart), defaulting False when the model omits it."""
+    its side-effect counterpart), defaulting True when the model omits it
+    (uncertain findings are treated as out-of-scope)."""
     finding = ArchitectureConsistencyFindingLLM.model_validate(
         {"category": "architecture", "description": "Bypasses the stated data-access layer."}
     )
-    assert finding.pre_existing is False
+    assert finding.pre_existing is True
 
     tagged = ArchitectureConsistencyFindingLLM.model_validate(
         {

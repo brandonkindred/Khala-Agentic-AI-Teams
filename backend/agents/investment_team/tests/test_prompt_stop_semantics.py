@@ -29,7 +29,7 @@ def test_analysis_agent_loads_block() -> None:
     from investment_team.strategy_lab.agents import analysis
 
     assert _MARKER in analysis._STOP_ORDER_SEMANTICS
-    assert _MARKER in analysis._get_analysis_review_system_prompt()
+    assert _MARKER in analysis._ANALYSIS_SYSTEM_PROMPT
 
 
 def test_design_system_prompts_include_block() -> None:

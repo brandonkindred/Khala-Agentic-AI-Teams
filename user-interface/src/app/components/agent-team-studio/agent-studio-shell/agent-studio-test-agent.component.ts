@@ -1,10 +1,10 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
-import { A11yModule } from '@angular/cdk/a11y';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
 import { AgentRunnerComponent } from '../agent-console/agent-runner/agent-runner.component';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
+import { AgentStudioSlideOutComponent } from './agent-studio-slide-out/agent-studio-slide-out.component';
 import { STAGE_INDEX } from '../../../models/agent-studio.model';
 
 /**
@@ -13,7 +13,7 @@ import { STAGE_INDEX } from '../../../models/agent-studio.model';
  * Runs the agent chosen in Stage 1 inside its sandbox by reusing the Agent
  * Console runner as-is (`app-agent-runner`), pre-seeded from the handoff
  * `registryAgentId`. The runner owns all sandbox / invoke / saved-input /
- * run-history / diff behaviour (including `AgentRunnerApiService`); this
+ * run-history / diff behaviour (including `AgentConsoleApiService`); this
  * stage only seeds it and frames the agent. Stage 2's happy path therefore
  * has no Studio HTTP-client injection of its own — invoke/sandbox stay on
  * the reused Console runner rather than being re-wired through
@@ -29,17 +29,17 @@ import { STAGE_INDEX } from '../../../models/agent-studio.model';
  *
  * **Browse agents (spec §2.1).** The forward-only stepper never jumps back to
  * Stage 1, so picking a *different* agent once here is an explicit in-context
- * action: a `[ Browse agents ]` slide-out (the same scrim + `<aside>` +
- * `cdkTrapFocus` pattern as Stage 1's provisioning panel,
- * `agent-studio-build-agent.component.ts`) hosts the catalog again. Selecting
- * an agent there just re-points `registryAgentId` — since `AgentRunnerComponent`
- * exposes `preselectedAgentId` as an `@Input()` setter, reassigning it already
- * resets run history and re-warms the sandbox for the new agent.
+ * action: a `[ Browse agents ]` overlay hosts the catalog again, using the
+ * shared `AgentStudioSlideOutComponent` (the same scrim + focus-trapped panel
+ * chrome as Stage 1's provisioning panel). Selecting an agent there just
+ * re-points `registryAgentId` — since `AgentRunnerComponent` exposes
+ * `preselectedAgentId` as an `@Input()` setter, reassigning it already resets
+ * run history and re-warms the sandbox for the new agent.
  */
 @Component({
   selector: 'app-agent-studio-test-agent',
   standalone: true,
-  imports: [A11yModule, MatButtonModule, MatIconModule, AgentCatalogComponent, AgentRunnerComponent],
+  imports: [MatButtonModule, MatIconModule, AgentCatalogComponent, AgentRunnerComponent, AgentStudioSlideOutComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './agent-studio-test-agent.component.html',
   styleUrl: './agent-studio-test-agent.component.scss',
@@ -50,7 +50,7 @@ export class AgentStudioTestAgentComponent {
   /** The agent to test, carried from Stage 1 (null until one is selected). */
   readonly agentId = computed(() => this.state.registryAgentId());
 
-  /** Whether the "Browse agents" slide-out is open. */
+  /** Whether the "Browse agents" overlay is open. */
   readonly browseOpen = signal(false);
 
   /**

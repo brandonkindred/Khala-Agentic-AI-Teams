@@ -11,7 +11,8 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSelectModule } from '@angular/material/select';
 import { MatFormFieldModule } from '@angular/material/form-field';
-import { AgentRunnerApiService } from '../../../../services/agent-runner-api.service';
+import { AgentConsoleApiService } from '../../../../services/agent-console-api.service';
+import { extractErrorDetail } from '../../../../shared/extract-error-detail';
 import type {
   DiffResult,
   DiffSide,
@@ -51,7 +52,7 @@ export interface AgentDiffDialogData {
 export class AgentDiffDialogComponent implements OnInit {
   readonly data = inject<AgentDiffDialogData>(MAT_DIALOG_DATA);
   readonly ref = inject<MatDialogRef<AgentDiffDialogComponent>>(MatDialogRef);
-  private readonly api = inject(AgentRunnerApiService);
+  private readonly api = inject(AgentConsoleApiService);
 
   readonly runs = signal<RunSummary[]>([]);
   readonly savedInputs = signal<SavedInput[]>([]);
@@ -85,7 +86,7 @@ export class AgentDiffDialogComponent implements OnInit {
         });
       },
       error: (err) => {
-        this.candidateError.set(err?.error?.detail ?? err?.message ?? 'Failed to load candidates');
+        this.candidateError.set(extractErrorDetail(err, 'Failed to load candidates'));
         this.loadingCandidates.set(false);
       },
     });
@@ -105,7 +106,7 @@ export class AgentDiffDialogComponent implements OnInit {
         this.diffing.set(false);
       },
       error: (err) => {
-        this.diffError.set(err?.error?.detail ?? err?.message ?? 'Diff failed');
+        this.diffError.set(extractErrorDetail(err, 'Diff failed'));
         this.diffing.set(false);
       },
     });

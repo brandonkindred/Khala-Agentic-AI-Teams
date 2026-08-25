@@ -18,7 +18,7 @@ from agents.data import data_architect  # noqa: E402
 from agents.data_streaming import data_streaming_architect  # noqa: E402
 from agents.devops import devops_architect  # noqa: E402
 from agents.observability import observability_architect  # noqa: E402
-from agents.prompts import ORCHESTRATOR_PROMPT  # noqa: E402
+from agents.prompts import ORCHESTRATOR_PROMPT, cached_system_prompt  # noqa: E402
 from agents.security import security_architect  # noqa: E402
 from strands import Agent  # noqa: E402
 from tools import (  # noqa: E402
@@ -65,7 +65,7 @@ def create_orchestrator(session_manager=None):
     ]
     kwargs = {
         "model": model,
-        "system_prompt": ORCHESTRATOR_PROMPT,
+        "system_prompt": cached_system_prompt(ORCHESTRATOR_PROMPT, model),
         "tools": tools,
         "callback_handler": None,
     }

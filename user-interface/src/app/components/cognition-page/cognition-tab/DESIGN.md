@@ -1,6 +1,11 @@
 # Cognition HITL Review Panel — Design Spec
 
-Operator surface in the Agent Console for acting on an agent's **rule proposals**
+> **Note:** This spec was written when Cognition was planned as a tab inside
+> the Agent Console. The Agent Console shell has since been deleted; Cognition
+> now lives at its own route (`/cognition`) as a standalone page. References to
+> `AgentConsoleComponent` and tab placement below are historical only.
+
+Operator surface for acting on an agent's **rule proposals**
 (human-in-the-loop approve / reject), and inspecting its learned **memory** and
 active **rules**. This document is the design contract for the new
 `CognitionTabComponent` and its sub-sections; the Figma mockups linked at the
@@ -45,7 +50,7 @@ endpoints are keyed by `agent_id`, so nothing renders until an agent is chosen.
 
 ## 3. Agent picker (reuses the existing catalogue)
 
-The picker is **not** a new endpoint. It reuses the Agent Console catalogue
+The picker is **not** a new endpoint. It reuses the Agent Studio catalogue
 (`AgentCatalogApiService` → `GET /api/agents`) to list selectable agents, then
 scopes every cognition request to the chosen `agent_id`.
 
@@ -272,7 +277,7 @@ Every section renders one of: **loading** (`app-loading-spinner`), **empty**
 
 ## 9. Visual language
 
-Reuses the Agent Console dark theme tokens — no new palette:
+Reuses the Agent Studio dark theme tokens — no new palette:
 
 | Token | Use |
 |---|---|

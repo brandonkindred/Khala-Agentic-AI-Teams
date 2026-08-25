@@ -560,7 +560,9 @@ def test_brand_story_output_rejects_blank_boilerplate_variant() -> None:
 
 
 _ARCHETYPE = BrandArchetypeOutput(
-    archetype="The Creator", rationale="Inventive.", personality_traits=["Imaginative", "Original"]
+    archetype="The Creator",
+    rationale="Inventive.",
+    personality_traits=["Imaginative", "Original", "Expressive"],
 )
 _PITCHES = [
     ElevatorPitchOutput(tier="5-second", pitch="a"),
@@ -838,6 +840,29 @@ def test_writing_guidelines_output_rejects_missing_and_enforces_cardinality() ->
 
     output = WritingGuidelinesOutput(writing_guidelines=_GUIDELINES)
     assert len(output.writing_guidelines.voice_principles) == 3
+
+
+def test_phase2_specialist_models_declare_only_own_fields() -> None:
+    """Each Phase 2 specialist's structured_output model is own-field-only
+    (Story 5b Step 1): no cumulative-inheritance leftovers, and no two
+    specialists' field sets collide (the orchestrator's flat union-merge in
+    _merge_named_fragments relies on this to be collision-free). Checked
+    against each model's own model_fields, not a hardcoded flat list, so a
+    future field added to the wrong model is caught here."""
+    own_fields = {
+        BrandStoryOutput: {"brand_story", "hero_narrative", "boilerplate_variants"},
+        BrandArchetypesOutput: {"brand_archetypes"},
+        TaglineOutput: {"tagline", "tagline_rationale", "elevator_pitches"},
+        MessagingFrameworkOutput: {"messaging_framework", "audience_message_maps"},
+        PersonaProfilesOutput: {"persona_profiles"},
+        WritingGuidelinesOutput: {"writing_guidelines"},
+    }
+    for model_cls, expected in own_fields.items():
+        assert set(model_cls.model_fields) == expected, model_cls.__name__
+
+    all_fields = [name for fields in own_fields.values() for name in fields]
+    assert len(all_fields) == len(set(all_fields)), "Phase 2 specialist fields collide"
+    assert set(all_fields) == set(NarrativeMessagingOutput.model_fields)
 
 
 def test_writing_guidelines_body_rejects_blank_list_items() -> None:
@@ -1417,7 +1442,7 @@ def test_brand_health_kpi_output_is_usable_as_a_brand_health_kpi() -> None:
 
 
 def test_channel_activation_accepts_strict_architecture_fragment_dump() -> None:
-    """``_merge_structured_output`` validates a specialist dump against the
+    """A dump-then-validate merge of a specialist fragment against the
     soft phase model; a ``BrandArchitectureOutput`` dump must still merge
     into ``ChannelActivationOutput`` after the nested twin collapse."""
     merged = ChannelActivationOutput.model_validate(
@@ -1429,7 +1454,7 @@ def test_channel_activation_accepts_strict_architecture_fragment_dump() -> None:
 
 
 def test_governance_accepts_strict_workflow_fragment_dump() -> None:
-    """``_merge_structured_output`` validates a specialist dump against the
+    """A dump-then-validate merge of a specialist fragment against the
     soft phase model; an ``ApprovalWorkflowsOutput`` dump must still merge
     into ``GovernanceOutput`` after the nested twin collapse."""
     workflow = ApprovalWorkflowOutput(

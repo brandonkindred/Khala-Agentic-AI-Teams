@@ -1,6 +1,5 @@
 import { ChangeDetectionStrategy, Component, DestroyRef, computed, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { A11yModule } from '@angular/cdk/a11y';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { AgentDefinition, BUILD_SUB_STAGES, SaveAgentRequest } from '../../../models/agent-studio.model';
@@ -8,6 +7,9 @@ import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-cata
 import { AgentProvisioningPanelComponent } from '../agent-provisioning-panel/agent-provisioning-panel.component';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
+import { InlineBannerComponent } from '../../../shared/inline-banner/inline-banner.component';
+import { extractErrorDetail } from '../../../shared/extract-error-detail';
+import { AgentStudioSlideOutComponent } from './agent-studio-slide-out/agent-studio-slide-out.component';
 import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-placeholder.component';
 
 /**
@@ -41,20 +43,20 @@ import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-place
  * `?jobId=` deep link, neither of which apply on this route. The full
  * dashboard is untouched and still used as-is in Agent Console's own
  * "Provisioning & Environments" tab. The panel is self-contained, so it is
- * only mounted while the slide-out is open. The slide-out itself is a proper
- * modal: a CDK focus trap with auto-capture moves focus into the panel, keeps
- * Tab cycling inside it, and restores focus to the trigger on close; Escape
- * dismisses it.
+ * only mounted while the slide-out is open. The slide-out chrome itself
+ * (scrim, focus-trapped panel, Escape/scrim/close-button dismissal) is the
+ * shared `AgentStudioSlideOutComponent`, reused by Stage 2/3's own overlays.
  */
 @Component({
   selector: 'app-agent-studio-build-agent',
   standalone: true,
   imports: [
-    A11yModule,
     MatButtonModule,
     MatIconModule,
     AgentCatalogComponent,
     AgentProvisioningPanelComponent,
+    InlineBannerComponent,
+    AgentStudioSlideOutComponent,
     AgentStudioStagePlaceholderComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -129,7 +131,7 @@ export class AgentStudioBuildAgentComponent {
         },
         error: (err) => {
           this.cloning.set(false);
-          this.cloneError.set(err?.error?.detail ?? 'Could not clone this agent — try again.');
+          this.cloneError.set(extractErrorDetail(err, 'Could not clone this agent — try again.'));
         },
       });
   }
@@ -173,7 +175,7 @@ export class AgentStudioBuildAgentComponent {
         },
         error: (err) => {
           this.saving.set(false);
-          this.saveError.set(err?.error?.detail ?? 'Could not save this agent — try again.');
+          this.saveError.set(extractErrorDetail(err, 'Could not save this agent — try again.'));
         },
       });
   }

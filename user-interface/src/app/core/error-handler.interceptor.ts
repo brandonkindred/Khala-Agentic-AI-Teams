@@ -8,6 +8,9 @@ import {
 import { inject } from '@angular/core';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { catchError, throwError } from 'rxjs';
+import { extractErrorDetail } from '../shared/extract-error-detail';
+
+export { extractErrorDetail };
 
 /**
  * Set on a request's `HttpContext` to suppress the global error toast for that
@@ -29,27 +32,11 @@ export function skipErrorNotify(): HttpContext {
 }
 
 /**
- * Extract a human-readable message from an API error for an inline banner —
- * the component-side counterpart to the global toast's formatter, so screens
- * that render their own error don't each re-derive the `detail`/`message`
- * unwrapping.
- *
- * Preconditions: `fallback` is a non-empty default message.
- * Postconditions: returns the FastAPI `detail` (a string, or the joined `msg`
- * fields of a validation-error array), else the error's `message`, else
- * `fallback`. Never throws.
+ * Pre-built request options that suppress the global error toast. Services
+ * that render their own inline error can pass this as the options argument to
+ * `HttpClient` methods (e.g. `this.http.post(url, body, SKIP_NOTIFY_OPTIONS)`).
  */
-export function extractErrorDetail(err: unknown, fallback: string): string {
-  const e = err as { error?: { detail?: unknown }; message?: unknown };
-  const detail = e?.error?.detail;
-  if (typeof detail === 'string' && detail) return detail;
-  if (Array.isArray(detail)) {
-    const msgs = detail.map((d: { msg?: string }) => d?.msg).filter(Boolean);
-    if (msgs.length > 0) return msgs.join('; ');
-  }
-  if (typeof e?.message === 'string' && e.message) return e.message;
-  return fallback;
-}
+export const SKIP_NOTIFY_OPTIONS: { context: HttpContext } = { context: skipErrorNotify() };
 
 /**
  * HTTP interceptor that catches API errors and displays user-friendly messages via MatSnackBar.
@@ -115,20 +102,19 @@ function formatErrorMessage(err: unknown): string {
   }
 }
 
+// Passed as extractErrorDetail's fallback so we can tell "no usable detail" apart from a
+// real message; { error: err.error } (no top-level `message`) keeps extractErrorDetail from
+// ever resolving through its own err.message branch, so it only reports detail/no-detail and
+// each function below still runs its own original fallback chain.
+const NO_DETAIL = ' __NO_DETAIL__ ';
+
 function formatValidationError(err: HttpErrorResponse): string | null {
-  const detail = err.error?.detail;
-  if (typeof detail === 'string') return detail;
-  if (Array.isArray(detail)) {
-    const msgs = detail
-      .map((d: { msg?: string }) => d.msg)
-      .filter(Boolean);
-    return msgs.length > 0 ? msgs.join('; ') : null;
-  }
-  return null;
+  const result = extractErrorDetail({ error: err.error }, NO_DETAIL, { joinValidationArray: true });
+  return result === NO_DETAIL ? null : result;
 }
 
 function formatServerError(err: HttpErrorResponse): string {
-  const detail = err.error?.detail;
-  if (typeof detail === 'string') return detail;
+  const detail = extractErrorDetail({ error: err.error }, NO_DETAIL);
+  if (detail !== NO_DETAIL) return detail;
   return err.error?.message ?? err.message ?? err.statusText ?? 'Unknown error';
 }

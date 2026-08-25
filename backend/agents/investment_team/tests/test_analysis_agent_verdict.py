@@ -15,9 +15,9 @@ Robustness notes:
   ``analysis._DRAFT_TEMPLATES`` (the templates are loaded once at import) — this
   survives wording edits to ``analysis_win.md`` / ``analysis_lose.md`` (the
   goldens in ``test_analysis_alignment_prompts.py`` pin the actual content).
-- ``Outcome label: <LABEL>`` is asserted against the rendered self-review
-  prompt; that placeholder lives in ``analysis.py`` itself (the
-  ``_SELF_REVIEW_PROMPT`` constant), not in a drifting template.
+- ``Outcome label: <LABEL>`` is asserted against the rendered prompt; that
+  placeholder lives in ``analysis.py`` itself (the ``_SELF_REVIEW_CHECKLIST``
+  constant spliced into the draft prompt), not in a drifting template.
 """
 
 from __future__ import annotations
@@ -86,18 +86,9 @@ class _Recorder:
     def __init__(self) -> None:
         self.prompts: List[str] = []
         self.read_files: List[str] = []
-        self._call_count = 0
 
     def render_response(self) -> str:
-        self._call_count += 1
-        if self._call_count == 1:
-            return json.dumps({"draft_narrative": "draft body"})
-        return json.dumps(
-            {
-                "revised_narrative": "final revised narrative",
-                "verification_notes": "checked",
-            }
-        )
+        return json.dumps({"draft_narrative": "draft body"})
 
 
 def _install_recorder(monkeypatch) -> _Recorder:
@@ -136,19 +127,17 @@ def _install_recorder(monkeypatch) -> _Recorder:
 
 
 def test_agent_key_is_strategy_analysis_not_ideation(monkeypatch):
-    """Regression guard: both the draft and self-review call sites must
-    identify themselves as ``strategy_analysis`` (not the mislabeled
-    ``strategy_ideation`` copied from an unrelated agent) so per-agent
-    telemetry/timeout/model routing is not mis-attributed."""
+    """Regression guard: the single draft/self-review call must identify
+    itself as ``strategy_analysis`` (not the mislabeled ``strategy_ideation``
+    copied from an unrelated agent) so per-agent telemetry/timeout/model
+    routing is not mis-attributed."""
 
     class _StubAgent:
         def __init__(self, *_: Any, **__: Any) -> None:
             pass
 
         def __call__(self, _prompt: str) -> str:
-            return json.dumps(
-                {"draft_narrative": "draft", "revised_narrative": "revised narrative"}
-            )
+            return json.dumps({"draft_narrative": "draft"})
 
     model_keys: List[str] = []
     monkeypatch.setattr(agent_runner_module, "Agent", _StubAgent)
@@ -164,7 +153,7 @@ def test_agent_key_is_strategy_analysis_not_ideation(monkeypatch):
         is_winning=True,
     )
 
-    assert model_keys == ["strategy_analysis", "strategy_analysis"]
+    assert model_keys == ["strategy_analysis"]
 
 
 def test_analysis_agent_honours_explicit_is_winning_false_on_high_return(monkeypatch):
@@ -193,7 +182,7 @@ def test_analysis_agent_honours_explicit_is_winning_false_on_high_return(monkeyp
         "AnalysisAgent must NOT read analysis_win.md when is_winning=False is "
         "forced by the orchestrator (issue #529 follow-up)."
     )
-    # The outcome_label placeholder lives in analysis.py's _SELF_REVIEW_PROMPT
+    # The outcome_label placeholder lives in analysis.py's _SELF_REVIEW_CHECKLIST
     # constant, so this stays stable even if the template files are reworded.
     prompts = "\n\n".join(rec.prompts)
     assert "Outcome label: LOSING" in prompts
@@ -275,9 +264,9 @@ def test_analysis_agent_metric_fallback_is_deterministic_at_boundary(
 
 def test_analysis_agent_threads_robustness_caveats_from_metrics(monkeypatch):
     """A run carrying a recorded robustness concern (acceptance_reason) must
-    inject the ``## Robustness caveats`` block into BOTH the draft and the
-    self-review prompts so a winner's narrative can cite the risk without
-    reclassifying the verdict — the reported high-return-but-fragile case."""
+    inject the ``## Robustness caveats`` block into the draft prompt so a
+    winner's narrative can cite the risk without reclassifying the verdict —
+    the reported high-return-but-fragile case."""
 
     rec = _install_recorder(monkeypatch)
 
@@ -329,14 +318,14 @@ def test_analysis_agent_honours_explicit_robustness_caveats_override(monkeypatch
         assert "injected marker" in prompt
 
 
-def test_misaligned_alignment_report_threads_disclaimer_into_draft_and_review(
+def test_misaligned_alignment_report_threads_disclaimer_into_draft(
     monkeypatch,
 ):
     """Issue #532: when the orchestrator passes an ``alignment_report`` with
-    ``aligned=False``, both the draft template prompt and the self-review
-    prompt must surface the disclaimer + each concrete issue description.
-    Without this the LLM keeps writing confident causal narratives even when
-    the trades didn't implement the spec."""
+    ``aligned=False``, the single draft prompt must surface the disclaimer +
+    each concrete issue description. Without this the LLM keeps writing
+    confident causal narratives even when the trades didn't implement the
+    spec."""
 
     rec = _install_recorder(monkeypatch)
 
@@ -368,25 +357,25 @@ def test_misaligned_alignment_report_threads_disclaimer_into_draft_and_review(
         alignment_report=report,
     )
 
-    # Two prompts are expected: draft (Phase 1) and self-review (Phase 2).
-    assert len(rec.prompts) == 2, (
-        f"Expected exactly two LLM calls (draft + self-review); got {len(rec.prompts)}."
+    # Exactly one LLM call is expected now that draft + self-review are merged.
+    assert len(rec.prompts) == 1, (
+        f"Expected exactly one LLM call (self-reviewing draft); got {len(rec.prompts)}."
     )
-    for label, prompt in zip(("draft", "self-review"), rec.prompts):
-        assert "TRADES DID NOT IMPLEMENT THE SPEC" in prompt, (
-            f"{label} prompt missing misalignment header (issue #532)."
+    prompt = rec.prompts[0]
+    assert "TRADES DID NOT IMPLEMENT THE SPEC" in prompt, (
+        "draft prompt missing misalignment header (issue #532)."
+    )
+    assert (
+        "The executed trades did not faithfully implement the specification; "
+        "interpretation is preliminary." in prompt
+    ), "draft prompt missing verbatim disclaimer (issue #532)."
+    for issue in report.issues:
+        assert issue.description in prompt, (
+            f"draft prompt dropped alignment issue {issue.description!r} (issue #532)."
         )
-        assert (
-            "The executed trades did not faithfully implement the specification; "
-            "interpretation is preliminary." in prompt
-        ), f"{label} prompt missing verbatim disclaimer (issue #532)."
-        for issue in report.issues:
-            assert issue.description in prompt, (
-                f"{label} prompt dropped alignment issue {issue.description!r} (issue #532)."
-            )
-        assert "DO NOT make causal claims about strategy design" in prompt, (
-            f"{label} prompt missing 'no causal claims' instruction (issue #532)."
-        )
+    assert "DO NOT make causal claims about strategy design" in prompt, (
+        "draft prompt missing 'no causal claims' instruction (issue #532)."
+    )
 
 
 def test_aligned_report_does_not_inject_disclaimer(monkeypatch):
@@ -443,35 +432,29 @@ def test_no_alignment_report_omits_section_entirely(monkeypatch):
 
 
 def _install_failing_draft_recorder(monkeypatch, *, mode: str) -> _Recorder:
-    """Patch ``strands.Agent`` so the FIRST call (draft phase) fails per
-    ``mode`` and any subsequent call (self-review) returns a normal
-    response. Mirrors the production failure modes Codex flagged:
+    """Patch ``strands.Agent`` so the sole draft/self-review call fails per
+    ``mode``. Mirrors the production failure modes Codex flagged:
 
-    * ``raise``  — draft LLM call raises
-    * ``junk``   — draft returns non-JSON text (``extract_json_object`` raises)
-    * ``empty``  — draft returns valid JSON with an empty ``draft_narrative``
+    * ``raise``  — the LLM call raises
+    * ``junk``   — the LLM returns non-JSON text (``extract_json_object`` raises)
+    * ``empty``  — the LLM returns valid JSON with an empty ``draft_narrative``
     """
 
     rec = _Recorder()
 
     class _FailingDraftAgent:
-        _call_count = 0
-
         def __init__(self, *_: Any, **__: Any) -> None:
             pass
 
         def __call__(self, prompt: str) -> str:
             rec.prompts.append(prompt)
-            _FailingDraftAgent._call_count += 1
-            if _FailingDraftAgent._call_count == 1:
-                if mode == "raise":
-                    raise RuntimeError("simulated draft transport failure")
-                if mode == "junk":
-                    return "this is not json"
-                if mode == "empty":
-                    return json.dumps({"draft_narrative": ""})
-                raise AssertionError(f"unknown mode {mode!r}")
-            return rec.render_response()
+            if mode == "raise":
+                raise RuntimeError("simulated draft transport failure")
+            if mode == "junk":
+                return "this is not json"
+            if mode == "empty":
+                return json.dumps({"draft_narrative": ""})
+            raise AssertionError(f"unknown mode {mode!r}")
 
     monkeypatch.setattr(agent_runner_module, "Agent", _FailingDraftAgent)
     monkeypatch.setattr(agent_runner_module, "get_strands_model", lambda _name: None)
@@ -577,47 +560,38 @@ def test_no_report_fallback_unchanged_on_draft_failure(monkeypatch):
 
 # ---------------------------------------------------------------------------
 # Issue #532 Codex follow-up (PR #584): the LLM cannot be trusted to follow
-# the "open with the disclaimer verbatim" instruction, and the self-review
-# pass meant to enforce it can itself fail. ``_ensure_misalignment_disclaimer``
-# is the deterministic safety rail that prepends the prefix on misaligned
-# runs whenever the published narrative is missing the disclaimer string.
+# the "open with the disclaimer verbatim" instruction embedded in its prompt.
+# ``_ensure_misalignment_disclaimer`` is the deterministic safety rail that
+# prepends the prefix on misaligned runs whenever the published narrative is
+# missing the disclaimer string.
 # ---------------------------------------------------------------------------
 
 
 def _install_compliant_review_recorder(monkeypatch, *, draft_body: str) -> _Recorder:
-    """Stubs ``strands.Agent`` so the FIRST call (draft) returns
-    ``draft_body`` (the test controls whether it contains the disclaimer)
-    and the SECOND call (self-review) returns a revised narrative that
-    echoes the draft. Captures both prompts in the recorder."""
+    """Stubs ``strands.Agent`` so the sole draft/self-review call returns
+    ``draft_body`` (the test controls whether it contains the disclaimer).
+    Captures the prompt in the recorder."""
 
     rec = _Recorder()
 
     class _StubAgent:
-        _call_count = 0
-
         def __init__(self, *_: Any, **__: Any) -> None:
             pass
 
         def __call__(self, prompt: str) -> str:
             rec.prompts.append(prompt)
-            _StubAgent._call_count += 1
-            if _StubAgent._call_count == 1:
-                return json.dumps({"draft_narrative": draft_body})
-            # Self-review echoes the draft verbatim — exercises the
-            # "LLM ignored the disclaimer instruction" failure mode.
-            return json.dumps({"revised_narrative": draft_body, "verification_notes": "echoed"})
+            return json.dumps({"draft_narrative": draft_body})
 
     monkeypatch.setattr(agent_runner_module, "Agent", _StubAgent)
     monkeypatch.setattr(agent_runner_module, "get_strands_model", lambda _name: None)
     return rec
 
 
-def test_misaligned_disclaimer_prepended_when_revised_drops_it(monkeypatch):
-    """Codex on PR #584: even when self-review succeeds, the LLM can ignore
-    the disclaimer instruction. The agent must deterministically prepend
-    the prefix when the revised narrative is missing the disclaimer
-    string so a non-compliant LLM cannot publish a clean narrative on a
-    misaligned run."""
+def test_misaligned_disclaimer_prepended_when_draft_drops_it(monkeypatch):
+    """Codex on PR #584: the LLM can ignore the disclaimer instruction. The
+    agent must deterministically prepend the prefix when the narrative is
+    missing the disclaimer string so a non-compliant LLM cannot publish a
+    clean narrative on a misaligned run."""
 
     _install_compliant_review_recorder(
         monkeypatch,
@@ -800,54 +774,6 @@ def test_misaligned_disclaimer_enforced_when_buried_mid_narrative(monkeypatch):
             f"Alignment issue {issue.description!r} must appear before "
             "the LLM's causal claim, not after."
         )
-
-
-def test_misaligned_disclaimer_enforced_when_review_fails(monkeypatch):
-    """Codex's specific scenario: the self-review LLM call raises (or
-    returns junk), and the agent returns the draft as-is. If the draft
-    ignored the disclaimer instruction the safety rail must still
-    enforce it deterministically."""
-
-    rec = _Recorder()
-
-    class _FailingReviewAgent:
-        _call_count = 0
-
-        def __init__(self, *_: Any, **__: Any) -> None:
-            pass
-
-        def __call__(self, prompt: str) -> str:
-            rec.prompts.append(prompt)
-            _FailingReviewAgent._call_count += 1
-            if _FailingReviewAgent._call_count == 1:
-                return json.dumps(
-                    {
-                        "draft_narrative": (
-                            "The strategy underperformed because of slow regime adaptation."
-                        )
-                    }
-                )
-            raise RuntimeError("simulated review transport failure")
-
-    monkeypatch.setattr(agent_runner_module, "Agent", _FailingReviewAgent)
-    monkeypatch.setattr(agent_runner_module, "get_strands_model", lambda _name: None)
-
-    narrative = AnalysisAgent().run(
-        _spec(),
-        _high_return_metrics(),
-        trades=[],
-        rationale="rationale",
-        is_winning=False,
-        alignment_report=_MISALIGNED_REPORT,
-    )
-
-    assert (
-        "The executed trades did not faithfully implement the specification; "
-        "interpretation is preliminary." in narrative
-    )
-    for issue in _MISALIGNED_REPORT.issues:
-        assert issue.description in narrative
-    assert "slow regime adaptation" in narrative
 
 
 def test_aligned_runs_skip_disclaimer_enforcement(monkeypatch):

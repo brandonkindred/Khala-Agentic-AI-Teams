@@ -13,14 +13,18 @@ chunk -> map-phase LLM call -> merge -> translate chain is exercised for real.
 
 from __future__ import annotations
 
-import threading
-from typing import Any
-
 import pytest
 
-from llm_service import LLMSemanticExhaustionError
-from llm_service.clients.dummy import DummyLLMClient
-from software_engineering_team.code_review_agent.chunk_reviewer import CODE_TO_REVIEW_HEADER
+from software_engineering_team.codegen_team.stacks.frontend.profile import (
+    _ACCESSIBILITY_VERIFY_NOTE,
+    _run_llm_review,
+)
+
+from ._review_fallback_test_doubles import AlwaysFail as _AlwaysFail
+from ._review_fallback_test_doubles import FailBadKeepGood as _FailBadKeepGoodBase
+from ._review_fallback_test_doubles import PerFileScriptedClient as _PerFileScriptedClient
+from ._review_fallback_test_doubles import PromptCapturingClient as _PromptCapturingClient
+from ._review_fallback_test_doubles import ScriptedClient as _ScriptedClient
 
 
 @pytest.fixture(autouse=True)
@@ -59,158 +63,9 @@ def _task(**overrides):
     return Task(**base)
 
 
-class _ScriptedClient(DummyLLMClient):
-    """Returns a different canned response on each ``complete_json`` call.
-
-    Copied from ``test_code_review_coordinator.py``'s ``_ScriptedClient``: a
-    real ``DummyLLMClient`` (not a mock of the coordinator), so it drives the
-    coordinator's actual map-reduce pipeline. Adds ``call_count`` so a test
-    can assert how many real LLM calls the pipeline made.
-    """
-
-    def __init__(self, responses: list[dict[str, Any]]) -> None:
-        super().__init__()
-        self._responses = list(responses)
-        self._idx = 0
-        self.call_count = 0
-        self._lock = threading.Lock()
-
-    def complete_json(
-        self,
-        prompt: str,
-        *,
-        temperature: float = 0.0,
-        system_prompt: str | None = None,
-        tools: list | None = None,
-        think: bool = False,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        with self._lock:
-            self.call_count += 1
-            if self._idx < len(self._responses):
-                resp = self._responses[self._idx]
-                self._idx += 1
-                return resp
-            return self._responses[-1] if self._responses else {}
-
-
-class _PerFileScriptedClient(DummyLLMClient):
-    """Returns a response keyed by which file marker appears in the prompt.
-
-    Unlike ``_ScriptedClient`` (which returns responses strictly by call
-    order), this binds each canned response to the chunk it actually belongs
-    to via the chunk's ``### path ###`` header. Real map-phase calls may run
-    concurrently, so call order is not guaranteed to match file order; an
-    order-based client would still pass an attribution assertion even if the
-    coordinator mixed up which finding came from which file's content, since
-    each canned response's ``file_path`` is a hard-coded value independent of
-    the prompt it was served to. Selecting by marker closes that gap.
-
-    Markers are matched on the reasoning ``complete`` prompt; the format
-    ``complete_json`` wrap does not carry ``### path ###`` headers.
-    """
-
-    def __init__(self, responses_by_marker: dict[str, dict[str, Any]]) -> None:
-        super().__init__()
-        self._responses_by_marker = dict(responses_by_marker)
-        self.call_count = 0
-        self._lock = threading.Lock()
-        self._tls = threading.local()
-
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        if CODE_TO_REVIEW_HEADER not in prompt:
-            return super().complete(prompt, **kwargs)
-        with self._lock:
-            self.call_count += 1
-        for marker, response in self._responses_by_marker.items():
-            if marker in prompt:
-                self._tls.pending = response
-                return "Structured prose review summary."
-        raise AssertionError(f"no scripted response matches prompt: {prompt[:200]!r}")
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-        pending = getattr(self._tls, "pending", None)
-        if pending is not None:
-            self._tls.pending = None
-            return pending
-        return super().complete_json(prompt, **kwargs)
-
-
-class _PromptCapturingClient(DummyLLMClient):
-    """Records every chunk-review reasoning prompt; always returns a clean pass."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.prompts: list[str] = []
-        self._lock = threading.Lock()
-
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        if CODE_TO_REVIEW_HEADER in prompt:
-            with self._lock:
-                self.prompts.append(prompt)
-        return super().complete(prompt, **kwargs)
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-        return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
-
-
-class _FailBadKeepGood(DummyLLMClient):
-    """Fails any chunk touching ``bad.tsx``; returns a genuine issue for ``good.tsx``.
-
-    Mirrors ``test_code_review_coordinator.py``'s
-    ``test_semantic_exhaustion_multi_file_still_separates_files`` fixture
-    (``_FailWhenBadPresent``), scripted with a real finding for the surviving
-    file so the translated output is non-empty.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.call_count = 0
-        self._lock = threading.Lock()
-        self._tls = threading.local()
-
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        if CODE_TO_REVIEW_HEADER not in prompt:
-            return super().complete(prompt, **kwargs)
-        with self._lock:
-            self.call_count += 1
-        if "### bad.tsx ###" in prompt:
-            raise LLMSemanticExhaustionError("no content", retry_thinking_level=False)
-        if "### good.tsx ###" in prompt:
-            self._tls.keep = True
-            return "Structured prose review summary."
-        return super().complete(prompt, **kwargs)
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-        if getattr(self._tls, "keep", False):
-            self._tls.keep = False
-            return {
-                "approved": False,
-                "issues": [
-                    {
-                        "severity": "high",
-                        "category": "logic",
-                        "file_path": "good.tsx",
-                        "description": "real issue",
-                        "suggestion": "fix it",
-                    }
-                ],
-                "summary": "found one",
-                "spec_compliance_notes": "",
-            }
-        return super().complete_json(prompt, **kwargs)
-
-
-class _AlwaysFail(DummyLLMClient):
-    """Fails every chunk-review call, unconditionally."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.call_count = 0
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-        self.call_count += 1
-        raise LLMSemanticExhaustionError("no content", retry_thinking_level=False)
+def _FailBadKeepGood():  # noqa: N802 -- preserves original class-style call-site spelling
+    """Frontend variant: fails ``bad.tsx``, keeps ``good.tsx``."""
+    return _FailBadKeepGoodBase(ext="tsx")
 
 
 def test_run_llm_review_real_coordinator_single_chunk_translates_issue():
@@ -218,8 +73,6 @@ def test_run_llm_review_real_coordinator_single_chunk_translates_issue():
     ``CodeReviewIssue`` is translated into a ``ReviewIssue`` end-to-end
     (``suggestion`` -> ``recommendation``), with ``raw_issue_count`` staying
     ``None`` -- no monkeypatched ``run_coordinator`` involved."""
-    from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review
-
     client = _ScriptedClient(
         [
             {
@@ -263,8 +116,6 @@ def test_run_llm_review_real_coordinator_multi_chunk_attributes_issues_to_source
     genuinely verify per-file attribution rather than merely echoing
     hard-coded ``file_path`` values back from whichever response landed on
     whichever call index."""
-    from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review
-
     file_a = "x" * 20_000
     file_b = "y" * 20_000
     client = _PerFileScriptedClient(
@@ -325,8 +176,6 @@ def test_run_llm_review_real_coordinator_isolates_per_chunk_failure(monkeypatch)
     surviving file's genuine finding.
     """
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
-    from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review
-
     client = _FailBadKeepGood()
 
     out = _run_llm_review(
@@ -346,8 +195,6 @@ def test_run_llm_review_real_coordinator_forwards_review_context_to_prompt():
     mocked test only proves the field lands on ``CodeReviewInput``, not that a
     real prompt renders it."""
     from shared.dev_models.models import ReviewContext, SystemArchitecture
-    from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review
-
     client = _PromptCapturingClient()
     architecture = SystemArchitecture(overview="Layered service architecture.")
     review_context = ReviewContext(
@@ -379,8 +226,6 @@ def test_run_llm_review_real_coordinator_oversized_single_line_file_is_reviewed(
     in ``shared/agent_review.py``). Parity here means "still reviewed, still
     correctly attributed" -- not "still hard-split".
     """
-    from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review
-
     line = "const DATA = '" + ("a" * 100_000) + "';"
     assert "\n" not in line  # unsplittable at a line boundary
 
@@ -418,8 +263,6 @@ def test_run_llm_review_real_coordinator_empty_files_raises_value_error():
     constructs ``CodeReviewInput`` directly, and that type's own fail-closed
     validation raises so a caller bug (e.g. a glob miss) never silently
     becomes an approved empty review (see its docstring's Preconditions)."""
-    from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review
-
     client = _ScriptedClient([])
 
     with pytest.raises(ValueError):
@@ -432,7 +275,6 @@ def test_run_llm_review_real_coordinator_propagates_unavailable_when_all_chunks_
     real-coordinator counterpart to the existing mocked
     ``test_fe_run_llm_review_propagates_coordinator_unavailable``."""
     from software_engineering_team.code_review_agent.models import CodeReviewUnavailableError
-    from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review
 
     client = _AlwaysFail()
 
@@ -446,12 +288,9 @@ def test_run_llm_review_real_coordinator_forwards_accessibility_note_to_prompt()
     the real chunk-review LLM prompt via ``extra_task_requirements`` -- the
     existing mocked test only proves it lands on
     ``CodeReviewInput.task_requirements``, not that a real prompt renders it."""
-    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review
-
     client = _PromptCapturingClient()
 
     _run_llm_review(llm=client, task=_task(), files={"x.tsx": "const f = () => 1;\n"})
 
     assert client.prompts, "expected at least one real chunk-review call"
-    assert any(review_mod._ACCESSIBILITY_VERIFY_NOTE in p for p in client.prompts)
+    assert any(_ACCESSIBILITY_VERIFY_NOTE in p for p in client.prompts)

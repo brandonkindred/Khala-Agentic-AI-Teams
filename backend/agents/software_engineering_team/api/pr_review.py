@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 from shared.concurrency import parallel_map
+from shared.env import env_flag_enabled
 from shared.temporal.client import get_temporal_client
 from software_engineering_team.activity import ActivityBridge
 from software_engineering_team.api import coding_team_main as _main
@@ -39,6 +40,7 @@ from software_engineering_team.github_source import (
     choose_event,
     duplicate_check_max_open_issues,
     format_issue_comment,
+    format_systemic_findings_comment,
     group_similar_findings,
     inline_comment_to_timeline_body,
     is_within_diff,
@@ -250,20 +252,28 @@ REVIEW_FOCUS_NOTE_PREFIX = "Review focus:"
 _PRE_EXISTING_TAG_INSTRUCTIONS = (
     "For EVERY issue you report, add a boolean field named `pre_existing` to the issue "
     "object:\n"
-    "- Set `pre_existing: false` for a defect in the code this pull request ADDS or MODIFIES — "
-    "these are the findings that matter for reviewing the PR.\n"
+    "- Set `pre_existing: false` ONLY with positive evidence the defect is in code this pull "
+    "request ADDS or MODIFIES — it sits on a line the change-surface markers show was touched "
+    "(a leading `+`), or it is a required add/modify this change omitted. These are the "
+    "findings that matter for reviewing the PR.\n"
     "- Set `pre_existing: true` for a genuine bug you notice in PRE-EXISTING, UNCHANGED code "
-    "that this pull request did not touch (an unrelated defect visible in the surrounding "
-    "code). Still report such bugs — do not stay silent about them — but tag them so they are "
-    "recorded separately instead of blamed on this change.\n"
+    "(including anything visible only on a space-marked context line) — and for any finding "
+    "you cannot point to that positive evidence for. Still report such bugs — do not stay "
+    "silent about them — but tag them so they are recorded separately instead of blamed on "
+    "this change.\n"
+    "When you are uncertain whether this change actually touched the defect, tag it "
+    "`pre_existing: true` rather than guessing it into scope — an uncertain finding never "
+    "defaults toward posting.\n"
     "Do not invent pre-existing issues to pad the review; only tag a finding `pre_existing: "
-    "true` when it is a real defect in code outside this PR's change."
+    "true` when it is a real defect you noticed, not a fabricated one."
 )
 
 _DIFF_FIRST_FOCUS_NOTE = (
     f"{REVIEW_FOCUS_NOTE_PREFIX} evaluate what this pull request changes (and enclosing "
     "constructs when shown). Treat surrounding or unchanged code as context, not the primary "
-    "target — this is a diff-first review.\n"
+    "target — this is a diff-first review. When change-surface markers are shown (a leading "
+    "`+` on added/modified lines, a leading space on context lines), use them as your evidence "
+    "for what this change actually touched.\n"
     "Judge the change against these eight criteria:\n"
     "1. Logical / syntactic correctness of the change\n"
     "2. Contract changes on touched functions/classes (DbC, signatures, invariants)\n"
@@ -1538,19 +1548,28 @@ def _partition_review_issues(
           :func:`_decide_review_mode` built for the same file set.
         - ``client`` is an open ``GitHubClient``.
     Postconditions:
-        - An issue tagged ``pre_existing=True`` is kept in
-          ``preexisting_issues`` unless :func:`is_within_diff` against
-          ``changed_by_path`` proves it lies on a line this PR actually
-          ADDED, in which case it is overridden into ``pr_issues``. An issue
-          that omits the tag (or from a caller that never asks for it)
-          defaults ``pre_existing=False`` and is treated as a PR finding —
-          this deliberately includes a finding naming a file outside the
-          diff (e.g. "module X is imported but was never added"): such a
-          finding is exactly the kind ``false_positive_filter.py`` already
-          keeps rather than treats as noise (a missing file/module the PR
-          should have added is a real, in-scope defect, not a pre-existing
-          one), so only the reviewer's own tag — never file/diff membership
-          alone — routes a finding to proposals.
+        - The in/out-of-scope verdict is purely change-map-driven: an issue is
+          in-scope, and goes to ``pr_issues``, iff at least one of (1) it is a
+          blocking :func:`_is_not_reviewed_coverage_finding` "could not be
+          reviewed" coverage/safety finding — always kept in-scope, mirroring
+          :func:`_tag_review_issues_for_scope`'s identical carve-out, so it can
+          never be routed to a proposal and defeat the fail-closed
+          ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` gate; (2) :func:`is_within_diff`
+          against ``changed_by_path`` (deliberately narrower than
+          ``valid_by_path``, which would also match unchanged context lines)
+          proves the issue lies on a line this PR actually added or modified;
+          or (3) the issue is tagged ``omission`` — a required add/modify this
+          change left out, which stays in-scope regardless of which file it
+          names, since it describes what the change should have touched, not
+          pre-existing code (see ``CodeReviewIssue.omission``). Every other
+          issue goes to ``preexisting_issues`` — this includes an issue an
+          earlier pass tagged ``pre_existing=False``, or one with no tag at
+          all, when it names unchanged context or a file outside the diff: the
+          ``pre_existing`` tag (set upstream by
+          :func:`_tag_review_issues_for_scope`, an input to the reviewer, not
+          a posting decision) plays no part in this gate either way — it
+          cannot keep an on-diff/omission issue out, and it cannot let an
+          off-diff, non-omission issue in.
         - ``proposals`` is :func:`_detect_duplicate_proposals` applied to
           ``proposal_from_findings`` over each :func:`group_similar_findings`
           group of ``preexisting_issues``, with any proposal matched to an
@@ -1568,10 +1587,12 @@ def _partition_review_issues(
           over :func:`map_issues_to_comments` applied to ``pr_issues``.
           ``standalone_comments`` renders (via :func:`format_issue_comment`)
           every leftover ``map_issues_to_comments`` could not resolve to a
-          path in the diff at all — such a finding is never misattributed to
-          an unrelated changed file (the bug this replaces): it is posted as
-          its own standalone conversation comment naming its own
-          ``file_path`` instead.
+          path in the diff at all — by construction this is now exactly an
+          ``omission`` naming a file the PR never touched (every other
+          in-scope issue is, by the diff-membership rule above, on a path
+          ``changed_by_path`` already knows): it is posted as its own
+          standalone conversation comment naming its own ``file_path``
+          instead of being misattributed to an unrelated changed file.
         - The existing-comments fetch and duplicate-detection are both
           best-effort and degrade internally (never raise). Any other
           exception (e.g. from ``map_issues_to_comments``) propagates to the
@@ -1581,35 +1602,39 @@ def _partition_review_issues(
     # Defects in the code the PR added or modified drive the review
     # (comments + REQUEST_CHANGES); pre-existing bugs the reviewer noticed
     # in unchanged code are NOT posted on this PR — they become GitHub-issue
-    # proposals a human approves later on the Code Review page. A finding
-    # without the tag defaults to a PR finding (reviews now tag via
-    # _diff_first_focus, but any caller that doesn't ask still
-    # behaves exactly as before). The LLM's self-reported tag is not trusted
-    # unconditionally: a finding whose file/line is verified to be a line
-    # this PR actually ADDED (per is_within_diff against changed_by_path —
-    # deliberately narrower than valid_by_path, which would also match
-    # unchanged context lines) cannot legitimately be "pre-existing,
-    # unchanged code", so a mistagged pre_existing=true is overridden back to
-    # a PR finding rather than silently skipping review.
+    # proposals a human approves later on the Code Review page.
     #
-    # Deliberately NOT gated on whether the finding's file is in the diff at
-    # all: a finding naming a file outside the diff is very often "this PR
-    # should have added/modified file X but didn't" — a genuine, in-scope
-    # defect, not a pre-existing one — and false_positive_filter.py already
-    # keeps exactly this kind of "unresolved path" finding rather than
-    # dropping it as noise. Forcing every off-diff-file finding to
-    # preexisting_issues would silently swallow that class of real,
-    # PR-blocking finding. The mis-anchoring failure mode that once
-    # motivated such a gate (an off-diff finding posted against an unrelated
-    # changed file) is fixed below instead, by giving it its own standalone
-    # comment rather than a borrowed file anchor.
+    # The gate is purely change-map-driven: is_within_diff against
+    # changed_by_path (deliberately narrower than valid_by_path, which would
+    # also match unchanged context lines) is the sole source of truth for
+    # whether a finding sits on code this PR touched. No LLM verdict and no
+    # pre_existing tag can put an off-diff finding into pr_issues or pull an
+    # on-diff finding out of it.
+    #
+    # Two carve-outs stay in-scope regardless of the diff map:
+    #   - A blocking "could not be reviewed" coverage/safety finding
+    #     (_is_not_reviewed_coverage_finding) — these are constructed with
+    #     line=end of the reviewed segment, which in whole-file review mode
+    #     can land on an unchanged context line; routing one to a proposal
+    #     instead of pr_issues would silently defeat the fail-closed
+    #     CODE_REVIEW_BLOCK_ON_UNREVIEWED gate (choose_event below only
+    #     reacts to partition.pr_issues).
+    #   - An omission-tagged finding (a required add/modify this change left
+    #     out) — it describes what the change SHOULD have touched, so it is
+    #     in-scope even though, definitionally, it names no line this change
+    #     actually added. This is also why an omission naming an untouched
+    #     file correctly falls through to map_issues_to_comments' leftover
+    #     path below and becomes a standalone comment rather than being
+    #     misattributed to an unrelated changed file.
     pr_issues: List[Any] = []
     preexisting_issues: List[Any] = []
     for i in output.issues:
-        if getattr(i, "pre_existing", False) and not is_within_diff(i, changed_by_path):
-            preexisting_issues.append(i)
-        else:
-            pr_issues.append(i)
+        in_scope = (
+            _is_not_reviewed_coverage_finding(i)
+            or is_within_diff(i, changed_by_path)
+            or bool(getattr(i, "omission", False))
+        )
+        (pr_issues if in_scope else preexisting_issues).append(i)
     # Similar findings (same category, near-identical description — e.g. the
     # same "bare import" pattern flagged across several files) are combined
     # into one proposal so a human is offered one issue per kind of problem,
@@ -1666,6 +1691,70 @@ def _partition_review_issues(
         file_comments=file_comments,
         standalone_comments=standalone_comments,
     )
+
+
+# Default-on toggle for the systemic/cross-cutting synthesis pass: a single
+# best-effort LLM call clustering the PR's in-scope findings to surface a
+# shared root cause. See docs/ENV_VARS.md.
+_SYSTEMIC_SYNTHESIS_ENV = "CODE_REVIEW_SYSTEMIC_SYNTHESIS"
+
+# A systemic pattern is, by definition, evidenced by at least two findings.
+_MIN_FINDINGS_FOR_SYSTEMIC_SYNTHESIS = 2
+
+
+def _synthesize_systemic_findings(
+    provider: Any, partition: ReviewIssuePartition, mode: ReviewModeDecision, pr: Any
+) -> List[Dict[str, Any]]:
+    """Best-effort systemic/cross-cutting synthesis over this review's in-scope findings.
+
+    The synthesis CALL runs after :func:`_partition_review_issues` (which
+    already applied :func:`partition_issues_by_existing_comments`) and before
+    :func:`_post_review_comments`, so it operates on the same deduped
+    ``partition.pr_issues`` the individual findings post from. The caller
+    posts the resulting standalone comment separately, only once
+    :func:`_post_review_comments` has actually succeeded — computing the
+    synthesis here does not itself post anything, so an untolerated
+    ``GitHubAPIError`` from the main review submission can never leave an
+    orphaned systemic comment referencing findings that were never posted.
+
+    Preconditions:
+        - ``partition`` was produced by :func:`_partition_review_issues` for
+          this same review. ``mode``/``pr`` are the same objects
+          :func:`_tag_review_issues_for_scope` uses to build scope-grounding
+          context.
+    Postconditions:
+        - Returns ``[]`` immediately when :data:`_SYSTEMIC_SYNTHESIS_ENV` is
+          disabled, or when ``len(partition.pr_issues) <
+          _MIN_FINDINGS_FOR_SYSTEMIC_SYNTHESIS``  — no provider call happens
+          on either short-circuit.
+        - Otherwise returns ``provider.synthesize_systemic_findings(...)``,
+          normalized to ``[]`` if the provider returns ``None`` or another
+          falsy non-list value (belt-and-suspenders — the provider method's
+          own contract already never returns anything but a list). **Never
+          raises**: any exception from the provider call is caught, logged,
+          and degrades to ``[]``.
+    """
+    if not env_flag_enabled(_SYSTEMIC_SYNTHESIS_ENV):
+        return []
+    if len(partition.pr_issues) < _MIN_FINDINGS_FOR_SYSTEMIC_SYNTHESIS:
+        return []
+    task_description = (
+        f"Review pull request #{getattr(pr, 'number', '') or ''}: {getattr(pr, 'title', '') or ''}"
+    )
+    try:
+        return (
+            provider.synthesize_systemic_findings(
+                partition.pr_issues, _files_for_scope(mode), task_description
+            )
+            or []
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort pass, must never fail the review
+        logger.warning(
+            "PR review: systemic synthesis skipped (%s: %s)",
+            type(exc).__name__,
+            scrub_token_from_text(str(exc)),
+        )
+        return []
 
 
 class CommentPostingResult(NamedTuple):
@@ -1817,6 +1906,7 @@ def _finalize_review_outcome(
     files_reviewed: int,
     partition: ReviewIssuePartition,
     posting: CommentPostingResult,
+    systemic_findings: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Compute severity metrics, assemble ``review_summary``, and write the terminal outcome.
 
@@ -1824,6 +1914,8 @@ def _finalize_review_outcome(
         - ``partition``/``posting`` come from the same review run, produced in
           ``_partition_review_issues`` → ``_post_review_comments`` order.
         - ``client`` is an open ``GitHubClient``; ``pr`` carries ``html_url``.
+        - ``systemic_findings`` is ``None`` or the list
+          :func:`_synthesize_systemic_findings` returned for this same run.
     Postconditions:
         - ``severity_counts`` buckets ``partition.pr_issues`` over the five
           recognized levels (critical/high/medium/low/info); an issue with an
@@ -1833,7 +1925,8 @@ def _finalize_review_outcome(
           the split: ``total_issues``, ``inline_comments``, ``file_comments``,
           ``comment_findings``, ``comments_failed``, ``event``,
           ``files_reviewed``, ``severity_counts``, ``addressed_issues_dropped``,
-          ``pending_issue_proposals``.
+          ``pending_issue_proposals``, ``systemic_findings`` (``None``
+          coerced to ``[]``).
         - When ``posting.comments_failed`` is truthy: posts an "incomplete"
           notice via ``_main._safe_comment``, calls :func:`_finalize_review`
           with ``JobStatus.FAILED``, and returns — no further writes happen.
@@ -1884,6 +1977,10 @@ def _finalize_review_outcome(
         # _partition_review_issues drops it before it ever reaches here --
         # every entry below is a genuinely new candidate.
         "pending_issue_proposals": partition.proposals,
+        # Cross-cutting / root-cause patterns synthesized from clusters of this
+        # review's in-scope findings (see _synthesize_systemic_findings). Also
+        # posted as its own standalone PR comment when non-empty.
+        "systemic_findings": systemic_findings or [],
     }
     if posting.comments_failed:
         # Some findings could not be posted as their own comment; the
@@ -2004,11 +2101,37 @@ def _run_pr_review_body(
                 mode.valid_by_path,
                 mode.changed_by_path,
             )
+            # Synthesize now: it only needs partition.pr_issues, which is
+            # already final at this point.
+            systemic_findings = _synthesize_systemic_findings(provider, partition, mode, pr)
             posting = _post_review_comments(
                 client, owner, repo, pr_number, pr, reviewer_login, output, partition
             )
+            # Post the standalone systemic comment only now, after
+            # _post_review_comments above has actually succeeded: that call
+            # can raise an untolerated GitHubAPIError, and posting the
+            # systemic comment earlier would leave it orphaned on the PR --
+            # referencing findings whose own comments never landed -- with a
+            # retried review then posting a second copy on top of it.
+            if systemic_findings:
+                _main._safe_comment(
+                    client,
+                    owner,
+                    repo,
+                    pr_number,
+                    format_systemic_findings_comment(systemic_findings),
+                )
             _finalize_review_outcome(
-                client, job_id, owner, repo, pr_number, pr, mode.files_reviewed, partition, posting
+                client,
+                job_id,
+                owner,
+                repo,
+                pr_number,
+                pr,
+                mode.files_reviewed,
+                partition,
+                posting,
+                systemic_findings,
             )
     except Exception as review_exc:  # noqa: BLE001 - any failure must mark the job, never wedge it
         # The hook runs in a daemon thread; if we let an exception escape, the thread

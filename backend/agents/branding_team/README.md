@@ -37,7 +37,15 @@ This team defines and operationalizes an enterprise brand system through a coord
 
 `BrandingTeamOrchestrator.run()` (`orchestrator.py`) drives the pipeline: it resolves the mission, builds `build_branding_graph(target_phase=...)` (`graphs/top_level.py`), serializes the mission into a task string, and invokes the graph. The result is a **single top-level Strands `Graph`** whose 5 nodes are themselves phase sub-graphs, wired **strictly sequentially** — `phase1_strategic_core → phase2_narrative → phase3_visual → phase4_channel → phase5_governance`. An optional `target_phase` stops the pipeline early; gating happens at graph-build time (later phase nodes/edges are simply never added), not via runtime conditional edges. `run_single_phase()` reuses the same per-phase builders to run one phase in isolation (e.g. from a Temporal activity).
 
-`run()` also accepts an optional `phase_cache` (a `PhaseOutputCache`, `shared/phase_output_cache.py`). When supplied, the pipeline switches from the single monolithic-graph invocation to `_run_phases_with_cache()`, which runs each phase one at a time via `run_single_phase()`: before invoking a phase, it hashes the phase's inputs (`shared/memoization.py`'s `phase_input_hash`, over the phase itself, the mission, and every upstream output produced so far this call) and checks it against `phase_cache`. A hit reuses the cached output without invoking the phase; a miss runs it and, if the result isn't degraded, stores it back in the cache. Because each phase's hash is computed from the upstream outputs actually produced this call, a changed upstream phase automatically invalidates every downstream phase's hash. Omitting `phase_cache` (the default) preserves the original monolithic-graph behavior exactly.
+`run()` also accepts an optional `phase_cache` (a `PhaseOutputCache`, `shared/phase_output_cache.py`), and it's no longer opt-in: `phase_cache` defaults to a fresh `PhaseOutputCache()`, so every caller that doesn't pass `phase_cache` explicitly — including `api/routes/sessions.py` and `api/background.py`, which predate this parameter — gets the cached path. That path runs each phase one at a time via `run_single_phase()` instead of the single monolithic-graph invocation: before invoking a phase, it hashes the phase's inputs (`shared/memoization.py`'s `phase_input_hash`, over the phase itself, the mission, and every upstream output produced so far this call) and checks it against `phase_cache`. A hit reuses the cached output without invoking the phase; a miss runs it and, if the result isn't degraded, stores it back in the cache. Because each phase's hash is computed from the upstream outputs actually produced this call, a changed upstream phase automatically invalidates every downstream phase's hash. `run_phase()` mirrors the same default. To get the original monolithic-graph behavior back (testing/comparison use only — no production caller does this), pass `_use_monolithic=True` explicitly.
+
+`PhaseOutputCache` is a thin view over one process-wide shared namespace, not a private per-instance store (see `shared/phase_output_cache.py`), so defaulting every caller into it means those callers now implicitly share cached phase outputs with each other and across calls, for as long as the process is up. `phase_input_hash` keys a cache entry only on the phase, the mission, and upstream outputs — not on the LLM model, prompt template, or agent code version — so an entry can outlive a mid-process prompt/model/code change. The cache namespace is only build-id-suffixed when `KHALA_CACHE_BUILD_ID` / `KHALA_BUILD_ID` is set to a non-blank value (`shared/cache/build_id.py`); both default to blank in `docker/docker-compose.yml`, so a redeploy does **not** cold-start the cache unless an operator sets one of those env vars per deploy. Constructing your own `PhaseOutputCache()` does **not** provide isolation either — every instance shares the same process-wide entries by design — so `_use_monolithic=True` (the monolithic-graph path) is currently the only way for a caller to opt out of that staleness window.
+
+The cached path also changes the timeout envelope. `_run_phases_with_cache` shares no deadline across its sequential `run_single_phase` calls — each gets its own fresh 600s execution timeout / 180s node timeout (`graphs/top_level.py`'s `DEFAULT_EXECUTION_TIMEOUT_SECONDS`/`DEFAULT_NODE_TIMEOUT_SECONDS`), the same constants `build_branding_graph` applies once to the *entire* 5-phase monolithic run. A default-path call whose phases all miss can therefore take up to roughly the sum of five phase budgets before timing out, several times the monolithic path's single 600s ceiling.
+
+**Cross-turn threading (chat/conversation layer):** `api/conversation.py` gives each conversation its own `PhaseOutputCache` (`_get_or_create_phase_cache`, keyed by `conversation_id`, in-memory/process-local, never evicted — the same lifetime tradeoff as the conversation's Postgres row having no TTL/cleanup precedent) and threads it into every `_run_orchestrator_if_ready` call, so a cache populated on one chat turn is available to the next. Ordering matters here: `_run_orchestrator_if_ready` checks its own whole-mission short-circuit (`previous_output is not None and previous_mission == mission`) *before* ever consulting `phase_cache` — an unchanged mission with a stored prior output returns that output directly and never touches the orchestrator or the cache at all. The `phase_cache` path is what serves the case that slips past the short-circuit — most visibly, when a stored output is unavailable but the mission and a warmed cache are, in which case `orchestrator.run` executes for real but every phase can still resolve from cache with zero new LLM calls.
+
+Note a current limitation: `phase_input_hash` hashes the *entire* mission for every phase (a documented, deliberate over-hashing choice — see `shared/memoization.py`), so a genuine mission-field edit between two turns invalidates all 5 phases' cache entries in that run, not just the phase conceptually related to the changed field. Selective "only the affected phase and everything downstream recomputes" reuse is exactly what `_run_phases_with_cache` does internally when hashes *do* line up, but today that only happens when the mission is unchanged across turns. See `tests/test_conversation_phase_cache.py`'s `test_cross_turn_message_reuses_phase_cache_and_produces_correct_team_output` and `test_whole_mission_short_circuit_remains_outermost_fast_path_with_real_pipeline` for the exact mechanics, verified end-to-end against the real (dummy) pipeline.
 
 Brand-compliance checks (`BrandComplianceAgent`, a plain keyword-matching dataclass, not a graph node) and the market-research / design-asset integrations run **outside** the graph, after it completes: compliance checks run synchronously first, then the two integrations run concurrently with each other via `asyncio.gather`. The orchestrator then assembles everything into a single `TeamOutput` whose status depends on the per-phase gates and `human_review.approved`.
 
@@ -53,11 +61,11 @@ flowchart TB
 
     P1 --> P2
 
-    subgraph P2 ["Phase 2 · Narrative & Messaging (Graph, linear + read-only context)"]
+    subgraph P2 ["Phase 2 · Narrative & Messaging (Graph, pure fan-out — no compositor)"]
         direction LR
-        P2a[Storyteller] --> P2b[ArchetypeAnalyst]
-        P2b --> P2rest["TaglineWriter → MessageMapper →
-        PersonaBuilder → VoicePrinciplesDrafter"]
+        P2nodes["Storyteller, ArchetypeAnalyst, TaglineWriter,
+        MessageMapper, PersonaBuilder, VoicePrinciplesDrafter
+        (six parallel terminal nodes, Python-merged)"]
     end
 
     P2 --> P3
@@ -137,7 +145,7 @@ Per-phase participating nodes. Node identifiers are the explicit `node_id` value
 | Phase | Construct | Nodes |
 |---|---|---|
 | 1 — Strategic Core | `Graph`, fan-out/fan-in | `discovery_auditor`, `purpose_vision_writer`, `values_articulator`, `audience_segmenter`, `differentiation_mapper` → `positioning_synthesizer` |
-| 2 — Narrative & Messaging | `Graph`, linear + read-only context | `Storyteller` → `ArchetypeAnalyst` → `TaglineWriter` → `MessageMapper` → `PersonaBuilder` → `VoicePrinciplesDrafter` (single-predecessor chain; each `structured_output` is own-field-only, reading upstream output as read-only context) |
+| 2 — Narrative & Messaging | `Graph`, pure fan-out (no compositor) | `Storyteller`, `ArchetypeAnalyst`, `TaglineWriter`, `MessageMapper`, `PersonaBuilder`, `VoicePrinciplesDrafter` (six parallel terminal nodes; merged in Python via `_PHASE2_NODE_MERGE`) |
 | 3 — Visual & Expressive Identity | `Graph`, diverge fan-out + converge fan-out (no compositor) | `MoodBoardConceptualist_{Editorial,Minimalist,Bold}` → `converge_decider` → 7-way fan-out (`logo_specifier`, `color_system_builder`, `typography_builder`, `iconography_director`, `photography_video_director`, `voice_tone_builder`, `design_system_codifier`) (seven parallel terminal nodes; merged in Python via `_PHASE3_NODE_MERGE`) |
 | 4 — Channel Activation | `Graph`, pure fan-out (no compositor) | `brand_experience_principler`, `website_guide`, `social_guide`, `email_guide`, `events_guide`, `partnerships_guide`, `internal_guide`, `brand_architecture_builder`, `brand_in_action_illustrator` (nine parallel terminal nodes; merged in Python via `_PHASE4_NODE_MERGE`) |
 | 5 — Governance & Evolution | `Graph`, pure fan-out (no compositor) | `ownership_definer`, `approval_workflow_designer`, `asset_wiki_planner`, `training_planner`, `kpi_designer`, `evolution_framer`, `brand_rules_codifier` (seven parallel terminal nodes; merged in Python via `_PHASE5_NODE_MERGE`) |
@@ -213,19 +221,20 @@ Output model: `StrategicCoreOutput`
 | `differentiation_mapper` | Maps competitive differentiation pillars with proof points | `differentiation_pillars` |
 | `positioning_synthesizer` | Synthesises the fragments above into a positioning statement and brand promise | `positioning_statement`, `brand_promise` |
 
-### Phase 2 — Narrative & Messaging (Graph: linear + read-only context)
+### Phase 2 — Narrative & Messaging (Graph: pure fan-out, no compositor)
 
 Output model: `NarrativeMessagingOutput`
 
 Phase 2 is a Graph (not a Swarm). Agents use `structured_output=`, which stops
 Strands' agent loop after the structured payload is produced, so tool-based
-`handoff_to_agent` cannot sequence them. Edges are a single-predecessor chain
-(multi-in edges are OR-ready in Strands and would race). Each specialist's
-`structured_output` model is own-field-only (Story 5b Step 1): the
-single-predecessor edge into a node is what makes Strands auto-populate
-`Inputs from previous nodes` with the immediate predecessor's typed output,
-which downstream specialists read as read-only context rather than
-re-emitting.
+`handoff_to_agent` cannot sequence them. All six specialists are both entry
+points and terminal nodes, with no edges between them: they run concurrently
+and none receives another's output — each prompt draws only on the branding
+mission and the upstream `StrategicCoreOutput` (Phase 1), not on any sibling
+Phase 2 fragment. Each specialist's `structured_output` model is
+own-field-only (Story 5b Step 1); the orchestrator's Phase-2 `merge_fn`
+(`_PHASE2_NODE_MERGE`) assembles the six typed fragments into
+`NarrativeMessagingOutput` in Python, the same pattern Phase 3, 4, and 5 use.
 
 | Agent | Purpose | Output field(s) |
 |-------|---------|------------------|

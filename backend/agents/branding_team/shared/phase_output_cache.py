@@ -20,31 +20,44 @@ guarantee (the same handle stays available to a future consumer), not a
 source of per-conversation cache isolation.
 
 Storage is namespaced (``branding:phase:v1``, suffixed with a build id via
-``with_cache_build_id`` so a deploy cold-starts the cache) and keyed by
-``f"{phase.value}:{input_hash}"``, so every distinct ``(phase, input_hash)``
-pair addresses its own entry rather than sharing one slot per phase. This
-means a ``put`` for a phase under a *new* hash does not evict the *old*
-hash's entry — entries only leave the cache via the shared backend's LRU
-(bounded by ``_MAX_ENTRIES``) or an explicit ``clear_phase_output_cache()``.
-Because the underlying backend is a process-wide singleton per namespace
-(not private to a ``PhaseOutputCache`` instance), every instance in a
-process shares the same entries.
+``shared.cache.pydantic_cache.cache_namespace_for`` so a deploy cold-starts
+the cache) and keyed by ``f"{phase.value}:{input_hash}"`` (a ``.``, not a
+``:`` — ``RedisBackend._require_logical_key`` rejects any logical key
+containing ``:``, so a colon here would make every ``get``/``put`` raise
+under Redis, silently swallowed by ``pydantic_cache``'s fail-open handling
+as a permanent miss/no-op), so every distinct ``(phase, input_hash)`` pair
+addresses its own entry rather than sharing one slot per phase. This means
+a ``put`` for a phase under a *new* hash does not
+evict the *old* hash's entry — entries only leave the cache via the shared
+backend's LRU (bounded by ``_MAX_ENTRIES``) or an explicit
+``clear_phase_output_cache()``. Because the underlying backend is a
+process-wide singleton per namespace (not private to a ``PhaseOutputCache``
+instance), every instance in a process shares the same entries.
+
+The get/validate/corrupt-delete/set/clear mechanics are the team-neutral
+policy in ``shared.cache.pydantic_cache`` (shared with
+``software_engineering_team``'s review-result caches); this module supplies
+only its namespace stem, the per-phase output model lookup, and a fixed
+capacity (``_MAX_ENTRIES``, not env-var-driven here).
 """
 
 from __future__ import annotations
 
-import logging
 from typing import Optional
 
 from pydantic import BaseModel
 
 from branding_team.graphs.shared import PHASE_ORDER, PHASE_OUTPUT_MODELS
 from branding_team.models import BrandPhase
-from shared.cache import get_shared_cache, with_cache_build_id
+from shared.cache import get_shared_cache
+from shared.cache.pydantic_cache import (
+    cache_namespace_for,
+    clear_cache_namespace,
+    get_cached_model,
+    set_cached_model,
+)
 
 __all__ = ["PhaseOutputCache", "clear_phase_output_cache"]
-
-logger = logging.getLogger(__name__)
 
 # Bounded LRU shared by every PhaseOutputCache instance in this process (and,
 # under Redis, across processes). Five phases each address several distinct
@@ -59,11 +72,13 @@ _PHASE_CACHE_NAMESPACE = "branding:phase:v1"
 
 def _phase_cache_namespace() -> str:
     """Shared-cache namespace for branding phase outputs (includes build id)."""
-    return with_cache_build_id(_PHASE_CACHE_NAMESPACE)
+    return cache_namespace_for(_PHASE_CACHE_NAMESPACE)
 
 
 def _cache_key(phase: BrandPhase, input_hash: str) -> str:
-    return f"{phase.value}:{input_hash}"
+    # `.`, not `:` -- RedisBackend._require_logical_key rejects any logical
+    # key containing `:` (see module docstring).
+    return f"{phase.value}.{input_hash}"
 
 
 def clear_phase_output_cache() -> None:
@@ -74,8 +89,11 @@ def clear_phase_output_cache() -> None:
           when this function returns (best-effort across Redis). Intended
           for tests (the cache persists across ``PhaseOutputCache``
           instances by design) and for callers that must force a cold run.
+          A cache backend error is caught and logged rather than propagated
+          — fails open, so a broken backend never breaks a caller (e.g. a
+          test-teardown fixture) forcing a cold run.
     """
-    get_shared_cache(_phase_cache_namespace()).clear()
+    clear_cache_namespace("branding-phase", lambda: get_shared_cache(_phase_cache_namespace()))
 
 
 class PhaseOutputCache:
@@ -117,21 +135,8 @@ class PhaseOutputCache:
         self._validate_phase(phase)
         cache = get_shared_cache(_phase_cache_namespace())
         key = _cache_key(phase, input_hash)
-        raw = cache.get(key)
-        if raw is None:
-            return None
-
         model_cls = PHASE_OUTPUT_MODELS[phase]
-        try:
-            return model_cls.model_validate_json(raw)
-        except Exception:
-            logger.warning(
-                "corrupt phase-output cache entry for %s; evicting and treating as a miss",
-                key,
-                exc_info=True,
-            )
-            cache.delete(key)
-            return None
+        return get_cached_model("branding-phase", cache, key, model_cls)
 
     def put(self, phase: BrandPhase, input_hash: str, output: BaseModel) -> None:
         """Store ``output`` for ``phase``/``input_hash``.
@@ -151,4 +156,4 @@ class PhaseOutputCache:
         self._validate_phase(phase)
         cache = get_shared_cache(_phase_cache_namespace())
         key = _cache_key(phase, input_hash)
-        cache.set(key, output.model_dump_json().encode("utf-8"), max_entries=_MAX_ENTRIES)
+        set_cached_model("branding-phase", cache, key, output, capacity=_MAX_ENTRIES)

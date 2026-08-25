@@ -6,6 +6,7 @@ import { StrategyLabDestructiveActionsService } from './strategy-lab-destructive
 import { StrategyLabRunService } from './strategy-lab-run.service';
 import { InvestmentApiService } from './investment-api.service';
 import { NotificationService } from '../core/notification.service';
+import { ConfirmDestructiveService } from '../shared/confirm-destructive.service';
 import { createRunServiceStub, type RunServiceStub } from '../testing/strategy-lab-run-service.stub';
 import type { StrategyLabRecord } from '../models';
 
@@ -42,6 +43,7 @@ describe('StrategyLabDestructiveActionsService', () => {
     TestBed.configureTestingModule({
       providers: [
         StrategyLabDestructiveActionsService,
+        ConfirmDestructiveService,
         { provide: StrategyLabRunService, useValue: runService },
         { provide: InvestmentApiService, useValue: apiSpy },
         { provide: NotificationService, useValue: notifySpy },
@@ -65,7 +67,7 @@ describe('StrategyLabDestructiveActionsService', () => {
 
       expect(dialogSpy.open).toHaveBeenCalledTimes(1);
       expect(dialogSpy.open.mock.calls[0][1].data).toMatchObject({ variant: 'danger' });
-      expect(apiSpy.deleteStrategyLabRecord).toHaveBeenCalledWith('rec-1');
+      expect(apiSpy.deleteStrategyLabRecord).toHaveBeenCalledWith('rec-1', expect.anything());
       expect(refreshes).toHaveLength(1);
       expect(notifySpy.saved).toHaveBeenCalledWith('Strategy lab run deleted.');
       expect(service.deletingLabRecordId()).toBeNull();
@@ -84,7 +86,7 @@ describe('StrategyLabDestructiveActionsService', () => {
       const message = dialogSpy.open.mock.calls[0][1].data.message as string;
       expect(message).not.toContain('undefined');
       expect(message).toContain('Delete this strategy lab run?\n\n\n\nThis removes the record');
-      expect(apiSpy.deleteStrategyLabRecord).toHaveBeenCalledWith('rec-2');
+      expect(apiSpy.deleteStrategyLabRecord).toHaveBeenCalledWith('rec-2', expect.anything());
     });
 
     it('does not delete when the dialog is cancelled', () => {

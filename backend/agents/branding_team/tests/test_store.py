@@ -492,6 +492,28 @@ def test_attach_conversation_reattaching_same_brand_is_ok() -> None:
     assert updated_brand.mission.company_name == "Acme Inc"
 
 
+def test_attach_conversation_without_mission_preserves_existing_mission() -> None:
+    """Calling attach_conversation with mission=None (the attach_conversation_to_brand
+    endpoint's path) must not clobber the conversation's current mission with a
+    caller's pre-lock snapshot — it leaves mission_json exactly as this same
+    locked transaction just read it."""
+    store = BrandingStore()
+    conv_store = BrandingConversationStore()
+    client = store.create_client("Acme")
+    brand = store.create_brand(client.id, make_mission(company_name="Acme Inc"))
+    assert brand is not None
+    cid = conv_store.create(mission=make_mission(company_name="Acme Live Mission"))
+
+    result, updated_brand = store.attach_conversation(client.id, brand.id, cid)
+    assert result is AttachConversationResult.OK
+    assert updated_brand is not None
+    assert updated_brand.conversation_id == cid
+
+    state = conv_store.get_state(cid)
+    assert state is not None
+    assert state.mission.company_name == "Acme Live Mission"
+
+
 def test_attach_conversation_unknown_brand() -> None:
     """attach_conversation reports BRAND_NOT_FOUND when the brand row doesn't
     exist for the given client, and rolls back the conversation write so the

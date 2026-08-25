@@ -4,7 +4,6 @@ masking, per-entry guards, CRUD, reorder, and the Postgres-required contract."""
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -16,26 +15,8 @@ _agents = _backend / "agents"
 if str(_agents) not in sys.path:
     sys.path.insert(0, str(_agents))
 
-from fastapi import FastAPI  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
-
-from llm_service import provider_store as ps  # noqa: E402
 from unified_api.routes import llm_config as route  # noqa: E402
-
-
-def _entry(entry_id, *, provider="ollama", label="e", api_key="", limit=False, base_url=None):
-    return ps.ProviderEntry(
-        id=entry_id,
-        label=label,
-        provider=provider,
-        model="m",
-        base_url=base_url if base_url is not None else ("http://localhost:11434" if provider == "ollama" else ""),
-        api_key=api_key,
-        sort_order=entry_id,
-        limit_exceeded=limit,
-        limit_type="rate" if limit else "",
-        reset_at=datetime(2026, 6, 30, tzinfo=timezone.utc) if limit else None,
-    )
+from unified_api.tests.conftest import _entry  # noqa: E402
 
 
 def _find_op(state, op_name):
@@ -44,71 +25,6 @@ def _find_op(state, op_name):
     matches = [op for op in state["ops"] if isinstance(op, tuple) and op[0] == op_name]
     assert len(matches) == 1, f"expected exactly one {op_name!r} op, got {len(matches)}: {state['ops']!r}"
     return matches[0]
-
-
-@pytest.fixture
-def app_client(monkeypatch):
-    """TestClient over a minimal app with provider_store + caches stubbed."""
-    state: dict = {"entries": [], "ops": []}
-
-    monkeypatch.setattr(route, "is_postgres_enabled", lambda: True)
-    monkeypatch.setattr(route, "resolve_storage_status", lambda *a, **k: "available")
-    monkeypatch.setattr(route, "clear_client_cache", lambda: state["ops"].append("clear_clients"))
-    monkeypatch.setattr(route.runtime_config, "clear_cache", lambda: None)
-
-    # provider_store stubs (no DB).
-    monkeypatch.setattr(route.provider_store, "clear_cache", lambda: None)
-    monkeypatch.setattr(route.provider_store, "load_ordered_entries", lambda *a, **k: list(state["entries"]))
-
-    def fake_create(**kw):
-        state["ops"].append(("create", kw))
-        e = _entry(99, provider=kw["provider"], label=kw["label"], api_key=kw.get("api_key", ""))
-        state["entries"].append(e)
-        return e
-
-    def fake_get(entry_id):
-        return next((e for e in state["entries"] if e.id == entry_id), None)
-
-    def fake_update(entry_id, **kw):
-        state["ops"].append(("update", entry_id, kw))
-        return fake_get(entry_id)
-
-    def fake_delete(entry_id):
-        e = fake_get(entry_id)
-        if e is None:
-            return False
-        state["entries"].remove(e)
-        return True
-
-    def fake_reorder(ids):
-        # Mirror the real store: validate the permutation atomically and raise on
-        # mismatch (the route maps ReorderMismatchError -> 400).
-        live = {e.id for e in state["entries"]}
-        if len(ids) != len(live) or set(ids) != live:
-            raise ps.ReorderMismatchError("not a permutation")
-        state["ops"].append(("reorder", list(ids)))
-
-    monkeypatch.setattr(route.provider_store, "create_entry", lambda **kw: fake_create(**kw))
-    monkeypatch.setattr(route.provider_store, "get_entry", fake_get)
-    monkeypatch.setattr(route.provider_store, "update_entry", lambda i, **kw: fake_update(i, **kw))
-    monkeypatch.setattr(route.provider_store, "delete_entry", fake_delete)
-    monkeypatch.setattr(route.provider_store, "reorder", fake_reorder)
-
-    for var in (
-        "LLM_PROVIDER",
-        "LLM_MODEL",
-        "ANTHROPIC_API_KEY",
-        "LLM_CLAUDE_API_KEY",
-        "OLLAMA_API_KEY",
-        "LLM_OLLAMA_API_KEY",
-        "LLM_BASE_URL",
-    ):
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.delenv("POSTGRES_HOST", raising=False)
-
-    app = FastAPI()
-    app.include_router(route.router)
-    return TestClient(app), state
 
 
 def test_list_masks_keys_and_reports_state(app_client):
@@ -129,7 +45,7 @@ def test_list_masks_keys_and_reports_state(app_client):
 def test_list_returns_endpoint_id_for_runpod_entries_only(app_client):
     client, state = app_client
     state["entries"] = [
-        _entry(1, provider="runpod", api_key="k", base_url="https://api.runpod.ai/v2/abc123/openai/v1"),
+        _entry(1, provider="runpod", api_key="k", base_url="https://api.runpod.ai/v2/abc123/openai"),
         _entry(2, provider="ollama"),
     ]
     resp = client.get("/api/llm-config/providers")
@@ -451,9 +367,11 @@ def test_create_runpod_success_builds_base_url_and_trims_key(app_client, monkeyp
     kw = _find_op(state, "create")[1]
     # The endpoint_id is turned into the canonical OpenAI-compatible base URL, the key
     # is persisted whitespace-trimmed (matching the update path), and the label defaults.
-    assert kw["base_url"] == "https://api.runpod.ai/v2/abc123/openai/v1"
+    assert kw["base_url"] == "https://api.runpod.ai/v2/abc123/openai"
     assert kw["api_key"] == "sk-runpod"
     assert kw["label"] == "RunPod"
+    # RunPod entries never store a model — the serverless endpoint is pre-configured.
+    assert kw["model"] == ""
 
 
 def test_create_runpod_ignores_stray_base_url(app_client, monkeypatch):
@@ -468,6 +386,20 @@ def test_create_runpod_ignores_stray_base_url(app_client, monkeypatch):
     assert resp.status_code == 200
 
 
+def test_create_runpod_ignores_model(app_client, monkeypatch):
+    """RunPod serverless endpoints are pre-configured with a model; any client-supplied
+    model value is ignored and stored as empty."""
+    client, state = app_client
+    _patch_probe(monkeypatch)
+    resp = client.post(
+        "/api/llm-config/providers",
+        json={"provider": "runpod", "api_key": "k", "endpoint_id": "abc123", "model": "some-model"},
+    )
+    assert resp.status_code == 200
+    kw = _find_op(state, "create")[1]
+    assert kw["model"] == ""
+
+
 def test_create_runpod_probe_http_error_propagates_remote_status(app_client, monkeypatch):
     """A 4xx/5xx from RunPod is surfaced with the remote status code, not a blanket 400."""
     from unittest.mock import Mock
@@ -475,7 +407,7 @@ def test_create_runpod_probe_http_error_propagates_remote_status(app_client, mon
     import httpx
 
     client, _state = app_client
-    request = httpx.Request("GET", "https://api.runpod.ai/v2/abc123/openai/v1/models")
+    request = httpx.Request("GET", "https://api.runpod.ai/v2/abc123/health")
 
     # Drive the real probe through a mocked httpx.AsyncClient whose response raises the
     # status error _probe_runpod_endpoint is expected to catch and remap. The route only
@@ -523,7 +455,7 @@ def test_update_runpod_endpoint_id_rebuilds_base_url_without_probe(app_client, m
     resp = client.put("/api/llm-config/providers/1", json={"endpoint_id": "xyz789"})
     assert resp.status_code == 200
     kw = _find_op(state, "update")[2]
-    assert kw["base_url"] == "https://api.runpod.ai/v2/xyz789/openai/v1"
+    assert kw["base_url"] == "https://api.runpod.ai/v2/xyz789/openai"
     # provider was omitted from the request body, so the route passes through the
     # None sentinel rather than re-resolving it — provider_store.update_entry treats
     # None as "leave this column untouched", so the stored provider stays "runpod".
@@ -560,7 +492,9 @@ def test_update_switch_to_runpod_with_endpoint_id_succeeds(app_client):
     assert resp.status_code == 200
     kw = _find_op(state, "update")[2]
     assert kw["provider"] == "runpod"
-    assert kw["base_url"] == "https://api.runpod.ai/v2/abc123/openai/v1"
+    assert kw["base_url"] == "https://api.runpod.ai/v2/abc123/openai"
+    # Model is cleared when switching to RunPod — serverless endpoints are pre-configured.
+    assert kw["model"] == ""
 
 
 def test_update_runpod_ignores_stray_base_url_without_endpoint_id(app_client):
@@ -613,45 +547,5 @@ def test_probe_runpod_endpoint_success_returns_none(monkeypatch):
     mock_client = _patch_async_client_get(monkeypatch, get_return=mock_response)
     assert asyncio.run(route._probe_runpod_endpoint("abc123", "k")) is None
     call = mock_client.get.call_args
-    assert call.args[0].endswith("/v2/abc123/openai/v1/models")
+    assert call.args[0].endswith("/v2/abc123/health")
     assert call.kwargs["headers"] == {"Authorization": "Bearer k"}
-
-
-# --------------------------------------------------------------------------- #
-# /ollama-models — the browse utility endpoint (kept; single-provider config    #
-# GET/PUT was removed).                                                         #
-# --------------------------------------------------------------------------- #
-
-
-def test_ollama_models_live_listing(app_client, monkeypatch):
-    """A non-empty live listing from /api/tags is returned verbatim with source=live."""
-    client, _state = app_client
-    monkeypatch.setattr(route, "list_ollama_models", lambda: ["deepseek-v4-flash:cloud", "qwen3-coder:480b-cloud"])
-    resp = client.get("/api/llm-config/ollama-models")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["source"] == "live"
-    assert body["models"] == ["deepseek-v4-flash:cloud", "qwen3-coder:480b-cloud"]
-    # base_url reflects the resolved effective endpoint (cloud default with no env).
-    assert body["base_url"] == "https://ollama.com"
-
-
-def test_ollama_models_falls_back_to_curated(app_client, monkeypatch):
-    """An empty live listing degrades to the curated suggestions (source=fallback)."""
-    client, _state = app_client
-    monkeypatch.setattr(route, "list_ollama_models", lambda: [])
-    resp = client.get("/api/llm-config/ollama-models")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["source"] == "fallback"
-    assert body["models"] == list(route._OLLAMA_MODEL_SUGGESTIONS)
-    assert body["models"]  # non-empty curated fallback
-
-
-def test_ollama_models_base_url_reflects_resolved_endpoint(app_client, monkeypatch):
-    """The reported base_url tracks the resolved Ollama endpoint (env override here)."""
-    client, _state = app_client
-    monkeypatch.setenv("LLM_BASE_URL", "http://localhost:11434")
-    monkeypatch.setattr(route, "list_ollama_models", lambda: ["deepseek-v4-flash:cloud"])
-    body = client.get("/api/llm-config/ollama-models").json()
-    assert body["base_url"] == "http://localhost:11434"

@@ -20,12 +20,15 @@ frontend build path installs dependencies on demand, so a fresh worktree
 without ``node_modules`` would fail its first build — :meth:`prepare` symlinks
 an existing ``node_modules`` (repo root or ``frontend/``, mirroring
 ``software_engineering_team``'s own frontend-directory resolution) into each
-worktree at the same relative path. This assumes at most one worker per
-*stack kind* mutates shared/global state per round — true for the default
-2-worker roster (``frontend_v2``/``backend_v2``, disjoint stacks); a backend
-worker's dependency install (``pip install``) is a global-environment
-mutation, not per-worktree, so a future roster with 2+ same-stack workers
-running concurrently would need that addressed separately.
+worktree at the same relative path. This is deliberately a *shared, read-only*
+resource: every worktree gets its own independent symlink to the one
+repo-level ``node_modules`` directory, which is safe for any number of
+worktrees — including 2+ concurrent same-stack (e.g. ``frontend_v2-1``,
+``frontend_v2-2``) workers — because nothing on the swarm's own build/lint
+path installs into it (no ``npm install``/``npm ci``). The one genuine
+global-environment mutation is the backend worker's dependency install
+(``pip install``), which is not per-worktree; guarding that is tracked
+separately and out of scope here.
 """
 
 from __future__ import annotations

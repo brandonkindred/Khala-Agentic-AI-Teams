@@ -21,11 +21,12 @@ import { pollJobStatus } from '../../services/job-status-poller';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
 import { CodingTeamMonitorComponent } from '../coding-team-monitor/coding-team-monitor.component';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
+import { OutOfScopeIssuesComponent } from './out-of-scope-issues/out-of-scope-issues.component';
 import {
   PendingQuestionsComponent,
   type AnswersSubmittedStatus,
 } from '../pending-questions/pending-questions.component';
-import type { GitHubIssueItem, GitHubRepoItem, RunGitHubIssueResponse } from '../../models/integrations.model';
+import type { GitHubIssueItem, GitHubRepoItem, OutOfScopeProposalItem, RunGitHubIssueResponse } from '../../models/integrations.model';
 import type { CodingTeamJobListItem, CodingTeamJobStatus } from '../../models/coding-team.model';
 import type { TeamAssistantFieldSpec } from '../../models/team-assistant.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
@@ -123,6 +124,7 @@ interface IssueRowVm {
     HealthIndicatorComponent,
     CodingTeamMonitorComponent,
     TeamAssistantChatComponent,
+    OutOfScopeIssuesComponent,
     PendingQuestionsComponent,
     InlineBannerComponent,
   ],
@@ -136,7 +138,19 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   private readonly notifications = inject(NotificationService);
 
   /** Which single view is visible. The page opens on the job Runs panel. */
-  activeView: 'chat' | 'github' | 'jobs' = 'jobs';
+  private _activeView: 'chat' | 'github' | 'jobs' | 'issues' = 'jobs';
+
+  get activeView(): 'chat' | 'github' | 'jobs' | 'issues' {
+    return this._activeView;
+  }
+
+  set activeView(view: 'chat' | 'github' | 'jobs' | 'issues') {
+    this._activeView = view;
+    // Auto-load out-of-scope issues when switching to the Issues tab with a repo selected.
+    if (view === 'issues' && this.selectedRepo && this.oosProposals.length === 0 && !this.oosLoading) {
+      this.loadOutOfScopeIssues();
+    }
+  }
 
   // Embedded assistant chat configuration — named properties rather than template literals, so the
   // chat panel's wiring lives in one place.
@@ -261,6 +275,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   activityAnnouncement = '';
   /** Monotonic counter so each activity cue mutates the live-region text (identical strings are not re-announced). */
   private activityAnnounceSeq = 0;
+
+  // Out-of-scope issues state (Issues tab)
+  oosProposals: OutOfScopeProposalItem[] = [];
+  oosLoading = false;
+  oosFiling = false;
+  oosError: string | null = null;
 
   /**
    * Preconditions: none.
@@ -1253,5 +1273,77 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     if (event.job_id) {
       this.notifications.saved(`Coding job queued — id ${event.job_id}.`);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Out-of-scope issues (Issues tab)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Load all unfiled out-of-scope issue proposals for the currently selected repo.
+   *
+   * Preconditions: `selectedRepo` is set (a repo was expanded in the GitHub tab).
+   * Postconditions: `oosProposals` is populated with unfiled proposals from all
+   * reviews for this repo, or `oosError` is set on failure.
+   */
+  loadOutOfScopeIssues(): void {
+    const repo = this.selectedRepo;
+    if (!repo) return;
+
+    this.oosLoading = true;
+    this.oosError = null;
+    this.integrationsApi
+      .getOutOfScopeIssues(repo.owner, repo.name)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (resp) => {
+          this.oosProposals = resp.proposals;
+          this.oosLoading = false;
+        },
+        error: (err) => {
+          this.oosError = extractErrorDetail(err, 'Failed to load out-of-scope issues.');
+          this.oosLoading = false;
+        },
+      });
+  }
+
+  /**
+   * File selected out-of-scope proposals as enhanced GitHub issues.
+   *
+   * Preconditions: `compositeIds` is a non-empty array of "job_id:proposal_id" strings.
+   * Postconditions: calls the backend to file/merge issues, then reloads the list.
+   */
+  onFileOutOfScopeIssues(compositeIds: string[]): void {
+    const repo = this.selectedRepo;
+    if (!repo || compositeIds.length === 0) return;
+
+    this.oosFiling = true;
+    this.oosError = null;
+    this.integrationsApi
+      .fileOutOfScopeIssues(repo.owner, repo.name, compositeIds)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (resp) => {
+          this.oosFiling = false;
+          const count = resp.created.length;
+          const merged = resp.created.filter((c) => c.merged_into_existing).length;
+          const created = count - merged;
+          const parts: string[] = [];
+          if (created > 0) parts.push(`${created} issue(s) created`);
+          if (merged > 0) parts.push(`${merged} merged into existing`);
+          if (parts.length > 0) {
+            this.notifications.saved(parts.join(', ') + '.');
+          }
+          if (resp.errors.length > 0) {
+            this.oosError = resp.errors.join('; ');
+          }
+          // Reload to reflect the updated state
+          this.loadOutOfScopeIssues();
+        },
+        error: (err) => {
+          this.oosFiling = false;
+          this.oosError = extractErrorDetail(err, 'Failed to file issues.');
+        },
+      });
   }
 }

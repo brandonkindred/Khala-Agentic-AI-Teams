@@ -11,6 +11,7 @@ from security_agent import CybersecurityExpertAgent
 from security_agent.models import SecurityInput, SecurityOutput
 
 from llm_service.clients.dummy import DummyLLMClient
+from shared.dev_models.models import SystemArchitecture
 
 
 def _input(**overrides: object) -> SecurityInput:
@@ -35,8 +36,6 @@ def test_security_agent_default_run_returns_security_output() -> None:
 
 def test_security_agent_with_context_and_architecture() -> None:
     """Optional context and architecture fields should not crash the pipeline."""
-    from shared.dev_models.models import SystemArchitecture
-
     arch = SystemArchitecture(
         overview="Tiny microservice",
         architecture_document="# Arch\n\nSingle FastAPI service.",
@@ -212,3 +211,32 @@ def test_security_agent_blocks_on_capitalized_severity() -> None:
     agent = CybersecurityExpertAgent(_CapitalizedClient())
     result = agent.run(_input())
     assert result.approved is False
+
+
+# ---------------------------------------------------------------------------
+# _build_user_prompt: shared file context as a stable prefix
+# ---------------------------------------------------------------------------
+
+
+def test_user_prompt_contains_file_context_and_role_instructions() -> None:
+    """The user prompt carries both the file-context prefix (language + code
+    under review) and the role instructions. Untrusted code must stay in the
+    user message, not be elevated to system-level instructions."""
+    prompt = CybersecurityExpertAgent._build_user_prompt(
+        _input(
+            context="Runs behind reverse proxy",
+            architecture=SystemArchitecture(overview="layered"),
+        )
+    )
+    # Role instructions are present
+    assert "Review the code for security vulnerabilities" in prompt
+    assert "**Task:**" in prompt
+    assert "**Context:**" in prompt
+    assert "**Architecture:**" in prompt
+    # File-context prefix IS in the user prompt (untrusted code stays here)
+    assert "os.system(cmd)" in prompt
+    assert "**Language:**" in prompt
+    # DummyLLMClient's pattern-anchor regression guard: both words must still
+    # appear somewhere in the prompt (order-independent substring match).
+    assert "security" in prompt.lower()
+    assert "vulnerabilities" in prompt.lower()

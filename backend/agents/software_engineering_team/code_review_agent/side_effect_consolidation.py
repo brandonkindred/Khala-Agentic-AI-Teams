@@ -331,6 +331,15 @@ def _merge_group(
           removed. A single surviving value is used verbatim;
           multiple values are joined as a plain bulleted list (no preamble).
         - ``pre_existing`` is True only when every issue in the group is.
+        - ``omission`` is True when any issue in the group is (OR across the
+          group, the inverse quantifier from ``pre_existing``'s AND): a
+          combined finding stays a required-add/modify signal if any member
+          flagged one. This composes correctly with ``pre_existing``'s AND
+          without extra reconciliation -- ``CodeReviewIssue`` rejects
+          ``omission=True and pre_existing=True`` on every group member (see
+          ``_omission_implies_in_scope``), so a member with ``omission=True``
+          necessarily contributes ``pre_existing=False`` to the AND,
+          guaranteeing the merged pair can never itself be invalid.
         - Every other ``CodeReviewIssue`` field (including ``title``) is
           copied from the highest-severity member.
     """
@@ -401,6 +410,7 @@ def _merge_group(
             "description": description,
             "suggestion": suggestion,
             "pre_existing": all(i.pre_existing for i in group),
+            "omission": any(i.omission for i in group),
         }
     )
     return CodeReviewIssue.model_validate(payload)

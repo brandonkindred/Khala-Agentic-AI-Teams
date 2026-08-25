@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
@@ -100,7 +101,9 @@ class DevOpsTaskClarifierAgent(DevOpsSingleShotAgent):
             )
         if (
             "production" in spec.platform_scope.environments
-            and "approval" not in " ".join(spec.scope.included).lower()
+            # Word-boundary match, not substring: a plain "in" check would let
+            # "disapproval"/"preapproval" false-satisfy the approval gate.
+            and not re.search(r"\bapproval\b", " ".join(spec.scope.included).lower())
         ):
             gaps.append(
                 ClarificationGap(

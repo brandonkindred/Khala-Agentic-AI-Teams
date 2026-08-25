@@ -7,6 +7,7 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { IntegrationsApiService } from '../../../services/integrations-api.service';
 import { InlineBannerComponent } from '../../../shared/inline-banner/inline-banner.component';
 import type { CodeReviewTranscriptEntry } from '../../../models/integrations.model';
+import { extractErrorDetail } from '../../../shared/extract-error-detail';
 
 /** Data handed to the dialog: identifies the review whose transcript to load. */
 export interface CodeReviewTranscriptDialogData {
@@ -54,7 +55,7 @@ export class CodeReviewTranscriptDialogComponent implements OnInit {
         this.loading.set(false);
       },
       error: (err) => {
-        this.error.set(err?.error?.detail ?? err?.message ?? 'Failed to load transcript');
+        this.error.set(extractErrorDetail(err, 'Failed to load transcript'));
         this.loading.set(false);
       },
     });

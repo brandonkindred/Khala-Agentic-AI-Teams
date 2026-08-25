@@ -38,6 +38,9 @@ from llm_service.structured import (
     complete_json_response_text,
     complete_validated,
 )
+from software_engineering_team.shared.system_prompt_assembly import (
+    build_system_prompt_with_content,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -412,6 +415,18 @@ def complete_validated_via_reasoning_local(
     )
 
 
+def _build_reasoning_agent_system_prompt(
+    reasoning_system_prompt: str, system_prompt_content: list[Any] | None
+) -> "str | list[Any]":
+    """Combine the persona text with extra system-content segments, if any.
+
+    Delegates to :func:`shared.system_prompt_assembly.build_system_prompt_with_content`
+    — preserved as a module-level name for backward compatibility with
+    existing call sites within this module.
+    """
+    return build_system_prompt_with_content(reasoning_system_prompt, system_prompt_content)
+
+
 def run_agent_via_reasoning(
     *,
     model: Any,
@@ -421,6 +436,7 @@ def run_agent_via_reasoning(
     parse: Callable[[str], T],
     tools: list | None = None,
     reasoning_think: bool | str | None = True,
+    system_prompt_content: list[Any] | None = None,
     formatting_system_prompt: str | None = None,
     agent_key: str = "code_review",
     conversation_manager: Any | None = None,
@@ -453,6 +469,9 @@ def run_agent_via_reasoning(
         and the formatting pass's raw reply (JSON text, the unparsed body
         when ``complete_json`` raises ``LLMJsonParseError``, or
         ``partial_content`` when it raises ``LLMTruncatedError``).
+        ``system_prompt_content``, when given, is a non-empty list of
+        system-content segments (see :func:`_build_reasoning_agent_system_prompt`)
+        attached to the reasoning ``Agent`` only — never the formatting pass.
 
     Postconditions:
         Returns ``parse``'s result. Tools are attached only to call 1.
@@ -467,7 +486,12 @@ def run_agent_via_reasoning(
         call. ``on_formatting`` is invoked after that call returns or raises
         ``LLMJsonParseError`` / ``LLMTruncatedError`` (so a malformed or
         truncated reply is still observable) and before ``parse``; observer
-        exceptions are swallowed.
+        exceptions are swallowed. When ``system_prompt_content`` is given, the
+        reasoning ``Agent``'s system content is the persona text plus those
+        segments, in order (see :func:`_build_reasoning_agent_system_prompt`);
+        omitted (the default, and every caller as of this parameter's
+        introduction), behavior is unchanged from before this parameter
+        existed.
     """
     _require_non_empty("reasoning_prompt", reasoning_prompt)
     _require_non_empty("reasoning_system_prompt", reasoning_system_prompt)
@@ -481,7 +505,9 @@ def run_agent_via_reasoning(
     )
     reasoning_agent_kwargs: dict[str, Any] = {
         "model": text_model,
-        "system_prompt": reasoning_system_prompt,
+        "system_prompt": _build_reasoning_agent_system_prompt(
+            reasoning_system_prompt, system_prompt_content
+        ),
         "tools": tools or [],
     }
     if conversation_manager is not None:

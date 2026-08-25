@@ -31,16 +31,19 @@ from __future__ import annotations
 
 import logging
 import time
+from abc import abstractmethod
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Optional, Tuple
 
 from llm_service import LLMClient
 from shared.repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
 from software_engineering_team.shared.stack_profile import StackProfile
+from software_engineering_team.shared.task_utils import merge_extra_requirements
 from software_engineering_team.shared.team_lead_base import make_job_updater
 from software_engineering_team.shared.tool_agent_runners import build_tool_runners
 from software_engineering_team.shared.v2_models import MicrotaskReviewFailedError, Phase
+from software_engineering_team.shared.v2_team_config import V2TeamConfig
 
 
 class BaseV2DevelopmentAgent:
@@ -57,9 +60,15 @@ class BaseV2DevelopmentAgent:
     functions, review classes, git-branch tool-agent kind) into
     ``_run_development_workflow``.
 
-    Invariants: instance state is limited to ``llm`` and ``_repo_context_cache``,
-    so a subclass built via ``__new__`` and given those two attributes behaves
-    identically to a constructed one.
+    Invariants: this base's own instance state is limited to ``llm`` and
+    ``_repo_context_cache``, so ``BaseV2DevelopmentAgent`` itself (and a
+    subclass that adds no instance state of its own, e.g.
+    ``BackendDevelopmentAgent``/``FrontendDevelopmentAgent``) built via
+    ``__new__`` and given those two attributes behaves identically to a
+    constructed one. A subclass that extends instance state (e.g.
+    :class:`ConfigDrivenV2DevelopmentAgent`'s ``self.config``) documents its
+    own, wider construction contract instead — this invariant does not carry
+    over to it automatically.
     """
 
     PROFILE: StackProfile
@@ -367,7 +376,7 @@ class BaseV2DevelopmentAgent:
         and the one real per-team difference (``review_label``) is resolved
         there rather than duplicated here. ``review_deps`` (a
         ``ReviewDependencies``, itself defined once in ``shared.phases.execution``
-        and reused verbatim by both teams' ``phases/execution.py``) and
+        and re-exported verbatim by both teams' ``phases/_profile.py``) and
         ``review_config`` (the team's already-resolved ``MicrotaskReviewConfig``,
         i.e. ``review_config or MicrotaskReviewConfig()`` -- left to the caller
         since that class differs per team) are passed in fully constructed.
@@ -764,8 +773,9 @@ class BaseV2DevelopmentAgent:
           former per-team ``run_workflow`` bodies. On success, threads through
           bookkeeping, documentation, and deliver exactly as
           ``_run_deliver_and_finalize`` documents, and returns ``result``.
-          Never raises on its own; propagates only what the injected
-          callables raise outside their documented failure paths.
+          Propagates exceptions from ``self._stack_profile()`` and from the
+          injected callables when they raise outside their documented
+          failure paths; otherwise does not raise on its own.
         """
         self._repo_context_cache = repo_context_cache
         task_id = task.id
@@ -893,10 +903,13 @@ class BaseV2DevelopmentAgent:
         )
 
         # ── Deliver ─────────────────────────────────────────────────
-        # ``PROFILE`` is a concrete-subclass class attribute (Backend/FrontendDevelopmentAgent);
-        # absent on a bare ``BaseV2DevelopmentAgent`` (e.g. unit tests), where the labels are
-        # unused anyway since such callers also don't pass build_verifier/linting_tool_agent.
-        stack_profile = getattr(self, "PROFILE", None)
+        # ``_stack_profile()`` resolves the concrete class-level ``PROFILE``
+        # (Backend/FrontendDevelopmentAgent) or, for
+        # ``ConfigDrivenV2DevelopmentAgent``, ``self.config.stack_profile``;
+        # ``None`` only on a bare ``BaseV2DevelopmentAgent`` (e.g. unit
+        # tests), where the labels below default to "" and go unused since
+        # such callers also don't pass build_verifier/linting_tool_agent.
+        stack_profile = self._stack_profile()
         self._run_deliver_and_finalize(
             task_id=task_id,
             repo_path=repo_path,
@@ -953,6 +966,20 @@ class BaseV2DevelopmentAgent:
         """
         return cls.PROFILE.detect_tooling(repo_path)
 
+    def _stack_profile(self) -> Optional[StackProfile]:
+        """Return this instance's ``StackProfile``, if it has one.
+
+        Preconditions: none.
+        Postconditions: returns the concrete subclass's class-level
+          ``PROFILE`` (e.g. ``BackendDevelopmentAgent``/
+          ``FrontendDevelopmentAgent``), or ``None`` on a bare
+          ``BaseV2DevelopmentAgent`` (e.g. unit tests) that sets no
+          ``PROFILE``. Subclasses whose stack profile isn't a class
+          attribute (e.g. :class:`ConfigDrivenV2DevelopmentAgent`, which
+          resolves it from ``self.config`` instead) override this.
+        """
+        return getattr(self, "PROFILE", None)
+
     def _read_existing_code(self, repo_path: Path) -> str:
         """Return the repo briefing, consulting the incremental cache when one is threaded in.
 
@@ -973,3 +1000,233 @@ class BaseV2DevelopmentAgent:
         if self._repo_context_cache is not None:
             return self._repo_context_cache.read(repo_path)
         return self._read_repo_code(repo_path)
+
+
+class ConfigDrivenV2DevelopmentAgent(BaseV2DevelopmentAgent):
+    """Generic ``BaseV2DevelopmentAgent`` driven entirely by a :class:`V2TeamConfig`.
+
+    ``BaseV2DevelopmentAgent`` already takes nearly everything team-specific
+    (tool-agent builder, planning/execution/deliver functions, review classes)
+    as parameters injected by each subclass's ``run_workflow``; what still
+    comes from a hand-written per-team constant is specifically the four axes
+    :class:`V2TeamConfig` captures: the stack's default language and
+    conventions map (today a class-level ``PROFILE`` each team sets by hand),
+    its tool-agent registry (today only implicit in each team's
+    ``_build_tool_agents()`` body), and its optional extra review clause
+    (today a bare module constant, e.g. frontend's
+    ``_ACCESSIBILITY_VERIFY_NOTE``). This class resolves all four from a
+    ``V2TeamConfig`` instance instead, so a concrete team subclasses it and
+    supplies only that config plus a ``_build_tool_agents`` hook.
+    ``backend_code_v2_team`` and ``frontend_code_v2_team`` both subclass this
+    base and supply their team-specific ``V2TeamConfig`` instance.
+
+    Invariants: ``self.config`` is set once at construction and never
+    reassigned; every property/method below is a pure read through it (or
+    through the ``StackProfile`` it composes), so two instances built from the
+    same config always agree. This deliberately widens
+    ``BaseV2DevelopmentAgent``'s two-attribute ``__new__``-construction
+    contract: a ``__new__``-constructed instance of this subclass
+    specifically (bypassing ``__init__``) must also set ``self.config`` —
+    the base class's ``llm``/``_repo_context_cache`` pair is necessary but
+    not sufficient here, since every property/method above reads
+    ``self.config``.
+    """
+
+    def __init__(self, llm_client: LLMClient, config: V2TeamConfig) -> None:
+        """Construct the agent from an LLM client and a team's config.
+
+        Preconditions: ``llm_client`` is not ``None`` (enforced by
+          ``BaseV2DevelopmentAgent.__init__``); ``config`` is a ``V2TeamConfig``
+          instance (not ``None``).
+        Postconditions: ``self.config`` is ``config`` (the same object, not a
+          copy); all ``BaseV2DevelopmentAgent.__init__`` postconditions
+          (``self.llm``, ``self._repo_context_cache``) also hold.
+        """
+        super().__init__(llm_client)
+        assert config is not None, "config is required"
+        self.config = config
+
+    @property
+    def default_language(self) -> str:
+        """This team's fallback language, read from ``config.stack_profile``.
+
+        Preconditions: none beyond construction.
+        Postconditions: returns ``self.config.stack_profile.default_language``
+          unchanged; pure, no side effects.
+        """
+        return self.config.stack_profile.default_language
+
+    def conventions_for(self, language: str) -> str:
+        """Return this team's conventions text for ``language``.
+
+        Delegates to ``StackProfile.conventions_for`` rather than duplicating
+        its ``"_default"``-fallback logic, so the two can never disagree.
+
+        Preconditions: ``language`` is a string.
+        Postconditions: returns the conventions entry for ``language`` if
+          present in ``config.stack_profile.conventions_by_language``, else
+          the ``"_default"`` entry. Pure; no side effects.
+        """
+        return self.config.stack_profile.conventions_for(language)
+
+    @property
+    def tool_agent_kinds(self) -> FrozenSet[str]:
+        """This team's declared ``ToolAgentKind`` registry, as plain strings.
+
+        Preconditions: none beyond construction.
+        Postconditions: returns ``self.config.tool_agent_kinds`` unchanged;
+          pure, no side effects.
+        """
+        return self.config.tool_agent_kinds
+
+    @property
+    def extra_review_clause(self) -> str:
+        """This team's optional extra code-review guidance (``""`` if none).
+
+        Preconditions: none beyond construction.
+        Postconditions: returns ``self.config.extra_review_clause`` unchanged;
+          pure, no side effects.
+        """
+        return self.config.extra_review_clause
+
+    def _validate_tool_agents(self, tool_agents: Dict[Any, Any]) -> None:
+        """Assert a built tool-agent roster matches the config's declared registry.
+
+        Makes ``tool_agent_kinds`` genuinely config-driven rather than inert
+        stored data: a caller's ``build_tool_agents(llm)`` output (keyed by
+        the team's own ``ToolAgentKind`` enum members, which are ``(str,
+        Enum)`` subclasses) is checked against ``self.tool_agent_kinds``
+        instead of being trusted silently.
+
+        Preconditions: ``tool_agents`` is a mapping whose keys are ``str`` or
+          ``(str, Enum)``-subclass values (so ``str(kind.value if
+          hasattr(kind, "value") else kind)`` yields the plain-string form
+          ``V2TeamConfig.tool_agent_kinds`` stores).
+        Postconditions: returns ``None`` when the set of built kinds equals
+          ``self.tool_agent_kinds`` exactly. Raises ``ValueError`` naming the
+          missing and/or extra kinds otherwise. Never mutates ``tool_agents``
+          or ``self.config``.
+        """
+        built_kinds = frozenset(
+            str(kind.value if hasattr(kind, "value") else kind) for kind in tool_agents
+        )
+        expected_kinds = self.tool_agent_kinds
+        if built_kinds == expected_kinds:
+            return
+        missing = expected_kinds - built_kinds
+        extra = built_kinds - expected_kinds
+        raise ValueError(
+            "Tool-agent roster does not match the declared registry "
+            f"(missing={sorted(missing)}, extra={sorted(extra)})"
+        )
+
+    def build_task_requirements(self, base_requirements: str) -> str:
+        """Merge this team's extra review clause into a base requirements string.
+
+        Delegates to the shared ``merge_extra_requirements`` helper — the
+        same one ``shared.v2_review.run_coordinator_llm_review`` uses for its
+        ``extra_task_requirements`` handling — rather than duplicating the
+        blank-line-separator-or-verbatim merge rule, so this is a drop-in
+        source for that parameter once a concrete team wires this config
+        through instead of a hard-coded module constant.
+
+        Preconditions: ``base_requirements`` is a string (may be empty).
+        Postconditions: returns ``base_requirements`` unchanged when
+          ``self.extra_review_clause`` is ``""``; otherwise returns the clause
+          appended after a blank line when ``base_requirements`` is
+          non-empty, or the clause verbatim when it is empty. Pure; no side
+          effects.
+        """
+        return merge_extra_requirements(base_requirements, self.extra_review_clause)
+
+    def _stack_profile(self) -> StackProfile:
+        """Return this instance's ``StackProfile``, read from ``self.config``.
+
+        Overrides the parent's ``getattr(self, "PROFILE", None)`` lookup:
+        this class deliberately has no class-level ``PROFILE`` attribute, so
+        that lookup would always return ``None`` here (silently emptying the
+        deliver phase's ``build_verify_label``/``lint_agent_type``). This
+        override is what ``_run_development_workflow``'s deliver-phase call
+        to ``self._stack_profile()`` resolves to for this subclass.
+
+        Preconditions: none beyond construction.
+        Postconditions: returns ``self.config.stack_profile``; never
+          ``None`` (config is always required at construction, unlike the
+          base class's class-attribute fallback).
+        """
+        return self.config.stack_profile
+
+    def _read_repo_code(self, repo_path: Path, max_chars: Optional[int] = None) -> str:
+        """Read the repo briefing using ``self.config.stack_profile``.
+
+        Overrides the parent's ``classmethod`` (which reads a class-level
+        ``PROFILE``) as an instance method, since here the profile is
+        per-instance data threaded in via ``config`` at construction, not a
+        class attribute. ``self._read_existing_code``'s no-cache branch calls
+        ``self._read_repo_code(repo_path)`` via normal instance dispatch, so
+        it resolves to this override unchanged.
+
+        Preconditions: same as the parent classmethod.
+        Postconditions: same as the parent classmethod, but sourced from
+          ``self.config.stack_profile`` instead of ``cls.PROFILE``.
+        """
+        profile = self._stack_profile()
+        return read_repo_code_budgeted(
+            repo_path,
+            extensions=profile.repo_extensions,
+            exclude_dirs=profile.repo_exclude_dirs,
+            max_chars=max_chars if max_chars is not None else profile.repo_max_chars,
+        )
+
+    def _detect_tooling(self, repo_path: Path) -> Tuple[bool, bool]:
+        """Return ``(has_lint, has_test)`` via ``self.config.stack_profile.detect_tooling``.
+
+        Overrides the parent's ``classmethod`` as an instance method for the
+        same reason as ``_read_repo_code`` above; ``self._detect_tooling`` is
+        already how ``_run_development_workflow`` callers pass it through
+        (e.g. ``detect_tooling=self._detect_tooling``), so this resolves
+        unchanged via instance dispatch.
+
+        Preconditions: same as the parent classmethod.
+        Postconditions: same as the parent classmethod, but sourced from
+          ``self.config.stack_profile`` instead of ``cls.PROFILE``.
+        """
+        return self._stack_profile().detect_tooling(repo_path)
+
+    @abstractmethod
+    def _build_tool_agents(self, llm: LLMClient) -> Dict[Any, Any]:
+        """Build the team's tool-agent roster.
+
+        Subclasses override this to construct their team-specific tool agents.
+        The tool-agent builder is kept as a subclass hook (rather than a field
+        on ``V2TeamConfig``) because each team's builder uses deferred imports
+        of heavy strands/llm_service machinery that cannot be eagerly loaded
+        as a frozen-dataclass field.
+
+        Preconditions: ``llm`` is a configured ``LLMClient`` (not ``None``).
+        Postconditions: returns a ``Dict`` mapping the team's ``ToolAgentKind``
+          enum members to constructed agent instances.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} must override _build_tool_agents"
+        )
+
+    def _build_and_validate_tool_agents(self, llm: LLMClient) -> Dict[Any, Any]:
+        """Build tool agents and validate the roster matches the config's declared registry.
+
+        Calls :meth:`_build_tool_agents` (the subclass-supplied hook) then
+        :meth:`_validate_tool_agents` to enforce exact equality with the
+        config's ``tool_agent_kinds``.
+
+        Preconditions:
+            ``llm`` is a configured ``LLMClient`` (not ``None``).
+        Postconditions:
+            Returns a ``Dict[Any, Any]`` mapping every kind declared in
+            ``self.config.tool_agent_kinds`` (as strings or enum members) to a
+            constructed agent instance. Raises ``ValueError`` (from
+            ``_validate_tool_agents``) if the built roster does not exactly
+            match the config's declared kinds.
+        """
+        agents = self._build_tool_agents(llm)
+        self._validate_tool_agents(agents)
+        return agents

@@ -582,7 +582,7 @@ class _FakeOutput:
 class _FakeReviewIssue:
     """Duck-typed stand-in for a CodeReviewIssue, with the attributes the PR-review
     flow reads (severity, category, file_path, line, description, suggestion,
-    pre_existing)."""
+    pre_existing, omission)."""
 
     def __init__(
         self,
@@ -591,6 +591,7 @@ class _FakeReviewIssue:
         file_path: str = "a.py",
         description: str = "desc",
         pre_existing: bool = False,
+        omission: bool = False,
     ) -> None:
         self.severity = severity
         self.category = "logic"
@@ -599,6 +600,7 @@ class _FakeReviewIssue:
         self.description = description
         self.suggestion = "fix"
         self.pre_existing = pre_existing
+        self.omission = omission
 
 
 class _FakeReviewClient:
@@ -823,9 +825,17 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
         AsyncMock(return_value=mock_client)
     )
 
-    # Install a fake engine provider so no LLM stack loads.
+    # Install a fake engine provider so no LLM stack loads. The PR-review path
+    # calls provider.run_pr_code_review(...) via coding_team.engine_provider; the
+    # monkeypatched module global auto-reverts after the test.
+    # The second finding sits on an off-diff line (999) of the changed file
+    # "a.py" -- omission=True keeps it in-scope under the change-map-driven
+    # gate (is_within_diff alone would not, since line 999 was never added).
     holder["agent_output"] = _FakeOutput(
-        issues=[_FakeReviewIssue("high", line=2), _FakeReviewIssue("low", line=999)]
+        issues=[
+            _FakeReviewIssue("high", line=2),
+            _FakeReviewIssue("low", line=999, omission=True),
+        ]
     )
 
     class _FakeProvider:
@@ -922,10 +932,11 @@ class TestReviewEndpoint:
         )
 
     def test_review_summary_counts_findings_by_severity(self, review_app) -> None:
-        # Findings across several recognized severities, plus a pre-existing bug:
+        # Findings across several recognized severities, plus an off-diff bug:
         # severity matching is case-insensitive ("HIGH" folds into "high"), the
-        # pre-existing bug (excluded from the PR review) does not inflate the counts,
-        # and only non-zero levels are emitted. With every PR finding at a recognized
+        # off-diff bug on unchanged.py (not added/modified, and omission=False)
+        # is routed to a proposal and does not inflate the counts, and only
+        # non-zero levels are emitted. With every PR finding at a recognized
         # severity the invariant holds: the counts sum to total_issues.
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
@@ -945,7 +956,7 @@ class TestReviewEndpoint:
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
-        # Four PR findings counted (the pre-existing bug is excluded); zero levels
+        # Four PR findings counted (the off-diff bug is excluded); zero levels
         # (medium, low) are absent from the compact map.
         assert job["review_summary"]["total_issues"] == 4
         assert job["review_summary"]["severity_counts"] == {"critical": 1, "high": 2, "info": 1}
@@ -955,7 +966,7 @@ class TestReviewEndpoint:
             sum(job["review_summary"]["severity_counts"].values())
             == job["review_summary"]["total_issues"]
         )
-        # The pre-existing bug is excluded from the counts because it's routed to a
+        # The off-diff bug is excluded from the counts because it's routed to a
         # proposal, not silently dropped: it must show up there and never as any kind
         # of PR comment.
         proposals = job["review_summary"]["pending_issue_proposals"]
@@ -1023,9 +1034,15 @@ class TestReviewEndpoint:
         secret_url = "https://x:ghp_SECRETTOKEN@github.com/o/r.git"
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
-                _FakeReviewIssue("low", line=999, description=f"leak {secret_url} here"),
                 _FakeReviewIssue(
-                    "low", line=4, file_path="not_in_diff.py", description=f"leak {secret_url} too"
+                    "low", line=999, description=f"leak {secret_url} here", omission=True
+                ),
+                _FakeReviewIssue(
+                    "low",
+                    line=4,
+                    file_path="not_in_diff.py",
+                    description=f"leak {secret_url} too",
+                    omission=True,
                 ),
             ]
         )
@@ -1046,8 +1063,8 @@ class TestReviewEndpoint:
         # review comment attached to the single review (no loose comments).
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
-                _FakeReviewIssue("high", line=999, description="first finding"),
-                _FakeReviewIssue("low", line=1000, description="second finding"),
+                _FakeReviewIssue("high", line=999, description="first finding", omission=True),
+                _FakeReviewIssue("low", line=1000, description="second finding", omission=True),
             ]
         )
         resp = review_app["client"].post("/review-pr", json=_review_body())
@@ -1069,17 +1086,22 @@ class TestReviewEndpoint:
         assert job["review_summary"]["file_comments"] == 2
         assert job["review_summary"]["comment_findings"] == 0
 
-    def test_off_diff_finding_without_tag_becomes_standalone_comment(self, review_app) -> None:
-        # A finding whose file is not in the PR diff, and which the reviewer did NOT
-        # tag pre_existing, is still an in-scope PR finding (round 2): forcing every
-        # off-diff-file finding into proposals would silently drop a real,
-        # PR-blocking finding like "this PR references module X but never added
-        # it". Since it cannot be anchored to any diff location, it is posted as
-        # its own standalone conversation comment naming its own file -- never
-        # dropped, and never misattributed to an unrelated changed file.
+    def test_off_diff_omission_becomes_standalone_comment(self, review_app) -> None:
+        # A finding whose file is not in the PR diff, tagged omission=True (a
+        # required add/modify this change left out): it stays an in-scope PR
+        # finding under the change-map-driven gate. Since it cannot be anchored
+        # to any diff location, it is posted as its own standalone conversation
+        # comment naming its own file -- never dropped, and never misattributed
+        # to an unrelated changed file.
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
-                _FakeReviewIssue("low", line=4, file_path="not_in_diff.py", description="orphan")
+                _FakeReviewIssue(
+                    "low",
+                    line=4,
+                    file_path="not_in_diff.py",
+                    description="orphan",
+                    omission=True,
+                )
             ]
         )
         resp = review_app["client"].post("/review-pr", json=_review_body())
@@ -1090,7 +1112,9 @@ class TestReviewEndpoint:
         for review in gh.reviews:
             for c in review.get("comments", []):
                 assert "orphan" not in c.get("body", "")
-        # Posted as its own standalone comment naming its own file.
+        # Posted as its own standalone comment naming its own file. gh.comments
+        # entries are (pr_number, body) -- 7 is _review_body()'s default
+        # pr_number, not derived from the finding's line/file.
         assert len(gh.comments) == 1
         assert gh.comments[0][0] == 7
         assert "orphan" in gh.comments[0][1]
@@ -1099,8 +1123,32 @@ class TestReviewEndpoint:
         assert job["status"] == "completed"
         assert job["review_summary"]["file_comments"] == 0
         assert job["review_summary"]["comment_findings"] == 1
-        # Never routed to a proposal -- only an explicit pre_existing=True tag does that.
+        # An omission stays in-scope -- it is never routed to a proposal.
         assert job["review_summary"]["pending_issue_proposals"] == []
+
+    def test_off_diff_finding_without_omission_routes_to_proposal(self, review_app) -> None:
+        # The new-contract counterpart to the test above: an off-diff-file
+        # finding WITHOUT omission (and without pre_existing, which no longer
+        # matters to the gate either way) is now out-of-scope by default -- it
+        # is never posted (not even standalone) and instead becomes a proposal.
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue("low", line=4, file_path="not_in_diff.py", description="orphan")
+            ]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        assert gh.comments == []
+        assert gh.review_comments == []
+        for review in gh.reviews:
+            for c in review.get("comments", []):
+                assert "orphan" not in c.get("body", "")
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        proposals = job["review_summary"]["pending_issue_proposals"]
+        assert len(proposals) == 1
+        assert proposals[0]["description"] == "orphan"
 
     def test_reviewer_none_output_fails_job(self, review_app) -> None:
         # A provider that returns None WITHOUT raising must fail the job, never
@@ -1639,10 +1687,14 @@ class TestReviewEndpoint:
         gh = review_app["github"]["client"]
         # Explicit file_path so this stays an off-diff *line in a changed file*
         # (-> file-level review comment) even if the fixture default ever changes.
+        # omission=True keeps the off-diff-line finding in-scope under the
+        # change-map-driven gate.
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
                 _FakeReviewIssue("high", line=2, description="in-diff finding"),
-                _FakeReviewIssue("low", line=999, file_path="a.py", description="off-diff line"),
+                _FakeReviewIssue(
+                    "low", line=999, file_path="a.py", description="off-diff line", omission=True
+                ),
             ]
         )
         gh.review_fail_times = 1  # first submit 422s, retry as COMMENT succeeds
@@ -1669,10 +1721,14 @@ class TestReviewEndpoint:
         gh = review_app["github"]["client"]
         # Explicit file_path so this stays an off-diff *line in a changed file*
         # (-> file-level review comment) even if the fixture default ever changes.
+        # omission=True keeps the off-diff-line finding in-scope under the
+        # change-map-driven gate.
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
                 _FakeReviewIssue("high", line=2, description="in-diff finding"),
-                _FakeReviewIssue("low", line=999, file_path="a.py", description="off-diff line"),
+                _FakeReviewIssue(
+                    "low", line=999, file_path="a.py", description="off-diff line", omission=True
+                ),
             ]
         )
         gh.review_fail_times = 2  # both full-batch attempts 422; bisection then succeeds
@@ -1696,11 +1752,13 @@ class TestReviewEndpoint:
         # A single line rejected by GitHub (bad_lines) must not collapse the whole
         # review: the good lines stay inline and only the bad one is demoted to a
         # file-level comment. (Diff valid lines for a.py are {1, 2, 3}; line 3 is
-        # in-diff but still rejected by the fake client.)
+        # unchanged context within the diff hunk but still rejected by the fake
+        # client.) Line 3 is not an added line, so omission=True is what keeps it
+        # in-scope under the change-map-driven gate.
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
                 _FakeReviewIssue("high", line=2, description="good line"),
-                _FakeReviewIssue("high", line=3, description="bad line"),
+                _FakeReviewIssue("high", line=3, description="bad line", omission=True),
             ]
         )
         gh = review_app["github"]["client"]
@@ -1730,11 +1788,13 @@ class TestReviewEndpoint:
         # inline and both bad lines are demoted to file-level comments (none lost
         # to standalone).
         # (Diff valid lines for a.py are {1, 2, 3}, so all three are line-anchored.)
+        # Lines 1 and 3 are unchanged context, not added lines, so omission=True
+        # is what keeps them in-scope under the change-map-driven gate.
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
-                _FakeReviewIssue("high", line=1, description="bad alpha"),
+                _FakeReviewIssue("high", line=1, description="bad alpha", omission=True),
                 _FakeReviewIssue("high", line=2, description="good beta"),
-                _FakeReviewIssue("high", line=3, description="bad gamma"),
+                _FakeReviewIssue("high", line=3, description="bad gamma", omission=True),
             ]
         )
         gh = review_app["github"]["client"]
@@ -1758,16 +1818,20 @@ class TestReviewEndpoint:
         assert job["review_summary"]["file_comments"] == 2
         assert job["review_summary"]["comment_findings"] == 0
 
-    def test_off_diff_finding_without_tag_becomes_standalone_not_inline(self, review_app) -> None:
-        # A finding whose file is not in the diff, without a pre_existing tag,
+    def test_off_diff_finding_with_omission_tag_becomes_standalone_not_inline(
+        self, review_app
+    ) -> None:
+        # A finding whose file is not in the diff, tagged omission=True: it
         # cannot be anchored to any diff location -- it must never be posted
-        # line-anchored or file-level, but (round 2) it must still be posted, as
-        # its own standalone comment, rather than dropped to a proposal. The
-        # in-diff finding is unaffected.
+        # line-anchored or file-level, but it must still be posted, as its own
+        # standalone comment, rather than dropped to a proposal. The in-diff
+        # finding is unaffected.
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
                 _FakeReviewIssue("high", line=2, description="inline"),
-                _FakeReviewIssue("low", line=4, file_path="missing.py", description="leftover"),
+                _FakeReviewIssue(
+                    "low", line=4, file_path="missing.py", description="leftover", omission=True
+                ),
             ]
         )
         gh = review_app["github"]["client"]
@@ -1791,15 +1855,21 @@ class TestReviewEndpoint:
         assert job["review_summary"]["pending_issue_proposals"] == []
 
     def test_multiple_off_diff_findings_each_get_own_standalone_comment(self, review_app) -> None:
-        # All three findings name files absent from the diff, with no pre_existing
-        # tag -- none can be anchored to any diff location, so each becomes its own
+        # All three findings name files absent from the diff, tagged omission=True
+        # -- none can be anchored to any diff location, so each becomes its own
         # standalone conversation comment: never dropped, never merged, and never
         # misattributed to an unrelated changed file.
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
-                _FakeReviewIssue("high", line=1, file_path="gone.py", description="leftover one"),
-                _FakeReviewIssue("high", line=2, file_path="gone.py", description="leftover two"),
-                _FakeReviewIssue("low", line=3, file_path="gone.py", description="leftover three"),
+                _FakeReviewIssue(
+                    "high", line=1, file_path="gone.py", description="leftover one", omission=True
+                ),
+                _FakeReviewIssue(
+                    "high", line=2, file_path="gone.py", description="leftover two", omission=True
+                ),
+                _FakeReviewIssue(
+                    "low", line=3, file_path="gone.py", description="leftover three", omission=True
+                ),
             ]
         )
         gh = review_app["github"]["client"]
@@ -1847,7 +1917,13 @@ class TestReviewEndpoint:
         gh.review_comment_fail_paths = {"a.py"}  # every file-level post 422s
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
-                _FakeReviewIssue("low", line=999, file_path="a.py", description="dropped finding")
+                _FakeReviewIssue(
+                    "low",
+                    line=999,
+                    file_path="a.py",
+                    description="dropped finding",
+                    omission=True,
+                )
             ]
         )
         resp = review_app["client"].post("/review-pr", json=_review_body())
@@ -1874,7 +1950,11 @@ class TestReviewEndpoint:
         gh.review_comment_fail_paths = {"a.py"}  # file-level post 422s → standalone
         gh.comment_fail_times = 1  # ...and the first standalone comment also fails
         review_app["github"]["agent_output"] = _FakeOutput(
-            issues=[_FakeReviewIssue("low", line=999, file_path="a.py", description="lost finding")]
+            issues=[
+                _FakeReviewIssue(
+                    "low", line=999, file_path="a.py", description="lost finding", omission=True
+                )
+            ]
         )
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
@@ -1895,7 +1975,11 @@ class TestReviewEndpoint:
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
                 _FakeReviewIssue(
-                    "low", line=999, file_path="a.py", description="off-hunk line in changed file"
+                    "low",
+                    line=999,
+                    file_path="a.py",
+                    description="off-hunk line in changed file",
+                    omission=True,
                 )
             ]
         )
@@ -2019,7 +2103,11 @@ class TestReviewEndpoint:
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
                 _FakeReviewIssue(
-                    "low", line=999, file_path="a.py", description="off-hunk line in changed file"
+                    "low",
+                    line=999,
+                    file_path="a.py",
+                    description="off-hunk line in changed file",
+                    omission=True,
                 )
             ]
         )
@@ -2126,6 +2214,143 @@ class TestReviewEndpointExistingComments:
         assert job["review_summary"]["addressed_issues_dropped"] == 0
         # No findings to de-duplicate: the existing-comment fetch must not run.
         assert gh.list_review_comments_calls == 0
+
+
+class TestSystemicFindingsSynthesis:
+    """End-to-end wiring for the systemic/cross-cutting synthesis pass (issue
+    #6363): a best-effort provider call, gated on >= 2 in-scope findings and
+    the CODE_REVIEW_SYSTEMIC_SYNTHESIS flag, posted as its own standalone
+    comment and persisted on review_summary.systemic_findings. Default
+    fixture output is two in-scope findings on a.py (see _FakeOutput above),
+    so the gate is open by default in these tests.
+    """
+
+    def _install_provider(
+        self, monkeypatch: pytest.MonkeyPatch, review_app, synthesize: Any
+    ) -> None:
+        import software_engineering_team.engine_provider as engine_provider
+
+        class _Provider:
+            def run_pr_code_review(self, **_kw: Any) -> Any:
+                out = review_app["github"]["agent_output"]
+                if isinstance(out, Exception):
+                    raise out
+                return out
+
+            def synthesize_systemic_findings(
+                self, findings: Any, changed_context: Any, task_description: str
+            ) -> Any:
+                return synthesize(findings, changed_context, task_description)
+
+        monkeypatch.setattr(engine_provider, "_provider", _Provider())
+
+    def test_posts_standalone_comment_and_persists_summary(
+        self, monkeypatch: pytest.MonkeyPatch, review_app
+    ) -> None:
+        result = [
+            {
+                "title": "Shared root cause",
+                "description": "Both findings stem from the same missing check.",
+                "related_locations": [
+                    {"file_path": "a.py", "description": "desc"},
+                    {"file_path": "a.py", "description": "desc"},
+                ],
+            }
+        ]
+        calls: list[Any] = []
+        self._install_provider(monkeypatch, review_app, lambda *a: (calls.append(a), result)[1])
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["review_summary"]["systemic_findings"] == result
+        assert len(calls) == 1
+        assert len(calls[0][0]) == 2  # both in-scope findings offered to synthesis
+        systemic_comments = [b for _n, b in gh.comments if "Systemic / cross-cutting findings" in b]
+        assert len(systemic_comments) == 1
+        assert "Shared root cause" in systemic_comments[0]
+
+    def test_no_pattern_found_posts_no_comment(
+        self, monkeypatch: pytest.MonkeyPatch, review_app
+    ) -> None:
+        self._install_provider(monkeypatch, review_app, lambda *a: [])
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["review_summary"]["systemic_findings"] == []
+        assert not any("Systemic / cross-cutting findings" in b for _n, b in gh.comments)
+
+    def test_disabled_by_env_flag_skips_synthesis_and_comment(
+        self, monkeypatch: pytest.MonkeyPatch, review_app
+    ) -> None:
+        monkeypatch.setenv("CODE_REVIEW_SYSTEMIC_SYNTHESIS", "false")
+        calls: list[Any] = []
+        self._install_provider(monkeypatch, review_app, lambda *a: (calls.append(a), [])[1])
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["review_summary"]["systemic_findings"] == []
+        assert calls == []  # the provider is never even called when disabled
+        assert not any("Systemic / cross-cutting findings" in b for _n, b in gh.comments)
+
+    def test_single_in_scope_finding_skips_synthesis(
+        self, monkeypatch: pytest.MonkeyPatch, review_app
+    ) -> None:
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[_FakeReviewIssue("high", line=2)]
+        )
+        calls: list[Any] = []
+        self._install_provider(monkeypatch, review_app, lambda *a: (calls.append(a), [])[1])
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["review_summary"]["systemic_findings"] == []
+        assert calls == []  # a single finding cannot be "cross-cutting"
+
+    def test_provider_raising_never_fails_the_review(
+        self, monkeypatch: pytest.MonkeyPatch, review_app
+    ) -> None:
+        def _boom(*_a: Any) -> Any:
+            raise RuntimeError("synthesis blew up")
+
+        self._install_provider(monkeypatch, review_app, _boom)
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["review_summary"]["systemic_findings"] == []
+
+    def test_main_review_submission_failure_never_orphans_the_systemic_comment(
+        self, monkeypatch: pytest.MonkeyPatch, review_app
+    ) -> None:
+        """The systemic comment posts only after _post_review_comments succeeds.
+
+        If it posted first and the main review submission then hit an
+        untolerated (non-API) error, the job would fail but the systemic
+        comment would already be on the PR, referencing findings whose own
+        comments never landed -- and a retried review would post a second
+        copy on top of it. Simulating that failure here must leave zero
+        standalone comments posted at all.
+        """
+        result = [{"title": "t", "description": "d", "related_locations": []}]
+        self._install_provider(monkeypatch, review_app, lambda *a: result)
+        review_app["github"]["client"].review_exc = RuntimeError("kaboom")
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert not any("Systemic / cross-cutting findings" in b for _n, b in gh.comments)
 
 
 class TestReviewPersistence:
@@ -2354,10 +2579,13 @@ class TestBugConditionExploration:
     """Exploration tests written BEFORE the fix as part of the bugfix workflow (Task 1).
 
     Originally encoded round-1 "route every off-diff-file finding to a proposal"
-    behavior; updated for round 2 (see the section comment above) to encode
-    the correct behavior instead: an off-diff-file finding WITHOUT an explicit
-    pre_existing tag becomes its own standalone conversation comment -- never a
-    proposal, and never a comment mis-anchored to an unrelated changed file.
+    behavior; then round 2 made an off-diff-file finding without a pre_existing
+    tag stay in-scope by default. Round 3 (the change-map-driven posting gate)
+    flips that default: an off-diff-file finding is now in-scope, and reaches
+    its own standalone conversation comment -- never a proposal, and never a
+    comment mis-anchored to an unrelated changed file -- ONLY when the reviewer
+    tags it `omission=True` (see `CodeReviewIssue.omission`); everything else
+    off-diff now routes to a proposal instead (see `TestFixedRunPrReview`).
 
     Why keep these alongside TestReviewEndpoint?
     - TestReviewEndpoint tests are the canonical integration suite.  They cover the
@@ -2395,8 +2623,8 @@ class TestBugConditionExploration:
     """
 
     def test_leftover_finding_becomes_standalone_comment_not_misanchored(self, review_app) -> None:
-        """A finding whose file_path is NOT in the PR diff, and which the reviewer did
-        NOT tag pre_existing, is an in-scope PR finding (round 2): since it cannot be
+        """A finding whose file_path is NOT in the PR diff is an in-scope PR finding
+        (round 3) ONLY when the reviewer tags it omission=True: since it cannot be
         anchored to any diff location, it must be posted as its own standalone
         conversation comment naming its own file. It must NEVER be re-anchored as a
         file-level review comment against an unrelated changed file (the interim
@@ -2410,7 +2638,10 @@ class TestBugConditionExploration:
             being posted as a standalone comment.
         """
         # The PR diff only touches "a.py" (set up by _FakeReviewClient.files).
-        # The finding names "src/config.py" which is absent from the diff.
+        # The finding names "src/config.py" which is absent from the diff --
+        # omission=True is what now keeps an off-diff-file finding in scope
+        # (see CodeReviewIssue.omission); without it this would route to a
+        # proposal instead of a comment.
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
                 _FakeReviewIssue(
@@ -2418,6 +2649,7 @@ class TestBugConditionExploration:
                     line=4,
                     file_path="src/config.py",
                     description="Security issue in config",
+                    omission=True,
                 )
             ]
         )
@@ -2442,15 +2674,16 @@ class TestBugConditionExploration:
 
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["review_summary"]["comment_findings"] == 1
-        # Never routed to a proposal -- only an explicit pre_existing=True tag does that.
+        # Never routed to a proposal -- an off-diff finding without omission=True
+        # would now route to preexisting_issues instead of being posted.
         assert job["review_summary"]["pending_issue_proposals"] == []
 
     def test_empty_file_path_finding_becomes_standalone_not_misanchored(self, review_app) -> None:
         """A finding with an empty or None file_path cannot resolve into the diff at
-        all, but (round 2) is still an in-scope PR finding absent an explicit
-        pre_existing tag: it must become its own standalone comment, never anchored
-        to the first changed file in the diff as a file-level comment, and never
-        silently dropped to a proposal.
+        all, but (round 3) is still an in-scope PR finding when tagged omission=True
+        (the change-map gate's structural signal): it must become its own standalone
+        comment, never anchored to the first changed file in the diff as a file-level
+        comment, and never silently dropped to a proposal.
 
         On code with EITHER now-fixed bug this test FAILS:
           - review_comments carries a subject_type="file" entry for the finding, OR
@@ -2464,6 +2697,7 @@ class TestBugConditionExploration:
                     line=None,
                     file_path="",  # empty file_path — no anchor at all
                     description="No file path finding",
+                    omission=True,  # keeps it in-scope under the change-map gate
                 )
             ]
         )
@@ -2492,10 +2726,11 @@ class TestBugConditionExploration:
         assert job["review_summary"]["pending_issue_proposals"] == []
 
     def test_multiple_leftovers_each_get_their_own_standalone_comment(self, review_app) -> None:
-        """Multiple findings whose files are not in the PR diff, without a
-        pre_existing tag, must each become their OWN standalone comment -- never
-        mis-anchored to the same first changed file, never merged into one comment,
-        and never silently dropped to a proposal.
+        """Multiple findings whose files are not in the PR diff, each tagged
+        omission=True to keep it in-scope under the change-map gate, must each
+        become their OWN standalone comment -- never mis-anchored to the same
+        first changed file, never merged into one comment, and never silently
+        dropped to a proposal.
 
         On code with EITHER now-fixed bug this test FAILS:
           - review_comments carries subject_type="file" entries for the findings, OR
@@ -2504,8 +2739,12 @@ class TestBugConditionExploration:
         """
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
-                _FakeReviewIssue("high", line=1, file_path="gone1.py", description="issue one"),
-                _FakeReviewIssue("low", line=2, file_path="gone2.py", description="issue two"),
+                _FakeReviewIssue(
+                    "high", line=1, file_path="gone1.py", description="issue one", omission=True
+                ),
+                _FakeReviewIssue(
+                    "low", line=2, file_path="gone2.py", description="issue two", omission=True
+                ),
             ]
         )
         resp = review_app["client"].post("/review-pr", json=_review_body())
@@ -2678,17 +2917,28 @@ class TestPreservationProperties:
     ) -> None:
         """PBT A — Line-anchored routing preserved.
 
-        Property: a finding with file_path="a.py" and line ∈ {1,2,3} (valid
-        diff hunk) must produce a review comment with:
+        Property: an in-scope finding with file_path="a.py" and line ∈ {1,2,3}
+        (valid diff hunk) must produce a review comment with:
           - side="RIGHT"
           - path=="a.py"
           - line==<finding line>
         This is the Req 3.1 invariant: correctly-routed findings are unchanged.
+        Only line 2 was actually added by this PR's patch (lines 1/3 are
+        unchanged context), so omission=True is used here to keep the
+        unchanged-context cases in-scope and let the test focus on the
+        line-vs-file comment SHAPE selection, not scope eligibility itself
+        (that is covered separately by TestFixedRunPrReview /
+        TestPartitionReviewIssuesUnit). Line 2 would pass the gate on its
+        own as an added line.
         Validates: Requirements 3.1
         """
         _resp, gh, _job = self._post_review(
             review_app,
-            [_FakeReviewIssue(severity, line=line, file_path="a.py", description=description)],
+            [
+                _FakeReviewIssue(
+                    severity, line=line, file_path="a.py", description=description, omission=True
+                )
+            ],
         )
 
         assert len(gh.reviews) >= 1, "Expected at least one review submission"
@@ -2766,18 +3016,25 @@ class TestPreservationProperties:
     ) -> None:
         """PBT B — File-level routing preserved.
 
-        Property: a finding with file_path="a.py" and line NOT in {1,2,3}
-        (or line=None) must produce a review comment with:
+        Property: an in-scope finding with file_path="a.py" and line NOT in
+        {1,2,3} (or line=None) must produce a review comment with:
           - subject_type=="file"
           - path=="a.py"
           - no "line" key in the comment dict
         This is the Req 3.2 invariant: correctly-routed file-level comments
-        are unchanged.
+        are unchanged. None of these lines were added by this PR's patch, so
+        omission=True is what keeps every case in-scope under the
+        change-map-driven gate -- the property under test here is the
+        line-vs-file comment SHAPE selection, not scope eligibility itself.
         Validates: Requirements 3.2
         """
         _resp, gh, _job = self._post_review(
             review_app,
-            [_FakeReviewIssue(severity, line=line, file_path="a.py", description=description)],
+            [
+                _FakeReviewIssue(
+                    severity, line=line, file_path="a.py", description=description, omission=True
+                )
+            ],
         )
 
         assert len(gh.reviews) >= 1, "Expected at least one review submission"
@@ -2987,16 +3244,30 @@ class TestPreservationProperties:
           2. Submit the in-diff finding TOGETHER with out-of-diff findings → capture
              the same in-diff finding's review comment shape.
           3. Assert the two shapes are identical (path, line/subject_type, side).
+          4. Assert each out-of-diff finding lands in its own standalone comment
+             and never leaks into the in-diff finding's review/file-level comments.
 
         This is the core Req 3.1/3.2 preservation invariant: adding out-of-diff
-        findings to the list must not perturb the routing of in-diff ones.
+        findings to the list must not perturb the routing of in-diff ones. Every
+        finding here is tagged omission=True so each stays in-scope under the
+        change-map-driven gate. Every _PBT_D_CASES out-of-diff spec names a file
+        entirely absent from valid_by_path (never "a.py", the only file in the
+        diff) -- never an off-diff LINE on an in-diff file, which routes to a
+        file-level comment instead (see PBT B) -- so step 4's standalone
+        assertion holds regardless of which line each out-of-diff spec names.
+        The property under test is primarily routing SHAPE, not scope
+        eligibility, though step 4 does also assert the out-of-diff findings'
+        own routing outcome (standalone, never leaked) since that's what step
+        3's isolation depends on.
         Validates: Requirements 3.1, 3.2
         """
         in_sev, in_line, in_path, in_desc = in_diff_spec
 
         # --- Step 1: route the in-diff finding alone ---
         solo_issues = [
-            _FakeReviewIssue(in_sev, line=in_line, file_path=in_path, description=in_desc)
+            _FakeReviewIssue(
+                in_sev, line=in_line, file_path=in_path, description=in_desc, omission=True
+            )
         ]
         _r1, gh1, _j1 = self._post_review(review_app, solo_issues)
 
@@ -3032,6 +3303,7 @@ class TestPreservationProperties:
                 line=ln,
                 file_path=fp,
                 description=desc,
+                omission=True,
             )
             for sev, ln, fp, desc in out_of_diff_specs
         ]
@@ -3069,10 +3341,17 @@ class TestPreservationProperties:
             f"[{description}] Mixed run created extra comments on in-diff path {in_path!r}: "
             f"solo={solo_on_path}, mixed={mixed_on_path}"
         )
-        # Each out-of-diff finding (none tagged pre_existing here) must appear
+        # Each out-of-diff finding (tagged omission=True here) must appear
         # in at least one standalone conversation comment that names its file
         # when one is set, and never leak into the review/file-level comments
-        # checked above.
+        # checked above. Both checks use substring containment against the
+        # rendered comment body (not exact equality, since format_comment_body
+        # wraps the description in markdown); this is safe because, within
+        # each _PBT_D_CASES entry, the in-diff and out-of-diff descriptions
+        # are distinct and none is a substring of another (only the
+        # descriptions belonging to the SAME test run are ever compared, so
+        # collisions across different table entries don't matter) -- keep
+        # that property when extending this table.
         for issue in out_issues:
             path = issue.file_path or ""
             assert any(
@@ -3110,23 +3389,26 @@ class TestPreservationProperties:
 class TestFixedRunPrReview:
     """Integration tests verifying _run_pr_review's handling of out-of-diff
     findings: never mis-anchored to an unrelated changed file, never dropped,
-    and routed to a proposal ONLY when the reviewer explicitly tagged the
-    finding pre_existing=True (round 2; see the section comment above
-    TestBugConditionExploration for the full history).
+    and posted ONLY when the finding is on-diff or the reviewer explicitly
+    tagged it omission=True -- the change-map-driven posting gate (see the
+    section comment above TestBugConditionExploration for the full history;
+    the pre_existing tag itself no longer drives this decision either way).
 
     Validates: Requirements 2.1, 2.2, 2.4, 2.5
     """
 
-    def test_off_diff_finding_without_tag_never_misanchored(self, review_app) -> None:
-        """Full _run_pr_review with a finding naming a file outside the PR's diff,
-        and no pre_existing tag: it is never posted as a file-level comment
+    def test_off_diff_finding_never_misanchored(self, review_app) -> None:
+        """Full _run_pr_review with an omission-tagged finding naming a file
+        outside the PR's diff: it is never posted as a file-level comment
         mis-anchored to an unrelated changed file, and it is never silently
         dropped -- it is posted as its own standalone conversation comment.
 
-        A finding whose file_path is NOT in the PR diff (valid_by_path only
-        contains "a.py") cannot be anchored to any diff location, so it must
-        surface as a standalone comment naming its own file, not as a proposal
-        and not mis-anchored onto "a.py".
+        An omission=True finding whose file_path is NOT in the PR diff
+        (valid_by_path only contains "a.py") cannot be anchored to any diff
+        location, so it must surface as a standalone comment naming its own
+        file, not as a proposal and not mis-anchored onto "a.py". Without
+        omission=True, such a finding would instead be routed to
+        pending_issue_proposals as a pre-existing issue.
 
         Validates: Requirements 2.1, 2.2, 2.5
         """
@@ -3137,6 +3419,7 @@ class TestFixedRunPrReview:
                     line=4,
                     file_path="not_in_diff.py",
                     description="leftover finding",
+                    omission=True,
                 )
             ]
         )
@@ -3178,11 +3461,12 @@ class TestFixedRunPrReview:
 
         Three findings are submitted:
           1. On-diff (file="a.py", line=2)  → line-anchored inline comment.
-          2. Off-diff-line (file="a.py", line=999) → file-level inline comment
-             (the file itself is in the diff, only the cited line is not).
-          3. Off-diff-file (file="not_in_diff.py", line=1), no pre_existing tag →
-             cannot be anchored to any diff location, so it is posted as its own
-             standalone conversation comment.
+          2. Off-diff-line, omission=True (file="a.py", line=999) → file-level
+             inline comment (the file itself is in the diff, only the cited
+             line is not).
+          3. Off-diff-file, omission=True (file="not_in_diff.py", line=1) →
+             cannot be anchored to any diff location, so it is posted as its
+             own standalone conversation comment.
 
         Validates: Requirements 2.1, 2.2, 2.4, 2.5
         """
@@ -3190,13 +3474,18 @@ class TestFixedRunPrReview:
             issues=[
                 _FakeReviewIssue("high", line=2, file_path="a.py", description="on-diff finding"),
                 _FakeReviewIssue(
-                    "low", line=999, file_path="a.py", description="off-diff-line finding"
+                    "low",
+                    line=999,
+                    file_path="a.py",
+                    description="off-diff-line finding",
+                    omission=True,
                 ),
                 _FakeReviewIssue(
                     "medium",
                     line=1,
                     file_path="not_in_diff.py",
                     description="off-diff-file finding",
+                    omission=True,
                 ),
             ]
         )
@@ -3270,9 +3559,12 @@ class TestFixedRunPrReview:
         assert len(proposals) == 1
         assert proposals[0]["description"] == "out-of-scope bug (tagged)"
 
-    def test_off_diff_file_pre_existing_false_posts_standalone(self, review_app) -> None:
-        """Off-diff-file findings left at default pre_existing=False are in-scope
-        PR findings and are posted as their own standalone conversation comment.
+    def test_off_diff_file_pre_existing_false_routes_to_proposal(self, review_app) -> None:
+        """Off-diff-file findings left at default pre_existing=False, without
+        omission, are out-of-scope under the change-map-driven gate: the
+        pre_existing tag itself no longer keeps a finding in scope -- only
+        is_within_diff or omission does. Routes to a proposal, same as the
+        pre_existing=True sibling above.
         """
         review_app["github"]["client"] = _FakeReviewClient()
         review_app["github"]["agent_output"] = _FakeOutput(
@@ -3291,11 +3583,12 @@ class TestFixedRunPrReview:
         assert gh.review_comments == [], (
             f"untagged: file-level comment posted: {gh.review_comments}"
         )
-        assert len(gh.comments) == 1, f"untagged: expected a standalone comment, got {gh.comments}"
-        assert "out-of-scope bug (untagged)" in gh.comments[0][1]
+        assert gh.comments == [], f"untagged: standalone comment posted: {gh.comments}"
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
-        assert job["review_summary"]["pending_issue_proposals"] == []
+        proposals = job["review_summary"]["pending_issue_proposals"]
+        assert len(proposals) == 1
+        assert proposals[0]["description"] == "out-of-scope bug (untagged)"
 
     def test_scope_verifier_unsure_does_not_post_comment(self, review_app, monkeypatch) -> None:
         """An unsure scope verdict fail-closes posting: no PR comment, proposal instead."""
@@ -3354,40 +3647,13 @@ class TestFixedRunPrReview:
             == "maybe out of scope"
         )
 
-    def test_scope_verifier_omission_still_posts(self, review_app, monkeypatch) -> None:
-        """A confident omission stays a PR finding even when the path is off-diff."""
-        from software_engineering_team.code_review_agent.models import CodeReviewIssue
-        from software_engineering_team.code_review_agent.scope_filter import (
-            ScopeVerdict,
-            apply_scope_verdicts,
-        )
+    def test_scope_verifier_omission_still_posts(self, review_app) -> None:
+        """A confident omission stays a PR finding even when the path is off-diff.
 
-        def _force_omission(
-            llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None, **_kw
-        ):
-            converted = [
-                CodeReviewIssue(
-                    severity=getattr(i, "severity", "high"),
-                    category=getattr(i, "category", "logic"),
-                    file_path=getattr(i, "file_path", ""),
-                    line=getattr(i, "line", None),
-                    description=getattr(i, "description", ""),
-                    suggestion=getattr(i, "suggestion", ""),
-                    pre_existing=bool(getattr(i, "pre_existing", False)),
-                )
-                for i in issues
-            ]
-            return apply_scope_verdicts(
-                converted,
-                changed_by_path=changed_by_path,
-                verdicts={0: ScopeVerdict(scope="omission", confidence="high")},
-                grounded=True,
-            )
-
-        monkeypatch.setattr(
-            "software_engineering_team.code_review_agent.scope_filter.apply_scope_verification",
-            _force_omission,
-        )
+        omission=True is the reviewer's own explicit signal (see
+        CodeReviewIssue.omission) -- the change-map-driven gate treats it as
+        always in-scope, independent of pre_existing or any other pass.
+        """
         review_app["github"]["client"] = _FakeReviewClient()
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
@@ -3396,12 +3662,16 @@ class TestFixedRunPrReview:
                     line=1,
                     file_path="missing.py",
                     description="should have added missing.py",
+                    omission=True,
                 )
             ]
         )
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         gh = review_app["github"]["client"]
+        assert gh.review_comments == [], (
+            f"omission on off-diff file posted as inline review comment: {gh.review_comments}"
+        )
         assert any("should have added missing.py" in c[1] for c in gh.comments)
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["review_summary"]["pending_issue_proposals"] == []
@@ -3526,6 +3796,254 @@ class TestFixedRunPrReview:
         # into the verifier so scope classification has the diff to reason over.
         assert captured.get("changed") is not None
         assert captured.get("removed") is not None
+
+
+# ---------------------------------------------------------------------------
+# DIFF-GROUNDED CONTRACT MATRIX  (issue #6414)
+#
+# Consolidated test class encoding the complete posting-gate contract in one
+# readable place.  The diff for "a.py" in _FakeReviewClient is:
+#   "@@ -1,2 +1,3 @@\n ctx\n+added\n more"
+#   line 1 — context ("ctx")   → in valid_by_path, NOT in changed_by_path
+#   line 2 — added  ("+added") → in BOTH valid_by_path and changed_by_path
+#   line 3 — context ("more")  → in valid_by_path, NOT in changed_by_path
+#
+# The posting gate (_partition_review_issues) is purely change-map-driven:
+#   in_scope = is_within_diff(i, changed_by_path) or omission or coverage_finding
+# The pre_existing tag plays NO part in this gate.
+# ---------------------------------------------------------------------------
+
+
+class TestDiffGroundedContractMatrix:
+    """The complete posting-gate contract as a single readable matrix.
+
+    The first five tests encode the canonical cells from issue #6335's
+    acceptance criteria:
+
+      1. Defect on added line              → PR comment (line-anchored inline)
+      2. Defect on unchanged context line   → NOT posted; routes to proposal
+      3. Off-diff omission                  → still in-scope (standalone comment)
+      4. Off-diff pre-existing bug          → proposal, NOT posted as comment
+      5. Mistagged pre_existing=true on     → still a PR finding (gate overrides)
+         an added line
+
+    Two additional tests cover supplementary cases:
+
+      6. Off-diff untagged finding (variant of 4) — proves pre_existing tag
+         plays no part in the gate either way.
+      7. Context line with omission (edge case) — omission carve-out overrides
+         the context-line exclusion.
+
+    Validates: issue #6414 acceptance criteria, parent issue #6335 AC9.
+    """
+
+    @staticmethod
+    def _run(review_app: dict, issues: list) -> tuple:
+        """Run a PR review with the given findings and return (gh_client, job).
+
+        Mutates ``review_app["github"]["agent_output"]`` to inject the fake
+        reviewer output, then POSTs ``/review-pr`` with the standard review
+        body fixture.  Returns the ``_FakeReviewClient`` instance (for
+        inspecting posted comments/reviews) and the completed job dict (for
+        inspecting the review_summary).
+        """
+        review_app["github"]["agent_output"] = _FakeOutput(issues=issues)
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        return gh, job
+
+    def test_defect_on_added_line_posts_as_inline_comment(self, review_app) -> None:
+        """Matrix cell 1: a finding on a line the PR actually added (line 2)
+        is in-scope and posts as a line-anchored inline review comment."""
+        gh, job = self._run(
+            review_app,
+            [_FakeReviewIssue("high", line=2, file_path="a.py", description="bug on added line")],
+        )
+        summary = job["review_summary"]
+        # The finding posts as a PR comment (not a proposal).
+        assert summary["total_issues"] == 1
+        assert summary["inline_comments"] == 1
+        assert summary["pending_issue_proposals"] == []
+        # Verify it landed as a line-anchored review comment on line 2.
+        assert len(gh.submitted_reviews) >= 1
+        all_comments = [c for rev in gh.submitted_reviews for c in rev.get("comments", [])]
+        assert any(
+            c.get("line") == 2
+            and c.get("side") == "RIGHT"
+            and "bug on added line" in c.get("body", "")
+            for c in all_comments
+        ), f"Expected line-anchored comment on line 2, got: {all_comments}"
+        # Never routed to standalone or proposal.
+        assert gh.comments == []
+
+    def test_defect_on_unchanged_context_line_routes_to_proposal(self, review_app) -> None:
+        """Matrix cell 2: a finding on a context line (line 1, visible in the
+        diff hunk but not added/modified by this PR) is NOT posted as any kind
+        of PR comment — it routes to a pending issue proposal instead.
+
+        This is the core diff-grounded rule: only findings on actually-changed
+        lines (or tagged omission) are in-scope for posting."""
+        gh, job = self._run(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high",
+                    line=1,
+                    file_path="a.py",
+                    description="bug on context line",
+                )
+            ],
+        )
+        summary = job["review_summary"]
+        # NOT posted: no inline, no file-level, no standalone comment.
+        assert summary["total_issues"] == 0
+        assert summary["inline_comments"] == 0
+        for rev in gh.submitted_reviews:
+            for c in rev.get("comments", []):
+                assert "bug on context line" not in c.get("body", "")
+        assert all("bug on context line" not in c.get("body", "") for c in gh.review_comments)
+        assert all("bug on context line" not in body for _n, body in gh.comments)
+        # Routes to a proposal instead.
+        proposals = summary["pending_issue_proposals"]
+        assert len(proposals) == 1
+        assert proposals[0]["description"] == "bug on context line"
+
+    def test_off_diff_omission_stays_in_scope_as_standalone(self, review_app) -> None:
+        """Matrix cell 3: an omission-tagged finding (describes a required
+        add/modify this change left out) stays in-scope even when its file is
+        not in the diff — posted as a standalone conversation comment."""
+        gh, job = self._run(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high",
+                    line=1,
+                    file_path="missing_module.py",
+                    description="should have added error handler",
+                    omission=True,
+                )
+            ],
+        )
+        summary = job["review_summary"]
+        # In-scope: posted as a standalone comment (file not in diff, cannot anchor).
+        assert summary["comment_findings"] == 1
+        assert any("should have added error handler" in body for _n, body in gh.comments)
+        assert any("`missing_module.py`" in body for _n, body in gh.comments)
+        # Never routed to a proposal.
+        assert summary["pending_issue_proposals"] == []
+
+    def test_off_diff_pre_existing_bug_becomes_proposal_not_comment(self, review_app) -> None:
+        """Matrix cell 4: an off-diff finding (no omission tag) routes to a
+        pending issue proposal regardless of the pre_existing tag value — the
+        change-map gate, not the tag, decides scope."""
+        gh, job = self._run(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "critical",
+                    line=5,
+                    file_path="legacy_utils.py",
+                    description="null deref in legacy code",
+                    pre_existing=True,
+                )
+            ],
+        )
+        summary = job["review_summary"]
+        # Never posted as any kind of PR comment.
+        assert summary["total_issues"] == 0
+        assert all("null deref in legacy code" not in body for _n, body in gh.comments)
+        assert all("null deref in legacy code" not in c.get("body", "") for c in gh.review_comments)
+        for rev in gh.submitted_reviews:
+            for c in rev.get("comments", []):
+                assert "null deref in legacy code" not in c.get("body", "")
+        # Routed to proposal.
+        proposals = summary["pending_issue_proposals"]
+        assert len(proposals) == 1
+        assert proposals[0]["description"] == "null deref in legacy code"
+
+    def test_mistagged_pre_existing_on_added_line_still_posts(self, review_app) -> None:
+        """Matrix cell 5: a finding mistagged pre_existing=true on a line the
+        PR actually ADDED (line 2) — the change-map gate overrides the tag,
+        keeping the finding in-scope as a PR comment. The tag cannot suppress
+        a defect on code this PR introduced."""
+        gh, job = self._run(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high",
+                    line=2,
+                    file_path="a.py",
+                    description="mistagged defect on added line",
+                    pre_existing=True,
+                )
+            ],
+        )
+        summary = job["review_summary"]
+        # The gate overrides: the finding IS posted as a PR comment.
+        assert summary["total_issues"] == 1
+        assert summary["inline_comments"] == 1
+        # Never routed to a proposal.
+        assert summary["pending_issue_proposals"] == []
+        # Verify inline comment exists.
+        all_comments = [c for rev in gh.submitted_reviews for c in rev.get("comments", [])]
+        assert any("mistagged defect on added line" in c.get("body", "") for c in all_comments)
+
+    def test_off_diff_untagged_finding_routes_to_proposal(self, review_app) -> None:
+        """Variant of cell 4: an off-diff finding with NO pre_existing tag at
+        all (default False, no omission) also routes to a proposal — proving
+        the pre_existing tag plays no part in the gate either way."""
+        gh, job = self._run(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "medium",
+                    line=10,
+                    file_path="unrelated.py",
+                    description="untagged off-diff finding",
+                )
+            ],
+        )
+        summary = job["review_summary"]
+        assert summary["total_issues"] == 0
+        assert all("untagged off-diff finding" not in body for _n, body in gh.comments)
+        proposals = summary["pending_issue_proposals"]
+        assert len(proposals) == 1
+        assert proposals[0]["description"] == "untagged off-diff finding"
+
+    def test_context_line_with_omission_stays_in_scope(self, review_app) -> None:
+        """Edge case: a finding on a context line (line 1) but tagged
+        omission=True — the omission carve-out keeps it in-scope, and since
+        the line IS in valid_by_path it can be anchored (line-anchored, since
+        line 1 is a valid diff line even though it was not changed)."""
+        gh, job = self._run(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high",
+                    line=1,
+                    file_path="a.py",
+                    description="omission on context line",
+                    omission=True,
+                )
+            ],
+        )
+        summary = job["review_summary"]
+        # In-scope via omission: posts as a PR finding (total_issues counts it).
+        assert summary["total_issues"] == 1
+        assert summary["inline_comments"] == 1
+        assert summary["pending_issue_proposals"] == []
+        # Verify it landed as a line-anchored inline comment on line 1.
+        all_comments = [c for rev in gh.submitted_reviews for c in rev.get("comments", [])]
+        assert any(
+            c.get("line") == 1
+            and c.get("side") == "RIGHT"
+            and "omission on context line" in c.get("body", "")
+            for c in all_comments
+        ), f"Expected line-anchored comment on line 1, got: {all_comments}"
+        # Never posted as a standalone comment.
+        assert gh.comments == []
 
 
 # ---------------------------------------------------------------------------
@@ -4679,6 +5197,68 @@ class TestDuplicateProposalDetection:
         )
         assert job["review_summary"]["pending_issue_proposals"] == []
 
+    def test_full_chain_from_preexisting_split_to_persisted_survivors(self, review_app) -> None:
+        """End-to-end regression for the out-of-scope dedup path (issue #6364):
+        drives real off-diff/pre_existing findings through the current
+        change-map-driven scope split in ``_partition_review_issues``, then
+        through ``group_similar_findings`` -> ``proposal_from_findings`` ->
+        ``_detect_duplicate_proposals`` -> the ``matched_existing`` drop, and
+        asserts the exact set of proposals that survives to
+        ``pending_issue_proposals`` for human review on the Code Review page.
+
+        Three off-diff findings feed the split: two near-identical "bare
+        import" findings (same category/description shape) group into one
+        proposal, and a distinct "off-by-one" finding matches an already-open
+        GitHub issue and must be dropped. Only the grouped, unmatched proposal
+        should survive.
+        """
+        gh = review_app["github"]["client"]
+        gh.open_issues = [
+            Issue(
+                number=42,
+                title="off-by-one error in loop bound",
+                body="",
+                state="open",
+                html_url="https://example/issues/42",
+                labels=(),
+                id=42,
+            )
+        ]
+        job = _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high",
+                    line=2,
+                    file_path="legacy.py",
+                    description="off-by-one error in loop bound",
+                    pre_existing=True,
+                ),
+                _FakeReviewIssue(
+                    "low",
+                    line=3,
+                    file_path="legacy_a.py",
+                    description="bare import statement",
+                    pre_existing=True,
+                ),
+                _FakeReviewIssue(
+                    "low",
+                    line=4,
+                    file_path="legacy_b.py",
+                    description="bare import statement",
+                    pre_existing=True,
+                ),
+            ],
+        )
+        proposals = job["review_summary"]["pending_issue_proposals"]
+        assert len(proposals) == 1
+        survivor = proposals[0]
+        assert survivor["matched_existing"] is False
+        assert "bare import" in survivor["description"]
+        assert "off-by-one" not in survivor["description"]
+        # The matched finding was dropped, not merely flagged.
+        assert all("off-by-one" not in p["description"] for p in proposals)
+
     def test_unrelated_open_issue_does_not_mark_proposal_matched(self, review_app) -> None:
         gh = review_app["github"]["client"]
         gh.open_issues = [
@@ -5448,6 +6028,37 @@ class TestRunReviewerFallbackAndMixedMode:
         assert "hunk spec" in result.spec_compliance_notes
 
 
+class _SilentGitHubClient:
+    """Module-level fake GitHub client returning empty defaults for all comment
+    and issue-listing endpoints.
+
+    Used by TestPartitionReviewIssuesUnit (and related suites) to satisfy
+    _partition_review_issues without exercising the real GitHub API.
+    """
+
+    def list_review_comments(self, owner, repo, pr_number):
+        return []
+
+    def list_issue_comments(self, owner, repo, pr_number):
+        return []
+
+    def get_resolved_review_thread_comment_ids(self, owner, repo, pr_number):
+        return set()
+
+    def list_open_issues(self, owner, repo):
+        return iter(())
+
+
+class _UnreachableGitHubClient(_SilentGitHubClient):
+    """Subclass that raises AssertionError from list_review_comments.
+
+    Used to verify that comment-fetching is skipped when no PR issues exist.
+    """
+
+    def list_review_comments(self, owner, repo, pr_number):
+        raise AssertionError("should not be called when pr_issues is empty")
+
+
 class TestPartitionReviewIssuesUnit:
     """Direct unit tests for _partition_review_issues, extracted from
     _run_pr_review_body for exactly this reason."""
@@ -5459,6 +6070,121 @@ class TestPartitionReviewIssuesUnit:
         output = _FakeOutput(issues=[issue])
         valid_by_path = {"a.py": [1, 2, 99]}
         changed_by_path = {"a.py": [1]}  # line 99 was NOT added by this PR
+
+        result = pr_review._partition_review_issues(
+            output, _SilentGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
+        )
+        assert result.pr_issues == []
+        assert result.preexisting_issues == [issue]
+        assert len(result.proposals) == 1
+
+    def test_pre_existing_tag_overridden_when_within_diff(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        issue = _FakeReviewIssue("medium", line=1, file_path="a.py", pre_existing=True)
+        output = _FakeOutput(issues=[issue])
+        valid_by_path = {"a.py": [1]}
+        changed_by_path = {"a.py": [1]}  # line 1 WAS added by this PR
+
+        result = pr_review._partition_review_issues(
+            output, _SilentGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
+        )
+        assert result.pr_issues == [issue]
+        assert result.preexisting_issues == []
+        assert result.proposals == []
+
+    def test_existing_comments_fetch_skipped_when_no_pr_issues(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        output = _FakeOutput(issues=[])
+
+        result = pr_review._partition_review_issues(
+            output, _UnreachableGitHubClient(), "o", "r", 7, {}, {}
+        )
+        assert result.pr_issues == []
+        assert result.addressed_issues == []
+
+    def test_finding_matching_resolved_comment_is_dropped_as_addressed(self) -> None:
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.github_source import ReviewComment
+
+        issue = _FakeReviewIssue("high", line=2, file_path="a.py", description="dup finding")
+        output = _FakeOutput(issues=[issue])
+        valid_by_path = {"a.py": [1, 2]}
+        changed_by_path = {"a.py": [1, 2]}
+        existing = ReviewComment(
+            id=1, path="a.py", line=2, body="dup finding", html_url="https://example/comment/1"
+        )
+
+        class _ResolvedCommentClient(_SilentGitHubClient):
+            def list_review_comments(self, owner, repo, pr_number):
+                return [existing]
+
+            def get_resolved_review_thread_comment_ids(self, owner, repo, pr_number):
+                return {1}  # resolved
+
+        result = pr_review._partition_review_issues(
+            output, _ResolvedCommentClient(), "o", "r", 7, valid_by_path, changed_by_path
+        )
+        assert result.pr_issues == []
+        assert result.addressed_issues == [issue]
+
+    def test_out_of_diff_finding_without_omission_becomes_proposal(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        # file_path not present in valid_by_path, no pre_existing tag, and no
+        # omission tag: the change-map-driven gate routes this to a proposal --
+        # neither is_within_diff nor omission holds, so pre_existing (or its
+        # absence) plays no part in the decision either way.
+        issue = _FakeReviewIssue("high", line=1, file_path="missing.py")
+        output = _FakeOutput(issues=[issue])
+        valid_by_path = {"a.py": [1, 2]}
+        changed_by_path = {"a.py": [1, 2]}
+
+        result = pr_review._partition_review_issues(
+            output, _SilentGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
+        )
+        assert result.pr_issues == []
+        assert result.preexisting_issues == [issue]
+        assert len(result.proposals) == 1
+        assert result.line_comments == []
+        assert result.file_comments == []
+        assert result.standalone_comments == []
+
+    def test_out_of_diff_omission_finding_becomes_standalone(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        # file_path not present in valid_by_path, but tagged omission=True: the
+        # finding stays a PR finding regardless of diff/file membership. Since
+        # it cannot resolve to any path in the diff, map_issues_to_comments
+        # returns it as a leftover, rendered into standalone_comments.
+        issue = _FakeReviewIssue("high", line=1, file_path="missing.py", omission=True)
+        output = _FakeOutput(issues=[issue])
+        valid_by_path = {"a.py": [1, 2]}
+        changed_by_path = {"a.py": [1, 2]}
+
+        result = pr_review._partition_review_issues(
+            output, _SilentGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
+        )
+        assert result.pr_issues == [issue]
+        assert result.preexisting_issues == []
+        assert result.proposals == []
+        assert result.line_comments == []
+        assert result.file_comments == []
+        assert len(result.standalone_comments) == 1
+        assert "missing.py" in result.standalone_comments[0]
+
+    def test_finding_on_context_line_becomes_proposal(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        # The finding is on line 2 of a.py, which is in valid_by_path (shown in
+        # the diff hunk as context) but NOT in changed_by_path (the PR did not
+        # add or modify it). Without omission, the change-map gate routes it to
+        # preexisting_issues / proposals.
+        issue = _FakeReviewIssue("high", line=2, file_path="a.py")
+        output = _FakeOutput(issues=[issue])
+        valid_by_path = {"a.py": [1, 2, 3]}
+        changed_by_path = {"a.py": [1]}  # only line 1 was added; line 2 is context
 
         class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
@@ -5479,89 +6205,21 @@ class TestPartitionReviewIssuesUnit:
         assert result.pr_issues == []
         assert result.preexisting_issues == [issue]
         assert len(result.proposals) == 1
+        # The finding is routed to a proposal, never posted.
+        assert result.line_comments == []
+        assert result.file_comments == []
+        assert result.standalone_comments == []
 
-    def test_pre_existing_tag_overridden_when_within_diff(self) -> None:
+    def test_finding_on_context_line_with_omission_stays_in_scope(self) -> None:
         from software_engineering_team.api import pr_review
 
-        issue = _FakeReviewIssue("medium", line=1, file_path="a.py", pre_existing=True)
+        # Same as above but with omission=True: the omission carve-out keeps it
+        # in-scope as a PR finding despite being on a context line. Since the file
+        # IS in valid_by_path and the line IS valid, it routes to a line comment.
+        issue = _FakeReviewIssue("high", line=2, file_path="a.py", omission=True)
         output = _FakeOutput(issues=[issue])
-        valid_by_path = {"a.py": [1]}
-        changed_by_path = {"a.py": [1]}  # line 1 WAS added by this PR
-
-        class _FakeGitHubClient:
-            def list_review_comments(self, o, r, n):
-                return []
-
-            def list_issue_comments(self, o, r, n):
-                return []
-
-            def get_resolved_review_thread_comment_ids(self, o, r, n):
-                return set()
-
-        result = pr_review._partition_review_issues(
-            output, _FakeGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
-        )
-        assert result.pr_issues == [issue]
-        assert result.preexisting_issues == []
-        assert result.proposals == []
-
-    def test_existing_comments_fetch_skipped_when_no_pr_issues(self) -> None:
-        from software_engineering_team.api import pr_review
-
-        output = _FakeOutput(issues=[])
-
-        class _FakeGitHubClient:
-            def list_review_comments(self, o, r, n):
-                raise AssertionError("should not be called when pr_issues is empty")
-
-        result = pr_review._partition_review_issues(
-            output, _FakeGitHubClient(), "o", "r", 7, {}, {}
-        )
-        assert result.pr_issues == []
-        assert result.addressed_issues == []
-
-    def test_finding_matching_resolved_comment_is_dropped_as_addressed(self) -> None:
-        from software_engineering_team.api import pr_review
-        from software_engineering_team.github_source import ReviewComment
-
-        issue = _FakeReviewIssue("high", line=2, file_path="a.py", description="dup finding")
-        output = _FakeOutput(issues=[issue])
-        valid_by_path = {"a.py": [1, 2]}
-        changed_by_path = {"a.py": [1, 2]}
-        existing = ReviewComment(
-            id=1, path="a.py", line=2, body="dup finding", html_url="https://example/comment/1"
-        )
-
-        class _FakeGitHubClient:
-            def list_review_comments(self, o, r, n):
-                return [existing]
-
-            def list_issue_comments(self, o, r, n):
-                return []
-
-            def get_resolved_review_thread_comment_ids(self, o, r, n):
-                return {1}  # resolved
-
-        result = pr_review._partition_review_issues(
-            output, _FakeGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
-        )
-        assert result.pr_issues == []
-        assert result.addressed_issues == [issue]
-
-    def test_out_of_diff_finding_without_tag_becomes_standalone(self) -> None:
-        from software_engineering_team.api import pr_review
-
-        # file_path not present in valid_by_path, and no pre_existing tag (round
-        # 2): the finding stays a PR finding -- routing to preexisting_issues is
-        # driven ONLY by the reviewer's own tag, never by diff/file membership
-        # alone (forcing this to preexisting would silently drop a real, in-scope
-        # finding like "this PR references module X but never added it"). Since
-        # it cannot resolve to any path in the diff, map_issues_to_comments
-        # returns it as a leftover, rendered into standalone_comments.
-        issue = _FakeReviewIssue("high", line=1, file_path="missing.py")
-        output = _FakeOutput(issues=[issue])
-        valid_by_path = {"a.py": [1, 2]}
-        changed_by_path = {"a.py": [1, 2]}
+        valid_by_path = {"a.py": [1, 2, 3]}
+        changed_by_path = {"a.py": [1]}  # line 2 is context
 
         class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
@@ -5582,10 +6240,11 @@ class TestPartitionReviewIssuesUnit:
         assert result.pr_issues == [issue]
         assert result.preexisting_issues == []
         assert result.proposals == []
-        assert result.line_comments == []
+        # The finding is in-scope and routes to a line comment (line 2 in valid_by_path).
+        assert len(result.line_comments) == 1
+        assert result.line_comments[0]["line"] == 2
         assert result.file_comments == []
-        assert len(result.standalone_comments) == 1
-        assert "missing.py" in result.standalone_comments[0]
+        assert result.standalone_comments == []
 
 
 def _review_issue_partition(**overrides: Any):

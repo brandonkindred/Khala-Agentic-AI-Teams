@@ -49,12 +49,6 @@
   }
 }
 
-.error-text {
-  color: var(--kh-error);
-  font-size: var(--kh-text-sm);
-  margin: 0;
-}
-
 .empty-state,
 .loading-state {
   display: flex;
@@ -78,50 +72,4 @@
     margin: 0;
     max-width: 42ch;
   }
-}
-
-// ── Browse-agents slide-out (spec §2.1) ─────────────────────────────────────
-// Mirrors Stage 1's provisioning slide-out (`agent-studio-build-agent`) and
-// Stage 2's Browse-agents panel: scrim + fixed right-hand panel.
-.browse-scrim {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.4);
-  z-index: 1100;
-}
-
-.browse-panel {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 1101;
-  width: min(560px, 92vw);
-  display: flex;
-  flex-direction: column;
-  background: var(--kh-surface-1);
-  border-left: 1px solid var(--kh-border-subtle);
-  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.25);
-}
-
-.browse-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--kh-space-4);
-  padding: var(--kh-space-4) var(--kh-space-5);
-  border-bottom: 1px solid var(--kh-border-subtle);
-
-  h2 {
-    margin: 0;
-    font-size: var(--kh-text-md);
-    font-weight: 600;
-    color: var(--kh-text-primary);
-  }
-}
-
-.browse-body {
-  flex: 1 1 auto;
-  overflow: auto;
-  padding: var(--kh-space-4) var(--kh-space-5);
 }

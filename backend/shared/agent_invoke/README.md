@@ -1,7 +1,7 @@
 # shared.agent_invoke
 
 FastAPI shim mounted inside the `khala-agent-sandbox` image. Exposes the
-single specialist agent loaded by the sandbox runtime to the Agent Console
+single specialist agent loaded by the sandbox runtime to the Agent Studio
 **Runner** over `POST /_agents/{agent_id}/invoke`.
 
 The shim does **not** run inside production team services; it lives only

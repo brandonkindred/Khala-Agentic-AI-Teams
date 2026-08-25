@@ -364,8 +364,9 @@ class GatedExecutionConfig:
 
     Mirrors the ``ReviewConfig`` seam in ``shared/v2_review.py``: scalars/enums
     for the plain divergences and callables for the behavioural ones. Each team
-    builds one instance in its ``phases/execution.py`` next to its
-    ``_run_general_microtask`` boundary.
+    builds one instance via
+    ``software_engineering_team.shared.v2_execution_bindings.build_execution_bindings``,
+    called once from its ``phases/_profile.py``.
 
     Invariants:
         The three ``run_*_gate`` callables return a :class:`GateOutcome`; the
@@ -389,8 +390,13 @@ class GatedExecutionConfig:
     # above): it caches the QA/security *LLM* steps, while ``tool_agent_cache``
     # caches tool-agent ``.review()`` results and travels via ``deps`` — a
     # team's gate callables read it off ``deps`` themselves (see the frontend
-    # gates in ``frontend_code_v2_team/phases/execution.py``) rather than
+    # gates in ``frontend_code_v2_team/phases/_profile.py``) rather than
     # receiving it as a keyword here, so this callable signature is unchanged.
+    # A team whose gate architecture calls one unified review function per
+    # gate (rather than a gate-scoped shared phase function) should narrow
+    # ``deps.tool_agents`` via the shared, public
+    # ``software_engineering_team.shared.v2_execution_bindings.scope_tool_agents_by_kind``
+    # helper rather than hand-rolling its own copy.
     run_code_review_gate: Callable[..., GateOutcome]
     run_qa_gate: Callable[..., GateOutcome]
     run_security_gate: Callable[..., GateOutcome]

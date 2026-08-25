@@ -20,7 +20,7 @@ import type {
  * Talks to the unified API at `${environment.agentCognitionApiUrl}`
  * (`/api/cognition`). Every endpoint is scoped to an `agent_id`. Errors are
  * not handled here; subscribers surface `err?.error?.detail` at the component
- * layer (existing project convention — see `AgentRunnerApiService`).
+ * layer (existing project convention — see `AgentConsoleApiService`).
  *
  * Preconditions (all methods): `agentId` — and, where applicable, `proposalId`
  * — are non-empty strings. Violations throw rather than issue a malformed URL.

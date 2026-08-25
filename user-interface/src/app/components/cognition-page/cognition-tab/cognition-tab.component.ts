@@ -19,8 +19,9 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatSelectModule } from '@angular/material/select';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { AgentCatalogApiService } from '../../../services/agent-catalog-api.service';
+import { AgentConsoleApiService } from '../../../services/agent-console-api.service';
 import { CognitionApiService } from '../../../services/cognition-api.service';
+import { extractErrorDetail } from '../../../shared/extract-error-detail';
 import {
   ConfirmDialogComponent,
   ConfirmDialogData,
@@ -96,7 +97,7 @@ const RULE_PAGE_LIMIT = 500;
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class CognitionTabComponent implements OnInit {
-  private readonly catalog = inject(AgentCatalogApiService);
+  private readonly agentConsoleApi = inject(AgentConsoleApiService);
   private readonly api = inject(CognitionApiService);
   private readonly dialog = inject(MatDialog);
   private readonly destroyRef = inject(DestroyRef);
@@ -210,7 +211,7 @@ export class CognitionTabComponent implements OnInit {
   loadAgents(): void {
     this.loadingAgents.set(true);
     this.agentsError.set(null);
-    this.catalog
+    this.agentConsoleApi
       .listAgents()
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
@@ -222,7 +223,7 @@ export class CognitionTabComponent implements OnInit {
           }
         },
         error: (err) => {
-          this.agentsError.set(this.extractError(err, 'Failed to load agents.'));
+          this.agentsError.set(extractErrorDetail(err, 'Failed to load agents.'));
           this.loadingAgents.set(false);
         },
       });
@@ -791,11 +792,6 @@ export class CognitionTabComponent implements OnInit {
       return;
     }
     unavailSig.set(false);
-    errSig.set(this.extractError(err, fallback));
-  }
-
-  private extractError(err: unknown, fallback: string): string {
-    const e = err as { error?: { detail?: string }; message?: string } | undefined;
-    return e?.error?.detail ?? e?.message ?? fallback;
+    errSig.set(extractErrorDetail(err, fallback));
   }
 }

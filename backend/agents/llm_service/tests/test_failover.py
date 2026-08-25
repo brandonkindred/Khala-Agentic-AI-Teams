@@ -447,11 +447,11 @@ def test_build_entry_client_empty_falls_back_to_resolvers(monkeypatch):
 
 def test_build_entry_client_runpod(monkeypatch):
     e = _full_entry(
-        "runpod", model="mixtral", base_url="https://api.runpod.ai/v2/abc123/openai/v1", api_key="sk-rp"
+        "runpod", model="mixtral", base_url="https://api.runpod.ai/v2/abc123/openai", api_key="sk-rp"
     )
     c = _build_entry_client(e, None, None, 0)
     assert isinstance(c, RunPodLLMClient)
-    assert c.model == "mixtral" and c.base_url == "https://api.runpod.ai/v2/abc123/openai/v1"
+    assert c.model == "mixtral" and c.base_url == "https://api.runpod.ai/v2/abc123/openai"
 
 
 def test_build_entry_client_runpod_strips_base_url(monkeypatch):
@@ -460,12 +460,12 @@ def test_build_entry_client_runpod_strips_base_url(monkeypatch):
     e = _full_entry(
         "runpod",
         model="m",
-        base_url="  https://api.runpod.ai/v2/abc123/openai/v1  ",
+        base_url="  https://api.runpod.ai/v2/abc123/openai  ",
         api_key="sk-rp",
     )
     c = _build_entry_client(e, None, None, 0)
     assert isinstance(c, RunPodLLMClient)
-    assert c.base_url == "https://api.runpod.ai/v2/abc123/openai/v1"
+    assert c.base_url == "https://api.runpod.ai/v2/abc123/openai"
 
 
 def test_build_entry_client_runpod_empty_base_url_passes_through(monkeypatch):
@@ -480,13 +480,13 @@ def test_build_entry_client_runpod_empty_base_url_passes_through(monkeypatch):
 
 
 def test_build_entry_client_runpod_empty_model_falls_back_to_resolver(monkeypatch):
-    """An empty ``model`` on a RunPod entry resolves via ``llm_config.resolve_model``
-    (the same resolver Ollama falls back to) — RunPod has no model default of its own."""
+    """An empty ``model`` on a RunPod entry uses the 'auto' placeholder — RunPod
+    serverless endpoints serve a single pre-configured model and don't need one."""
     monkeypatch.setenv("LLM_MODEL", "env-model")
-    e = _full_entry("runpod", base_url="https://api.runpod.ai/v2/abc123/openai/v1", api_key="sk-rp")
+    e = _full_entry("runpod", base_url="https://api.runpod.ai/v2/abc123/openai", api_key="sk-rp")
     c = _build_entry_client(e, None, None, 0)
     assert isinstance(c, RunPodLLMClient)
-    assert c.model == "env-model"
+    assert c.model == "auto"
 
 
 def test_build_entry_client_on_reasoning_is_fresh(monkeypatch):
@@ -500,7 +500,7 @@ def test_build_entry_client_on_reasoning_is_fresh(monkeypatch):
 
 def test_build_entry_client_runpod_on_reasoning_is_fresh(monkeypatch):
     sink = lambda _t: None  # noqa: E731
-    e = _full_entry("runpod", model="m", base_url="https://api.runpod.ai/v2/abc123/openai/v1", api_key="sk-rp")
+    e = _full_entry("runpod", model="m", base_url="https://api.runpod.ai/v2/abc123/openai", api_key="sk-rp")
     c1 = _build_entry_client(e, None, sink, 0)
     c2 = _build_entry_client(e, None, sink, 0)
     assert isinstance(c1, RunPodLLMClient) and c1.on_reasoning is sink

@@ -85,17 +85,14 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   /**
    * Emitted when a roster entry's `Test ▸` action is clicked (spec §2.1,
    * registry-sourced entries only — see the template's `source === 'registry'`
-   * gate). This component stays decoupled from `AgentStudioStateService` (it
-   * is still mounted by the legacy `/agentic-teams` dashboard too), so the
-   * embedding Stage-3 host owns the actual "jump to Stage 2" back-loop.
+   * gate). This component stays decoupled from `AgentStudioStateService`, so
+   * the embedding Stage-3 host owns the actual "jump to Stage 2" back-loop.
    */
   @Output() readonly testAgent = new EventEmitter<AgenticTeamAgent>();
 
   /**
    * Tooltip for an enabled `Test ▸` action (registry-sourced entries). Kept
-   * generic by default — this component is also mounted by the legacy
-   * `/agentic-teams` dashboard, where a Studio-specific "Stage 2" reference
-   * would be meaningless; the Agent Studio Stage-3 host overrides this to
+   * generic by default — the Agent Studio Stage-3 host overrides this to
    * name the stage explicitly.
    */
   @Input() testAgentTooltip = 'Test this agent';

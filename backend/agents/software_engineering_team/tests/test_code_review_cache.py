@@ -63,8 +63,13 @@ class _CountingClient(DummyLLMClient):
 
     Thread-safe: map calls may run in parallel across chunks.
 
-    After the think-then-format split, the map marker lives on the reasoning
-    ``complete`` prompt; ``complete_json`` is the format pass only.
+    Both the reasoning pass (reached via the Strands Agent's ``chat()``
+    delegation) and the formatting pass land on ``complete_json`` now.
+    Routed by content, not call order, since concurrent chunks interleave:
+    the formatting pass's prompt carries the "--- ANALYSIS" marker
+    ``wrap_with_analysis_delimiters`` always injects; the reasoning pass's
+    prompt (the original chunk-review prompt) carries ``_MAP_MARKER``
+    instead.
     """
 
     def __init__(self, response: Dict[str, Any]) -> None:
@@ -74,24 +79,26 @@ class _CountingClient(DummyLLMClient):
         self.calls = 0
         self.map_calls = 0
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
+    def complete_json(self, prompt: str, **kwargs: Any) -> Any:
         with self._lock:
             self.calls += 1
+            if "--- ANALYSIS" in prompt:
+                return dict(self._response)
             if _MAP_MARKER in prompt:
                 self.map_calls += 1
         return "Structured prose review summary."
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        with self._lock:
-            self.calls += 1
-        return dict(self._response)
-
 
 class _SwitchingClient(DummyLLMClient):
-    """Returns a different response on each call; counts map-phase calls.
+    """Returns a different response on each formatting-pass call; counts
+    map-phase (reasoning-pass) calls.
 
     Lets a test prove a cache hit did *not* consult the model: a second run that
-    hit the cache never advances past the first response.
+    hit the cache never advances past the first response. The index only
+    advances on the formatting pass (one outcome per chunk review), identified
+    by the "--- ANALYSIS" marker the formatting prompt always carries — the
+    reasoning pass (bearing ``_MAP_MARKER`` instead) returns fixed prose and
+    never touches ``_idx``.
     """
 
     def __init__(self, responses: List[Dict[str, Any]]) -> None:
@@ -101,17 +108,15 @@ class _SwitchingClient(DummyLLMClient):
         self._lock = threading.Lock()
         self.map_calls = 0
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
+    def complete_json(self, prompt: str, **kwargs: Any) -> Any:
         with self._lock:
+            if "--- ANALYSIS" in prompt:
+                resp = self._responses[min(self._idx, len(self._responses) - 1)]
+                self._idx += 1
+                return dict(resp)
             if _MAP_MARKER in prompt:
                 self.map_calls += 1
         return "Structured prose review summary."
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        with self._lock:
-            resp = self._responses[min(self._idx, len(self._responses) - 1)]
-            self._idx += 1
-            return dict(resp)
 
 
 class _FailOnMarkerClient(DummyLLMClient):
@@ -129,16 +134,15 @@ class _FailOnMarkerClient(DummyLLMClient):
         self.map_calls = 0
         self.fail = True
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
+    def complete_json(self, prompt: str, **kwargs: Any) -> Any:
+        if "--- ANALYSIS" in prompt:
+            return dict(_APPROVED)
         with self._lock:
             if _MAP_MARKER in prompt:
                 self.map_calls += 1
         if self.fail and self._fail_marker in prompt:
             raise LLMSemanticExhaustionError("no verdict")
         return "Structured prose review summary."
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        return dict(_APPROVED)
 
 
 _APPROVED = {"approved": True, "issues": [], "summary": "OK", "spec_compliance_notes": ""}
@@ -415,16 +419,15 @@ class _FailFullThenBisectClient(DummyLLMClient):
         self._lock = threading.Lock()
         self.map_calls = 0
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
+    def complete_json(self, prompt: str, **kwargs: Any) -> Any:
+        if "--- ANALYSIS" in prompt:
+            return dict(_APPROVED)
         with self._lock:
             if _MAP_MARKER in prompt:
                 self.map_calls += 1
         if "S_MARK_START" in prompt and "E_MARK_END" in prompt:
             raise LLMTruncatedError("full chunk too big", finish_reason="length")
         return "Structured prose review summary."
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        return dict(_APPROVED)
 
 
 def test_bisected_recovery_outcome_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -530,14 +533,13 @@ class _PromptCapturingClient(DummyLLMClient):
         self._lock = threading.Lock()
         self.map_prompts: List[str] = []
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
+    def complete_json(self, prompt: str, **kwargs: Any) -> Any:
+        if "--- ANALYSIS" in prompt:
+            return dict(_APPROVED)
         with self._lock:
             if _MAP_MARKER in prompt:
                 self.map_prompts.append(prompt)
         return "Structured prose review summary."
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        return dict(_APPROVED)
 
 
 def _defined_file(symbol: str, body: str = "1") -> str:
@@ -692,16 +694,15 @@ class _FailFullCaptureHalvesClient(DummyLLMClient):
         self._lock = threading.Lock()
         self.map_prompts: List[str] = []
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
+    def complete_json(self, prompt: str, **kwargs: Any) -> Any:
+        if "--- ANALYSIS" in prompt:
+            return dict(_APPROVED)
         with self._lock:
             if _MAP_MARKER in prompt:
                 self.map_prompts.append(prompt)
         if "def a_func" in prompt and "def b_func" in prompt:
             raise LLMSemanticExhaustionError("combined chunk too big")
         return "Structured prose review summary."
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        return dict(_APPROVED)
 
 
 def test_bisected_multifile_chunk_recomputes_sibling_surface() -> None:
@@ -1520,6 +1521,167 @@ def test_submission_cache_bypassed_when_repo_reader_given(
     # A repo_reader-backed run must not poison the cache for reader-free reruns either.
     run_coordinator(client, data)
     assert spy["n"] == 2
+
+
+def _lookup_kwargs(**overrides: Any) -> Dict[str, Any]:
+    """Default keyword args for ``coord._lookup_submission_cache``, direct calls."""
+    kwargs: Dict[str, Any] = {
+        "input_data": _one_file_input(),
+        "model_fingerprint": "model-A",
+        "spec_compliance_single_pass": False,
+        "mutation_analysis_enabled": False,
+        "side_effect_consolidation_enabled": False,
+        "combine_similarity_threshold": 0.5,
+        "repo_reader": None,
+        "submission_capacity": 8,
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_lookup_submission_cache_disabled_returns_no_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Capacity <= 0 short-circuits the lookup to ``(None, None)`` before any
+    fingerprint or cache access — proven by never calling ``_submission_fingerprint``.
+    ``submission_capacity`` is passed in directly (not re-read from the env) so this
+    exercises the same disabled path ``run_coordinator`` reaches from its own resolved
+    capacity."""
+    monkeypatch.setattr(
+        coord,
+        "_submission_fingerprint",
+        lambda *_a, **_k: pytest.fail("fingerprint must not be computed when disabled"),
+    )
+
+    key, cached = coord._lookup_submission_cache(**_lookup_kwargs(submission_capacity=0))
+    assert key is None
+    assert cached is None
+
+
+def test_lookup_submission_cache_bypassed_for_repo_reader() -> None:
+    """A ``repo_reader`` bypasses the lookup entirely, regardless of capacity."""
+    key, cached = coord._lookup_submission_cache(**_lookup_kwargs(repo_reader=object()))
+    assert key is None
+    assert cached is None
+
+
+def test_lookup_submission_cache_empty_miss_returns_key() -> None:
+    """A plain miss (no entry at all) still returns the computed key, unlike
+    the disabled/repo_reader-bypass paths above which return ``(None, None)``
+    -- the caller needs the key regardless of hit/miss for a later write."""
+    kwargs = _lookup_kwargs()
+    expected_key = coord._submission_fingerprint(
+        kwargs["input_data"],
+        kwargs["model_fingerprint"],
+        kwargs["spec_compliance_single_pass"],
+        kwargs["mutation_analysis_enabled"],
+        kwargs["side_effect_consolidation_enabled"],
+        kwargs["combine_similarity_threshold"],
+    )
+
+    key, cached = coord._lookup_submission_cache(**kwargs)
+    assert key == expected_key
+    assert cached is None
+
+
+def test_lookup_submission_cache_clean_approved_hit() -> None:
+    """A clean approved entry under the computed fingerprint is served as a hit."""
+    from shared.cache import get_shared_cache
+
+    approved = CodeReviewOutput.model_validate(_APPROVED)
+    kwargs = _lookup_kwargs()
+    expected_key = coord._submission_fingerprint(
+        kwargs["input_data"],
+        kwargs["model_fingerprint"],
+        kwargs["spec_compliance_single_pass"],
+        kwargs["mutation_analysis_enabled"],
+        kwargs["side_effect_consolidation_enabled"],
+        kwargs["combine_similarity_threshold"],
+    )
+    get_shared_cache(coord._submission_cache_namespace()).set(
+        expected_key, approved.model_dump_json().encode("utf-8"), max_entries=8
+    )
+
+    key, cached = coord._lookup_submission_cache(**kwargs)
+    assert key == expected_key
+    assert cached is not None
+    assert cached.approved is True
+
+
+def test_lookup_submission_cache_corrupt_entry_evicted() -> None:
+    """A corrupt/unreadable cache entry is treated as a miss and evicted."""
+    from shared.cache import get_shared_cache
+
+    kwargs = _lookup_kwargs()
+    expected_key = coord._submission_fingerprint(
+        kwargs["input_data"],
+        kwargs["model_fingerprint"],
+        kwargs["spec_compliance_single_pass"],
+        kwargs["mutation_analysis_enabled"],
+        kwargs["side_effect_consolidation_enabled"],
+        kwargs["combine_similarity_threshold"],
+    )
+    cache = get_shared_cache(coord._submission_cache_namespace())
+    cache.set(expected_key, b"not-valid-json", max_entries=8)
+
+    key, cached = coord._lookup_submission_cache(**kwargs)
+    assert key == expected_key
+    assert cached is None
+    assert cache.get(expected_key) is None  # evicted
+
+
+def test_lookup_submission_cache_unclean_entry_evicted() -> None:
+    """A partially-reviewed (``not_reviewed_ranges``) entry is treated as a
+    miss and evicted, even though ``approved`` is True."""
+    from shared.cache import get_shared_cache
+
+    kwargs = _lookup_kwargs()
+    expected_key = coord._submission_fingerprint(
+        kwargs["input_data"],
+        kwargs["model_fingerprint"],
+        kwargs["spec_compliance_single_pass"],
+        kwargs["mutation_analysis_enabled"],
+        kwargs["side_effect_consolidation_enabled"],
+        kwargs["combine_similarity_threshold"],
+    )
+    cache = get_shared_cache(coord._submission_cache_namespace())
+    partial = CodeReviewOutput(
+        approved=True,
+        issues=[],
+        summary="OK but incomplete",
+        not_reviewed_ranges=["src/a.py:1-10"],
+    )
+    cache.set(expected_key, partial.model_dump_json().encode("utf-8"), max_entries=8)
+
+    key, cached = coord._lookup_submission_cache(**kwargs)
+    assert key == expected_key
+    assert cached is None
+    assert cache.get(expected_key) is None  # evicted
+
+
+def test_lookup_submission_cache_non_approved_entry_evicted() -> None:
+    """A non-approved entry is treated as a miss and evicted, even with no
+    ``not_reviewed_ranges`` -- the complementary half of "not a clean
+    approval" from ``test_lookup_submission_cache_unclean_entry_evicted``."""
+    from shared.cache import get_shared_cache
+
+    kwargs = _lookup_kwargs()
+    expected_key = coord._submission_fingerprint(
+        kwargs["input_data"],
+        kwargs["model_fingerprint"],
+        kwargs["spec_compliance_single_pass"],
+        kwargs["mutation_analysis_enabled"],
+        kwargs["side_effect_consolidation_enabled"],
+        kwargs["combine_similarity_threshold"],
+    )
+    cache = get_shared_cache(coord._submission_cache_namespace())
+    rejected = CodeReviewOutput.model_validate(_REJECTED)
+    cache.set(expected_key, rejected.model_dump_json().encode("utf-8"), max_entries=8)
+
+    key, cached = coord._lookup_submission_cache(**kwargs)
+    assert key == expected_key
+    assert cached is None
+    assert cache.get(expected_key) is None  # evicted
 
 
 def test_consumer_cache_namespaces_include_build_id(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -442,8 +442,8 @@ class RosterGap(BaseModel):
 
     category: str = Field(
         ...,
-        description="Gap category: 'unrostered_agent', 'missing_manifest', 'missing_skill', "
-        "'missing_capability', 'missing_tool', 'missing_expertise', 'unstaffed_step'",
+        description="Gap category: 'unstaffed_step', 'unrostered_agent', 'unused_agent', "
+        "'missing_manifest', 'incomplete_profile', 'sparse_profile'",
     )
     detail: str = Field(..., description="Human-readable description of the gap")
     process_id: Optional[str] = Field(default=None, description="Process where the gap was found")

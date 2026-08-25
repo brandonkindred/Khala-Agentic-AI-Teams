@@ -50,31 +50,50 @@ def test_import_bootstraps_se_team_dir_on_syspath() -> None:
 
 
 def test_build_team_lead_routes_frontend(monkeypatch) -> None:
-    import software_engineering_team.frontend_code_v2_team as fe
+    import software_engineering_team.codegen_team as codegen
 
     captured: dict = {}
 
     class _FakeLead:
-        def __init__(self, llm):
+        def __init__(self, llm, stack):
             captured["llm"] = llm
+            captured["stack"] = stack
 
-    monkeypatch.setattr(fe, "FrontendCodeV2TeamLead", _FakeLead)
+    monkeypatch.setattr(codegen, "CodegenTeamLead", _FakeLead)
     lead = SECodeEngineProvider().build_implementation_team_lead("frontend", "L")
     assert isinstance(lead, _FakeLead)
     assert captured["llm"] == "L"
+    assert captured["stack"] == "frontend"
 
 
 def test_build_team_lead_routes_backend(monkeypatch) -> None:
-    import software_engineering_team.backend_code_v2_team as be
+    import software_engineering_team.codegen_team as codegen
+
+    captured: dict = {}
 
     class _FakeLead:
-        def __init__(self, llm):
-            self.llm = llm
+        def __init__(self, llm, stack):
+            captured["llm"] = llm
+            captured["stack"] = stack
 
-    monkeypatch.setattr(be, "BackendCodeV2TeamLead", _FakeLead)
+    monkeypatch.setattr(codegen, "CodegenTeamLead", _FakeLead)
     lead = SECodeEngineProvider().build_implementation_team_lead("backend", "L")
     assert isinstance(lead, _FakeLead)
-    assert lead.llm == "L"
+    assert captured["llm"] == "L"
+    assert captured["stack"] == "backend"
+
+
+def test_build_team_lead_unknown_kind_raises_valueerror() -> None:
+    """An unrecognised ``team_kind`` violates the documented precondition and
+    must surface as a caller bug (``ValueError``, raised by
+    ``CodegenTeamLead``'s own ``stack`` precondition check via
+    ``_validate_stack``), not silently resolve to either stack -- matches
+    this repo's DbC convention of never coercing a precondition violation.
+    ``ValueError`` rather than ``AssertionError`` since ``stack`` is external
+    input crossing a boundary from outside static-type enforcement, and
+    ``assert`` is stripped under ``python -O``."""
+    with pytest.raises(ValueError, match="stack must be one of"):
+        SECodeEngineProvider().build_implementation_team_lead("mobile", "L")
 
 
 def test_quality_gate_methods_delegate(monkeypatch) -> None:
@@ -242,6 +261,99 @@ def test_classify_issue_scope_client_resolution_failure_degrades_to_none_llm(mon
     )
 
     out = SECodeEngineProvider().classify_issue_scope(["f1"], None, "desc")
+
+    assert out == []
+    assert captured["llm"] is None
+
+
+def test_synthesize_systemic_findings_delegates_to_systemic_synthesis(monkeypatch) -> None:
+    """Delegates straight through to
+    ``systemic_synthesis.synthesize_systemic_findings``, passing ``findings``
+    unchanged and adapting ``changed_context``/``task_description`` into a
+    ``CodeReviewInput``. The verify-model client comes from
+    ``model_resolution.resolve_code_review_verify_client`` -- the same
+    Ollama-pinned resolver ``classify_issue_scope`` uses -- not a bare
+    ``get_client`` call."""
+    import software_engineering_team.code_review_agent.model_resolution as model_resolution
+    import software_engineering_team.code_review_agent.systemic_synthesis as ss
+
+    captured: dict = {}
+    sentinel = [{"title": "t", "description": "d", "related_locations": []}]
+
+    def _fake_synthesize(issues, *, llm=None, input_data=None, **kwargs):
+        captured["issues"] = issues
+        captured["llm"] = llm
+        captured["input_data"] = input_data
+        return sentinel
+
+    def _fake_resolve_client():
+        return "the-pinned-client"
+
+    monkeypatch.setattr(ss, "synthesize_systemic_findings", _fake_synthesize)
+    monkeypatch.setattr(model_resolution, "resolve_code_review_verify_client", _fake_resolve_client)
+
+    findings = ["f1", "f2"]
+    out = SECodeEngineProvider().synthesize_systemic_findings(
+        findings, {"a.py": "x = 1\n"}, "review this PR"
+    )
+
+    assert out is sentinel
+    assert captured["issues"] is findings
+    assert captured["llm"] == "the-pinned-client"
+    assert captured["input_data"].files == {"a.py": "x = 1\n"}
+    assert captured["input_data"].task_description == "review this PR"
+
+
+@pytest.mark.parametrize("changed_context", [None, {}])
+def test_synthesize_systemic_findings_empty_changed_context_omits_input_data(
+    monkeypatch, changed_context
+) -> None:
+    """A falsy ``changed_context`` (``None`` or ``{}``) never constructs a
+    ``CodeReviewInput`` -- which would raise on empty ``files`` -- so
+    ``synthesize_systemic_findings`` receives ``input_data=None``."""
+    import software_engineering_team.code_review_agent.model_resolution as model_resolution
+    import software_engineering_team.code_review_agent.systemic_synthesis as ss
+
+    captured: dict = {}
+
+    def _fake_synthesize(issues, *, llm=None, input_data=None, **kwargs):
+        captured["input_data"] = input_data
+        return []
+
+    monkeypatch.setattr(ss, "synthesize_systemic_findings", _fake_synthesize)
+    monkeypatch.setattr(
+        model_resolution, "resolve_code_review_verify_client", lambda: "the-pinned-client"
+    )
+
+    SECodeEngineProvider().synthesize_systemic_findings(["f1"], changed_context, "desc")
+
+    assert captured["input_data"] is None
+
+
+def test_synthesize_systemic_findings_client_resolution_failure_degrades_to_none_llm(
+    monkeypatch,
+) -> None:
+    """A client-resolution failure (e.g. no LLM provider configured) never
+    propagates -- ``synthesize_systemic_findings`` receives ``llm=None`` and
+    degrades to ``[]`` itself, matching its own never-raises contract."""
+    import software_engineering_team.code_review_agent.model_resolution as model_resolution
+    import software_engineering_team.code_review_agent.systemic_synthesis as ss
+
+    captured: dict = {}
+
+    def _fake_synthesize(issues, *, llm=None, input_data=None, **kwargs):
+        captured["llm"] = llm
+        return []
+
+    def _raising_resolve_client():
+        raise RuntimeError("no provider configured")
+
+    monkeypatch.setattr(ss, "synthesize_systemic_findings", _fake_synthesize)
+    monkeypatch.setattr(
+        model_resolution, "resolve_code_review_verify_client", _raising_resolve_client
+    )
+
+    out = SECodeEngineProvider().synthesize_systemic_findings(["f1"], None, "desc")
 
     assert out == []
     assert captured["llm"] is None

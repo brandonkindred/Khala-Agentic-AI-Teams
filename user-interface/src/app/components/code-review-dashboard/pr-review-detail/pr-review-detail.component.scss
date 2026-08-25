@@ -44,6 +44,22 @@
     background: var(--mat-sys-surface-container-high, #ececec);
     color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.7));
   }
+
+  // Interactive chip (a <button>, not a <span>) opening the systemic-findings
+  // dialog: reset native button chrome so it still just looks like a chip.
+  &--systemic {
+    border: none;
+    font: inherit;
+    cursor: pointer;
+    background: var(--mat-sys-secondary-container, #e0e7ef);
+    color: var(--mat-sys-on-secondary-container, #2a3441);
+    font-weight: 600;
+
+    &:hover,
+    &:focus-visible {
+      background: var(--mat-sys-secondary-container-high, #cdd6e2);
+    }
+  }
 }
 
 // Review-run status text in the table (shared with the parent's row badge).

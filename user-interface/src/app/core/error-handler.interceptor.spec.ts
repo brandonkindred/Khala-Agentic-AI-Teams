@@ -96,6 +96,12 @@ describe('errorHandlerInterceptor', () => {
     expect(error).toBeDefined();
   });
 
+  it('falls back to statusText for a 400 without parseable detail, not the raw HttpErrorResponse message', () => {
+    http.get('/test').subscribe({ error: () => undefined });
+    httpMock.expectOne('/test').flush({}, { status: 400, statusText: 'Bad Request' });
+    expect(lastMessage()).toBe('Bad request: Bad Request');
+  });
+
   it('formats a 422 detail string (FastAPI validation)', () => {
     http.get('/test').subscribe({ error: () => undefined });
     httpMock
@@ -152,6 +158,12 @@ describe('errorHandlerInterceptor', () => {
     req.flush({ message: 'oops' }, { status: 500, statusText: 'Server Error' });
     expect(error).toBeDefined();
   });
+
+  it('prefers err.error.message over the HttpErrorResponse message for a 500 without detail', () => {
+    http.get('/test').subscribe({ error: () => undefined });
+    httpMock.expectOne('/test').flush({ message: 'oops' }, { status: 500, statusText: 'Server Error' });
+    expect(lastMessage()).toBe('Server error: oops');
+  });
 });
 
 describe('errorHandlerInterceptor SKIP_ERROR_NOTIFY', () => {
@@ -188,18 +200,23 @@ describe('errorHandlerInterceptor SKIP_ERROR_NOTIFY', () => {
   });
 });
 
-describe('extractErrorDetail', () => {
+describe('extractErrorDetail (re-exported from shared)', () => {
   it('returns the FastAPI detail string when present', () => {
     expect(extractErrorDetail({ error: { detail: 'boom' } }, 'fallback')).toBe('boom');
   });
 
-  it('joins the msg fields of a validation-error detail array', () => {
+  it('joins the msg fields of a validation-error detail array when opted in', () => {
     const err = { error: { detail: [{ msg: 'field x' }, { msg: 'field y' }, {}] } };
-    expect(extractErrorDetail(err, 'fallback')).toBe('field x; field y');
+    expect(extractErrorDetail(err, 'fallback', { joinValidationArray: true })).toBe('field x; field y');
+  });
+
+  it('skips the detail array by default (defers to interceptor toast)', () => {
+    const err = { error: { detail: [{ msg: 'field x' }] }, message: 'net down' };
+    expect(extractErrorDetail(err, 'fallback')).toBe('net down');
   });
 
   it('falls back to the fallback when the detail array has no messages', () => {
-    expect(extractErrorDetail({ error: { detail: [{}, {}] } }, 'fallback')).toBe('fallback');
+    expect(extractErrorDetail({ error: { detail: [{}, {}] } }, 'fallback', { joinValidationArray: true })).toBe('fallback');
   });
 
   it('falls back to the error message when there is no detail', () => {

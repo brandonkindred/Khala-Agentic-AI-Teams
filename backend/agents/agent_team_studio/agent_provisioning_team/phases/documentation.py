@@ -4,8 +4,11 @@ Documentation phase: Generate onboarding packet for the agent.
 This is phase 5 of the provisioning workflow.
 """
 
-import asyncio
+import logging
+import re
 from typing import Callable, Dict, List, Optional
+
+from llm_service import DummyLLMClient, LLMNotConfiguredError, get_client
 
 from ..anatomy_assets import try_materialize_anatomy_bundle
 from ..models import (
@@ -19,11 +22,10 @@ from ..prompts import (
     format_onboarding_summary_prompt,
     format_tool_getting_started_prompt,
 )
-from ..shared.llm_client import LLMClient, LLMRequest, sanitize_prompt_var
+from ..shared.prompt_sanitize import sanitize_prompt_var
 from ..shared.tool_manifest import ToolManifest
 
-# Module-level shared client; cheap to construct, no network until is_configured.
-_LLM = LLMClient()
+logger = logging.getLogger(__name__)
 
 _SUMMARY_SYSTEM = (
     "You are the onboarding writer for the Khala Agent Provisioning Team. "
@@ -33,6 +35,10 @@ _TOOL_DOC_SYSTEM = (
     "You are the tool documentation writer. Write a short, accurate getting-started "
     "blurb for an AI agent that just received credentials for the named tool."
 )
+# `credentials.extra` keys are interpolated into a `{key}` replacement target (not
+# sanitized like the values are — sanitize_prompt_var deliberately allows braces).
+# Restrict to safe identifiers so a stray brace/special char can't malform the target.
+_SAFE_EXTRA_KEY = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 def run_documentation(
@@ -139,17 +145,25 @@ def _generate_summary(
     every backing service (#456), so the summary doesn't condition on
     permission level.
     """
-    if _LLM.is_configured:
-        prompt = format_onboarding_summary_prompt(
-            agent_id=sanitize_prompt_var(agent_id),
-            tool_names=sanitize_prompt_var(", ".join(tool_names or [])),
-        )
-        try:
-            return asyncio.run(
-                _LLM.complete(LLMRequest(system=_SUMMARY_SYSTEM, user=prompt, max_tokens=300))
-            ).strip()
-        except Exception:  # noqa: BLE001 — fall through to deterministic template
-            pass
+    prompt = format_onboarding_summary_prompt(
+        agent_id=sanitize_prompt_var(agent_id),
+        tool_names=sanitize_prompt_var(", ".join(tool_names or [])),
+    )
+    try:
+        client = get_client(agent_key="agent_provisioning_team.documentation")
+        if isinstance(client, DummyLLMClient):
+            # Dummy is the no-LLM test/dev harness — prefer the deterministic
+            # template over its generic canned text, same as "unconfigured".
+            raise LLMNotConfiguredError("agent_provisioning_team.documentation: dummy provider")
+        return client.complete(
+            prompt,
+            objective="generate onboarding summary",
+            system_prompt=_SUMMARY_SYSTEM,
+            temperature=0.2,
+            max_tokens=300,
+        ).strip()
+    except Exception as exc:  # noqa: BLE001 — fall through to deterministic template
+        logger.warning("LLM summary failed, using template fallback: %s", exc)
 
     return (
         f"Your agent environment is ready with {tool_count} tool(s) configured. "
@@ -165,35 +179,81 @@ def _generate_getting_started(
     credentials: Optional[GeneratedCredentials],
     result: ToolProvisionResult,
 ) -> str:
-    """Generate getting-started text for a tool."""
+    """Generate getting-started text for a tool, preferring an explicit
+    template, then LLM generation, then a deterministic fallback.
+
+    Execution order:
+      1. If `onboarding_config.getting_started` is set, use it as a
+         template, substituting `{username}`, `{connection_string}`, and
+         any `credentials.extra` keys (each value passed through
+         `sanitize_prompt_var`), and return it directly — no LLM call is
+         made.
+      2. Otherwise, request a completion from the LLM client resolved by
+         `llm_service.get_client(agent_key="agent_provisioning_team.documentation")`.
+         A `DummyLLMClient` result is treated as "unconfigured" rather
+         than used, so its generic canned text is never returned.
+      3. If step 2 is unconfigured, resolves to `DummyLLMClient`, or
+         raises for any other reason, the exception is logged and a
+         deterministic template is built from `tool_name`, whether
+         `credentials.connection_string` is present, and
+         `result.permissions`.
+
+    Preconditions:
+        tool_name is non-empty. onboarding_config is not None (callers
+        only invoke this after resolving a tool definition from the
+        manifest). result is not None. credentials may be None when a
+        tool was provisioned without generated credentials.
+
+    Postconditions:
+        Returns a non-empty str. Never raises: any exception from the
+        LLM path is caught and replaced by the deterministic fallback
+        text.
+    """
     if onboarding_config.getting_started:
         text = onboarding_config.getting_started
 
         if credentials:
             if credentials.username:
-                text = text.replace("{username}", credentials.username)
+                text = text.replace("{username}", sanitize_prompt_var(credentials.username))
             if credentials.connection_string:
-                text = text.replace("{connection_string}", credentials.connection_string)
+                text = text.replace(
+                    "{connection_string}", sanitize_prompt_var(credentials.connection_string)
+                )
             for key, value in credentials.extra.items():
-                text = text.replace(f"{{{key}}}", str(value))
+                if not _SAFE_EXTRA_KEY.match(key):
+                    logger.warning(
+                        "Skipping unsafe extra key %r for %s getting-started template",
+                        key,
+                        tool_name,
+                    )
+                    continue
+                text = text.replace(f"{{{key}}}", sanitize_prompt_var(str(value)))
 
         return text
 
-    if _LLM.is_configured:
-        prompt = format_tool_getting_started_prompt(
-            tool_name=sanitize_prompt_var(tool_name),
-            description=sanitize_prompt_var(getattr(onboarding_config, "description", "") or ""),
-            connection_details=sanitize_prompt_var(
-                "available via env var" if credentials and credentials.connection_string else "n/a"
-            ),
-            permissions=sanitize_prompt_var(", ".join(result.permissions or [])),
-        )
-        try:
-            return asyncio.run(
-                _LLM.complete(LLMRequest(system=_TOOL_DOC_SYSTEM, user=prompt, max_tokens=400))
-            ).strip()
-        except Exception:  # noqa: BLE001
-            pass
+    prompt = format_tool_getting_started_prompt(
+        tool_name=sanitize_prompt_var(tool_name),
+        description=sanitize_prompt_var(getattr(onboarding_config, "description", "") or ""),
+        connection_details=sanitize_prompt_var(
+            "available via env var" if credentials and credentials.connection_string else "n/a"
+        ),
+        permissions=sanitize_prompt_var(", ".join(result.permissions or [])),
+    )
+    try:
+        client = get_client(agent_key="agent_provisioning_team.documentation")
+        if isinstance(client, DummyLLMClient):
+            # Dummy is the no-LLM test/dev harness — prefer the deterministic
+            # template over its generic canned text, same as "unconfigured".
+            raise LLMNotConfiguredError("agent_provisioning_team.documentation: dummy provider")
+        return client.complete(
+            prompt,
+            objective="generate tool getting-started guide",
+            system_prompt=_TOOL_DOC_SYSTEM,
+            temperature=0.2,
+            max_tokens=400,
+        ).strip()
+    except Exception as exc:  # noqa: BLE001 — fall through to deterministic template
+        logger.warning("LLM getting-started guide failed, using template fallback: %s", exc)
 
     lines = [f"To use {tool_name}:"]
 

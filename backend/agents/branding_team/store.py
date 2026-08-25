@@ -32,6 +32,7 @@ from shared.postgres import PostgresHelperMixin
 from shared.postgres.metrics import timed_query
 from user_profile import ArtifactType, record_association_safe, remove_association_safe
 
+from .assistant.store import BrandingConversationStore, ConversationAttachResult
 from .models import (
     Brand,
     BrandingMission,
@@ -445,7 +446,11 @@ class BrandingStore(PostgresHelperMixin):
 
     @timed_query(store=_STORE, op="attach_conversation")
     def attach_conversation(
-        self, client_id: str, brand_id: str, conversation_id: str, mission: BrandingMission
+        self,
+        client_id: str,
+        brand_id: str,
+        conversation_id: str,
+        mission: Optional[BrandingMission] = None,
     ) -> Tuple[AttachConversationResult, Optional[Brand]]:
         """Attach an existing conversation to *brand_id* and patch the brand, atomically.
 
@@ -460,14 +465,27 @@ class BrandingStore(PostgresHelperMixin):
 
         Preconditions:
             ``client_id``, ``brand_id``, ``conversation_id`` are non-empty
-            strings; ``mission`` is a valid :class:`BrandingMission`.
+            strings; ``mission``, when provided, is a valid
+            :class:`BrandingMission`.
         Postconditions:
             On :attr:`AttachConversationResult.OK`, the conversation row now has
-            ``brand_id`` set to *brand_id* and ``mission_json`` set to *mission*,
-            the brand's ``conversation_id`` is set to *conversation_id*, and the
-            updated :class:`Brand` is returned. Any other result leaves both
-            rows unchanged (the transaction rolls back) and the paired value is
-            ``None``.
+            ``brand_id`` set to *brand_id*, the brand's ``conversation_id`` is set
+            to *conversation_id*, and the updated :class:`Brand` is returned.
+
+            When *mission* is provided, ``mission_json`` is overwritten with it.
+            When *mission* is omitted (``None``), ``mission_json`` is left as
+            whatever this same locked transaction just read — never a snapshot
+            the caller took before acquiring the lock. This matters when the
+            conversation may have gained a newer mission (e.g. via a concurrent
+            ``POST /conversations/{id}/messages`` turn) between the caller's own
+            read and this call: passing a stale pre-lock mission here would
+            silently roll that edit back and could pair an old mission with
+            output generated for a newer one. Callers that are themselves the
+            source of truth for the mission (e.g. brand creation, where *mission*
+            drove the just-created brand) should still pass it explicitly.
+
+            Any other result leaves both rows unchanged (the transaction rolls
+            back) and the paired value is ``None``.
         """
         if not client_id:
             raise ValueError("client_id must be a non-empty string")
@@ -475,27 +493,16 @@ class BrandingStore(PostgresHelperMixin):
             raise ValueError("brand_id must be a non-empty string")
         if not conversation_id:
             raise ValueError("conversation_id must be a non-empty string")
-        if not isinstance(mission, BrandingMission):
+        if mission is not None and not isinstance(mission, BrandingMission):
             raise ValueError("mission must be a BrandingMission")
+        conv_store = BrandingConversationStore()
         try:
             with self._transaction() as cur:
-                cur.execute(
-                    "SELECT brand_id FROM branding_conversations WHERE conversation_id = %s FOR UPDATE",
-                    (conversation_id,),
-                )
-                row = cur.fetchone()
-                if row is None:
+                conv_result = conv_store.attach_locked(cur, conversation_id, brand_id, mission)
+                if conv_result is ConversationAttachResult.NOT_FOUND:
                     raise _AttachAbort(AttachConversationResult.CONVERSATION_NOT_FOUND)
-                current_brand_id = row["brand_id"]
-                if current_brand_id and str(current_brand_id) != brand_id:
+                if conv_result is ConversationAttachResult.ALREADY_ATTACHED:
                     raise _AttachAbort(AttachConversationResult.ALREADY_ATTACHED)
-
-                ts = datetime.now(tz=timezone.utc)
-                cur.execute(
-                    "UPDATE branding_conversations SET brand_id = %s, mission_json = %s, updated_at = %s "
-                    "WHERE conversation_id = %s",
-                    (brand_id, Json(mission.model_dump(mode="json")), ts, conversation_id),
-                )
 
                 patch = {"conversation_id": conversation_id, "updated_at": _now_iso()}
                 brand = _apply_brand_patch(cur, brand_id, client_id, patch)

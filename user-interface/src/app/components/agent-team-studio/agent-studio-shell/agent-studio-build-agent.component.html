@@ -43,7 +43,7 @@
       </div>
 
       @if (cloneError(); as message) {
-        <p class="error-text">{{ message }}</p>
+        <app-inline-banner variant="error" [message]="message" />
       }
 
       <app-agent-catalog (requestRun)="onSelectAgent($event)" />
@@ -87,7 +87,7 @@
         [handoff]="state.handoff()"
       />
       @if (saveError(); as message) {
-        <p class="error-text">{{ message }}</p>
+        <app-inline-banner variant="error" [message]="message" />
       }
       <div class="studio-build__substage-actions">
         <button
@@ -113,29 +113,12 @@
 </section>
 
 @if (provisionOpen()) {
-  <div class="studio-build__scrim" (click)="closeProvision()" aria-hidden="true"></div>
-  <aside
-    class="studio-build__provision-panel"
-    role="dialog"
-    aria-modal="true"
-    aria-label="Provision an agent"
-    cdkTrapFocus
-    [cdkTrapFocusAutoCapture]="true"
-    (keydown.escape)="closeProvision()"
+  <app-agent-studio-slide-out
+    [open]="provisionOpen()"
+    heading="Provision an agent"
+    closeButtonLabel="Close provisioning panel"
+    (closeRequested)="closeProvision()"
   >
-    <header class="studio-build__provision-head">
-      <h2>Provision an agent</h2>
-      <button
-        mat-icon-button
-        type="button"
-        aria-label="Close provisioning panel"
-        (click)="closeProvision()"
-      >
-        <mat-icon aria-hidden="true">close</mat-icon>
-      </button>
-    </header>
-    <div class="studio-build__provision-body">
-      <app-agent-provisioning-panel />
-    </div>
-  </aside>
+    <app-agent-provisioning-panel />
+  </app-agent-studio-slide-out>
 }

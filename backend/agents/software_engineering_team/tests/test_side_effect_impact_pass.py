@@ -46,13 +46,30 @@ from tests.submission_pass_two_call_client import (
     MutationFindingClient,
     SubmissionPassTwoCallClient,
     mutation_finding_payload,
+    wire_run_agent_via_reasoning_for_test_clients,
     wire_run_agent_via_reasoning_with_raw,
 )
 
 from llm_service import LLMJsonParseError
 from llm_service.clients.dummy import DummyLLMClient
 
-pytest_plugins = ["tests.submission_pass_two_call_client"]
+
+@pytest.fixture(autouse=True)
+def _wire_submission_pass_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route the submission-pass runner's ``run_agent_via_reasoning`` through the
+    two-call test stub for every test in this module.
+
+    File-scoped (a plain module-level fixture, not a ``pytest_plugins``
+    registration): a fixture defined directly in a test module only applies to
+    that module's own tests, so this cannot leak into sibling test files under
+    pytest-xdist the way a ``pytest_plugins`` registration would (each xdist
+    worker collects the whole test tree, so a session-wide plugin's autouse
+    fixtures would otherwise apply to every test the worker runs).
+    """
+    import code_review_agent.submission_pass_runner as runner_mod
+
+    wire_run_agent_via_reasoning_for_test_clients(monkeypatch, runner_mod)
+
 
 # Unique anchor in this pass's user prompt (never the system prompt), distinct
 # from architecture_consistency_pass's own anchor so a DummyLLMClient subclass
@@ -615,7 +632,8 @@ def test_coerce_finding_carries_through_pre_existing_tag() -> None:
     """The model's optional pre_existing tag (used by the PR-review whole-file
     path to route a doc/impl-mismatch finding in untouched code to a
     human-review proposal instead of a blocking PR comment) survives
-    conversion, tolerates string encodings, and defaults False when absent --
+    conversion, tolerates string encodings, and defaults True when absent
+    (uncertain findings are treated as out-of-scope) --
     mirrors chunking._issues_from_chunk_output's identical convention."""
     tagged_true = _coerce_finding(
         {"category": "side-effects", "description": "d1", "pre_existing": True}
@@ -631,8 +649,68 @@ def test_coerce_finding_carries_through_pre_existing_tag() -> None:
         True,
         True,
         False,
+        True,
+    ]
+
+
+def test_coerce_finding_carries_through_omission_tag() -> None:
+    """The model's optional omission tag (the positive signal for "this
+    change should have added or modified file X but didn't", distinct from
+    pre_existing) survives conversion, tolerates string encodings, and
+    defaults False when absent -- mirrors
+    test_coerce_finding_carries_through_pre_existing_tag."""
+    tagged_true = _coerce_finding(
+        {"category": "side-effects", "description": "d1", "omission": True}
+    )
+    tagged_str = _coerce_finding(
+        {"category": "side-effects", "description": "d2", "omission": "true"}
+    )
+    tagged_false_str = _coerce_finding(
+        {"category": "side-effects", "description": "d3", "omission": "false"}
+    )
+    untagged = _coerce_finding({"category": "side-effects", "description": "d4"})
+    assert [f.omission for f in (tagged_true, tagged_str, tagged_false_str, untagged)] == [
+        True,
+        True,
+        False,
         False,
     ]
+
+
+def test_coerce_finding_reconciles_contradictory_raw_tags() -> None:
+    """A raw finding tagging both omission and pre_existing true (a
+    self-contradictory reply that CodeReviewIssue would otherwise reject via
+    _omission_implies_in_scope) is reconciled here rather than raised:
+    omission wins, so the constructed issue is in-scope. Keeps
+    _coerce_finding's documented "never raises on malformed input"
+    contract intact."""
+    finding = _coerce_finding(
+        {
+            "category": "side-effects",
+            "description": "contradictory tags",
+            "omission": True,
+            "pre_existing": True,
+        }
+    )
+    assert finding is not None
+    assert finding.omission is True
+    assert finding.pre_existing is False
+
+
+def test_side_effect_finding_llm_rejects_omission_and_pre_existing_both_true() -> None:
+    """SideEffectImpactFindingLLM's own schema-level validator rejects the
+    self-contradictory combination too, independent of _coerce_finding's
+    runtime reconciliation (see the class's _omission_implies_in_scope
+    docstring for why: not currently exercised by the hand-rolled parsing
+    path, but kept self-enforcing for any future caller that validates
+    against it directly)."""
+    from code_review_agent.models import SideEffectImpactFindingLLM
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        SideEffectImpactFindingLLM.model_validate(
+            {"category": "side-effects", "description": "d", "omission": True, "pre_existing": True}
+        )
 
 
 @pytest.mark.parametrize(
@@ -964,6 +1042,37 @@ def test_finds_and_returns_new_findings() -> None:
     assert len(result) == 1
     assert result[0].category == "side-effects"
     assert "app/caller.py" in result[0].description
+
+
+def test_finds_and_returns_new_findings_tags_omission() -> None:
+    """End-to-end: a finding the model tags omission=true carries that tag
+    all the way through to the returned CodeReviewIssue -- mirrors
+    test_finds_and_returns_new_findings, proving
+    SideEffectImpactFindingLLM.omission actually reaches
+    CodeReviewIssue.omission via _coerce_finding, not just the schema."""
+
+    class _FindingsClient(SubmissionPassTwoCallClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _SIDE_EFFECT_PASS_ANCHOR in self.latest_reasoning_prompt():
+                return {
+                    "findings": [
+                        {
+                            "severity": "high",
+                            "category": "documentation",
+                            "file_path": "app/main.py",
+                            "description": "the task required updating README.md but it wasn't",
+                            "suggestion": "update README.md to document bar()'s new behavior",
+                            "pre_existing": False,
+                            "omission": True,
+                        }
+                    ]
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = find_side_effect_impact_issues(_FindingsClient(), _input())
+    assert len(result) == 1
+    assert result[0].omission is True
+    assert result[0].pre_existing is False
 
 
 @pytest.mark.parametrize(

@@ -29,13 +29,14 @@ This spec extends the feature so a user can:
 **Non-goals**
 - Renaming the backend module `user_agent_founder` or the route prefix `/api/user-agent-founder`. (High churn, zero user-facing value; tracked as a future follow-up.)
 - Renaming the internal URL path `/persona-testing` in the Angular router. (Would break any bookmarks; internal detail.)
+  > **Note (post-cutover):** the standalone `/persona-testing` route has been removed; persona testing now lives under `/agent-studio` as Stage 4 of the unified Studio journey.
 - Adding adapters for teams other than SE.
 - Structured persona-builder UI (values / vision / style as separate fields). Free-form textareas only.
 - Real-time streaming of persona decisions. Existing 10–15s polling stays.
 
 ## UX Flow
 
-### Testing Personas dashboard (`/persona-testing`)
+### Testing Personas dashboard (`/agent-studio` — Stage 4)
 
 ```mermaid
 flowchart TB
@@ -72,7 +73,7 @@ flowchart TB
     Project --> Buttons
 ```
 
-Clicking **Start Test** → `POST /api/user-agent-founder/start` with `{persona_id, target_team_key, project_name}` → navigate to `/persona-testing/audit/:runId` (existing audit panel, unchanged).
+Clicking **Start Test** → `POST /api/user-agent-founder/start` with `{persona_id, target_team_key, project_name, process_id}` → navigate to `/agent-studio/persona-run/:runId` (audit panel nested under Studio). Note: `process_id` is required when `target_team_key` starts with `agentic_team:` (handed off from Stage 3) and ignored for the default SE target.
 
 ### Create / Edit Persona dialog
 
@@ -241,7 +242,7 @@ Backward compatibility: an empty POST body (no JSON / no `Content-Type`) still p
 - `user-interface/src/app/components/persona-testing-dashboard/persona-testing-dashboard.component.html:2` — update `title="Persona Testing"` → `title="Testing Personas"` and refresh the subtitle to describe the new flow ("Create personas and direct them to autonomously test your teams.").
 - `user-interface/src/app/components/persona-test-audit-panel/persona-test-audit-panel.component.html:3` — update back-link text to "Back to Testing Personas".
 
-Route path `/persona-testing` and component class/file names stay as-is (internal).
+Route path has been consolidated under `/agent-studio` (Stage 4 of the Studio journey); component class/file names stay as-is (internal).
 
 ### 2. Models (extend)
 
@@ -309,7 +310,7 @@ File: `user-interface/src/app/components/persona-testing-dashboard/persona-testi
 Reuse the pattern from `BrandingDashboardComponent` (client/brand create forms via Angular Material `MatDialog`).
 
 - `PersonaEditorDialogComponent` — used for both Create and Duplicate. Form fields: name, description, icon picker, system_prompt (`MatInput` multiline, ~20 rows), spec_generation_prompt (multiline, ~15 rows). Submit → `createPersona()` or `updatePersona()`.
-- `StartTestDialogComponent` — persona `mat-select` (from `getPersonas()`), target team `mat-select` (from `getTestableTeams()`), optional project name. Both selectors required; submit disabled otherwise. Submit → `startTest({...})` → router navigate to `/persona-testing/audit/:runId`.
+- `StartTestDialogComponent` — persona `mat-select` (from `getPersonas()`), target team `mat-select` (from `getTestableTeams()`), optional project name. Both selectors required; submit disabled otherwise. Submit → `startTest({...})` → router navigate to `/agent-studio/persona-run/:runId`.
 
 ## Files to Modify
 
@@ -355,7 +356,7 @@ Reuse the pattern from `BrandingDashboardComponent` (client/brand create forms v
 
 **Frontend**
 1. `cd user-interface && npm ci && npm test` — Vitest suites green, 80% coverage floor.
-2. `npm start` and navigate to `/persona-testing`. Sidebar reads **Testing Personas**. Dashboard shell title reads **Testing Personas**. Breadcrumb reads **Testing Personas**.
+2. `npm start` and navigate to `/agent-studio`. Advance through the Studio stages (Build Agent → Test Agent → Compose Team → Test Team w/ Personas) to reach Stage 4. Sidebar reads **Agent Studio**. The stage stepper shows "Test Team w/ Personas" as the active stage.
 3. Click **+ Create Persona** → dialog opens → fill required fields → submit → persona appears in the list with an **Edit / Delete** action.
 4. On the builtin card click **Duplicate** → dialog opens pre-filled with builtin's prompts + name `"Startup Founder (copy)"` → submit → new user persona created.
 5. Click **Start Test** → dialog opens → both dropdowns populated (personas from `/personas`, one team from `/testable-teams`) → Submit disabled until both selected → select → submit → app routes to the audit panel and the run appears in the **Running tests** list with the selected persona name + `Software Engineering`.

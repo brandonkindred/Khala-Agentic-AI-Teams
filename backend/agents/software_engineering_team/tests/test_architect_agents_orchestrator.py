@@ -67,8 +67,14 @@ def test_create_orchestrator_returns_configured_agent(fake_agent) -> None:
 
     assert isinstance(result, fake_agent)
     kwargs = fake_agent.last_kwargs
-    assert isinstance(kwargs["system_prompt"], str)
-    assert "Enterprise Architect Orchestrator" in kwargs["system_prompt"]
+    sp = kwargs["system_prompt"]
+    # cached_system_prompt returns a list for Anthropic models, str for others
+    if isinstance(sp, list):
+        text = sp[0]["text"]
+        assert sp[1] == {"cachePoint": {"type": "default"}}
+    else:
+        text = sp
+    assert "Enterprise Architect Orchestrator" in text
 
 
 def test_create_orchestrator_default_model_env(monkeypatch, fake_agent) -> None:
@@ -90,7 +96,12 @@ def test_create_orchestrator_model_env_override(monkeypatch, fake_agent) -> None
 def test_create_orchestrator_prompt_matches_constant(fake_agent) -> None:
     create_orchestrator()
 
-    assert fake_agent.last_kwargs["system_prompt"] == ORCHESTRATOR_PROMPT
+    sp = fake_agent.last_kwargs["system_prompt"]
+    if isinstance(sp, list):
+        assert sp[0] == {"text": ORCHESTRATOR_PROMPT}
+        assert sp[1] == {"cachePoint": {"type": "default"}}
+    else:
+        assert sp == ORCHESTRATOR_PROMPT
 
 
 def test_create_orchestrator_tools_list_composition(fake_agent) -> None:

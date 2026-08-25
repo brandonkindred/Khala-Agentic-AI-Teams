@@ -24,6 +24,10 @@ from .client import (
     scrub_token_from_text,
 )
 from .dependency_resolver import ReadyCheckResult, is_ready, pick_ready_issue
+from .enhanced_issue_builder import (
+    build_enhanced_issue_from_proposal,
+    compute_complexity_score,
+)
 from .existing_comments import (
     ExistingComment,
     build_existing_comments,
@@ -76,6 +80,7 @@ from .pr_review_mapping import (
     choose_event,
     format_comment_body,
     format_issue_comment,
+    format_systemic_findings_comment,
     inline_comment_to_timeline_body,
     is_within_diff,
     map_issues_to_comments,
@@ -112,6 +117,7 @@ __all__ = [
     "ScoreBreakdown",
     "SubIssue",
     "annotate_duplicate_proposals",
+    "build_enhanced_issue_from_proposal",
     "build_existing_comments",
     "build_issue_from_proposal",
     "build_review_body",
@@ -119,11 +125,13 @@ __all__ = [
     "build_scoring_prompt",
     "choose_event",
     "complexity_label",
+    "compute_complexity_score",
     "duplicate_check_max_open_issues",
     "extract_checklist_items",
     "find_matching_open_issue",
     "format_comment_body",
     "format_issue_comment",
+    "format_systemic_findings_comment",
     "from_unified_score",
     "group_similar_findings",
     "inline_comment_to_timeline_body",

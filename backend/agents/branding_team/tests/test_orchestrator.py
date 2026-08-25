@@ -1,13 +1,18 @@
 """Tests for the branding team orchestrator.
 
 Since all agents are now LLM-backed strands.Agent instances running inside
-Strands SDK Graph/Swarm orchestration, we patch
-``branding_team.orchestrator.build_branding_graph`` so the returned graph's
-``invoke_async`` yields a canned result, and verify the orchestrator
-correctly assembles ``TeamOutput`` from it.
+Strands SDK Graph/Swarm orchestration, most tests patch
+``branding_team.orchestrator.GraphBuilder`` so the isolated per-phase graph
+``run_single_phase`` builds for each phase (the default, production
+execution path) yields a canned ``invoke_async`` result, and verify the
+orchestrator correctly assembles ``TeamOutput`` from it. A couple of tests
+patch ``branding_team.orchestrator.build_branding_graph`` directly instead —
+those specifically cover the `_use_monolithic=True` escape hatch, which is
+not used in production.
 """
 
 import asyncio
+import functools
 import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -91,10 +96,13 @@ from branding_team.models import (
     WritingGuidelinesOutput,
 )
 from branding_team.orchestrator import (
+    _PHASE1_NODE_MERGE,
+    _PHASE2_NODE_MERGE,
+    _PHASE3_NODE_MERGE,
+    _PHASE4_NODE_MERGE,
+    _PHASE5_NODE_MERGE,
     _PHASE_SPEC,
-    _merge_phase3_fragments,
-    _merge_phase4_fragments,
-    _merge_phase5_fragments,
+    _merge_named_fragments,
 )
 from branding_team.shared.memoization import phase_input_hash
 from branding_team.shared.phase_output_cache import PhaseOutputCache
@@ -278,6 +286,26 @@ def _patch_graph_invoke(phases_to_include: list[str]):
     )
 
 
+def _patch_phase_graph_invoke(phases_to_include: list[str]):
+    """Return a context manager that patches ``branding_team.orchestrator.GraphBuilder``
+    so each isolated per-phase graph's ``invoke_async`` yields a canned result --
+    the ``run_single_phase`` (default execution path) analogue of
+    ``_patch_graph_invoke``. ``run_single_phase`` builds a fresh single-node
+    graph per phase, but since every call shares this mock's ``invoke_async``
+    result (keyed by node id), each phase's real ``_extract_phase_output``
+    call still reads its own entry out of it -- exactly like the monolithic
+    graph's single shared result did."""
+    mock_result = _mock_graph_result(phases_to_include)
+
+    async def mock_invoke_async(task, **kwargs):
+        return mock_result
+
+    mock_graph = MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async))
+    mock_builder = MagicMock()
+    mock_builder.build.return_value = mock_graph
+    return patch("branding_team.orchestrator.GraphBuilder", return_value=mock_builder)
+
+
 ALL_PHASES = [
     "phase1_strategic_core",
     "phase2_narrative",
@@ -288,7 +316,7 @@ ALL_PHASES = [
 
 
 def test_full_run_approved() -> None:
-    with _patch_graph_invoke(ALL_PHASES):
+    with _patch_phase_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
             mission=make_mission(
@@ -324,7 +352,7 @@ def test_full_run_approved() -> None:
 
 
 def test_requires_human_approval() -> None:
-    with _patch_graph_invoke(ALL_PHASES):
+    with _patch_phase_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
             mission=make_mission(
@@ -347,7 +375,7 @@ def test_requires_human_approval() -> None:
 
 
 def test_brand_checks() -> None:
-    with _patch_graph_invoke(ALL_PHASES):
+    with _patch_phase_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         checks = [
             BrandCheckRequest(
@@ -377,7 +405,7 @@ def test_market_research_integration() -> None:
     # The orchestrator runs integrations concurrently via the async adapter
     # variant, so patch that (not the sync wrapper).
     with (
-        _patch_graph_invoke(ALL_PHASES),
+        _patch_phase_graph_invoke(ALL_PHASES),
         patch(
             "branding_team.adapters.market_research.request_market_research_async",
             new_callable=AsyncMock,
@@ -404,7 +432,7 @@ def test_market_research_integration() -> None:
 
 
 def test_design_assets_integration() -> None:
-    with _patch_graph_invoke(ALL_PHASES):
+    with _patch_phase_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
             mission=make_mission(
@@ -439,7 +467,7 @@ def test_run_with_store_appends_version() -> None:
     store.get_brand.return_value = brand
     store.append_brand_version.return_value = updated
 
-    with _patch_graph_invoke(ALL_PHASES):
+    with _patch_phase_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         orchestrator.run(
             mission=mission,
@@ -482,7 +510,7 @@ def test_run_with_store_append_brand_version_none_raises() -> None:
     store.get_brand.return_value = brand
     store.append_brand_version.return_value = None
 
-    with _patch_graph_invoke(ALL_PHASES):
+    with _patch_phase_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         with pytest.raises(
             BrandVersionAppendConflict,
@@ -553,7 +581,7 @@ def test_run_branding_team_route_does_not_remap_unrelated_runtime_error() -> Non
 
 
 def test_run_phase_stops_at_strategic_core() -> None:
-    with _patch_graph_invoke(["phase1_strategic_core"]):
+    with _patch_phase_graph_invoke(["phase1_strategic_core"]):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run_phase(
             mission=make_mission(
@@ -611,7 +639,7 @@ def test_approved_partial_run_is_not_rollout_ready() -> None:
         ],
     }
     for phase, phases in phase_sets.items():
-        with _patch_graph_invoke(phases):
+        with _patch_phase_graph_invoke(phases):
             orchestrator = BrandingTeamOrchestrator()
             result = orchestrator.run_phase(
                 mission=make_mission(
@@ -648,7 +676,7 @@ def test_unapproved_partial_run_labels_current_phase_not_target() -> None:
         ),
     }
     for phase, (phases, expected_label) in phase_sets.items():
-        with _patch_graph_invoke(phases):
+        with _patch_phase_graph_invoke(phases):
             orchestrator = BrandingTeamOrchestrator()
             result = orchestrator.run_phase(
                 mission=make_mission(
@@ -667,7 +695,7 @@ def test_default_human_feedback_message_survives_when_feedback_omitted() -> None
     """Locks in the current (deliberately unchanged) fallback behavior for
     #3435: HumanReview.feedback is typed str = "", so omitted feedback must
     still produce the status-appropriate default message."""
-    with _patch_graph_invoke(ALL_PHASES):
+    with _patch_phase_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         approved_result = orchestrator.run(
             mission=make_mission(
@@ -678,7 +706,7 @@ def test_default_human_feedback_message_survives_when_feedback_omitted() -> None
         )
     assert approved_result.human_feedback == "Approved for rollout."
 
-    with _patch_graph_invoke(ALL_PHASES):
+    with _patch_phase_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         unapproved_result = orchestrator.run(
             mission=make_mission(
@@ -716,7 +744,7 @@ def test_determine_current_phase_treats_degraded_default_as_reached() -> None:
 
 
 def test_phase_gates_are_populated() -> None:
-    with _patch_graph_invoke(ALL_PHASES):
+    with _patch_phase_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
             mission=make_mission(
@@ -732,7 +760,7 @@ def test_phase_gates_are_populated() -> None:
 
 def test_phase_absorbed_fields_populated() -> None:
     """Verify sub-team outputs are accessible via their phase-output homes."""
-    with _patch_graph_invoke(ALL_PHASES):
+    with _patch_phase_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
             mission=make_mission(
@@ -777,8 +805,12 @@ def test_unparseable_phase_output_marks_phase_degraded(caplog) -> None:
 
     with (
         patch(
-            "branding_team.orchestrator.build_branding_graph",
-            return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+            "branding_team.orchestrator.GraphBuilder",
+            return_value=MagicMock(
+                build=MagicMock(
+                    return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async))
+                )
+            ),
         ),
         caplog.at_level("WARNING", logger="branding_team.orchestrator"),
     ):
@@ -823,8 +855,12 @@ def test_trailing_unrelated_json_object_does_not_win_over_real_payload() -> None
         return mock_result
 
     with patch(
-        "branding_team.orchestrator.build_branding_graph",
-        return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+        "branding_team.orchestrator.GraphBuilder",
+        return_value=MagicMock(
+            build=MagicMock(
+                return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async))
+            )
+        ),
     ):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
@@ -840,42 +876,6 @@ def test_trailing_unrelated_json_object_does_not_win_over_real_payload() -> None
     assert result.narrative_messaging.tagline == real_payload.tagline
 
 
-def test_extract_phase_output_uses_structured_output_when_present() -> None:
-    """Agents built with ``structured_output=`` populate ``AgentResult.structured_output``
-    rather than the message's text blocks; extraction must check that field before
-    falling back to text or it silently discards the agent's real output.
-
-    Calls the private ``_extract_phase_output`` helper directly: the public
-    ``run``/``run_phase`` APIs always go through a full graph invoke, which
-    cannot isolate the structured-output-vs-text branch without rebuilding the
-    entire Strands result shape around this one field.
-    """
-    agent_result = MagicMock()
-    agent_result.message = {"content": []}
-    agent_result.structured_output = PositioningOutput(
-        positioning_statement=(
-            "For enterprise product leaders who need cohesive digital experiences, "
-            "Northstar Labs is the hands-on partner that delivers clarity."
-        ),
-        brand_promise="Every customer touchpoint will feel cohesive, useful, and unmistakably aligned.",
-    )
-
-    node_result = MagicMock()
-    node_result.get_agent_results.return_value = [agent_result]
-
-    mock_result = MagicMock()
-    mock_result.result = {"phase1_strategic_core": node_result}
-
-    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
-        mock_result, "phase1_strategic_core", StrategicCoreOutput
-    )
-
-    assert degraded is False
-    assert isinstance(output, StrategicCoreOutput)
-    assert output.positioning_statement == agent_result.structured_output.positioning_statement
-    assert output.brand_promise == agent_result.structured_output.brand_promise
-
-
 def test_phase_spec_every_entry_declares_merge_fn() -> None:
     """All five phases now merge their fan-out fragments in Python (Phases 1-2
     always did; Phases 3-5 dropped their LLM compositors in stories 1a/1b/1c).
@@ -886,12 +886,10 @@ def test_phase_spec_every_entry_declares_merge_fn() -> None:
         assert spec.merge_fn is not None, f"{phase} has no merge_fn"
 
 
-def _phase1_leaf_node(structured_output) -> MagicMock:
+def _leaf_node_result(structured_output) -> MagicMock:
     """A mock NodeResult for a single fan-out/fan-in leaf agent.
 
-    Despite the name (it was introduced for Phase 1), this is the shared
-    generic helper reused by every phase's tests below — Phase 2, 4, and 5's
-    fixtures all wrap their fragments with it too, not just Phase 1's.
+    Shared generic helper reused across every phase's tests below.
     """
     agent_result = MagicMock()
     agent_result.message = {"content": []}
@@ -905,94 +903,7 @@ def test_extract_phase_output_merges_every_phase1_fragment() -> None:
     """Phase 1 wraps six agents as one top-level node; get_agent_results()[-1] only
     ever sees the synthesizer, so the five specialists' fragments must be merged
     in separately or their data is silently discarded (see PR review discussion)."""
-    positioning_leaf = _phase1_leaf_node(
-        PositioningOutput(
-            positioning_statement="For enterprise leaders who need clarity, we deliver it.",
-            brand_promise="Every touchpoint feels cohesive.",
-        )
-    )
-    nested_results = {
-        "discovery_auditor": _phase1_leaf_node(
-            BrandDiscoveryAudit(
-                current_brand_perception="Seen as reliable but generic.",
-                market_position="Mid-market challenger.",
-                strengths=["Delivery speed"],
-                weaknesses=["Low brand recall"],
-                opportunities=["Category consolidating"],
-                threats=["Bigger competitors out-spending"],
-                stakeholder_insights=["Sales wants sharper differentiation"],
-            )
-        ),
-        "purpose_vision_writer": _phase1_leaf_node(
-            PurposeVisionOutput(
-                brand_purpose="Why we exist.",
-                mission_statement="What we do for customers.",
-                vision_statement="Where the brand is headed.",
-            )
-        ),
-        "values_articulator": _phase1_leaf_node(
-            CoreValuesOutput(
-                core_values=[
-                    CoreValueOutput(
-                        value="Clarity",
-                        behavioral_definition="We demonstrate clarity in every decision.",
-                        observable_behaviors=["Plain-language docs"],
-                    ),
-                    CoreValueOutput(
-                        value="Trust",
-                        behavioral_definition="We build trust through transparency.",
-                        observable_behaviors=["Public roadmap"],
-                    ),
-                    CoreValueOutput(
-                        value="Momentum",
-                        behavioral_definition="We maintain momentum through disciplined execution.",
-                        observable_behaviors=["Weekly release cadence"],
-                    ),
-                ]
-            )
-        ),
-        "audience_segmenter": _phase1_leaf_node(
-            AudienceSegmentsOutput(
-                target_audience_segments=[
-                    AudienceSegmentOutput(
-                        name="Enterprise product leaders",
-                        description="VP/Director-level buyers at mid-market SaaS companies.",
-                        pain_points=["Inconsistent brand touchpoints"],
-                        goals=["Ship cohesive experiences"],
-                        decision_drivers=["Proven execution speed"],
-                    )
-                ]
-            )
-        ),
-        "differentiation_mapper": _phase1_leaf_node(
-            DifferentiationPillarsOutput(
-                differentiation_pillars=[
-                    DifferentiationPillarOutput(
-                        pillar="Execution speed",
-                        proof_points=["Ship weekly release cadence"],
-                        competitive_context="Competitors ship quarterly.",
-                    ),
-                    DifferentiationPillarOutput(
-                        pillar="Hands-on partnership",
-                        proof_points=["Dedicated strategist per account"],
-                        competitive_context="Competitors use ticket-based support.",
-                    ),
-                ]
-            )
-        ),
-        "positioning_synthesizer": positioning_leaf,
-    }
-
-    inner_multi_result = MagicMock()
-    inner_multi_result.results = nested_results
-
-    node_result = MagicMock()
-    node_result.result = inner_multi_result
-    # Matches real Strands semantics: get_agent_results() on the outer node
-    # flattens to every nested agent, in completion order (synthesizer last).
-    node_result.get_agent_results.return_value = [
-        node.get_agent_results.return_value[0] for node in nested_results.values()
-    ]
+    node_result = _phase1_nested_node_result()
 
     mock_result = MagicMock()
     mock_result.result = {"phase1_strategic_core": node_result}
@@ -1018,10 +929,101 @@ def test_extract_phase_output_merges_every_phase1_fragment() -> None:
     assert output.brand_promise == "Every touchpoint feels cohesive."
 
 
-def test_extract_phase_output_merges_every_phase2_fragment() -> None:
-    """Phase 2 wraps six sequential Graph agents as one top-level node;
-    get_agent_results()[-1] only ever sees VoicePrinciplesDrafter, so the five
-    upstream agents' fragments must be merged in separately."""
+def _phase1_nested_node_result() -> MagicMock:
+    """A mock NodeResult wrapping all six Phase-1 specialists' fragments,
+    shaped like the real nested MultiAgentResult.results Strands returns."""
+    nested_results = {
+        "discovery_auditor": _leaf_node_result(
+            BrandDiscoveryAudit(
+                current_brand_perception="Seen as reliable but generic.",
+                market_position="Mid-market challenger.",
+                strengths=["Delivery speed"],
+                weaknesses=["Low brand recall"],
+                opportunities=["Category consolidating"],
+                threats=["Bigger competitors out-spending"],
+                stakeholder_insights=["Sales wants sharper differentiation"],
+            )
+        ),
+        "purpose_vision_writer": _leaf_node_result(
+            PurposeVisionOutput(
+                brand_purpose="Why we exist.",
+                mission_statement="What we do for customers.",
+                vision_statement="Where the brand is headed.",
+            )
+        ),
+        "values_articulator": _leaf_node_result(
+            CoreValuesOutput(
+                core_values=[
+                    CoreValueOutput(
+                        value="Clarity",
+                        behavioral_definition="We demonstrate clarity in every decision.",
+                        observable_behaviors=["Plain-language docs"],
+                    ),
+                    CoreValueOutput(
+                        value="Trust",
+                        behavioral_definition="We build trust through transparency.",
+                        observable_behaviors=["Public roadmap"],
+                    ),
+                    CoreValueOutput(
+                        value="Momentum",
+                        behavioral_definition="We maintain momentum through disciplined execution.",
+                        observable_behaviors=["Weekly release cadence"],
+                    ),
+                ]
+            )
+        ),
+        "audience_segmenter": _leaf_node_result(
+            AudienceSegmentsOutput(
+                target_audience_segments=[
+                    AudienceSegmentOutput(
+                        name="Enterprise product leaders",
+                        description="VP/Director-level buyers at mid-market SaaS companies.",
+                        pain_points=["Inconsistent brand touchpoints"],
+                        goals=["Ship cohesive experiences"],
+                        decision_drivers=["Proven execution speed"],
+                    )
+                ]
+            )
+        ),
+        "differentiation_mapper": _leaf_node_result(
+            DifferentiationPillarsOutput(
+                differentiation_pillars=[
+                    DifferentiationPillarOutput(
+                        pillar="Execution speed",
+                        proof_points=["Ship weekly release cadence"],
+                        competitive_context="Competitors ship quarterly.",
+                    ),
+                    DifferentiationPillarOutput(
+                        pillar="Hands-on partnership",
+                        proof_points=["Dedicated strategist per account"],
+                        competitive_context="Competitors use ticket-based support.",
+                    ),
+                ]
+            )
+        ),
+        "positioning_synthesizer": _leaf_node_result(
+            PositioningOutput(
+                positioning_statement="For enterprise leaders who need clarity, we deliver it.",
+                brand_promise="Every touchpoint feels cohesive.",
+            )
+        ),
+    }
+
+    inner_multi_result = MagicMock()
+    inner_multi_result.results = nested_results
+
+    node_result = MagicMock()
+    node_result.result = inner_multi_result
+    node_result.get_agent_results.return_value = [
+        node.get_agent_results.return_value[0] for node in nested_results.values()
+    ]
+    return node_result
+
+
+def _phase2_nested_node_result() -> MagicMock:
+    """A mock NodeResult wrapping all six Phase-2 specialists' own-field
+    fragments, shaped like the real nested MultiAgentResult.results Strands
+    returns."""
     _story = dict(
         brand_story="Origin story about shipping on-brand experiences.",
         hero_narrative="Brand that ships with the product.",
@@ -1031,7 +1033,7 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
         BrandArchetypeOutput(
             archetype="The Creator",
             rationale="Inventive.",
-            personality_traits=["Imaginative", "Original"],
+            personality_traits=["Imaginative", "Original", "Expressive"],
         )
     ]
     _pitches = [
@@ -1080,7 +1082,7 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
             jobs_to_be_done=["Brief agencies quickly"],
         ),
     ]
-    voice_leaf = _phase1_leaf_node(
+    voice_leaf = _leaf_node_result(
         WritingGuidelinesOutput(
             writing_guidelines=WritingGuidelinesBody(
                 voice_principles=["Confident", "Human", "Concrete"],
@@ -1091,22 +1093,22 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
         )
     )
     nested_results = {
-        "Storyteller": _phase1_leaf_node(BrandStoryOutput(**_story)),
-        "ArchetypeAnalyst": _phase1_leaf_node(BrandArchetypesOutput(brand_archetypes=_archetypes)),
-        "TaglineWriter": _phase1_leaf_node(
+        "Storyteller": _leaf_node_result(BrandStoryOutput(**_story)),
+        "ArchetypeAnalyst": _leaf_node_result(BrandArchetypesOutput(brand_archetypes=_archetypes)),
+        "TaglineWriter": _leaf_node_result(
             TaglineOutput(
                 tagline="Ship brand with the product",
                 tagline_rationale="Ties cohesion to shipping speed.",
                 elevator_pitches=_pitches,
             )
         ),
-        "MessageMapper": _phase1_leaf_node(
+        "MessageMapper": _leaf_node_result(
             MessagingFrameworkOutput(
                 messaging_framework=_pillars,
                 audience_message_maps=_maps,
             )
         ),
-        "PersonaBuilder": _phase1_leaf_node(PersonaProfilesOutput(persona_profiles=_personas)),
+        "PersonaBuilder": _leaf_node_result(PersonaProfilesOutput(persona_profiles=_personas)),
         "VoicePrinciplesDrafter": voice_leaf,
     }
 
@@ -1118,9 +1120,15 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
     node_result.get_agent_results.return_value = [
         node.get_agent_results.return_value[0] for node in nested_results.values()
     ]
+    return node_result
 
+
+def test_extract_phase_output_merges_every_phase2_fragment() -> None:
+    """Phase 2 wraps six parallel fan-out Graph agents as one top-level node;
+    get_agent_results()[-1] only ever sees VoicePrinciplesDrafter, so the five
+    upstream agents' fragments must be merged in separately."""
     mock_result = MagicMock()
-    mock_result.result = {"phase2_narrative": node_result}
+    mock_result.result = {"phase2_narrative": _phase2_nested_node_result()}
 
     output, degraded = BrandingTeamOrchestrator._extract_phase_output(
         mock_result, "phase2_narrative", NarrativeMessagingOutput
@@ -1148,6 +1156,23 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
     ]
 
 
+def test_phase2_fragments_collectively_populate_every_output_field() -> None:
+    """Schema-coverage guard: the six Phase-2 specialists' fragments must
+    collectively populate every field on NarrativeMessagingOutput, checked
+    generically against the model's own field list (not a hardcoded field
+    enumeration) -- mirrors test_phase3/4/5_fragments_collectively_populate_every_output_field."""
+    mock_result = MagicMock()
+    mock_result.result = {"phase2_narrative": _phase2_nested_node_result()}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase2_narrative", NarrativeMessagingOutput
+    )
+
+    assert degraded is False
+    assert isinstance(output, NarrativeMessagingOutput)
+    _assert_every_field_populated(output)
+
+
 # NOTE (Story 5b Step 1): test_extract_phase_output_phase2_prefers_upstream_owned_fields
 # was removed here. Its premise -- a downstream specialist's cumulative payload
 # re-emitting (and potentially rewriting) an earlier specialist's field, with
@@ -1164,7 +1189,7 @@ def test_extract_phase_output_rejects_incomplete_phase2_fragments() -> None:
     complete NarrativeMessagingOutput via field defaults (the structured_output
     + Swarm failure mode where handoff never fired)."""
     nested_results = {
-        "Storyteller": _phase1_leaf_node(
+        "Storyteller": _leaf_node_result(
             BrandStoryOutput(
                 brand_story="Origin story.",
                 hero_narrative="Hero.",
@@ -1194,35 +1219,108 @@ def test_extract_phase_output_rejects_incomplete_phase2_fragments() -> None:
     assert output.tagline == ""
 
 
-def test_extract_phase_output_falls_back_when_not_phase1_shaped() -> None:
-    """A node whose nested result isn't Phase 1/2's known node-id set (e.g. every
-    other phase) must fall through to the existing single-agent-result logic
-    unchanged — fragment merges are additive, never a regression."""
-    agent_result = MagicMock()
-    agent_result.message = {"content": []}
-    agent_result.structured_output = PositioningOutput(
-        positioning_statement="Fallback statement.",
-        brand_promise="Fallback promise.",
+def test_full_run_phase2_not_degraded_with_six_fragments() -> None:
+    """Phase 2's real runtime shape is six separate specialist fragments, not
+    the single flat block _mock_graph_result's default gives every phase
+    (which never actually exercises _merge_phase2_fragments, since it bails
+    out unless node_result.result.results is a dict). Wire that real shape
+    through orchestrator.run() end-to-end and confirm the Python merge keeps
+    Phase 2 out of degraded_phases, fully populates its output, and -- with
+    the prefer_first rewrite guard gone -- that every specialist's
+    authoritative field value survives unrewritten all the way through
+    _assemble_team_output, not just the direct _extract_phase_output call
+    test_extract_phase_output_merges_every_phase2_fragment already covers."""
+    mock_result = _mock_graph_result(ALL_PHASES)
+    mock_result.result["phase2_narrative"] = _phase2_nested_node_result()
+
+    async def mock_invoke_async(task, **kwargs):
+        return mock_result
+
+    with patch(
+        "branding_team.orchestrator.GraphBuilder",
+        return_value=MagicMock(
+            build=MagicMock(
+                return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async))
+            )
+        ),
+    ):
+        orchestrator = BrandingTeamOrchestrator()
+        result = orchestrator.run(
+            mission=make_mission(
+                company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                values=["clarity", "trust", "momentum"],
+            ),
+            human_review=HumanReview(approved=True),
+        )
+
+    assert result.degraded_phases == []
+    assert isinstance(result.narrative_messaging, NarrativeMessagingOutput)
+    _assert_every_field_populated(result.narrative_messaging)
+
+    narrative = result.narrative_messaging
+    assert narrative.brand_story == "Origin story about shipping on-brand experiences."
+    assert narrative.hero_narrative == "Brand that ships with the product."
+    assert narrative.boilerplate_variants == ["short bio", "medium bio", "long bio"]
+    assert [a.archetype for a in narrative.brand_archetypes] == ["The Creator"]
+    assert narrative.tagline == "Ship brand with the product"
+    assert narrative.tagline_rationale == "Ties cohesion to shipping speed."
+    assert [p.tier for p in narrative.elevator_pitches] == ["5-second", "30-second", "2-minute"]
+    assert [p.pillar for p in narrative.messaging_framework] == ["Cohesion", "Speed", "Clarity"]
+    assert [m.audience_segment for m in narrative.audience_message_maps] == [
+        "Enterprise product leaders"
+    ]
+    assert [p.name for p in narrative.persona_profiles] == ["Alex Rivera", "Jordan Lee"]
+    assert narrative.writing_guidelines.voice_principles == ["Confident", "Human", "Concrete"]
+    assert narrative.writing_guidelines.editorial_quality_bar == [
+        "States who it's for",
+        "Cites proof",
+        "Matches tone",
+    ]
+
+
+
+def test_phase1_and_phase2_merge_parity_through_shared_helper() -> None:
+    """Phase 1 and Phase 2 both merge their fragments through the same shared
+    ``_merge_named_fragments`` helper (bound as functools.partial in
+    _PHASE_SPEC). This test confirms the shared path produces a valid,
+    non-degraded output for both phases -- asserting parity of the merge
+    mechanism, not just of the individual phase fixtures.
+
+    By calling ``_merge_named_fragments`` directly with each phase's node_merge
+    table against its own nested node result, we prove both phases exercise
+    the same code path and that neither silently falls through to None.
+    """
+    import functools
+
+    # Confirm both merge_fns are functools.partial wrapping _merge_named_fragments.
+    phase1_spec = _PHASE_SPEC[BrandPhase.STRATEGIC_CORE]
+    phase2_spec = _PHASE_SPEC[BrandPhase.NARRATIVE_MESSAGING]
+    assert isinstance(phase1_spec.merge_fn, functools.partial)
+    assert isinstance(phase2_spec.merge_fn, functools.partial)
+    assert phase1_spec.merge_fn.func is _merge_named_fragments
+    assert phase2_spec.merge_fn.func is _merge_named_fragments
+
+    # Phase 1: call the shared helper directly with Phase 1's node_merge table.
+    phase1_node = _phase1_nested_node_result()
+    phase1_output = _merge_named_fragments(
+        phase1_node, StrategicCoreOutput, _PHASE1_NODE_MERGE
     )
+    assert phase1_output is not None
+    assert isinstance(phase1_output, StrategicCoreOutput)
+    assert phase1_output.positioning_statement != ""
 
-    inner_multi_result = MagicMock()
-    inner_multi_result.results = {"some_other_phase_node": MagicMock()}
-
-    node_result = MagicMock()
-    node_result.result = inner_multi_result
-    node_result.get_agent_results.return_value = [agent_result]
-
-    mock_result = MagicMock()
-    mock_result.result = {"phase1_strategic_core": node_result}
-
-    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
-        mock_result, "phase1_strategic_core", StrategicCoreOutput
+    # Phase 2: call the shared helper directly with Phase 2's node_merge table.
+    phase2_node = _phase2_nested_node_result()
+    phase2_output = _merge_named_fragments(
+        phase2_node, NarrativeMessagingOutput, _PHASE2_NODE_MERGE, require_all=True
     )
+    assert phase2_output is not None
+    assert isinstance(phase2_output, NarrativeMessagingOutput)
+    assert phase2_output.tagline != ""
 
-    assert degraded is False
-    assert isinstance(output, StrategicCoreOutput)
-    assert output.positioning_statement == "Fallback statement."
-    assert output.brand_promise == "Fallback promise."
+    # Both phases produce fully-populated outputs from the same helper.
+    _assert_every_field_populated(phase1_output)
+    _assert_every_field_populated(phase2_output)
 
 
 def _channel_guide_output(channel: str) -> ChannelGuidelineOutput:
@@ -1244,7 +1342,7 @@ def _phase4_nested_node_result() -> MagicMock:
     shaped like the real nested MultiAgentResult.results Strands returns."""
     channels = _PHASE4_CHANNELS
     nested_results = {
-        "brand_experience_principler": _phase1_leaf_node(
+        "brand_experience_principler": _leaf_node_result(
             BrandExperiencePrinciplesOutput(
                 brand_experience_principles=["Consistent", "Human", "Confident"],
                 signature_moments=["Onboarding email", "First dashboard load", "Renewal call"],
@@ -1252,10 +1350,10 @@ def _phase4_nested_node_result() -> MagicMock:
             )
         ),
         **{
-            f"{channel}_guide": _phase1_leaf_node(_channel_guide_output(channel))
+            f"{channel}_guide": _leaf_node_result(_channel_guide_output(channel))
             for channel in channels
         },
-        "brand_architecture_builder": _phase1_leaf_node(
+        "brand_architecture_builder": _leaf_node_result(
             BrandArchitectureOutput(
                 brand_architecture=[
                     BrandArchitectureRuleOutput(
@@ -1279,7 +1377,7 @@ def _phase4_nested_node_result() -> MagicMock:
                 },
             )
         ),
-        "brand_in_action_illustrator": _phase1_leaf_node(
+        "brand_in_action_illustrator": _leaf_node_result(
             BrandInActionOutput(
                 brand_in_action=[
                     BrandInActionExampleOutput(
@@ -1387,7 +1485,7 @@ def test_phase4_fragments_collectively_populate_every_output_field() -> None:
 def test_full_run_phase4_not_degraded_with_nine_fragments() -> None:
     """Phase 4's real runtime shape is nine separate specialist fragments,
     not the single flat block _mock_graph_result's default gives every
-    phase (which never actually exercises _merge_phase4_fragments, since it
+    phase (which never actually exercises the Phase 4 merge_fn partial, since it
     bails out unless node_result.result.results is a dict). Wire that real
     shape through orchestrator.run() end-to-end and confirm the Python merge
     keeps Phase 4 out of degraded_phases and fully populates its output."""
@@ -1398,8 +1496,12 @@ def test_full_run_phase4_not_degraded_with_nine_fragments() -> None:
         return mock_result
 
     with patch(
-        "branding_team.orchestrator.build_branding_graph",
-        return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+        "branding_team.orchestrator.GraphBuilder",
+        return_value=MagicMock(
+            build=MagicMock(
+                return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async))
+            )
+        ),
     ):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
@@ -1415,20 +1517,20 @@ def test_full_run_phase4_not_degraded_with_nine_fragments() -> None:
     _assert_every_field_populated(result.channel_activation)
 
 
-def test_merge_phase4_fragments_rejects_incomplete_specialist_set() -> None:
+def test_merge_named_fragments_phase4_rejects_incomplete_specialist_set() -> None:
     """A Phase 4 run missing one of the nine specialists (e.g. events_guide
     never completed) must not validate as a complete ChannelActivationOutput
     via field defaults — every field on it defaults to empty/absent, so a
     partial merge would otherwise pass validation silently.
 
-    Tested directly against ``_merge_phase4_fragments`` (require_all=True) as
+    Tested directly against ``_merge_named_fragments`` bound with ``_PHASE4_NODE_MERGE`` (require_all=True) as
     a focused unit test of the merge function in isolation. See
     ``test_extract_phase_output_rejects_incomplete_phase4_fragments`` for the
     end-to-end path through ``_extract_phase_output``.
     """
     channels = ["website", "social", "email", "partnerships", "internal"]  # events_guide omitted
     nested_results = {
-        "brand_experience_principler": _phase1_leaf_node(
+        "brand_experience_principler": _leaf_node_result(
             BrandExperiencePrinciplesOutput(
                 brand_experience_principles=["Consistent", "Human", "Confident"],
                 signature_moments=["Onboarding email", "First dashboard load", "Renewal call"],
@@ -1436,7 +1538,7 @@ def test_merge_phase4_fragments_rejects_incomplete_specialist_set() -> None:
             )
         ),
         **{
-            f"{channel}_guide": _phase1_leaf_node(_channel_guide_output(channel))
+            f"{channel}_guide": _leaf_node_result(_channel_guide_output(channel))
             for channel in channels
         },
     }
@@ -1447,43 +1549,12 @@ def test_merge_phase4_fragments_rejects_incomplete_specialist_set() -> None:
     node_result = MagicMock()
     node_result.result = inner_multi_result
 
-    merged = _merge_phase4_fragments(node_result, ChannelActivationOutput)
+    merged = functools.partial(
+        _merge_named_fragments, node_merge=_PHASE4_NODE_MERGE, require_all=True
+    )(node_result, ChannelActivationOutput)
 
     assert merged is None
 
-
-def test_extract_phase_output_rejects_incomplete_phase4_fragments() -> None:
-    """Without channel_compositor, a partial Phase 4 run (merge_fn returns
-    None) must degrade to defaults, not accept one specialist's own fragment
-    as the complete ChannelActivationOutput (``check_structured_output`` is
-    False for Phase 4, same guard Phase 2 already relies on)."""
-    nested_results = {
-        "brand_experience_principler": _phase1_leaf_node(
-            BrandExperiencePrinciplesOutput(
-                brand_experience_principles=["Consistent", "Human", "Confident"],
-                signature_moments=["Onboarding email", "First dashboard load", "Renewal call"],
-                sensory_elements=["Signature blue", "Rounded corners"],
-            )
-        ),
-    }
-    inner_multi_result = MagicMock()
-    inner_multi_result.results = nested_results
-
-    node_result = MagicMock()
-    node_result.result = inner_multi_result
-    node_result.get_agent_results.return_value = [
-        nested_results["brand_experience_principler"].get_agent_results.return_value[0]
-    ]
-
-    mock_result = MagicMock()
-    mock_result.result = {"phase4_channel": node_result}
-
-    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
-        mock_result, "phase4_channel", ChannelActivationOutput
-    )
-
-    assert degraded is True
-    assert output == ChannelActivationOutput()
 
 
 def _phase5_specialist_fragments() -> dict[str, BaseModel]:
@@ -1631,7 +1702,7 @@ def _phase5_nested_node_result(*, omit: str = "") -> MagicMock:
     specialist set for the rejection tests below).
     """
     nested_results = {
-        node_id: _phase1_leaf_node(fragment)
+        node_id: _leaf_node_result(fragment)
         for node_id, fragment in _phase5_specialist_fragments().items()
         if node_id != omit
     }
@@ -1715,7 +1786,7 @@ def test_phase5_fragments_collectively_populate_every_output_field() -> None:
 def test_full_run_phase5_not_degraded_with_seven_fragments() -> None:
     """Phase 5's real runtime shape is seven separate specialist fragments,
     not the single flat block _mock_graph_result's default gives every
-    phase (which never actually exercises _merge_phase5_fragments, since it
+    phase (which never actually exercises the Phase 5 merge_fn partial, since it
     bails out unless node_result.result.results is a dict). Wire that real
     shape through orchestrator.run() end-to-end and confirm the Python merge
     keeps Phase 5 out of degraded_phases and fully populates its output."""
@@ -1726,8 +1797,12 @@ def test_full_run_phase5_not_degraded_with_seven_fragments() -> None:
         return mock_result
 
     with patch(
-        "branding_team.orchestrator.build_branding_graph",
-        return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+        "branding_team.orchestrator.GraphBuilder",
+        return_value=MagicMock(
+            build=MagicMock(
+                return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async))
+            )
+        ),
     ):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
@@ -1743,56 +1818,26 @@ def test_full_run_phase5_not_degraded_with_seven_fragments() -> None:
     _assert_every_field_populated(result.governance)
 
 
-def test_merge_phase5_fragments_rejects_incomplete_specialist_set() -> None:
+def test_merge_named_fragments_phase5_rejects_incomplete_specialist_set() -> None:
     """A Phase 5 run missing one of the seven specialists (e.g.
     evolution_framer never completed) must not validate as a complete
     GovernanceOutput via field defaults — every field on it defaults to
     empty/absent, so a partial merge would otherwise pass validation
     silently.
 
-    Tested directly against ``_merge_phase5_fragments`` (require_all=True) as
+    Tested directly against ``_merge_named_fragments`` bound with ``_PHASE5_NODE_MERGE`` (require_all=True) as
     a focused unit test of the merge function in isolation. See
     ``test_extract_phase_output_rejects_incomplete_phase5_fragments`` for the
     end-to-end path through ``_extract_phase_output``.
     """
     node_result = _phase5_nested_node_result(omit="evolution_framer")
 
-    merged = _merge_phase5_fragments(node_result, GovernanceOutput)
+    merged = functools.partial(
+        _merge_named_fragments, node_merge=_PHASE5_NODE_MERGE, require_all=True
+    )(node_result, GovernanceOutput)
 
     assert merged is None
 
-
-def test_extract_phase_output_rejects_incomplete_phase5_fragments() -> None:
-    """Without governance_compositor, a partial Phase 5 run (merge_fn returns
-    None) must degrade to defaults, not accept one specialist's own fragment
-    as the complete GovernanceOutput (``check_structured_output`` is False for
-    Phase 5, same guard Phase 2 and Phase 4 already rely on)."""
-    node_result = MagicMock()
-    single_fragment = {
-        "ownership_definer": _phase1_leaf_node(
-            OwnershipOutput(
-                ownership_model="Brand Director owns the system end to end.",
-                decision_authority={"logo_changes": "Brand Director"},
-            )
-        ),
-    }
-    inner_multi_result = MagicMock()
-    inner_multi_result.results = single_fragment
-
-    node_result.result = inner_multi_result
-    node_result.get_agent_results.return_value = [
-        single_fragment["ownership_definer"].get_agent_results.return_value[0]
-    ]
-
-    mock_result = MagicMock()
-    mock_result.result = {"phase5_governance": node_result}
-
-    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
-        mock_result, "phase5_governance", GovernanceOutput
-    )
-
-    assert degraded is True
-    assert output == GovernanceOutput()
 
 
 def _phase3_specialist_fragments() -> dict[str, BaseModel]:
@@ -1967,7 +2012,7 @@ def _phase3_nested_node_result(*, omit: str = "") -> MagicMock:
     node set for the rejection tests below).
     """
     nested_results = {
-        node_id: _phase1_leaf_node(fragment)
+        node_id: _leaf_node_result(fragment)
         for node_id, fragment in _phase3_specialist_fragments().items()
         if node_id != omit
     }
@@ -2046,7 +2091,7 @@ def test_phase3_fragments_collectively_populate_every_output_field() -> None:
 def test_full_run_phase3_not_degraded_with_eleven_fragments() -> None:
     """Phase 3's real runtime shape is eleven separate node fragments, not the
     single flat block _mock_graph_result's default gives every phase (which
-    never actually exercises _merge_phase3_fragments, since it bails out
+    never actually exercises the Phase 3 merge_fn partial, since it bails out
     unless node_result.result.results is a dict). Wire that real shape
     through orchestrator.run() end-to-end and confirm the Python merge keeps
     Phase 3 out of degraded_phases."""
@@ -2057,8 +2102,12 @@ def test_full_run_phase3_not_degraded_with_eleven_fragments() -> None:
         return mock_result
 
     with patch(
-        "branding_team.orchestrator.build_branding_graph",
-        return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+        "branding_team.orchestrator.GraphBuilder",
+        return_value=MagicMock(
+            build=MagicMock(
+                return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async))
+            )
+        ),
     ):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
@@ -2075,54 +2124,25 @@ def test_full_run_phase3_not_degraded_with_eleven_fragments() -> None:
     _assert_every_field_populated(result.visual_identity)
 
 
-def test_merge_phase3_fragments_rejects_incomplete_specialist_set() -> None:
+def test_merge_named_fragments_phase3_rejects_incomplete_specialist_set() -> None:
     """A Phase 3 run missing one node (e.g. design_system_codifier never
     completed) must not validate as a complete VisualIdentityOutput via field
     defaults -- every field on it defaults to empty/absent, so a partial
     merge would otherwise pass validation silently.
 
-    Tested directly against ``_merge_phase3_fragments`` (require_all=True) as
+    Tested directly against ``_merge_named_fragments`` bound with ``_PHASE3_NODE_MERGE`` (require_all=True) as
     a focused unit test of the merge function in isolation. See
     ``test_extract_phase_output_rejects_incomplete_phase3_fragments`` for the
     end-to-end path through ``_extract_phase_output``.
     """
     node_result = _phase3_nested_node_result(omit="design_system_codifier")
 
-    merged = _merge_phase3_fragments(node_result, VisualIdentityOutput)
+    merged = functools.partial(
+        _merge_named_fragments, node_merge=_PHASE3_NODE_MERGE, require_all=True
+    )(node_result, VisualIdentityOutput)
 
     assert merged is None
 
-
-def test_extract_phase_output_rejects_incomplete_phase3_fragments() -> None:
-    """Without visual_compositor, a partial Phase 3 run (merge_fn returns
-    None) must degrade to defaults, not accept one node's own fragment as the
-    complete VisualIdentityOutput (``check_structured_output`` is False for
-    Phase 3, same guard Phase 2, Phase 4, and Phase 5 already rely on)."""
-    single_fragment = {
-        # CreativeRefinementDecision is converge_decider's real structured_output
-        # type (see agents.py:make_converge_decider) -- not a Phase 1 model.
-        "converge_decider": _phase1_leaf_node(
-            CreativeRefinementDecision(winning_candidate_title="Modern Confidence")
-        ),
-    }
-    inner_multi_result = MagicMock()
-    inner_multi_result.results = single_fragment
-
-    node_result = MagicMock()
-    node_result.result = inner_multi_result
-    node_result.get_agent_results.return_value = [
-        single_fragment["converge_decider"].get_agent_results.return_value[0]
-    ]
-
-    mock_result = MagicMock()
-    mock_result.result = {"phase3_visual": node_result}
-
-    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
-        mock_result, "phase3_visual", VisualIdentityOutput
-    )
-
-    assert degraded is True
-    assert output == VisualIdentityOutput()
 
 
 def _text_node_result(text: str) -> MagicMock:
@@ -2213,6 +2233,56 @@ def test_parse_model_from_text_schema_mismatch_returns_none_and_extract_degrades
     assert output == StrategicCoreOutput()
 
 
+def test_last_resort_text_parse_recovers_malformed_specialist_reply() -> None:
+    """When a specialist emits garbled nested results that merge_fn cannot
+    assemble (e.g. unexpected child ids), but the last agent's text reply
+    contains a valid JSON dump of the full phase output, the last-resort text
+    parse in ``_extract_from_single_agent`` recovers it without degrading.
+
+    This is the single remaining fallback path after the compositor-only
+    branches were pruned: merge_fn fires and returns None → text parse of
+    the last agent's message succeeds → output is returned non-degraded.
+    """
+    real_payload = _full_strategic_core()
+    # Simulate a malformed specialist reply: the nested MultiAgentResult has
+    # unexpected/garbled child ids so merge_fn finds none of its known ids.
+    garbled_nested = {"unknown_specialist_xyz": MagicMock(), "another_garbled": MagicMock()}
+    inner_multi_result = MagicMock()
+    inner_multi_result.results = garbled_nested
+
+    # But the last agent wrote the correct payload as prose-wrapped text.
+    agent_result = MagicMock()
+    agent_result.message = {
+        "content": [
+            {
+                "text": (
+                    "I've synthesized the strategic core:\n\n"
+                    + real_payload.model_dump_json()
+                    + "\n\nReady for review."
+                )
+            }
+        ]
+    }
+    agent_result.structured_output = None
+
+    node_result = MagicMock()
+    node_result.result = inner_multi_result
+    node_result.get_agent_results.return_value = [agent_result]
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase1_strategic_core": node_result}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase1_strategic_core", StrategicCoreOutput
+    )
+
+    assert degraded is False
+    assert isinstance(output, StrategicCoreOutput)
+    assert output.positioning_statement == real_payload.positioning_statement
+    assert output.brand_promise == real_payload.brand_promise
+    assert [v.value for v in output.core_values] == [v.value for v in real_payload.core_values]
+
+
 def test_gather_integrations_market_research_failure_returns_none() -> None:
     """A failing market-research call is swallowed to None; disabled design → None."""
     from branding_team.orchestrator import _gather_integrations
@@ -2289,21 +2359,8 @@ def test_locate_node_result_node_without_result_attr_returns_none() -> None:
     assert _locate_node_result(mock_result, "phase1_strategic_core") is None
 
 
-def test_extract_from_single_agent_prefers_structured_output() -> None:
-    """The last agent's typed ``structured_output`` is validated and returned."""
-    from branding_team.orchestrator import _extract_from_single_agent
-
-    core = _full_strategic_core()
-    node = _phase1_leaf_node(core)
-
-    parsed = _extract_from_single_agent(node, StrategicCoreOutput, None)
-
-    assert isinstance(parsed, StrategicCoreOutput)
-    assert parsed.positioning_statement == core.positioning_statement
-
-
 def test_extract_from_single_agent_falls_back_to_text() -> None:
-    """With no usable structured output, the last text block is parsed."""
+    """With no merge_fn match, the last agent's last text block is parsed."""
     from branding_team.orchestrator import _extract_from_single_agent
 
     core = _full_strategic_core()
@@ -2313,26 +2370,10 @@ def test_extract_from_single_agent_falls_back_to_text() -> None:
     node = MagicMock()
     node.get_agent_results.return_value = [agent_result]
 
-    parsed = _extract_from_single_agent(node, StrategicCoreOutput, None)
+    parsed = _extract_from_single_agent(node, StrategicCoreOutput)
 
     assert isinstance(parsed, StrategicCoreOutput)
     assert parsed.brand_promise == core.brand_promise
-
-
-def test_extract_from_single_agent_skips_structured_when_spec_disallows() -> None:
-    """When ``spec.check_structured_output`` is False the structured field is
-    ignored and extraction falls through to text (here empty → None)."""
-    from branding_team.orchestrator import _extract_from_single_agent, _PhaseSpec
-
-    spec = _PhaseSpec(
-        builder_fn=lambda: None,
-        node_id="phase2_narrative",
-        model_cls=StrategicCoreOutput,
-        check_structured_output=False,
-    )
-    node = _phase1_leaf_node(_full_strategic_core())  # message content is empty
-
-    assert _extract_from_single_agent(node, StrategicCoreOutput, spec) is None
 
 
 def test_extract_from_single_agent_no_agent_results_returns_none() -> None:
@@ -2342,7 +2383,7 @@ def test_extract_from_single_agent_no_agent_results_returns_none() -> None:
     node = MagicMock()
     node.get_agent_results.return_value = []
 
-    assert _extract_from_single_agent(node, StrategicCoreOutput, None) is None
+    assert _extract_from_single_agent(node, StrategicCoreOutput) is None
 
 
 def test_child_structured_output_valid_child() -> None:
@@ -2350,7 +2391,7 @@ def test_child_structured_output_valid_child() -> None:
     from branding_team.orchestrator import _child_structured_output
 
     core = _full_strategic_core()
-    child = _phase1_leaf_node(core)
+    child = _leaf_node_result(core)
 
     assert _child_structured_output(child) is core
 
@@ -2386,7 +2427,7 @@ def test_child_structured_output_non_basemodel_returns_none() -> None:
     """A child whose structured_output isn't a BaseModel is skipped."""
     from branding_team.orchestrator import _child_structured_output
 
-    child = _phase1_leaf_node({"not": "a model"})
+    child = _leaf_node_result({"not": "a model"})
 
     assert _child_structured_output(child) is None
 
@@ -2457,8 +2498,11 @@ def _run_single_phase_fixture_side_effect(mission, phase, prior_outputs=None):
     return _PHASE_FIXTURES[phase](), False
 
 
-def test_run_without_phase_cache_never_calls_run_single_phase() -> None:
-    """Omitting ``phase_cache`` (the default) preserves the monolithic-graph path."""
+def test_run_with_use_monolithic_true_never_calls_run_single_phase() -> None:
+    """Explicitly passing ``_use_monolithic=True`` still selects the
+    monolithic-graph path, even though it's not the default -- see
+    test_run_with_phase_cache_miss_falls_through_and_populates_cache for the
+    default per-phase path."""
     orchestrator = BrandingTeamOrchestrator()
     with (
         _patch_graph_invoke(ALL_PHASES),
@@ -2467,6 +2511,7 @@ def test_run_without_phase_cache_never_calls_run_single_phase() -> None:
         result = orchestrator.run(
             mission=make_mission(),
             human_review=HumanReview(approved=True),
+            _use_monolithic=True,
         )
 
     mock_run_single_phase.assert_not_called()
@@ -2519,7 +2564,9 @@ def test_run_with_phase_cache_miss_falls_through_and_populates_cache() -> None:
 
     upstream: dict[BrandPhase, Any] = {}
     for phase in PHASE_ORDER:
-        expected_hash = phase_input_hash(phase, mission, upstream)
+        expected_hash = phase_input_hash(
+            phase, mission, upstream, _PHASE_SPEC[phase].context_phases
+        )
         cached = cache.get(phase, expected_hash)
         assert cached is not None
         upstream[phase] = cached
@@ -2674,6 +2721,68 @@ def test_run_with_phase_cache_cascades_recompute_through_three_phase_chain() -> 
     assert result.visual_identity == fresh_upstream[BrandPhase.VISUAL_IDENTITY]
 
 
+def test_run_called_twice_with_identical_mission_only_invokes_run_single_phase_once() -> None:
+    """Two ``run()`` calls sharing one cache, with an identical mission, invoke
+    ``run_single_phase`` only on the first call -- the second is served
+    entirely from cache."""
+    mission = make_mission()
+    cache = PhaseOutputCache()
+    orchestrator = BrandingTeamOrchestrator()
+
+    with patch.object(
+        orchestrator, "run_single_phase", side_effect=_run_single_phase_fixture_side_effect
+    ) as mock_run_single_phase:
+        first_result = orchestrator.run(
+            mission=mission,
+            human_review=HumanReview(approved=True),
+            phase_cache=cache,
+        )
+        assert mock_run_single_phase.call_count == len(PHASE_ORDER)
+
+        second_result = orchestrator.run(
+            mission=mission,
+            human_review=HumanReview(approved=True),
+            phase_cache=cache,
+        )
+
+    assert mock_run_single_phase.call_count == len(PHASE_ORDER)
+    assert second_result == first_result
+
+
+def test_run_called_twice_with_changed_mission_reinvokes_affected_phases() -> None:
+    """Two ``run()`` calls sharing one cache: the first populates it for one
+    mission, the second uses a mission with a changed field. Since every
+    phase's hash folds in the full mission, the changed field invalidates
+    every phase, and the second call re-invokes ``run_single_phase`` for all
+    of them again."""
+    first_mission = make_mission(company_name="Northstar Labs")
+    second_mission = make_mission(company_name="Different Co")
+    cache = PhaseOutputCache()
+    orchestrator = BrandingTeamOrchestrator()
+
+    with patch.object(
+        orchestrator, "run_single_phase", side_effect=_run_single_phase_fixture_side_effect
+    ) as mock_run_single_phase:
+        orchestrator.run(
+            mission=first_mission,
+            human_review=HumanReview(approved=True),
+            phase_cache=cache,
+        )
+        assert mock_run_single_phase.call_count == len(PHASE_ORDER)
+
+        orchestrator.run(
+            mission=second_mission,
+            human_review=HumanReview(approved=True),
+            phase_cache=cache,
+        )
+
+    assert mock_run_single_phase.call_count == 2 * len(PHASE_ORDER)
+    second_call_phases = [
+        call.args[1] for call in mock_run_single_phase.call_args_list[len(PHASE_ORDER) :]
+    ]
+    assert second_call_phases == list(PHASE_ORDER)
+
+
 # ---------------------------------------------------------------------------
 # Story 2b Step 3: thread/Temporal confinement + cached-vs-cold output parity.
 # The Temporal path (temporal/activities.py) never calls `run` -- it calls
@@ -2695,7 +2804,9 @@ def test_run_with_phase_cache_matches_cold_monolithic_run() -> None:
 
     with _patch_graph_invoke(ALL_PHASES):
         cold_orchestrator = BrandingTeamOrchestrator()
-        cold_result = cold_orchestrator.run(mission=mission, human_review=human_review)
+        cold_result = cold_orchestrator.run(
+            mission=mission, human_review=human_review, _use_monolithic=True
+        )
 
     cache = PhaseOutputCache()
     miss_orchestrator = BrandingTeamOrchestrator()

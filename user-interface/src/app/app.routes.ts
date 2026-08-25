@@ -310,6 +310,7 @@ export const routes: Routes = [
         title: 'Job Matching',
         data: { breadcrumb: 'Job Matching' },
       },
+
     ],
   },
   { path: '**', redirectTo: '/dashboard' },

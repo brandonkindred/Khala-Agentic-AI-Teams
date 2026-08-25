@@ -470,7 +470,7 @@ Every `llm_service` call emits a span carrying `agent.name`, `task.id`,
 `cost.usd`, and `outcome`, plus a `khala.llm.cost_usd` counter. Per-job cost is
 accumulated and written to the job-store entry (`cost_usd`). DORA metrics and
 cost are exposed at `GET /api/se/metrics` (alias of
-`/api/software-engineering/dora`) and rendered in the Agent Console
+`/api/software-engineering/dora`) and rendered in the Agent Studio
 "Metrics" tab. Post-mortems and quality-gate rejections are distilled into the
 `se_learnings` Postgres table and the top-N relevant ones are injected into the
 Tech Lead's Design prompt. All Postgres-backed pieces no-op when `POSTGRES_HOST`
@@ -1130,6 +1130,43 @@ never enter this pass. The unscripted dummy LLM harness is a no-op so tests
 that do not stub the verifier keep their existing posting behavior. Set to
 `false`/`0`/`no` to disable (any other value, or unset, leaves it enabled).
 
+### CODE_REVIEW_SCOPE_LLM_PASS
+Removed: no code reads this flag any more. `api/pr_review.py::_partition_review_issues`'s
+posting gate is purely change-map-driven: a finding posts when `is_within_diff`
+proves it sits on a line the PR actually added/modified, or it carries the
+`omission` signal, regardless of any LLM verdict or the `pre_existing` tag
+`CODE_REVIEW_SCOPE_FILTER` sets. Neither the tag nor a verdict can decide the
+outcome either way — a `pre_existing=true` finding on an added/modified line
+still posts (`is_within_diff` alone decides that), and an untagged finding on
+unchanged context or an untouched file still routes to a proposal. The batched
+classifier this flag used to gate (`code_review_agent/scope_classifier.py`'s
+`classify_scope`, via the `classify_issue_scope` provider method) still exists
+but currently has no caller.
+
+### CODE_REVIEW_SYSTEMIC_SYNTHESIS
+Default-on toggle for the systemic/cross-cutting findings synthesis pass. The
+LLM call runs once per review, after `partition_issues_by_existing_comments`
+has deduped the PR's in-scope findings and before the individual findings'
+comments are posted, but only when at least two in-scope findings
+(`partition.pr_issues`) remain — a systemic pattern is, by definition,
+evidenced by two or more findings. A single best-effort LLM call
+(`code_review_agent/systemic_synthesis.py`'s `synthesize_systemic_findings`,
+via the `synthesize_systemic_findings` provider method) is pre-clustered with
+the same `group_similar_findings` helper used for pre-existing-bug proposals,
+then asked to name cross-cutting/foundational root causes spanning multiple
+findings — issues in interdependent functions, or conceptually similar issues
+in different files pointing at a shared design flaw. A non-empty result is
+persisted under `review_summary.systemic_findings` for the Code Review page
+(rendered there via a "N systemic pattern(s)" chip opening a detail dialog)
+and posted as its own standalone "Systemic / cross-cutting findings" PR
+conversation comment (separate from each finding's own comment) — but only
+once the main review's comments have themselves posted successfully, so a
+failure there never leaves an orphaned systemic comment. Fail-safe:
+a missing client, too few findings, or any failure (LLM error, malformed
+reply) degrades to an empty result and never fails the review. The unscripted
+dummy LLM harness is a no-op. Set to `false`/`0`/`no` to disable (any other
+value, or unset, leaves it enabled).
+
 ### CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS
 Default-on toggle for the architecture-consistency / cross-codebase-redundancy
 pass. This toggle enables the architecture half of the in-process coordinator's
@@ -1400,6 +1437,21 @@ fail open to a miss/recompute, same as every other `shared.cache` consumer.
 Default `256`, floor `0` (`0` disables the cache — every call re-invokes the
 model).
 
+### ACCESSIBILITY_REVIEW_CACHE_SIZE
+Max entries in the shared Accessibility review-result cache (`shared.cache`;
+owned by `accessibility_agent.agent.AccessibilityExpertAgent.run`), via the
+same `software_engineering_team.shared.review_result_cache.ReviewResultCache`
+class that backs `QA_REVIEW_CACHE_SIZE` above. The key hashes the whole
+`AccessibilityInput` — code, language, task description, architecture — plus
+the resolved review model in one shot, so any reviewed-file byte change
+naturally busts the key with no explicit invalidation logic. A cache hit
+skips the LLM call entirely. Every genuine (non-fallback) result is cached
+regardless of `approved`; only a structured-output parse/model failure is
+never cached, so it is retried for real on the next call. Backend failures
+(Redis unavailable, corrupt entry) fail open to a miss/recompute, same as
+every other `shared.cache` consumer. Default `256`, floor `0` (`0` disables
+the cache — every call re-invokes the model).
+
 ---
 
 ## Software Engineering DevOps Review
@@ -1605,7 +1657,7 @@ The full `STRATEGY_LAB_*` knob reference (defaults, backoff math, cascade semant
 
 ---
 
-## Agent Console and Invoke
+## Agent Studio and Invoke
 
 ### AGENT_INVOKE_MAX_PAYLOAD_BYTES
 Hard cap on request body for `POST /api/agents/{id}/invoke` and the sandbox shim (default `1048576`
@@ -1960,6 +2012,18 @@ otherwise. A genuinely production-scoped task therefore keeps the DevOps pipelin
 policy and approval-gate checks (`required_approvals`/`prod_approval_required` on the completion
 package); if its text carries no explicit approval-gate language it fails Phase 1's environment-policy
 gate rather than silently proceeding, the same trade-off `run_workflow` callers already accept.
+
+### CODING_TEAM_WORKERS_PER_STACK
+Number of implementation-worker `agent_id`s `derive_stack_roster` emits per stack (default `1`,
+floored at `1`; garbage/empty → default). `derive_stack_roster`
+(`software_engineering_team/agent_status.py`) is the single source of truth for worker-id naming,
+shared by the coding-team orchestrator (which builds the actual v2 implementation workers) and the
+status endpoint's roster builder, so both stay in sync automatically. With the default `1`, naming
+is unchanged from before this knob existed: one `agent_id` per stack, equal to the stack name (with
+a `_N` suffix on a name collision). With `N > 1`, each stack instead yields `N` `agent_id`s
+suffixed `-1`..`-N` off the stack's id (e.g. `backend_v2-1`, `backend_v2-2`), all sharing that
+stack's display name and tools. Naming is deterministic and stable across repeated calls with the
+same stack specs and env value, which resume/retry correctness depends on.
 
 ---
 

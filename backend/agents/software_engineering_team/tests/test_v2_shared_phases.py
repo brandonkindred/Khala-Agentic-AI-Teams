@@ -28,7 +28,7 @@ from shared.dev_models.models import (
     TaskType,
 )
 from shared.git.git_utils import write_files_and_commit
-from software_engineering_team.backend_code_v2_team import models as be_models
+from software_engineering_team.codegen_team import models as be_models
 from software_engineering_team.shared.phases import execution as sh_exec
 from software_engineering_team.shared.phases import planning as sh_plan
 from software_engineering_team.shared.phases import problem_solving as sh_ps
@@ -1183,7 +1183,7 @@ def test_fix_issues_one_at_a_time_impl_survives_parse_failure(caplog):
 # prompt output is an acceptance criterion of that refactor, so this test locks
 # the six constants against silent drift. If you INTENTIONALLY change a template
 # or builder, regenerate a digest with:
-#     python -c "import hashlib; from software_engineering_team.<team>_code_v2_team \
+#     python -c "import hashlib; from software_engineering_team.codegen_team.stacks.<team> \
 #         import prompts as p; print(hashlib.sha256(p.<NAME>.encode()).hexdigest())"
 _EXPECTED_PROMPT_DIGESTS = {
     (
@@ -1223,7 +1223,7 @@ def test_prompt_constants_are_byte_stable(team: str, name: str):
     import hashlib
     import importlib
 
-    prompts = importlib.import_module(f"software_engineering_team.{team}_code_v2_team.prompts")
+    prompts = importlib.import_module(f"software_engineering_team.codegen_team.stacks.{team}.prompts")
     actual = hashlib.sha256(getattr(prompts, name).encode("utf-8")).hexdigest()
     assert actual == _EXPECTED_PROMPT_DIGESTS[(team, name)], (
         f"{team} {name} changed; if intentional, update its digest in _EXPECTED_PROMPT_DIGESTS."
@@ -1787,40 +1787,3 @@ def test_apply_tool_agents_recommendation_schema_includes_llm_keys():
     }
     assert fixes[0].get("advisory") is True
 
-
-# --- deliberate wrapper duplication drift guard ------------------------------
-
-
-@pytest.mark.parametrize("phase_module", ["documentation.py"])
-def test_v2_team_phase_wrappers_stay_byte_identical(phase_module: str) -> None:
-    """The backend and frontend copies of a v2 phase wrapper are byte-identical.
-
-    The two teams deliberately keep a separate thin copy of
-    ``phases/documentation.py``: it is the per-team monkeypatch / model-binding
-    boundary that wires that team's models into the shared ``make_run_*``
-    factories in ``shared/phases/``. It must stay separate from its counterpart —
-    but they must also stay identical, so a one-sided edit (a fix applied to
-    one team only) fails loudly here instead of silently forking the behavior.
-    (``phases/deliver.py`` had the same pattern until ``make_run_deliver`` grew
-    default ``git_ns``/``output_ns`` namespaces pointing at the real shared
-    modules, letting tests monkeypatch those directly — no per-team wrapper
-    file remains for it.)
-
-    Preconditions:
-        - Both team packages are importable (their ``__init__`` resolves).
-
-    Postconditions:
-        - Asserts the two wrapper files' raw bytes are equal; on failure the
-          fix is to apply the same edit to both copies (or move the shared
-          part into ``shared/phases/``).
-    """
-    import software_engineering_team.backend_code_v2_team as be_pkg
-    import software_engineering_team.frontend_code_v2_team as fe_pkg
-
-    be_file = Path(be_pkg.__file__).parent / "phases" / phase_module
-    fe_file = Path(fe_pkg.__file__).parent / "phases" / phase_module
-    assert be_file.read_bytes() == fe_file.read_bytes(), (
-        f"{phase_module} has drifted between backend_code_v2_team and "
-        "frontend_code_v2_team; these wrappers are deliberate duplicates and "
-        "every edit must be applied to both copies"
-    )

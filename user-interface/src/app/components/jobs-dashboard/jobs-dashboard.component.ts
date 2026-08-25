@@ -34,6 +34,7 @@ import type {
 } from '../../models';
 import { ALREADY_COMPLETE, COMPLETED_WITH_FAILURES } from '../../models/job-status.model';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 import {
   type DashboardRow,
   type JobSource,
@@ -242,7 +243,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
         switchMap(() => this.fetchAllJobLists()),
         switchMap((rows) => this.enrichSERows(rows)),
         catchError((err) => {
-          this.error = err?.message ?? 'Failed to fetch jobs';
+          this.error = extractErrorDetail(err, 'Failed to fetch jobs');
           this.loading = false;
           return of([]);
         })
@@ -376,7 +377,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
         catchError((err) =>
           of({
             jobs: [] as RunningJobSummary[],
-            _error: err?.message ?? err?.error?.detail ?? 'Failed to load',
+            _error: extractErrorDetail(err, 'Failed to load'),
           } as { jobs: RunningJobSummary[]; _error?: string })
         )
       ),
@@ -763,7 +764,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       if (!confirmed) return;
       this.jobActions.stop(job.unified.source, job.unified.jobId).subscribe({
         next: () => this.refresh(),
-        error: (err) => { this.error = err?.error?.detail ?? err?.message ?? 'Failed to stop job'; },
+        error: (err) => { this.error = extractErrorDetail(err, 'Failed to stop job'); },
       });
     });
   }
@@ -772,7 +773,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     event.stopPropagation();
     this.jobActions.resume(job.unified.source, job.unified.jobId).subscribe({
       next: () => this.refresh(),
-      error: (err) => { this.error = err?.error?.detail ?? err?.message ?? 'Failed to resume job'; },
+      error: (err) => { this.error = extractErrorDetail(err, 'Failed to resume job'); },
     });
   }
 
@@ -787,7 +788,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       if (!confirmed) return;
       this.jobActions.restart(job.unified.source, job.unified.jobId).subscribe({
         next: () => this.refresh(),
-        error: (err) => { this.error = err?.error?.detail ?? err?.message ?? 'Failed to restart job'; },
+        error: (err) => { this.error = extractErrorDetail(err, 'Failed to restart job'); },
       });
     });
   }
@@ -803,7 +804,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       if (!confirmed) return;
       this.jobActions.delete(job.unified.source, job.unified.jobId).subscribe({
         next: () => this.refresh(),
-        error: (err) => { this.error = err?.error?.detail ?? err?.message ?? 'Failed to delete job'; },
+        error: (err) => { this.error = extractErrorDetail(err, 'Failed to delete job'); },
       });
     });
   }

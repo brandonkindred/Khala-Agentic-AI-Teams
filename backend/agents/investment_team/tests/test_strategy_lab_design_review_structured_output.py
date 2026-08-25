@@ -323,7 +323,7 @@ def test_schema_forced_starvation_degrades_to_legacy_call_and_succeeds(
     # reasoning-pass one.
     assert starved_client.reasoning_ran is True
     assert agent.calls == 1
-    starvation_warnings = [r for r in caplog.records if "design-review decode starved" in r.message]
+    starvation_warnings = [r for r in caplog.records if "schema_forced_degrade" in r.message]
     assert len(starvation_warnings) == 1
     # Reasoning + formatting charges both land before/at the failing
     # formatting call (charge-before-call); legacy fallback adds a third.
@@ -371,7 +371,7 @@ def test_reasoning_pass_starvation_also_degrades_to_legacy_call(
 
     assert critique.ready is True
     assert agent.calls == 1
-    starvation_warnings = [r for r in caplog.records if "design-review decode starved" in r.message]
+    starvation_warnings = [r for r in caplog.records if "schema_forced_degrade" in r.message]
     assert len(starvation_warnings) == 1
     # Only the reasoning unit is charged before the failing reasoning call;
     # the formatting charge never happens because complete_json is never reached.

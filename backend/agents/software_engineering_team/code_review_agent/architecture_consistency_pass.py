@@ -59,8 +59,9 @@ from shared.dev_models.models import SystemArchitecture
 from shared.env import env_flag_enabled
 from software_engineering_team.shared.llm import extract_json_from_response
 
+from ._prompt_utils import _render_manifest
 from .architecture_context import architecture_evidence_available, render_architecture_context
-from .chunking import _coerce_bool
+from .chunking import _coerce_scope_tags
 from .false_positive_filter import CodebaseIndex, _build_tools, _code_fence_for
 from .models import CodeReviewInput, CodeReviewIssue, coerce_line, is_no_op_suggestion
 from .profiles import ReviewProfile
@@ -102,18 +103,6 @@ def _flatten_architecture_document(architecture: Optional[SystemArchitecture]) -
         )
         if p
     )
-
-
-def _render_manifest(paths: List[str]) -> List[str]:
-    """Render the full changed-file path list (no character truncation).
-
-    A small pass-owned duplicate of
-    ``merged_architecture_side_effect_pass._render_manifest`` -- that module
-    imports this one, so importing the reverse direction would be circular.
-
-    Postconditions: always includes the section header followed by every path.
-    """
-    return [f"**Changed files in this submission ({len(paths)}):**", *paths]
 
 
 def _build_prompt(
@@ -227,14 +216,21 @@ def _coerce_finding(item: object) -> Optional[CodeReviewIssue]:
           ``severity`` defaults to ``"medium"`` rather than being dropped,
           matching this pass's default-severity guidance. Never raises on
           malformed input.
-        - ``pre_existing`` reflects the model's optional per-finding tag
-          (coerced via ``chunking._coerce_bool``, tolerating string
-          encodings), defaulting to ``False`` when absent -- mirrors
-          ``side_effect_impact_pass._coerce_finding``'s identical convention,
-          used by the PR-review whole-file path to route a finding about a
-          field/function/class this submission did NOT add or modify to a
-          human-review proposal instead of a blocking PR comment (see
-          ``CodeReviewIssue.pre_existing``).
+        - ``pre_existing``/``omission`` reflect the model's optional
+          per-finding tags, coerced and reconciled together via
+          ``chunking._coerce_scope_tags`` (the single source of truth this
+          coercion boundary shares with ``chunking._issues_from_chunk_output``
+          and ``side_effect_impact_pass._coerce_finding``) -- each defaults
+          to ``False`` when absent, used by the PR-review whole-file path to
+          route a finding about a field/function/class this submission did
+          NOT add or modify to a human-review proposal instead of a blocking
+          PR comment (see ``CodeReviewIssue.pre_existing``). When the raw
+          finding tags both true (a self-contradictory reply --
+          ``CodeReviewIssue`` rejects that combination via
+          ``_omission_implies_in_scope``), ``omission`` wins: the
+          constructed issue carries ``pre_existing=False``, so this boundary
+          degrades a malformed reply to the more specific signal instead of
+          raising.
     """
     if not isinstance(item, dict):
         return None
@@ -250,6 +246,7 @@ def _coerce_finding(item: object) -> Optional[CodeReviewIssue]:
     severity = str(item.get("severity", "") or "").strip().lower()
     if severity not in _ALLOWED_SEVERITIES:
         severity = "medium"
+    pre_existing_flag, omission_flag = _coerce_scope_tags(item)
     return CodeReviewIssue(
         severity=severity,
         category=category,
@@ -257,7 +254,8 @@ def _coerce_finding(item: object) -> Optional[CodeReviewIssue]:
         line=coerce_line(item.get("line")),
         description=description,
         suggestion=suggestion,
-        pre_existing=_coerce_bool(item.get("pre_existing")),
+        pre_existing=pre_existing_flag,
+        omission=omission_flag,
     )
 
 

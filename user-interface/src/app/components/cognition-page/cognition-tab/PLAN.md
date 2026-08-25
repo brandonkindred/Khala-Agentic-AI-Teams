@@ -1,6 +1,11 @@
 # Cognition HITL Review Panel — Implementation Plan
 
-Implementation plan for the Agent Console **Cognition** tab. This plan is the
+> **Note:** This plan was written when Cognition was a tab inside the Agent Console.
+> The Agent Console shell has since been deleted; Cognition now lives at its own
+> route (`/cognition`) as a standalone page. References to `agent-console.component`
+> below are historical only.
+
+Implementation plan for the ~~Agent Console **Cognition** tab~~ standalone Cognition page. This plan is the
 build companion to [`DESIGN.md`](./DESIGN.md) and incorporates every design
 requirement from it (section references below point at `DESIGN.md §N`).
 
@@ -31,8 +36,8 @@ rules, proposals approve/reject) already exists; this work consumes it.
 | File | Change | Design ref |
 |---|---|---|
 | `environments/environment.ts` + `environment.prod.ts` | Add `agentCognitionApiUrl: \`${apiBase}/api/cognition\`` | §2 |
-| `components/agent-console/agent-console.component.ts` | Import `CognitionTabComponent`, add to `imports[]`, bump docstring to seven tabs | §1 |
-| `components/agent-console/agent-console.component.html` | Add 7th `<mat-tab>` (icon `psychology`, label "Cognition") after Feedback | §1 |
+| ~~`components/agent-console/agent-console.component.ts`~~ | ~~Import `CognitionTabComponent`, add to `imports[]`~~ (removed — Console shell deleted; Cognition is now a standalone route) | §1 |
+| ~~`components/agent-console/agent-console.component.html`~~ | ~~Add 7th `<mat-tab>`~~ (removed — Console shell deleted; Cognition lives at `/cognition`) | §1 |
 
 ---
 
@@ -150,7 +155,7 @@ Try again shortly."
 2. [x] `cognition.model.ts` + `cognition-labels.ts` (+ spec).
 3. [x] `cognition-api.service.ts` (+ spec).
 4. [x] `cognition-tab.component.*` — picker → Proposals → Memory → Rules (+ spec).
-5. [x] Wire 7th tab into `agent-console.component.{ts,html}`.
+5. [x] ~~Wire 7th tab into `agent-console.component.{ts,html}`.~~ (Console shell deleted; Cognition is now a standalone route at `/cognition`.)
 6. [x] Lint + production build green; 100% line coverage on the new files
    (37 specs: labels 9, service 12, component 16).
 7. [ ] Manual smoke: approve/reject round-trip against a running unified API.

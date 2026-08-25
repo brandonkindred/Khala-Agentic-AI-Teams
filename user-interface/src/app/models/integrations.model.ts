@@ -328,3 +328,58 @@ export interface CodeReviewTranscript {
   job_id: string;
   entries: CodeReviewTranscriptEntry[];
 }
+
+
+// ---------------------------------------------------------------------------
+// Out-of-scope issue proposals
+// ---------------------------------------------------------------------------
+
+/** One unfiled out-of-scope issue proposal surfaced by code reviews. */
+export interface OutOfScopeProposalItem {
+  id: string;
+  job_id: string;
+  pr_number: number;
+  pr_url: string | null;
+  severity: string;
+  category: string;
+  file_path: string;
+  line: number | null;
+  description: string;
+  suggestion: string;
+  locations: { file_path: string; line: number | null; description: string; suggestion: string }[];
+  issue_number: number | null;
+  issue_url: string | null;
+}
+
+/** Response from GET /api/integrations/github/reviews/out-of-scope-issues. */
+export interface OutOfScopeProposalsResponse {
+  owner: string;
+  repo: string;
+  proposals: OutOfScopeProposalItem[];
+  total: number;
+  unfiled: number;
+}
+
+/** Request body for POST /api/integrations/github/reviews/out-of-scope-issues/file. */
+export interface FileOutOfScopeIssuesRequest {
+  proposal_ids: string[];
+  owner: string;
+  repo: string;
+}
+
+/** One GitHub issue created via the enhanced issue builder. */
+export interface EnhancedCreatedIssueItem {
+  proposal_id: string;
+  issue_number: number;
+  issue_url: string;
+  title: string;
+  label: string;
+  complexity_score: number;
+  merged_into_existing: boolean;
+}
+
+/** Response from POST /api/integrations/github/reviews/out-of-scope-issues/file. */
+export interface FileOutOfScopeIssuesResponse {
+  created: EnhancedCreatedIssueItem[];
+  errors: string[];
+}

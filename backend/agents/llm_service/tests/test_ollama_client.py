@@ -2116,6 +2116,42 @@ def test_entry_points_record_semantic_exhaustion_telemetry(
     assert any(r.get("error_type") == "semantic_exhaustion" for r in recorded)
 
 
+def test_complete_truncated_records_prompt_and_response_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """complete()'s LLMTruncatedError handler records prompt_text/response_text,
+    matching the complete_json truncated-telemetry pattern."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    recorded: list[dict] = []
+    monkeypatch.setattr(
+        "llm_service.clients.ollama.record_llm_call", lambda **kw: recorded.append(kw)
+    )
+    truncated_partial_sse = [
+        'data: {"choices":[{"delta":{"content":"PARTIAL "},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+        "data: [DONE]",
+    ]
+    continuation_ok_sse = [
+        'data: {"choices":[{"delta":{"content":"REVIEW"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    cms = [
+        _stream_cm(200, sse_lines=truncated_partial_sse),
+        _stream_cm(200, sse_lines=continuation_ok_sse),
+    ]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, _captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete("q", objective="test", think=False)
+    assert result == "PARTIAL REVIEW"
+    truncated_records = [r for r in recorded if r.get("status") == "truncated"]
+    assert truncated_records
+    assert truncated_records[0]["prompt_text"] == "q"
+    assert truncated_records[0]["response_text"] == "PARTIAL "
+
+
 def test_continuation_resumes_at_downgraded_thinking_level(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

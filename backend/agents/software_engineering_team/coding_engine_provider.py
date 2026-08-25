@@ -29,9 +29,10 @@ import time. The insert is idempotent and triggers no engine import itself.
 
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # The two-insert idiom is inlined (rather than delegating to
 # ``shared.app.paths.bootstrap_syspath``) because importing ``shared.app`` runs its
@@ -44,23 +45,73 @@ for _p in (_TEAM_DIR / "architect_agents", _TEAM_DIR):
         if _s not in sys.path:
             sys.path.insert(0, _s)
 
+# One generic, config-driven resolution point for both code-v2 language
+# surfaces (Story 3e Step 2) -- replaces a hardcoded if/else that imported
+# each team's ``*CodeV2TeamLead`` separately. Keyed on the same ``team_kind``
+# values the codegen team's ``V2TeamConfig``-backed orchestrator already uses
+# as its ``stack`` parameter. Deferred import (module name + class name, not
+# the class itself) keeps this module cheap to import, matching the class's
+# existing per-method contract.
+_CODEGEN_TEAM_LEAD_MODULE: Tuple[str, str] = (
+    "software_engineering_team.codegen_team",
+    "CodegenTeamLead",
+)
+
+
+def _resolve_verify_input_and_client(
+    changed_context: Optional[Dict[str, str]], task_description: str
+) -> Tuple[Optional[Any], Optional[Any]]:
+    """Shared setup for the ``code_review_verify``-keyed provider methods
+    (``classify_issue_scope``, ``synthesize_systemic_findings``): build the
+    grounding ``CodeReviewInput`` (if any) and resolve the pinned verify
+    client.
+
+    Preconditions: ``changed_context`` is ``None``/empty or a non-empty
+        ``{path: content}`` mapping; ``CodeReviewInput`` requires non-empty
+        ``files``, so an empty mapping is treated the same as ``None``.
+
+    Postconditions: returns ``(input_data, llm)``. ``input_data`` is ``None``
+        when ``changed_context`` is falsy, else a ``CodeReviewInput`` built
+        from it and ``task_description``. ``llm`` is the pinned
+        ``code_review_verify`` client (via
+        ``model_resolution.resolve_code_review_verify_client``), or ``None``
+        when resolution fails -- callers' delegates treat ``llm=None`` as a
+        degraded/unknown verdict rather than raising, so this never raises
+        either.
+    """
+    from software_engineering_team.code_review_agent.model_resolution import (
+        resolve_code_review_verify_client,
+    )
+    from software_engineering_team.code_review_agent.models import build_code_review_input
+
+    input_data = None
+    if changed_context:
+        input_data = build_code_review_input(
+            files=dict(changed_context), task_description=task_description
+        )
+
+    try:
+        llm = resolve_code_review_verify_client()
+    except Exception:  # noqa: BLE001 — never raise; callers treat llm=None as degraded
+        llm = None
+
+    return input_data, llm
+
 
 class SECodeEngineProvider:
     """Concrete engine provider backed by the software-engineering team's engines."""
 
     def build_implementation_team_lead(self, team_kind: str, llm: Any) -> Any:
-        """Construct the frontend/backend code-v2 team lead for ``team_kind``.
+        """Construct the codegen team lead for ``team_kind`` (its ``stack``).
 
         Preconditions: ``team_kind`` in ``{"frontend", "backend"}``.
-        Postconditions: returns a code-v2 team-lead instance built from ``llm``.
+        Postconditions: returns a codegen team-lead instance built from ``llm``
+        and ``stack=team_kind``.
         """
-        if team_kind == "frontend":
-            from software_engineering_team.frontend_code_v2_team import FrontendCodeV2TeamLead
-
-            return FrontendCodeV2TeamLead(llm)
-        from software_engineering_team.backend_code_v2_team import BackendCodeV2TeamLead
-
-        return BackendCodeV2TeamLead(llm)
+        module_name, class_name = _CODEGEN_TEAM_LEAD_MODULE
+        module = importlib.import_module(module_name)
+        team_lead_cls = getattr(module, class_name)
+        return team_lead_cls(llm, stack=team_kind)
 
     def run_build_verification(self, repo_path: Any, agent_type: str, task_id: str) -> Any:
         from software_engineering_team.quality_gate_tools import run_build_verification
@@ -161,29 +212,44 @@ class SECodeEngineProvider:
 
         Postconditions: returns ``scope_classifier.classify_scope(findings,
             ...)`` unchanged — a list positionally aligned 1:1 with
-            ``findings``. Resolves the ``code_review_verify`` client itself
-            (pinned the same way as the sibling verification passes, via
-            ``model_resolution.resolve_code_review_verify_client``) so callers
-            need no SE or ``llm_service`` imports; a client-resolution failure
-            degrades to ``llm=None`` (all findings verdict to "unknown"),
-            preserving ``classify_scope``'s never-raises guarantee at this
-            boundary too.
+            ``findings``. Resolves the ``code_review_verify`` client and
+            builds ``input_data`` via the shared
+            ``_resolve_verify_input_and_client`` helper (pinned the same way
+            as the sibling verification passes) so callers need no SE or
+            ``llm_service`` imports; a client-resolution failure degrades to
+            ``llm=None`` (all findings verdict to "unknown"), preserving
+            ``classify_scope``'s never-raises guarantee at this boundary too.
         """
-        from software_engineering_team.code_review_agent.model_resolution import (
-            resolve_code_review_verify_client,
-        )
-        from software_engineering_team.code_review_agent.models import build_code_review_input
         from software_engineering_team.code_review_agent.scope_classifier import classify_scope
 
-        input_data = None
-        if changed_context:
-            input_data = build_code_review_input(
-                files=dict(changed_context), task_description=task_description
-            )
-
-        try:
-            llm = resolve_code_review_verify_client()
-        except Exception:  # noqa: BLE001 — never raise; classify_scope treats llm=None as UNKNOWN
-            llm = None
-
+        input_data, llm = _resolve_verify_input_and_client(changed_context, task_description)
         return classify_scope(findings, llm=llm, input_data=input_data)
+
+    def synthesize_systemic_findings(
+        self,
+        findings: Sequence[Any],
+        changed_context: Optional[Dict[str, str]],
+        task_description: str,
+    ) -> List[Dict[str, Any]]:
+        """Synthesize cross-cutting patterns, delegating to ``systemic_synthesis``.
+
+        Preconditions: ``findings`` is a sequence of ``CodeReviewIssue``-like
+            objects. ``changed_context`` is ``None``/empty or a non-empty
+            ``{path: content}`` mapping — same shape as ``classify_issue_scope``'s.
+
+        Postconditions: returns ``systemic_synthesis.synthesize_systemic_findings(
+            findings, ...)`` unchanged — a list of ``{"title", "description",
+            "related_locations"}`` dicts, possibly empty. Resolves the
+            ``code_review_verify`` client and builds ``input_data`` via the
+            same shared ``_resolve_verify_input_and_client`` helper
+            ``classify_issue_scope`` uses; a client-resolution failure
+            degrades to ``llm=None`` (synthesis returns ``[]``), preserving
+            ``synthesize_systemic_findings``'s never-raises guarantee at this
+            boundary too.
+        """
+        from software_engineering_team.code_review_agent.systemic_synthesis import (
+            synthesize_systemic_findings,
+        )
+
+        input_data, llm = _resolve_verify_input_and_client(changed_context, task_description)
+        return synthesize_systemic_findings(findings, llm=llm, input_data=input_data)

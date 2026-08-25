@@ -65,7 +65,7 @@ runs five phases in strict order:
        `max_cycles_requires_failing_gate=True`, so a clean pass on the capped cycle
        still proceeds to Documentation there (both conditions hold: not
        still_failing, and the flag is true). The frontend config sets it to `False`
-       (`frontend_code_v2_team/phases/execution.py:278`), so on the frontend,
+       (`frontend_code_v2_team/phases/_profile.py:795`), so on the frontend,
        passing every gate on the exact cycle that also happens to hit
        `max_total_cycles` is still marked `REVIEW_FAILED` and does **not** proceed
        to Documentation — a frontend-only terminal edge that any concurrency
@@ -84,7 +84,7 @@ runs five phases in strict order:
 | Code review (agent) | `_code_review_step` via `run_code_review_phase_impl` (`review.py:41-123`) | `microtask_files`, `review_context` (architecture/spec); `enable_llm_review_grounding` (a plain parameter of `run_code_review_phase_impl`, **not** a `ReviewConfig` attribute — the caller `_run_review_cycles` forwards it via `getattr(config, "enable_llm_review_grounding", True)` off the higher-level `MicrotaskReviewConfig`, `execution.py:902`/`985`) | `ReviewIssue(source="code_review", ...)`; combined `GateOutcome(passed, issues, summary, raw_issue_count)` (`execution.py:360-377`) |
 | QA (backend) | `run_qa_testing_phase_impl` → `_run_agent_testing_phase` (`review.py:329-375`, body at `149-295`) | `microtask_files` (post-CR content), `deps.qa_agent`, `agent_review_cache`, and **only** `deps.tool_agents["testing_qa"]` — the shared body filters by `spec.tool_kind` (`review.py:233-235`) before calling any tool agent | `GateOutcome` with `source="qa"` issues |
 | Security (backend) | `run_security_testing_phase_impl` → `_run_agent_testing_phase` (`review.py:378-414`, same shared body) | `microtask_files`, `deps.security_agent`, `agent_review_cache`, and **only** `deps.tool_agents["security"]`, filtered the same way | `GateOutcome` with `source="security"` issues |
-| QA / Security (frontend) | `_qa_gate` (`frontend_code_v2_team/phases/execution.py:213-244`) / `_security_gate` (`247-278`) → `run_microtask_review` (`shared/v2_review.py:750-938`, invoked via `from .review import run_microtask_review` inside each gate) | `microtask_files`, `deps.qa_agent` or `deps.security_agent`, `deps.tool_agent_cache` (a content-addressed `AgentReviewCache`, reset per microtask cycle in `_run_review_cycles`, forwarded so a tool agent already run by the CR gate this cycle is reused instead of re-invoked — see the caching design below), and `_scoped_tool_agents(deps.tool_agents, kind)` — **only their own kind** (`testing_qa` / `security`), not the full mapping (see note below) | `GateOutcome`, filtered post hoc to `source="qa"` or `source="security"` |
+| QA / Security (frontend) | `_qa_gate` (`frontend_code_v2_team/phases/_profile.py:617-682`) / `_security_gate` (`685-750`) → `run_microtask_review` (`shared/v2_review.py:750-938`, called directly by bare name since both the gates and `run_microtask_review` now live in the same `_profile.py` module) | `microtask_files`, `deps.qa_agent` or `deps.security_agent`, `deps.tool_agent_cache` (a content-addressed `AgentReviewCache`, reset per microtask cycle in `_run_review_cycles`, forwarded so a tool agent already run by the CR gate this cycle is reused instead of re-invoked — see the caching design below), and `scope_tool_agents_by_kind(deps.tool_agents, kind)` (shared helper, `shared/v2_execution_bindings.py`) — **only their own kind** (`testing_qa` / `security`), not the full mapping (see note below) | `GateOutcome`, filtered post hoc to `source="qa"` or `source="security"` |
 | Documentation | `_run_documentation_phase` (`execution.py:1224-1347`) | `microtask_files` (last review-accepted write), `deps.tool_agents[DOCUMENTATION]`, `task.description` | Refined `doc_files` merged into `microtask_files`/`all_files`/`mt.output_files`; sets `mt.status = COMPLETED` |
 
 ## Dependency graph
@@ -136,15 +136,17 @@ Edge classification:
 
   As of commit `abd5bb5` (PR #2912), `_qa_gate` and `_security_gate` each
   scope `deps.tool_agents` down to their own kind before calling
-  `run_microtask_review` —
-  `_scoped_tool_agents(deps.tool_agents, ToolAgentKind.TESTING_QA)`
-  (`frontend_code_v2_team/phases/execution.py:239`) and
-  `_scoped_tool_agents(deps.tool_agents, ToolAgentKind.SECURITY)` (line 273)
+  `run_microtask_review` — via the shared
+  `scope_tool_agents_by_kind(deps.tool_agents, kind)` helper
+  (`shared/v2_execution_bindings.py`), called as
+  `scope_tool_agents_by_kind(deps.tool_agents, ToolAgentKind.TESTING_QA)`
+  (`frontend_code_v2_team/phases/_profile.py:676`) and
+  `scope_tool_agents_by_kind(deps.tool_agents, ToolAgentKind.SECURITY)` (line 744)
   respectively — instead of the full mapping. Build verification and lint are
   also disabled for those two gates (`build_verifier=None`,
-  `linting_tool_agent=None` at lines 234/238 and 268/272), so those never ran
+  `linting_tool_agent=None` at lines 671/675 and 739/743), so those never ran
   more than once either. Only `_code_review_gate` still passes the *entire*
-  `deps.tool_agents` mapping (line 200) — deliberately, since it's the only
+  `deps.tool_agents` mapping (line 603) — deliberately, since it's the only
   gate meant to surface `ACCESSIBILITY`/`UI_DESIGN` findings, which have no
   dedicated gate of their own.
 
@@ -256,7 +258,7 @@ Edge classification:
   cannot start earlier without weakening that invariant.
 - The frontend's post-loop max-cycles check: because
   `max_cycles_requires_failing_gate=False`
-  (`frontend_code_v2_team/phases/execution.py:278`), a redesign that changes when
+  (`frontend_code_v2_team/phases/_profile.py:795`), a redesign that changes when
   or how the cap is evaluated must explicitly decide whether to preserve today's
   behavior (a fully-passing capped cycle is still `REVIEW_FAILED` on frontend) or
   change it — this is a behavioral edge, not a parallelization opportunity, but it
@@ -286,7 +288,7 @@ Edge classification:
   optimization — it changes the retry/restart semantics described above and needs
   its own design before implementation.
 - QA and Security analysis calls **on the frontend**: the QA/Security gates'
-  own tool-agent fan-out is scoped per gate (`_scoped_tool_agents`, see the
+  own tool-agent fan-out is scoped per gate (`scope_tool_agents_by_kind`, see the
   dependency-graph note above) as of commit `abd5bb5`, matching the backend's
   `_run_agent_testing_phase` filter, and `frontend_code_v2_team`'s
   `GATE_CONFIG` now sets `parallelize_qa_security=True` (matching the

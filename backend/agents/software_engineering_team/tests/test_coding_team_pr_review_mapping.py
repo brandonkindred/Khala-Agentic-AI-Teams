@@ -26,6 +26,7 @@ from software_engineering_team.github_source.pr_review_mapping import (
     format_issue_comment,
     format_numbered_source_line,
     format_removed_excerpt,
+    format_systemic_findings_comment,
     inline_comment_to_timeline_body,
     is_within_diff,
     map_issues_to_comments,
@@ -451,6 +452,28 @@ def test_is_within_diff_false_for_non_numeric_line_does_not_raise() -> None:
     assert is_within_diff(finding, valid) is False
 
 
+def test_is_within_diff_context_vs_changed_distinction() -> None:
+    # The posting gate calls is_within_diff with changed_by_path (narrower, only
+    # added/modified lines), NOT valid_by_path (which also includes context lines).
+    # A context line (line 1) is in valid_by_path but NOT in changed_by_path:
+    #   - is_within_diff(finding, valid_by_path)   → True (commentable location)
+    #   - is_within_diff(finding, changed_by_path) → False (not a changed line)
+    # This test documents the distinction that drives the diff-grounded contract.
+    valid_by_path = {"app/main.py": {1, 2, 3}}  # context + added lines
+    changed_by_path = {"app/main.py": {2}}  # only the added line
+
+    context_finding = _Issue(file_path="app/main.py", line=1)
+    added_finding = _Issue(file_path="app/main.py", line=2)
+
+    # Against valid_by_path (used for ROUTING to comment shape):
+    assert is_within_diff(context_finding, valid_by_path) is True
+    assert is_within_diff(added_finding, valid_by_path) is True
+
+    # Against changed_by_path (used for SCOPE eligibility in the posting gate):
+    assert is_within_diff(context_finding, changed_by_path) is False
+    assert is_within_diff(added_finding, changed_by_path) is True
+
+
 # ---------------------------------------------------------------------------
 # split_review_comments
 # ---------------------------------------------------------------------------
@@ -671,6 +694,109 @@ def test_build_review_body_fallback_singular_finding() -> None:
     body = build_review_body("", "", issue_count=1)
     assert "1 finding reported" in body
     assert "findings" not in body
+
+
+# ---------------------------------------------------------------------------
+# format_systemic_findings_comment
+# ---------------------------------------------------------------------------
+
+
+def test_format_systemic_findings_comment_renders_title_description_and_locations() -> None:
+    body = format_systemic_findings_comment(
+        [
+            {
+                "title": "Missing validation repeated",
+                "description": "Three call sites skip input validation.",
+                "related_locations": [
+                    {"file_path": "a.py", "description": "missing check in f"},
+                    {"file_path": "b.py", "description": "missing check in g"},
+                ],
+            }
+        ]
+    )
+    assert body.startswith("### Systemic / cross-cutting findings")
+    assert "**Missing validation repeated**" in body
+    assert "Three call sites skip input validation." in body
+    assert "- `a.py` — missing check in f" in body
+    assert "- `b.py` — missing check in g" in body
+
+
+def test_format_systemic_findings_comment_multiple_entries() -> None:
+    body = format_systemic_findings_comment(
+        [
+            {"title": "First", "description": "d1", "related_locations": []},
+            {"title": "Second", "description": "d2", "related_locations": []},
+        ]
+    )
+    assert "**First**" in body
+    assert "**Second**" in body
+
+
+def test_format_systemic_findings_comment_missing_title_falls_back() -> None:
+    body = format_systemic_findings_comment(
+        [{"title": "", "description": "d", "related_locations": []}]
+    )
+    assert "**Cross-cutting finding**" in body
+
+
+def test_format_systemic_findings_comment_location_variants() -> None:
+    body = format_systemic_findings_comment(
+        [
+            {
+                "title": "t",
+                "description": "d",
+                "related_locations": [
+                    {"file_path": "only_path.py", "description": ""},
+                    {"file_path": "", "description": "only description"},
+                    {"file_path": "", "description": ""},
+                ],
+            }
+        ]
+    )
+    assert "- `only_path.py`" in body
+    assert "- only description" in body
+
+
+def test_format_systemic_findings_comment_missing_related_locations_key() -> None:
+    # related_locations may be absent entirely -- treated as empty, never raises.
+    body = format_systemic_findings_comment([{"title": "t", "description": "d"}])
+    assert "**t**" in body
+    assert "d" in body
+
+
+def test_format_systemic_findings_comment_skips_non_dict_entries() -> None:
+    # A non-dict entry in `findings`, or in one entry's `related_locations`,
+    # is skipped rather than raising (e.g. AttributeError from `.get` on a
+    # non-mapping) -- well-formed siblings still render.
+    body = format_systemic_findings_comment(
+        [
+            "not a dict",
+            {
+                "title": "Good finding",
+                "description": "d",
+                "related_locations": [
+                    "not a dict either",
+                    {"file_path": "a.py", "description": "x"},
+                ],
+            },
+        ]
+    )
+    assert "**Good finding**" in body
+    assert "- `a.py` — x" in body
+
+
+def test_format_systemic_findings_comment_non_iterable_related_locations() -> None:
+    # A truthy but non-iterable `related_locations` (e.g. an int) does not
+    # raise TypeError from `for ... in x or []` -- normalized to no locations,
+    # never raises -- and does not stop other findings from rendering.
+    body = format_systemic_findings_comment(
+        [
+            {"title": "First", "description": "d1", "related_locations": 5},
+            {"title": "Second", "description": "d2", "related_locations": []},
+        ]
+    )
+    assert "**First**" in body
+    assert "**Second**" in body
 
 
 # ---------------------------------------------------------------------------

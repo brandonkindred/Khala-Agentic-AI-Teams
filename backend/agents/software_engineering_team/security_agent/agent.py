@@ -3,9 +3,10 @@
 Calls the LLM via ``shared.single_shot_review.run_single_shot_review`` in
 schema-validated mode, which resolves the client, validates the reply
 against ``SecurityLLMResponse``, and drives one bounded corrective retry
-(re-prompting with the schema/validation error) before falling back — in
-place of the single-shot, no-retry Strands ``structured_output_model`` path
-this agent used previously.
+(re-prompting with the schema/validation error) before falling back. The
+file-context prefix (language + code under review) is kept in the user
+message — it is untrusted repository content and must not be elevated to
+system-level instructions.
 """
 
 from __future__ import annotations
@@ -15,15 +16,8 @@ from typing import Optional
 
 from llm_service import LLMClient, get_strands_model
 from llm_service.strands_model import model_fingerprint, resolve_strands_model
-from shared.cache import get_shared_cache
-from software_engineering_team.shared.review_result_cache import (
-    build_review_cache_key,
-    cache_capacity_for,
-    cache_namespace_for,
-    clear_review_cache_namespace,
-    get_cached_review_result,
-    set_cached_review_result,
-)
+from software_engineering_team.shared.review_prompt_utils import build_file_context_prefix
+from software_engineering_team.shared.review_result_cache import ReviewResultCache
 from software_engineering_team.shared.security_service import derive_approved
 from software_engineering_team.shared.single_shot_review import run_single_shot_review
 
@@ -40,31 +34,17 @@ _CACHE_LABEL = "Security"
 # the LLM call entirely. Mirrors qa_agent's review cache exactly (same
 # whole-input key *shape*, same "cache every genuine outcome regardless of
 # approved" *policy*, since this is a single atomic call with no reduce
-# phase to short-circuit) — the shared policy itself lives in
-# ``software_engineering_team.shared.review_result_cache``, imported above;
-# this module supplies only its own namespace stem, env var, capacity
-# default, and output model. Backed by shared.cache (Redis, falls open to an
-# in-process store). Base stem; ``_review_cache_namespace()`` appends build id.
+# phase to short-circuit) — the shared ``ReviewResultCache`` supplies the
+# get/put/clear policy; this module supplies only its own namespace stem,
+# env var, capacity default, and output model.
 DEFAULT_REVIEW_CACHE_SIZE = 256  # SECURITY_REVIEW_CACHE_SIZE, floor 0
-_REVIEW_CACHE_NAMESPACE = "security:review:v1"
-
-
-def _review_cache_namespace() -> str:
-    """Shared-cache namespace for security review results (includes build id)."""
-    return cache_namespace_for(_REVIEW_CACHE_NAMESPACE)
-
-
-def _review_cache_size() -> int:
-    """Resolve the review cache capacity from the environment.
-
-    Postconditions:
-        - Returns ``SECURITY_REVIEW_CACHE_SIZE`` parsed as an int, clamped to
-          a floor of 0: an unset or unparseable value falls back to
-          ``DEFAULT_REVIEW_CACHE_SIZE``, a negative value clamps to 0. An
-          explicit or clamped-to 0 disables the cache — every ``run()`` call
-          re-invokes the model, matching pre-cache behavior.
-    """
-    return cache_capacity_for("SECURITY_REVIEW_CACHE_SIZE", DEFAULT_REVIEW_CACHE_SIZE)
+_REVIEW_CACHE: ReviewResultCache[SecurityOutput] = ReviewResultCache(
+    namespace_stem="security:review:v1",
+    env_var="SECURITY_REVIEW_CACHE_SIZE",
+    default_capacity=DEFAULT_REVIEW_CACHE_SIZE,
+    label=_CACHE_LABEL,
+    output_model=SecurityOutput,
+)
 
 
 def clear_review_cache() -> None:
@@ -81,18 +61,14 @@ def clear_review_cache() -> None:
           forcing a cold review. Intended for tests and for callers that
           must force a cold review.
     """
-    clear_review_cache_namespace(_CACHE_LABEL, lambda: get_shared_cache(_review_cache_namespace()))
+    _REVIEW_CACHE.clear()
 
 
 def _security_model_fingerprint(llm: Optional[LLMClient]) -> str:
     """Best-effort stable identifier for the model a security review will run on.
 
-    Unlike ``qa_agent``, this agent never resolves/holds a Strands model —
-    it calls the LLM via ``run_single_shot_review`` on the raw ``self.llm``.
-    Mirrors ``code_review_agent.mapping._review_model_fingerprint``: resolve
-    a Strands model purely for identity purposes via the generic
-    ``resolve_strands_model`` (not the code-review-specific resolver), then
-    delegate the attribute probing to
+    Resolves a Strands model for identity purposes via ``resolve_strands_model``,
+    then delegates the attribute probing to
     ``llm_service.strands_model.model_fingerprint``.
 
     Preconditions:
@@ -119,27 +95,53 @@ def _security_model_fingerprint(llm: Optional[LLMClient]) -> str:
     return model_fingerprint(model)
 
 
-def _review_cache_key(input_data: SecurityInput, model_fp: str) -> str:
-    """Hash of the whole security input plus the resolved review model.
+def _build_security_file_context_prefix(input_data: SecurityInput) -> list[str]:
+    """Render the microtask file context (language + code) as a stable prefix.
 
-    Keys the entire ``SecurityInput`` — code, language, task description,
-    architecture, context — so any reviewed-file byte change naturally
-    busts the key with no explicit invalidation logic. ``SecurityInput``
-    carries no per-invocation id field, so nothing needs to be excluded
-    before hashing.
+    Positioned ahead of ``_build_security_role_instructions``'s output in the
+    assembled user prompt (reorder/isolation only; no cache marking here).
+
+    Preconditions:
+        - ``input_data`` is a valid ``SecurityInput`` with ``code`` set.
+
+    Postconditions:
+        - Returns non-empty prompt lines: the language line, then the code
+          fence around ``input_data.code``. Never raises or transforms the code.
+    """
+    return build_file_context_prefix(input_data.language, input_data.code)
+
+
+def _build_security_role_instructions(input_data: SecurityInput) -> list[str]:
+    """Render the security-specific review instructions that follow the file-context prefix.
+
+    The words "security" and "vulnerabilities" MUST appear here because
+    ``DummyLLMClient.complete_json`` pattern-matches on them (substring check
+    over the whole prompt, order-independent) to return a deterministic stub
+    in tests — see llm_service/README.md "Migration rule: keep pattern
+    anchors in the user prompt".
 
     Preconditions:
         - ``input_data`` is a valid ``SecurityInput``.
-        - ``model_fp`` is the value returned by
-          ``_security_model_fingerprint(self.llm)`` for this
-          ``CybersecurityExpertAgent`` instance.
 
     Postconditions:
-        - Returns a hex digest that changes whenever any input field or the
-          resolved model changes, and is stable (``sort_keys``) across calls
-          in a process, so a byte-identical resubmission is recognized.
+        - Returns non-empty prompt lines: the schema-hint sentence, then the
+          task description, context, and architecture when each is present —
+          in that fixed order. Never raises.
     """
-    return build_review_cache_key(input_data, model_fp)
+    parts = [
+        "",
+        "Review the code for security vulnerabilities. Produce "
+        "structured JSON with fields: vulnerabilities, summary, "
+        "remediations. Each vulnerability must include severity, "
+        "category, description, location, and recommendation.",
+    ]
+    if input_data.task_description:
+        parts.append(f"**Task:** {input_data.task_description}")
+    if input_data.context:
+        parts.append(f"**Context:** {input_data.context}")
+    if input_data.architecture:
+        parts.append(f"**Architecture:** {input_data.architecture.overview}")
+    return parts
 
 
 class CybersecurityExpertAgent:
@@ -181,12 +183,9 @@ class CybersecurityExpertAgent:
         """
         logger.info("Security: reviewing %s chars of code", len(input_data.code or ""))
 
-        capacity = _review_cache_size()
-        cache_key: Optional[str] = None
-        if capacity > 0:
-            cache_key = _review_cache_key(input_data, _security_model_fingerprint(self.llm))
-            cache = get_shared_cache(_review_cache_namespace())
-            cached_result = get_cached_review_result(_CACHE_LABEL, cache, cache_key, SecurityOutput)
+        model_fp = _security_model_fingerprint(self.llm)
+        if _REVIEW_CACHE.capacity() > 0:
+            cached_result = _REVIEW_CACHE.get(input_data, model_fp)
             if cached_result is not None:
                 logger.info(
                     "Security: review cache hit; skipping LLM call (approved=%s)",
@@ -213,7 +212,6 @@ class CybersecurityExpertAgent:
                 approved=False,
                 summary=f"Security analysis failed: {exc}",
                 remediations=[],
-                suggested_commit_message="",
             )
 
         # Re-derive ``approved`` via the unified rule so a disagreement between
@@ -234,9 +232,7 @@ class CybersecurityExpertAgent:
             result.approved,
         )
 
-        if cache_key is not None:
-            cache = get_shared_cache(_review_cache_namespace())
-            set_cached_review_result(_CACHE_LABEL, cache, cache_key, result, capacity=capacity)
+        _REVIEW_CACHE.put(input_data, model_fp, result)
 
         return result
 
@@ -246,33 +242,24 @@ class CybersecurityExpertAgent:
 
         The persona (``SECURITY_PROMPT``) is passed as
         ``run_single_shot_review``'s ``system_prompt``. The user prompt
-        carries the code under review plus an explicit schema hint. The
-        words "security" and "vulnerabilities" MUST appear here because
-        ``DummyLLMClient.complete_json`` pattern-matches on them to return a
-        deterministic stub in tests — see llm_service/README.md "Migration
-        rule: keep pattern anchors in the user prompt".
+        carries the code under review (see ``_build_security_file_context_prefix``)
+        followed by the per-gate role instructions — the schema hint, task
+        description, context, and architecture. The code under review is
+        untrusted repository content and must stay in the user message, not
+        be elevated to system-level instructions. The trusted task
+        description and architecture overview stay in the user message too
+        (not a ``CacheBreakpoint`` system segment): ``run_single_shot_review``'s
+        underlying ``LLMClient.complete_json`` implementations
+        (Claude/Ollama/RunPod/Dummy) do not consume a ``system_prompt_content``
+        kwarg — it would be silently dropped on the wire, so this content
+        must stay where every implementation actually reads it. The words
+        "security" and "vulnerabilities" MUST appear somewhere in the prompt
+        because ``DummyLLMClient.complete_json`` pattern-matches on them
+        (order-independent substring check) to return a deterministic stub
+        in tests — see llm_service/README.md "Migration rule: keep pattern
+        anchors in the user prompt".
         """
-        parts = [
-            "Review the following code for security vulnerabilities. Produce "
-            "structured JSON with fields: vulnerabilities, summary, "
-            "remediations. Each vulnerability must include severity, "
-            "category, description, location, and recommendation.",
-            "",
-            f"**Language:** {input_data.language}",
-        ]
-        if input_data.task_description:
-            parts.append(f"**Task:** {input_data.task_description}")
-        parts.extend(
-            [
-                "**Code to review:**",
-                "```",
-                input_data.code,
-                "```",
-            ]
+        parts = _build_security_file_context_prefix(input_data) + _build_security_role_instructions(
+            input_data
         )
-        if input_data.context:
-            parts.append(f"**Context:** {input_data.context}")
-        if input_data.architecture:
-            parts.append(f"**Architecture:** {input_data.architecture.overview}")
-
         return "\n".join(parts)

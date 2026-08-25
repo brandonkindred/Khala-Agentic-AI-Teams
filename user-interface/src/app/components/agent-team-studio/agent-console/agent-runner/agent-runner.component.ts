@@ -1,5 +1,6 @@
 import {
   Component,
+  DestroyRef,
   EventEmitter,
   Input,
   OnDestroy,
@@ -10,6 +11,7 @@ import {
   inject,
   signal,
 } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { HttpErrorResponse } from '@angular/common/http';
@@ -23,11 +25,13 @@ import { MatInputModule } from '@angular/material/input';
 import { MatMenuModule } from '@angular/material/menu';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSelectModule } from '@angular/material/select';
+import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
-import { Subscription, interval } from 'rxjs';
-import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
-import { AgentRunnerApiService } from '../../../../services/agent-runner-api.service';
+import { Subscription } from 'rxjs';
+import { AgentConsoleApiService } from '../../../../services/agent-console-api.service';
+import { AgentRunnerDestructiveActionsService } from '../../../../services/agent-runner-destructive-actions.service';
+import { ConfirmDestructiveService } from '../../../../shared/confirm-destructive.service';
 import type {
   AgentDetail,
   AgentSummary,
@@ -44,6 +48,8 @@ import type {
 import { AgentRunHistoryComponent } from '../agent-run-history/agent-run-history.component';
 import { AgentSchemaFormComponent } from '../agent-schema-form/agent-schema-form.component';
 import { InlineBannerComponent } from '../../../../shared/inline-banner/inline-banner.component';
+import { extractErrorDetail } from '../../../../shared/extract-error-detail';
+import { pollWhile } from '../../../../shared/poll-while';
 import {
   AgentDiffDialogComponent,
   type AgentDiffDialogData,
@@ -81,24 +87,31 @@ import {
     MatMenuModule,
     MatProgressSpinnerModule,
     MatSelectModule,
+    MatSnackBarModule,
     MatTooltipModule,
     AgentRunHistoryComponent,
     AgentSchemaFormComponent,
     InlineBannerComponent,
   ],
+  providers: [ConfirmDestructiveService, AgentRunnerDestructiveActionsService],
   templateUrl: './agent-runner.component.html',
   styleUrl: './agent-runner.component.scss',
 })
 export class AgentRunnerComponent implements OnInit, OnDestroy {
-  private readonly catalog = inject(AgentCatalogApiService);
-  private readonly runner = inject(AgentRunnerApiService);
+  private readonly api = inject(AgentConsoleApiService);
   private readonly dialog = inject(MatDialog);
+  private readonly snackBar = inject(MatSnackBar);
+  private readonly destructiveActions = inject(AgentRunnerDestructiveActionsService);
+  private readonly destroyRef = inject(DestroyRef);
+
+  /** Expose service loading signals for the template. */
+  readonly deletingSavedInputId = this.destructiveActions.deletingSavedInputId;
+  readonly tearingDown = this.destructiveActions.tearingDown;
 
   /** Preselect an agent (wired from the Catalog drawer). */
   @Input() set preselectedAgentId(value: string | null) {
     if (value && value !== this.selectedAgentId()) {
-      this.selectedAgentId.set(value);
-      this.loadAgentDetail(value);
+      this.onAgentChange(value);
     }
   }
 
@@ -128,6 +141,9 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   readonly lastError = signal<string | null>(null);
   readonly activeRunId = signal<string | null>(null);
 
+  /** Separate error signal for destructive-action failures (visible alongside a run result). */
+  readonly destructiveError = signal<string | null>(null);
+
   readonly requiresLiveIntegration = computed(() => {
     const detail = this.selectedAgent();
     if (!detail) return false;
@@ -155,16 +171,56 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   });
 
   private sandboxPollSub: Subscription | null = null;
+  private runSub: Subscription | null = null;
 
   ngOnInit(): void {
-    this.catalog.listAgents().subscribe({
+    this.api.listAgents().subscribe({
       next: (agents) => this.agents.set(agents),
       error: (err) => console.error('Runner: failed to load agents', err),
     });
+
+    // Wire destructive-actions service observables.
+    this.destructiveActions.savedInputDeleted$
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(({ agentId, payload: savedId }) => {
+        if (agentId !== this.selectedAgentId()) return;
+        this.savedInputs.update((rows) => rows.filter((s) => s.id !== savedId));
+        if (this.selectedPickerValue() === `saved:${savedId}`) {
+          this.selectedPickerValue.set(null);
+        }
+      });
+
+    this.destructiveActions.sandboxTornDown$
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(({ agentId }) => {
+        if (agentId !== this.selectedAgentId()) return;
+        const current = this.sandbox();
+        this.sandbox.set(
+          current
+            ? { ...current, status: 'cold', url: null }
+            : {
+                agent_id: agentId,
+                team: '',
+                status: 'cold',
+                url: null,
+                service_name: '',
+                container_name: '',
+                host_port: 0,
+              },
+        );
+      });
+
+    this.destructiveActions.errors$
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(({ agentId, message }) => {
+        if (agentId !== this.selectedAgentId()) return;
+        this.destructiveError.set(message);
+      });
   }
 
   ngOnDestroy(): void {
     this.sandboxPollSub?.unsubscribe();
+    this.runSub?.unsubscribe();
   }
 
   // ---------------------------------------------------------------
@@ -184,14 +240,18 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     this.lastResponse.set(null);
     this.lastError.set(null);
     this.activeRunId.set(null);
+    this.destructiveError.set(null);
     this.sandbox.set(null);
     this.sandboxPollSub?.unsubscribe();
     this.sandboxPollSub = null;
+    this.runSub?.unsubscribe();
+    this.runSub = null;
+    this.running.set(false);
     if (id) this.loadAgentDetail(id);
   }
 
   private loadAgentDetail(id: string): void {
-    this.catalog.getAgent(id).subscribe({
+    this.api.getAgent(id).subscribe({
       next: (detail) => {
         this.selectedAgent.set(detail);
         this.loadSamples(id);
@@ -207,7 +267,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   }
 
   private loadSamples(id: string): void {
-    this.runner.listSamples(id).subscribe({
+    this.api.listSamples(id).subscribe({
       next: (samples) => {
         this.goldenSamples.set(samples);
         if (samples.length > 0 && !this.selectedPickerValue()) {
@@ -219,14 +279,14 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   }
 
   private loadSavedInputs(id: string): void {
-    this.runner.listSavedInputs(id).subscribe({
+    this.api.listSavedInputs(id).subscribe({
       next: (items) => this.savedInputs.set(items),
       error: () => this.savedInputs.set([]),
     });
   }
 
   private loadInputSchema(id: string): void {
-    this.catalog.getInputSchema(id).subscribe({
+    this.api.getInputSchema(id).subscribe({
       next: (schema) => {
         this.inputSchema.set(schema);
         // Default to form when a schema is available. The form component
@@ -260,7 +320,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     const agent = this.selectedAgentId();
     if (!agent) return;
     this.selectedPickerValue.set(`golden:${name}`);
-    this.runner.getSample(agent, name).subscribe({
+    this.api.getSample(agent, name).subscribe({
       next: (body) => this.setInputFromPicker(body),
       error: () => this.inputError.set('Could not load sample.'),
     });
@@ -304,6 +364,17 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   // Save + delete saved inputs
   // ---------------------------------------------------------------
 
+  /**
+   * Opens the save-input dialog and, on confirmation, persists the current
+   * editor input as a named saved input via the runner API.
+   *
+   * Preconditions: an agent is selected (`selectedAgentId()` is non-null).
+   * Behavior: attempts to parse `inputText()` as JSON; on parse failure sets
+   * `inputError` to the error message and returns without opening the dialog.
+   * Side effects: opens a Material dialog; on success prepends the new entry
+   * to `savedInputs` and sets `selectedPickerValue` to the new saved ID;
+   * alerts the user on API failure.
+   */
   openSaveInputDialog(): void {
     const agent = this.selectedAgentId();
     if (!agent) return;
@@ -321,7 +392,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     >(SaveInputDialogComponent, { data: { mode: 'create' } });
     ref.afterClosed().subscribe((result) => {
       if (!result) return;
-      this.runner
+      this.api
         .createSavedInput(agent, {
           name: result.name,
           input_data: body,
@@ -329,30 +400,45 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
         })
         .subscribe({
           next: (saved) => {
+            this.lastError.set(null);
             this.savedInputs.update((rows) => [saved, ...rows]);
             this.selectedPickerValue.set(`saved:${saved.id}`);
           },
           error: (err) => {
-            // Mat dialog is already closed; surface via snackbar-equivalent.
-            alert(err?.error?.detail ?? err?.message ?? 'Failed to save input');
+            this.snackBar.open(
+              extractErrorDetail(err, 'Failed to save input', { joinValidationArray: true }),
+              'Close',
+              {
+                duration: 6000,
+                horizontalPosition: 'end',
+                verticalPosition: 'top',
+                politeness: 'assertive',
+                panelClass: 'kh-snack-error',
+              },
+            );
           },
         });
     });
   }
 
+  /**
+   * Prompts the user to confirm deletion of a saved input and, on
+   * confirmation, calls the runner API to remove it permanently.
+   *
+   * Preconditions: `savedId` is a non-empty string.
+   * Behavior: if `savedId` does not match any row in `savedInputs()`, the
+   * method returns without side effects.
+   * Side effects: stops event propagation; opens a confirmation dialog;
+   * removes the row from `savedInputs` on success; resets
+   * `selectedPickerValue` if the deleted entry was active.
+   */
   deleteSavedInput(savedId: string, event: Event): void {
     event.stopPropagation();
     const match = this.savedInputs().find((s) => s.id === savedId);
     if (!match) return;
-    if (!confirm(`Delete saved input "${match.name}"?`)) return;
-    this.runner.deleteSavedInput(savedId).subscribe({
-      next: () => {
-        this.savedInputs.update((rows) => rows.filter((s) => s.id !== savedId));
-        if (this.selectedPickerValue() === `saved:${savedId}`) {
-          this.selectedPickerValue.set(null);
-        }
-      },
-    });
+    const agentId = this.selectedAgentId();
+    if (!agentId) return;
+    this.destructiveActions.deleteSavedInput(agentId, savedId, match.name);
   }
 
   // ---------------------------------------------------------------
@@ -361,22 +447,30 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
 
   private startSandboxPolling(agentId: string): void {
     this.sandboxPollSub?.unsubscribe();
-    this.runner.getSandbox(agentId).subscribe({
-      next: (handle) => this.sandbox.set(handle),
-      error: () => this.sandbox.set(null),
-    });
-    this.sandboxPollSub = interval(5000).subscribe(() => {
-      this.runner.getSandbox(agentId).subscribe({
-        next: (handle) => this.sandbox.set(handle),
-      });
-    });
+    // Sandbox status has no terminal state to poll toward — `isDone` never
+    // fires, so this polls indefinitely until `sandboxPollSub` is
+    // unsubscribed (agent switch or component destroy).
+    this.sandboxPollSub = pollWhile(() => this.api.getSandbox(agentId), () => false, {
+      intervalMs: 5000,
+    })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((handle) => this.sandbox.set(handle));
   }
 
+  /**
+   * Warms the sandbox for the currently selected agent by calling the
+   * runner's ensure-warm endpoint.
+   *
+   * Preconditions: a valid agent is selected (`selectedAgentId()` is non-null).
+   * Side effects: sets `sandboxPolling` to true while the request is in
+   * flight; updates the `sandbox` signal on success; logs errors and resets
+   * polling state on failure.
+   */
   warmSandbox(): void {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
     this.sandboxPolling.set(true);
-    this.runner.ensureWarm(agentId).subscribe({
+    this.api.ensureWarm(agentId).subscribe({
       next: (handle) => {
         this.sandbox.set(handle);
         this.sandboxPolling.set(false);
@@ -388,17 +482,20 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     });
   }
 
+  /**
+   * Tears down the sandbox environment for the currently selected agent
+   * after confirming with the user via a modal dialog.
+   *
+   * Preconditions: a valid agent is selected (`selectedAgentId()` is non-null).
+   * Side effects: opens a confirmation dialog; on confirmation calls the
+   * runner teardown API and sets the local sandbox status to `'cold'` with
+   * a null URL; logs errors to the console on API failure.
+   */
   tearDownSandbox(): void {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
     const label = this.selectedAgent()?.manifest.name ?? agentId;
-    if (!confirm(`Tear down the ${label} sandbox?`)) return;
-    this.runner.teardown(agentId).subscribe({
-      next: () => {
-        this.sandbox.set({ ...(this.sandbox() as SandboxHandle), status: 'cold', url: null });
-      },
-      error: (err) => console.error('teardown failed', err),
-    });
+    this.destructiveActions.tearDownSandbox(agentId, label);
   }
 
   // ---------------------------------------------------------------
@@ -422,7 +519,8 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     this.lastResponse.set(null);
     this.lastError.set(null);
     this.activeRunId.set(null);
-    this.runner.invoke(id, body, savedId).subscribe({
+    this.runSub?.unsubscribe();
+    this.runSub = this.api.invoke(id, body, savedId).subscribe({
       next: (response) => {
         this.running.set(false);
         // 202 is the sandbox "still warming" signal — HttpClient delivers it
@@ -441,13 +539,31 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
       error: (err: HttpErrorResponse) => {
         this.running.set(false);
         if (err.status === 409) {
-          this.lastError.set(err.error?.detail ?? 'Agent not runnable in sandbox.');
+          this.lastError.set(
+            extractErrorDetail(err, 'Agent not runnable in sandbox.', { joinValidationArray: true }),
+          );
         } else if (err.status === 422 && err.error?.detail) {
           // The shim wraps user-space exceptions in a 422 with the envelope
-          // as `detail`, so we can surface the output + logs inline.
-          this.lastResponse.set(err.error.detail as InvokeEnvelope);
+          // as `detail`, so we can surface the output + logs inline — but only
+          // if the detail actually has the InvokeEnvelope shape. A plain string
+          // or validation-error array must go through extractErrorDetail.
+          const detail = err.error.detail;
+          if (
+            typeof detail === 'object' &&
+            detail !== null &&
+            'trace_id' in detail &&
+            'logs_tail' in detail
+          ) {
+            this.lastResponse.set(detail as InvokeEnvelope);
+          } else {
+            this.lastError.set(
+              extractErrorDetail(err, 'Invocation failed.', { joinValidationArray: true }),
+            );
+          }
         } else {
-          this.lastError.set(err.error?.detail ?? err.message ?? 'Invocation failed.');
+          this.lastError.set(
+            extractErrorDetail(err, 'Invocation failed.', { joinValidationArray: true }),
+          );
         }
         this.historyPanel?.refresh();
       },
@@ -459,7 +575,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
   // ---------------------------------------------------------------
 
   onHistoryLoadRun(runId: string): void {
-    this.runner.getRun(runId).subscribe({
+    this.api.getRun(runId).subscribe({
       next: (record) => {
         this.activeRunId.set(record.id);
         this.inputText.set(JSON.stringify(record.input_data ?? {}, null, 2));

@@ -658,6 +658,129 @@ def test_mechanical_repair_then_substantive_critical_still_revises(
     assert record.backtest.status == "failed: design_not_ready"
 
 
+# ---------------------------------------------------------------------------
+# skip_self_review threading (#6930)
+# ---------------------------------------------------------------------------
+
+
+def test_revise_skips_self_review_when_round_is_clean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a round's readiness gate passes and no mechanical repair fires,
+    ``_run_design_review_rounds`` calls ``DesignAgent.revise`` with
+    ``skip_self_review=True`` — the designer's internal self-review LLM
+    audit is skipped for that revision."""
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict(), "scripted"))
+    review_calls = iter(
+        [
+            SpecCritique(
+                ready=False,
+                rationale="round-0",
+                issues=[CritiqueIssue(field="exit_rules", description="add take_profit")],
+            ),
+            SpecCritique(ready=True, rationale="round-1 ok"),
+        ]
+    )
+    monkeypatch.setattr(orch.design_review_agent, "run", lambda *a, **kw: next(review_calls))
+
+    revise_calls: List[Dict[str, Any]] = []
+
+    def _revise(*_a, **kwargs) -> Tuple[Dict[str, Any], str]:
+        revise_calls.append(kwargs)
+        return _spec_dict(), "revised"
+
+    monkeypatch.setattr(orch.design_agent, "revise", _revise)
+    _force_synthesis_skip(monkeypatch, orch, _VALID_CODE)
+    _short_circuit_synthesis(monkeypatch)
+
+    orch.run_cycle(prior_records=[], config=_config())
+
+    assert len(revise_calls) == 1
+    assert revise_calls[0]["skip_self_review"] is True
+
+
+def test_revise_does_not_skip_self_review_when_mechanical_repair_fires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When mechanical repair fires this round — even if the spec ends up
+    readiness-clean afterward — ``skip_self_review=False`` is passed so the
+    designer's self-review still runs on the resulting revision."""
+    from investment_team.strategy_lab import mechanical_repair as mech
+
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(
+        orch.design_agent, "run", lambda **_kw: (_mechanical_spec_dict(), "scripted")
+    )
+    review_calls = iter(
+        [
+            SpecCritique(
+                ready=False,
+                rationale="not ready yet",
+                issues=[CritiqueIssue(field="hypothesis", description="tighten")],
+            ),
+            SpecCritique(ready=True, rationale="ok"),
+        ]
+    )
+    monkeypatch.setattr(orch.design_review_agent, "run", lambda *a, **kw: next(review_calls))
+
+    revise_calls: List[Dict[str, Any]] = []
+
+    def _revise(*_a, **kwargs) -> Tuple[Dict[str, Any], str]:
+        revise_calls.append(kwargs)
+        return _mechanical_spec_dict(), "revised"
+
+    monkeypatch.setattr(orch.design_agent, "revise", _revise)
+    monkeypatch.setattr(mech, "compile_strategy", lambda _spec: _VALID_CODE)
+    _force_synthesis_skip(monkeypatch, orch, _VALID_CODE)
+    _short_circuit_synthesis(monkeypatch)
+
+    orch.run_cycle(prior_records=[], config=_config())
+
+    assert len(revise_calls) == 1
+    assert revise_calls[0]["skip_self_review"] is False
+
+
+def test_revise_does_not_skip_self_review_when_readiness_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the round's readiness gate does not pass (and mechanical repair
+    cannot fix it), ``skip_self_review=False`` is passed even though no
+    mechanical repair fired."""
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "2")
+    orch = StrategyLabOrchestrator()
+
+    def _spec_with_substantive_defect() -> Dict[str, Any]:
+        d = _spec_dict()
+        d["entry_rules"] = []  # Rule 2 critical — not mechanically repairable.
+        return d
+
+    monkeypatch.setattr(
+        orch.design_agent, "run", lambda **_kw: (_spec_with_substantive_defect(), "scripted")
+    )
+    monkeypatch.setattr(
+        orch.design_review_agent,
+        "run",
+        lambda *_a, **_kw: SpecCritique(ready=True, rationale="never reached"),
+    )
+
+    revise_calls: List[Dict[str, Any]] = []
+
+    def _revise(*_a, **kwargs) -> Tuple[Dict[str, Any], str]:
+        revise_calls.append(kwargs)
+        return _spec_with_substantive_defect(), "revised"
+
+    monkeypatch.setattr(orch.design_agent, "revise", _revise)
+    _short_circuit_synthesis(monkeypatch)
+
+    orch.run_cycle(prior_records=[], config=_config())
+
+    assert len(revise_calls) >= 1
+    assert revise_calls[0]["skip_self_review"] is False
+
+
 def test_mechanical_repair_toggle_off_skips_preflight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

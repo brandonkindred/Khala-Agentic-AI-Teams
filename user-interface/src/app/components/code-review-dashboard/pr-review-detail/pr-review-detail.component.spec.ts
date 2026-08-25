@@ -3,8 +3,8 @@ import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { MatDialog } from '@angular/material/dialog';
 import { PrReviewDetailComponent } from './pr-review-detail.component';
 import { CodeReviewTranscriptDialogComponent } from '../code-review-transcript-dialog/code-review-transcript-dialog.component';
+import { CodeReviewSystemicFindingsDialogComponent } from '../code-review-systemic-findings-dialog/code-review-systemic-findings-dialog.component';
 import type { GitHubPullRequestItem } from '../../../models/integrations.model';
-import type { PendingIssueProposal } from '../../../models/coding-team.model';
 import type { PrReviewRecord } from '../pr-review-record.model';
 
 function makePull(over: Partial<GitHubPullRequestItem> = {}): GitHubPullRequestItem {
@@ -35,33 +35,10 @@ function record(over: Partial<PrReviewRecord> = {}): PrReviewRecord {
   };
 }
 
-function proposal(id: string, over: Record<string, unknown> = {}): PendingIssueProposal {
-  return {
-    id,
-    severity: 'high',
-    category: 'logic',
-    file_path: 'a.py',
-    line: 3,
-    description: `bug ${id}`,
-    suggestion: 'fix',
-    issue_number: null,
-    issue_url: null,
-    ...over,
-  };
-}
-
-function terminalRecordWith(proposals: PendingIssueProposal[]): PrReviewRecord {
-  return record({
-    status: 'completed',
-    reviewSummary: {
-      total_issues: 0,
-      inline_comments: 0,
-      event: 'COMMENT',
-      pending_issue_proposals: proposals,
-    },
-  });
-}
-
+// This spec intentionally has no coverage for pending-issue-proposal behavior
+// (creating GitHub issues from a review, `hasProposals`/`isCreatingIssues`/etc.).
+// That responsibility was moved out of PrReviewDetailComponent into the Coding
+// Team page's Issues tab; see the component's class docstring.
 describe('PrReviewDetailComponent', () => {
   let component: PrReviewDetailComponent;
   let fixture: ComponentFixture<PrReviewDetailComponent>;
@@ -82,8 +59,6 @@ describe('PrReviewDetailComponent', () => {
     component.reviews = [];
     component.starting = false;
     component.reviewError = null;
-    component.creatingIssues = new Set<string>();
-    component.createIssueErrors = new Map<string, string>();
     Object.assign(component, inputs);
     fixture.detectChanges();
   }
@@ -261,58 +236,6 @@ describe('PrReviewDetailComponent', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Pending-issue proposals delegation
-  // -------------------------------------------------------------------------
-
-  it('renders the proposals child for a terminal run with proposals', async () => {
-    await setup({ reviews: [terminalRecordWith([proposal('p0', { description: 'latent leak' })])] });
-    const host = el();
-    expect(host.querySelector('app-pending-issue-proposals')).toBeTruthy();
-    expect(host.querySelector('.cr-proposals')?.textContent).toContain('latent leak');
-  });
-
-  it('does not render proposals for non-terminal runs or runs without proposals', async () => {
-    const running = record({
-      jobId: 'run',
-      status: 'running',
-      reviewSummary: { total_issues: 0, inline_comments: 0, event: 'COMMENT', pending_issue_proposals: [proposal('p0')] },
-    });
-    const terminalNoProposals = { ...terminalRecordWith([]), jobId: 'term' };
-    await setup({ reviews: [running, terminalNoProposals] });
-    expect(el().querySelector('app-pending-issue-proposals')).toBeNull();
-  });
-
-  it('passes the per-job creating flag and error down to the proposals child', async () => {
-    const rec = terminalRecordWith([proposal('p0')]);
-    await setup({
-      reviews: [rec],
-      creatingIssues: new Set<string>(['j1']),
-      createIssueErrors: new Map<string, string>([['j1', 'no scope']]),
-    });
-    const proposals = el().querySelector('.cr-proposals')!;
-    expect(proposals.querySelector('button')?.textContent).toContain('Creating');
-    expect(proposals.querySelector('app-inline-banner')?.textContent).toContain('no scope');
-  });
-
-  it('re-emits createIssuesRequested with the record and selected ids', async () => {
-    const rec = terminalRecordWith([proposal('p0')]);
-    await setup({ reviews: [rec] });
-    const emitted: { record: PrReviewRecord; ids: string[] }[] = [];
-    component.createIssuesRequested.subscribe((e) => emitted.push(e));
-
-    // Select the proposal, then click the "Create GitHub issue(s)" button in the child.
-    const host = el();
-    (host.querySelector('.cr-proposal__select input') as HTMLInputElement).click();
-    fixture.detectChanges();
-    const button = Array.from(host.querySelectorAll('button')).find((b) =>
-      b.textContent?.includes('Create GitHub issue'),
-    ) as HTMLButtonElement;
-    button.click();
-
-    expect(emitted).toEqual([{ record: rec, ids: ['p0'] }]);
-  });
-
-  // -------------------------------------------------------------------------
   // View Transcript action
   // -------------------------------------------------------------------------
 
@@ -339,6 +262,54 @@ describe('PrReviewDetailComponent', () => {
   });
 
   // -------------------------------------------------------------------------
+  // View Systemic Findings action
+  // -------------------------------------------------------------------------
+
+  it('shows the systemic-findings chip only when the run has systemic findings', async () => {
+    const withFindings = record({
+      jobId: 'a',
+      status: 'completed',
+      reviewSummary: {
+        total_issues: 2,
+        inline_comments: 2,
+        event: 'REQUEST_CHANGES',
+        systemic_findings: [
+          { title: 't', description: 'd', related_locations: [] },
+          { title: 't2', description: 'd2', related_locations: [] },
+        ],
+      },
+    });
+    const withoutFindings = record({
+      jobId: 'b',
+      status: 'completed',
+      reviewSummary: { total_issues: 1, inline_comments: 1, event: 'COMMENT', systemic_findings: [] },
+    });
+    await setup({ reviews: [withFindings, withoutFindings] });
+    const rows = el().querySelectorAll('.cr-reviews-table tbody tr');
+    const chip = rows[0].querySelector('.cr-chip--systemic');
+    expect(chip).toBeTruthy();
+    expect(chip?.textContent).toContain('2 systemic pattern(s)');
+    expect(chip?.getAttribute('aria-label')).toBe('View systemic findings');
+    expect(rows[1].querySelector('.cr-chip--systemic')).toBeNull();
+  });
+
+  it('opens the systemic-findings dialog with the record findings on click', async () => {
+    const findings = [{ title: 't', description: 'd', related_locations: [] }];
+    const rec = record({
+      jobId: 'j9',
+      status: 'completed',
+      reviewSummary: { total_issues: 1, inline_comments: 1, event: 'COMMENT', systemic_findings: findings },
+    });
+    await setup({ reviews: [rec] });
+    const chip = el().querySelector('.cr-chip--systemic') as HTMLButtonElement;
+    chip.click();
+    expect(dialogOpen).toHaveBeenCalledWith(
+      CodeReviewSystemicFindingsDialogComponent,
+      expect.objectContaining({ data: { findings } }),
+    );
+  });
+
+  // -------------------------------------------------------------------------
   // View helpers
   // -------------------------------------------------------------------------
 
@@ -359,26 +330,30 @@ describe('PrReviewDetailComponent', () => {
     expect(component.commentFindings({ total_issues: 0, inline_comments: 0, event: 'COMMENT' })).toBe(0);
   });
 
-  it('exposes proposals only for terminal runs that have them', async () => {
+  it('counts systemic findings, treating absent/empty as 0', async () => {
     await setup();
-    const running = record({
-      status: 'running',
-      reviewSummary: { total_issues: 0, inline_comments: 0, event: 'COMMENT', pending_issue_proposals: [proposal('p0')] },
-    });
-    expect(component.hasProposals(running)).toBe(false);
-    expect(component.hasProposals(terminalRecordWith([proposal('p0')]))).toBe(true);
-    expect(component.hasProposals(terminalRecordWith([]))).toBe(false);
-  });
-
-  it('reads the create-issue in-flight flag and error from its inputs', async () => {
-    await setup({
-      creatingIssues: new Set<string>(['j1']),
-      createIssueErrors: new Map<string, string>([['j1', 'no scope']]),
-    });
-    expect(component.isCreatingIssues('j1')).toBe(true);
-    expect(component.isCreatingIssues('other')).toBe(false);
-    expect(component.createIssueErrorFor('j1')).toBe('no scope');
-    expect(component.createIssueErrorFor('other')).toBeNull();
+    expect(
+      component.systemicFindingsCount({
+        total_issues: 2,
+        inline_comments: 2,
+        event: 'COMMENT',
+        systemic_findings: [
+          { title: 't', description: 'd', related_locations: [] },
+          { title: 't2', description: 'd2', related_locations: [] },
+        ],
+      }),
+    ).toBe(2);
+    expect(
+      component.systemicFindingsCount({ total_issues: 0, inline_comments: 0, event: 'COMMENT' }),
+    ).toBe(0);
+    expect(
+      component.systemicFindingsCount({
+        total_issues: 0,
+        inline_comments: 0,
+        event: 'COMMENT',
+        systemic_findings: [],
+      }),
+    ).toBe(0);
   });
 
   // -------------------------------------------------------------------------

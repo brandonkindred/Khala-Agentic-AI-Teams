@@ -126,7 +126,7 @@ bootstrap, or by the standalone agent-provisioning container's main worker.
 When Temporal is enabled the reaper is `SandboxReaperWorkflow` (background retry
 until the client is ready). Otherwise it is `run_idle_reaper()` on the API loop.
 
-### 5. Agent Console run pruner
+### 5. Agent Studio run pruner
 
 `asyncio.create_task(agent_platform.console.prune.run_pruner())`. Keeps the newest
 N runs per agent. Log-and-continue on import/start failure.

@@ -66,6 +66,7 @@ from software_engineering_team.shared.job_store import (
     update_job,
 )
 from software_engineering_team.shared.plan_dir import ensure_plan_dir
+from software_engineering_team.shared.project_overview_builder import build_project_overview
 
 try:
     from unified_api.slack_notifier import notify_open_questions as slack_notify_open_questions
@@ -149,65 +150,70 @@ PLANNING_PHASE_ORDER = [
 ]
 
 
-def _make_pra_job_updater(job_id: str) -> Callable[..., None]:
-    """Build the job updater handed to the PRA agent.
+def _make_phase_job_updater(
+    job_id: str,
+    *,
+    subprocess_key: str,
+    completed_key: str,
+    phase_order: List[str],
+    progress_band: "tuple[int, int]",
+    phase: Optional[str] = None,
+) -> Callable[..., None]:
+    """Build the job updater handed to a phase's sub-agent (PRA, Planning, ...).
 
-    Postconditions: the returned updater rewrites ``current_phase`` into
-    ``analysis_subprocess``/``analysis_completed_phases``, rescales the agent's own
-    0-100 ``progress`` onto PROGRESS_BAND_PRODUCT_ANALYSIS (garbage progress is
-    dropped, never written), and swallows store errors (observability only).
+    Preconditions:
+        - ``subprocess_key``/``completed_key`` are non-empty strings naming the
+          phase-specific job fields to write (e.g. ``"analysis_subprocess"``/
+          ``"analysis_completed_phases"``).
+        - ``phase_order`` is a list of phase-name strings in pipeline order; an
+          empty list is valid (no phase ever completes, only the current one is set).
+        - ``progress_band`` is a ``(base, span)`` tuple valid per :func:`_scale_progress`.
+        - ``phase`` is either ``None`` (forward the caller's own ``phase`` kwarg, if
+          any, unmodified) or a job-status phase string to force on every write.
+    Postconditions:
+        - Returns an updater that pops ``current_phase`` from kwargs (any non-``None``
+          value, including falsy ones like ``""``) and rewrites it into ``subprocess_key``;
+          ``completed_key`` is set to every ``phase_order`` entry preceding
+          ``current_phase`` only when ``current_phase`` is actually found in
+          ``phase_order`` — an unrecognized ``current_phase`` leaves ``completed_key``
+          unwritten rather than marking the whole order complete; rescales a
+          ``progress`` kwarg onto ``progress_band`` (garbage progress is dropped,
+          never written); forces ``phase=phase`` on the ``update_job`` call when
+          ``phase`` is not ``None`` (a ``phase`` kwarg passed in by the caller is
+          dropped in favor of the forced value, so a caller-supplied ``phase``
+          never collides with it); forwards all other remaining kwargs untouched;
+          and swallows all exceptions raised during the update (observability-only
+          updater — never raises).
     """
+    assert isinstance(subprocess_key, str) and subprocess_key, subprocess_key
+    assert isinstance(completed_key, str) and completed_key, completed_key
+    assert isinstance(phase_order, list), f"phase_order must be a list, got {type(phase_order)}"
 
     def _updater(**kwargs: Any) -> None:
         try:
-            analysis_phase = kwargs.pop("current_phase", None)
-            if analysis_phase:
-                kwargs["analysis_subprocess"] = analysis_phase
+            current_phase = kwargs.pop("current_phase", None)
+            if current_phase is not None:
+                kwargs[subprocess_key] = current_phase
                 completed_phases = []
-                for p in PRA_PHASE_ORDER:
-                    if p == analysis_phase:
+                found = False
+                for p in phase_order:
+                    if p == current_phase:
+                        found = True
                         break
                     completed_phases.append(p)
-                kwargs["analysis_completed_phases"] = completed_phases
-            # The PRA agent reports its own 0-100 progress; rescale onto this
-            # phase's band so the job bar cannot hit 100 before coding starts.
+                if found:
+                    kwargs[completed_key] = completed_phases
+            # The sub-agent reports its own 0-100 progress; rescale onto this
+            # phase's band so the job bar is monotone across the whole run.
             if "progress" in kwargs:
-                scaled = _scale_progress(kwargs.pop("progress"), PROGRESS_BAND_PRODUCT_ANALYSIS)
+                scaled = _scale_progress(kwargs.pop("progress"), progress_band)
                 if scaled is not None:
                     kwargs["progress"] = scaled
-            update_job(job_id, phase="product_analysis", **kwargs)
-        except Exception:
-            pass
-
-    return _updater
-
-
-def _make_planning_job_updater(job_id: str) -> Callable[..., None]:
-    """Build the job updater handed to the Planning workflow.
-
-    Postconditions: mirrors :func:`_make_pra_job_updater` for the planning phase —
-    ``current_phase`` becomes ``planning_subprocess``/``planning_completed_phases``
-    and ``progress`` is rescaled onto PROGRESS_BAND_PLANNING.
-    """
-
-    def _updater(**kwargs: Any) -> None:
-        try:
-            planning_phase = kwargs.pop("current_phase", None)
-            if planning_phase:
-                kwargs["planning_subprocess"] = planning_phase
-                completed_phases = []
-                for p in PLANNING_PHASE_ORDER:
-                    if p == planning_phase:
-                        break
-                    completed_phases.append(p)
-                kwargs["planning_completed_phases"] = completed_phases
-            # Planning reports its own 0-100 progress; rescale onto this
-            # phase's band so the job bar stays monotone into the coding phase.
-            if "progress" in kwargs:
-                scaled = _scale_progress(kwargs.pop("progress"), PROGRESS_BAND_PLANNING)
-                if scaled is not None:
-                    kwargs["progress"] = scaled
-            update_job(job_id, **kwargs)
+            if phase is not None:
+                kwargs.pop("phase", None)
+                update_job(job_id, phase=phase, **kwargs)
+            else:
+                update_job(job_id, **kwargs)
         except Exception:
             pass
 
@@ -452,39 +458,17 @@ def _run_architecture_for_planning(
         priority="medium",
         metadata={},
     )
-    features_parts = []
-    if prd_content:
-        features_parts.append(prd_content)
-    if client_context:
-        if client_context.get("problem_summary"):
-            features_parts.append(
-                "## Problem summary\n" + (client_context["problem_summary"] or "")
-            )
-        if client_context.get("opportunity_statement"):
-            features_parts.append(
-                "## Opportunity\n" + (client_context["opportunity_statement"] or "")
-            )
-    features_doc = "\n\n".join(features_parts) if features_parts else ""
-    goals = ""
-    if client_context and (
-        client_context.get("problem_summary") or client_context.get("opportunity_statement")
-    ):
-        goals = (
-            (client_context.get("problem_summary") or "")
-            + "\n"
-            + (client_context.get("opportunity_statement") or "")
-        )
-    project_overview = {
-        "features_and_functionality_doc": features_doc,
-        "goals": goals.strip(),
-    }
-    arch_input = ArchitectureInput(
-        requirements=requirements,
-        technology_preferences=technology_preferences,
-        project_overview=project_overview,
-        features_and_functionality_doc=features_doc or None,
-    )
     try:
+        project_overview = build_project_overview(
+            prd_content=prd_content, client_context=client_context
+        )
+        features_doc = project_overview["features_and_functionality_doc"]
+        arch_input = ArchitectureInput(
+            requirements=requirements,
+            technology_preferences=technology_preferences,
+            project_overview=project_overview,
+            features_and_functionality_doc=features_doc or None,
+        )
         arch_output = arch_agent.run(arch_input)
         return (
             (arch_output.architecture.overview or "")
@@ -609,74 +593,31 @@ def _get_agents() -> Mapping[str, Any]:
     project-planning / domain-planning agents are not used in the main flow
     (``clarification_store`` may still use Spec Intake elsewhere).
 
-    Audit (kept honest here so future readers do not assume the dict is fully
-    consumed): the two production callers of ``_get_agents`` — the thread-mode
-    orchestrator below and ``temporal/activities.py`` — read only
-    ``agents["architecture"]`` from the returned mapping. Per-task
-    backend/frontend work is delegated to the coding-team / code-v2 sub-teams,
-    which construct their own tool agents via ``_build_tool_agents`` rather than
-    reading them from this mapping. The remaining entries are retained because
-    the integration tests in ``test_backend_code_v2_integration.py`` and
-    ``test_frontend_code_v2_integration.py`` pin the presence of the v2 team
-    leads, and this function is the canonical fleet factory for the thread-mode
-    pipeline.
+    This registry holds only ``architecture`` — the single role the two
+    production callers read: the thread-mode orchestrator below and
+    ``temporal/activities.py`` both read only ``agents["architecture"]``.
+    Per-task backend/frontend/devops work is built independently by
+    ``coding_team_orchestrator.py`` via
+    ``worker_factory._build_implementation_worker``, which never reads this
+    mapping.
 
-    Returns a lazy mapping (:class:`_LazyAgentRegistry`): each role's agent is
+    Returns a lazy mapping (:class:`_LazyAgentRegistry`): the role's agent is
     constructed on first subscript and then cached; membership tests and
-    iteration never construct. Since only ``architecture`` is read in
-    production, the other roles cost nothing unless a caller asks for them —
-    which avoids eagerly paying ``get_client`` (and the ``devops`` sub-agent
-    fan-out) on every call.
+    iteration never construct.
 
     Postconditions:
         - Returns a ``Mapping[str, Any]`` over the SE role names; ``result[key]``
           lazily builds and caches the corresponding agent.
     """
-    from agent_repair_team import RepairExpertAgent
-    from software_engineering_team.accessibility_agent import AccessibilityExpertAgent
     from software_engineering_team.architect_agents.architecture_expert import (
         ArchitectureExpertAgent,
-    )
-    from software_engineering_team.build_fix_specialist import BuildFixSpecialistAgent
-    from software_engineering_team.devops_team import DevOpsTeamLeadAgent
-    from software_engineering_team.git_setup_agent import GitSetupAgent
-    from software_engineering_team.integration_team import IntegrationAgent
-    from software_engineering_team.linting_tool_agent import LintingToolAgent
-    from software_engineering_team.technical_writers.documentation_agent import (
-        DocumentationAgent,
     )
 
     return _LazyAgentRegistry(
         {
             "architecture": lambda: ArchitectureExpertAgent(get_client("architecture")),
-            "integration": lambda: IntegrationAgent(get_client("integration")),
-            "devops": lambda: DevOpsTeamLeadAgent(get_client("devops")),
-            "backend": _lazy_init_backend_code_v2_team,
-            "frontend_code_v2": _lazy_init_frontend_code_v2_team,
-            "accessibility": lambda: AccessibilityExpertAgent(get_client("accessibility")),
-            "documentation": lambda: DocumentationAgent(get_client("documentation")),
-            "git_setup": GitSetupAgent,
-            "repair": lambda: RepairExpertAgent(get_client("repair")),
-            "linting_tool_agent": lambda: LintingToolAgent(get_client("linting_tool_agent")),
-            "build_fix_specialist": lambda: BuildFixSpecialistAgent(
-                get_client("build_fix_specialist")
-            ),
         }
     )
-
-
-def _lazy_init_backend_code_v2_team():
-    """Instantiate the backend team lead (backend_code_v2_team; lazy import)."""
-    from software_engineering_team.backend_code_v2_team import BackendCodeV2TeamLead
-
-    return BackendCodeV2TeamLead(get_client("backend"))
-
-
-def _lazy_init_frontend_code_v2_team():
-    """Instantiate the frontend team lead (frontend_code_v2_team; lazy import)."""
-    from software_engineering_team.frontend_code_v2_team import FrontendCodeV2TeamLead
-
-    return FrontendCodeV2TeamLead(get_client("frontend"))
 
 
 MAX_REVIEW_ITERATIONS = 15
@@ -942,7 +883,14 @@ def _run_orchestrator_body(
         logger.info("Plan folder ensured at %s", plan_dir, extra={"trace_id": current_trace_id()})
 
         # ── Step 1: Product Requirements Analysis Agent (skipped on the sprint path) ──
-        _pra_job_updater = _make_pra_job_updater(job_id)
+        _pra_job_updater = _make_phase_job_updater(
+            job_id,
+            subprocess_key="analysis_subprocess",
+            completed_key="analysis_completed_phases",
+            phase_order=PRA_PHASE_ORDER,
+            progress_band=PROGRESS_BAND_PRODUCT_ANALYSIS,
+            phase="product_analysis",
+        )
         validated_spec = run_product_requirements_analysis(
             job_id,
             path,
@@ -976,7 +924,13 @@ def _run_orchestrator_body(
             adapt_planning_result,
         )
 
-        _planning_job_updater = _make_planning_job_updater(job_id)
+        _planning_job_updater = _make_phase_job_updater(
+            job_id,
+            subprocess_key="planning_subprocess",
+            completed_key="planning_completed_phases",
+            phase_order=PLANNING_PHASE_ORDER,
+            progress_band=PROGRESS_BAND_PLANNING,
+        )
 
         planning_result = run_planning_workflow(
             repo_path=str(path),

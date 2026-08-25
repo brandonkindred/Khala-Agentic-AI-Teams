@@ -458,3 +458,179 @@ def test_invoke_structured_with_schema_propagates_parse_value_error(
             logger=logging.getLogger("test.so"),
             reasoning_system_prompt="sys" + so_mod.REASONING_MODE_SUFFIX,
         )
+
+
+# ---------------------------------------------------------------------------
+# try_structured_or_degrade
+# ---------------------------------------------------------------------------
+
+_TRY_STRUCTURED_OR_DEGRADE_KWARGS: Dict[str, Any] = {
+    "agent_key": "strategy_design",
+    "schema": {"type": "object"},
+    "system_prompt": "sys",
+    "user_prompt": "user",
+    "phase": "design_generate_structured",
+    "charge": True,
+    "objective": "strategy design (structured)",
+}
+
+
+def test_try_structured_or_degrade_unavailable_returns_none_without_invoking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the provider doesn't support structured output, the helper must
+    return ``None`` immediately without ever calling
+    :func:`invoke_structured_with_schema`."""
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: False)
+
+    def _fail_if_called(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("invoke_structured_with_schema must not be called")
+
+    monkeypatch.setattr(so_mod, "invoke_structured_with_schema", _fail_if_called)
+
+    result = so_mod.try_structured_or_degrade(
+        **_TRY_STRUCTURED_OR_DEGRADE_KWARGS,
+        reasoning_system_prompt="sys" + so_mod.REASONING_MODE_SUFFIX,
+        logger=logging.getLogger("test.so"),
+    )
+    assert result is None
+
+
+def test_try_structured_or_degrade_success_returns_parsed_and_logs_info(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """On success, the parsed dict is returned as-is and an INFO log naming
+    the agent/phase is emitted."""
+    parsed = {"ready": True, "rationale": "ok", "issues": []}
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "invoke_structured_with_schema", lambda *_a, **_k: dict(parsed))
+
+    logger_name = "test.so.try_structured_or_degrade.success"
+    with caplog.at_level(logging.INFO, logger=logger_name):
+        result = so_mod.try_structured_or_degrade(
+            **_TRY_STRUCTURED_OR_DEGRADE_KWARGS,
+            reasoning_system_prompt="sys" + so_mod.REASONING_MODE_SUFFIX,
+            logger=logging.getLogger(logger_name),
+        )
+
+    assert result == parsed
+    info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert len(info_records) == 1
+    message = info_records[0].getMessage()
+    assert "outcome=succeeded" in message
+    assert _TRY_STRUCTURED_OR_DEGRADE_KWARGS["agent_key"] in message
+    assert _TRY_STRUCTURED_OR_DEGRADE_KWARGS["phase"] in message
+
+
+def test_try_structured_or_degrade_schema_forced_degrades_to_none_and_logs_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A ``StrategyLabLLMError`` whose cause is a schema-forced
+    ``LLMSemanticExhaustionError`` must degrade to ``None`` with a WARNING
+    log, rather than propagating."""
+    from investment_team.strategy_lab.exceptions import StrategyLabLLMError
+    from llm_service.interface import LLMSemanticExhaustionError
+
+    cause = LLMSemanticExhaustionError("starved", schema_forced=True)
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(
+        so_mod,
+        "invoke_structured_with_schema",
+        lambda *_a, **_k: (_ for _ in ()).throw(StrategyLabLLMError("boom", cause=cause)),
+    )
+
+    logger_name = "test.so.try_structured_or_degrade.schema_forced"
+    with caplog.at_level(logging.WARNING, logger=logger_name):
+        result = so_mod.try_structured_or_degrade(
+            **_TRY_STRUCTURED_OR_DEGRADE_KWARGS,
+            reasoning_system_prompt="sys" + so_mod.REASONING_MODE_SUFFIX,
+            logger=logging.getLogger(logger_name),
+        )
+
+    assert result is None
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warning_records) == 1
+    message = warning_records[0].getMessage()
+    assert "schema_forced_degrade" in message
+    assert _TRY_STRUCTURED_OR_DEGRADE_KWARGS["agent_key"] in message
+    assert _TRY_STRUCTURED_OR_DEGRADE_KWARGS["phase"] in message
+
+
+def test_try_structured_or_degrade_non_schema_forced_cause_reraises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``StrategyLabLLMError`` whose cause is an
+    ``LLMSemanticExhaustionError`` with ``schema_forced=False`` is not
+    degradable and must propagate unmodified."""
+    from investment_team.strategy_lab.exceptions import StrategyLabLLMError
+    from llm_service.interface import LLMSemanticExhaustionError
+
+    cause = LLMSemanticExhaustionError("starved", schema_forced=False)
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(
+        so_mod,
+        "invoke_structured_with_schema",
+        lambda *_a, **_k: (_ for _ in ()).throw(StrategyLabLLMError("boom", cause=cause)),
+    )
+
+    with pytest.raises(StrategyLabLLMError, match="boom"):
+        so_mod.try_structured_or_degrade(
+            **_TRY_STRUCTURED_OR_DEGRADE_KWARGS,
+            reasoning_system_prompt="sys" + so_mod.REASONING_MODE_SUFFIX,
+            logger=logging.getLogger("test.so"),
+        )
+
+
+def test_try_structured_or_degrade_non_semantic_exhaustion_cause_reraises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``StrategyLabLLMError`` whose cause is not an
+    ``LLMSemanticExhaustionError`` at all (e.g. a fatal transport error) is
+    never degradable and must propagate unmodified."""
+    from investment_team.strategy_lab.exceptions import StrategyLabLLMError
+
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(
+        so_mod,
+        "invoke_structured_with_schema",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            StrategyLabLLMError("fatal", cause=RuntimeError("transport down"))
+        ),
+    )
+
+    with pytest.raises(StrategyLabLLMError, match="fatal"):
+        so_mod.try_structured_or_degrade(
+            **_TRY_STRUCTURED_OR_DEGRADE_KWARGS,
+            reasoning_system_prompt="sys" + so_mod.REASONING_MODE_SUFFIX,
+            logger=logging.getLogger("test.so"),
+        )
+
+
+def test_try_structured_or_degrade_budget_exhausted_propagates_uncaught(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``DesignBudgetExhausted`` is not a ``StrategyLabLLMError`` and must
+    propagate through :func:`try_structured_or_degrade` untouched — never
+    caught, wrapped, or degraded to ``None``."""
+    from investment_team.strategy_lab.agents._llm_budget import DesignBudgetExhausted
+    from investment_team.strategy_lab.exceptions import StrategyLabLLMError
+
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(
+        so_mod,
+        "invoke_structured_with_schema",
+        lambda *_a, **_k: (_ for _ in ()).throw(DesignBudgetExhausted(limit=1, calls_made=1)),
+    )
+
+    with pytest.raises(DesignBudgetExhausted) as excinfo:
+        so_mod.try_structured_or_degrade(
+            **_TRY_STRUCTURED_OR_DEGRADE_KWARGS,
+            reasoning_system_prompt="sys" + so_mod.REASONING_MODE_SUFFIX,
+            logger=logging.getLogger("test.so"),
+        )
+
+    assert excinfo.value.limit == 1
+    assert excinfo.value.calls_made == 1
+    assert not isinstance(excinfo.value, StrategyLabLLMError)

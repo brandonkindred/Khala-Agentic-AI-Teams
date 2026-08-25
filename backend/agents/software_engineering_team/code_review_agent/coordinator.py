@@ -103,6 +103,7 @@ from typing import List, NamedTuple, Optional, Tuple
 from llm_service import LLMClient, compact_text
 from llm_service.interface import observer_turn_started_monotonic
 from shared.cache import get_shared_cache
+from shared.cache.pydantic_cache import get_cached_model
 from shared.env import env_flag_enabled
 from shared.env_config import env_bool
 from software_engineering_team.shared.context_sizing import (
@@ -591,6 +592,41 @@ def _run_tail_passes(
     )
 
 
+def _run_spec_compliance_single_pass(
+    *,
+    llm: LLMClient,
+    input_data: CodeReviewInput,
+    deduped: List[CodeReviewIssue],
+    spec_compliance_single_pass: bool,
+) -> Optional[str]:
+    """Run the dedicated post-dedupe spec-compliance single pass, once.
+
+    Runs over the final deduped issue list instead of relying on the
+    (now-empty) per-chunk ``spec_compliance_notes``. ``spec_compliance_single_pass``
+    already folds in the ``CODE_REVIEW`` profile restriction (computed by the
+    caller before dedupe/cap/approval-reconcile run).
+
+    Preconditions:
+        - ``deduped`` is the final merged, capped, approval-reconciled issue
+          list (post-``_dedupe_issues``/``_cap_issues``/``_reconcile_approval``);
+          this function must be called after those steps, not before.
+
+    Postconditions:
+        - Returns ``None`` when ``spec_compliance_single_pass`` is False, or
+          when the pass itself raises (logged, not propagated) — both cases
+          tell the caller's ``_merge_narrative`` to fall back to today's
+          per-chunk-sourced behavior unchanged.
+        - Otherwise returns the synthesized spec-compliance notes string.
+    """
+    if not spec_compliance_single_pass:
+        return None
+    try:
+        return synthesize_spec_compliance(llm, input_data=input_data, issues=deduped)
+    except Exception:
+        logger.exception("CodeReviewCoordinator: spec-compliance single pass failed; falling back")
+        return None
+
+
 def _compact_for_review(
     text: str,
     max_chars: int,
@@ -632,6 +668,99 @@ def _compact_for_review(
     return compact_text(text, max_chars, llm, content_description, on_attempt=_on_attempt)[
         :max_chars
     ]
+
+
+def _lookup_submission_cache(
+    *,
+    input_data: CodeReviewInput,
+    model_fingerprint: str,
+    spec_compliance_single_pass: bool,
+    mutation_analysis_enabled: bool,
+    side_effect_consolidation_enabled: bool,
+    combine_similarity_threshold: float,
+    repo_reader: Optional[RepoReader],
+    submission_capacity: int,
+) -> Tuple[Optional[str], Optional[CodeReviewOutput]]:
+    """Read the submission-level short-circuit cache (see module docstring).
+
+    An identical, previously approved submission can return its cached output
+    before any LLM work. Keyed on the raw input + model + output-affecting
+    toggles -- no compaction -- so the check itself costs no model call.
+
+    Preconditions:
+        - ``model_fingerprint``, ``spec_compliance_single_pass``,
+          ``mutation_analysis_enabled``, ``side_effect_consolidation_enabled``,
+          and ``combine_similarity_threshold`` are the same values
+          ``run_coordinator`` resolved once for this run (they, together with
+          ``input_data``, form the fingerprint that must agree with the one
+          used on the write side for a later cache write in the same run).
+        - ``submission_capacity`` is the single ``_submission_cache_size()``
+          value ``run_coordinator`` resolved once for this run -- passed in
+          rather than re-read here so a same-run env change can never make
+          this lookup's enabled/disabled decision disagree with the write
+          side's ``max_entries=submission_capacity``.
+
+    Postconditions:
+        - Returns ``(None, None)`` when the submission cache is disabled
+          (``submission_capacity <= 0``) or ``repo_reader`` is given (a
+          verdict that reads the rest of the repository cannot be safely
+          reproduced from an input-only cache key) -- the lookup never runs.
+        - Otherwise returns ``(submission_key, cached)`` where
+          ``submission_key`` is always the computed fingerprint, regardless of
+          hit or miss, so the caller can reuse it for a later cache write.
+        - The get/validate/corrupt-entry-delete policy is delegated to
+          ``shared.cache.pydantic_cache.get_cached_model`` (the same shared
+          primitive ``qa_agent``, ``security_agent``, and ``ReviewResultCache``
+          use): a raw miss or an unreadable/schema-skewed entry (evicted
+          before returning) both yield ``cached is None``. On top of that,
+          ``cached`` is further reset to ``None`` (and the entry evicted) when
+          it is not a fully-clean approval (``approved`` is False or
+          ``not_reviewed_ranges`` is non-empty -- a hit there would skip
+          re-review of ranges previously degraded/unreviewed, the same gate
+          the write side applies). ``cached`` is the fresh deserialize of the
+          stored output only for a clean, approved, fully-reviewed hit --
+          independent of the stored bytes, so the caller may mutate it freely
+          without corrupting the stored entry.
+        - Fail-open throughout: any cache backend error (get/delete) or
+          deserialize error is logged and treated as a miss rather than
+          raising into the review.
+    """
+    if submission_capacity <= 0 or repo_reader is not None:
+        return None, None
+
+    submission_key = _submission_fingerprint(
+        input_data,
+        model_fingerprint,
+        spec_compliance_single_pass,
+        mutation_analysis_enabled,
+        side_effect_consolidation_enabled,
+        combine_similarity_threshold,
+    )
+    cache = get_shared_cache(_submission_cache_namespace())
+    cached = get_cached_model("CodeReviewCoordinator", cache, submission_key, CodeReviewOutput)
+
+    if cached is not None:
+        # Only fully-clean approved verdicts are eligible: a hit with
+        # ``not_reviewed_ranges`` would skip re-review of ranges that were
+        # previously degraded / unreviewed (same gate as the write path).
+        if not cached.approved or cached.not_reviewed_ranges:
+            logger.warning(
+                "CodeReviewCoordinator: cached submission %s is not a clean "
+                "approval (approved=%s, not_reviewed_ranges=%s); treating as miss",
+                submission_key,
+                cached.approved,
+                cached.not_reviewed_ranges,
+            )
+            try:
+                cache.delete(submission_key)
+            except Exception:
+                logger.warning(
+                    "CodeReviewCoordinator: submission cache delete failed for unclean entry",
+                    exc_info=True,
+                )
+            cached = None
+
+    return submission_key, cached
 
 
 def run_coordinator(
@@ -808,86 +937,29 @@ def run_coordinator(
     combine_similarity_threshold = resolve_combine_similarity_threshold()
 
     # Submission-level short-circuit (see module docstring's "Submission-level
-    # short-circuit" section). An identical approved submission returns its
-    # cached output before any LLM work. Keyed on the raw input + model +
-    # output-affecting toggles — no compaction — so the check itself costs no
-    # model call. Skipped entirely when disabled (size 0) or when a
-    # ``repo_reader`` is given. On a miss the run proceeds and stores its
+    # short-circuit" section, and ``_lookup_submission_cache`` for the
+    # lookup/validate/evict logic). On a miss the run proceeds and stores its
     # verdict below if approved.
     submission_capacity = _submission_cache_size()
-    submission_key: Optional[str] = None
-    cached: Optional[CodeReviewOutput] = None
-    if submission_capacity > 0 and repo_reader is None:
-        submission_key = _submission_fingerprint(
-            input_data,
-            model_fingerprint,
-            spec_compliance_single_pass,
-            mutation_analysis_enabled,
-            side_effect_consolidation_enabled,
-            combine_similarity_threshold,
+    submission_key, cached = _lookup_submission_cache(
+        input_data=input_data,
+        model_fingerprint=model_fingerprint,
+        spec_compliance_single_pass=spec_compliance_single_pass,
+        mutation_analysis_enabled=mutation_analysis_enabled,
+        side_effect_consolidation_enabled=side_effect_consolidation_enabled,
+        combine_similarity_threshold=combine_similarity_threshold,
+        repo_reader=repo_reader,
+        submission_capacity=submission_capacity,
+    )
+    if cached is not None:
+        logger.info("CodeReviewCoordinator: submission cache hit; skipping review (approved)")
+        notify_review_progress(
+            progress_callback,
+            "done",
+            "identical approved submission; review skipped",
+            _PROGRESS_DONE,
         )
-        cache = get_shared_cache(_submission_cache_namespace())
-        # shared.cache is fail-open, but keep an explicit local guard so a
-        # misbehaving backend / unexpected raise never aborts the review.
-        try:
-            raw = cache.get(submission_key)
-        except Exception:
-            logger.warning(
-                "CodeReviewCoordinator: submission cache get failed; treating as miss",
-                exc_info=True,
-            )
-            raw = None
-        if raw is not None:
-            # Fresh deserialize — independent of the stored entry (same guarantee
-            # as the former under-lock model_copy). Unreadable / schema-skewed
-            # Redis entries fail open to a miss so a deploy never aborts a review.
-            try:
-                cached = CodeReviewOutput.model_validate_json(raw)
-            except Exception:
-                logger.warning(
-                    "CodeReviewCoordinator: corrupt submission cache entry for %s; treating as miss",
-                    submission_key,
-                    exc_info=True,
-                )
-                try:
-                    cache.delete(submission_key)
-                except Exception:
-                    logger.warning(
-                        "CodeReviewCoordinator: submission cache delete failed after corrupt entry",
-                        exc_info=True,
-                    )
-                cached = None
-        if cached is not None:
-            # Only fully-clean approved verdicts are eligible: a hit with
-            # ``not_reviewed_ranges`` would skip re-review of ranges that were
-            # previously degraded / unreviewed (same gate as the write path).
-            if not cached.approved or cached.not_reviewed_ranges:
-                logger.warning(
-                    "CodeReviewCoordinator: cached submission %s is not a clean "
-                    "approval (approved=%s, not_reviewed_ranges=%s); treating as miss",
-                    submission_key,
-                    cached.approved,
-                    cached.not_reviewed_ranges,
-                )
-                try:
-                    cache.delete(submission_key)
-                except Exception:
-                    logger.warning(
-                        "CodeReviewCoordinator: submission cache delete failed for unclean entry",
-                        exc_info=True,
-                    )
-                cached = None
-            else:
-                logger.info(
-                    "CodeReviewCoordinator: submission cache hit; skipping review (approved)"
-                )
-                notify_review_progress(
-                    progress_callback,
-                    "done",
-                    "identical approved submission; review skipped",
-                    _PROGRESS_DONE,
-                )
-                return cached
+        return cached
 
     notify_review_progress(
         progress_callback, "preparing", "preparing review input", _PROGRESS_PREPARING_INPUT
@@ -1066,24 +1138,12 @@ def run_coordinator(
     all_llm_approved = all(outcome.approved_flags)
     approved, deduped = _reconcile_approval(all_llm_approved, deduped)
 
-    # CODE_REVIEW_SPEC_COMPLIANCE_PASS: run the dedicated single pass once, over
-    # the final deduped issue list, instead of relying on the (now-empty)
-    # per-chunk spec_compliance_notes. ``spec_compliance_single_pass`` already
-    # folds in the CODE_REVIEW profile restriction (see its computation above).
-    # ``None`` (flag/profile off, or the pass itself failed) tells
-    # ``_merge_narrative`` to fall back to today's per-chunk-sourced behavior
-    # unchanged.
-    single_pass_spec_notes: Optional[str] = None
-    if spec_compliance_single_pass:
-        try:
-            single_pass_spec_notes = synthesize_spec_compliance(
-                llm, input_data=input_data, issues=deduped
-            )
-        except Exception:
-            logger.exception(
-                "CodeReviewCoordinator: spec-compliance single pass failed; falling back"
-            )
-            single_pass_spec_notes = None
+    single_pass_spec_notes = _run_spec_compliance_single_pass(
+        llm=llm,
+        input_data=input_data,
+        deduped=deduped,
+        spec_compliance_single_pass=spec_compliance_single_pass,
+    )
 
     merged_summary, spec_notes = _merge_narrative(
         llm,

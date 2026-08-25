@@ -15,7 +15,7 @@ import { MatCheckboxModule } from '@angular/material/checkbox';
 import { LlmConfigApiService } from '../../services/llm-config-api.service';
 import { HasUnsavedChanges } from '../../core/unsaved-changes.guard';
 import { NotificationService } from '../../core/notification.service';
-import { extractErrorDetail } from '../../core/error-handler.interceptor';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import {
   providerRequiresApiKey,
@@ -225,7 +225,7 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
           this.providersLoading = false;
         },
         error: (err) => {
-          this.providersError = extractErrorDetail(err, 'Failed to load provider list.');
+          this.providersError = extractErrorDetail(err, 'Failed to load provider list.', { joinValidationArray: true });
           this.providersLoading = false;
         },
       });
@@ -302,7 +302,7 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
     const body: LlmProviderCreate = {
       label: form.label.trim(),
       provider: form.provider,
-      model: form.model.trim(),
+      model: this.usesEndpointId(form.provider) ? '' : form.model.trim(),
       base_url: this.usesBaseUrl(form.provider) ? form.base_url.trim() : '',
       api_key: form.api_key.trim(),
       endpoint_id: this.usesEndpointId(form.provider) ? form.endpoint_id.trim() : '',
@@ -376,7 +376,7 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
     const body: LlmProviderUpdate = {
       label: form.label.trim(),
       provider: form.provider,
-      model: form.model.trim(),
+      model: this.usesEndpointId(form.provider) ? '' : form.model.trim(),
       base_url: this.usesBaseUrl(form.provider) ? form.base_url.trim() : '',
       api_key: newKey,
       clear_api_key: form.clear_api_key && !newKey,
@@ -422,7 +422,7 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
       error: (err) => {
         this.providersSaving = false;
         opts?.revert?.();
-        this.providersError = extractErrorDetail(err, 'Failed to save the provider list.');
+        this.providersError = extractErrorDetail(err, 'Failed to save the provider list.', { joinValidationArray: true });
       },
     });
   }

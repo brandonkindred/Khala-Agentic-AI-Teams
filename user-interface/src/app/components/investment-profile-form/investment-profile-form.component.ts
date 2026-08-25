@@ -25,6 +25,7 @@ import {
   WorkflowMode,
   UserGoal,
 } from '../../models';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 
 @Component({
   selector: 'app-investment-profile-form',
@@ -172,7 +173,7 @@ export class InvestmentProfileFormComponent {
       },
       error: (err) => {
         this.loading = false;
-        this.error = err.error?.detail || err.message || 'Failed to create profile';
+        this.error = extractErrorDetail(err, 'Failed to create profile');
       },
     });
   }

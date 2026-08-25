@@ -143,7 +143,7 @@ def _run_frontend_code_v2_impl(
     """Same logic as _run_frontend_code_v2_background without starting a thread."""
     from llm_service import get_client
     from shared.dev_models.models import TaskType
-    from software_engineering_team.frontend_code_v2_team import FrontendCodeV2TeamLead
+    from software_engineering_team.codegen_team import CodegenTeamLead
 
     _run_code_v2_impl(
         job_id,
@@ -153,7 +153,7 @@ def _run_frontend_code_v2_impl(
         task_type=TaskType.FRONTEND,
         assignee="frontend-code-v2",
         id_prefix="fv2",
-        team_lead_factory=lambda: FrontendCodeV2TeamLead(get_client("frontend")),
+        team_lead_factory=lambda: CodegenTeamLead(get_client("frontend"), stack="frontend"),
     )
 
 
@@ -191,7 +191,7 @@ def _run_backend_code_v2_impl(
     """Same logic as _run_backend_code_v2_background without starting a thread."""
     from llm_service import get_client
     from shared.dev_models.models import TaskType
-    from software_engineering_team.backend_code_v2_team import BackendCodeV2TeamLead
+    from software_engineering_team.codegen_team import CodegenTeamLead
 
     _run_code_v2_impl(
         job_id,
@@ -201,7 +201,7 @@ def _run_backend_code_v2_impl(
         task_type=TaskType.BACKEND,
         assignee="backend-code-v2",
         id_prefix="bv2",
-        team_lead_factory=lambda: BackendCodeV2TeamLead(get_client("backend")),
+        team_lead_factory=lambda: CodegenTeamLead(get_client("backend"), stack="backend"),
     )
 
 
@@ -426,7 +426,11 @@ def _parse_spec_activity_body(
             pra_iterations = 0
         else:
             # Run PRA
-            from software_engineering_team.orchestrator import _make_pra_job_updater
+            from software_engineering_team.orchestrator import (
+                PRA_PHASE_ORDER,
+                PROGRESS_BAND_PRODUCT_ANALYSIS,
+                _make_phase_job_updater,
+            )
             from software_engineering_team.product_requirements_analysis_agent import (
                 ProductRequirementsAnalysisAgent,
             )
@@ -435,7 +439,14 @@ def _parse_spec_activity_body(
             # fields AND rescales the agent's own 0-100 progress onto the
             # product-analysis band — without it the Temporal bar sprints to 100
             # during PRA and collapses at the next phase handoff.
-            _pra_updater = _make_pra_job_updater(job_id)
+            _pra_updater = _make_phase_job_updater(
+                job_id,
+                subprocess_key="analysis_subprocess",
+                completed_key="analysis_completed_phases",
+                phase_order=PRA_PHASE_ORDER,
+                progress_band=PROGRESS_BAND_PRODUCT_ANALYSIS,
+                phase="product_analysis",
+            )
 
             pra_agent = ProductRequirementsAnalysisAgent(get_client("product_analysis"))
             pra_result = pra_agent.run_workflow(
@@ -531,13 +542,21 @@ def _plan_project_activity_body(
         agents = _get_agents()
 
         from software_engineering_team.orchestrator import (
+            PLANNING_PHASE_ORDER,
+            PROGRESS_BAND_PLANNING,
+            _make_phase_job_updater,
             _make_planning_architecture_fn,
-            _make_planning_job_updater,
         )
 
         # Shared with the thread path: rescales Planning's own 0-100 progress onto
         # the planning band so the Temporal bar stays monotone into the coding phase.
-        _planning_updater = _make_planning_job_updater(job_id)
+        _planning_updater = _make_phase_job_updater(
+            job_id,
+            subprocess_key="planning_subprocess",
+            completed_key="planning_completed_phases",
+            phase_order=PLANNING_PHASE_ORDER,
+            progress_band=PROGRESS_BAND_PLANNING,
+        )
 
         # Identical wiring to the thread path: the shared factory owns architecture-input
         # construction (including technology_preferences derivation) and resolves the agent

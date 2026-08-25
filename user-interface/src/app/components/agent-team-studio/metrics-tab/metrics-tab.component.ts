@@ -16,6 +16,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTableModule } from '@angular/material/table';
 import { SeMetricsApiService } from '../../../services/se-metrics-api.service';
+import { extractErrorDetail } from '../../../shared/extract-error-detail';
 import type { SeMetrics } from '../../../models/se-metrics.model';
 
 /** Selectable lookback windows, in days. */
@@ -99,7 +100,7 @@ export class MetricsTabComponent implements OnInit, OnDestroy {
         const detail =
           typeof err?.error === 'string'
             ? err.error
-            : (err?.error?.detail ?? err?.message ?? 'Failed to load metrics.');
+            : extractErrorDetail(err, 'Failed to load metrics.');
         this.error.set(detail);
         this.loading.set(false);
       },
