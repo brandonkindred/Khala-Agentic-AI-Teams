@@ -395,38 +395,47 @@ def test_design_loop_regenerates_full_spec_when_correction_succeeds(
     assert record.strategy_rationale == "regenerated for stocks"
 
 
-def test_design_loop_enforces_asset_category_when_correction_also_fails(
+def test_design_loop_short_circuits_when_correction_cannot_converge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When even the corrective regeneration still violates the pin, the
-    deterministic relabel backstop (``_enforce_selected_asset_category``)
-    is the bounded last resort — the pin is guaranteed to hold within one
-    extra LLM call, never an unbounded retry loop.
+    design agent's output must NEVER be deterministically relabeled and
+    persisted as if it were a successful spec: a relabeled-but-mismatched
+    narrative (e.g. a "stocks"-labeled spec whose hypothesis/rules describe
+    crypto) would review and backtest coherently while being attributed to
+    the wrong thesis — exactly what structural readiness validation cannot
+    catch. Instead the attempt raises SpecImplementabilityError and
+    run_cycle's existing MAX_DESIGN_REENTRIES retry loop re-enters with a
+    fresh design attempt; if every attempt fails to converge, the cycle
+    short-circuits with status="failed: spec_unimplementable" rather than
+    ever persisting a mismatched spec as a success."""
+    from investment_team.strategy_lab.orchestrator import MAX_DESIGN_REENTRIES
 
-    Critically, the fallback must relabel the *original* pre-regeneration
-    ``(spec, rationale)`` pair, not the discarded regeneration attempt: the
-    designer's ``revise`` stub below returns a *different* rationale
-    ("revised", for a still-wrong "crypto" spec) than the original ``run``
-    call ("scripted", for "forex") — if the fallback paired the relabeled
-    ("stocks") spec with the discarded "revised" rationale, the persisted
-    record would narrate crypto next to a stocks label, reproducing the
-    exact "wrong thesis" bug this whole mechanism exists to prevent.
-    """
     orch = StrategyLabOrchestrator()
 
-    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict("forex"), "scripted"))
-    # The corrective regeneration also violates the pin, and with a
-    # *different* wrong category than the original — simulating a designer
-    # that ignores both the MANDATORY EXCLUSION instruction and the
-    # explicit corrective critique.
-    monkeypatch.setattr(
-        orch.design_agent, "revise", lambda *_a, **_kw: (_spec_dict("crypto"), "revised")
-    )
-    monkeypatch.setattr(
-        orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
-    )
-    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
-    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
+    run_calls: List[str] = []
+    revise_calls: List[str] = []
+
+    def _run(**_kw: Any) -> Tuple[Dict[str, Any], str]:
+        run_calls.append("call")
+        return _spec_dict("forex"), "scripted"
+
+    def _revise(*_a: Any, **_kw: Any) -> Tuple[Dict[str, Any], str]:
+        revise_calls.append("call")
+        # Different wrong category than the original, every attempt —
+        # simulating a designer that never converges on the pinned category.
+        return _spec_dict("crypto"), "revised"
+
+    monkeypatch.setattr(orch.design_agent, "run", _run)
+    monkeypatch.setattr(orch.design_agent, "revise", _revise)
+
+    def _review_must_not_run(*_a: Any, **_kw: Any) -> Any:
+        raise AssertionError(
+            "design_review_agent.run must not be reached — the pin-violation "
+            "correction fails before any review round starts"
+        )
+
+    monkeypatch.setattr(orch.design_review_agent, "run", _review_must_not_run)
     _short_circuit_synthesis(monkeypatch)
 
     # allowed = {stocks} -> exclude everything else, including forex/crypto.
@@ -436,49 +445,42 @@ def test_design_loop_enforces_asset_category_when_correction_also_fails(
         exclude_asset_classes=["forex", "crypto", "futures", "commodities"],
     )
 
-    assert record.strategy.asset_class == "stocks"
-    assert record.strategy_rationale == "scripted"
+    assert record.backtest.status == "failed: spec_unimplementable"
+    # Never force-relabeled to the pinned category — the persisted
+    # short-circuit spec is whatever the last failed attempt actually
+    # produced, not a coerced "stocks" label on a crypto narrative.
+    assert record.strategy.asset_class != "stocks"
+    assert len(run_calls) == MAX_DESIGN_REENTRIES + 1
+    assert len(revise_calls) == MAX_DESIGN_REENTRIES + 1
 
 
-def test_design_loop_clears_stale_target_symbols_when_category_enforced(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When the deterministic-relabel backstop fires (the corrective
-    regeneration also failed), any explicit ``target_symbols`` authored for
-    the wrong category must be cleared too — otherwise e.g. crypto tickers
-    like "BTC-USD" would be honored verbatim and fetched under the
-    corrected (forex) asset class, a structurally inconsistent request."""
+def test_enforce_selected_asset_category_clears_stale_target_symbols() -> None:
+    """Non-empty ``target_symbols`` authored for the wrong category must be
+    cleared in the same correction as the ``asset_class`` relabel —
+    otherwise e.g. crypto tickers like "BTC-USD" would be honored verbatim
+    and fetched under the corrected (forex) asset class, a structurally
+    inconsistent request. ``_enforce_selected_asset_category`` is now only
+    reachable via the budget-exhausted fallback (see the module docstring
+    on ``_reconcile_asset_category`` for why its own fallback no longer
+    calls this method), so this is exercised as a direct unit test rather
+    than through ``run_cycle``."""
     orch = StrategyLabOrchestrator()
+    spec = orch._build_spec_from_dict(
+        _spec_dict("crypto", target_symbols=["BTC-USD"]), strategy_id="test-strat"
+    )
 
-    monkeypatch.setattr(
-        orch.design_agent,
-        "run",
-        lambda **_kw: (_spec_dict("crypto", target_symbols=["BTC-USD"]), "scripted"),
-    )
-    # The corrective regeneration also ignores the pin, forcing the fallback
-    # to the deterministic relabel where target_symbols clearing lives.
-    monkeypatch.setattr(
-        orch.design_agent,
-        "revise",
-        lambda *_a, **_kw: (_spec_dict("crypto", target_symbols=["BTC-USD"]), "revised"),
-    )
-    monkeypatch.setattr(
-        orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
-    )
-    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
-    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
-    _short_circuit_synthesis(monkeypatch)
-
-    # allowed = {forex} -> the design agent ignores the pin and returns
-    # crypto with explicit crypto symbols.
-    record = orch.run_cycle(
-        prior_records=[],
+    corrected = orch._enforce_selected_asset_category(
+        spec,
+        selected_category="forex",
+        review_round=1,
+        emit=lambda *_a, **_kw: None,
+        drift_collector=None,
         config=_config(),
-        exclude_asset_classes=["stocks", "crypto", "futures", "commodities"],
+        all_gate_results=[],
     )
 
-    assert record.strategy.asset_class == "forex"
-    assert record.strategy.target_symbols == []
+    assert corrected.asset_class == "forex"
+    assert corrected.target_symbols == []
 
 
 def test_design_loop_enforces_asset_category_on_budget_exhausted_before_first_response(
@@ -629,13 +631,18 @@ def test_enforce_selected_asset_category_records_readiness_gates() -> None:
     assert all_gate_results
 
 
-def test_design_loop_enforces_asset_category_after_revise(
+def test_design_loop_reconciles_asset_category_after_revise_round(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The enforcement backstop applies after a ``revise`` round too, not
-    only the initial generation — closing the gap where a mid-loop revision
-    could otherwise drift the spec's asset class away from the category
-    pinned for this attempt."""
+    """The corrective-regeneration mechanism applies after a mid-loop
+    ``revise`` round drifts the category too, not only the initial
+    generation — this exercises the reconciliation call site inside the
+    round loop, distinct from the pre-loop one every other success-path
+    test in this file exercises. A round's own ``revise`` call drifts the
+    spec to "forex"; the pin-violation correction's ``revise`` call (a
+    second, distinct call, immediately following) then successfully
+    regenerates a "stocks" spec, and that regenerated spec/rationale is what
+    the loop carries into its next round."""
     orch = StrategyLabOrchestrator()
 
     monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict("stocks"), "scripted"))
@@ -647,10 +654,18 @@ def test_design_loop_enforces_asset_category_after_revise(
         ]
     )
     monkeypatch.setattr(orch.design_review_agent, "run", lambda *_a, **_kw: next(review_calls))
-    # revise() drifts the asset_class to "forex" even though "stocks" is pinned.
-    monkeypatch.setattr(
-        orch.design_agent, "revise", lambda *_a, **_kw: (_spec_dict("forex"), "revised")
-    )
+
+    revise_calls: List[str] = []
+
+    def _revise(*_a: Any, **_kw: Any) -> Tuple[Dict[str, Any], str]:
+        revise_calls.append("call")
+        if len(revise_calls) == 1:
+            # The round's own revise() drifts off the pin.
+            return _spec_dict("forex"), "revised off-pin"
+        # The pin-violation correction's revise() call converges.
+        return _spec_dict("stocks", target_symbols=["AAPL"]), "corrected back to stocks"
+
+    monkeypatch.setattr(orch.design_agent, "revise", _revise)
     monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
     monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
     _short_circuit_synthesis(monkeypatch)
@@ -661,7 +676,10 @@ def test_design_loop_enforces_asset_category_after_revise(
         exclude_asset_classes=["forex", "crypto", "futures", "commodities"],
     )
 
+    assert len(revise_calls) == 2
     assert record.strategy.asset_class == "stocks"
+    assert record.strategy.target_symbols == ["AAPL"]
+    assert record.strategy_rationale == "corrected back to stocks"
 
 
 def test_design_loop_leaves_matching_asset_class_untouched(

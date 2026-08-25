@@ -1353,19 +1353,29 @@ class DesignMixin:
             appends the fresh readiness validation to ``all_gate_results``
             via :meth:`record_gates`, emits a ``design_repair`` event, and
             records the change on ``drift_collector`` when one is present.
-          - If the regeneration itself still violates the pin, the
-            regenerated draft is discarded entirely — falls back to
-            :meth:`_enforce_selected_asset_category` on the *original*
-            ``(spec, rationale)`` pair, not the also-mismatched regenerated
-            one, so the persisted spec and its rationale never narrate two
-            different asset classes. This method never retries the LLM more
-            than once, so the pin is always satisfied deterministically
-            within one extra call.
+          - If the regeneration itself still violates the pin, a
+            deterministic relabel is deliberately *not* attempted here — it
+            would only fix ``asset_class``, leaving the hypothesis /
+            signal_definition / rules / rationale narrating a different
+            category than the one now forced onto the label, which
+            structural readiness validation cannot detect. Raises
+            :class:`~..exceptions.SpecImplementabilityError` instead (the
+            same exception, and the same ``failure_phase="design"``,
+            :func:`build_spec_from_dict` already raises for an unsupported
+            ``asset_class``), so the caller's existing
+            ``MAX_DESIGN_REENTRIES`` retry loop re-enters with a fresh
+            design attempt rather than a mismatched spec ever being
+            persisted as a successful record. This method never retries the
+            LLM itself more than once — convergence, if it happens, happens
+            via the outer re-entry loop, not a local loop here.
           - Propagates :class:`DesignBudgetExhausted` (annotated with the
             pre-regeneration ``spec``/``rationale`` so a trip here still
             yields a well-formed short-circuit record via the caller's
             existing handler, which itself runs the mismatched pre-
-            regeneration spec through :meth:`_enforce_selected_asset_category`).
+            regeneration spec through :meth:`_enforce_selected_asset_category`
+            — a budget-exhausted record is already a failure record, so a
+            relabeled-but-mismatched narrative there is a lesser concern
+            than persisting one as an apparent success).
         """
         if selected_category is None:
             return spec, rationale
@@ -1410,26 +1420,36 @@ class DesignMixin:
         if regenerated_actual != selected_category:
             # The corrective revision itself still violated the pin (with a
             # *different* wrong class than the original, in the general
-            # case). Discard it and relabel the original (spec, rationale)
-            # pair instead of `regenerated` — that pair is the one already
-            # returned to (or received from) the caller, so falling back to
-            # it never pairs a corrected label with a still-mismatched
-            # narrative the way relabeling `regenerated` would.
+            # case). A deterministic relabel here would only fix the label —
+            # the hypothesis/signal_definition/rules/rationale would still
+            # narrate `regenerated_actual` (or, if relabeling the original
+            # instead, `actual`), producing a spec that reviews and
+            # backtests coherently but is attributed to the wrong thesis
+            # under a forced label. Readiness validation does not (and
+            # cannot) catch this — it checks structural validity, not
+            # whether a spec's narrative matches its own asset_class. Treat
+            # this the same way ``build_spec_from_dict`` already treats an
+            # unsupported asset_class (see its own ``SpecImplementabilityError``
+            # raise above): fail this attempt and let ``run_cycle``'s
+            # existing MAX_DESIGN_REENTRIES retry loop re-enter with a fresh
+            # design attempt (and a fresh random category pin) rather than
+            # ever persist a mismatched-narrative record as a "success".
+            evidence = (
+                f"Design agent could not converge on asset_class={selected_category!r} for "
+                "this attempt: the initial draft emitted "
+                f"{actual!r} and one corrective revision emitted {regenerated_actual!r} "
+                "instead of the pinned category."
+            )
             logger.warning(
-                "Corrective regeneration also violated the pin (still %r); falling back to a "
-                "deterministic relabel of the pre-regeneration draft.",
-                regenerated_actual,
+                "%s Re-entering design instead of persisting a mismatched spec.", evidence
             )
-            spec = self._enforce_selected_asset_category(
-                spec,
-                selected_category=selected_category,
-                review_round=review_round,
-                emit=emit,
+            raise SpecImplementabilityError(
+                evidence,
+                failure_phase="design",
+                last_spec=regenerated,
+                last_code="",
                 drift_collector=drift_collector,
-                config=config,
-                all_gate_results=all_gate_results,
             )
-            return spec, rationale
         readiness_results = self.spec_readiness_gate.validate(
             regenerated, phase="design", backtest_config=config
         )
@@ -1474,16 +1494,21 @@ class DesignMixin:
         """Deterministically pin ``spec.asset_class`` to the category selected
         for this design attempt.
 
-        Last-resort backstop used where a real corrective regeneration isn't
-        possible or didn't converge: the budget-exhausted fallback spec (no
-        LLM budget left to call ``revise`` again — see the ``except
-        DesignBudgetExhausted`` handler in ``_run_design_loop``), and as
-        :meth:`_reconcile_asset_category`'s own fallback when its one
-        corrective ``revise`` call still returns the wrong category. A
-        mismatched output is corrected here rather than trusted, mirroring
-        the deterministic mechanical-repair pattern
-        (:func:`..mechanical_repair.repair_spec`) already used elsewhere in
-        this loop for other structural violations.
+        Used only for the budget-exhausted fallback spec (no LLM budget left
+        to call ``revise`` again — see the ``except DesignBudgetExhausted``
+        handler in ``_run_design_loop``), which is already persisted with a
+        ``failed: budget_exhausted`` status: a relabeled-but-mismatched
+        narrative there is a lesser concern than the LLM budget being spent
+        without ever producing a usable spec, and there is no budget left to
+        do better. :meth:`_reconcile_asset_category` — the primary
+        correction path for a live LLM budget — deliberately does *not* fall
+        back to this method when its own corrective regeneration still
+        violates the pin; it raises :class:`~..exceptions.SpecImplementabilityError`
+        instead, since a mismatched narrative must never be persisted as an
+        apparent success (see that method's docstring). A mismatched output
+        is corrected here rather than trusted, mirroring the deterministic
+        mechanical-repair pattern (:func:`..mechanical_repair.repair_spec`)
+        already used elsewhere in this loop for other structural violations.
 
         Preconditions:
           - ``selected_category`` is ``None`` (no category restriction is
