@@ -63,10 +63,14 @@ re-entries — see that variable's own entry below for the distinct, larger 540-
 exists to cap: the *uncapped* worst-case multiplicative demand computed by
 `worst_case_design_llm_calls()`, which only models the design/review portion). The ceiling
 covers every budget-charged call across the whole attempt, **not** design-phase calls alone —
-`CodeSynthesisAgent.run`, `AnalysisAgent`'s calls, and `DesignReviewAgent`'s legacy-fallback
-path (`_invoke_legacy`) are the explicit `charge=False` exceptions (custom-code synthesis,
-the final narrative, and a rarely-taken legacy review path), so a successful attempt's total
-LLM round-trip count can still exceed 120, just not from the budget-charged calls this cap
+only `CodeSynthesisAgent.run` and `AnalysisAgent`'s calls are true `charge=False` exceptions
+(custom-code synthesis and the final narrative — neither is charged anywhere).
+`DesignReviewAgent`'s legacy-fallback path (`_invoke_legacy`) also passes `charge=False` to
+`run_structured_agent`, but every call site that reaches it first charges explicitly via
+`charge_active_budget()` (`design_review.py`:571 or :590) — so that path *is* budget-charged
+in practice, just through a manual charge rather than the `charge=` parameter, and isn't a
+real exception. A successful attempt's total LLM round-trip count can still exceed 120, just
+not from the budget-charged calls this cap
 governs. A durable checkpoint
 taken at the design/synthesis boundary — where the design + review phase hands its `spec`/
 `rationale`/`design_context` off to code synthesis — means a worker crash partway through an

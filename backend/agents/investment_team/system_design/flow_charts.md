@@ -178,7 +178,7 @@ sequenceDiagram
   surface — so a restart or a stale cache never desyncs progress counters.
 - `STRATEGY_LAB_SIGNAL_EXPERT_ENABLED` toggles the per-batch signal-expert
   step off for A/B comparison or cost control.
-- Polling clients can use `GET /strategy-lab/runs/{run_id}/status` (L1534)
+- Polling clients can use `GET /strategy-lab/runs/{run_id}/status` (L4259)
   instead of SSE — both surfaces read the same reconciled data.
 
 ---
