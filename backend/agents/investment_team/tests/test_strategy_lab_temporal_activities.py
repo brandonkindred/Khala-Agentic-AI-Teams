@@ -2967,6 +2967,107 @@ def test_compute_signal_brief_snapshot_disabled_returns_skip(monkeypatch):
     assert storage == {"skipped": True, "skipped_reason": "signal_expert_disabled"}
 
 
+def test_compute_signal_brief_snapshot_scopes_market_context_per_category(monkeypatch):
+    """A stocks brief must never see the shared snapshot's FX rates or crypto
+    headline -- rendering them would contradict the brief's own "covers
+    stocks and nothing else" scope instruction and hand the model
+    cross-category evidence it was told not to use. A category's own
+    single-class field (crypto's headline) still reaches its own brief."""
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    def _prior_record(asset_class: str):
+        strat = StrategySpec(
+            strategy_id=f"strat-{asset_class}",
+            authored_by="x",
+            asset_class=asset_class,
+            hypothesis="h",
+            signal_definition="s",
+            timeframe="1d",
+        )
+        result = BacktestResult(
+            total_return_pct=1.0,
+            annualized_return_pct=1.0,
+            volatility_pct=10.0,
+            sharpe_ratio=1.0,
+            max_drawdown_pct=5.0,
+            win_rate_pct=40.0,
+            profit_factor=1.0,
+            calmar_ratio=0.0,
+            deflated_sharpe=0.0,
+            sortino_ratio=0.0,
+        )
+        bt = BacktestRecord(
+            backtest_id=f"bt-{asset_class}",
+            strategy_id=strat.strategy_id,
+            strategy=strat,
+            config=BacktestConfig(start_date="2024-01-01", end_date="2024-02-01"),
+            submitted_by="x",
+            submitted_at="2024-01-01T00:00:00Z",
+            completed_at="2024-01-01T01:00:00Z",
+            result=result,
+            trades=[],
+        )
+        return StrategyLabRecord(
+            lab_record_id=f"lab-{asset_class}",
+            strategy=strat,
+            backtest=bt,
+            is_winning=False,
+            strategy_rationale="r",
+            analysis_narrative="n",
+            created_at="2024-01-01T01:00:00Z",
+        )
+
+    monkeypatch.setattr(api_main, "_strategy_lab_signal_expert_enabled", lambda: True)
+    monkeypatch.setattr(
+        api_main,
+        "_snapshot_prior_records",
+        lambda: [_prior_record("stocks"), _prior_record("crypto")],
+    )
+
+    class _FakeProvider:
+        def fetch_context(self, request):
+            from investment_team.market_lab_data import MarketLabContext
+
+            return MarketLabContext(
+                fetched_at="2024-01-01T00:00:00Z",
+                degraded=False,
+                sources_used=["x"],
+                fx_rates={"EUR": 1.08},
+                crypto_snapshot="BTC=65000",
+                macro_snippets=["DGS10=4.2%"],
+            )
+
+        def close(self):
+            pass
+
+    seen_prompts: Dict[str, str] = {}
+
+    class _FakeExpert:
+        def produce_signal_brief(self, prior_records, market_ctx, *, asset_class=None):
+            from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
+
+            seen_prompts[asset_class] = market_ctx.as_prompt_text()
+            return SignalIntelligenceBriefV1(brief_version=1)
+
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _FakeProvider)
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
+
+    api_main._compute_signal_brief_snapshot("SPY", ["forex", "futures", "commodities"])
+
+    assert "FX" not in seen_prompts["stocks"]
+    assert "Crypto" not in seen_prompts["stocks"]
+    assert "DGS10" in seen_prompts["stocks"]
+    assert "Crypto" in seen_prompts["crypto"]
+    assert "FX" not in seen_prompts["crypto"]
+
+
 def test_compute_signal_brief_snapshot_skips_categories_with_no_prior_records(monkeypatch):
     """A category with zero prior records has nothing for the expert to
     analyze -- calling it anyway would be a paid LLM round-trip for generic

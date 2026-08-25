@@ -46,6 +46,41 @@ class MarketLabContext(BaseModel):
         description="Optional social/sentiment line; often empty on free tier without dedicated API",
     )
 
+    def scoped_to(self, asset_class: Optional[str]) -> "MarketLabContext":
+        """Narrow the shared snapshot to what one asset category may see.
+
+        ``fx_rates`` and ``crypto_snapshot`` are single asset-class-specific
+        fields on an otherwise-shared per-batch snapshot; rendering them
+        unconditionally into a category-pinned signal brief's prompt
+        directly contradicts that brief's own "covers X and nothing else"
+        scope instruction, leaving a path for cross-category evidence
+        (explicit FX rates in a stocks-only brief, say) to reach the brief's
+        narrative and, from there, the pinned design prompt it's injected
+        into verbatim. ``macro_snippets`` (e.g. the 10-year yield) and
+        ``social_sentiment`` are genuinely class-agnostic macro context and
+        stay shared across every category.
+
+        Preconditions:
+            ``asset_class`` is a canonical asset-class label or ``None``
+            (unscoped — returns ``self`` unchanged).
+        Postconditions:
+            Returns a new ``MarketLabContext`` with ``fx_rates`` cleared
+            unless ``asset_class == "forex"`` and ``crypto_snapshot`` cleared
+            unless ``asset_class == "crypto"``. Returns ``self`` verbatim
+            (no copy) when ``asset_class`` is ``None``, when neither field
+            is populated, or when both already match the given class.
+        """
+        if asset_class is None:
+            return self
+        updates: dict = {}
+        if self.fx_rates and asset_class != "forex":
+            updates["fx_rates"] = {}
+        if self.crypto_snapshot and asset_class != "crypto":
+            updates["crypto_snapshot"] = None
+        if not updates:
+            return self
+        return self.model_copy(update=updates)
+
     def as_prompt_text(self) -> str:
         """Render a stable block for LLM consumption.
 

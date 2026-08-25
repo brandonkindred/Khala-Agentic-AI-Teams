@@ -179,6 +179,62 @@ def test_market_lab_context_prompt_text_not_truncated() -> None:
     assert t.count("macro line ") == 60
 
 
+def _scoping_ctx() -> MarketLabContext:
+    return MarketLabContext(
+        fetched_at="2024-01-01T00:00:00Z",
+        degraded=False,
+        sources_used=["x"],
+        fx_rates={"EUR": 1.08, "GBP": 1.27},
+        macro_snippets=["DGS10=4.2%"],
+        crypto_snapshot="BTC=65000",
+        social_sentiment="neutral",
+    )
+
+
+def test_scoped_to_stocks_clears_fx_and_crypto_but_keeps_shared_macro() -> None:
+    """A category-pinned signal brief's own scope block says "covers stocks
+    and nothing else" -- rendering explicit FX rates and a crypto headline
+    into that same prompt directly contradicts it and gives the model
+    cross-category evidence it was told not to use. Genuinely class-agnostic
+    macro fields (yield, sentiment) still reach every category."""
+    scoped = _scoping_ctx().scoped_to("stocks")
+    text = scoped.as_prompt_text()
+    assert "FX" not in text
+    assert "Crypto" not in text
+    assert "DGS10" in text
+    assert "neutral" in text
+
+
+def test_scoped_to_forex_keeps_fx_drops_crypto() -> None:
+    text = _scoping_ctx().scoped_to("forex").as_prompt_text()
+    assert "FX" in text
+    assert "Crypto" not in text
+
+
+def test_scoped_to_crypto_keeps_crypto_drops_fx() -> None:
+    text = _scoping_ctx().scoped_to("crypto").as_prompt_text()
+    assert "Crypto" in text
+    assert "FX" not in text
+
+
+def test_scoped_to_does_not_mutate_the_original_context() -> None:
+    ctx = _scoping_ctx()
+    ctx.scoped_to("stocks")
+    text = ctx.as_prompt_text()
+    assert "FX" in text
+    assert "Crypto" in text
+
+
+def test_scoped_to_none_returns_the_same_instance() -> None:
+    ctx = _scoping_ctx()
+    assert ctx.scoped_to(None) is ctx
+
+
+def test_scoped_to_returns_the_same_instance_when_nothing_to_strip() -> None:
+    ctx = MarketLabContext(fetched_at="x", macro_snippets=["DGS10=4.2%"])
+    assert ctx.scoped_to("stocks") is ctx
+
+
 def test_strategy_lab_data_request_defaults() -> None:
     r = StrategyLabDataRequest()
     assert r.benchmark_symbol == "SPY"

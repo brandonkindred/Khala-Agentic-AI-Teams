@@ -2604,7 +2604,10 @@ def _compute_signal_brief_snapshot(
     its diversity hint would push toward categories the attempt is forbidden
     to use — the analysis surface that made cross-category learnings leak into
     a restricted run. Each brief here sees only its own category's records, so
-    every category is analyzed independently.
+    every category is analyzed independently. The shared per-batch market
+    snapshot is likewise scoped per category (``MarketLabContext.scoped_to``)
+    before each call, since it carries single-class fields (FX rates, a
+    crypto headline) alongside genuinely shared macro context.
 
     Cost is bounded by the number of *allowed* categories with at least one
     prior record (at most ``len(PROMPT_ASSET_CLASSES)``) and paid once per
@@ -2680,8 +2683,6 @@ def _compute_signal_brief_snapshot(
                 "error": str(exc),
             }
 
-        prov_text = market_ctx.as_prompt_text()
-        market_hash = hashlib.sha256(prov_text.encode()).hexdigest()[:16]
         briefs: Dict[str, SignalIntelligenceBriefV1] = {}
         by_class: Dict[str, Any] = {}
         for asset_class in allowed:
@@ -2700,10 +2701,21 @@ def _compute_signal_brief_snapshot(
                     "skipped_reason": "no_prior_records",
                 }
                 continue
+            # ``fx_rates``/``crypto_snapshot`` are single asset-class-specific
+            # fields on the shared per-batch snapshot; passing the unscoped
+            # context here would render explicit FX/crypto evidence into
+            # (say) a stocks-only brief's prompt, directly contradicting its
+            # own "covers stocks and nothing else" scope instruction. Scoping
+            # per category closes that path; genuinely shared macro fields
+            # (yields, sentiment) still reach every category.
+            category_market_ctx = market_ctx.scoped_to(asset_class)
+            market_hash = hashlib.sha256(
+                category_market_ctx.as_prompt_text().encode()
+            ).hexdigest()[:16]
             try:
                 t0 = datetime.now(tz=timezone.utc)
                 brief = expert.produce_signal_brief(
-                    category_records, market_ctx, asset_class=asset_class
+                    category_records, category_market_ctx, asset_class=asset_class
                 )
             except Exception as exc:
                 # One category's failure must not cost the others their brief;
