@@ -329,10 +329,13 @@ class CodegenDevelopmentAgent(ConfigDrivenV2DevelopmentAgent):
         Code Review gate covers code quality only, leaving build/lint
         unchecked per microtask (see ``run_code_review_phase``). Separately,
         when ``merge_to_development`` is True (the default, for both stacks),
-        a whole-repo pre-merge quality gate re-verifies build and lint once,
+        a whole-repo pre-merge gate re-verifies build and lint once,
         immediately before the merge, compensating for this endpoint having
-        no follow-up Tech Lead review (see
-        ``shared.deliver_utils.run_pre_merge_quality_gate``).
+        no follow-up Tech Lead review — but only for whichever of
+        ``build_verifier``/``linting_tool_agent`` was actually supplied; either
+        left ``None`` (including via a production-agent factory that degrades
+        to ``None`` on construction failure) has that check silently skipped
+        (see ``shared.deliver_utils.run_pre_merge_quality_gate``).
 
         Args:
             repo_path: Path to the checked-out repo the workflow writes into.
