@@ -25,15 +25,15 @@ them uniformly.
 | `position_value` | `float` | `entry_fill_price × shares` (cash committed at entry). |
 | `entry_price` | `float` | **Legacy alias** for `entry_fill_price`. Kept for backward compatibility. |
 | `exit_price` | `float` | **Legacy alias** for `exit_fill_price`. Kept for backward compatibility. |
-| `entry_bid_price` | `float \| None` | Reference close price at the entry bar, **before** slippage adjustment. |
-| `entry_fill_price` | `float \| None` | Actual filled price paid at entry, **after** slippage: `entry_bid_price × (1 + slippage_bps/10000)`. |
-| `exit_bid_price` | `float \| None` | Reference close price at the exit bar, **before** slippage. |
-| `exit_fill_price` | `float \| None` | Actual filled price received at exit, **after** slippage: `exit_bid_price × (1 − slippage_bps/10000)`. |
-| `entry_order_type` | `str` | Order type used for entry — `"market"` today; field is forward-compatible with `"limit"`, `"stop"`, etc. |
+| `entry_bid_price` | `float \| None` | Reference price at the entry bar, **before** slippage. Order-type dependent — for a market order this is the bar's **open**, not its close (see "Where it's produced"). |
+| `entry_fill_price` | `float \| None` | Actual filled price paid at entry, **after** slippage: `entry_bid_price × (1 + slippage_bps/10000)`, rounded to 4 dp below $10 and 2 dp at or above. |
+| `exit_bid_price` | `float \| None` | Reference price at the exit bar, **before** slippage. Not the raw close: on a partially-filled exit this is `weighted_avg_exit_bid_price`, the quantity-weighted mean of the per-slice reference prices. |
+| `exit_fill_price` | `float \| None` | Actual filled price received at exit, **after** slippage: `exit_bid_price × (1 − slippage_bps/10000)`, rounded the same way as entry. |
+| `entry_order_type` | `str` | Order type used for entry. `market`, `limit`, `stop`, `stop_limit`, and `trailing_stop` are all live and each derives its own reference price. |
 | `exit_order_type` | `str` | Order type used for exit — same semantics. |
 | `gross_pnl` | `float` | P/L before transaction costs: `shares × (exit_fill - entry_fill)` (sign-flipped for shorts). |
-| `net_pnl` | `float` | P/L after transaction costs (round-trip `cost_bps` applied to `position_value`). This is the canonical P/L used to drive `outcome`, `cumulative_pnl`, and aggregate metrics. |
-| `return_pct` | `float` | Per-trade return in percent: `(exit_fill - entry_fill) / entry_fill × 100` (sign-flipped for shorts). |
+| `net_pnl` | `float` | P/L after transaction costs, charged on entry and exit notional **separately**: `(entry_notional + exit_notional) × cost_bps/10000`. This is the canonical P/L used to drive `outcome`, `cumulative_pnl`, and aggregate metrics. |
+| `return_pct` | `float` | Per-trade return in percent, **net** of costs and over entry notional: `net_pnl / (entry_fill_price × shares) × 100`. |
 | `hold_days` | `int` | Calendar days between `entry_date` and `exit_date` (floor of 1). |
 | `outcome` | `str` | `"win"` if `net_pnl > 0`, else `"loss"`. |
 | `cumulative_pnl` | `float` | Running total of `net_pnl` across the session. |
@@ -54,15 +54,18 @@ Entry bar has `close = 100.00`. The simulator records:
 Exit bar has `close = 105.00`. The simulator records:
 
 - `exit_bid_price = 105.00`
-- `exit_fill_price = 105.00 × (1 − 2/10_000) = 104.979`
+- `exit_fill_price = round(105.00 × (1 − 2/10_000), 2) = 104.98` — the simulator
+  rounds each fill before storing it (4 dp under $10, 2 dp at or above), so the
+  stored value is not the unrounded `104.979`
 
 With `shares = 10` (using `FillSimulator`'s actual formula — entry and exit
 notional charged separately, not a flat notional doubled):
 
-- `gross_pnl = 10 × (104.979 − 100.02) = 49.59`
-- `entry_notional = 100.02 × 10 = 1000.20`; `exit_notional = 104.979 × 10 = 1049.79`
-- `tx_cost = (1000.20 + 1049.79) × (5/10_000) ≈ 1.02`
-- `net_pnl = 49.59 − 1.02 ≈ 48.57`
+- `gross_pnl = 10 × (104.98 − 100.02) = 49.60`
+- `entry_notional = 100.02 × 10 = 1000.20`; `exit_notional = 104.98 × 10 = 1049.80`
+- `tx_cost = (1000.20 + 1049.80) × (5/10_000) = 1.025`
+- `net_pnl = round(49.60 − 1.025, 2) = 48.58`
+- `return_pct = round(48.58 / 1000.20 × 100, 2) = 4.86`
 
 ## Backward compatibility
 
@@ -97,6 +100,13 @@ that reference price. `trade_simulator.OpenPosition` is a separate, retired-simu
 dataclass kept only for legacy/unit-test consumers — not the production state
 carrier. Transaction costs are charged on entry and exit notional
 separately: `(entry_notional + exit_notional) * cost_rate`.
+
+**`trade_simulator.py` is not dead code**, despite `TradeSimulationEngine` and
+`OpenPosition` being retired: the module still owns `compute_metrics`, the
+canonical P&L / Sharpe / drawdown estimator imported by
+`strategy_lab/orchestrator.py`, `strategy_lab/zero_trade_repair.py`, and
+`trading_service/modes/backtest.py`. Retiring the file wholesale would break
+metrics for every backtest.
 
 [`strategy_lab/executor/trade_builder.py::build_trade_records`](../strategy_lab/executor/trade_builder.py)
 is a separate, older raw-trade-dict-to-`TradeRecord` converter with only one

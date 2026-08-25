@@ -63,11 +63,20 @@ this: checkpointing is unconditional, activating automatically whenever the atte
 `run_id` and is executing inside a real Temporal activity context (both absent for thread mode
 and for direct-call unit tests, which simply always run Phase 1 fresh).
 
-The guarantee this closes: no double-charged LLM budget on resume. Skipping the design phase
-entirely on a valid-checkpoint resume means its LLM calls are never re-issued — there is nothing
-to double-charge — and the resumed budget is seeded from the checkpoint's own boundary-time call
-count, not from the pre-attempt count, so the budget ceiling can't silently regain headroom for
-calls that already happened.
+The guarantee this closes: no double-charged LLM budget on resume **for the design phase**.
+Skipping that phase entirely on a valid-checkpoint resume means its LLM calls are never
+re-issued — there is nothing to double-charge — and the resumed budget is seeded from the
+checkpoint's own boundary-time call count, not from the pre-attempt count, so the ceiling
+can't regain headroom for design calls that already happened.
+
+The guarantee stops at that boundary, and this is the practical limit on calling the ceiling
+"hard": the checkpoint records only the boundary-time count, so charges made *after* it —
+every refinement, alignment, and zero-trade-repair call — are not recorded anywhere the retry
+can see. A crash after 40 such calls resumes with those 40 charges erased and re-issues them,
+so one cycle can charge more provider calls in total than `STRATEGY_LAB_DESIGN_MAX_LLM_CALLS`.
+With no valid checkpoint it is worse: the budget seeds from the count as of the *start* of the
+attempt, discarding the crashed execution's charges entirely. Temporal grants only one retry
+(`maximum_attempts=2`), so the overshoot is bounded, not unbounded.
 
 What it does *not* cover: only the design phase is checkpointed, so a crash during synthesis,
 refinement, alignment, verification, or analysis still discards that entire portion of the
@@ -467,38 +476,46 @@ the resend-free path versus fell back. This mirrors the `json_self_correction su
 convention in `llm_service/structured.py`.
 
 ### STRATEGY_LAB_DESIGN_MAX_LLM_CALLS
-Per-cycle hard cap on the total number of *budget-charged* LLM calls across the **entire** design
-attempt (`use_budget(budget)` wraps the whole `_run_design_attempt` call, not the design phase
-alone), spanning all `MAX_DESIGN_REENTRIES` re-entries (default `120`, sub-1 values floored to
-`1`). A `LLMCallBudget` is created once per cycle and charged before every design/review LLM call
-(generation, each parse-retry, the self-review verdict, each self-revision, and each
-`DesignReviewAgent` round) — and, against that same active budget, every refinement call
-(`RefinementAgent`, via `try_structured_or_degrade`/`run_json_with_parse_retry`,
-`_structured_output.py`/`_agent_runner.py`) and every trade-alignment / zero-trade-repair call
-(`TradeAlignmentAgent`/`ZeroTradeRepairAgent`, via `run_single_shot_agent(..., charge=True)`).
-Only `CodeSynthesisAgent.run` and `AnalysisAgent`'s calls are true `charge=False` exceptions
-(custom-code synthesis and the final narrative — neither is charged anywhere).
-`DesignReviewAgent`'s legacy-fallback path (`_invoke_legacy`) also passes `charge=False` to
-`run_structured_agent`, but every call site that reaches it first charges explicitly via
-`charge_active_budget()` (`design_review.py`:571 or :590) — so that path *is* budget-charged in
-practice, just through a manual charge rather than the `charge=` parameter, and isn't a real
-exception. When the ceiling trips, the cycle short-circuits with `status="failed:
-budget_exhausted"` (distinct from `failed: design_not_ready`) before runaway cloud spend. A
-successful attempt's total LLM round-trip count can still exceed 120, just not from the
-budget-charged calls this cap governs. **Worst-case sizing** is not maintained here as
-independent prose — it is computed by
-`StrategyLabBudgetConfig.worst_case_design_llm_calls()` (`budget_config.py`), the same enforced
-config object every design-phase knob on this page resolves from, so the number below cannot drift
-out of sync with the code that produces it — note this worst-case figure only models the
-design/review portion (not refinement/alignment/repair), so it's a conservative basis the 120
-ceiling is sized against, not a claim about the cap's own scope. One design round costs at most
+Cap on the number of *budget-charged* LLM calls across the **entire** design attempt (default
+`120`, sub-1 values floored to `1`). `use_budget(budget)` wraps the whole `_run_design_attempt`
+call, not the design phase alone.
+
+**What is charged.** Every design/review call (generation, each parse-retry, the self-review
+verdict, each self-revision, and each `DesignReviewAgent` round); every refinement call
+(`RefinementAgent`); and every trade-alignment / zero-trade-repair call
+(`TradeAlignmentAgent`/`ZeroTradeRepairAgent`). Note the charge is inside the retry envelope and
+the structured path charges per provider round-trip, so one *logical* call can consume several
+units — up to 6 for a structured design call at the default `llm_max_retries`.
+
+**What is not.** Only `CodeSynthesisAgent.run` and `AnalysisAgent` are genuinely uncharged
+(custom-code synthesis and the final narrative). Three other sites pass `charge=False` but are
+charged by their caller instead: `DesignReviewAgent._invoke_legacy` (both paths into it call
+`charge_active_budget()` first), and the `_structured_output.py` / `_agent_runner.py` helpers,
+which delegate charging to an inner `_call` or a caller-supplied `before_attempt` hook — so
+`charge=False` in this codebase means "charged elsewhere" more often than "free".
+
+**Scope.** The budget object is created once per cycle in thread mode; in Temporal mode — the
+only supported mode — a fresh `LLMCallBudget` is constructed inside *each* design-attempt
+activity and seeded from the prior attempt's count, which preserves the ceiling across
+re-entries but not across a Temporal activity retry (see "Design-attempt checkpointing" above).
+When the ceiling trips, the cycle short-circuits with `status="failed: budget_exhausted"`
+(distinct from `failed: design_not_ready`).
+
+**Sizing.** `StrategyLabBudgetConfig.worst_case_design_llm_calls()` (`budget_config.py`) computes
+the figure below from the same enforced config object every design-phase knob resolves from, so it
+cannot drift from the code. It models **only** the design/review portion — refinement, alignment,
+and repair are charged but not counted, and neither are the per-round-trip multipliers above — so
+it *under*-states real worst-case demand rather than bounding it. Treat 540 as "what the
+design/review loop alone could ask for if nothing converged", not as a ceiling. One design round
+costs at most
 `(design_parse_retries + 1) * (1 + design_self_revision_rounds) + 2` revise-path calls (parse-retries
 on the initial generate/revise, the self-review verdict, parse-retries across self-revision, and the
 re-audit verdict) plus 1 `DesignReviewAgent` round; that per-round cost repeats for up to
 `design_review_rounds` rounds, across up to `MAX_DESIGN_REENTRIES + 1` design attempts. At the
 dataclass defaults (`design_parse_retries=2`, `design_self_revision_rounds=1`,
 `design_review_rounds=20`) this evaluates to 9 calls/round × 20 rounds × 3 attempts = **540** calls
-per design phase — `StrategyLabBudgetConfig.from_env()` logs the value actually resolved for the
+per *cycle* — the ×3 is `MAX_DESIGN_REENTRIES + 1` design attempts, so this spans three design
+phases, not one — `StrategyLabBudgetConfig.from_env()` logs the value actually resolved for the
 running environment's env-var overrides at `INFO` on every resolution, so the current worst case is
 always visible at runtime rather than only in this doc. `STRATEGY_LAB_DESIGN_MAX_LLM_CALLS` ceilings
 that uncapped worst case. Raise it for genuinely hard-but-converging specs; lower it to tighten the

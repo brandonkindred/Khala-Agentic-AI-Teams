@@ -45,8 +45,10 @@ with implementation detail for individual Strategy Lab capabilities:
   engine, and the four-step fill-price-from-bar derivation.
 - **[`strategy_lab_pipeline.md`](./strategy_lab_pipeline.md)** — full per-cycle
   pipeline shape (`ideating → fetching_data → backtest → aligning →
-  analyzing → paper_trading? → complete`), the complete list of SSE phase
-  events, the winner gate, and the paper-trade skip/failure paths.
+  analyzing → paper_trading? → complete`, the cycle's own stage vocabulary —
+  the phase *events* a client receives are the narrower
+  `ideating`/`coding`/`backtesting`/`analyzing` set), the complete list of SSE
+  phase events, the winner gate, and the paper-trade skip/failure paths.
 - **[`generation_pipeline.md`](./generation_pipeline.md)** — what actually
   happens *inside* "ideating" and "backtest" above: the 4-phase contract, the
   design ↔ review loop, the compiled-DSL-vs-custom-code fork, the refinement
@@ -67,8 +69,8 @@ with implementation detail for individual Strategy Lab capabilities:
 
 | Concept | Source |
 |---|---|
-| Two-track API, all 30+ endpoints | [`api/main.py`](../api/main.py) (2063 lines) |
-| Core agents (Advisor, PolicyGuardian, ValidationAgent, PromotionGate, InvestmentCommittee) | [`agents.py`](../agents.py) (933 lines) |
+| Two-track API, all 30+ endpoints | [`api/main.py`](../api/main.py) |
+| Core agents (Advisor, PolicyGuardian, ValidationAgent, PromotionGate, InvestmentCommittee) | [`agents.py`](../agents.py) |
 | Batch-level Strategy Lab agents (once-per-batch signal brief, post-cycle paper trading) | [`signal_intelligence_agent.py::SignalIntelligenceExpert`](../signal_intelligence_agent.py), [`paper_trading_agent.py::PaperTradingAgent`](../paper_trading_agent.py) |
 | Strategy generation pipeline agents (design, review, code synthesis, refinement, alignment, analysis) | [`strategy_lab/agents/`](../strategy_lab/agents/) — see [`generation_pipeline.md`](./generation_pipeline.md) |
 | 4-phase contract + drift-hash tracking | [`strategy_lab/phases.py`](../strategy_lab/phases.py) |

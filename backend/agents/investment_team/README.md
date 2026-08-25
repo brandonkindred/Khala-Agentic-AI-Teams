@@ -63,6 +63,13 @@ The Strategy Lab generation pipeline itself — `DesignAgent`,
 [`system_design/generation_pipeline.md`](./system_design/generation_pipeline.md)
 rather than duplicated in this table; none of them require a user profile.
 
+`strategy_ideation_agent.py`'s `StrategyIdeationAgent` is **vestigial** — it
+still ships, with its own test suite, but has no production caller: the
+generation pipeline above superseded it. `agent_catalog.py` still describes
+the signal brief as produced "before `StrategyIdeationAgent` runs", which is
+stale for the same reason. Neither is part of any live flow, which is why
+they appear in no diagram in `system_design/`.
+
 ### HTTP endpoints — profile requirement
 
 **Requires `user_id` / IPS in store**
@@ -193,7 +200,7 @@ Engineer-facing architecture details live under [`system_design/`](./system_desi
 - [`use_cases.md`](./system_design/use_cases.md) — use-case diagram grouped by actor and track.
 - [`flow_charts.md`](./system_design/flow_charts.md) — sequence/state diagrams for advisor, Strategy Lab batch, promotion gate, orchestrator mode.
 - [`market_data_flow.md`](./system_design/market_data_flow.md) — data providers, how data is retrieved and streamed into the engine, provider-selection precedence, and fill-price-from-bar logic for backtest + paper trade.
-- [`strategy_lab_pipeline.md`](./system_design/strategy_lab_pipeline.md) — per-cycle pipeline (`ideating → fetching_data → backtest → aligning → analyzing → paper_trading? → complete`), phase events, winner gate, skip paths.
+- [`strategy_lab_pipeline.md`](./system_design/strategy_lab_pipeline.md) — per-cycle pipeline (`ideating → fetching_data → backtest → aligning → analyzing → paper_trading? → complete` — the cycle's own stage names; the SSE phase events a client receives are the narrower `ideating`/`coding`/`backtesting`/`analyzing` set), phase events, winner gate, skip paths.
 - [`generation_pipeline.md`](./system_design/generation_pipeline.md) — what happens inside "ideating" and "backtest": the 4-phase contract, design ↔ review loop, code synthesis, refinement/alignment loops, the full quality-gates catalog, and the Temporal activity mapping.
 - [`paper_trading_integration.md`](./system_design/paper_trading_integration.md) — paper trading as an integrated cycle step: winner gate, config, failure contract, linkage to `StrategyLabRecord`.
 - [`trade_record_schema.md`](./system_design/trade_record_schema.md) — every `TradeRecord` field, including bid vs fill prices and order-type fields used for post-hoc execution analysis.

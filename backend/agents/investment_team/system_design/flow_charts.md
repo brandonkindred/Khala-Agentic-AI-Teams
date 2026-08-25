@@ -109,12 +109,12 @@ sequenceDiagram
     end
 
     loop for each batch
+        BatchWF->>SIE: compute_signal_brief_activity<br/>(dispatched unconditionally, once per batch —<br/>a mid-batch resume re-runs it, so later cycles<br/>in that batch can see a different brief)
         opt STRATEGY_LAB_SIGNAL_EXPERT_ENABLED (default true)
-            BatchWF->>SIE: compute_signal_brief_activity<br/>(once per batch-workflow invocation, a mid-batch<br/>resume re-runs it, so later cycles in that batch<br/>can see a different brief than earlier ones)
             SIE->>LLM: complete_json
             LLM-->>SIE: SignalIntelligenceBriefV1
-            SIE-->>BatchWF: brief
         end
+        SIE-->>BatchWF: brief, or null +<br/>skipped_reason=signal_expert_disabled
 
         loop wave of cycles (bounded parallelism)
             loop start every cycle in the wave, before awaiting any
@@ -156,7 +156,7 @@ sequenceDiagram
         end
     end
 
-    BatchWF->>RunStore: persist_run_state_activity<br/>(mark run complete)
+    BatchWF->>RunStore: persist_run_state_activity — writes the terminal<br/>status: completed, completed_with_errors, or whatever<br/>external_terminal_status_activity reported between waves<br/>(cancelled / failed / interrupted)
     BatchWF->>Bus: publish_run_event_activity (run_complete)
     Bus-->>Client: SSE event (close)
 ```
@@ -175,11 +175,26 @@ sequenceDiagram
   Backtests execute deterministically through the sandboxed engine
   (`trading_service/`), the same execution path Strategy Lab and paper
   trading both use.
-- `_active_runs` is an in-memory read cache kept in sync with the durable
-  job-service record via `_reconcile_run_progress`, called by every read
-  surface — so a restart or a stale cache never desyncs progress counters.
-- `STRATEGY_LAB_SIGNAL_EXPERT_ENABLED` toggles the per-batch signal-expert
-  step off for A/B comparison or cost control.
+- Two market-data dependencies are folded inside the activities above rather
+  than drawn as participants. `compute_signal_brief_activity` builds a
+  `MarketLabContext` through `FreeTierMarketDataProvider.fetch_context(...)`
+  and reads the prior `StrategyLabRecord`s before the LLM call — a provider
+  outage surfaces as a null brief with `skipped_reason="provider_init_failed"`,
+  not as an error. The `execute strategy_code` step fetches OHLCV through
+  `MarketDataService` (see [`market_data_flow.md`](./market_data_flow.md)).
+- `_active_runs` is an in-memory read cache. The **GET** surfaces
+  (`/strategy-lab/runs`, `.../status`, `/strategy-lab/jobs`) call
+  `_reconcile_run_progress` first, so they recover from a restart or a stale
+  cache. The `resume` and `restart` endpoints do **not**: they read
+  `_get_run_state`'s process-local snapshot and compute the resume offset
+  straight from its counters, so on a multi-replica deployment a resume can
+  act on stale progress. Reconciliation also no-ops once the in-memory status
+  is already terminal.
+- `STRATEGY_LAB_SIGNAL_EXPERT_ENABLED` (default true) doesn't skip the
+  activity — the workflow always dispatches it. The gate is inside
+  `_compute_signal_brief_snapshot`, which returns a null brief with
+  `skipped_reason="signal_expert_disabled"`, so the LLM call is what's
+  actually avoided.
 - Polling clients can use `GET /strategy-lab/runs/{run_id}/status` (L4259)
   instead of SSE — both surfaces read the same reconciled data.
 

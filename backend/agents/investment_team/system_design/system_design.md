@@ -9,8 +9,10 @@ For the container-level view of how this team fits into Khala, see
 ## Component diagram — API router
 
 How each endpoint reaches an agent or orchestrator call and which persistence
-bucket it reads/writes. Every line number below is from
-[`api/main.py`](../api/main.py).
+bucket it reads/writes. Line numbers below are from
+[`api/main.py`](../api/main.py) and point at each route's path literal. That
+file changes often, so treat them as a starting offset, not a guarantee — the
+route path itself is the stable identifier to search for.
 
 ```mermaid
 flowchart LR
@@ -98,7 +100,7 @@ flowchart LR
 
   S1 --> B4
   S2 --> VA --> B5
-  S3 --> B6
+  S3 --> RDB[_run_real_data_backtest<br/>fetches OHLCV, executes<br/>strategy_code via trading_service] --> B6
   S4 --> B6
   S5 --> ORCH --> PGate
   PGate -.reads.-> B2
@@ -120,8 +122,8 @@ flowchart LR
   L3 --> B7
   L4 --> BatchWF
   L5 --> BatchWF
-  L6 --> B9
-  L7 --> B9
+  L6 -->|"_active_runs first,<br/>job-service rows merged in"| B9
+  L7 -->|"reconcile, then _active_runs;<br/>job service only as fallback"| B9
   L8 --> EventBus
   L9 --> B7
   L10 --> B7
@@ -412,13 +414,13 @@ the verification/publication decision is documented in
 
 | Enum | Values | Defined |
 |---|---|---|
-| `RiskTolerance` | `conservative`, `moderate_conservative`, `moderate`, `moderate_aggressive`, `aggressive` | [`models.py`](../models.py):11 |
-| `WorkflowMode` | `monitor_only`, `paper`, `live` | [`models.py`](../models.py):55 |
-| `PromotionStage` | `reject`, `revise`, `paper`, `live` | [`models.py`](../models.py):42 |
-| `PromotionGate` | `separation_of_duties`, `risk_veto`, `validation`, `ips_live`, `human_approval`, `live_promote` | [`models.py`](../models.py):62 |
-| `GateResult` | `pass`, `fail`, `warn` | [`models.py`](../models.py):70 |
-| `AdvisorTopic` | `greeting`, `risk`, `horizon`, `income`, `net_worth`, `savings`, `tax`, `liquidity`, `goals`, `preferences`, `constraints`, `review` | [`models.py`](../models.py):24 |
-| `AdvisorSessionStatus` | `active`, `completed`, `abandoned` | [`models.py`](../models.py):18 |
+| `RiskTolerance` | `conservative`, `moderate_conservative`, `moderate`, `moderate_aggressive`, `aggressive` | [`models.py`](../models.py):72 |
+| `WorkflowMode` | `monitor_only`, `paper`, `live` | [`models.py`](../models.py):116 |
+| `PromotionStage` | `reject`, `revise`, `paper`, `live` | [`models.py`](../models.py):103 |
+| `PromotionGate` | `separation_of_duties`, `risk_veto`, `validation`, `ips_live`, `human_approval`, `live_promote` | [`models.py`](../models.py):123 |
+| `GateResult` | `pass`, `fail`, `warn` | [`models.py`](../models.py):131 |
+| `AdvisorTopic` | `greeting`, `risk`, `horizon`, `income`, `net_worth`, `savings`, `tax`, `liquidity`, `goals`, `preferences`, `constraints`, `review` | [`models.py`](../models.py):85 |
+| `AdvisorSessionStatus` | `active`, `completed`, `abandoned` | [`models.py`](../models.py):79 |
 | `PaperTradingStatus` | `running`, `completed`, `failed` (legacy), plus live-mode `opening`, `warming_up`, `live` | [`models.py`](../models.py):1198 |
 | `PaperTradingVerdict` | `ready_for_live`, `not_performant` | [`models.py`](../models.py):1210 |
 
@@ -438,11 +440,10 @@ deliberately separate fields, not one enum reused inconsistently.
 
 Instead of owning a `shared.postgres` schema, the team pushes every artifact
 through the `_PersistentDict` wrapper (`api/main.py` — search for `class
-_PersistentDict`; line numbers here drift with unrelated edits elsewhere in
-that file).
+_PersistentDict`).
 Reads and writes look like a normal Python dict but the backing store is the
 Khala job service (`JobServiceClient`), which persists to the `khala_jobs`
 Postgres database. The bucket names double as the job-service `team` field so
 operators can clean up with SQL filters like
-`WHERE team = 'investment_strategy_lab_records'` — see
-[`../README.md`](../README.md):77-86.
+`WHERE team = 'investment_strategy_lab_records'` — see "Clearing strategy lab
+data in Postgres directly" in [`../README.md`](../README.md).

@@ -4,13 +4,17 @@ This is the "how it all works together" deep dive: what actually happens
 **inside** a single Strategy Lab design attempt, from a bare cycle request to
 an assembled `StrategyLabRecord`. It complements, rather than duplicates,
 [`strategy_lab_pipeline.md`](./strategy_lab_pipeline.md), which documents the
-*outer*, SSE-facing cycle phases a UI client sees
-(`ideating → fetching_data → backtest → aligning → analyzing →
-paper_trading? → complete`). This document opens up what happens behind each
-of those — in particular everything inside "ideating" (the design ↔ review
-loop) and "backtest" (synthesis, refinement, verification) — and is the
-companion to [`architecture.md`](./architecture.md)'s container view and §11
-(orchestrator composition).
+*outer* cycle phases and their SSE events. Note the two vocabularies: the
+orchestrator emits internal phase names (`designing`, `design_review`,
+`design_repair`, `coding`, `backtesting`, `aligning`, `analyzing`,
+`complete`), and `_PROGRESS_PHASE_MAP` collapses them onto the four-entry
+stepper a UI client actually receives — `ideating → coding → backtesting →
+analyzing` (an unmapped phase is not published at all). `fetching_data` is a
+`sub_phase` of `backtesting`, not a phase of its own. This document opens up
+what happens behind those — in particular everything inside "ideating" (the
+design ↔ review loop) and "backtesting" (synthesis, refinement, verification)
+— and is the companion to [`architecture.md`](./architecture.md)'s container
+view and §11 (orchestrator composition).
 
 Everything below through "Record assembly" happens inside **one Temporal
 activity**, `run_design_attempt_activity`
@@ -26,9 +30,11 @@ or run paper trading itself. Both of those happen one step later, in
 below), which is the actual durable-write and paper-trading boundary.
 Temporal's durability boundary for everything *inside* this document is the
 *design attempt* itself, not any phase inside it — a worker crash mid-attempt
-discards everything except a design-phase checkpoint (see "Design-attempt
-checkpointing" in [`../strategy_lab/README.md`](../strategy_lab/README.md))
-and the attempt restarts from the top on retry.
+discards everything after the design/synthesis boundary. On the retry Temporal
+grants, a valid design-phase checkpoint makes the attempt **skip** the design
+phase entirely rather than re-run it (its LLM calls must never be re-issued);
+without one, the attempt restarts from the top. See "Design-attempt
+checkpointing" in [`../strategy_lab/README.md`](../strategy_lab/README.md).
 
 A file-reference note before diving in: `../strategy_lab/orchestrator.py`
 defines the combined `StrategyLabOrchestrator` class itself — composed from
@@ -37,8 +43,10 @@ of the pipeline. Most phase-specific logic below is cited to its owning
 mixin file, but several top-level orchestration methods that don't belong to
 any single phase — `_synthesize_initial_code` (the compiled-DSL-vs-custom-code
 fork), `_run_realism_gates`, `_refine`/`_refine_or_exhaust`, `_run_alignment_audit`,
-`_apply_updates` — live directly on `orchestrator.py` itself, not on a mixin.
-Citations to `orchestrator.py` below mean that base class file specifically.
+`_apply_updates` — live directly on `../strategy_lab/orchestrator.py` itself,
+not on a mixin. Bare `orchestrator.py` citations below always mean that file,
+never the team-level `investment_team/orchestrator.py` (a different, much
+smaller module that owns the advisor-track queues).
 
 ## The 4-phase contract
 
@@ -61,7 +69,8 @@ CODE_SYNTHESIS` and the following transition: `hash_spec` includes
 `risk_limits`, and the refinement loop that runs before the `CODE_SYNTHESIS →
 BACKTEST_AND_VERIFICATION` transition may accept a tighten-only `risk_limits`
 update (`_apply_updates`); separately, `_synthesize_initial_code`
-(`orchestrator.py`:810) tries `compile_strategy(spec)` first and, on a
+(`_synthesize_initial_code`, `../strategy_lab/orchestrator.py`) tries
+`compile_strategy(spec)` first and, on a
 `CompilerError` the mechanical-repair pre-flight didn't already catch, flips
 `spec.requires_custom_code` to `True` before falling back to
 `CodeSynthesisAgent` — and `hash_spec` excludes only `strategy_code`, not
@@ -82,7 +91,7 @@ driven rewrite, not drift. All four emission sites live in
 `CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION` (1577-1584), and the terminal
 `BACKTEST_AND_VERIFICATION → None` (1756-1763) — the mixin that owns the
 whole-attempt sequencer emits every transition, even though the phases
-themselves execute across three different mixins (below).
+themselves execute across all five mixins (below).
 
 ## Design ↔ review loop (DESIGN → DESIGN_REVIEW)
 
@@ -151,15 +160,16 @@ a `DesignReviewAgent` LLM call.
   (`../strategy_lab/market_regime.py`, `STRATEGY_LAB_REGIME_SUMMARY_ENABLED`) helps the
   designer pick a setup archetype that fits current conditions.
 
-Every numeric cap above is `STRATEGY_LAB_*`-tunable; the exhaustive reference
-(exact defaults, worst-case LLM-call sizing, interplay between retries and
-budgets) lives in
+Every numeric cap above is `STRATEGY_LAB_*`-tunable. Defaults are quoted here
+only to make the prose concrete —
 [`../strategy_lab/README.md`](../strategy_lab/README.md#environment-variables)
-and is not repeated here.
+is the canonical home for them, and wins on any disagreement; it also carries
+what is genuinely not repeated here (worst-case LLM-call sizing, the interplay
+between retries and budgets, and the parse/clamp rules).
 
 ## Code synthesis (CODE_SYNTHESIS)
 
-`_synthesize_initial_code` (`orchestrator.py`:810-918) picks one of two paths
+`_synthesize_initial_code` (`../strategy_lab/orchestrator.py`) picks one of two paths
 per spec:
 
 - **Compiled DSL (default / preferred path)** — `compile_strategy(spec)`
@@ -242,10 +252,12 @@ has produced a real trade ledger. Each round:
 
 Capped at `STRATEGY_LAB_MAX_ALIGNMENT_ROUNDS` (default 10); reaching the cap
 logs a warning and keeps the last-audited trades rather than failing the
-cycle. The outer SSE-facing view of this loop (the `aligning` phase, its
-sub-phase events) is already documented in
-[`strategy_lab_pipeline.md`](./strategy_lab_pipeline.md) — this section adds
-the mechanism, that doc keeps the wire-level summary.
+cycle. [`strategy_lab_pipeline.md`](./strategy_lab_pipeline.md) covers the same
+loop from the outside (the `aligning` phase and its sub-phase events) and
+summarizes the same seven checks, so the two overlap here by design — if the
+check set or the informational/failable split changes, both need editing,
+along with the round cap in
+[`../strategy_lab/README.md`](../strategy_lab/README.md).
 
 ## Verification & publication decision (rest of BACKTEST_AND_VERIFICATION)
 
@@ -260,7 +272,8 @@ Owned by `VerificationMixin` (`orchestrator_verification.py`):
 - **Exit-rule conformance** — `ExitRuleConformanceGate`
   (`../strategy_lab/quality_gates/exit_rule_conformance.py`) deterministically checks that
   engine-enforced exits actually matched `spec.exit_rules`.
-- **Realism gates** run in fixed order (`orchestrator.py:685-749`,
+- **Realism gates** run in fixed order (`_run_realism_gates`,
+  `../strategy_lab/orchestrator.py`,
   `_run_realism_gates`): `TargetSymbolCoverageGate` (backtest universe
   matches requested symbols), `CostStressRealismGate`, `LiquidityRealismGate`,
   `RegimeCoverageGate`, `TradeClusteringGate`, `RuleFiringRateGate`.
@@ -278,35 +291,70 @@ vs publishable gate" there rather than duplicating it here.
 
 Analysis (`AnalysisAgent`, `../strategy_lab/agents/analysis.py`) runs last —
 a single self-reviewing narrative draft describing why the strategy won or
-lost, informed by every gate result above.
+lost. It does **not** receive the gate-results list: its inputs are the spec,
+the metrics (whose `acceptance_reason` carries a summarized veto string), the
+trades, the rationale, the `is_winning` verdict, and the alignment report.
 
 ## Quality gates catalog
 
 Every deterministic check in `../strategy_lab/quality_gates/` (23 of the
 directory's 26 files — see the omission note below), with the phase that
-invokes it:
+invokes it.
+
+**The Phase column uses `StrategyLabPhase`** (`quality_gates/models.py`:
+`"design" | "design_review" | "synthesis" | "verification"`), the tag gates
+stamp on their own results — *not* the four-phase `Phase` contract from the
+top of this document. They are different enums and the names only partly
+overlap: gate-`synthesis` runs inside contract-`CODE_SYNTHESIS`, and
+gate-`verification` inside contract-`BACKTEST_AND_VERIFICATION`. Superscripts
+mark rows whose invocation needs more than a phase name; those notes follow
+the table.
 
 | Gate / file | Phase | Purpose |
 |---|---|---|
-| `strategy_validator.py`: `StrategySpecValidator` | design (`check_hypothesis_rules(spec, phase="design")` — the hypothesis/rules check feeding `DesignReviewAgent`, called with an explicit phase at `orchestrator_design.py:1082`; and `validate(spec)`'s pre-synthesis call at `orchestrator_synthesis.py:203`, which defaults to the same `phase="design"`) and synthesis (`validate()` again, at `zero_trade_repair.py:509`, tagged `phase="synthesis"` for its re-validation of a repaired spec) | Deterministic field-level validation of `StrategySpec` |
+| `strategy_validator.py`: `StrategySpecValidator` | design, synthesis <sup>a</sup> | Deterministic field-level validation of `StrategySpec` |
 | `spec_readiness.py`: `SpecReadinessGate` | design, re-checked at synthesis round 0 | The implementability gate that decides design-loop readiness (sizing coherence, timeframe validity, DSL completeness) |
 | `code_safety.py` (+ `code_safety_ast.py`): `CodeSafetyChecker` | synthesis, and verification (alignment-proposal re-check) | AST + regex safety scan of generated strategy Python |
 | `code_conformance/gate.py` (+ `ast_helpers.py`): `CodeConformanceGate` | synthesis | Deterministic spec→code conformance, incl. custom-code faithfulness checks |
 | `predicate_conformance.py` (+ `predicate_conformance_fixtures.py`, `conformance_bars.py`): `PredicateConformanceGate` | synthesis, re-checked at verification | Pre-execution predicate-conformance shadow check against synthetic bars |
 | `predicate_reachability.py`: `PredicateReachabilityProbe` | synthesis | Pre-backtest, data-driven check that spec predicates can actually fire |
-| `backtest_anomaly.py`: `BacktestAnomalyDetector` | synthesis (per-round, `orchestrator_synthesis.py:938`), verification (unconditionally after every trade-alignment round, `orchestrator_alignment.py:653`; and again as the walk-forward-failure fallback recheck, `orchestrator_verification.py:357`) | Threshold-based anomaly detection over backtest results |
+| `backtest_anomaly.py`: `BacktestAnomalyDetector` | synthesis, verification <sup>b</sup> | Threshold-based anomaly detection over backtest results |
 | `alignment_checks.py`: `DeterministicAlignmentChecker` | trade-alignment loop | The seven per-rule trade-alignment checks described above |
 | `acceptance_gate.py`: `AcceptanceGate` | verification | Composite walk-forward acceptance (deflated Sharpe, IS/OOS degradation, OOS trade count, regime-conditional pass) |
 | `exit_rule_conformance.py`: `ExitRuleConformanceGate` | verification | Deterministic conformance of engine-enforced exits to `spec.exit_rules` |
-| `target_symbol_coverage.py`: `TargetSymbolCoverageGate` | synthesis (`check_fetch`/`check_trades`, critical failures fail the run closed before verification) and verification (`check_breadth`, softer check) | Backtest universe matches the requested target symbols |
+| `target_symbol_coverage.py`: `TargetSymbolCoverageGate` | synthesis, verification <sup>c</sup> | Backtest universe matches the requested target symbols |
 | `cost_stress_realism.py`: `CostStressRealismGate` | verification | Realism under cost-stress multipliers |
 | `realism/liquidity_realism.py`: `LiquidityRealismGate` | verification | Liquidity realism (fill participation vs volume) |
 | `realism/regime_coverage.py`: `RegimeCoverageGate` | verification | Coverage across market regimes |
 | `realism/trade_clustering.py`: `TradeClusteringGate` | verification | Detects unrealistic trade clustering |
 | `realism/rule_firing.py`: `RuleFiringRateGate` | verification | Spec-rule firing-rate realism |
-| `convergence_tracker.py`: `ConvergenceTracker` | recorded per-attempt inside `RecordAssemblyMixin` (`orchestrator_record_assembly.py:276` and `:399`, i.e. within the same `run_design_attempt_activity` activity as everything else); directives it derives are what carry *across* cycles, not the `record()` call itself | Stall/diversity/failure directives fed into design prompts |
+| `convergence_tracker.py`: `ConvergenceTracker` | record assembly <sup>d</sup> | Stall/diversity/failure directives fed into design prompts |
 | `universe_injection.py` | synthesis | Deterministic post-synthesis injection of the `UNIVERSE` constant |
 | `models.py` | — | Shared `QualityGateResult` / `StrategyLabPhase` types (not a gate itself) |
+
+<sup>a</sup> Two methods, three call sites. `check_hypothesis_rules(spec,
+phase="design")` is the hypothesis-vs-rules consistency check feeding
+`DesignReviewAgent` (`orchestrator_design.py:1082`). `validate(spec)` runs
+pre-synthesis (`orchestrator_synthesis.py:203`, defaulting to the same
+`phase="design"`), and again on a repaired spec at `zero_trade_repair.py:509`
+tagged `phase="synthesis"`. Readiness is a different gate — `SpecReadinessGate`,
+next row.
+
+<sup>b</sup> Three call sites: per refinement round
+(`orchestrator_synthesis.py:938`, `phase="synthesis"`); unconditionally after
+every trade-alignment round (`orchestrator_alignment.py:653`,
+`phase="verification"`); and the walk-forward-failure fallback recheck with
+`dsr_aware=False` (`orchestrator_verification.py:357`).
+
+<sup>c</sup> `check_fetch`/`check_trades` run at synthesis, where a critical
+failure fails the run closed before verification; `check_breadth` is a softer
+verification-phase check.
+
+<sup>d</sup> `record()` is called per-attempt inside `RecordAssemblyMixin`
+(`orchestrator_record_assembly.py:276` and `:399`) — the same activity scope as
+everything else here, not a batch-level step. The directives it *derives* are
+what carry across cycles; batch-level merging is a separate step
+(`merge_wave_results_activity`).
 
 `quality_gates/__init__.py` and its two subpackage markers
 (`code_conformance/__init__.py`, `realism/__init__.py`) are omitted above.
@@ -322,9 +370,10 @@ unimplementable after all re-entries). Module-level `_finalize_loop_telemetry`
 merges the design-loop telemetry with whole-funnel gate pass/fail histograms
 and derives the three-state `code_path`
 (`"not_synthesized" | "compiled" | "custom"`) recorded on the record. The
-drift ledgers (`spec_history`, `code_history`, `gate_timeline`,
-`rule_implementation_map`) accumulate via the copy-on-entry/commit-on-completion
-`_DriftCollector` (`_orchestrator_helpers.py`:322) — see
+drift ledgers (`spec_history`, `code_history`, `gate_timeline` — exactly the
+three `_DriftCollector` fields) accumulate via the
+copy-on-entry/commit-on-completion `_DriftCollector`
+(`_orchestrator_helpers.py`:322) — see
 [`../strategy_lab/RETRY_STATE_ISOLATION.md`](../strategy_lab/RETRY_STATE_ISOLATION.md)
 for exactly how that isolates one design attempt's drift from the next
 attempt's, and from a Temporal activity retry of the same attempt.
@@ -372,8 +421,9 @@ mapped to what it durability-wraps:
 | `merge_wave_results_activity` | Folds a completed wave's results into the batch-level `ConvergenceTracker` |
 | `publish_run_event_activity` | Best-effort SSE publish (fire-and-forget UX side-channel) |
 
-`StrategyLabCycleWorkflow` calls `run_design_attempt_activity` in a loop
-bounded by `MAX_DESIGN_REENTRIES` (2) — the *outer* design-re-entry loop is
+`StrategyLabCycleWorkflow` calls `run_design_attempt_activity` in a
+`range(MAX_DESIGN_REENTRIES + 1)` loop — `MAX_DESIGN_REENTRIES` is 2, so up
+to **3** design attempts. That *outer* design-re-entry loop is
 the only part of this pipeline actually expressed as durable workflow code;
 everything from "Design ↔ review loop" through "Record assembly" above runs
 inside that one activity call. `StrategyLabBatchWorkflow` calls

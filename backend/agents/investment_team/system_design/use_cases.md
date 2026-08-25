@@ -166,7 +166,7 @@ flowchart LR
 | List lab jobs | `GET /strategy-lab/jobs` | — (read-only) | `investment_strategy_lab_records` |
 | Delete lab record | `DELETE /strategy-lab/records/{id}` | — | `investment_strategy_lab_records` + linked strategies / backtests / paper sessions |
 | Purge lab storage | `DELETE /strategy-lab/storage` | — | all strategy-lab buckets |
-| Run paper-trading session | `POST /strategy-lab/paper-trade` | `PaperTradingAgent.run_paper_trading` | `investment_paper_trading_sessions` |
+| Run paper-trading session | `POST /strategy-lab/paper-trade` | `PaperTradingWorkflow` → `run_paper_trading_activity` → `PaperTradingAgent.run_session` | `investment_paper_trading_sessions` |
 | List paper sessions | `GET /strategy-lab/paper-trade/results` | — (read-only) | `investment_paper_trading_sessions` |
 | Get paper session detail | `GET /strategy-lab/paper-trade/{session_id}` | — (read-only) | `investment_paper_trading_sessions` |
 

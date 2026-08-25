@@ -188,16 +188,17 @@ passes validation is only promotable to paper/live when it is evaluated against
 a specific client's IPS. Keeping both tracks in one package lets
 `PromotionGateAgent` depend on both `StrategySpec` (lab side) and `IPS`
 (advisor side) without cross-team imports. This framing is authoritative in
-[`../README.md`](../README.md):1-56.
+[`../README.md`](../README.md)'s "Two tracks" section.
 
 ### 2. IPS-first, hard-constraint model
 
 `PolicyGuardianAgent` ([`agents.py`](../agents.py):49-103) treats IPS caps
 (per-position, asset-class, speculative sleeve) and explicit permissions
 (options, crypto) as **hard constraints** — not soft scores. Live-trading
-permission is a separate hard constraint enforced later, by
+permission is not checked here at all; it is handled later and more softly, by
 `PromotionGateAgent`'s Gate 4 (`../README.md`'s "Universal promotion
-checklist"), not by `PolicyGuardianAgent.check_portfolio`.
+checklist"), which records a `WARN` and downgrades the outcome to `paper`
+rather than rejecting.
 When a proposal is run through `POST /proposals/{proposal_id}/validate`
 ([`api/main.py`](../api/main.py):1174-1224) the guardian returns a structured
 list of violations that the caller is expected to gate on before acting.
@@ -276,8 +277,9 @@ team persists **everything** through the job service:
 
 Trade-off: the team does **not** publish a `shared.postgres` `SCHEMA` constant
 — artifact storage is opaque to the job DB. Operators cleaning up strategy-lab
-data query the `jobs` table directly (see
-[`../README.md`](../README.md):77-86) or use `DELETE /strategy-lab/storage`.
+data query the `jobs` table directly (see "Clearing strategy lab data in
+Postgres directly" in [`../README.md`](../README.md)) or use
+`DELETE /strategy-lab/storage`.
 
 ### 7. Temporal-only dispatch (thread-based worker retired)
 
@@ -352,8 +354,12 @@ snapshot reconciled live from that record via `_reconcile_run_progress` so
 a client always sees current progress at connect time and on each
 subsequent poll; separately, two call sites publish directly and
 best-effort, in-process, without going through that record —
-`run_design_attempt_activity`'s own progress callback (sub-cycle phase
-updates: design/synthesis/refinement) and `publish_run_event_activity`
+`run_design_attempt_activity`'s own progress callback (every sub-cycle
+phase update it forwards through `_PROGRESS_PHASE_MAP` — the internal
+`designing`/`design_review`/`design_repair`/`coding`/`backtesting`/
+`aligning`/`analyzing`/`complete` names, collapsed onto the UI's
+four-entry stepper `ideating`/`coding`/`backtesting`/`analyzing`; an
+unmapped phase is not published at all) and `publish_run_event_activity`
 (the batch workflow's skipped/finalized/terminal events). Reconciliation
 doesn't depend on either direct-publish path, so a missed one is still
 caught up by the next poll. A polling fallback (`GET /strategy-lab/runs/{run_id}/status`)
@@ -382,12 +388,22 @@ prompt-side data shape without destabilizing the backtester.
 ### 10. LLM access goes through the shared service
 
 Every agent takes an `LLMClient` from `backend/agents/llm_service/` and calls
-`.complete_json(...)`. Provider, base URL, and model are resolved from the
+`.complete_json(...)`. Platform-wide, provider/base-URL/model resolve from the
 Postgres-backed ordered provider list (`/llm-config` UI → `llm_provider_configs`)
-— the **sole** source of LLM resolution across Khala, per the root `CLAUDE.md`.
-`LLM_PROVIDER=dummy` is the only env override (selects the no-LLM test/dev
-harness); `LLM_BASE_URL`/`LLM_MODEL` only supply defaults for a blank
-provider-list entry, they don't select a live provider on their own. Strategy Lab's own
+— per the root `CLAUDE.md`, the sole source of LLM resolution, with
+`LLM_PROVIDER=dummy` as the only env override.
+
+**Strategy Lab's Strands agents are an exception to that rule today.**
+`DesignAgent`, `DesignReviewAgent`, and the shared agent runners build their
+model through `strategy_lab/agents/model_factory.py::get_strands_model`, which
+resolves via `llm_service.config`'s `resolve_provider()`/`resolve_base_url()`/
+`resolve_model()` — runtime config first, then the `LLM_PROVIDER` /
+`LLM_BASE_URL` / `LLM_MODEL` env vars. Two consequences worth knowing before
+you configure an environment: `LLM_PROVIDER=bedrock` constructs a
+`BedrockModel` directly, bypassing the provider list entirely; and
+`LLM_PROVIDER=dummy` **raises** for these agents rather than selecting a
+no-LLM harness (`"LLM_PROVIDER=dummy is not supported for Strands agents"`),
+so the platform-wide dry-run switch does not work here. Strategy Lab's own
 agents route through an additional shared fault-tolerance envelope on top of
 this (`strategy_lab/agents/_llm_envelope.py` — per-call timeout, retries,
 backoff, total wall-time budget); see
@@ -436,12 +452,14 @@ alignment loops, and the ~20-gate `quality_gates/` catalog — are documented in
 | `STRATEGY_LAB_MARKET_DATA_CACHE_TTL_SEC` | Snapshot cache TTL (default 120.0) |
 | `STRATEGY_LAB_MARKET_DATA_PROVIDER` | Provider key (only `free_tier` is implemented) |
 | `STRATEGY_LAB_SIGNAL_EXPERT_ENABLED` | Toggles the signal-intelligence step |
-| `LLM_PROVIDER=dummy` | Selects the no-LLM test/dev harness (the only load-bearing value for this team, same as every other Khala team) |
-| `LLM_BASE_URL` / `LLM_MODEL` | Default base URL / model for a blank Postgres provider-list entry only — not a live-provider selector |
+| `LLM_PROVIDER` | `ollama` or `bedrock` for Strategy Lab's Strands agents (`dummy` raises — see §10); platform-wide, only `dummy` is load-bearing |
+| `LLM_BASE_URL` / `LLM_MODEL` | Live base URL / model for the Strands agents via `model_factory`; elsewhere, blank-provider-list-entry defaults only |
 | `POSTGRES_HOST` (+ friends) | Enables job-service persistence (required for non-trivial use) |
 
-This table covers only the batch-level / market-data vars read directly by
-`api/main.py` and `market_data_service.py`. The much larger `STRATEGY_LAB_*`
+This table covers only the batch-level / market-data / platform vars this team
+consumes — they are read across `api/main.py`, `market_data_service.py`,
+`market_lab_data/free_tier.py`, and the shared `llm_service` / `shared.postgres`
+modules, not all in one place. The much larger `STRATEGY_LAB_*`
 surface tuning the design/review loop, code synthesis, refinement, alignment,
 and the LLM fault-tolerance envelope is documented exhaustively — and kept
 current — in [`../strategy_lab/README.md`](../strategy_lab/README.md#environment-variables),

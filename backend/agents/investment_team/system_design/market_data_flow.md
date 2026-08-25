@@ -342,7 +342,7 @@ class MarketDataStream(Protocol):                        # :39
     def __iter__(self) -> Iterator[StreamEvent]: ...     # synchronous generator
 ```
 
-`TradingService.run(stream, *, on_trade=None)` (`service.py:1236`) consumes that
+`TradingService.run(stream, *, on_trade=None)` (`service.py`) consumes that
 iterator one event at a time. It is **mode-agnostic** — it never knows whether
 the stream is historical or live. The mode layer decides which stream object to
 build:
@@ -549,7 +549,7 @@ of the whole document:
    `LiveStream` + `Resampler` from a live adapter (paper). All three emit the
    same `BarEvent … EndOfStreamEvent` sequence.
 4. **Pull into the engine** — `TradingService.run` drives a `while True` loop
-   (`service.py:1390`) that calls `event = next(event_iter, None)` (`:1395`)
+   (in `TradingService.run`) that calls `event = next(event_iter, None)`
    **once per iteration, one bar at a time**, breaking on
    `None`/`EndOfStreamEvent` (`:1396`). The engine never holds the whole series —
    it only ever sees the current bar (plus a parent-side `next_bar` peek used by
@@ -582,7 +582,7 @@ honour the same `StreamEvent` iterator contract.
 
 ## 6. How a bar drives the engine
 
-### 6.1 The unified run loop (`service.py:1390`)
+### 6.1 The unified run loop (`TradingService.run`, `service.py`)
 
 Per `BarEvent` (non-warm-up), the loop:
 
@@ -604,9 +604,9 @@ Per `BarEvent` (non-warm-up), the loop:
 
 The default execution model is `RealisticExecutionModel`
 (`build_execution_model(name="realistic", participation_cap=0.10)`,
-`execution_model.py:350`). Each bar, for every working order,
-`compute_fill_terms(req, bar, next_bar)` (`:180`) returns a
-`FillTerms(reference_price, qty_fraction, extra_slip_bps)` (`:222`) in four steps,
+`build_execution_model`, `engine/execution_model.py`). Each bar, for every
+working order, `compute_fill_terms(req, bar, next_bar)` returns a
+`FillTerms(reference_price, qty_fraction, extra_slip_bps)` in four steps,
 which the fill simulator then turns into money.
 
 ```mermaid
@@ -647,19 +647,19 @@ Returned as `extra_slip_bps`.
 `long_entry = 1+s`, `long_exit = 1−s`, `short_entry = 1−s`, `short_exit = 1+s`
 (you always pay the spread). Then:
 
-- `_fill_entry` (`:472`): `filled_qty = target_qty · qty_fraction` (`:507`), risk
-  gate `risk.can_enter(...)` (`:546`) + capital check (`:557`),
-  `fill_price = round(ref_price · slip_entry, dp)` (`:567-571`),
-  `portfolio.open(...)` (`:574`).
-- `_fill_exit` (`:913`): `fill_price = round(ref_price · slip_exit, dp)`
-  (`:936-940`), `filled_qty = min(target_qty, pos.qty) · qty_fraction` (`:954`),
-  `portfolio.partial_close(...)` (`:988`); on full close it builds the
+- `_fill_entry`: `filled_qty = target_qty · qty_fraction`, risk
+  gate `risk.can_enter(...)` + capital check,
+  `fill_price = round(ref_price · slip_entry, dp)`,
+  `portfolio.open(...)`.
+- `_fill_exit`: `fill_price = round(ref_price · slip_exit, dp)`,
+  `filled_qty = min(target_qty, pos.qty) · qty_fraction`,
+  `portfolio.partial_close(...)`; on full close it builds the
   `TradeRecord` with `tx_costs = (entry_notional + exit_notional) ·
-  transaction_cost_bps/10_000`, `net = gross − tx_costs` (`:1054-1062`), then
-  `portfolio.record_pnl(net)` (`:1065`).
+  transaction_cost_bps/10_000`, `net = gross − tx_costs`, then
+  `portfolio.record_pnl(net)`.
 
 `FillSimulatorConfig` defaults: `slippage_bps=2.0`, `transaction_cost_bps=5.0`
-(`fill_simulator.py:44`).
+(`engine/fill_simulator.py`).
 
 > **Worked example** — long MARKET buy of 10 shares, `bar.open=100`,
 > `slippage_bps=2`, within the participation cap, no adverse haircut:
