@@ -85,7 +85,24 @@ transition, but the trade-alignment loop that follows it can still commit a
 rewritten baseline (`_commit_alignment_proposal`), so the terminal
 transition's `code_hash` can legitimately differ from the one recorded at
 `CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION` — that's an accepted, alignment-
-driven rewrite, not drift. All four emission sites live in
+driven rewrite, not drift. (The terminal emit is reached with the
+`_DesignAttemptState` built *after* the alignment loop, so it carries the
+committed rewrite.)
+
+> **Known doc/code discrepancy.** `phases.py`'s `PhaseTransition` docstring
+> states as an Invariant that `code_hash` "is stable from the `CODE_SYNTHESIS
+> → BACKTEST_AND_VERIFICATION` transition onward … code is not regenerated
+> past the synthesis loop", and the terminal emit site carries a comment
+> saying the hashes "must match the values emitted on the previous two
+> boundaries". Both predate `_commit_alignment_proposal` and are stricter than
+> the code actually is; the existing phase-transition tests don't catch it
+> because they assert `spec_hash` stability and the *synthesis-exit*
+> `code_hash`, never terminal-vs-synthesis equality. Treat this document as
+> describing observed behavior and those docstrings as the stale side — but
+> don't write a new assertion against either until someone reconciles them in
+> code.
+
+All four emission sites live in
 `orchestrator_design.py`, in phase order: `DESIGN → DESIGN_REVIEW`
 (642-649), `DESIGN_REVIEW → CODE_SYNTHESIS` (1960-1967),
 `CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION` (1577-1584), and the terminal
@@ -213,8 +230,10 @@ exception from executing the code in the sandbox, `RefinementAgent`
 itself does not change here except for the tighten-only `risk_limits`
 carve-out. The loop is capped at `STRATEGY_LAB_MAX_CODE_REFINEMENT_ROUNDS`
 (default 50) with its own stall detector
-(`STRATEGY_LAB_REFINEMENT_STALL_ROUNDS`); exhaustion sets
-`backtest_status="failed: max_refinement_rounds"` rather than looping forever.
+(`STRATEGY_LAB_REFINEMENT_STALL_ROUNDS`). The two exits are distinct statuses:
+a stall sets `backtest_status="failed: refinement_stalled"`, plain cap
+exhaustion sets `"failed: max_refinement_rounds"`. A stall implies exhaustion,
+so the stall check runs first and reports the more specific reason.
 A **zero-trade backtest** (a strategy that compiles and runs but never
 enters a position) is routed to
 [`ZeroTradeRepairer`](../strategy_lab/zero_trade_repair.py)/[`ZeroTradeRepairAgent`](../strategy_lab/agents/zero_trade_repair.py)
@@ -236,8 +255,8 @@ has produced a real trade ledger. Each round:
    list, not repeated here. What matters for the loop: the checker is
    deterministic and makes **no LLM call**, so a clean audit costs nothing.
    A near-miss on the entry-signal check (within
-   `STRATEGY_LAB_ALIGNMENT_NEAR_MISS_PCT`, read in
-   `../strategy_lab/agents/alignment.py`) routes to
+   `STRATEGY_LAB_ALIGNMENT_NEAR_MISS_PCT`, resolved by `_near_miss_pct()` in
+   `../strategy_lab/quality_gates/alignment_checks.py`) routes to
    `TradeAlignmentAgent.adjudicate_near_miss` — a single-shot yes/no call,
    not a full re-audit.
 2. If misaligned, `TradeAlignmentAgent.propose_code_fix` receives the
@@ -266,8 +285,7 @@ Owned by `VerificationMixin` (`orchestrator_verification.py`):
   (`../strategy_lab/quality_gates/exit_rule_conformance.py`) deterministically checks that
   engine-enforced exits actually matched `spec.exit_rules`.
 - **Realism gates** run in fixed order (`_run_realism_gates`,
-  `../strategy_lab/orchestrator.py`,
-  `_run_realism_gates`): `TargetSymbolCoverageGate` (backtest universe
+  `../strategy_lab/orchestrator.py`): `TargetSymbolCoverageGate` (backtest universe
   matches requested symbols), `CostStressRealismGate`, `LiquidityRealismGate`,
   `RegimeCoverageGate`, `TradeClusteringGate`, `RuleFiringRateGate`.
 
@@ -355,7 +373,9 @@ what carry across cycles; batch-level merging is a separate step
 ## Record assembly (end of BACKTEST_AND_VERIFICATION)
 
 Owned by `RecordAssemblyMixin` (`orchestrator_record_assembly.py`) — pure
-assembly from already-computed state, no agent or gate calls of its own.
+assembly from already-computed state. It makes no *agent* (LLM) calls; its one
+gate interaction is `ConvergenceTracker.record(...)`, which files this
+attempt's outcome for later cycles rather than evaluating anything.
 `_assemble_record` builds the happy-path `StrategyLabRecord`;
 `_build_short_circuit_record` builds the equivalent for a cycle that never
 reached a full backtest (budget exhausted, design stalled, spec

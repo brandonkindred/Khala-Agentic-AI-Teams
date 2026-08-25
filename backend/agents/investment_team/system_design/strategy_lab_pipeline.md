@@ -110,14 +110,30 @@ the joined failing gate codes (veto order: `exit_rule_conformance_failed`,
 
 ## Phase events
 
-Every cycle emits phase events via the `on_phase(phase, data)` callback.
-The strategy-lab worker forwards them as SSE `progress` events. The
-canonical list is:
+Every cycle emits phase events via the `on_phase(phase, data)` callback. The
+table below is the **`on_phase` contract** — the full set of names a callback
+implementation must handle — not the set a browser receives. Two filters sit
+between them under the current Temporal-only dispatch:
+
+- `run_design_attempt_activity`'s progress callback publishes through
+  `_PROGRESS_PHASE_MAP` (`temporal/activities.py`), which maps the
+  orchestrator's internal names (`designing`, `design_review`,
+  `design_repair`, `coding`, `backtesting`, `aligning`, `analyzing`,
+  `complete`) onto the UI's four-entry stepper — `ideating`, `coding`,
+  `backtesting`, `analyzing`. An unmapped phase is not published at all.
+- `finalize_cycle_record_activity` calls `_finalize_strategy_lab_cycle_record`
+  with `on_phase=None`, so the `paper_trading*` and `complete` rows below
+  reach no subscriber on that path.
+
+So a subscriber sees only those four names. Note also that `fetching_data` is
+emitted as a `sub_phase` of `backtesting`
+(`emit("backtesting", {"sub_phase": "fetching_data"})`), not as a top-level
+phase. The rows:
 
 | Phase | When emitted | Data fields |
 |---|---|---|
-| `ideating` | Start of cycle; also on re-ideation retry | `{ retry?, excluded? }` |
-| `fetching_data` | After ideation, before backtest | `{ strategy: {asset_class, hypothesis}, retry? }` |
+| `ideating` | Start of cycle; also on re-ideation retry. Reaches a subscriber as the `_PROGRESS_PHASE_MAP` target of `designing`/`design_review`/`design_repair` | `{ retry?, excluded? }` |
+| `fetching_data` | After ideation, before backtest. Emitted as `backtesting` with `sub_phase="fetching_data"`, never as a bare phase | `{ strategy: {asset_class, hypothesis}, retry? }` |
 | `aligning` | Trade-alignment audit and problem-solving loop | `{ sub_phase, alignment_round, trades_count?, issues_count?, issues_preview?, findings_count?, findings_preview?, changes_made?, predicted_aligned_after_fix? }` |
 | `analyzing` | After backtest, before narrative | `{ strategy, metrics }` |
 | `paper_trading` | Entering the paper-trading step (publishable winners only) | `{ strategy }` |

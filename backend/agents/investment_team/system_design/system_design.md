@@ -66,7 +66,7 @@ flowchart LR
     CycleWF[StrategyLabCycleWorkflow<br/>per-cycle child workflow]
     SLO["StrategyLabOrchestrator<br/>4-phase pipeline — see architecture.md §11<br/>and generation_pipeline.md"]
     Finalize[finalize_cycle_record_activity<br/>paper-trade + persist]
-    PTA[PaperTradingAgent<br/>post-cycle]
+    PTA[PaperTradingAgent<br/>run_session — post-cycle via Finalize,<br/>or standalone via PaperTradingWorkflow]
     ORCH[InvestmentTeamOrchestrator]
     BatchWF[StrategyLabBatchWorkflow<br/>Temporal-only]
     EventBus[job_event_bus]
@@ -119,7 +119,7 @@ flowchart LR
   BatchWF -->|"progress writes<br/>(persist_run_state_activity)"| B9
   BatchWF --> EventBus
   L2 --> B7
-  L3 --> B7
+  L3 -->|"reconciles run progress<br/>before reading"| B7
   L4 --> BatchWF
   L5 --> BatchWF
   L6 -->|"_active_runs first,<br/>job-service rows merged in"| B9
@@ -127,7 +127,7 @@ flowchart LR
   L8 --> EventBus
   L9 --> B7
   L10 --> B7
-  L11 --> PTA --> B8
+  L11 -->|"PaperTradingWorkflow →<br/>run_paper_trading_activity"| PTA --> B8
   L12 --> B8
   L13 --> B8
 ```
@@ -147,8 +147,8 @@ priority)`:
 | `execution` | Accepted strategies awaiting execution routing | Ad hoc |
 | `escalation` | Rejected / revised strategies needing human review | **Automatic**: any `PromotionDecision` with outcome `reject` or `revise` is enqueued here with `priority="high"` ([`orchestrator.py`](../orchestrator.py):113-117) |
 
-`GET /workflow/queues` ([`api/main.py`](../api/main.py):1830) exposes the
-current contents of every queue; `GET /workflow/status` ([`api/main.py`](../api/main.py):1807)
+`GET /workflow/queues` exposes the
+current contents of every queue; `GET /workflow/status`
 returns the current `WorkflowMode` and the audit log.
 
 ## Orchestrator — promotion gates

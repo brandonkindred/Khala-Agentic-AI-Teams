@@ -8,7 +8,7 @@
 > execution path, and note that `trade_simulator.py` itself survives — it
 > still owns the `compute_metrics` estimator.
 
-**Status:** Spec (pre-implementation, since shipped) · **Author:** Trading Service ·
+**Status:** Shipped (historical spec) · **Author:** Trading Service ·
 **Target branch:** `claude/gifted-kalam` · **Depends on:** PR 1
 (`8be4481 investment_team: unified streaming Trading Service`)
 

@@ -158,7 +158,7 @@ flowchart LR
 |---|---|---|---|
 | Run strategy lab batch | `POST /strategy-lab/run` | `StrategyLabBatchWorkflow` → `SignalIntelligenceExpert` (once/batch) → `StrategyLabCycleWorkflow` → `run_design_attempt_activity` (`DesignAgent`/`DesignReviewAgent`/`CodeSynthesisAgent`/`RefinementAgent`/`TradeAlignmentAgent`/`AnalysisAgent`/`ZeroTradeRepairAgent` + quality gates — see [`generation_pipeline.md`](./generation_pipeline.md)) → `finalize_cycle_record_activity` (`PaperTradingAgent`) | `investment_strategy_lab_records` |
 | Stream run progress | `GET /strategy-lab/runs/{id}/stream` | `job_event_bus` subscription | — |
-| Poll run status | `GET /strategy-lab/runs/{id}/status` | `_active_runs` + `_load_run_from_job_service` | — |
+| Poll run status | `GET /strategy-lab/runs/{id}/status` | `_reconcile_run_progress` → `_active_runs`, falling back to `_load_run_from_job_service` | — |
 | Resume paused run | `POST /strategy-lab/runs/{id}/resume` | `StrategyLabBatchWorkflow` | `investment_strategy_lab_records` |
 | Restart failed run | `POST /strategy-lab/runs/{id}/restart` | `StrategyLabBatchWorkflow` | `investment_strategy_lab_records` |
 | List active runs | `GET /strategy-lab/runs` | `_active_runs` | — |

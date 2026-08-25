@@ -46,11 +46,12 @@ with implementation detail for individual Strategy Lab capabilities:
 - **[`strategy_lab_pipeline.md`](./strategy_lab_pipeline.md)** — the per-cycle
   pipeline as a narrative of stages (ideate → fetch data → backtest → align →
   analyze → optionally paper-trade), the winner gate, and the paper-trade
-  skip/failure paths. Its phase-event table is the *cycle-level* vocabulary,
-  including the `paper_trading*` events that only the thread-mode `on_phase`
-  callback emits — under Temporal-only dispatch a subscriber sees just the
-  four `_PROGRESS_PHASE_MAP` targets
-  (`ideating`/`coding`/`backtesting`/`analyzing`).
+  skip/failure paths. Its phase-event table documents the `on_phase` callback
+  contract, not what a browser receives: under Temporal-only dispatch a
+  subscriber sees only the four `_PROGRESS_PHASE_MAP` targets
+  (`ideating`/`coding`/`backtesting`/`analyzing`), and the `paper_trading*`
+  rows reach no subscriber at all because `finalize_cycle_record_activity`
+  passes `on_phase=None`.
 - **[`generation_pipeline.md`](./generation_pipeline.md)** — what actually
   happens *inside* "ideating" and "backtest" above: the 4-phase contract, the
   design ↔ review loop, the compiled-DSL-vs-custom-code fork, the refinement

@@ -8,8 +8,10 @@ investment team:
 3. [Promotion-gate decision tree](#3-promotion-gate-decision-tree) (flowchart)
 4. [Orchestrator workflow mode](#4-orchestrator-workflow-mode) (state diagram)
 
-Line references point to [`api/main.py`](../api/main.py),
-[`agents.py`](../agents.py), and [`orchestrator.py`](../orchestrator.py).
+Line references point to [`agents.py`](../agents.py) and
+[`orchestrator.py`](../orchestrator.py). Endpoints in
+[`api/main.py`](../api/main.py) are cited by route path rather than line —
+that file changes several times a day, and the route path never goes stale.
 
 ---
 
@@ -28,7 +30,7 @@ sequenceDiagram
     participant LLM as LLM Service
     participant Store as _PersistentDict
 
-    UI->>API: POST /advisor/sessions (L5918)
+    UI->>API: POST /advisor/sessions
     API->>FA: start_session() (agents.py:433)
     FA->>FA: create AdvisorSession<br/>topic = GREETING
     FA-->>API: session + opening question
@@ -36,7 +38,7 @@ sequenceDiagram
     API-->>UI: StartAdvisorSessionResponse
 
     loop While session.status == active
-        UI->>API: POST /advisor/sessions/{id}/messages (L5965)
+        UI->>API: POST /advisor/sessions/{id}/messages
         API->>Store: load session
         API->>FA: handle_message(session, user_msg) (agents.py:449)
         FA->>FA: _extract_topic_data(current_topic, msg)<br/>(regex-heavy, agents.py:615-881)
@@ -51,7 +53,7 @@ sequenceDiagram
         API-->>UI: SendAdvisorMessageResponse
     end
 
-    UI->>API: POST /advisor/sessions/{id}/complete (L6055)
+    UI->>API: POST /advisor/sessions/{id}/complete
     API->>FA: build_ips(session) (agents.py:509)
     FA->>FA: CollectedProfileData → InvestmentProfile → IPS
     FA-->>API: IPS
@@ -99,12 +101,12 @@ sequenceDiagram
     participant RunStore as investment_strategy_lab_runs<br/>(direct JobServiceClient)
     participant Bus as job_event_bus
 
-    Client->>API: POST /strategy-lab/run (L3024)
+    Client->>API: POST /strategy-lab/run
     API->>BatchWF: start_workflow (503 if Temporal unreachable)
     API-->>Client: StrategyLabRunStartResponse (run_id)
 
     opt Real-time subscription
-        Client->>API: GET /strategy-lab/runs/{run_id}/stream (L4300)
+        Client->>API: GET /strategy-lab/runs/{run_id}/stream
         API->>Bus: subscribe(run_id)
     end
 
@@ -195,7 +197,7 @@ sequenceDiagram
   `_compute_signal_brief_snapshot`, which returns a null brief with
   `skipped_reason="signal_expert_disabled"`, so the LLM call is what's
   actually avoided.
-- Polling clients can use `GET /strategy-lab/runs/{run_id}/status` (L4259)
+- Polling clients can use `GET /strategy-lab/runs/{run_id}/status`
   instead of SSE — both surfaces read the same reconciled data.
 
 ---
@@ -211,7 +213,7 @@ the `escalation` queue in
 
 ```mermaid
 flowchart TD
-    START([POST /promotions/decide<br/>L1674]) --> G1{Gate 1<br/>Separation of duties<br/>proposer_id ≠ approver.agent_id?}
+    START([POST /promotions/decide]) --> G1{Gate 1<br/>Separation of duties<br/>proposer_id ≠ approver.agent_id?}
     G1 -- No --> REJ1[outcome = reject<br/>gate: separation_of_duties = fail]
     G1 -- Yes --> G2{Gate 2<br/>Risk veto?}
     G2 -- Yes --> REJ2[outcome = reject<br/>gate: risk_veto = fail]
@@ -253,7 +255,7 @@ transitions defined on the orchestrator but only exercised by tests).
 
 ```mermaid
 stateDiagram-v2
-    [*] --> monitor_only : WorkflowState() default<br/>(orchestrator.py:50)<br/>instantiated at api/main.py:287
+    [*] --> monitor_only : WorkflowState() default<br/>(orchestrator.py:50)<br/>instantiated at module import in api/main.py
 
     monitor_only --> monitor_only : GET /workflow/status<br/>(read-only)
 
@@ -281,11 +283,11 @@ stateDiagram-v2
 **Key notes**
 
 - **Current behavior.** `_workflow_state = WorkflowState()` is created once
-  at module import ([`api/main.py`](../api/main.py):287) and the dataclass
+  at module import in [`api/main.py`](../api/main.py) and the dataclass
   default pins `mode = WorkflowMode.MONITOR_ONLY`
   ([`orchestrator.py`](../orchestrator.py):50). `GET /workflow/status`
-  ([`api/main.py`](../api/main.py):1807) and `GET /workflow/queues`
-  ([`api/main.py`](../api/main.py):1830) are the only endpoints that touch
+  and `GET /workflow/queues`
+  (both in [`api/main.py`](../api/main.py)) are the only endpoints that touch
   it, and both are read-only.
 - **What is defined but not called.** `InvestmentTeamOrchestrator.bootstrap`
   ([`orchestrator.py`](../orchestrator.py):69-71) (which would copy

@@ -549,7 +549,7 @@ of the whole document:
    `LiveStream` + `Resampler` from a live adapter (paper). All three emit the
    same `BarEvent … EndOfStreamEvent` sequence.
 4. **Pull into the engine** — `TradingService.run` drives a `while True` loop
-   (in `TradingService.run`) that calls `event = next(event_iter, None)`
+   that calls `event = next(event_iter, None)`
    **once per iteration, one bar at a time**, breaking on
    `None`/`EndOfStreamEvent`. The engine never holds the whole series —
    it only ever sees the current bar (plus a parent-side `next_bar` peek used by

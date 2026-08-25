@@ -52,7 +52,7 @@ flowchart TB
 
     subgraph batch_agents[Batch-level Agents — investment_team/]
       SIE[SignalIntelligenceExpert<br/>signal_intelligence_agent.py<br/>runs once per batch, not per cycle —<br/>a multi-batch run sees a fresh brief each<br/>batch by design; a mid-batch resume can<br/>also re-run it within one batch]
-      PTA["PaperTradingAgent<br/>paper_trading_agent.py<br/>post-cycle from Finalize, or standalone<br/>from POST /strategy-lab/paper-trade —<br/>never inside orchestrator.py"]
+      PTA["PaperTradingAgent<br/>paper_trading_agent.py<br/>run_session — reached from Finalize, or via<br/>PaperTradingWorkflow for the standalone<br/>endpoint; never inside orchestrator.py"]
     end
 
     subgraph orch[Orchestration — orchestrator.py]
@@ -128,7 +128,8 @@ flowchart TB
   CycleWF -->|"assembled record"| BatchWF
   BatchWF -->|"after awaiting the wave's child workflows"| Finalize
   Finalize --> PTA
-  LabEP -.->|"POST /strategy-lab/paper-trade (standalone,<br/>bypasses BatchWF/Finalize)"| PTA
+  LabEP -.->|"POST /strategy-lab/paper-trade — standalone,<br/>bypasses BatchWF/Finalize"| PTWF["PaperTradingWorkflow<br/>→ run_paper_trading_activity"]
+  PTWF --> PTA
 
   ORCH --> PG
   ORCH --> PGate
@@ -200,12 +201,12 @@ permission is not checked here at all; it is handled later and more softly, by
 checklist"), which records a `WARN` and downgrades the outcome to `paper`
 rather than rejecting.
 When a proposal is run through `POST /proposals/{proposal_id}/validate`
-([`api/main.py`](../api/main.py):1174-1224) the guardian returns a structured
+(`validate_proposal` in [`api/main.py`](../api/main.py)) the guardian returns a structured
 list of violations that the caller is expected to gate on before acting.
 
 **Scope of enforcement (today).** The guardian is only invoked by the
 proposal-validation endpoint. It is **not** automatically applied by
-`POST /memos` ([`api/main.py`](../api/main.py):1859-1899) — that endpoint calls
+`POST /memos` (`create_memo` in [`api/main.py`](../api/main.py)) — that endpoint calls
 `InvestmentCommitteeAgent.draft_memo` directly — nor by `POST /promotions/decide`,
 which consumes a `ValidationReport` rather than a `PortfolioProposal`. In
 practice, enforcement is the caller's responsibility: validate the proposal
@@ -239,13 +240,14 @@ See [`flow_charts.md`](./flow_charts.md) for the decision tree.
 ### 5. Safe-by-default workflow mode
 
 The API module constructs a single process-wide `WorkflowState()` at
-import time ([`api/main.py`](../api/main.py):287). `WorkflowState` is a
+import time (`_workflow_state = WorkflowState()` in
+[`api/main.py`](../api/main.py)). `WorkflowState` is a
 dataclass whose `mode` field defaults to `WorkflowMode.MONITOR_ONLY`
 ([`orchestrator.py`](../orchestrator.py):50), so the running system always
 boots in `monitor_only` regardless of any user's `IPS.default_mode`. The only
 endpoints that expose the workflow state are the read-only
-`GET /workflow/status` ([`api/main.py`](../api/main.py):1807) and
-`GET /workflow/queues` ([`api/main.py`](../api/main.py):1830).
+`GET /workflow/status` and `GET /workflow/queues`
+(both in [`api/main.py`](../api/main.py) — grep the route path).
 
 **What is designed but not wired.** `InvestmentTeamOrchestrator.bootstrap`
 ([`orchestrator.py`](../orchestrator.py):69-71) — which would copy
