@@ -683,8 +683,8 @@ def test_make_phase_job_updater_forced_phase_overrides_caller_kwarg(monkeypatch)
     assert written[-1]["status_text"] == "collide"
 
 
-def test_make_phase_job_updater_swallows_store_errors(monkeypatch):
-    """update_job errors are swallowed (observability only, never raises)."""
+def test_make_phase_job_updater_swallows_store_errors(monkeypatch, caplog):
+    """update_job errors are swallowed (never raise) but logged for observability."""
     import software_engineering_team.orchestrator as se_orch
 
     forced_updater = se_orch._make_phase_job_updater(
@@ -700,7 +700,11 @@ def test_make_phase_job_updater_swallows_store_errors(monkeypatch):
         raise RuntimeError("store unavailable")
 
     monkeypatch.setattr(se_orch, "update_job", _raise)
-    forced_updater(status_text="should not raise")
+    with caplog.at_level(logging.WARNING, logger=se_orch.logger.name):
+        forced_updater(status_text="should not raise")
+
+    assert "j-forced" in caplog.text
+    assert "store unavailable" in caplog.text
 
 
 # ---------------------------------------------------------------------------
