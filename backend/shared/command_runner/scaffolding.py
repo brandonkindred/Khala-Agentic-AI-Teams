@@ -439,8 +439,8 @@ import { BrowserDynamicTestingModule, platformBrowserDynamicTesting } from '@ang
 getTestBed().initTestEnvironment(BrowserDynamicTestingModule, platformBrowserDynamicTesting());
 """
 
-# Public aliases: frontend_code_v2_team's Setup phase (a consumer outside this
-# package) writes these same lint/test config templates into agent-generated
+# Public aliases: codegen_team's frontend-stack Setup phase (a consumer outside
+# this package) writes these same lint/test config templates into agent-generated
 # projects when they're missing, so they need a non-underscore, importable name.
 MINIMAL_REACT_ESLINT_CONFIG = _MINIMAL_REACT_ESLINT_CONFIG
 MINIMAL_REACT_VITEST_CONFIG = _MINIMAL_REACT_VITEST_CONFIG

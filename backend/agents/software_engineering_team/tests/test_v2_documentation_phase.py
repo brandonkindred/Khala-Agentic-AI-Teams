@@ -37,27 +37,27 @@ def _frontend_task(**overrides):
 
 def _execution_result(files, *, team="backend_code_v2_team"):
     if team == "backend_code_v2_team":
-        from software_engineering_team.backend_code_v2_team.models import ExecutionResult
+        from software_engineering_team.codegen_team.models import ExecutionResult
     else:
-        from software_engineering_team.frontend_code_v2_team.models import ExecutionResult
+        from software_engineering_team.codegen_team.models import ExecutionResult
 
     return ExecutionResult(files=files)
 
 
 def _planning_result(*, language="python", team="backend_code_v2_team"):
     if team == "backend_code_v2_team":
-        from software_engineering_team.backend_code_v2_team.models import PlanningResult
+        from software_engineering_team.codegen_team.models import PlanningResult
     else:
-        from software_engineering_team.frontend_code_v2_team.models import PlanningResult
+        from software_engineering_team.codegen_team.models import PlanningResult
 
     return PlanningResult(language=language)
 
 
 def _issue(*, file_path="x.py", team="backend_code_v2_team", **overrides):
     if team == "backend_code_v2_team":
-        from software_engineering_team.backend_code_v2_team.models import ReviewIssue
+        from software_engineering_team.codegen_team.models import ReviewIssue
     else:
-        from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
+        from software_engineering_team.codegen_team.models import ReviewIssue
 
     base = dict(
         source="documentation", severity="low", description="missing docstring", file_path=file_path
@@ -67,7 +67,7 @@ def _issue(*, file_path="x.py", team="backend_code_v2_team", **overrides):
 
 
 def test_run_documentation_phase_no_agent(tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.backend.profile import (
         run_documentation_phase,
     )
 
@@ -83,8 +83,8 @@ def test_run_documentation_phase_no_agent(tmp_path: Path):
 
 
 def test_run_documentation_phase_missing_methods(tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.backend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.stacks.backend.profile import (
         run_documentation_phase,
     )
 
@@ -101,11 +101,11 @@ def test_run_documentation_phase_missing_methods(tmp_path: Path):
 
 
 def test_run_documentation_phase_clean_review(tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
-    from software_engineering_team.backend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.backend.profile import (
         run_documentation_phase,
     )
 
@@ -125,8 +125,8 @@ def test_run_documentation_phase_clean_review(tmp_path: Path):
 
 
 def test_run_documentation_phase_review_raises(tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.backend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.stacks.backend.profile import (
         run_documentation_phase,
     )
 
@@ -147,11 +147,11 @@ def test_run_documentation_phase_review_raises(tmp_path: Path):
 
 
 def test_run_documentation_phase_problem_solve_raises(tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
-    from software_engineering_team.backend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.backend.profile import (
         run_documentation_phase,
     )
 
@@ -171,11 +171,11 @@ def test_run_documentation_phase_problem_solve_raises(tmp_path: Path):
 
 
 def test_run_documentation_phase_writes_files(tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
-    from software_engineering_team.backend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.backend.profile import (
         run_documentation_phase,
     )
 
@@ -205,11 +205,11 @@ def test_run_documentation_phase_writes_files(tmp_path: Path):
 
 def test_run_documentation_phase_problem_solve_no_files(tmp_path: Path):
     """If problem_solve returns no files, we stop iterating."""
-    from software_engineering_team.backend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
-    from software_engineering_team.backend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.backend.profile import (
         run_documentation_phase,
     )
 
@@ -230,11 +230,11 @@ def test_run_documentation_phase_problem_solve_no_files(tmp_path: Path):
 
 def test_run_documentation_phase_max_iterations(tmp_path: Path):
     """If review keeps finding issues, stops at max_iterations."""
-    from software_engineering_team.backend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
-    from software_engineering_team.backend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.backend.profile import (
         run_documentation_phase,
     )
 
@@ -280,7 +280,7 @@ def test_write_files_strips_leading_slash(tmp_path: Path):
 
 
 def test_fe_run_documentation_phase_no_agent(tmp_path: Path):
-    from software_engineering_team.frontend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.frontend.profile import (
         run_documentation_phase,
     )
 
@@ -296,8 +296,8 @@ def test_fe_run_documentation_phase_no_agent(tmp_path: Path):
 
 
 def test_fe_run_documentation_phase_missing_methods(tmp_path: Path):
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.frontend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.stacks.frontend.profile import (
         run_documentation_phase,
     )
 
@@ -314,11 +314,11 @@ def test_fe_run_documentation_phase_missing_methods(tmp_path: Path):
 
 
 def test_fe_run_documentation_phase_clean_review(tmp_path: Path):
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
-    from software_engineering_team.frontend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.frontend.profile import (
         run_documentation_phase,
     )
 
@@ -338,8 +338,8 @@ def test_fe_run_documentation_phase_clean_review(tmp_path: Path):
 
 
 def test_fe_run_documentation_phase_review_raises(tmp_path: Path):
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.frontend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.stacks.frontend.profile import (
         run_documentation_phase,
     )
 
@@ -359,11 +359,11 @@ def test_fe_run_documentation_phase_review_raises(tmp_path: Path):
 
 
 def test_fe_run_documentation_phase_problem_solve_raises(tmp_path: Path):
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
-    from software_engineering_team.frontend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.frontend.profile import (
         run_documentation_phase,
     )
 
@@ -385,11 +385,11 @@ def test_fe_run_documentation_phase_problem_solve_raises(tmp_path: Path):
 
 
 def test_fe_run_documentation_phase_writes_files(tmp_path: Path):
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
-    from software_engineering_team.frontend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.frontend.profile import (
         run_documentation_phase,
     )
 
@@ -417,11 +417,11 @@ def test_fe_run_documentation_phase_writes_files(tmp_path: Path):
 
 def test_fe_run_documentation_phase_problem_solve_no_files(tmp_path: Path):
     """If problem_solve returns no files, we stop iterating (frontend binding)."""
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
-    from software_engineering_team.frontend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.frontend.profile import (
         run_documentation_phase,
     )
 
@@ -444,11 +444,11 @@ def test_fe_run_documentation_phase_problem_solve_no_files(tmp_path: Path):
 
 def test_fe_run_documentation_phase_max_iterations(tmp_path: Path):
     """If review keeps finding issues, stops at max_iterations (frontend binding)."""
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         ToolAgentKind,
         ToolAgentPhaseOutput,
     )
-    from software_engineering_team.frontend_code_v2_team.phases._profile import (
+    from software_engineering_team.codegen_team.stacks.frontend.profile import (
         run_documentation_phase,
     )
 

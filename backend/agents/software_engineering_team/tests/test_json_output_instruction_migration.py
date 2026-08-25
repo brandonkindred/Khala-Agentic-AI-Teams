@@ -15,6 +15,25 @@ from software_engineering_team.accessibility_agent.prompts import ACCESSIBILITY_
 from software_engineering_team.architect_agents.architecture_expert.prompts import (
     ARCHITECTURE_PROMPT,
 )
+from software_engineering_team.codegen_team.tool_agents.frontend.accessibility.agent import (
+    ACCESSIBILITY_REVIEW_PROMPT,
+)
+from software_engineering_team.codegen_team.tool_agents.frontend.architecture.agent import (
+    FRONTEND_ARCHITECT_PROMPT,
+)
+from software_engineering_team.codegen_team.tool_agents.frontend.branding_theme.agent import (
+    DESIGN_SYSTEM_PLAN_PROMPT,
+)
+from software_engineering_team.codegen_team.tool_agents.frontend.performance.agent import (
+    PERFORMANCE_REVIEW_PROMPT,
+)
+from software_engineering_team.codegen_team.tool_agents.frontend.ui_design.agent import (
+    UI_DESIGNER_PLAN_PROMPT,
+)
+from software_engineering_team.codegen_team.tool_agents.frontend.ux_usability.agent import (
+    UX_DESIGNER_PLAN_PROMPT,
+    UX_ENGINEER_REVIEW_PROMPT,
+)
 from software_engineering_team.devops_team.cicd_pipeline_agent.prompts import (
     CICD_PIPELINE_PROMPT,
 )
@@ -25,25 +44,6 @@ from software_engineering_team.devops_team.doc_runbook_agent.prompts import DOC_
 from software_engineering_team.devops_team.iac_agent.prompts import IAC_AGENT_PROMPT
 from software_engineering_team.devops_team.task_clarifier.prompts import (
     DEVOPS_TASK_CLARIFIER_PROMPT,
-)
-from software_engineering_team.frontend_code_v2_team.tool_agents.accessibility.agent import (
-    ACCESSIBILITY_REVIEW_PROMPT,
-)
-from software_engineering_team.frontend_code_v2_team.tool_agents.architecture.agent import (
-    FRONTEND_ARCHITECT_PROMPT,
-)
-from software_engineering_team.frontend_code_v2_team.tool_agents.branding_theme.agent import (
-    DESIGN_SYSTEM_PLAN_PROMPT,
-)
-from software_engineering_team.frontend_code_v2_team.tool_agents.performance.agent import (
-    PERFORMANCE_REVIEW_PROMPT,
-)
-from software_engineering_team.frontend_code_v2_team.tool_agents.ui_design.agent import (
-    UI_DESIGNER_PLAN_PROMPT,
-)
-from software_engineering_team.frontend_code_v2_team.tool_agents.ux_usability.agent import (
-    UX_DESIGNER_PLAN_PROMPT,
-    UX_ENGINEER_REVIEW_PROMPT,
 )
 from software_engineering_team.integration_team.prompts import INTEGRATION_PROMPT
 from software_engineering_team.problem_solver_agent.prompts import PROBLEM_SOLVER_PROMPT

@@ -143,7 +143,7 @@ def _run_frontend_code_v2_impl(
     """Same logic as _run_frontend_code_v2_background without starting a thread."""
     from llm_service import get_client
     from shared.dev_models.models import TaskType
-    from software_engineering_team.frontend_code_v2_team import FrontendCodeV2TeamLead
+    from software_engineering_team.codegen_team import CodegenTeamLead
 
     _run_code_v2_impl(
         job_id,
@@ -153,7 +153,7 @@ def _run_frontend_code_v2_impl(
         task_type=TaskType.FRONTEND,
         assignee="frontend-code-v2",
         id_prefix="fv2",
-        team_lead_factory=lambda: FrontendCodeV2TeamLead(get_client("frontend")),
+        team_lead_factory=lambda: CodegenTeamLead(get_client("frontend"), stack="frontend"),
     )
 
 
@@ -191,7 +191,7 @@ def _run_backend_code_v2_impl(
     """Same logic as _run_backend_code_v2_background without starting a thread."""
     from llm_service import get_client
     from shared.dev_models.models import TaskType
-    from software_engineering_team.backend_code_v2_team import BackendCodeV2TeamLead
+    from software_engineering_team.codegen_team import CodegenTeamLead
 
     _run_code_v2_impl(
         job_id,
@@ -201,7 +201,7 @@ def _run_backend_code_v2_impl(
         task_type=TaskType.BACKEND,
         assignee="backend-code-v2",
         id_prefix="bv2",
-        team_lead_factory=lambda: BackendCodeV2TeamLead(get_client("backend")),
+        team_lead_factory=lambda: CodegenTeamLead(get_client("backend"), stack="backend"),
     )
 
 

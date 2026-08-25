@@ -6,7 +6,7 @@ import json
 
 
 def _fe_microtask():
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         Microtask,
         ToolAgentKind,
     )
@@ -15,7 +15,7 @@ def _fe_microtask():
 
 
 def _fe_phase_input(**kwargs):
-    from software_engineering_team.frontend_code_v2_team.models import (
+    from software_engineering_team.codegen_team.models import (
         Phase,
         ToolAgentPhaseInput,
     )
@@ -34,7 +34,7 @@ def _fe_phase_input(**kwargs):
 
 
 def _fe_tool_input():
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentInput
+    from software_engineering_team.codegen_team.models import ToolAgentInput
 
     return ToolAgentInput(
         microtask=_fe_microtask(),
@@ -46,7 +46,7 @@ def _fe_tool_input():
 
 
 def _fe_review_issue(**kwargs):
-    from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
+    from software_engineering_team.codegen_team.models import ReviewIssue
 
     base = dict(
         source="accessibility", severity="medium", description="d", file_path="", recommendation=""
@@ -78,7 +78,7 @@ def _patch(monkeypatch, mod, response="{}", raise_exc=None):
 
 class TestAccessibility:
     def _agent(self):
-        from software_engineering_team.frontend_code_v2_team.tool_agents.accessibility import (
+        from software_engineering_team.codegen_team.tool_agents.frontend.accessibility import (
             agent as mod,
         )
 
@@ -192,7 +192,7 @@ class TestAccessibility:
 
 class TestPerformance:
     def _agent(self):
-        from software_engineering_team.frontend_code_v2_team.tool_agents.performance import (
+        from software_engineering_team.codegen_team.tool_agents.frontend.performance import (
             agent as mod,
         )
 
@@ -279,7 +279,7 @@ class TestPerformance:
 
 class TestUxUsability:
     def _agent(self):
-        from software_engineering_team.frontend_code_v2_team.tool_agents.ux_usability import (
+        from software_engineering_team.codegen_team.tool_agents.frontend.ux_usability import (
             agent as mod,
         )
 
@@ -386,7 +386,7 @@ def test_accessibility_review_uses_json_mode_model(monkeypatch) -> None:
     """The review path must route through ``_model_json`` so a prose
     response from the LLM is biased toward returning JSON; routing it
     through ``_model`` (text mode) would silently drop WCAG findings."""
-    from software_engineering_team.frontend_code_v2_team.tool_agents.accessibility import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.accessibility import (
         agent as mod,
     )
 
@@ -407,7 +407,7 @@ def test_accessibility_review_uses_json_mode_model(monkeypatch) -> None:
 
 
 def test_performance_review_uses_json_mode_model(monkeypatch) -> None:
-    from software_engineering_team.frontend_code_v2_team.tool_agents.performance import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.performance import (
         agent as mod,
     )
 
@@ -426,7 +426,7 @@ def test_performance_review_uses_json_mode_model(monkeypatch) -> None:
 
 def test_ux_usability_plan_and_review_use_json_mode_model(monkeypatch) -> None:
     """Both plan() and review() on UX usability ask for strict JSON."""
-    from software_engineering_team.frontend_code_v2_team.tool_agents.ux_usability import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.ux_usability import (
         agent as mod,
     )
 
@@ -452,13 +452,13 @@ def test_a11y_perf_ux_constructor_resolves_both_models_with_distinct_modes(monke
     ``_model_json``. Verified by recording every ``response_format``
     requested at the resolver boundary so we lock in the JSON path
     cannot silently fall back to text mode for the review/plan calls."""
-    from software_engineering_team.frontend_code_v2_team.tool_agents.accessibility import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.accessibility import (
         agent as a11y_mod,
     )
-    from software_engineering_team.frontend_code_v2_team.tool_agents.performance import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.performance import (
         agent as perf_mod,
     )
-    from software_engineering_team.frontend_code_v2_team.tool_agents.ux_usability import (
+    from software_engineering_team.codegen_team.tool_agents.frontend.ux_usability import (
         agent as ux_mod,
     )
 
