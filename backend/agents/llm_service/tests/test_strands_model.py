@@ -9,7 +9,7 @@ cover their extra client-resolution/fallback behavior, not this tail.
 
 from __future__ import annotations
 
-from llm_service.strands_model import model_fingerprint
+from llm_service.strands_model import model_fingerprint, run_strands_agent
 
 
 class _Bare:
@@ -102,3 +102,50 @@ def test_model_fingerprint_survives_config_that_raises() -> None:
             raise RuntimeError("no touching")
 
     assert model_fingerprint(_AngryConfig()) == "_AngryConfig"
+
+
+class _RecordingAgentFactory:
+    """Callable ``Agent`` stand-in: records the kwargs it is built with."""
+
+    def __init__(self) -> None:
+        self.build_kwargs: list[dict] = []
+
+    def __call__(self, **kwargs):
+        self.build_kwargs.append(kwargs)
+
+        def _run(prompt: str) -> str:
+            return f"resp:{prompt}"
+
+        return _run
+
+
+def test_run_strands_agent_omits_system_prompt_by_default() -> None:
+    """No system_prompt_content -> agent built exactly as before this kwarg existed."""
+    factory = _RecordingAgentFactory()
+    model = object()
+
+    result = run_strands_agent(factory, model, "hello")
+
+    assert result == "resp:hello"
+    assert factory.build_kwargs == [{"model": model}]
+
+
+def test_run_strands_agent_passes_system_prompt_content_as_system_prompt() -> None:
+    factory = _RecordingAgentFactory()
+    model = object()
+    content = ["shared system segment"]
+
+    result = run_strands_agent(factory, model, "hello", system_prompt_content=content)
+
+    assert result == "resp:hello"
+    assert factory.build_kwargs == [{"model": model, "system_prompt": content}]
+
+
+def test_run_strands_agent_omits_system_prompt_when_content_is_empty_list() -> None:
+    """An empty (falsy) list is treated the same as None -- no system_prompt kwarg."""
+    factory = _RecordingAgentFactory()
+    model = object()
+
+    run_strands_agent(factory, model, "hello", system_prompt_content=[])
+
+    assert factory.build_kwargs == [{"model": model}]

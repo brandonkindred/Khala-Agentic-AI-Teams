@@ -328,6 +328,14 @@ class ToolAgentPhaseInput(BaseModel):
         default=None, description="Pre-merge quality gate: linting tool agent"
     )
     lint_agent_type: str = Field(default="", description="Pre-merge quality gate: lint agent_type")
+    shared_review_context: Optional[List[Any]] = Field(
+        default=None,
+        description=(
+            "Once-per-microtask CacheBreakpoint system_prompt_content shared across "
+            "wired tool agents' review() calls (see "
+            "shared.tool_agent_base.build_shared_tool_agent_review_system_content)"
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
