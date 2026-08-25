@@ -230,16 +230,25 @@ def test_fe_detect_tooling_real_npm_test_script(tmp_path: Path):
     assert has_lint and has_test
 
 
-def test_fe_detect_tooling_rejects_placeholder_and_unparseable(tmp_path: Path):
+@pytest.mark.parametrize(
+    "package_json_content",
+    [
+        pytest.param('{"scripts": {"test": "echo \'no tests\'"}}', id="placeholder_script"),
+        pytest.param("not json {", id="unparseable_json"),
+    ],
+)
+def test_fe_detect_tooling_rejects_placeholder_and_unparseable(
+    tmp_path: Path, package_json_content: str
+):
     """A 'no test'/placeholder script and an unparseable package.json both yield no test."""
     from software_engineering_team.codegen_team.orchestrator import (
         CodegenDevelopmentAgent,
     )
 
     (tmp_path / "eslint.config.js").write_text("")
-    (tmp_path / "package.json").write_text("not json {")
+    (tmp_path / "package.json").write_text(package_json_content)
     has_lint, has_test = CodegenDevelopmentAgent(MagicMock(), "frontend")._detect_tooling(tmp_path)
-    assert has_lint and not has_test  # unparseable package.json → no test detected
+    assert has_lint and not has_test
 
 
 # ---------------------------------------------------------------------------
