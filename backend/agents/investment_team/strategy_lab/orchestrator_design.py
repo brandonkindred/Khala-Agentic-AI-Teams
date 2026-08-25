@@ -689,12 +689,15 @@ class DesignMixin:
                 regime_summary=regime_summary,
             )
             spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
-            spec = self._enforce_selected_asset_category(
+            spec, rationale = self._reconcile_asset_category(
                 spec,
+                rationale,
                 selected_category=selected_category,
                 review_round=-1,
                 emit=emit,
                 drift_collector=drift_collector,
+                config=config,
+                strategy_id=strategy_id,
             )
 
             # ═══ Phase 1 → 2 transition: DESIGN → DESIGN_REVIEW ═══════════
@@ -753,6 +756,7 @@ class DesignMixin:
                 review_round=len(critique_history),
                 emit=emit,
                 drift_collector=drift_collector,
+                config=config,
             )
             emit(
                 "designing",
@@ -964,12 +968,15 @@ class DesignMixin:
                 drift_collector=drift_collector,
                 skip_self_review=skip_self_review,
             )
-            spec = self._enforce_selected_asset_category(
+            spec, rationale = self._reconcile_asset_category(
                 spec,
+                rationale,
                 selected_category=selected_category,
                 review_round=review_round,
                 emit=emit,
                 drift_collector=drift_collector,
+                config=config,
+                strategy_id=strategy_id,
             )
 
         loop_telemetry = _design_loop_telemetry_summary(
@@ -1294,6 +1301,136 @@ class DesignMixin:
         """
         return build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
 
+    def _reconcile_asset_category(
+        self,
+        spec: StrategySpec,
+        rationale: str,
+        *,
+        selected_category: Optional[str],
+        review_round: int,
+        emit: PhaseCallback,
+        drift_collector: Optional[_DriftCollector],
+        config: BacktestConfig,
+        strategy_id: str,
+    ) -> Tuple[StrategySpec, str]:
+        """Correct a category-pin violation by regenerating the spec, not
+        just relabeling it.
+
+        A mismatched ``asset_class`` usually means the *entire* draft was
+        authored for the wrong category — hypothesis, signal definition,
+        rules, and rationale all tell a story for that category, not
+        ``selected_category``. Only overwriting ``asset_class`` (and
+        clearing ``target_symbols``) would leave that narrative intact and
+        backtest it under a different asset class's default universe,
+        attributing results to the wrong thesis. This spends one real
+        ``DesignAgent.revise`` call — outside the bounded round loop's own
+        ``critique_history``/``CritiqueLedger`` accounting, since it is a
+        pin-violation correction, not a design-quality review round — asking
+        the designer to rebuild the whole spec for ``selected_category``.
+
+        Preconditions:
+          - ``selected_category`` is ``None`` or one of
+            :data:`PROMPT_ASSET_CLASSES`.
+
+        Postconditions:
+          - Returns ``(spec, rationale)`` unchanged when ``selected_category``
+            is ``None`` or ``spec``'s normalized asset class already matches.
+          - Otherwise calls ``self.design_agent.revise`` once with a
+            corrective critique. If the regenerated spec matches
+            ``selected_category``, returns it (with its new rationale) and
+            emits a ``design_repair`` event. If the regeneration itself
+            still violates the pin, falls back to
+            :meth:`_enforce_selected_asset_category` (deterministic
+            relabel) on the regenerated spec as a bounded last resort — this
+            method never retries the LLM more than once, so the pin is
+            always satisfied deterministically within one extra call.
+          - Propagates :class:`DesignBudgetExhausted` (annotated with the
+            pre-regeneration ``spec``/``rationale`` so a trip here still
+            yields a well-formed short-circuit record via the caller's
+            existing handler, which itself runs the mismatched pre-
+            regeneration spec through :meth:`_enforce_selected_asset_category`).
+        """
+        if selected_category is None:
+            return spec, rationale
+        actual = normalize_asset_class(spec.asset_class)
+        if actual == selected_category:
+            return spec, rationale
+        logger.warning(
+            "Design agent emitted asset_class=%r outside the category %r pinned for this "
+            "design attempt; requesting a corrective regeneration.",
+            spec.asset_class,
+            selected_category,
+        )
+        correction = SpecCritique(
+            ready=False,
+            rationale=(
+                f"This spec's asset_class ({actual}) violates the category pinned for "
+                f"this design attempt ({selected_category})."
+            ),
+            issues=[
+                CritiqueIssue(
+                    field="asset_class",
+                    description=(
+                        f"Rebuild the ENTIRE strategy for asset_class={selected_category}: "
+                        "hypothesis, signal_definition, entry/exit rules, and "
+                        f"target_symbols must all target {selected_category}, not "
+                        f"{actual} — do not just relabel the {actual} thesis."
+                    ),
+                )
+            ],
+        )
+        prev_spec = spec.model_copy(deep=True)
+        try:
+            strategy_dict, new_rationale = self.design_agent.revise(
+                spec, correction, prior_critiques=None, skip_self_review=False
+            )
+        except DesignBudgetExhausted as exc:
+            _annotate_budget_exhaustion(exc, spec, rationale=rationale, mechanical_repair_count=0)
+            raise
+        regenerated = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
+        regenerated_actual = normalize_asset_class(regenerated.asset_class)
+        if regenerated_actual != selected_category:
+            # The corrective revision itself still violated the pin — fall
+            # back to the deterministic relabel rather than spending more
+            # budget chasing convergence; the invariant must hold either way.
+            spec = self._enforce_selected_asset_category(
+                regenerated,
+                selected_category=selected_category,
+                review_round=review_round,
+                emit=emit,
+                drift_collector=drift_collector,
+                config=config,
+            )
+            return spec, new_rationale
+        readiness_results = self.spec_readiness_gate.validate(
+            regenerated, phase="design", backtest_config=config
+        )
+        emit(
+            "design_repair",
+            {
+                "round": review_round,
+                "actions": [
+                    {
+                        "rule": "asset_category_pin",
+                        "field": "asset_class",
+                        "before": actual,
+                        "after": selected_category,
+                        "reason": "regenerated via a corrective revision for the pinned category",
+                    }
+                ],
+                "now_ready": not _has_critical_failures(readiness_results),
+            },
+        )
+        if drift_collector is not None:
+            drift_collector.record_spec_change(
+                phase="design",
+                agent="AssetCategoryEnforcement",
+                before_spec=prev_spec,
+                after_spec=regenerated,
+                reason="regenerated to match the category pinned for this design attempt",
+            )
+        return regenerated, new_rationale
+
     def _enforce_selected_asset_category(
         self,
         spec: StrategySpec,
@@ -1302,19 +1439,19 @@ class DesignMixin:
         review_round: int,
         emit: PhaseCallback,
         drift_collector: Optional[_DriftCollector],
+        config: BacktestConfig,
     ) -> StrategySpec:
         """Deterministically pin ``spec.asset_class`` to the category selected
         for this design attempt.
 
-        The design/review prompts instruct the LLM to use only
-        ``selected_category`` (see ``select_asset_category`` in
-        ``_run_design_loop``, and the "MANDATORY EXCLUSION" rule appended to
-        every prompt), but neither the initial generation nor a ``revise``
-        round is guaranteed to honor a prompt-only instruction. This is the
-        deterministic backstop: a strategy must never persist in an asset
-        category the user did not select for this attempt, so a mismatched
-        output is corrected here rather than trusted, mirroring the
-        deterministic mechanical-repair pattern
+        Last-resort backstop used where a real corrective regeneration isn't
+        possible or didn't converge: the budget-exhausted fallback spec (no
+        LLM budget left to call ``revise`` again — see the ``except
+        DesignBudgetExhausted`` handler in ``_run_design_loop``), and as
+        :meth:`_reconcile_asset_category`'s own fallback when its one
+        corrective ``revise`` call still returns the wrong category. A
+        mismatched output is corrected here rather than trusted, mirroring
+        the deterministic mechanical-repair pattern
         (:func:`..mechanical_repair.repair_spec`) already used elsewhere in
         this loop for other structural violations.
 
@@ -1337,8 +1474,10 @@ class DesignMixin:
             inconsistent request. Clearing it falls back to that class's
             default symbol universe (the same fallback an empty
             ``target_symbols`` already triggers for every other spec).
-            Emits a ``design_repair`` event describing the correction(s) and
-            records the change on ``drift_collector`` when one is present.
+            Emits a ``design_repair`` event — ``now_ready`` reflects a fresh
+            :attr:`spec_readiness_gate` validation of the corrected spec, not
+            an assumption — and records the change on ``drift_collector``
+            when one is present.
         """
         if selected_category is None:
             return spec
@@ -1377,12 +1516,15 @@ class DesignMixin:
             )
             updates["target_symbols"] = []
         spec = spec.model_copy(update=updates)
+        readiness_results = self.spec_readiness_gate.validate(
+            spec, phase="design", backtest_config=config
+        )
         emit(
             "design_repair",
             {
                 "round": review_round,
                 "actions": actions,
-                "now_ready": True,
+                "now_ready": not _has_critical_failures(readiness_results),
             },
         )
         if drift_collector is not None:
