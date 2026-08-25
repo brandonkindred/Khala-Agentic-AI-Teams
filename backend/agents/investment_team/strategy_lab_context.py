@@ -6,11 +6,14 @@ Used by strategy ideation and signal intelligence to avoid circular imports.
 
 from __future__ import annotations
 
+import logging
 import random
 from typing import Iterable, List, Optional
 
 from .models import StrategyLabRecord
 from .strategy_lab.spec_dsl import AllOf, AnyOf, Predicate, iter_leaf_predicates
+
+logger = logging.getLogger(__name__)
 
 _CANONICAL_ASSET_CLASSES: tuple[str, ...] = (
     "stocks",
@@ -224,10 +227,32 @@ def excluded_for_allowed(allowed: Optional[Iterable[str]]) -> List[str]:
     return [c for c in PROMPT_ASSET_CLASSES if c not in allowed_set]
 
 
+def _canonical_subset(raw: Optional[List[str]]) -> set[str]:
+    """Normalize a class-name list to the canonical labels it actually names.
+
+    Shared by :func:`select_asset_category` for both its exclusion and its
+    ``avoid`` bias, so an alias (``equity`` / ``fx``) is honored rather than
+    silently matching nothing against :data:`PROMPT_ASSET_CLASSES`.
+
+    Preconditions:
+      - ``raw`` is ``None`` or a list of scalar values.
+    Postconditions:
+      - Returns the set of canonical labels named by ``raw``; entries that
+        resolve to no known class are dropped.
+    """
+    out: set[str] = set()
+    for item in raw or ():
+        try:
+            out.add(normalize_asset_class_strict(item))
+        except ValueError:
+            continue
+    return out
+
+
 def select_asset_category(
-    exclude_asset_classes: Optional[Iterable[str]],
+    exclude_asset_classes: Optional[List[str]],
     *,
-    avoid: Optional[Iterable[str]] = None,
+    avoid: Optional[List[str]] = None,
     rng: Optional[random.Random] = None,
 ) -> str:
     """Randomly pick exactly one asset category for a design attempt.
@@ -238,7 +263,10 @@ def select_asset_category(
     ``exclude_asset_classes`` within :data:`PROMPT_ASSET_CLASSES` — the exact
     inverse of :func:`excluded_for_allowed`, so this reconstructs the user's
     original ``allowed_asset_classes`` selection without needing it threaded
-    through separately.
+    through separately. Entries are normalized through
+    :func:`normalize_asset_class_strict`, so an alias (``equity`` / ``fx``)
+    excludes the canonical class it names rather than silently matching
+    nothing and leaving that class selectable.
 
     ``avoid`` (optional) names classes to steer away from when possible —
     typically the convergence tracker's over-represented set
@@ -249,34 +277,78 @@ def select_asset_category(
     also in ``avoid``, e.g. a single-category restriction) it falls back to
     the full ``allowed`` set — the pin always wins over the bias.
 
+    Both list parameters are typed ``List[str]`` (not ``Iterable[str]``)
+    deliberately, matching :func:`asset_class_mix_hint`: ``str`` is itself
+    iterable, so an ``Iterable[str]`` annotation would silently accept a bare
+    string and iterate its characters — excluding nothing and inverting the
+    caller's intent.
+
     Preconditions:
-      - ``exclude_asset_classes`` is ``None`` or an iterable of canonical
-        class labels, and does not exclude every class in
-        :data:`PROMPT_ASSET_CLASSES` (the API boundary already rejects an
-        empty allowed-category selection, so this should be unreachable).
+      - ``exclude_asset_classes`` / ``avoid`` are ``None`` or lists of
+        canonical class labels or known aliases. Entries that resolve to no
+        known class are ignored.
 
     Postconditions:
-      - Returns one class from :data:`PROMPT_ASSET_CLASSES` not present in
-        ``exclude_asset_classes``.
-
-    Raises:
-      ValueError: if every class in :data:`PROMPT_ASSET_CLASSES` is excluded,
-        leaving no category to select from.
+      - Returns one class from :data:`PROMPT_ASSET_CLASSES`, never one named
+        (directly or by alias) in ``exclude_asset_classes`` — unless the
+        exclusion covers every class, in which case it degrades to the full
+        menu rather than raising, matching :func:`asset_class_mix_hint`'s
+        defensive handling of the same internal-caller misuse.
     """
-    excluded_set = set(exclude_asset_classes or ())
+    excluded_set = _canonical_subset(exclude_asset_classes)
     allowed = [c for c in PROMPT_ASSET_CLASSES if c not in excluded_set]
     if not allowed:
-        raise ValueError(
-            "select_asset_category: no asset category remains after applying "
-            f"exclude_asset_classes={sorted(excluded_set)}"
+        # Defensive: an exclusion covering every class leaves nothing to pin
+        # to. The API boundary already rejects an empty allowed-category
+        # selection, so this only guards against a misuse from internal
+        # callers — degrade to the full menu rather than crashing the whole
+        # cycle, mirroring ``asset_class_mix_hint``'s handling of the same input.
+        logger.warning(
+            "select_asset_category: exclude_asset_classes=%s covers every category; "
+            "falling back to the full menu instead of failing the cycle.",
+            sorted(excluded_set),
         )
+        allowed = list(PROMPT_ASSET_CLASSES)
     chooser = rng or random
-    if avoid:
-        avoid_set = set(avoid)
+    avoid_set = _canonical_subset(avoid)
+    if avoid_set:
         preferred = [c for c in allowed if c not in avoid_set]
         if preferred:
             return chooser.choice(preferred)
     return chooser.choice(allowed)
+
+
+def strip_offcategory_symbols(target_symbols: List[str], asset_class: str) -> List[str]:
+    """Drop explicit tickers that unambiguously belong to another asset class.
+
+    ``MarketDataService.resolve_strategy_symbols`` honors a non-empty
+    ``target_symbols`` verbatim regardless of ``asset_class`` (it only logs a
+    mismatch warning), so a spec that names another category's tickers is
+    fetched and backtested against them under the wrong class label. Callers
+    that force a spec onto a pinned category use this to keep the symbol list
+    consistent with the label; an empty result falls back to the class's
+    default universe, the same fallback an empty ``target_symbols`` already
+    triggers for every other spec.
+
+    Preconditions:
+      - ``target_symbols`` is a list of ticker strings (possibly empty);
+        ``asset_class`` is a canonical class label.
+
+    Postconditions:
+      - Returns the subset of ``target_symbols`` whose
+        :func:`~..symbols.classify_symbol` result is either ``None``
+        (ambiguous — cross-asset ETFs like GLD/QQQ trade like equities and
+        must not be dropped as false positives) or equal to ``asset_class``,
+        preserving input order.
+    """
+    from .symbols import classify_symbol
+
+    kept: List[str] = []
+    for sym in target_symbols:
+        natural = classify_symbol(sym)
+        if natural is None or natural == asset_class:
+            kept.append(sym)
+    return kept
 
 
 def filter_records_by_asset_class(

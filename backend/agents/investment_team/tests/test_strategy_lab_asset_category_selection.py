@@ -78,9 +78,36 @@ def test_select_is_deterministic_with_a_seeded_rng() -> None:
     assert picks_a == picks_b
 
 
-def test_select_raises_when_every_class_excluded() -> None:
-    with pytest.raises(ValueError, match="no asset category remains"):
-        select_asset_category(list(PROMPT_ASSET_CLASSES))
+def test_select_degrades_to_full_menu_when_every_class_excluded() -> None:
+    """A degenerate exclusion covering every category must not crash the
+    cycle: nothing on the ``_run_design_loop`` -> ``run_cycle`` path catches a
+    ValueError (they catch only DesignBudgetExhausted / SpecImplementabilityError),
+    so raising here would abort the whole run with no persisted record. The
+    sibling helper for the same input, ``asset_class_mix_hint``, deliberately
+    degrades to the full menu; match that fail-open convention."""
+    picked = select_asset_category(list(PROMPT_ASSET_CLASSES))
+    assert picked in PROMPT_ASSET_CLASSES
+
+
+def test_select_normalizes_aliases_in_the_exclusion() -> None:
+    """Aliases are accepted everywhere else via normalize_asset_class, and the
+    pin turns the recovered allowed set into a HARD constraint — so an alias
+    that matched nothing would let the pin land on the very class the caller
+    excluded and then mandate it in the prompt."""
+    for _ in range(30):
+        # "equity" -> stocks, "fx" -> forex; both must actually be excluded.
+        assert select_asset_category(["equity", "fx"]) not in ("stocks", "forex")
+
+
+def test_select_ignores_a_bare_string_rather_than_iterating_characters() -> None:
+    """``str`` is itself iterable, so a bare string must not be character-
+    iterated into a meaningless exclusion set that silently inverts the
+    caller's intent."""
+    # No character of "stocks" resolves to a class, so nothing is excluded and
+    # every category stays selectable — but crucially the function must not
+    # crash or treat {'s','t','o','c','k'} as meaningful.
+    picked = select_asset_category(["stocks"])
+    assert picked in PROMPT_ASSET_CLASSES and picked != "stocks"
 
 
 def test_select_avoid_steers_away_from_over_represented_classes() -> None:
@@ -343,6 +370,92 @@ def test_design_loop_pins_one_of_several_allowed_categories(
 # and any ``revise`` round, so a strategy can never persist in a category the
 # user did not select for this attempt.
 # ---------------------------------------------------------------------------
+
+
+def test_design_loop_drops_offcategory_symbols_from_a_relabeled_regeneration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A matching ``asset_class`` on the regenerated spec is NOT proof of a
+    genuine rebuild. ``_REVISION_USER_TEMPLATE`` instructs the designer to
+    "preserve every aspect of the spec that was NOT criticised", so the common
+    partial-compliance outcome is a spec relabeled to the pinned category that
+    still carries the wrong category's tickers. Nothing downstream rejects
+    that — ``resolve_strategy_symbols`` honors a non-empty ``target_symbols``
+    verbatim (mismatch is only a logged warning) and no readiness rule checks
+    symbol-vs-class — so those tickers would be fetched and backtested under
+    the pinned label, persisting the exact out-of-category record this whole
+    mechanism exists to prevent, on the primary success path."""
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(
+        orch.design_agent,
+        "run",
+        lambda **_kw: (_spec_dict("crypto", target_symbols=["BTC-USD", "ETH-USD"]), "scripted"),
+    )
+    # The corrective revise flips only asset_class and copies the crypto
+    # tickers through verbatim.
+    monkeypatch.setattr(
+        orch.design_agent,
+        "revise",
+        lambda *_a, **_kw: (
+            _spec_dict("stocks", target_symbols=["BTC-USD", "ETH-USD"]),
+            "relabeled",
+        ),
+    )
+    monkeypatch.setattr(
+        orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
+    )
+    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
+    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
+    _short_circuit_synthesis(monkeypatch)
+
+    # allowed = {stocks} -> exclude everything else.
+    record = orch.run_cycle(
+        prior_records=[],
+        config=_config(),
+        exclude_asset_classes=["crypto", "forex", "futures", "commodities"],
+    )
+
+    assert record.strategy.asset_class == "stocks"
+    # The crypto tickers must not survive onto a stocks-labeled spec; clearing
+    # them falls back to the stocks default universe.
+    assert record.strategy.target_symbols == []
+
+
+def test_design_loop_keeps_ambiguous_symbols_when_correcting_category(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cross-asset ETFs (GLD, QQQ, ...) trade like equities via the same
+    provider even when their underlying exposure differs, so ``classify_symbol``
+    deliberately returns ``None`` for them. They must be kept, not dropped as
+    false positives."""
+    orch = StrategyLabOrchestrator()
+
+    monkeypatch.setattr(
+        orch.design_agent,
+        "run",
+        lambda **_kw: (_spec_dict("crypto", target_symbols=["GLD", "BTC-USD"]), "scripted"),
+    )
+    monkeypatch.setattr(
+        orch.design_agent,
+        "revise",
+        lambda *_a, **_kw: (_spec_dict("stocks", target_symbols=["GLD", "BTC-USD"]), "relabeled"),
+    )
+    monkeypatch.setattr(
+        orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
+    )
+    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
+    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
+    _short_circuit_synthesis(monkeypatch)
+
+    record = orch.run_cycle(
+        prior_records=[],
+        config=_config(),
+        exclude_asset_classes=["crypto", "forex", "futures", "commodities"],
+    )
+
+    assert record.strategy.asset_class == "stocks"
+    assert record.strategy.target_symbols == ["GLD"]
 
 
 def test_design_loop_regenerates_full_spec_when_correction_succeeds(
@@ -809,21 +922,27 @@ def test_design_loop_drops_diversity_directive_when_pin_forces_over_represented_
     assert not any("You MUST choose a DIFFERENT asset class" in d for d in convergence_directives)
 
 
-def test_design_loop_keeps_diversity_directive_when_pin_avoids_over_represented_class(
+def test_design_loop_also_drops_the_stall_directive_when_pinned(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When the pin can honor the diversity directive (another allowed
-    category exists), the directive is preserved verbatim — only a genuine
-    conflict (tested above) drops it."""
+    """``get_stall_directive`` carries the same "try a fundamentally different
+    ... asset class" mandate as the diversity one, and is equally impossible to
+    satisfy under a pin — a pinned attempt's exclusion list already forbids
+    every other class. Both must be suppressed, not just the diversity one."""
+    from investment_team.strategy_lab.quality_gates.convergence_tracker import (
+        ASSET_CLASS_STEERING_PHRASES,
+    )
+
     orch = StrategyLabOrchestrator()
-    _skew_convergence_tracker_toward(orch, "stocks")
-    assert orch.convergence_tracker.get_diversity_avoid_classes() == {"stocks"}
+    monkeypatch.setattr(orch.convergence_tracker, "is_stalled", lambda: True)
+    stall_directive = orch.convergence_tracker.get_stall_directive()
+    assert stall_directive is not None and ASSET_CLASS_STEERING_PHRASES[1] in stall_directive
 
     captured: List[Dict[str, Any]] = []
 
     def _run(**kwargs: Any) -> Tuple[Dict[str, Any], str]:
         captured.append(kwargs)
-        return _spec_dict("forex"), "scripted"
+        return _spec_dict("stocks"), "scripted"
 
     monkeypatch.setattr(orch.design_agent, "run", _run)
     monkeypatch.setattr(
@@ -833,14 +952,14 @@ def test_design_loop_keeps_diversity_directive_when_pin_avoids_over_represented_
     monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
     _short_circuit_synthesis(monkeypatch)
 
-    # allowed = {stocks, forex} -> the bias in select_asset_category can (and
-    # given the stub above, does) avoid the over-represented "stocks".
     orch.run_cycle(
         prior_records=[],
         config=_config(),
-        exclude_asset_classes=["crypto", "futures", "commodities"],
+        exclude_asset_classes=["crypto", "forex", "futures", "commodities"],
     )
 
     assert len(captured) == 1
     convergence_directives = captured[0]["convergence_directives"] or []
-    assert any("You MUST choose a DIFFERENT asset class" in d for d in convergence_directives)
+    assert not any(
+        phrase in d for d in convergence_directives for phrase in ASSET_CLASS_STEERING_PHRASES
+    )

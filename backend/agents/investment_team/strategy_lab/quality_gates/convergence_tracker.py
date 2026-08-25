@@ -17,6 +17,33 @@ from .models import QualityGateResult
 
 logger = logging.getLogger(__name__)
 
+# The asset-class-steering sentences this tracker embeds in its directives.
+# Owned here (rather than duplicated as string literals at the consumer) so a
+# reword cannot silently break the pin's suppression filter: both the text and
+# the predicate that recognises it live in this one place.
+#   [0] -> get_diversity_directive   [1] -> get_stall_directive
+ASSET_CLASS_STEERING_PHRASES: tuple[str, ...] = (
+    "You MUST choose a DIFFERENT asset class",
+    "Try a fundamentally different trading thesis, asset class, or indicator combination",
+)
+
+
+def is_asset_class_steering_directive(directive: str) -> bool:
+    """True when ``directive`` instructs the designer to change asset class.
+
+    A design attempt pinned to a single asset category cannot satisfy any such
+    instruction — the pin's exclusion list already forbids every other class —
+    so the caller drops these rather than handing the designer a prompt that
+    mandates both "use only X" and "use something other than X".
+
+    Preconditions:
+      - ``directive`` is a string (a rendered convergence-tracker directive).
+    Postconditions:
+      - Returns ``True`` iff any entry of
+        :data:`ASSET_CLASS_STEERING_PHRASES` occurs in ``directive``.
+    """
+    return any(phrase in directive for phrase in ASSET_CLASS_STEERING_PHRASES)
+
 
 class ConvergenceTracker:
     """Track strategy diversity and failure repetition across batch cycles.
@@ -129,27 +156,43 @@ class ConvergenceTracker:
         caller (e.g. a per-attempt asset-category pin) that needs to steer
         *around* the same skew without re-deriving it from the raw history.
 
-        Postconditions: returns an empty set when fewer than 3 asset classes
-        have been recorded, or when no class exceeds the 40% share threshold.
+        Preconditions:
+          - ``tail >= 1``. A non-positive ``tail`` is clamped to the full
+            history rather than silently reading it via the ``[-0:]`` slice,
+            which returns everything rather than nothing.
+
+        Postconditions:
+          - Returns an empty set when fewer than 3 asset classes have been
+            recorded, or when no class exceeds the 40% share threshold.
         """
         if len(self._asset_class_history) < 3:
             return set()
-        recent = self._asset_class_history[-tail:]
+        recent = self._asset_class_history[-tail:] if tail > 0 else list(self._asset_class_history)
         counts = Counter(recent)
         total = len(recent)
         return {ac for ac, c in counts.items() if c / total > 0.4}
 
     def get_diversity_directive(self, tail: int = 10) -> Optional[str]:
-        """Return a steering directive if asset-class distribution is skewed."""
+        """Return a steering directive if asset-class distribution is skewed.
+
+        Preconditions:
+          - ``tail >= 1`` (see :meth:`get_diversity_avoid_classes`).
+
+        Postconditions:
+          - Returns ``None`` when no class is over-represented; otherwise a
+            directive naming the over-represented classes in alphabetical
+            order and containing :data:`ASSET_CLASS_STEERING_PHRASES`\\ [0], so
+            :func:`is_asset_class_steering_directive` recognises it.
+        """
         over_represented = self.get_diversity_avoid_classes(tail)
         if not over_represented:
             return None
 
-        recent = self._asset_class_history[-tail:]
+        recent = self._asset_class_history[-tail:] if tail > 0 else list(self._asset_class_history)
         total = len(recent)
         return (
             f"MANDATORY: The last {total} strategies are heavily skewed toward "
-            f"{', '.join(sorted(over_represented))}. You MUST choose a DIFFERENT asset class. "
+            f"{', '.join(sorted(over_represented))}. {ASSET_CLASS_STEERING_PHRASES[0]}. "
             f"Consider: {', '.join(ac for ac in ['stocks', 'crypto', 'forex', 'commodities', 'futures'] if ac not in over_represented)}."
         )
 
@@ -166,13 +209,20 @@ class ConvergenceTracker:
         return directives
 
     def get_stall_directive(self) -> Optional[str]:
-        """Return a directive if the tracker detects convergence."""
+        """Return a directive if the tracker detects convergence.
+
+        Preconditions: none.
+        Postconditions:
+          - Returns ``None`` unless :meth:`is_stalled`; otherwise a directive
+            containing :data:`ASSET_CLASS_STEERING_PHRASES`\\ [1], so
+            :func:`is_asset_class_steering_directive` recognises it as
+            asset-class steering that a single-category pin must suppress.
+        """
         if not self.is_stalled():
             return None
         return (
             "WARNING: Strategy ideation is converging — recent strategies are too similar. "
-            "MANDATORY: Try a fundamentally different trading thesis, asset class, "
-            "or indicator combination."
+            f"MANDATORY: {ASSET_CLASS_STEERING_PHRASES[1]}."
         )
 
     # ------------------------------------------------------------------

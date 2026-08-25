@@ -58,6 +58,7 @@ from ..strategy_lab_context import (
     normalize_asset_class,
     normalize_asset_class_strict,
     select_asset_category,
+    strip_offcategory_symbols,
 )
 from ._orchestrator_helpers import (
     _DesignAttemptState,
@@ -78,6 +79,7 @@ from .exceptions import OrchestratorContractError, SpecImplementabilityError
 from .market_regime import RegimeSummary
 from .mechanical_repair import RepairAction, demote_code_path, repair_spec, select_code_path
 from .phases import Phase
+from .quality_gates.convergence_tracker import is_asset_class_steering_directive
 from .quality_gates.models import QualityGateResult
 from .spec_dsl import DEFAULT_SIZING_PAYLOAD
 
@@ -669,16 +671,17 @@ class DesignMixin:
             pinned_exclude_asset_classes = exclude_asset_classes
 
         attempt_directives = directives
-        if selected_category is not None and selected_category in diversity_avoid_classes:
-            # The bias above couldn't avoid it (e.g. only one category is
-            # allowed and it happens to be over-represented) — the pin must
-            # win, so drop the now-impossible-to-satisfy diversity directive
-            # rather than hand the designer a self-contradictory prompt
-            # ("MUST choose a DIFFERENT asset class" alongside "MANDATORY
-            # EXCLUSION: only <selected_category> is allowed").
-            attempt_directives = [
-                d for d in directives if "You MUST choose a DIFFERENT asset class" not in d
-            ]
+        if selected_category is not None:
+            # A pinned attempt cannot satisfy ANY "change asset class"
+            # directive — ``pinned_exclude_asset_classes`` already forbids
+            # every class but the pinned one — so drop them all rather than
+            # hand the designer a self-contradictory prompt ("use something
+            # other than X" alongside "MANDATORY EXCLUSION: only X is
+            # allowed"). This covers the stall directive as well as the
+            # diversity one; the predicate lives with the text it matches
+            # (see ``convergence_tracker``) so a reword cannot silently stop
+            # it matching.
+            attempt_directives = [d for d in directives if not is_asset_class_steering_directive(d)]
 
         try:
             strategy_dict, rationale = self.design_agent.run(
@@ -727,6 +730,30 @@ class DesignMixin:
                 drift_collector=drift_collector,
                 selected_category=selected_category,
             )
+        except SpecImplementabilityError as exc:
+            # A category-pin non-convergence raised by ``_reconcile_asset_category``
+            # (either the pre-loop call above or the in-loop one). It unwinds past
+            # the ``scope=design_loop`` telemetry emit and past
+            # ``_orchestrate_design_and_review``, which builds the design context
+            # only on a normal return — so without this the persisted
+            # ``failed: spec_unimplementable`` record would report design_rounds=0
+            # and no critiques even when real review rounds ran. Attach the audit
+            # bundle from the state this frame still holds, and emit the loop
+            # summary the raise skipped, before re-raising.
+            if exc.design_context is None:
+                pin_telemetry = _design_loop_telemetry_summary(
+                    ledger, len(critique_history), "asset_category_unconverged"
+                )
+                if selected_category is not None:
+                    pin_telemetry["asset_category"] = selected_category
+                emit("telemetry", {"scope": "design_loop", **pin_telemetry})
+                exc.design_context = _DesignPersistContext(
+                    rounds=len(critique_history),
+                    critiques=list(critique_history),
+                    stop_reason="asset_category_unconverged",
+                    loop_telemetry=pin_telemetry,
+                )
+            raise
         except DesignBudgetExhausted as exc:
             # Per-cycle LLM-call budget hit mid-design. Surface whatever
             # spec/critique state we reached as a not-ready outcome tagged
@@ -1417,6 +1444,26 @@ class DesignMixin:
             raise
         regenerated = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
         regenerated_actual = normalize_asset_class(regenerated.asset_class)
+        if regenerated_actual == selected_category and regenerated.target_symbols:
+            # A matching ``asset_class`` is not proof of a genuine rebuild:
+            # ``_REVISION_USER_TEMPLATE`` tells the designer to "preserve every
+            # aspect of the spec that was NOT criticised", so the common
+            # partial-compliance outcome is a relabeled spec that still carries
+            # the wrong category's tickers. ``resolve_strategy_symbols`` honors
+            # a non-empty ``target_symbols`` verbatim (mismatch is only a logged
+            # warning, and no readiness rule rejects it), so those tickers would
+            # be fetched and backtested under the pinned label — persisting the
+            # exact out-of-category record this whole mechanism prevents.
+            kept = strip_offcategory_symbols(list(regenerated.target_symbols), selected_category)
+            if kept != list(regenerated.target_symbols):
+                logger.warning(
+                    "Corrective regeneration kept off-category target_symbols %s for pinned "
+                    "category %r; dropping the mismatched tickers (kept %s).",
+                    list(regenerated.target_symbols),
+                    selected_category,
+                    kept,
+                )
+                regenerated = regenerated.model_copy(update={"target_symbols": kept})
         if regenerated_actual != selected_category:
             # The corrective revision itself still violated the pin (with a
             # *different* wrong class than the original, in the general
