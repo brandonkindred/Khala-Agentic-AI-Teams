@@ -70,8 +70,17 @@ Out of scope (note it and move on, do not fix):
     scale). Recommendations must name tokens, never raw hex.
   - `user-interface/src/styles/scss-contrast-guard.spec.ts` — the static guard against
     hardcoded low-contrast text and suppressed focus outlines. Its allowlist is a
-    burndown list: if a <TEAM> file is on it, that is a known debt, and clearing it is
-    a legitimate finding.
+    burndown list that is now EMPTY by design — the migration onto `--kh-*` tokens
+    finished, the guard enforces across the whole UI, and its own docstring forbids
+    adding entries to silence a failure. So do not expect a <TEAM> file on it, and
+    never propose adding or removing an entry. Note also what the guard does NOT do:
+    it pattern-matches banned hex literals and outline suppression in
+    `src/app/**/*.scss`; it computes no contrast ratios, never pairs a foreground
+    against a background, does not read token values, does not see `theme.scss`,
+    `styles.scss`, or inline template styles, and deliberately still permits `#fff`.
+    A real contrast failure — a `--kh-text-*` on the wrong `--kh-surface-*`, or a
+    hardcoded `color: #fff` on a light chip — is caught by NEITHER this guard NOR the
+    jsdom axe run, so it remains fully reportable.
   - `user-interface/src/app/shared/` — existing primitives to reuse before inventing
     anything: `dashboard-shell`, `empty-state`, `error-message`, `inline-banner`,
     `loading-spinner`, `stall-warning`, `confirm-dialog` / `confirm-destructive.service`,
@@ -84,24 +93,31 @@ Out of scope (note it and move on, do not fix):
     human-readable message out of an HTTP error for an inline error field, used by
     ~70 call sites; recommend it rather than hand-rolled `err?.error?.detail ?? …`
     chains when proposing error copy),
-    `result-count-announcement.ts` (live-region text for filtered lists), and
+    `result-count-announcement.ts` (live-region text for filtered lists),
+    `latest-only.ts` (`LatestOnly` — monotonic "latest wins" guard so a slow response
+    cannot overwrite a newer one; it replaces the hand-rolled `const seq = ++this.xSeq`
+    pattern, and is the mechanism to name for a refresh race or unstable ordering
+    across polls), `clamp.util.ts`, `number-format.ts`, `date-only.pipe.ts`
+    (truncation, number and date presentation), and
     `poll-while.ts` / `staleness.util.ts` (long-running job polling and staleness).
-    "Build a custom X" when a shared X exists is itself a finding.
+    "Build a custom X" when a shared X exists is itself a finding. This list is a
+    starting point, not a census — `ls user-interface/src/app/shared/` before
+    concluding no primitive exists.
   - Existing `*.a11y.spec.ts` files and `user-interface/src/app/testing/a11y.ts`
     (`expectNoAxeViolations`, with `color-contrast` disabled under jsdom). Coverage is
-    narrower than it looks, in three independent ways, and ALL THREE must hold before
+    narrower than it looks, in four independent ways, and ALL FOUR must hold before
     you treat anything as guarded:
-      * By state — a spec guards only the states its fixtures render. One that mounts
-        empty listings, jobs, and runs audits the empty state and nothing else, so the
-        populated, active-job, and error branches are unaudited even for defects axe
-        could catch.
+      * By state — a spec guards only the states its fixtures render. A spec whose
+        fixtures supply empty listings, empty jobs, and empty runs audits the empty
+        state and nothing else, so the populated, active-job, and error branches are
+        unaudited even for defects axe could catch.
       * By assertion — the specs vary, so read the one you intend to rely on rather
         than assuming either way. Many are bare `expectNoAxeViolations` smoke tests;
         others (`strategy-lab`, `strategy-card`, `paper-trading-panel`) additionally
         assert accessible names and icon ARIA, and those assertions DO guard the
         behaviour they name. A bare axe call guards only what axe checks in jsdom,
-        which excludes colour contrast (disabled outright in `axeOptions`; the SCSS
-        guard and browser axe cover it instead) and everything interaction-dependent:
+        which excludes colour contrast (disabled outright in `axeOptions`) and
+        everything interaction-dependent:
         focus restoration after a mutation, live-region announcements, keyboard
         sequences, reflow at 320 px and 200%, and target size or spacing.
       * By scope — `expectNoAxeViolations` runs `axe(host, …)` on the element it is
@@ -114,9 +130,21 @@ Out of scope (note it and move on, do not fix):
         `aria-labelledby` pointing at an id outside the component. Before excluding a
         composition-level finding, confirm a fixture actually renders that composition
         and that multiplicity.
-    Read each spec's fixtures, its assertions, AND what element it audits before
-    excluding a finding, then spend your attention on the unrendered states, the
-    unrendered compositions, and what axe structurally cannot see.
+      * By per-spec rule disables — `expectNoAxeViolations(host, extraRules)` merges
+        caller-supplied disables on top of `color-contrast`, and specs use it:
+        `agent-studio-persona` turns off `page-has-heading-one` and `region`,
+        `job-listing-card` turns off `aria-required-parent`, `strategy-lab` disables
+        others inline. A rule a spec switched off is NOT guarded there however
+        thoroughly that state is rendered. Read the call's second argument, not just
+        the fixture.
+    Read each spec's fixtures, its assertions, what element it audits, AND which rules
+    it disables before excluding a finding, then spend your attention on the unrendered
+    states, the unrendered compositions, the disabled rules, and what axe structurally
+    cannot see.
+    Note that axe coverage does not always live in a `.a11y.spec.ts`: `empty-state`,
+    `dashboard-shell`, and `inline-banner` call `expectNoAxeViolations` from their
+    ordinary `*.component.spec.ts` and have no `.a11y.spec.ts` at all. Search for the
+    call, not the filename.
 
 ## 3. Review lenses
 
@@ -129,10 +157,15 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
      visible label (2.5.3 Label in Name is a containment rule, not an equality one).
      Supplementing the visible text with disambiguating context is correct and often
      better — a visible "Cancel" named "Cancel <job label>" is compliant, and reporting
-     it as a mismatch is a false positive. Flag only when the visible label is absent
-     from or reordered within the accessible name, which is what actually breaks
-     speech-input users. Icon-only buttons carry `[attr.aria-label]`; form fields are
-     programmatically associated with labels, hints, and errors.
+     it as a mismatch is a false positive. Flag only when the visible label's own text
+     is absent from the accessible name, or appears with its words broken up or
+     re-sequenced so the visible string is no longer contained (visible "Cancel Scan"
+     named "Scan Cancel"). Word ORDER RELATIVE TO ADDED CONTEXT is not a conformance
+     matter: "Backtest run 42 — Cancel" contains "Cancel" and conforms, even though
+     the visible label does not come first. Containment is the test.
+     Icon-only buttons carry an accessible name — `aria-label` for a static one,
+     `[attr.aria-label]` where the value is computed; form fields are programmatically
+     associated with labels, hints, and errors.
    - Keyboard: every interaction reachable and operable without a pointer; no traps;
      tab order matches visual order; no positive `tabindex`; custom widgets implement
      the expected key bindings; visible focus ring survives (`--kh-focus-ring`).
@@ -149,19 +182,26 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
    - Contrast and non-color signalling: text and UI-component contrast against the
      actual `--kh-surface-*` it sits on; status is never conveyed by hue alone (chips,
      graph edges, diff highlights, severity dots need text or shape too).
-   - Zoom and reflow: usable at 200% zoom and 320 CSS px wide without clipped controls
-     and without horizontal scrolling — except where 1.4.10 exempts it, for the parts
-     of the content that genuinely require a two-dimensional layout for meaning or use
-     (data tables, task graphs, Mermaid diagrams). Test whether the two-dimensional
-     layout is actually necessary before reporting horizontal scroll: a wide data table
-     scrolling inside its own container is compliant, a paragraph doing so is not.
+   - Zoom and reflow — two separate AA criteria; cite the right one:
+       * 1.4.4 Resize Text (AA) — text resizes to 200% without loss of content or
+         functionality. A control clipped or cut off at 200% zoom is a 1.4.4 failure,
+         NOT a 1.4.10 one, and 1.4.10's two-dimensional exception does not apply to it.
+       * 1.4.10 Reflow (AA) — content presented at 320 CSS px wide without horizontal
+         scrolling, EXCEPT for the parts that genuinely require a two-dimensional
+         layout for meaning or use (data tables, task graphs, Mermaid diagrams). Test
+         whether the two-dimensional layout is actually necessary before reporting: a
+         wide data table scrolling inside its own container is compliant, a paragraph
+         doing so is not.
      Text-spacing overrides don't break layout.
    - Motion and timing, at the A/AA bar this review holds to, and only where the
-     criterion actually applies. These summaries are compressed; before reporting any
-     motion or timing finding, re-read the criterion in
-     `backend/agents/accessibility_audit_team/wcag_criteria.py` and confirm its
-     applicability conditions and exceptions hold — a compressed restatement is a
-     starting point, not the standard.
+     criterion actually applies. The summaries below are compressed, and so is
+     `backend/agents/accessibility_audit_team/wcag_criteria.py` — that table gives the
+     number, name, and LEVEL of each criterion and nothing more; its one-line
+     descriptions carry no applicability conditions and no exceptions, and on 2.3.1 it
+     states only the three-flash half. Use it to confirm a criterion's number and
+     level; do NOT treat it as the standard, and never let it override a condition
+     stated here. Where a finding turns on a threshold, condition, or exception, check
+     the criterion's own normative text before reporting.
        * 2.2.1 Timing Adjustable (A) — judge a time limit by its mechanism, not by
          whether the duration feels generous: a comfortable but fixed limit still
          fails. Passing takes ONE of three, and the thresholds are part of the
@@ -228,7 +268,15 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
          itself require dragging — a second drag gesture does not satisfy this, since
          dragging is already single-pointer. Essential dragging, and behaviour set by
          the user agent and not modified by the author, are excepted.
-       * Redundant entry, and consistent help placement.
+       * Redundant Entry (3.3.7, A) — information the user already entered is
+         auto-populated or offered for selection rather than demanded again.
+       * Consistent Help (3.2.6, A) — where a help mechanism exists, it sits in a
+         consistent place across pages.
+       * Accessible Authentication (Minimum) (3.3.8, AA) — no step of an
+         authentication process may require a cognitive function test (remembering a
+         password, transcribing characters, solving a puzzle) unless an alternative
+         exists, or a mechanism assists. This one is inside the AA bar and easy to
+         miss: check it on any credential-entry or connect-an-account surface.
 
 B. INTERACTION COST
    - Count the clicks, keystrokes, page transitions, and decisions in the primary task.
@@ -273,6 +321,15 @@ D. STATE COVERAGE
        reached a terminal failed state. Work failed, not the call.
      - API-error — the residual: any other request failure (5xx, timeout, malformed or
        unparseable response). Reach for this only when none of the four above fits.
+   One generic catch branch commonly serves several of these at once — the repo-wide
+   `catch (err) => this.error = extractErrorDetail(err)` renders one message for a 401,
+   a 503, a network drop, and a missing-provider response alike. Score that branch
+   per state, on whether ITS OUTPUT gives that state's user a way forward: a message
+   that reads "Failed to load" earns HANDLED for API-error and MISSING for
+   permission-denied and backend-unconfigured, because neither of those users learns
+   what to do. When one branch is MISSING for several states, file ONE finding naming
+   every state it fails and the distinct copy or handling each needs — not one finding
+   per state against the same line.
    Give every state exactly one disposition, and state which:
      - HANDLED — the UI is (1) rendered at all; (2) recoverable from, where the state
        represents a failure or interruption (partial, failed, stalled, stale-data,
@@ -357,9 +414,10 @@ Then every finding, in ranked order:
     stabilizing sort order across polls). Include a code sketch when the change is
     subtle. Do not invent an irrelevant token or attribute to satisfy the format.
   - **Cost**: S / M / L, plus blast radius (this page | this team | shared primitive).
-  - **Verification**: how a reviewer proves it fixed — the `.a11y.spec.ts` assertion to
-    add, the contrast-guard allowlist entry to remove, or the manual keyboard /
-    screen-reader / 200%-zoom walkthrough to run.
+  - **Verification**: how a reviewer proves it fixed — the assertion to add and the
+    spec file to add it to (whichever one already calls `expectNoAxeViolations` for
+    that component), or the manual walkthrough to run (keyboard, screen reader,
+    200% zoom for 1.4.4, 320 px for 1.4.10, real-browser contrast).
 
 Close with:
   - **Open questions** — anything that needs a product decision or a running browser.
@@ -382,7 +440,12 @@ Close with:
 
   - No new dependencies. Angular 19 standalone components, SCSS, existing `--kh-*`
     tokens, existing shared primitives.
-  - ARIA attributes in templates use the `[attr.aria-*]` form.
+  - ARIA in templates: BOTH forms are sanctioned by `CONTRIBUTORS.md`, and the
+    codebase uses both heavily. A static value belongs in a plain attribute
+    (`aria-label="Remove goal"`); the `[attr.aria-*]` binding form is for values
+    computed at runtime, where it avoids Angular's property-binding pitfalls. Do not
+    file a finding to convert a correct static attribute to the bound form — that is a
+    no-op refactor and the kind of style preference §8 forbids.
   - Native semantics before ARIA; ARIA only where no native element does the job.
   - Design by Contract applies to any code you propose, per the repo-wide mandate in
     `CLAUDE.md` ("mandatory for all code and comments"): preconditions, postconditions,
@@ -391,14 +454,21 @@ Close with:
     software-engineering team enforces in generated code, and does not relax the
     repo-wide rule.
   - Any behavior change needs test coverage (90% line-coverage floor). Prefer extending
-    the existing `.a11y.spec.ts` for the component over writing a new harness.
+    whichever existing spec already calls `expectNoAxeViolations` for that component —
+    usually a `.a11y.spec.ts`, but for `empty-state`, `dashboard-shell`, and
+    `inline-banner` it is the ordinary `*.component.spec.ts` — over writing a new
+    harness.
   - Never reference an external issue tracker in code, comments, or docs.
 
 ## 8. Do not report
 
-  - Findings that an existing `.a11y.spec.ts` guards with an assertion covering THAT
-    BEHAVIOUR in THAT STATE. Both halves are required: a state the fixtures never
-    render is not guarded, and neither is a behaviour the spec never asserts. A bare
+  - Findings a spec genuinely guards. ALL FOUR conditions from §2 must hold before you
+    drop a finding: the fixtures render THAT STATE, the spec asserts THAT BEHAVIOUR,
+    the audited element covers THAT COMPOSITION (a component-scoped `axe(host, …)`
+    never sees siblings, a second instance, or the page shell), and the relevant rule
+    is NOT disabled via `extraRules`. Any one of the four failing means unguarded —
+    report it. The spec need not be named `.a11y.spec.ts`; search for the
+    `expectNoAxeViolations` call. A bare
     `expectNoAxeViolations` in the populated state does not cover a focus-management,
     announcement, reflow, target-size, or contrast defect in that state, nor keyboard
     behaviour axe cannot exercise — key sequences, focus movement and restoration,
