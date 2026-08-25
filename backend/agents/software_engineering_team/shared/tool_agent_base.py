@@ -144,15 +144,72 @@ _PROBLEM_SOLVE_RESERVED_KEYS = frozenset(
 )
 
 
+def build_code_text(current_files: Dict[str, str]) -> str:
+    """Render ``current_files`` as ``--- path ---\\ncontent`` blocks, joined for the prompt.
+
+    Preconditions: ``current_files`` maps path -> content.
+    Postconditions: returns "" when ``current_files`` is empty; otherwise
+        returns each file rendered as a labeled block, joined with a blank line.
+    """
+    return "\n\n".join(f"--- {p} ---\n{c}" for p, c in current_files.items())
+
+
+def build_shared_tool_agent_review_system_content(
+    task_description: str,
+) -> Optional[List[Any]]:
+    """Once-per-microtask ``CacheBreakpoint`` system segment shared by every wired
+    tool agent's ``review()`` call for that microtask -- currently always ``None``.
+
+    Mirrors ``code_review_agent/chunk_reviewer.py``'s
+    ``_build_shared_review_prefix``: only internal, non-externally-controlled
+    metadata belongs in a cached system segment --
+    ``system_prompt_assembly.build_system_prompt_with_content``'s own contract
+    is explicit that "untrusted content (code under review,
+    repository-controlled text) must remain in the user message". Promoting
+    untrusted content to the system prompt would hand adversarial instructions
+    embedded in it (a classic prompt-injection vector security/QA review
+    agents exist to catch) elevated priority over the reviewer's own
+    instructions, which stay in the (lower-privilege) user message instead --
+    see :meth:`BaseReviewToolAgent.review`.
+
+    ``task_description`` does not qualify as trusted: unlike the
+    already-landed ``qa_agent``/``security_agent`` sibling step's
+    ``_build_qa_shared_review_prefix`` (which cache-marks task description and
+    architecture, treating both as "internal, non-repository-controlled"),
+    this family's ``task_description`` can originate directly from an
+    externally-authored GitHub issue body (see
+    ``github_source/issue_to_plan.py``) -- i.e. it is adversary-controllable
+    the same way reviewed code is, just from a different source. There is
+    therefore currently no field available to this function that is both (a)
+    identical across every wired tool agent's call for one microtask and (b)
+    safe to place in the higher-priority system role, so this always returns
+    ``None``. The function, the ``ToolAgentPhaseInput.shared_review_context``
+    field, and the ``system_prompt_content`` plumbing through
+    :meth:`LlmToolAgentBase._invoke_llm`/``run_strands_agent`` are kept in
+    place for a genuinely internal, run-wide-trusted field (e.g. an
+    architecture overview sourced from internal specs, not from task text)
+    should one become available to this call site in the future.
+
+    Preconditions: ``task_description`` is a str (accepted for interface
+        parity with callers; unused).
+    Postconditions: always returns ``None``.
+    """
+    return None
+
+
 def fill_review_prompt(template: str, *, task_description: str, code: str) -> str:
     """Substitute ``{task_description}`` and ``{code}`` without rescanning values.
 
     Preconditions:
         ``template``, ``task_description``, and ``code`` are strings.
     Postconditions:
-        Each known placeholder is replaced once with the corresponding value.
-        Inserted values are never re-scanned for placeholders or braces; other
-        ``{...}`` sequences in ``template`` are left unchanged.
+        Every occurrence of ``{task_description}``/``{code}`` in ``template``
+        (there may be more than one of either) is substituted with the
+        corresponding value in a single pass. Inserted values are never
+        re-scanned for placeholders or braces -- a value that itself contains
+        ``{code}``/``{task_description}`` or arbitrary ``{...}`` text is
+        copied through verbatim, not substituted again. Other ``{...}``
+        sequences already in ``template`` are left unchanged.
     """
     values = {"task_description": task_description, "code": code}
     return _REVIEW_PLACEHOLDER_RE.sub(lambda m: values[m.group(1)], template)
@@ -488,7 +545,7 @@ class BaseReviewToolAgent(LlmToolAgentBase):
 
     def _build_code_text(self, current_files: Dict[str, str]) -> str:
         """Render ``current_files`` as ``--- path ---\\ncontent`` blocks, joined for the prompt."""
-        return "\n\n".join(f"--- {p} ---\n{c}" for p, c in current_files.items())
+        return build_code_text(current_files)
 
     def _problem_solving_kwargs(self, inp) -> Dict[str, Any]:
         """Extra ``.format`` kwargs for the single-issue prompt.
@@ -654,12 +711,29 @@ class BaseReviewToolAgent(LlmToolAgentBase):
             propagates uncaught; see :meth:`_build_review` and
             :meth:`_engine_review`. On the default one-shot LLM path, the
             call is routed through :meth:`LlmToolAgentBase._cached_invoke_llm`
-            (keyed on this class's identity, the resolved model, and the
-            rendered prompt): a cache hit skips the LLM call entirely; a
-            cache miss or cache-backend failure falls open to the exact same
-            ``_invoke_llm`` call this method used before caching existed, so
-            the fallback taxonomy above (skip/fail summaries, the
-            ``ValueError`` case) is unaffected by cache state.
+            (keyed on this class's identity, the resolved model, the rendered
+            prompt, and any shared system-prompt content): a cache hit skips
+            the LLM call entirely; a cache miss or cache-backend failure falls
+            open to the exact same ``_invoke_llm`` call this method used
+            before caching existed, so the fallback taxonomy above (skip/fail
+            summaries, the ``ValueError`` case) is unaffected by cache state.
+            Both ``task_description`` and ``code`` are always rendered into
+            the user prompt, regardless of whether ``inp.shared_review_context``
+            is present -- neither is safe to place in the system prompt (see
+            :func:`build_shared_tool_agent_review_system_content`'s
+            docstring), and the mere presence of a shared context is never
+            treated as a signal that it subsumes either. ``inp.shared_review_context``
+            (via ``getattr``, so missing on ``inp`` degrades to ``None`` rather
+            than raising) is always forwarded as the ``system_prompt_content``
+            keyword to :meth:`LlmToolAgentBase._cached_invoke_llm`, whatever
+            its value; a falsy value (``None`` or ``[]`` -- currently true for
+            every production caller, since
+            :func:`build_shared_tool_agent_review_system_content` always
+            returns ``None``, see its docstring) is treated downstream, in
+            :meth:`LlmToolAgentBase._invoke_llm`/``run_strands_agent``, as "no
+            system prompt for this call" rather than being passed on to the
+            Strands ``Agent`` -- it is never omitted from this method's own
+            call, only from what reaches the model.
         """
         if self.build_runner is not None:
             return self._build_review(inp)
@@ -683,13 +757,25 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         # Single-pass substitution of the two known placeholders. Values are
         # never re-scanned, so task text/code may contain braces or the
         # placeholder tokens themselves without corruption or duplication.
+        # Both `task_description` and `code` are always rendered here,
+        # regardless of whether a shared_review_context is present: neither
+        # is safe to place in the (higher-privilege) system prompt (see
+        # build_shared_tool_agent_review_system_content's docstring), and
+        # presence of a shared context must never be treated as a signal that
+        # it subsumes task_description -- a future genuinely trusted segment
+        # (e.g. an architecture overview) would have nothing to do with the
+        # task text, and blanking it here would silently drop the review
+        # requirements from every wired tool agent's prompt.
+        shared_system_content = getattr(inp, "shared_review_context", None)
         prompt = fill_review_prompt(
             self.review_prompt,
             task_description=inp.task_description or "N/A",
             code=code_text,
         )
         status, result = self._call_with_single_fallback(
-            lambda: self._cached_invoke_llm(model, prompt),
+            lambda: self._cached_invoke_llm(
+                model, prompt, system_prompt_content=shared_system_content
+            ),
             log_label=review_label,
         )
         if status == "error":
