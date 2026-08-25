@@ -139,9 +139,13 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
    - Focus management: focus moves deliberately when content is destroyed or replaced
      (row triaged, job cancelled, dialog opened/closed, route changed) — see
      `defer-focus.ts`. Focus must never land on `<body>` after a user action.
-   - Live regions: async results, validation errors, job-status transitions, and
-     filtered result counts are announced once, at the right politeness, without
-     spamming on every poll tick.
+   - Live regions: an update that arrives WITHOUT navigation or focus movement —
+     async results, validation errors, job-status transitions, filtered result counts
+     — is announced once, at the right politeness, without spamming on every poll
+     tick. Where the component instead moves focus to the new result or error, that
+     focus move IS the announcement: do not also recommend a live region, which would
+     announce the content twice. Same condition as the HANDLED gate in §3D; if these
+     two ever disagree, §3D governs.
    - Contrast and non-color signalling: text and UI-component contrast against the
      actual `--kh-surface-*` it sits on; status is never conveyed by hue alone (chips,
      graph edges, diff highlights, severity dots need text or shape too).
@@ -214,9 +218,12 @@ A. ACCESSIBILITY (WCAG 2.2 AA)
          header, toolbar, or footer being the usual culprits. Content the USER opened
          is carved out: if they can reveal the focused control without advancing
          focus, such as pressing Escape to dismiss an overlay they opened, it does not
-         count as hidden, so check for that before reporting. Partial obscuration
-         fails only the AAA criterion (2.4.12) — report it, if at all, as an
-         enhancement, never as an AA violation.
+         count as hidden, so check for that before reporting. A second carve-out
+         covers configurable interfaces: where the user can reposition content, only
+         its INITIAL position counts, so a panel the user themselves dragged over the
+         focused control is not a failure. Partial obscuration fails only the AAA
+         criterion (2.4.12) — report it, if at all, as an enhancement, never as an AA
+         violation.
        * Dragging movements (2.5.7) have a single-pointer alternative that does NOT
          itself require dragging — a second drag gesture does not satisfy this, since
          dragging is already single-pointer. Essential dragging, and behaviour set by
