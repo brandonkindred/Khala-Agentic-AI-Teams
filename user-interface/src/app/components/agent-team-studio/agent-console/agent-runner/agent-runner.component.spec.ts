@@ -7,7 +7,6 @@ import { Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { AgentConsoleApiService } from '../../../../services/agent-console-api.service';
 import { AgentRunnerDestructiveActionsService } from '../../../../services/agent-runner-destructive-actions.service';
-import { ConfirmDestructiveService } from '../../../../shared/confirm-destructive.service';
 import { NotificationService } from '../../../../core/notification.service';
 import {
   createAgentRunnerDestructiveActionsServiceStub,
@@ -162,14 +161,13 @@ describe('AgentRunnerComponent', () => {
     TestBed.overrideProvider(MatSnackBar, { useValue: { open: snackBarOpen } });
     // AgentRunnerDestructiveActionsService is provided in AgentRunnerComponent's
     // own component-level `providers` array, not at module scope — reaching it
-    // requires overrideComponent, not overrideProvider.
+    // requires overrideComponent, not overrideProvider. ConfirmDestructiveService
+    // (the real service's only consumer) is deliberately omitted here: it's
+    // never constructed once AgentRunnerDestructiveActionsService is a useValue.
     if (destructiveActionsStub) {
       TestBed.overrideComponent(AgentRunnerComponent, {
         set: {
-          providers: [
-            ConfirmDestructiveService,
-            { provide: AgentRunnerDestructiveActionsService, useValue: destructiveActionsStub },
-          ],
+          providers: [{ provide: AgentRunnerDestructiveActionsService, useValue: destructiveActionsStub }],
         },
       });
     }
@@ -479,7 +477,7 @@ describe('AgentRunnerComponent', () => {
       expect(component.selectedPickerValue()).toBe(`saved:${savedInput.id}`);
     });
 
-    it('surfaces destructiveError when errors$ emits for the selected agent', () => {
+    it('surfaces destructiveError when errors$ emits for the selected agent (delete)', () => {
       destructiveActionsService.errors$.next({ agentId: 'blogging.writer', message: 'delete failed' });
       expect(component.destructiveError()).toBe('delete failed');
     });
@@ -588,12 +586,8 @@ describe('AgentRunnerComponent', () => {
         expect(component.sandbox()).toEqual({ ...coldHandle, status: 'cold', url: null });
       });
 
-      it('sets a fallback cold handle when sandboxTornDown$ emits with no existing sandbox', async () => {
-        destructiveActionsService = createAgentRunnerDestructiveActionsServiceStub();
-        await setup(
-          { getSandbox: vi.fn().mockReturnValue(throwError(() => new Error('down'))) },
-          destructiveActionsService,
-        );
+      it('sets a fallback cold handle when sandboxTornDown$ emits with no existing sandbox', () => {
+        api.getSandbox.mockReturnValue(throwError(() => new Error('down')));
         selectWriter();
         expect(component.sandbox()).toBeNull();
 
@@ -620,7 +614,7 @@ describe('AgentRunnerComponent', () => {
         expect(component.sandbox()).toEqual(warmHandle);
       });
 
-      it('surfaces destructiveError when errors$ emits for the selected agent', () => {
+      it('surfaces destructiveError when errors$ emits for the selected agent (teardown)', () => {
         selectWriter();
         destructiveActionsService.errors$.next({ agentId: 'blogging.writer', message: 'teardown failed' });
         expect(component.destructiveError()).toBe('teardown failed');
