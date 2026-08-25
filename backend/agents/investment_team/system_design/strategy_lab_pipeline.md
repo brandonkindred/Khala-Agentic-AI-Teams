@@ -39,7 +39,13 @@ loop now runs a two-step inner check:
    per-rule checks (universe, side, sizing ±1%, stop-loss compliance,
    take-profit compliance, entry-signal correlation with optional
    near-miss adjudication, and signal-exit correlation for specs with a
-   `SignalExitRule`). Output is a list of
+   `SignalExitRule`). The stop-loss/take-profit checks are
+   informational-only — every finding they emit is hardcoded
+   `passed=True` (a stop/take-profit is a trigger, not a price cap, so a
+   fill landing past the nominal threshold is expected, not a
+   misalignment); real engine-side firing is verified separately by
+   `ExitRuleConformanceGate`. The other five checks can fail and drive
+   the `aligned`/`misaligned` verdict below. Output is a list of
    `AlignmentFinding` rows that ride on `BacktestRecord.alignment_findings`
    plus matching `QualityGateResult` rows on the existing
    `quality_gate_results` stream.

@@ -223,8 +223,14 @@ has produced a real trade ledger. Each round:
    seven per-rule checks: universe, side, sizing (±1%), stop-loss compliance,
    take-profit compliance, entry-signal correlation, and — for specs with a
    `SignalExitRule` where the engine didn't attribute the close to a
-   structured exit — signal-exit correlation (`_check_signal_exit`). A
-   near-miss on the entry-signal check (within
+   structured exit — signal-exit correlation (`_check_signal_exit`). Only
+   five of the seven can actually fail: `_check_stop_loss` and
+   `_check_take_profit` always record `passed=True, severity="info"` (a
+   stop/take-profit is a trigger, not a price cap — a fill past the nominal
+   threshold is expected market behavior, not a misalignment), so they never
+   drive the `aligned`/`misaligned` verdict; engine-side stop/take-profit
+   firing is instead verified deterministically by `ExitRuleConformanceGate`.
+   A near-miss on the entry-signal check (within
    `STRATEGY_LAB_ALIGNMENT_NEAR_MISS_PCT`) routes to
    `TradeAlignmentAgent.adjudicate_near_miss` — a single-shot yes/no call,
    not a full re-audit.
@@ -359,7 +365,7 @@ mapped to what it durability-wraps:
 | `snapshot_prior_records_activity` | Reads the durable record store, sorted by creation time |
 | `build_short_circuit_record_activity` | `StrategyLabOrchestrator._build_short_circuit_record` |
 | **`run_design_attempt_activity`** | **The entire per-attempt pipeline above, verbatim** (`_run_design_attempt`) |
-| `compute_signal_brief_activity` | Signal brief (`SignalIntelligenceExpert`), once per batch-workflow invocation — a mid-batch resume re-runs it |
+| `compute_signal_brief_activity` | Signal brief (`SignalIntelligenceExpert`), once per batch — see `architecture.md` §7 for the invocation-count nuance |
 | `is_run_cancelled_activity` | Whether the run stopped for an external reason |
 | `external_terminal_status_activity` | The run's persisted external stop status, if any |
 | `finalize_cycle_record_activity` | Post-`run_cycle` tail: signal-brief attach + paper-trade (`PaperTradingAgent`) + persist |
@@ -371,10 +377,9 @@ bounded by `MAX_DESIGN_REENTRIES` (2) — the *outer* design-re-entry loop is
 the only part of this pipeline actually expressed as durable workflow code;
 everything from "Design ↔ review loop" through "Record assembly" above runs
 inside that one activity call. `StrategyLabBatchWorkflow` calls
-`compute_signal_brief_activity` once per batch-workflow invocation (a
-mid-batch resume via `start_cycle_offset` re-enters that batch and re-runs
-it, so a resumed batch's later cycles can see a different brief than its
-already-completed earlier ones), then fans a wave of cycles out as
+`compute_signal_brief_activity` once per batch (see `architecture.md` §7 —
+"Temporal-only dispatch" — for the full invocation-count nuance, including
+the mid-batch resume case), then fans a wave of cycles out as
 `StrategyLabCycleWorkflow` child workflows before awaiting them together,
 then calls `finalize_cycle_record_activity` per settled result.
 

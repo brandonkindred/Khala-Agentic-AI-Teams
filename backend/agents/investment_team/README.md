@@ -52,7 +52,7 @@ flowchart LR
 | **PromotionGateAgent** | Yes (IPS) | Live/paper gates from IPS |
 | **ValidationAgent** | No | Only `ValidationReport` checklist |
 | **InvestmentCommitteeAgent** | Yes (user id) | Memo `prepared_for_user_id` |
-| **SignalIntelligenceExpert** | No | Runs once per **batch** (not per cycle) over prior lab results + `MarketLabContext` (free-tier APIs); brief shared by every cycle within that batch and persisted on each `StrategyLabRecord`. A multi-batch run (`batch_count > 1`) computes a fresh brief per batch by design; a mid-batch resume (`start_cycle_offset`) can also re-run it within one batch, so that batch's later cycles can see a different brief than its already-completed earlier ones |
+| **SignalIntelligenceExpert** | No | Runs once per **batch** (not per cycle) over prior lab results + `MarketLabContext` (free-tier APIs); brief shared by every cycle within that batch and persisted on each `StrategyLabRecord` — see `system_design/architecture.md` §7 for the full invocation-count nuance (multi-batch runs and mid-batch resumes) |
 | **InvestmentTeamOrchestrator** | Mixed | Promotion needs IPS; web tool coordinator has no profile |
 | **InvestmentWebInterfaceCoordinator** | No investment profile | Provider login/config only |
 
