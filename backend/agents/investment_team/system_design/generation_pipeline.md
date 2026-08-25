@@ -54,15 +54,29 @@ enum every attempt moves through, in order:
 DESIGN → DESIGN_REVIEW → CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION
 ```
 
-All four fire on a fresh attempt. A **checkpoint-resumed** attempt is the
-exception: `_run_design_attempt` skips `_orchestrate_design_and_review`
-entirely when `resume_spec` is set. Both design-phase emits are reached only
-through that call — `DESIGN_REVIEW → CODE_SYNTHESIS` directly inside it, and
-`DESIGN → DESIGN_REVIEW` transitively via `_run_design_loop` — so such an
-attempt's transition stream starts at `CODE_SYNTHESIS →
-BACKTEST_AND_VERIFICATION`. A consumer that derives a drift baseline from the
-first transition it sees must handle that case rather than assume boundary 2
-is present.
+All four fire, in order, on a fresh attempt that reaches the terminal
+transition — but a consumer must treat the emitted set as **the prefix of
+phases actually reached**, not a fixed count, for two independent reasons:
+
+- **Front-truncated.** A design-phase short-circuit can stop the stream
+  after the first transition or before any transition at all.
+  `_run_design_loop` calls `DesignAgent.run()` before its own
+  `DESIGN → DESIGN_REVIEW` emit, so a `DesignBudgetExhausted` trip on that
+  very first call yields **zero** transitions for the attempt.
+  `_orchestrate_design_and_review` emits `DESIGN_REVIEW → CODE_SYNTHESIS`
+  only when the design ↔ review loop reaches readiness; a round-cap
+  (`design_not_ready`), a stall (`design_stalled`), or a later budget trip
+  (`budget_exhausted`) instead returns a short-circuit record right after
+  the first transition, so the stream can also stop at exactly one.
+- **Front-skipped.** A **checkpoint-resumed** attempt is a distinct case:
+  `_run_design_attempt` skips `_orchestrate_design_and_review` entirely when
+  `resume_spec` is set, so both design-phase emits (only reachable through
+  that call) never fire and the stream starts at `CODE_SYNTHESIS →
+  BACKTEST_AND_VERIFICATION`.
+
+A consumer that derives a drift baseline from the first transition it sees
+must handle all three cases (empty, one-transition, and resumed) rather than
+assume boundary 1 or 2 is present.
 
 Each transition emits a `PhaseTransition` event (`class PhaseTransition`,
 `phases.py`) carrying `from_phase`, `to_phase`, a 64-char SHA-256 `spec_hash`
@@ -466,10 +480,13 @@ flowchart TB
         SYN -->|fail| RF[RefinementAgent]
         RF --> SYN
         SYN -->|pass| BT[Execute in sandbox<br/>→ trade ledger]
-        BT --> POST[Post-execution, still synthesis phase:<br/>TargetSymbolCoverage.check_trades]
-        POST --> EV{critical anomaly<br/>or zero trades?}
-        EV -->|zero-trade| ZTRA[ZeroTradeRepairAgent]
-        ZTRA --> BT
+        BT --> POST{Post-execution, still synthesis phase:<br/>TargetSymbolCoverage.check_trades<br/>— critical?}
+        POST -->|critical: coverage| SCX[Synthesis round budget<br/>exhausted → short-circuit]
+        POST -->|clean| EV{critical anomaly<br/>or zero trades?}
+        EV -->|ENTRY_WITH_NO_EXIT| REDES[SpecImplementabilityError<br/>→ phase back to DESIGN]
+        EV -->|other zero-trade,<br/>market data available| ZTRA[ZeroTradeRepairAgent]
+        ZTRA -->|committed| BT
+        ZTRA -->|not committed| RF
         EV -->|other anomaly| RF
         EV -->|clean| AL{DeterministicAlignmentChecker}
         AL -->|misaligned| TAA[TradeAlignmentAgent<br/>propose_code_fix]
