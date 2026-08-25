@@ -254,12 +254,6 @@ The **backend-code-v2** agent team is a config-driven backend development team t
 flowchart TB
     subgraph techLead ["Backend Tech Lead Agent"]
         Setup["Setup\n(git init, README, dev branch)"]
-        TLPlanning["Planning"]
-        TLExecution["Execution"]
-        TLReview["Review"]
-        TLProblemSolving["Problem-solving"]
-        TLDeliver["Deliver"]
-        Setup --> TLPlanning --> TLExecution --> TLReview --> TLProblemSolving --> TLDeliver
     end
 
     subgraph devAgent ["Backend Development Agent"]

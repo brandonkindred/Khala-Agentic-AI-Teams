@@ -200,19 +200,21 @@ class RefinementAgent:
         :class:`~..exceptions.StrategyLabLLMError` when the envelope exhausts
         its transport retries / budget.
 
-        When the active provider supports provider-enforced structured
-        decoding (:func:`so.structured_output_available`), a reasoning pass
-        followed by a schema-constrained formatting pass is attempted first
-        via :func:`so.invoke_structured_with_schema` (two sequential calls
-        under one budget/timeout envelope) — no parse-retry loop needed,
-        since a conformant decode cannot emit unparseable JSON. Any
-        failure OTHER than a ``schema_forced`` starvation signal propagates
-        immediately (unchanged fail-fast semantics for a genuine transport/auth
-        failure) rather than degrading — a deliberate, narrow reading of
-        this call site's degrade contract, not an oversight. On capability
-        absence, or on ``schema_forced`` starvation specifically, this falls
-        through to the unconstrained parse-retry loop below, reproducing
-        today's behavior exactly.
+        When structured decoding is available, a reasoning pass followed by
+        a schema-constrained formatting pass is attempted first via
+        :func:`so.try_structured_or_degrade`, which itself encapsulates the
+        :func:`so.structured_output_available` check, the two sequential
+        calls into :func:`so.invoke_structured_with_schema` under one
+        budget/timeout envelope, and the degrade-on-``schema_forced`` logic.
+        Any failure OTHER than a ``schema_forced`` starvation signal
+        propagates immediately out of that helper (unchanged fail-fast
+        semantics for a genuine transport/auth failure) rather than
+        degrading — a deliberate, narrow reading of this call site's degrade
+        contract, not an oversight. The helper returns the parsed dict on
+        success; it returns ``None`` on capability absence, or on
+        ``schema_forced`` starvation specifically, to signal degradation —
+        at which point this method falls through to the unconstrained
+        parse-retry loop below, reproducing today's behavior exactly.
 
         Why retry here: the LLM occasionally returns an empty, thinking-only,
         or prose-only response with no JSON object. That is not a transport

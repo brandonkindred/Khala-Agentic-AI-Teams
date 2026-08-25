@@ -482,10 +482,11 @@ class DesignAgent:
         :func:`so.invoke_structured_with_schema`.
 
         Pre: ``system_prompt`` / ``user_prompt`` are non-empty strings.
-        Structured-output availability is not a precondition of this call —
-        it is handled internally by :func:`so.try_structured_or_degrade`,
-        which returns ``None`` to signal degrade to the legacy path when
-        structured output is unavailable.
+        :func:`so.try_structured_or_degrade` internally checks
+        :func:`so.structured_output_available`, returning ``None`` when
+        structured output is disabled or schema-forced exhaustion occurs —
+        this method's caller, :meth:`_invoke_and_parse`, does not gate on
+        it itself.
         Post: returns ``(finalized, prompt)``.
           * On success: ``finalized`` is the ``(parsed, rationale)`` tuple
             the caller should return immediately; ``prompt`` is

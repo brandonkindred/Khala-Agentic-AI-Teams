@@ -1021,15 +1021,19 @@ class ConfigDrivenV2DevelopmentAgent(BaseV2DevelopmentAgent):
     base and supply their team-specific ``V2TeamConfig`` instance.
 
     Invariants: ``self.config`` is set once at construction and never
-    reassigned; every property/method below is a pure read through it (or
+    reassigned; every property and the ``conventions_for``, ``_stack_profile``,
+    ``_read_repo_code``, ``_detect_tooling``, ``build_task_requirements``, and
+    ``_validate_tool_agents`` methods below are pure reads through it (or
     through the ``StackProfile`` it composes), so two instances built from the
-    same config always agree. This deliberately widens
+    same config always agree. The ``_build_tool_agents`` hook and
+    ``_build_and_validate_tool_agents`` orchestrator are deliberate
+    construction points and not pure reads. This deliberately widens
     ``BaseV2DevelopmentAgent``'s two-attribute ``__new__``-construction
     contract: a ``__new__``-constructed instance of this subclass
     specifically (bypassing ``__init__``) must also set ``self.config`` —
     the base class's ``llm``/``_repo_context_cache`` pair is necessary but
-    not sufficient here, since every property/method above reads
-    ``self.config``.
+    not sufficient here, since the pure-read properties and methods above
+    read ``self.config``.
     """
 
     def __init__(self, llm_client: LLMClient, config: V2TeamConfig) -> None:
