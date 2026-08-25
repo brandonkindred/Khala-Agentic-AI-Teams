@@ -805,14 +805,22 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # --- THE ARCHITECTURALLY CORRECT MOCK ---
     # 1. Define the side effect
     async def start_workflow_side_effect(workflow, args=None, id=None, task_queue=None, **kwargs):
-        # Run the actual local PR review logic synchronously for the test
-        if args:
-            result = api_main._run_pr_review(*args)
-        else:
-            result = api_main._run_pr_review()
+        import asyncio
+        from software_engineering_team.api.coding_team_models import ReviewPrRequest
+        
+        if args and len(args) > 0:
+            # 1. Unpack the new single-dictionary payload
+            review_input = args[0]
+            job_id = review_input["job_id"]
+            request_obj = ReviewPrRequest(**review_input["request"])
             
-        if asyncio.iscoroutine(result):
-            await result
+            # 2. Since we aren't passing the token to Temporal anymore (security fix!),
+            test_token = "fake-token"
+            
+            # 3. Use to_thread so the synchronous local runner doesn't block the test loop!
+            await asyncio.to_thread(api_main._run_pr_review, job_id, request_obj, test_token)
+        else:
+            await asyncio.to_thread(api_main._run_pr_review)
 
     # 2. Setup our AsyncMocks for start_workflow
     mock_start = AsyncMock(side_effect=start_workflow_side_effect)
