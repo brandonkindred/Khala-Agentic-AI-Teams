@@ -113,6 +113,7 @@ is a separate, older raw-trade-dict-to-`TradeRecord` converter with only one
 remaining test caller — it is **not** part of the current production
 execution path (`trading_service/modes/sandbox_compat.py`'s own docstring
 notes `FillSimulator` makes it unnecessary there), and its cost math is not
-equivalent to `FillSimulator`'s: it charges a flat `position_value * cost_mult
-* 2` rather than summing entry and exit notional separately. Don't treat it
+equivalent to `FillSimulator`'s: it charges a flat
+`position_value * cost_mult * 2` rather than summing entry and exit notional
+separately. Don't treat it
 as a parity reference for either the execution path or the cost formula.

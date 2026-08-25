@@ -62,16 +62,21 @@ resolved from `STRATEGY_LAB_MAX_ALIGNMENT_ROUNDS`, default 10) prevents runaway 
 still giving the system room to correct genuine code defects across
 multiple rounds. The loop exits as soon as the gate reports aligned,
 no further fix is proposed, or the cap is hit. Entry-signal predicate
-misses within `STRATEGY_LAB_ALIGNMENT_NEAR_MISS_PCT` (default 1%
-relative) route through `TradeAlignmentAgent.adjudicate_near_miss`, a
-single-shot yes/no LLM call; tolerance `0` disables that adjudicator
-entirely. See `strategy_lab/quality_gates/alignment_checks.py`,
+misses within the `STRATEGY_LAB_ALIGNMENT_NEAR_MISS_PCT` tolerance route
+through `TradeAlignmentAgent.adjudicate_near_miss`, a single-shot yes/no
+LLM call (default and disable semantics: that env var's entry in
+`strategy_lab/README.md`). See `strategy_lab/quality_gates/alignment_checks.py`,
 `strategy_lab/agents/alignment.py`, and
 `strategy_lab/orchestrator.py::run_cycle` (Phase 2.5).
 
-The pipeline lives in
-[`api/main.py::_run_one_strategy_lab_cycle`](../api/main.py) and
-[`strategy_lab/temporal/workflows.py::StrategyLabBatchWorkflow`](../strategy_lab/temporal/workflows.py).
+Under the current Temporal-only dispatch the pipeline runs through
+[`strategy_lab/temporal/workflows.py`](../strategy_lab/temporal/workflows.py)
+(`StrategyLabBatchWorkflow` fanning out per-cycle `StrategyLabCycleWorkflow`
+children) with the whole per-attempt pipeline inside
+`run_design_attempt_activity`
+([`strategy_lab/temporal/activities.py`](../strategy_lab/temporal/activities.py));
+`api/main.py::_run_one_strategy_lab_cycle` is the thread-era equivalent, kept
+for tests.
 
 ## Winner label vs publishable gate
 

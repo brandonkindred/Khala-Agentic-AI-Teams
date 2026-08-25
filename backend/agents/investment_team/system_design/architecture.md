@@ -51,7 +51,7 @@ flowchart TB
     end
 
     subgraph batch_agents[Batch-level Agents — investment_team/]
-      SIE[SignalIntelligenceExpert<br/>signal_intelligence_agent.py<br/>runs once per batch, not per cycle —<br/>a multi-batch run sees a fresh brief each<br/>batch by design; a mid-batch resume can<br/>also re-run it within one batch]
+      SIE[SignalIntelligenceExpert<br/>signal_intelligence_agent.py<br/>runs once per batch, not per cycle — see §7]
       PTA["PaperTradingAgent<br/>paper_trading_agent.py<br/>run_session — reached from Finalize, or via<br/>PaperTradingWorkflow for the standalone<br/>endpoint; never inside orchestrator.py"]
     end
 
@@ -61,7 +61,7 @@ flowchart TB
     end
 
     subgraph worker[Strategy Lab Dispatch — Temporal-only]
-      BatchWF[StrategyLabBatchWorkflow<br/>strategy_lab/temporal/workflows.py<br/>wave/batch fan-out, 1 signal-brief call at the<br/>top of every batch — also re-run mid-batch<br/>on a start_cycle_offset resume]
+      BatchWF[StrategyLabBatchWorkflow<br/>strategy_lab/temporal/workflows.py<br/>wave/batch fan-out, 1 signal-brief call<br/>per batch — see §7]
       CycleWF[StrategyLabCycleWorkflow<br/>child workflow per cycle<br/>outer design-re-entry loop only]
       DesignAttempt["run_design_attempt_activity<br/>runs StrategyLabOrchestrator._run_design_attempt VERBATIM:<br/>design+review → synthesis → refinement/alignment →<br/>verification/analysis → record assembly — all in ONE activity"]
       Finalize[finalize_cycle_record_activity<br/>signal-brief attach + paper-trade + persist]
@@ -360,12 +360,11 @@ a client always sees current progress at connect time and on each
 subsequent poll; separately, two call sites publish directly and
 best-effort, in-process, without going through that record —
 `run_design_attempt_activity`'s own progress callback (every sub-cycle
-phase update it forwards through `_PROGRESS_PHASE_MAP` — the internal
-`designing`/`design_review`/`design_repair`/`coding`/`backtesting`/
-`aligning`/`analyzing`/`complete` names, collapsed onto the UI's
-four-entry stepper `ideating`/`coding`/`backtesting`/`analyzing`. The
-orchestrator also emits `telemetry` and `phase_transition`, which are
-deliberately absent from the map and therefore never published) and `publish_run_event_activity`
+phase update it forwards through `_PROGRESS_PHASE_MAP`, which collapses the
+orchestrator's internal phase names onto the UI's four-entry stepper — the
+full name inventory and mapping live in
+[`strategy_lab_pipeline.md`](./strategy_lab_pipeline.md)'s "Phase events"
+section) and `publish_run_event_activity`
 (the batch workflow's skipped/finalized/terminal events). Reconciliation
 doesn't depend on either direct-publish path, so a missed one is still
 caught up by the next poll. A polling fallback (`GET /strategy-lab/runs/{run_id}/status`)

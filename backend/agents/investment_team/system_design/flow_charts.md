@@ -111,7 +111,7 @@ sequenceDiagram
     end
 
     loop for each batch
-        BatchWF->>SIE: compute_signal_brief_activity<br/>(dispatched unconditionally, once per batch —<br/>a mid-batch resume re-runs it, so later cycles<br/>in that batch can see a different brief)
+        BatchWF->>SIE: compute_signal_brief_activity<br/>(dispatched unconditionally, once per batch —<br/>see architecture.md §7 for the resume caveat)
         opt STRATEGY_LAB_SIGNAL_EXPERT_ENABLED (default true)
             SIE->>LLM: Agent(prompt) — Strands path,<br/>not .complete_json
             LLM-->>SIE: SignalIntelligenceBriefV1

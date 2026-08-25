@@ -486,16 +486,19 @@ the resend-free path versus fell back. This mirrors the `json_self_correction su
 convention in `llm_service/structured.py`.
 
 ### STRATEGY_LAB_DESIGN_MAX_LLM_CALLS
-Cap on the number of *budget-charged* LLM calls across the **entire** design attempt (default
-`120`, sub-1 values floored to `1`). `use_budget(budget)` wraps the whole `_run_design_attempt`
-call, not the design phase alone.
+Per-**cycle** hard cap on the number of *budget-charged* LLM calls (default `120`, sub-1 values
+floored to `1`): the count is threaded across all `MAX_DESIGN_REENTRIES` re-entries, so the ceiling
+spans every design attempt in the cycle, and within each attempt `use_budget(budget)` wraps the
+whole `_run_design_attempt` call, not the design phase alone.
 
 **What is charged.** Every design/review call (generation, each parse-retry, the self-review
 verdict, each self-revision, and each `DesignReviewAgent` round); every refinement call
 (`RefinementAgent`); and every trade-alignment / zero-trade-repair call
-(`TradeAlignmentAgent`/`ZeroTradeRepairAgent`). Note the charge is inside the retry envelope and
-the structured path charges per provider round-trip, so one *logical* call can consume several
-units — up to 6 for a structured design call at the default `llm_max_retries`.
+(`TradeAlignmentAgent`/`ZeroTradeRepairAgent`). Two multiplier effects apply: the parse-retry
+loop charges once per parse attempt, and the structured two-pass path charges once per provider
+round-trip — so one *logical* structured design call can consume up to 6 units at the default
+`llm_max_retries`. Single-shot `charge=True` sites, by contrast, charge exactly once *before*
+the transport retry envelope, so transport retries cost no extra units.
 
 **What is not.** Only `CodeSynthesisAgent.run` and `AnalysisAgent` are genuinely uncharged
 (custom-code synthesis and the final narrative). Three other sites pass `charge=False` but are

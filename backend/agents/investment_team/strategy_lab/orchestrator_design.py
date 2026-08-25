@@ -1750,15 +1750,10 @@ class DesignMixin:
         )
 
         # ═══ Phase 4 → exit: BACKTEST_AND_VERIFICATION → ∅ ════════════
-        # Terminal transition out of the last named phase. ``to_phase`` is
-        # ``None``. Neither hash is guaranteed to match every earlier
-        # boundary: ``spec_hash`` can differ from the ``DESIGN_REVIEW →
-        # CODE_SYNTHESIS`` value via the synthesis-phase carve-outs, and
-        # ``code_hash`` can differ from the synthesis-exit value because
-        # ``state`` here is the post-alignment ``_DesignAttemptState`` and
-        # the trade-alignment loop may have committed a rewritten baseline
-        # (``_commit_alignment_proposal``). See ``PhaseTransition``'s
-        # Invariants in ``phases.py`` for the full carve-out list.
+        # Terminal transition out of the last named phase (``to_phase`` is
+        # ``None``), hashed from the post-alignment state — so neither hash
+        # is guaranteed to match every earlier boundary. ``PhaseTransition``'s
+        # Invariants in ``phases.py`` own the carve-out list.
         _emit_phase_transition(
             emit,
             from_phase=Phase.BACKTEST_AND_VERIFICATION,

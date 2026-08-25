@@ -52,7 +52,7 @@ flowchart LR
 | **PromotionGateAgent** | Yes (IPS) | Live/paper gates from IPS |
 | **ValidationAgent** | No | Only `ValidationReport` checklist |
 | **InvestmentCommitteeAgent** | Yes (user id) | Memo `prepared_for_user_id` |
-| **SignalIntelligenceExpert** | No | Runs once per **batch** (not per cycle) over prior lab results + `MarketLabContext` (free-tier APIs); brief shared by every cycle within that batch and persisted on each `StrategyLabRecord` — see `system_design/architecture.md` §7 for the full invocation-count nuance (multi-batch runs and mid-batch resumes) |
+| **SignalIntelligenceExpert** | No | Runs once per **batch** (not per cycle) over prior lab results + `MarketLabContext` (free-tier APIs); brief normally shared by every cycle within that batch and persisted on each `StrategyLabRecord` — see `system_design/architecture.md` §7 for the full invocation-count nuance (multi-batch runs and mid-batch resumes) |
 | **InvestmentTeamOrchestrator** | Mixed | Promotion needs IPS; web tool coordinator has no profile |
 | **InvestmentWebInterfaceCoordinator** | No investment profile | Provider login/config only |
 
@@ -198,7 +198,7 @@ Engineer-facing architecture details live under [`system_design/`](./system_desi
 - [`use_cases.md`](./system_design/use_cases.md) — use-case diagram grouped by actor and track.
 - [`flow_charts.md`](./system_design/flow_charts.md) — sequence/state diagrams for advisor, Strategy Lab batch, promotion gate, orchestrator mode.
 - [`market_data_flow.md`](./system_design/market_data_flow.md) — data providers, how data is retrieved and streamed into the engine, provider-selection precedence, and fill-price-from-bar logic for backtest + paper trade.
-- [`strategy_lab_pipeline.md`](./system_design/strategy_lab_pipeline.md) — the per-cycle pipeline as a narrative of stages (ideate → fetch data → backtest → align → analyze → optionally paper-trade), the winner gate, and the skip paths. Note these stage names are the doc's own descriptive labels, not wire values: the orchestrator emits `designing`/`design_review`/`design_repair`/`coding`/`backtesting`/`aligning`/`analyzing`/`complete` (plus `telemetry` and `phase_transition`, which are deliberately unmapped), of which a subscriber receives only the four `_PROGRESS_PHASE_MAP` targets (`ideating`/`coding`/`backtesting`/`analyzing`).
+- [`strategy_lab_pipeline.md`](./system_design/strategy_lab_pipeline.md) — the per-cycle pipeline as a narrative of stages (ideate → fetch data → backtest → align → analyze → optionally paper-trade), the winner gate, and the skip paths. Note these stage names are the doc's own descriptive labels, not wire values — its "Phase events" section owns the actual emitted-name inventory and the `_PROGRESS_PHASE_MAP` collapse a subscriber sees.
 - [`generation_pipeline.md`](./system_design/generation_pipeline.md) — what happens inside "ideating" and "backtest": the 4-phase contract, design ↔ review loop, code synthesis, refinement/alignment loops, the full quality-gates catalog, and the Temporal activity mapping.
 - [`paper_trading_integration.md`](./system_design/paper_trading_integration.md) — paper trading as an integrated cycle step: winner gate, config, failure contract, linkage to `StrategyLabRecord`.
 - [`trade_record_schema.md`](./system_design/trade_record_schema.md) — every `TradeRecord` field, including bid vs fill prices and order-type fields used for post-hoc execution analysis.

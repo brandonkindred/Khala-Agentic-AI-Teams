@@ -4,15 +4,11 @@ This is the "how it all works together" deep dive: what actually happens
 **inside** a single Strategy Lab design attempt, from a bare cycle request to
 an assembled `StrategyLabRecord`. It complements, rather than duplicates,
 [`strategy_lab_pipeline.md`](./strategy_lab_pipeline.md), which documents the
-*outer* cycle phases and their SSE events. Note the two vocabularies: the
-orchestrator emits internal phase names (`designing`, `design_review`,
-`design_repair`, `coding`, `backtesting`, `aligning`, `analyzing`,
-`complete`, plus the deliberately-unmapped `telemetry` and
-`phase_transition`), and `_PROGRESS_PHASE_MAP` collapses the first eight onto
-the four-entry stepper a UI client actually receives — `ideating → coding → backtesting →
-analyzing` (an unmapped phase is not published at all). `fetching_data` is a
-`sub_phase` of `backtesting`, not a phase of its own. This document opens up
-what happens behind those — in particular everything inside "ideating" (the
+*outer* cycle phases and their SSE events — including how
+`_PROGRESS_PHASE_MAP` collapses the orchestrator's internal phase names onto
+the four-entry stepper a UI client actually receives (see its "Phase events"
+section; that mapping is not restated here). This document opens up what
+happens behind those events — in particular everything inside "ideating" (the
 design ↔ review loop) and "backtesting" (synthesis, refinement, verification)
 — and is the companion to [`architecture.md`](./architecture.md)'s container
 view and §11 (orchestrator composition).
@@ -73,44 +69,20 @@ Each transition emits a `PhaseTransition` event (`class PhaseTransition`,
 (`hash_spec` — canonical-JSON of the spec, deliberately excluding
 `strategy_code`) and a 64-char SHA-256 `code_hash` (`hash_code`).
 
-This is a drift-detection mechanism, and the key thing to understand is that
-**both hashes are boundary snapshots** — each records state as of the moment
-its own transition fires, not a value pinned for the rest of the attempt.
-Comparing two boundaries detects drift only where none of the carve-outs
-below applies.
-
-`spec_hash` is frozen post-design apart from **three** carve-outs. All three
-land on the `CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION` boundary, but only
-(1) and (2) are inside `_run_synthesis_loop` — (3) fires earlier, in
-`_synthesize_initial_code`, before the loop is entered:
-
-1. the refinement loop accepting a **tighten-only** `risk_limits` update
-   (`_apply_updates` → `_merge_risk_limits_tighten_only`);
-2. a **zero-trade repair** committing a whitelisted `risk_limits` update
-   (`_apply_zero_trade_spec_updates`, `../strategy_lab/zero_trade_repair.py`).
-   Unlike (1) this path has **no** tighten-only guard — it assigns the
-   proposed value verbatim, so a *loosening* is accepted as-is;
-3. `_synthesize_initial_code` (`../strategy_lab/orchestrator.py`) flipping
-   `spec.requires_custom_code` to `True` on a `CompilerError` the
-   mechanical-repair pre-flight didn't catch — and `hash_spec` excludes only
-   `strategy_code`, not `requires_custom_code`.
-
-From there `spec_hash` is stable through the terminal transition: the
-trade-alignment loop's own `_apply_updates` call never carries `risk_limits`
-updates, and `requires_custom_code` isn't touched again after synthesis.
-
-`code_hash` is unchanged from `CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION`
-through the refinement loop that precedes it, but the trade-alignment loop
-that *follows* it can commit a rewritten baseline
-(`_commit_alignment_proposal`), so the terminal transition's `code_hash` can
-legitimately differ — the terminal emit is reached with the
-`_DesignAttemptState` built after the alignment loop, so it carries that
-rewrite. An alignment-driven rewrite is expected behaviour, not drift.
-
-`PhaseTransition`'s own `Invariants` block states the same carve-outs. It
-previously asserted flat stability for both hashes — which predated
-`_commit_alignment_proposal` and the zero-trade repair path — and was
-corrected alongside this document.
+This is a drift-detection mechanism with one subtlety: **both hashes are
+boundary snapshots** — each records state as of the moment its own transition
+fires, not a value pinned for the rest of the attempt. Neither is flatly
+stable post-design. The spec has three sanctioned mutation paths, all landing
+on the `CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION` boundary (a tighten-only
+refinement merge, a zero-trade repair's whitelisted `risk_limits` commit —
+deliberately allowed to *loosen* when over-tight limits caused the zero-trade
+outcome — and a `requires_custom_code` flip on compiler fallback), and the
+trade-alignment loop after that boundary can commit a rewritten code baseline
+(`_commit_alignment_proposal`) that the terminal transition picks up.
+`PhaseTransition`'s `Invariants` block in
+[`../strategy_lab/phases.py`](../strategy_lab/phases.py) is the authoritative
+carve-out list — consult it before treating a cross-boundary hash difference
+as drift; it is not restated in full here.
 
 All four emission sites live in `orchestrator_design.py` and are the only
 `_emit_phase_transition(...)` call sites in the package; in phase order they
@@ -300,16 +272,16 @@ Owned by `VerificationMixin` (`orchestrator_verification.py`):
   matches requested symbols), `CostStressRealismGate`, `LiquidityRealismGate`,
   `RegimeCoverageGate`, `TradeClusteringGate`, `RuleFiringRateGate`.
 
-The **winner label** is a simple deterministic threshold —
-`is_winning = execution_succeeded and trades and annualized_return_pct >= 8.0`
-(`WINNING_THRESHOLD` in `../models.py`) — independent of every gate above. The
-**publishable gate** is what actually decides paper-trading eligibility:
-`is_publishable = is_winning and realism_passed and trades_aligned and
-exit_rule_conformance_passed and not lookahead_violation`. Both the exact
-veto-code ordering on a failed publishable gate and the full paper-trading
-skip-reason table are already documented in
+Two distinct verdicts come out of this phase. The **winner label**
+(`is_winning`) is a simple deterministic return threshold
+(`WINNING_THRESHOLD` in `../models.py`) that none of the gates above can
+flip. The **publishable gate** (`is_publishable`) is what actually decides
+paper-trading eligibility: it requires the winner label *plus* a clean pass
+from realism, alignment, exit-rule conformance, and the look-ahead check.
+The exact boolean formulas, the veto-code ordering on a failed publishable
+gate, and the full paper-trading skip-reason table are all documented in
 [`strategy_lab_pipeline.md`](./strategy_lab_pipeline.md) — see "Winner label
-vs publishable gate" there rather than duplicating it here.
+vs publishable gate" there rather than duplicating them here.
 
 Analysis (`AnalysisAgent`, `../strategy_lab/agents/analysis.py`) runs last —
 a single self-reviewing narrative draft describing why the strategy won or

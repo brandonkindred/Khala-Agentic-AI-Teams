@@ -414,7 +414,8 @@ in the current model — walk-forward/deflated-Sharpe fields
 `acceptance_reason`, `regime_results`, `fold_results`), a `coverage_report`
 (zero/low-trade diagnostics from `coverage_probe/`), and
 `execution_diagnostics`. These aren't drawn above to keep the diagram
-readable; the full field list is in `models.py`:939-1003, and their role in
+readable; the full field list is on `class BacktestResult` in
+[`models.py`](../models.py), and their role in
 the verification/publication decision is documented in
 [`generation_pipeline.md`](./generation_pipeline.md).
 
@@ -422,15 +423,15 @@ the verification/publication decision is documented in
 
 | Enum | Values | Defined |
 |---|---|---|
-| `RiskTolerance` | `low`, `medium`, `high`, `very_high` | [`models.py`](../models.py):72 |
-| `WorkflowMode` | `advisory`, `paper`, `live`, `monitor_only` | [`models.py`](../models.py):116 |
-| `PromotionStage` | `reject`, `revise`, `paper`, `live` | [`models.py`](../models.py):103 |
-| `PromotionGate` | `separation_of_duties`, `risk_veto`, `validation`, `ips_permission`, `human_approval` — five members; the sixth checklist step ("promote to live") records `human_approval = pass` rather than a gate of its own | [`models.py`](../models.py):123 |
-| `GateResult` | `pass`, `fail`, `warn` | [`models.py`](../models.py):131 |
-| `AdvisorTopic` | `greeting`, `risk_tolerance`, `time_horizon`, `income`, `net_worth`, `savings`, `tax`, `liquidity`, `goals`, `preferences`, `constraints`, `trading_preferences`, `review` (13) | [`models.py`](../models.py):85 |
-| `AdvisorSessionStatus` | `active`, `completed`, `abandoned` | [`models.py`](../models.py):79 |
-| `PaperTradingStatus` | `running`, `completed`, `failed` (legacy), plus live-mode `opening`, `warming_up`, `live` | [`models.py`](../models.py):1198 |
-| `PaperTradingVerdict` | `ready_for_live`, `not_performant` | [`models.py`](../models.py):1210 |
+| `RiskTolerance` | `low`, `medium`, `high`, `very_high` | [`models.py`](../models.py) |
+| `WorkflowMode` | `advisory`, `paper`, `live`, `monitor_only` | [`models.py`](../models.py) |
+| `PromotionStage` | `reject`, `revise`, `paper`, `live` | [`models.py`](../models.py) |
+| `PromotionGate` | `separation_of_duties`, `risk_veto`, `validation`, `ips_permission`, `human_approval` — five members; the sixth checklist step ("promote to live") records `human_approval = pass` rather than a gate of its own | [`models.py`](../models.py) |
+| `GateResult` | `pass`, `fail`, `warn` | [`models.py`](../models.py) |
+| `AdvisorTopic` | `greeting`, `risk_tolerance`, `time_horizon`, `income`, `net_worth`, `savings`, `tax`, `liquidity`, `goals`, `preferences`, `constraints`, `trading_preferences`, `review` (13) | [`models.py`](../models.py) |
+| `AdvisorSessionStatus` | `active`, `completed`, `abandoned` | [`models.py`](../models.py) |
+| `PaperTradingStatus` | `running`, `completed`, `failed` (legacy), plus live-mode `opening`, `warming_up`, `live` | [`models.py`](../models.py) |
+| `PaperTradingVerdict` | `ready_for_live`, `not_performant` | [`models.py`](../models.py) |
 
 `PaperTradingStatus` (above) and `StrategyLabRecord.paper_trading_status`
 (in the class diagram) are **not** the same vocabulary despite the name and

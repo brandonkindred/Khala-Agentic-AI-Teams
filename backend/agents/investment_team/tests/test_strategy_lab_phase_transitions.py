@@ -11,7 +11,9 @@ These tests drive a real ``StrategyLabOrchestrator`` through
   a universal invariant: ``PhaseTransition`` documents three carve-outs
   (zero-trade repair committing ``risk_limits``, a tighten-only
   refinement merge, and a ``requires_custom_code`` flip on compiler
-  fallback) that none of these stubs exercise.
+  fallback) that none of these stubs exercise. A fixture exercising one
+  of them would legitimately produce a different hash — extend rather
+  than "fix" the stability assertion if you add such a case.
 * The ``code_hash`` recorded at the synthesis exit boundary matches the
   SHA-256 of the synthesised code string.
 * Critical ``SpecReadinessGate`` failure blocks the ``DESIGN_REVIEW →
@@ -228,14 +230,8 @@ def test_spec_hash_stable_after_design_review_exit(
 ) -> None:
     """On this happy-path fixture the spec is not mutated post-design, so
     ``spec_hash`` from the ``DESIGN_REVIEW → CODE_SYNTHESIS`` boundary
-    onward must be equal.
-
-    Scope: this asserts the *fixture's* behaviour, not a universal
-    invariant. ``PhaseTransition`` documents three legitimate carve-outs
-    that mutate the spec inside the synthesis phase; a fixture that
-    exercises any of them would produce a different — and correct —
-    hash at the CODE_SYNTHESIS exit boundary. Extend rather than
-    "fix" this assertion if you add such a case.
+    onward must be equal. Fixture behaviour, not a universal invariant —
+    the module docstring covers the carve-out caveat.
     """
     orch = StrategyLabOrchestrator()
     _stub_pipeline_for_happy_path(monkeypatch, orch)
@@ -247,8 +243,7 @@ def test_spec_hash_stable_after_design_review_exit(
     # Boundary 2 onward the spec is frozen.
     post_design_hashes = {t["spec_hash"] for t in transitions[1:]}
     assert len(post_design_hashes) == 1, (
-        "spec_hash changed after design review on a fixture that exercises "
-        f"none of PhaseTransition's documented carve-outs — distinct hashes: {post_design_hashes!r}"
+        f"spec_hash drift detected after design review — distinct hashes: {post_design_hashes!r}"
     )
 
 

@@ -181,15 +181,17 @@ class PhaseTransition(BaseModel):
              (``_orchestrator_helpers._merge_risk_limits_tighten_only``);
           2. a zero-trade repair committing a whitelisted ``risk_limits``
              update verbatim (``zero_trade_repair._apply_zero_trade_spec_updates``)
-             — note this path has **no** tighten-only guard, so a proposed
-             loosening is accepted as-is;
+             — deliberately not tighten-only: a loosening is the sanctioned
+             fix when over-tight limits caused the zero-trade outcome (the
+             repair prompt gates it on that diagnosis; the committed spec is
+             re-validated for range, then must survive a fresh backtest);
           3. ``_synthesize_initial_code`` flipping ``requires_custom_code``
              to ``True`` on a ``CompilerError`` fallback (``hash_spec``
              excludes only ``strategy_code``, not ``requires_custom_code``).
-      - ``code_hash`` is stable from the ``CODE_SYNTHESIS →
-        BACKTEST_AND_VERIFICATION`` transition through the refinement loop,
-        but **not** through to the terminal transition: the trade-alignment
-        loop runs after that boundary and may commit a rewritten baseline
+      - ``code_hash`` at the ``CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION``
+        transition already reflects the refinement loop, which runs *before*
+        that emit. Between that boundary and the terminal transition only
+        the trade-alignment loop runs; it may commit a rewritten baseline
         (``_commit_alignment_proposal``), which the terminal emit picks up
         because it is reached with the post-alignment ``_DesignAttemptState``.
         An alignment-driven rewrite is expected behaviour, not drift.

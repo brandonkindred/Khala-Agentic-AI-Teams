@@ -1,10 +1,9 @@
-"""LLM-call budget for a Strategy Lab design attempt.
+"""LLM-call budget for Strategy Lab's design attempts.
 
-Despite the ``DESIGN`` in ``STRATEGY_LAB_DESIGN_MAX_LLM_CALLS``, the cap is
-**not** design-phase-only: ``use_budget`` wraps the whole
-``_run_design_attempt``, so refinement, trade-alignment and zero-trade repair
-charge against the same counter. See :class:`LLMCallBudget` for the full
-scope, including how it behaves across Temporal activity retries.
+The cap is not design-phase-only, despite the env var's name — see
+:class:`LLMCallBudget` for the authoritative scope statement, including which
+agents charge, which are exempt, and how the count behaves across Temporal
+activity retries. Do not restate that scope elsewhere in this module.
 
 A single ``run_cycle`` can fan into a large number of
 LLM round-trips: each design re-entry runs a bounded design ↔ review loop,
@@ -17,19 +16,21 @@ spend and can exhaust rate-limited quotas mid-cycle.
 :class:`LLMCallBudget` is a plain counter threaded down to every
 budget-charged ``agent(prompt)`` call site. Each site charges the
 budget *before* invoking the model; when the cap is reached the next charge
-raises :class:`DesignBudgetExhausted`, which the design loop translates into
-a structured ``status="failed: budget_exhausted"`` short-circuit.
+raises :class:`DesignBudgetExhausted`, which is translated into a structured
+``status="failed: budget_exhausted"`` short-circuit (see that exception's
+docstring for which handler catches which trip).
 
 This module imports nothing from ``strategy_lab`` (stdlib only) so it can be
 imported by the orchestrator and both design agents without creating an
 import cycle.
 
 Charging is accessed through a single chokepoint — :func:`charge_active_budget`,
-backed by a context variable the orchestrator binds via :func:`use_budget`
-for the duration of the design attempt. Agents call ``charge_active_budget()``
-right before every model invocation; they no longer thread a ``budget``
-argument through their signatures, so a new charged LLM call site only
-has to make that one call to be covered by the cap.
+backed by a context variable bound via :func:`use_budget` (by ``run_cycle``
+around the whole cycle in thread mode, and by ``run_design_attempt_activity``
+around one attempt in Temporal mode). Agents call ``charge_active_budget()``
+right before every charged model invocation; they no longer thread a
+``budget`` argument through their signatures, so a new charged LLM call site
+only has to make that one call to be covered by the cap.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from typing import Iterator, Optional
 
 
 class DesignBudgetExhausted(Exception):
-    """Raised by :meth:`LLMCallBudget.charge` when the per-cycle budget is hit.
+    """Raised by :meth:`LLMCallBudget.charge` when the budget is hit.
 
     Caught in ``_run_design_loop`` for design-phase trips, and in
     ``orchestrator_design`` for trips from the later phases and translated to
@@ -75,7 +76,7 @@ def _annotate_budget_exhaustion(
     """Stamp the latest in-loop state onto a budget trip before re-raising.
 
     The design / refinement / alignment / synthesis loops each catch a
-    :class:`DesignBudgetExhausted` at the point the per-cycle LLM-call budget
+    :class:`DesignBudgetExhausted` at the point the LLM-call budget
     trips and attach the freshest spec — and, depending on the call site, the
     code, rationale, and mechanical-repair count they were working on — before
     re-raising, so the outer ``_run_design_loop`` budget handler can build the
@@ -120,8 +121,15 @@ class LLMCallBudget:
     In thread mode the budget is created once in ``run_cycle`` and spans every
     ``MAX_DESIGN_REENTRIES`` re-entry. In Temporal mode — the supported mode —
     a fresh instance is built inside each design-attempt activity and seeded
-    from the previous attempt's count, which preserves the ceiling across
-    re-entries but not across a Temporal activity retry.
+    from the previous attempt's count, preserving the ceiling across
+    re-entries. Across a Temporal *activity retry* the preservation is
+    partial: with a valid design-phase checkpoint the retry reseeds from the
+    checkpoint's boundary-time count (``activities.py``), so design-phase
+    charges are never regained — but charges made after that boundary
+    (refinement / alignment / repair) are not recorded anywhere the retry can
+    see and are re-issued, and a no-checkpoint retry reseeds from the
+    attempt-start count. Overshoot is bounded by the activity's
+    ``maximum_attempts``.
 
     Invariants:
       * ``0 <= calls_made <= limit`` at all times.
@@ -176,8 +184,10 @@ def use_budget(budget: Optional[LLMCallBudget]) -> Iterator[None]:
     """Bind ``budget`` as the active budget for the duration.
 
     Preconditions:
-      Wraps a whole design attempt — not just its design phase — so
-      refinement, alignment and repair calls charge against it too.
+      Wraps the full charged region — the whole cycle in thread mode
+      (``run_cycle``), one design attempt in Temporal mode
+      (``run_design_attempt_activity``); in both cases more than the design
+      phase alone, so refinement, alignment and repair calls charge too.
     Postconditions:
       Within the ``with`` block ``charge_active_budget`` charges ``budget``;
       the prior binding is restored on exit even if the block raises.
@@ -200,8 +210,10 @@ def active_budget() -> Optional[LLMCallBudget]:
 def charge_active_budget() -> None:
     """Charge the active budget for one imminent LLM call, if one is bound.
 
-    Single chokepoint for budget charging: every model invocation
-    calls this immediately before the call. A no-op when no budget is bound.
+    Single chokepoint for budget charging: every *charged* model invocation
+    calls this immediately before the call (uncharged sites —
+    ``CodeSynthesisAgent`` / ``AnalysisAgent`` — never do). A no-op when no
+    budget is bound.
 
     Postconditions:
       When a budget is bound, behaves exactly like :meth:`LLMCallBudget.charge`
