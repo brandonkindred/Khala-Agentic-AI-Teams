@@ -136,22 +136,27 @@ omit = [
     # lives in the shared, config-driven implementation (shared/phases/review.py,
     # shared/v2_review_bindings.py) and is covered there by unit tests with
     # mocked tool agents, same as setup/planning/deliver.
-    "agents/software_engineering_team/backend_code_v2_team/phases/problem_solving.py",
-    "agents/software_engineering_team/frontend_code_v2_team/phases/problem_solving.py",
+    "agents/software_engineering_team/codegen_team/stacks/backend/problem_solving.py",
+    "agents/software_engineering_team/codegen_team/stacks/frontend/problem_solving.py",
     # software_engineering_team: v2-team build specialist — wraps the
     # real `ng build`/`pytest` runners + LLM prompt repair loop, only
     # meaningful when those binaries and the LLM are reachable.
-    "agents/software_engineering_team/backend_code_v2_team/tool_agents/build_specialist/agent.py",
+    "agents/software_engineering_team/codegen_team/tool_agents/backend/build_specialist/agent.py",
     # software_engineering_team: linting_tool_agent.linter_runner — wraps
     # `ruff`/`pylint` subprocess invocations on the agent-generated tree;
     # only runs against real lint binaries + a generated repo.
     "agents/software_engineering_team/linting_tool_agent/linter_runner.py",
-    # software_engineering_team: v2-team orchestrators — wire setup → planning →
-    # execution → review → problem-solving → deliver around live LLM + npm/git/pytest.
-    # The smaller helpers and team-lead/dev-agent shell are covered via dedicated
-    # unit tests; the multi-phase `run_workflow` itself only runs end-to-end.
-    "agents/software_engineering_team/backend_code_v2_team/orchestrator.py",
-    "agents/software_engineering_team/frontend_code_v2_team/orchestrator.py",
+    # software_engineering_team: codegen_team frontend linter tool agent —
+    # wraps a real `npx eslint --format json` invocation via
+    # run_command_with_nvm; only meaningful against a real npm/eslint install
+    # and a generated frontend project. Mirrors the build_specialist omit above.
+    "agents/software_engineering_team/codegen_team/tool_agents/frontend/linter/agent.py",
+    # software_engineering_team: codegen_team orchestrator — wires setup → planning →
+    # execution → review → problem-solving → deliver around live LLM + npm/git/pytest,
+    # for both the backend and frontend stacks. The smaller helpers and
+    # team-lead/dev-agent shell are covered via dedicated unit tests; the
+    # multi-phase `run_workflow` itself only runs end-to-end.
+    "agents/software_engineering_team/codegen_team/orchestrator.py",
     # software_engineering_team: build_fix_specialist — uses Strands `Agent`
     # against the live LLM model registry to repair build failures; pure
     # integration entry point.
@@ -168,20 +173,20 @@ omit = [
     # an LLM phase against the agent-generated workspace. The smaller helpers
     # (resolve_files, group_issues, etc.) are still covered through the
     # per-tool-agent unit tests in tests/test_v2_phases.py and friends.
-    "agents/software_engineering_team/frontend_code_v2_team/tool_agents/architecture/agent.py",
-    "agents/software_engineering_team/frontend_code_v2_team/tool_agents/security/agent.py",
-    "agents/software_engineering_team/frontend_code_v2_team/tool_agents/performance/agent.py",
-    "agents/software_engineering_team/frontend_code_v2_team/tool_agents/ui_design/agent.py",
-    "agents/software_engineering_team/frontend_code_v2_team/tool_agents/ux_usability/agent.py",
-    "agents/software_engineering_team/frontend_code_v2_team/tool_agents/testing_qa/agent.py",
-    "agents/software_engineering_team/frontend_code_v2_team/tool_agents/documentation/agent.py",
-    "agents/software_engineering_team/frontend_code_v2_team/tool_agents/build_specialist/agent.py",
-    "agents/software_engineering_team/backend_code_v2_team/tool_agents/testing_qa/agent.py",
-    "agents/software_engineering_team/backend_code_v2_team/tool_agents/security/agent.py",
-    "agents/software_engineering_team/backend_code_v2_team/tool_agents/documentation/agent.py",
+    "agents/software_engineering_team/codegen_team/tool_agents/frontend/architecture/agent.py",
+    "agents/software_engineering_team/codegen_team/tool_agents/frontend/security/agent.py",
+    "agents/software_engineering_team/codegen_team/tool_agents/frontend/performance/agent.py",
+    "agents/software_engineering_team/codegen_team/tool_agents/frontend/ui_design/agent.py",
+    "agents/software_engineering_team/codegen_team/tool_agents/frontend/ux_usability/agent.py",
+    "agents/software_engineering_team/codegen_team/tool_agents/frontend/testing_qa/agent.py",
+    "agents/software_engineering_team/codegen_team/tool_agents/frontend/documentation/agent.py",
+    "agents/software_engineering_team/codegen_team/tool_agents/frontend/build_specialist/agent.py",
+    "agents/software_engineering_team/codegen_team/tool_agents/backend/testing_qa/agent.py",
+    "agents/software_engineering_team/codegen_team/tool_agents/backend/security/agent.py",
+    "agents/software_engineering_team/codegen_team/tool_agents/backend/documentation/agent.py",
     # software_engineering_team: dev-side orchestrator agents inside v2 teams
-    # (frontend BackendDevelopmentAgent equivalent path) that wire planning →
-    # execution → review → deliver against real LLM models.
+    # (analogous to codegen_team's CodegenDevelopmentAgent path) that wire
+    # planning → execution → review → deliver against real LLM models.
     "agents/software_engineering_team/ai_agent_development_team/orchestrator.py",
     # software_engineering_team: devops_team/phase2_graph — fans out the
     # IaC/CICD/Deployment agents through a ThreadPoolExecutor; the

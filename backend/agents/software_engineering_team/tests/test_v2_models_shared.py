@@ -12,10 +12,10 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from software_engineering_team.backend_code_v2_team.models import (
+from software_engineering_team.codegen_team.models import (
     MicrotaskStatus as BackendMicrotaskStatus,
 )
-from software_engineering_team.frontend_code_v2_team.models import (
+from software_engineering_team.codegen_team.models import (
     MicrotaskStatus as FrontendMicrotaskStatus,
 )
 from software_engineering_team.shared.v2_models import (

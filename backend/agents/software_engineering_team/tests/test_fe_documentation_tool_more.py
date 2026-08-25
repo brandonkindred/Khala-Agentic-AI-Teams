@@ -2,22 +2,27 @@
 
 from __future__ import annotations
 
+from software_engineering_team.codegen_team.models import (
+    Microtask,
+    Phase,
+    ReviewIssue,
+    ToolAgentKind,
+    ToolAgentPhaseInput,
+)
+from software_engineering_team.codegen_team.tool_agents.frontend.documentation import (
+    agent as _documentation_agent_mod,
+)
+from software_engineering_team.codegen_team.tool_agents.frontend.documentation.agent import (
+    MAX_RELEVANT_CODE_CHARS,
+    _relevant_code_for_issue,
+)
+
 
 def _fe_microtask():
-    from software_engineering_team.frontend_code_v2_team.models import (
-        Microtask,
-        ToolAgentKind,
-    )
-
     return Microtask(id="mt-1", title="t", description="d", tool_agent=ToolAgentKind.GENERAL)
 
 
 def _fe_phase_input(**kwargs):
-    from software_engineering_team.frontend_code_v2_team.models import (
-        Phase,
-        ToolAgentPhaseInput,
-    )
-
     base = dict(
         phase=Phase.PLANNING,
         repo_path="/tmp",
@@ -32,8 +37,6 @@ def _fe_phase_input(**kwargs):
 
 
 def _fe_review_issue(**kwargs):
-    from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
-
     base = dict(source="documentation", severity="medium", description="d", file_path="", recommendation="")
     base.update(kwargs)
     return ReviewIssue(**base)
@@ -59,10 +62,7 @@ def _patch(monkeypatch, mod, response="", raise_exc=None):
 
 
 def _agent():
-    from software_engineering_team.frontend_code_v2_team.tool_agents.documentation import (
-        agent as mod,
-    )
-
+    mod = _documentation_agent_mod
     a = mod.DocumentationToolAgent.__new__(mod.DocumentationToolAgent)
     a._model = None
     a.llm = None
@@ -144,12 +144,6 @@ def test_fe_doc_problem_solve_llm_failure(monkeypatch):
 
 
 def test_fe_doc_relevant_code_for_issue_includes_large_file():
-    from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
-    from software_engineering_team.frontend_code_v2_team.tool_agents.documentation.agent import (
-        MAX_RELEVANT_CODE_CHARS,
-        _relevant_code_for_issue,
-    )
-
     issue = ReviewIssue(file_path="a.ts")
     big = "x" * (MAX_RELEVANT_CODE_CHARS + 5000)
     out = _relevant_code_for_issue(issue, {"a.ts": big})
@@ -159,11 +153,6 @@ def test_fe_doc_relevant_code_for_issue_includes_large_file():
 
 
 def test_fe_doc_relevant_code_for_issue_fallback_multifile():
-    from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
-    from software_engineering_team.frontend_code_v2_team.tool_agents.documentation.agent import (
-        _relevant_code_for_issue,
-    )
-
     issue = ReviewIssue(file_path="missing.ts")
     files = {"a.ts": "X", "b.ts": "Y"}
     out = _relevant_code_for_issue(issue, files)
@@ -172,10 +161,5 @@ def test_fe_doc_relevant_code_for_issue_fallback_multifile():
 
 
 def test_fe_doc_relevant_code_for_issue_empty():
-    from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
-    from software_engineering_team.frontend_code_v2_team.tool_agents.documentation.agent import (
-        _relevant_code_for_issue,
-    )
-
     out = _relevant_code_for_issue(ReviewIssue(), {})
     assert out == "(no code)"

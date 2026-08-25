@@ -574,3 +574,22 @@ what documentation you fixed
 """
 
 DELIVER_COMMIT_MSG_TEMPLATE = "feat({scope}): {summary}"
+
+# File-output template instructions appended to codegen_team's
+# FileGeneratorToolAgent prompts (auth, api_openapi, state_management,
+# data_engineering, ...) -- byte-identical across both stacks, so it lives
+# here once rather than as two independently maintained copies.
+FILES_OUTPUT_TEMPLATE_INSTRUCTIONS = """
+**Output format (template – use exactly these markers):**
+For each file:
+## FILE path/to/file.ext ##
+<full file content>
+## FILE path/to/next.ext ##
+<content>
+## SUMMARY ##
+what you produced
+## END SUMMARY ##
+- Use "## FILE <path> ##" at the start of each file; the next "## FILE " or "## SUMMARY ##" ends the previous file.
+- Do not put the exact line "## FILE " or "## SUMMARY ##" inside file content.
+- Do not use JSON. Use only the template above. No explanatory text before or after.
+"""

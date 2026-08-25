@@ -22,6 +22,7 @@ import pytest
 from accessibility_agent import AccessibilityExpertAgent, AccessibilityInput
 from accessibility_agent.models import AccessibilityOutput
 
+import software_engineering_team.shared.review_result_cache as review_cache_mod
 from llm_service.clients.dummy import DummyLLMClient
 from llm_service.strands_model import model_fingerprint
 from shared.cache import get_shared_cache
@@ -109,8 +110,6 @@ def test_cache_backend_error_falls_open_to_correct_result(monkeypatch: pytest.Mo
             # blow up while the cache module's get_shared_cache is still
             # monkeypatched.
             pass
-
-    import software_engineering_team.shared.review_result_cache as review_cache_mod
 
     monkeypatch.setattr(review_cache_mod, "get_shared_cache", lambda namespace: _RaisingCache())
 

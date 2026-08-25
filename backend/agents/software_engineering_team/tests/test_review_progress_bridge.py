@@ -75,7 +75,7 @@ def test_run_code_review_phase_threads_detail_callback(monkeypatch, tmp_path: Pa
     """End-to-end through run_code_review_phase: the agent's progress reports reach
     detail_callback as formatted strings."""
     from shared.dev_models.models import Task, TaskType
-    from software_engineering_team.backend_code_v2_team.phases._profile import run_code_review_phase
+    from software_engineering_team.codegen_team.stacks.backend.profile import run_code_review_phase
 
     task = Task(
         id="t1",
@@ -86,7 +86,7 @@ def test_run_code_review_phase_threads_detail_callback(monkeypatch, tmp_path: Pa
         assignee="backend",
         acceptance_criteria=["AC"],
     )
-    from software_engineering_team.backend_code_v2_team.models import Microtask
+    from software_engineering_team.codegen_team.models import Microtask
 
     microtask = Microtask(id="m1", title="M", description="md")
 
@@ -113,8 +113,8 @@ def test_run_code_review_phase_forwards_architecture_and_spec_content(tmp_path: 
         Task,
         TaskType,
     )
-    from software_engineering_team.backend_code_v2_team.models import Microtask
-    from software_engineering_team.backend_code_v2_team.phases._profile import run_code_review_phase
+    from software_engineering_team.codegen_team.models import Microtask
+    from software_engineering_team.codegen_team.stacks.backend.profile import run_code_review_phase
 
     task = Task(
         id="t1",
