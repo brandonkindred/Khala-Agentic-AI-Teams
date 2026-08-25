@@ -80,8 +80,8 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 | **Design (post-planning)** | top-level | Architecture Expert, planning consolidation (task planning itself is owned by coding_team's Tech Lead) |
 | **Setup** | top-level | Git Setup |
 | **Implementation** | **coding-team execution engine** (Tech Lead + Task Graph; direct children of `software_engineering_team/` — see § Coding Team) | Tech Lead, frontend_v2/backend_v2 workers, Task Graph — **default SE execution path** after Planning + adapter |
-| **Implementation** | backend_code_v2_team | Backend v2 worker (Java/Python/Node, DBs, APIs, infra-adjacent); phase pipeline: setup → planning → execution → review → problem-solving → documentation → deliver, config-driven via `V2TeamConfig` over the shared phase implementations (not a standalone per-team implementation). Driven by the coding-team engine's Tech Lead |
-| **Implementation** | frontend_code_v2_team | Frontend v2 worker (Angular/React/TypeScript, CSS/SCSS, UI/UX, accessibility, state); same phase pipeline and shared, config-driven implementation with frontend tool agents. Driven by the coding-team engine's Tech Lead |
+| **Implementation** | codegen_team (`stack="backend"`) | Backend v2 worker (Java/Python/Node, DBs, APIs, infra-adjacent); phase pipeline: setup → planning → execution → review → problem-solving → documentation → deliver, config-driven via `V2TeamConfig` over the shared phase implementations. Driven by the coding-team engine's Tech Lead |
+| **Implementation** | codegen_team (`stack="frontend"`) | Frontend v2 worker (Angular/React/TypeScript, CSS/SCSS, UI/UX, accessibility, state); same phase pipeline and shared, config-driven implementation with frontend tool agents. Driven by the coding-team engine's Tech Lead |
 | **Implementation** | ai_agent_development_team | Intake/Planning/Execution/Review/Problem-solving/Delivery phases for spec-to-agent-system workflows with dedicated tool agents |
 | **Quality** | quality gates (cross-cutting) | Code Review, QA Expert, Cybersecurity Expert, Accessibility Expert |
 | **Integration / release** | top-level | Integration Agent, DevOps Team (sub-orchestrator), Documentation Agent |
@@ -92,7 +92,7 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 
 **Accessibility:** The top-level `accessibility_agent/` package is conceptually part of the **Quality** phase—it reviews frontend code for WCAG 2.2 compliance and is invoked per frontend task.
 
-**Sub-team shapes (deliberate, not drift):** the implementation sub-teams follow three different layouts on purpose. The **v2 phase-pipeline teams** (`backend_code_v2_team`, `frontend_code_v2_team`) are config-driven, not independently coded: each team's `phases/_profile.py` composes a `StackProfile`/`V2TeamConfig` (`shared/v2_team_config.py`) and binds the shared, generic phase implementations — `shared/v2_orchestrator.py`'s `ConfigDrivenV2DevelopmentAgent`, `shared/v2_phase_bindings.py` (documentation/planning/output-templates), `shared/v2_execution_bindings.py`, and `shared/v2_review_bindings.py` (with `V2TeamConfig.extra_review_clause` injecting frontend's accessibility clause) — plus `shared/phases/{setup,execution,review,documentation,planning,deliver,problem_solving}.py`. Only `phases/_profile.py` (config/bindings) and `phases/problem_solving.py` remain as real per-team files, and even `problem_solving.py` is a thin wrapper: its formatting, batch-fix, single-issue-loop, and top-level orchestration logic live in `shared/phases/problem_solving.py`, with each team's module wiring in its own models/prompts/profile — backend's copy additionally keeps its phase-specific fix functions (`run_code_review_fixes`, `run_qa_fixes`, `run_security_fixes`, `run_documentation_fixes`), which interlock with that team's own review-phase wiring and haven't been folded into the shared module. `documentation.py`, `planning.py`, `output_templates.py`, `setup.py`, `execution.py`, and `review.py` were deleted from both teams once their logic moved to the shared, config-driven seam. A digest-locked test (`test_prompt_constants_are_byte_stable` in `tests/test_v2_shared_phases.py`) guards each team's built prompt constants against silent drift now that both teams render from the same shared builders. The **coding-team execution engine** is independently routable (`/api/coding-team`), so its own request/response models, run-thread state, and Temporal definitions live as `coding_team_*`-prefixed siblings inside SE's `api/` and `temporal/` packages (and `github_source/`/`tech_lead_agent/` as their own top-level directories) rather than nested under a separate sub-package. The **devops_team** uses one directory per role agent plus LangGraph graphs, matching its contract-first gate pipeline. `ai_agent_development_team` is a complete but currently dormant v2-style team with no production consumer; it is intentionally left in its own shape rather than being force-fitted onto `BaseTeamLead`.
+**Sub-team shapes (deliberate, not drift):** the implementation sub-teams follow different layouts on purpose. The **v2 phase-pipeline team** (`codegen_team`) is a single config-driven implementation parametrized by `stack: Literal["backend", "frontend"]`, not two independently coded teams: `CodegenTeamLead`/`CodegenDevelopmentAgent` (`orchestrator.py`) resolve a `StackWiring` and `V2TeamConfig` by stack and bind the shared, generic phase implementations — `shared/v2_orchestrator.py`'s `ConfigDrivenV2DevelopmentAgent`, `shared/v2_phase_bindings.py` (documentation/planning/output-templates), `shared/v2_execution_bindings.py`, and `shared/v2_review_bindings.py` (with `V2TeamConfig.extra_review_clause` injecting frontend's accessibility clause) — plus `shared/phases/{setup,execution,review,documentation,planning,deliver,problem_solving}.py`. Only `stacks/{backend,frontend}/profile.py` (config/bindings), `stacks/{backend,frontend}/prompts.py` (prompt content), and `stacks/{backend,frontend}/problem_solving.py` remain as real per-stack files, and even `problem_solving.py` is a thin wrapper: its formatting, batch-fix, single-issue-loop, and top-level orchestration logic — including the phase-specific fix functions (`run_code_review_fixes`, `run_qa_fixes`, `run_security_fixes`, `run_documentation_fixes`) both stacks now call via `shared/phases/problem_solving.py`'s `make_phase_fix_functions` — live in `shared/phases/problem_solving.py`, with each stack's module wiring in only its own models/prompts/profile. `documentation.py`, `planning.py`, `output_templates.py`, `setup.py`, `execution.py`, and `review.py` were deleted from both stacks once their logic moved to the shared, config-driven seam. A digest-locked test (`test_prompt_constants_are_byte_stable` in `tests/test_v2_shared_phases.py`) guards each stack's built prompt constants against silent drift now that both stacks render from the same shared builders. The **coding-team execution engine** is independently routable (`/api/coding-team`), so its own request/response models, run-thread state, and Temporal definitions live as `coding_team_*`-prefixed siblings inside SE's `api/` and `temporal/` packages (and `github_source/`/`tech_lead_agent/` as their own top-level directories) rather than nested under a separate sub-package. The **devops_team** uses one directory per role agent plus LangGraph graphs, matching its contract-first gate pipeline. `ai_agent_development_team` is a complete but currently dormant v2-style team with no production consumer; it is intentionally left in its own shape rather than being force-fitted onto `BaseTeamLead`.
 
 ### SDLC Flow Diagram
 
@@ -141,7 +141,7 @@ flowchart LR
 
 ### Per-Task Workflow Gates
 
-These are the gates run by the default v2 execution path (`backend_code_v2_team`/`frontend_code_v2_team`, driven by the coding-team engine's Tech Lead), per `run_gated_execution_impl`'s `GATE_CONFIG`:
+These are the gates run by the default v2 execution path (`codegen_team`, for both the backend and frontend stacks, driven by the coding-team engine's Tech Lead), per `run_gated_execution_impl`'s `GATE_CONFIG`:
 
 **Backend and Frontend (same gate sequence):** build verification (lint + build, single CI-owned gate) → Code Review (build/lint findings + code review against spec/standards + every wired tool agent, e.g. accessibility and ui_design for frontend) → QA + Security (run in parallel over the same post-Code-Review snapshot, `parallelize_qa_security=True`) → Documentation (self-review loop, never fails). A gate that finds issues batch-fixes them and, for QA/Security, restarts from Code Review.
 
@@ -248,7 +248,7 @@ python -m agent_implementations.run_api_server
 
 Ensure Ollama is running with the model (e.g. `ollama run kimi-k2.7-code:cloud`). If you use a different API (OpenRouter, Together, etc.) or get a "model not found" error, set `LLM_MODEL` to a model your API supports (e.g. `export LLM_MODEL=deepseek-v4-flash:cloud` for Ollama, or your provider's model id). Note this only takes effect when the Postgres provider list is empty or the matching entry's model field is blank — otherwise the provider list value wins.
 
-**Per-phase retry limits:** each per-microtask review gate (Code Review, QA, Security, Documentation) has a hardcoded retry cap of `3` fix attempts (`max_retries`/`code_review_max_retries`/`qa_max_retries`/`security_max_retries`/`documentation_max_retries` on `MicrotaskReviewConfig`/`BaseMicrotaskReviewConfig` in `backend_code_v2_team/models.py`, `frontend_code_v2_team/models.py`, and `shared/v2_models.py`). These are not environment-configurable.
+**Per-phase retry limits:** each per-microtask review gate (Code Review, QA, Security, Documentation) has a hardcoded retry cap of `3` fix attempts (`max_retries`/`code_review_max_retries`/`qa_max_retries`/`security_max_retries`/`documentation_max_retries` on `MicrotaskReviewConfig`/`BaseMicrotaskReviewConfig` in `codegen_team/models.py` and `shared/v2_models.py`, shared unchanged by both stacks). These are not environment-configurable.
 
 **Coding-team and code-v2 execution concurrency (environment variables):** lowering these can reduce parallel LLM load but slows runs.
 
@@ -404,14 +404,15 @@ software_engineering_team/
 │   team_routing.py, token_crypto.py, v2_team_worker.py  # supporting collaborators
 ├── tech_lead_agent/       # Tech Lead: plan → Task Graph + stacks; grooming; assignments; review/merge
 ├── github_source/         # GitHub issue/PR integration (run-from-github, review-pr)
-├── backend_code_v2_team/  # Backend v2 implementation team (phases/ + tool_agents/)
-│   ├── orchestrator.py
-│   ├── phases/            # planning → setup → execution → review → problem_solving → documentation → deliver
+├── codegen_team/           # Config-driven backend+frontend v2 implementation team
+│   ├── orchestrator.py     # CodegenTeamLead / CodegenDevelopmentAgent, parametrized by stack
+│   ├── models.py           # Unified ToolAgentKind, CodegenWorkflowResult, MicrotaskReviewConfig
+│   ├── stacks/
+│   │   ├── backend/        # profile.py, prompts.py, problem_solving.py
+│   │   └── frontend/       # profile.py, prompts.py, problem_solving.py
 │   └── tool_agents/
-├── frontend_code_v2_team/ # Frontend v2 implementation team (phases/ + tool_agents/)
-│   ├── orchestrator.py
-│   ├── phases/
-│   └── tool_agents/       # accessibility, api_openapi, architecture, auth, branding_theme, build_specialist, ...
+│       ├── backend/        # api_openapi, auth, build_specialist, data_engineering, documentation, security, testing_qa
+│       └── frontend/       # accessibility, api_openapi, architecture, auth, branding_theme, build_specialist, ...
 ├── ai_agent_development_team/  # Spec-to-agent-system sub-team (phase-based, backend_v2-style)
 │   ├── orchestrator.py
 │   ├── prompts.py
@@ -479,7 +480,7 @@ Leaf agents (direct children of `software_engineering_team/`, e.g. `qa_agent/`, 
 - `models.py` – Input/output Pydantic models
 - `prompts.py` – LLM prompt templates
 
-Sub-team orchestrators (`backend_code_v2_team/`, `frontend_code_v2_team/`, `devops_team/`, `ai_agent_development_team/`, etc.) instead use `orchestrator.py`, `phases/`, and `tool_agents/`.
+Sub-team orchestrators (`codegen_team/`, `devops_team/`, `ai_agent_development_team/`, etc.) instead use `orchestrator.py`, `stacks/` (or `phases/`), and `tool_agents/`.
 
 ## Caching (shared.cache / Redis)
 
@@ -525,7 +526,7 @@ See `llm_service/README.md`'s "Prompt caching (cache-control breakpoints)" secti
 
 ## DevOps Engineering Team (`devops_team/`)
 
-The `devops_team/` package is the contract-first, multi-agent DevOps engineering team modeled after the code-v2 teams (`frontend_code_v2_team/`), and is the sole DevOps path (superseding an earlier monolithic DevOps agent). It implements the **MVP fleet** (9 core agents + 5 tool agents) with hard gates, environment-aware safety, and structured completion packages.
+The `devops_team/` package is the contract-first, multi-agent DevOps engineering team modeled after the code-v2 team (`codegen_team/`'s frontend stack), and is the sole DevOps path (superseding an earlier monolithic DevOps agent). It implements the **MVP fleet** (9 core agents + 5 tool agents) with hard gates, environment-aware safety, and structured completion packages.
 
 ### Design Principles
 

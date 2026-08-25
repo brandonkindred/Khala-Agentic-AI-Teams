@@ -8,15 +8,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from software_engineering_team.backend_code_v2_team.orchestrator import BackendDevelopmentAgent
+from software_engineering_team.codegen_team.orchestrator import CodegenDevelopmentAgent
 
 
 def test_be_build_tool_agents():
-    from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.backend_code_v2_team.orchestrator import _build_tool_agents_impl
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.orchestrator import _build_backend_tool_agents
 
     mock_llm = MagicMock()
-    agents = _build_tool_agents_impl(mock_llm)
+    agents = _build_backend_tool_agents(mock_llm)
     assert ToolAgentKind.DOCUMENTATION in agents
     assert ToolAgentKind.SECURITY in agents
     assert ToolAgentKind.TESTING_QA in agents
@@ -24,12 +24,12 @@ def test_be_build_tool_agents():
 
 
 def test_be_development_agent_init():
-    a = BackendDevelopmentAgent(llm_client=MagicMock())
+    a = CodegenDevelopmentAgent(llm_client=MagicMock(), stack="backend")
     assert a.llm is not None
 
 
 def test_be_development_agent_build_tool_runners():
-    a = BackendDevelopmentAgent(llm_client=MagicMock())
+    a = CodegenDevelopmentAgent(llm_client=MagicMock(), stack="backend")
 
     class _WithRun:
         def run(self, inp):
@@ -55,11 +55,11 @@ def test_be_development_agent_build_tool_runners():
 
 
 def test_fe_build_tool_agents():
-    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.frontend_code_v2_team.orchestrator import _build_tool_agents_impl
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+    from software_engineering_team.codegen_team.orchestrator import _build_frontend_tool_agents
 
     mock_llm = MagicMock()
-    agents = _build_tool_agents_impl(mock_llm)
+    agents = _build_frontend_tool_agents(mock_llm)
     assert ToolAgentKind.DOCUMENTATION in agents
     assert ToolAgentKind.SECURITY in agents
     assert ToolAgentKind.TESTING_QA in agents
@@ -99,11 +99,11 @@ class TestAssembleToolAgents:
 
 
 def test_fe_development_agent_init():
-    from software_engineering_team.frontend_code_v2_team.orchestrator import (
-        FrontendDevelopmentAgent,
+    from software_engineering_team.codegen_team.orchestrator import (
+        CodegenDevelopmentAgent,
     )
 
-    a = FrontendDevelopmentAgent(llm_client=MagicMock())
+    a = CodegenDevelopmentAgent(llm_client=MagicMock(), stack="frontend")
     assert a.llm is not None
 
 
@@ -115,15 +115,15 @@ def test_fe_development_agent_init():
 
 
 def _be_dev_agent():
-    return BackendDevelopmentAgent(llm_client=MagicMock())
+    return CodegenDevelopmentAgent(llm_client=MagicMock(), stack="backend")
 
 
 def _fe_dev_agent():
-    from software_engineering_team.frontend_code_v2_team.orchestrator import (
-        FrontendDevelopmentAgent,
+    from software_engineering_team.codegen_team.orchestrator import (
+        CodegenDevelopmentAgent,
     )
 
-    return FrontendDevelopmentAgent(llm_client=MagicMock())
+    return CodegenDevelopmentAgent(llm_client=MagicMock(), stack="frontend")
 
 
 def test_be_read_existing_code_uses_threaded_cache(tmp_path: Path):
@@ -169,11 +169,11 @@ def test_fe_read_existing_code_fresh_walk_without_cache(tmp_path: Path):
 
 def test_be_team_lead_repo_context_cache_is_lazy_and_reused(tmp_path: Path):
     """The team lead builds one cache per resolved repo and reuses it across calls."""
-    from software_engineering_team.backend_code_v2_team.orchestrator import (
-        BackendCodeV2TeamLead,
+    from software_engineering_team.codegen_team.orchestrator import (
+        CodegenTeamLead,
     )
 
-    lead = BackendCodeV2TeamLead(llm_client=MagicMock())
+    lead = CodegenTeamLead(llm_client=MagicMock(), stack="backend")
     first = lead._repo_context_cache_for(tmp_path)
     second = lead._repo_context_cache_for(tmp_path)
     assert first is second  # same resolved repo → reused, not rebuilt
@@ -185,11 +185,11 @@ def test_be_team_lead_repo_context_cache_is_lazy_and_reused(tmp_path: Path):
 
 
 def test_fe_team_lead_repo_context_cache_is_lazy_and_reused(tmp_path: Path):
-    from software_engineering_team.frontend_code_v2_team.orchestrator import (
-        FrontendCodeV2TeamLead,
+    from software_engineering_team.codegen_team.orchestrator import (
+        CodegenTeamLead,
     )
 
-    lead = FrontendCodeV2TeamLead(llm_client=MagicMock())
+    lead = CodegenTeamLead(llm_client=MagicMock(), stack="frontend")
     first = lead._repo_context_cache_for(tmp_path)
     second = lead._repo_context_cache_for(tmp_path)
     assert first is second
@@ -201,61 +201,61 @@ def test_fe_team_lead_repo_context_cache_is_lazy_and_reused(tmp_path: Path):
 
 
 def test_fe_detect_tooling_nothing_configured(tmp_path: Path):
-    from software_engineering_team.frontend_code_v2_team.orchestrator import (
-        FrontendDevelopmentAgent,
+    from software_engineering_team.codegen_team.orchestrator import (
+        CodegenDevelopmentAgent,
     )
 
-    assert FrontendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path) == (False, False)
+    assert CodegenDevelopmentAgent(MagicMock(), "frontend")._detect_tooling(tmp_path) == (False, False)
 
 
 def test_fe_detect_tooling_angular_and_vitest(tmp_path: Path):
-    from software_engineering_team.frontend_code_v2_team.orchestrator import (
-        FrontendDevelopmentAgent,
+    from software_engineering_team.codegen_team.orchestrator import (
+        CodegenDevelopmentAgent,
     )
 
     (tmp_path / "angular.json").write_text("{}")
     (tmp_path / "vitest.config.js").write_text("")
-    has_lint, has_test = FrontendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
+    has_lint, has_test = CodegenDevelopmentAgent(MagicMock(), "frontend")._detect_tooling(tmp_path)
     assert has_lint and has_test
 
 
 def test_fe_detect_tooling_real_npm_test_script(tmp_path: Path):
-    from software_engineering_team.frontend_code_v2_team.orchestrator import (
-        FrontendDevelopmentAgent,
+    from software_engineering_team.codegen_team.orchestrator import (
+        CodegenDevelopmentAgent,
     )
 
     (tmp_path / "eslint.config.js").write_text("")
     (tmp_path / "package.json").write_text('{"scripts": {"test": "vitest run"}}')
-    has_lint, has_test = FrontendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
+    has_lint, has_test = CodegenDevelopmentAgent(MagicMock(), "frontend")._detect_tooling(tmp_path)
     assert has_lint and has_test
 
 
 def test_fe_detect_tooling_rejects_placeholder_and_unparseable(tmp_path: Path):
     """A 'no test'/placeholder script and an unparseable package.json both yield no test."""
-    from software_engineering_team.frontend_code_v2_team.orchestrator import (
-        FrontendDevelopmentAgent,
+    from software_engineering_team.codegen_team.orchestrator import (
+        CodegenDevelopmentAgent,
     )
 
     (tmp_path / "eslint.config.js").write_text("")
     (tmp_path / "package.json").write_text("not json {")
-    has_lint, has_test = FrontendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
+    has_lint, has_test = CodegenDevelopmentAgent(MagicMock(), "frontend")._detect_tooling(tmp_path)
     assert has_lint and not has_test  # unparseable package.json → no test detected
 
 
 # ---------------------------------------------------------------------------
-# BackendDevelopmentAgent._detect_tooling
+# CodegenDevelopmentAgent._detect_tooling
 # ---------------------------------------------------------------------------
 
 
 def test_be_detect_tooling_nothing_configured(tmp_path: Path):
-    assert BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path) == (False, False)
+    assert CodegenDevelopmentAgent(MagicMock(), "backend")._detect_tooling(tmp_path) == (False, False)
 
 
 def test_be_detect_tooling_ruff_toml_and_pytest_ini(tmp_path: Path):
     (tmp_path / "ruff.toml").write_text("")
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
-    has_lint, has_test = BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
+    has_lint, has_test = CodegenDevelopmentAgent(MagicMock(), "backend")._detect_tooling(tmp_path)
     assert has_lint and has_test
 
 
@@ -265,14 +265,14 @@ def test_be_detect_tooling_pyproject_blocks(tmp_path: Path):
     (tmp_path / "pyproject.toml").write_text(
         "[tool.ruff]\nline-length = 120\n[tool.pytest.ini_options]\n"
     )
-    has_lint, has_test = BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
+    has_lint, has_test = CodegenDevelopmentAgent(MagicMock(), "backend")._detect_tooling(tmp_path)
     assert has_lint and has_test
 
 
 def test_be_detect_tooling_tests_dir_required_for_test(tmp_path: Path):
     """Lint alone (ruff.toml) without a tests dir reports lint=True, test=False."""
     (tmp_path / "ruff.toml").write_text("")
-    has_lint, has_test = BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
+    has_lint, has_test = CodegenDevelopmentAgent(MagicMock(), "backend")._detect_tooling(tmp_path)
     assert has_lint and not has_test
 
 
@@ -280,7 +280,7 @@ def test_be_detect_tooling_flake8_satisfies_lint(tmp_path: Path):
     (tmp_path / ".flake8").write_text("[flake8]")
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
-    has_lint, has_test = BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
+    has_lint, has_test = CodegenDevelopmentAgent(MagicMock(), "backend")._detect_tooling(tmp_path)
     assert has_lint and has_test
 
 
@@ -291,7 +291,7 @@ def test_be_detect_tooling_setup_cfg_flake8_section_satisfies_lint(tmp_path: Pat
     (tmp_path / "setup.cfg").write_text("[metadata]\nname=app\n\n[flake8]\nmax-line-length=100\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
-    has_lint, has_test = BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
+    has_lint, has_test = CodegenDevelopmentAgent(MagicMock(), "backend")._detect_tooling(tmp_path)
     assert has_lint and has_test
 
 
@@ -301,7 +301,7 @@ def test_be_detect_tooling_setup_cfg_without_flake8_section_is_not_lint(tmp_path
     (tmp_path / "setup.cfg").write_text("[metadata]\nname=app\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
-    has_lint, has_test = BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
+    has_lint, has_test = CodegenDevelopmentAgent(MagicMock(), "backend")._detect_tooling(tmp_path)
     assert not has_lint and has_test
 
 
@@ -315,7 +315,7 @@ def test_be_detect_tooling_ignores_commented_out_section_headers(tmp_path: Path)
     (tmp_path / "setup.cfg").write_text("# [flake8]\n# max-line-length = 100\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
-    has_lint, has_test = BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
+    has_lint, has_test = CodegenDevelopmentAgent(MagicMock(), "backend")._detect_tooling(tmp_path)
     assert not has_lint and has_test
 
 
@@ -325,7 +325,7 @@ def test_be_detect_tooling_matches_indented_section_header(tmp_path: Path):
     (tmp_path / "pyproject.toml").write_text("  [tool.ruff]\n  line-length = 120\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
-    has_lint, has_test = BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
+    has_lint, has_test = CodegenDevelopmentAgent(MagicMock(), "backend")._detect_tooling(tmp_path)
     assert has_lint and has_test
 
 
@@ -354,7 +354,7 @@ def test_be_detect_tooling_toml_multiline_string_header_not_a_false_positive(tmp
     )
     (tmp_path / "tests").mkdir()
     (tmp_path / "pytest.ini").write_text("[pytest]")
-    has_lint, has_test = BackendDevelopmentAgent(MagicMock())._detect_tooling(tmp_path)
+    has_lint, has_test = CodegenDevelopmentAgent(MagicMock(), "backend")._detect_tooling(tmp_path)
     assert not has_lint and has_test
 
 
@@ -1382,11 +1382,11 @@ _GIT_KIND = "git_branch_management"
 
 class TestRunDevelopmentWorkflow:
     """Tests for the shared ``BaseV2DevelopmentAgent._run_development_workflow`` template
-    method — the glue that both ``BackendDevelopmentAgent.run_workflow`` and
-    ``FrontendDevelopmentAgent.run_workflow`` now delegate to. Every team-specific
-    callable/class is injected with a fake here, mirroring ``TestRunPreflight`` /
+    method — the glue that ``CodegenDevelopmentAgent.run_workflow`` delegates to for
+    either stack (backend or frontend). Every stack-specific callable/class is
+    injected with a fake here, mirroring ``TestRunPreflight`` /
     ``TestRunPlanningAndBranchSetup`` / ``TestRunDeliverAndFinalize``'s style, so the
-    full phase sequencing is unit-isolated from either team's orchestrator module.
+    full phase sequencing is unit-isolated from either stack's profile module.
     """
 
     @staticmethod
@@ -1469,10 +1469,10 @@ class TestRunDevelopmentWorkflow:
 
     def test_forwards_profile_labels_and_verifier_to_deliver(self, tmp_path: Path) -> None:
         """Regression: when a concrete subclass sets ``PROFILE`` (e.g.
-        Backend/FrontendDevelopmentAgent), its ``build_verify_label``/``name``
-        must be forwarded to the deliver phase alongside the injected
-        build_verifier/linting_tool_agent -- this is how the standalone
-        code-v2 endpoints' quality gate gets its labels."""
+        ``CodegenDevelopmentAgent`` with ``stack="backend"``), its
+        ``build_verify_label``/``name`` must be forwarded to the deliver phase
+        alongside the injected build_verifier/linting_tool_agent -- this is how
+        the standalone code-v2 endpoints' quality gate gets its labels."""
         captured: dict = {}
 
         def _capture_run_deliver(**kw):

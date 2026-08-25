@@ -6,7 +6,7 @@ Invariants:
     - Import-side-effect free beyond class definition.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -405,6 +405,69 @@ class FrontendCodeV2StatusResponse(BaseModel):
 
     job_id: str = Field(...)
     status: str = Field(default="pending", description="pending, running, completed, failed")
+    repo_path: Optional[str] = None
+    current_phase: Optional[str] = None
+    current_microtask: Optional[str] = None
+    progress: int = Field(default=0, description="0-100 completion percentage")
+    microtasks_completed: int = Field(default=0)
+    microtasks_total: int = Field(default=0)
+    completed_phases: List[str] = Field(default_factory=list)
+    error: Optional[str] = None
+    summary: Optional[str] = None
+    status_text: Optional[str] = Field(
+        None,
+        description="Short human-readable status (e.g. what is being worked on right now).",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Codegen (unified backend/frontend) endpoints
+#
+# A stepping-stone alongside the existing split /backend-code-v2 and
+# /frontend-code-v2 endpoints above (which stay unchanged for existing
+# callers): one endpoint, `stack` selects which codegen team stack runs.
+# Field-identical to the per-stack request/response models except for the
+# added `stack` field.
+# ---------------------------------------------------------------------------
+
+
+class CodegenTaskInput(BaseModel):
+    """Task input for /code-v2/run."""
+
+    id: str = Field(default="", description="Task ID (auto-generated if empty)")
+    title: str = Field(default="", description="Short task title")
+    description: str = Field(default="", description="Detailed description")
+    requirements: str = Field(default="", description="Technical requirements")
+    acceptance_criteria: List[str] = Field(
+        default_factory=list, description="Acceptance criteria list"
+    )
+
+
+class CodegenRunRequest(BaseModel):
+    """Request body for POST /code-v2/run."""
+
+    task: CodegenTaskInput = Field(..., description="Task to implement")
+    repo_path: str = Field(..., description="Local path to the repository")
+    architecture: Optional[str] = Field(None, description="Optional architecture overview")
+    stack: Literal["backend", "frontend"] = Field(
+        ..., description="Which codegen team stack should run this task"
+    )
+
+
+class CodegenRunResponse(BaseModel):
+    """Response from POST /code-v2/run."""
+
+    job_id: str = Field(..., description="Job ID for polling status")
+    status: str = Field(default="running")
+    message: str = Field(default="")
+
+
+class CodegenStatusResponse(BaseModel):
+    """Response from GET /code-v2/status/{job_id}."""
+
+    job_id: str = Field(...)
+    status: str = Field(default="pending", description="pending, running, completed, failed")
+    stack: Optional[Literal["backend", "frontend"]] = None
     repo_path: Optional[str] = None
     current_phase: Optional[str] = None
     current_microtask: Optional[str] = None

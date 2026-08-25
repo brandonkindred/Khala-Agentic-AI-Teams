@@ -15,6 +15,11 @@ from __future__ import annotations
 
 import pytest
 
+from software_engineering_team.codegen_team.stacks.frontend.profile import (
+    _ACCESSIBILITY_VERIFY_NOTE,
+    _run_llm_review,
+)
+
 from ._review_fallback_test_doubles import AlwaysFail as _AlwaysFail
 from ._review_fallback_test_doubles import FailBadKeepGood as _FailBadKeepGoodBase
 from ._review_fallback_test_doubles import PerFileScriptedClient as _PerFileScriptedClient
@@ -68,8 +73,6 @@ def test_run_llm_review_real_coordinator_single_chunk_translates_issue():
     ``CodeReviewIssue`` is translated into a ``ReviewIssue`` end-to-end
     (``suggestion`` -> ``recommendation``), with ``raw_issue_count`` staying
     ``None`` -- no monkeypatched ``run_coordinator`` involved."""
-    from software_engineering_team.frontend_code_v2_team.phases._profile import _run_llm_review
-
     client = _ScriptedClient(
         [
             {
@@ -113,8 +116,6 @@ def test_run_llm_review_real_coordinator_multi_chunk_attributes_issues_to_source
     genuinely verify per-file attribution rather than merely echoing
     hard-coded ``file_path`` values back from whichever response landed on
     whichever call index."""
-    from software_engineering_team.frontend_code_v2_team.phases._profile import _run_llm_review
-
     file_a = "x" * 20_000
     file_b = "y" * 20_000
     client = _PerFileScriptedClient(
@@ -175,8 +176,6 @@ def test_run_llm_review_real_coordinator_isolates_per_chunk_failure(monkeypatch)
     surviving file's genuine finding.
     """
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
-    from software_engineering_team.frontend_code_v2_team.phases._profile import _run_llm_review
-
     client = _FailBadKeepGood()
 
     out = _run_llm_review(
@@ -196,8 +195,6 @@ def test_run_llm_review_real_coordinator_forwards_review_context_to_prompt():
     mocked test only proves the field lands on ``CodeReviewInput``, not that a
     real prompt renders it."""
     from shared.dev_models.models import ReviewContext, SystemArchitecture
-    from software_engineering_team.frontend_code_v2_team.phases._profile import _run_llm_review
-
     client = _PromptCapturingClient()
     architecture = SystemArchitecture(overview="Layered service architecture.")
     review_context = ReviewContext(
@@ -229,8 +226,6 @@ def test_run_llm_review_real_coordinator_oversized_single_line_file_is_reviewed(
     in ``shared/agent_review.py``). Parity here means "still reviewed, still
     correctly attributed" -- not "still hard-split".
     """
-    from software_engineering_team.frontend_code_v2_team.phases._profile import _run_llm_review
-
     line = "const DATA = '" + ("a" * 100_000) + "';"
     assert "\n" not in line  # unsplittable at a line boundary
 
@@ -268,8 +263,6 @@ def test_run_llm_review_real_coordinator_empty_files_raises_value_error():
     constructs ``CodeReviewInput`` directly, and that type's own fail-closed
     validation raises so a caller bug (e.g. a glob miss) never silently
     becomes an approved empty review (see its docstring's Preconditions)."""
-    from software_engineering_team.frontend_code_v2_team.phases._profile import _run_llm_review
-
     client = _ScriptedClient([])
 
     with pytest.raises(ValueError):
@@ -282,7 +275,6 @@ def test_run_llm_review_real_coordinator_propagates_unavailable_when_all_chunks_
     real-coordinator counterpart to the existing mocked
     ``test_fe_run_llm_review_propagates_coordinator_unavailable``."""
     from software_engineering_team.code_review_agent.models import CodeReviewUnavailableError
-    from software_engineering_team.frontend_code_v2_team.phases._profile import _run_llm_review
 
     client = _AlwaysFail()
 
@@ -296,11 +288,6 @@ def test_run_llm_review_real_coordinator_forwards_accessibility_note_to_prompt()
     the real chunk-review LLM prompt via ``extra_task_requirements`` -- the
     existing mocked test only proves it lands on
     ``CodeReviewInput.task_requirements``, not that a real prompt renders it."""
-    from software_engineering_team.frontend_code_v2_team.phases._profile import (
-        _ACCESSIBILITY_VERIFY_NOTE,
-        _run_llm_review,
-    )
-
     client = _PromptCapturingClient()
 
     _run_llm_review(llm=client, task=_task(), files={"x.tsx": "const f = () => 1;\n"})
