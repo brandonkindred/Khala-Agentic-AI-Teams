@@ -2450,8 +2450,15 @@ def _finalize_strategy_lab_cycle_record(
         passes ``None`` — SSE progress is a separate concern there).
     Postconditions:
         Returns the same ``record`` with its ``signal_intelligence_brief`` set
-        (when ``signal_brief_storage`` is given and it was empty) and its
-        ``paper_trading_*`` fields resolved — ``skipped`` for non-winning /
+        to *its own asset category's* entry from ``signal_brief_storage``
+        (when given, it was empty, and that category's entry is present) —
+        never the whole multi-category ``signal_brief_storage`` blob, which
+        the strategy-card UI cannot render (it expects one flat brief, not a
+        map keyed by category) and which would attribute every other
+        category's brief to this one record. A ``signal_brief_storage`` that
+        isn't a per-category map (the disabled/degraded skip marker) is
+        stored as-is, matching pre-per-category behavior. Also resolves its
+        ``paper_trading_*`` fields — ``skipped`` for non-winning /
         non-publishable / disabled / no-code / no-data cases, ``completed`` on
         success, ``failed`` (non-fatal) on a paper-trading error. The record is
         durably persisted via :func:`_persist_strategy_lab_record` before
@@ -2468,9 +2475,22 @@ def _finalize_strategy_lab_cycle_record(
             except Exception:
                 logger.exception("Strategy lab phase callback failed for phase %s", phase)
 
-    # Attach signal brief before persisting (PersistentDict serializes at assignment)
+    # Attach signal brief before persisting (PersistentDict serializes at assignment).
+    # ``signal_brief_storage`` covers every allowed category in the batch; this
+    # record was pinned to exactly one, so only that category's entry belongs
+    # on it — the whole map would silently replace the single-brief shape the
+    # strategy-card UI renders (one row per brief field) with an unrenderable
+    # nested-by-category blob.
     if signal_brief_storage and not record.signal_intelligence_brief:
-        record.signal_intelligence_brief = signal_brief_storage
+        by_class = signal_brief_storage.get("by_asset_class")
+        if isinstance(by_class, dict):
+            own_brief = by_class.get(normalize_asset_class(record.strategy.asset_class))
+            if own_brief is not None:
+                record.signal_intelligence_brief = own_brief
+        else:
+            # Disabled/degraded skip marker (e.g. {"skipped": True, ...}) —
+            # not a per-category map, so store it as-is.
+            record.signal_intelligence_brief = signal_brief_storage
 
     # --- Paper-trading step (gated on publishable backtest) ---------------
     # Only publishable winners proceed to paper trading; failures are

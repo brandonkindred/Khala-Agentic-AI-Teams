@@ -3255,6 +3255,97 @@ def _make_finalize_test_record(
     )
 
 
+# ---------------------------------------------------------------------------
+# _finalize_strategy_lab_cycle_record: per-category signal-brief attribution
+#
+# ``signal_brief_storage`` covers every allowed asset category in the batch
+# (``{"by_asset_class": {<class>: <brief-dict>, ...}}``); a given record was
+# pinned to exactly one category, so only that category's entry belongs on
+# it. Regression tests: an earlier revision stored the whole multi-category
+# map verbatim on every record, which the strategy-card UI cannot render (it
+# expects one flat brief, one row per field) and which misattributed every
+# other category's brief to a record that was never about that category.
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_attaches_only_the_records_own_category_brief(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "_strategies", {})
+    monkeypatch.setattr(api_main, "_backtests", {})
+
+    record = _make_finalize_test_record("lab-brief-own-category")  # asset_class="equities"
+    storage = {
+        "by_asset_class": {
+            "stocks": {"brief_version": 1, "macro_themes": ["equities"]},
+            "crypto": {"brief_version": 1, "macro_themes": ["digital assets"]},
+        }
+    }
+
+    result = api_main._finalize_strategy_lab_cycle_record(record, signal_brief_storage=storage)
+
+    assert result.signal_intelligence_brief == storage["by_asset_class"]["stocks"]
+    assert "by_asset_class" not in result.signal_intelligence_brief
+
+
+def test_finalize_stores_degraded_skip_marker_as_is(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-per-category ``signal_brief_storage`` (the disabled/degraded skip
+    marker, which carries no ``by_asset_class`` key) is stored verbatim,
+    matching pre-per-category behavior."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "_strategies", {})
+    monkeypatch.setattr(api_main, "_backtests", {})
+
+    record = _make_finalize_test_record("lab-brief-skip-marker")
+    storage = {"skipped": True, "skipped_reason": "signal_expert_disabled"}
+
+    result = api_main._finalize_strategy_lab_cycle_record(record, signal_brief_storage=storage)
+
+    assert result.signal_intelligence_brief == storage
+
+
+def test_finalize_leaves_brief_unset_when_records_category_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the record's own category has no entry in the per-category map
+    (defensive — every allowed category should always be present), the
+    record's brief is left unset rather than populated with another
+    category's data."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "_strategies", {})
+    monkeypatch.setattr(api_main, "_backtests", {})
+
+    record = _make_finalize_test_record("lab-brief-missing-category")  # asset_class="equities"
+    storage = {"by_asset_class": {"crypto": {"brief_version": 1}}}
+
+    result = api_main._finalize_strategy_lab_cycle_record(record, signal_brief_storage=storage)
+
+    assert result.signal_intelligence_brief is None
+
+
+def test_finalize_does_not_overwrite_an_existing_brief(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "_strategies", {})
+    monkeypatch.setattr(api_main, "_backtests", {})
+
+    record = _make_finalize_test_record("lab-brief-preexisting")
+    record.signal_intelligence_brief = {"brief_version": 1, "macro_themes": ["already set"]}
+    storage = {"by_asset_class": {"stocks": {"brief_version": 1, "macro_themes": ["new"]}}}
+
+    result = api_main._finalize_strategy_lab_cycle_record(record, signal_brief_storage=storage)
+
+    assert result.signal_intelligence_brief == {"brief_version": 1, "macro_themes": ["already set"]}
+
+
 def test_finalize_strategy_lab_cycle_record_isolates_raising_on_phase_callback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -672,16 +672,25 @@ def test_mechanical_repair_then_substantive_critical_still_revises(
 
 # ---------------------------------------------------------------------------
 # skip_self_review threading (#6930)
+#
+# ``deterministic_ready`` describes the round's *incoming* spec — the one the
+# reviewer just found insufficient — not the spec ``DesignAgent.revise`` is
+# about to produce in response to that critique, so it cannot predict whether
+# the rewrite is clean. Self-review's purpose is exactly to catch a
+# contradiction the designer introduces while addressing critique, so it must
+# never be skipped on a real revise call regardless of the incoming spec's
+# readiness state; the three scenarios below (clean incoming spec, mechanical
+# repair fired, readiness failed outright) all assert the same invariant.
 # ---------------------------------------------------------------------------
 
 
-def test_revise_skips_self_review_when_round_is_clean(
+def test_revise_always_requests_self_review_when_round_is_clean(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When a round's readiness gate passes and no mechanical repair fires,
-    ``_run_design_review_rounds`` calls ``DesignAgent.revise`` with
-    ``skip_self_review=True`` — the designer's internal self-review LLM
-    audit is skipped for that revision."""
+    """Even when a round's readiness gate passes and no mechanical repair
+    fires, ``_run_design_review_rounds`` still calls ``DesignAgent.revise``
+    with ``skip_self_review=False`` — the incoming spec's cleanliness says
+    nothing about the revision the LLM is about to produce."""
     orch = StrategyLabOrchestrator()
 
     monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict(), "scripted"))
@@ -710,7 +719,7 @@ def test_revise_skips_self_review_when_round_is_clean(
     orch.run_cycle(prior_records=[], config=_config())
 
     assert len(revise_calls) == 1
-    assert revise_calls[0]["skip_self_review"] is True
+    assert revise_calls[0]["skip_self_review"] is False
 
 
 def test_revise_does_not_skip_self_review_when_mechanical_repair_fires(
@@ -759,8 +768,7 @@ def test_revise_does_not_skip_self_review_when_readiness_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When the round's readiness gate does not pass (and mechanical repair
-    cannot fix it), ``skip_self_review=False`` is passed even though no
-    mechanical repair fired."""
+    cannot fix it), ``skip_self_review=False`` is passed as well."""
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "2")
     orch = StrategyLabOrchestrator()
 

@@ -989,6 +989,68 @@ def test_build_spec_defaults_a_blank_asset_class_to_the_pin() -> None:
     assert spec.asset_class == "forex"
 
 
+def test_build_spec_infers_asset_class_from_unambiguous_offpin_symbols() -> None:
+    from investment_team.strategy_lab.orchestrator_design import build_spec_from_dict
+
+    # An OMITTED asset_class with explicit, unambiguous stock tickers under a
+    # crypto pin must be inferred as "stocks", not silently defaulted to the
+    # pin. Regression test: defaulting to the pin here let the mismatch slip
+    # past Rule 11's class check (asset_class == pin), after which
+    # repair_spec's symbol-half mechanical repair silently stripped the
+    # off-category tickers to an empty list — laundering a stock hypothesis
+    # into an empty-symbol crypto strategy with no critique and no redesign.
+    payload = _spec_dict(target_symbols=["AAPL", "MSFT"])
+    payload.pop("asset_class")
+    spec = build_spec_from_dict(payload, strategy_id="s1", default_asset_class="crypto")
+    assert spec.asset_class == "stocks"
+    assert spec.target_symbols == ["AAPL", "MSFT"]
+
+
+def test_build_spec_still_defaults_to_pin_with_no_symbols() -> None:
+    from investment_team.strategy_lab.orchestrator_design import build_spec_from_dict
+
+    payload = _spec_dict(target_symbols=[])
+    payload.pop("asset_class")
+    spec = build_spec_from_dict(payload, strategy_id="s1", default_asset_class="crypto")
+    assert spec.asset_class == "crypto"
+
+
+def test_build_spec_still_defaults_to_pin_with_ambiguous_cross_asset_symbols() -> None:
+    from investment_team.strategy_lab.orchestrator_design import build_spec_from_dict
+
+    # GLD/QQQ are cross-asset ETFs classify_symbol deliberately leaves
+    # unclassified (None) -- not a vote for any class, so the pin still wins.
+    payload = _spec_dict(target_symbols=["GLD", "QQQ"])
+    payload.pop("asset_class")
+    spec = build_spec_from_dict(payload, strategy_id="s1", default_asset_class="crypto")
+    assert spec.asset_class == "crypto"
+    assert spec.target_symbols == ["GLD", "QQQ"]
+
+
+def test_build_spec_still_defaults_to_pin_with_conflicting_symbol_classes() -> None:
+    from investment_team.strategy_lab.orchestrator_design import build_spec_from_dict
+
+    # AAPL (stocks) + BTC (crypto) name two different classes -- genuinely
+    # ambiguous, so inference declines and the pin still wins.
+    payload = _spec_dict(target_symbols=["AAPL", "BTC"])
+    payload.pop("asset_class")
+    spec = build_spec_from_dict(payload, strategy_id="s1", default_asset_class="crypto")
+    assert spec.asset_class == "crypto"
+
+
+def test_build_spec_inferred_offpin_class_trips_readiness_rule_11() -> None:
+    from investment_team.strategy_lab.orchestrator_design import build_spec_from_dict
+    from investment_team.strategy_lab.quality_gates.spec_readiness import SpecReadinessGate
+
+    payload = _spec_dict(target_symbols=["AAPL", "MSFT"])
+    payload.pop("asset_class")
+    spec = build_spec_from_dict(payload, strategy_id="s1", default_asset_class="crypto")
+    results = SpecReadinessGate().validate(spec, phase="design", pinned_asset_class="crypto")
+    pin_findings = [r for r in results if (r.rule_id or "").startswith("asset_category:")]
+    assert [f.rule_id for f in pin_findings] == ["asset_category:pin"]
+    assert pin_findings[0].severity == "critical"
+
+
 def test_build_spec_preserves_an_authored_offpin_asset_class() -> None:
     from investment_team.strategy_lab.orchestrator_design import build_spec_from_dict
 

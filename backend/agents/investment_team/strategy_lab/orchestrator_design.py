@@ -60,6 +60,7 @@ from ..strategy_lab_context import (
     select_asset_category,
     select_signal_brief,
 )
+from ..symbols import classify_symbol
 from ._orchestrator_helpers import (
     _DesignAttemptState,
     _DesignPersistContext,
@@ -147,6 +148,26 @@ def _coerce_expectancy_forecast(raw: Any) -> Optional[ExpectancyForecast]:
     return None
 
 
+def _infer_asset_class_from_symbols(target_symbols: List[str]) -> Optional[str]:
+    """Infer a single asset class from explicit ``target_symbols``, if unambiguous.
+
+    Preconditions:
+        ``target_symbols`` is a list of ticker strings (possibly empty).
+
+    Postconditions:
+        Returns the one canonical class every *classifiable* symbol agrees on
+        (``classify_symbol`` returns ``None`` for cross-asset ETFs like
+        ``GLD``/``QQQ`` — those are ignored, not treated as a vote). Returns
+        ``None`` when there are no classifiable symbols, or when they name
+        more than one class — an ambiguous or empty signal must not override
+        the caller's default.
+    """
+    classified = {c for c in (classify_symbol(s) for s in target_symbols) if c is not None}
+    if len(classified) == 1:
+        return next(iter(classified))
+    return None
+
+
 def build_spec_from_dict(
     strategy_dict: Dict[str, Any],
     *,
@@ -169,14 +190,25 @@ def build_spec_from_dict(
     canonicalized before construction so a clean mapping never trips the
     strict ``StrategySpec`` validator. A missing or blank ``asset_class``
     resolves to ``default_asset_class`` rather than being treated as
-    unsupported, so it never triggers a spurious redesign.
+    unsupported, so it never triggers a spurious redesign — UNLESS explicit
+    ``target_symbols`` unambiguously name a different class (see
+    :func:`_infer_asset_class_from_symbols`), in which case the inferred
+    class is used instead. An omitted field with no such symbols expressed
+    no choice at all; an omitted field alongside symbols that only make
+    sense for one class (e.g. ``AAPL``, ``MSFT`` with no ``asset_class``)
+    expressed a choice through the symbols, and honoring the pin over that
+    signal would silently launder a differently-themed hypothesis into the
+    pinned category once the mismatched symbols are mechanically stripped by
+    ``repair_spec`` — exactly the mislabeling this function exists to refuse.
 
     ``default_asset_class`` is the category the caller's design attempt is
-    pinned to. Filling an *omitted* field from the pin is not a relabel: the
-    payload expressed no choice, and the pin is the only correct value it
-    could have had. A payload that names a *different* class is left exactly
-    as authored — readiness Rule 11 then rejects it so the strategy gets
-    rebuilt for the pinned category rather than silently reassigned to it.
+    pinned to. Filling an *omitted* field from the pin (when the symbols
+    don't override it) is not a relabel: the payload expressed no choice,
+    and the pin is the only correct value it could have had. A payload that
+    names a *different* class — explicitly, or implicitly via its symbols —
+    is left exactly as authored — readiness Rule 11 then rejects it so the
+    strategy gets rebuilt for the pinned category rather than silently
+    reassigned to it.
 
     A *genuinely unsupported* class the strict normalizer rejects (e.g.
     ``bonds``) is NOT silently coerced to ``stocks`` — doing so would run
@@ -201,8 +233,16 @@ def build_spec_from_dict(
         "default_asset_class must be a canonical PROMPT_ASSET_CLASSES member"
     )
     # ``or`` alone would let a whitespace-only value through as an authored
-    # choice; a blank field expresses no choice, so it inherits the pin.
-    raw_asset_class = str(strategy_dict.get("asset_class") or "").strip() or default_asset_class
+    # choice; a blank field expresses no choice on its own. But explicit
+    # target_symbols that unambiguously name a different class than the pin
+    # ARE a choice — inferring it here (rather than defaulting to the pin)
+    # means Rule 11 sees the true mismatch and forces a real redesign,
+    # instead of the mismatch being silently mechanically repaired away by
+    # stripping the "wrong" symbols down to an empty, pin-labeled spec.
+    raw_asset_class = str(strategy_dict.get("asset_class") or "").strip()
+    if not raw_asset_class:
+        inferred = _infer_asset_class_from_symbols(strategy_dict.get("target_symbols") or [])
+        raw_asset_class = inferred or default_asset_class
     asset_class = normalize_asset_class(raw_asset_class)
     # A missing/blank asset_class is the documented default, which
     # ``normalize_asset_class`` already produced above — it is not an unsupported
@@ -888,7 +928,6 @@ class DesignMixin:
             # Step 2 — deterministic mechanical pre-flight (repair criticals,
             # then trial-compile a readiness-clean spec to pick the code path)
             # before every review round.
-            repair_count_before_round = mechanical_repair_count
             if repair_enabled:
                 (
                     spec,
@@ -969,13 +1008,17 @@ class DesignMixin:
                 stop_reason = "round_cap"
                 break
 
-            # Step 5 — revise the spec from this round's critique. Skip the
-            # designer's internal self-review LLM call when this round's
-            # readiness gate passed AND no mechanical repair fired this round
-            # — the spec is already known structurally clean, so the
-            # self-review audit would be redundant work.
-            repair_fired_this_round = mechanical_repair_count > repair_count_before_round
-            skip_self_review = deterministic_ready and not repair_fired_this_round
+            # Step 5 — revise the spec from this round's critique. The
+            # designer's internal self-review always runs on this call's
+            # output: ``deterministic_ready`` describes the *incoming* spec
+            # (the one the reviewer just found insufficient), not the spec
+            # ``revise`` is about to produce, so it cannot predict whether
+            # the rewrite responding to ``critique`` is clean. Self-review's
+            # whole purpose — catching a prose/predicate or risk-math
+            # contradiction the designer slips in while addressing
+            # critique — applies precisely to this freshly generated spec,
+            # so skipping it here would disable the audit exactly when a
+            # substantive rewrite makes it most likely to be needed.
             spec, rationale = self._revise_with_regression_notice(
                 spec=spec,
                 rationale=rationale,
@@ -985,7 +1028,7 @@ class DesignMixin:
                 strategy_id=strategy_id,
                 mechanical_repair_count=mechanical_repair_count,
                 drift_collector=drift_collector,
-                skip_self_review=skip_self_review,
+                skip_self_review=False,
                 default_asset_class=selected_category,
             )
 

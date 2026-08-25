@@ -349,39 +349,6 @@ def select_asset_category(
     return chooser.choice(allowed)
 
 
-def strip_offcategory_symbols(target_symbols: List[str], asset_class: str) -> List[str]:
-    """Drop explicit tickers that unambiguously belong to another asset class.
-
-    ``MarketDataService.resolve_strategy_symbols`` honors a non-empty
-    ``target_symbols`` verbatim regardless of ``asset_class`` (it only logs a
-    mismatch warning), so a spec that names another category's tickers is
-    fetched and backtested against them under the wrong class label. Callers
-    that force a spec onto a pinned category use this to keep the symbol list
-    consistent with the label; an empty result falls back to the class's
-    default universe, the same fallback an empty ``target_symbols`` already
-    triggers for every other spec.
-
-    Preconditions:
-      - ``target_symbols`` is a list of ticker strings (possibly empty);
-        ``asset_class`` is a canonical class label.
-
-    Postconditions:
-      - Returns the subset of ``target_symbols`` whose
-        :func:`~..symbols.classify_symbol` result is either ``None``
-        (ambiguous — cross-asset ETFs like GLD/QQQ trade like equities and
-        must not be dropped as false positives) or equal to ``asset_class``,
-        preserving input order.
-    """
-    from .symbols import classify_symbol
-
-    kept: List[str] = []
-    for sym in target_symbols:
-        natural = classify_symbol(sym)
-        if natural is None or natural == asset_class:
-            kept.append(sym)
-    return kept
-
-
 def filter_records_by_asset_class(
     records: List[StrategyLabRecord], asset_class: str
 ) -> List[StrategyLabRecord]:
