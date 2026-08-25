@@ -161,9 +161,10 @@ describe('AgentRunnerComponent', () => {
     TestBed.overrideProvider(MatSnackBar, { useValue: { open: snackBarOpen } });
     // AgentRunnerDestructiveActionsService is provided in AgentRunnerComponent's
     // own component-level `providers` array, not at module scope — reaching it
-    // requires overrideComponent, not overrideProvider. ConfirmDestructiveService
-    // (the real service's only consumer) is deliberately omitted here: it's
-    // never constructed once AgentRunnerDestructiveActionsService is a useValue.
+    // requires overrideComponent, not overrideProvider. ConfirmDestructiveService,
+    // which the real service consumes, is deliberately omitted here: the real
+    // service is never constructed once AgentRunnerDestructiveActionsService is
+    // provided as a useValue.
     if (destructiveActionsStub) {
       TestBed.overrideComponent(AgentRunnerComponent, {
         set: {
