@@ -390,7 +390,11 @@ flowchart TB
         SYN -->|fail| RF[RefinementAgent]
         RF --> SYN
         SYN -->|pass| BT[Execute in sandbox<br/>→ trade ledger]
-        BT --> AL{DeterministicAlignmentChecker}
+        BT --> EV{critical anomaly<br/>or zero trades?}
+        EV -->|zero-trade| ZTRA[ZeroTradeRepairAgent]
+        ZTRA --> BT
+        EV -->|other anomaly| RF
+        EV -->|clean| AL{DeterministicAlignmentChecker}
         AL -->|misaligned| TAA[TradeAlignmentAgent<br/>propose_code_fix]
         TAA --> BT
         AL -->|aligned| VER[AcceptanceGate · ExitRuleConformanceGate ·<br/>6 realism gates]

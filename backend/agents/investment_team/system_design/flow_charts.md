@@ -124,8 +124,13 @@ sequenceDiagram
                 Attempt->>LLM: design ↔ review (DesignAgent/DesignReviewAgent)
                 LLM-->>Attempt: converged spec
                 Attempt->>Attempt: compile_strategy() deterministically<br/>synthesizes code for the default DSL path<br/>(no LLM call), or CodeSynthesisAgent for<br/>a custom-code spec
+                opt validation-gate failure (safety/conformance checks)
+                    Attempt->>LLM: RefinementAgent (no execution<br/>attempted this round — validation runs<br/>before execute)
+                end
                 Attempt->>Attempt: execute strategy_code in the<br/>sandboxed TradingService — trade ledger<br/>is engine output, not an LLM response
-                Attempt->>LLM: RefinementAgent (on a synthesis-gate<br/>or execution failure) → re-executes<br/>after each proposed fix
+                opt execution error, anomaly, or zero-trade result
+                    Attempt->>LLM: RefinementAgent, or<br/>ZeroTradeRepairAgent for a zero-trade<br/>result — either may trigger a re-execution
+                end
                 Attempt->>LLM: TradeAlignmentAgent (needs the<br/>produced trade ledger) → may re-execute<br/>a committed fix
                 Attempt->>LLM: AnalysisAgent (after the deterministic<br/>verification gates)
                 Attempt-->>CycleWF: record | reentry | skipped

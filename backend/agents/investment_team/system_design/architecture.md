@@ -61,7 +61,7 @@ flowchart TB
     end
 
     subgraph worker[Strategy Lab Dispatch — Temporal-only]
-      BatchWF[StrategyLabBatchWorkflow<br/>strategy_lab/temporal/workflows.py<br/>wave/batch fan-out, 1 signal-brief call per batch]
+      BatchWF[StrategyLabBatchWorkflow<br/>strategy_lab/temporal/workflows.py<br/>wave/batch fan-out, 1 signal-brief call per<br/>batch-workflow invocation — a mid-batch<br/>resume re-enters that batch and re-runs it]
       CycleWF[StrategyLabCycleWorkflow<br/>child workflow per cycle<br/>outer design-re-entry loop only]
       DesignAttempt["run_design_attempt_activity<br/>runs StrategyLabOrchestrator._run_design_attempt VERBATIM:<br/>design+review → synthesis → refinement/alignment →<br/>verification/analysis → record assembly — all in ONE activity"]
       Finalize[finalize_cycle_record_activity<br/>signal-brief attach + paper-trade + persist]
