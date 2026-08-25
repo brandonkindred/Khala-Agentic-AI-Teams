@@ -104,6 +104,15 @@ class _AssignmentMixin:
                 assigned.add(task.id)
         return assigned
 
+    def _matching_free_agents(self, target_team: Optional[str], candidates: List[str]) -> List[str]:
+        """Agents in ``candidates`` whose team matches ``target_team``, in ``candidates``'
+        order (any agent matches a falsy ``target_team`` — see ``_target_matches_agent``)."""
+        return [
+            agent_id
+            for agent_id in candidates
+            if _target_matches_agent(target_team, self.agent_team_keys.get(agent_id, agent_id))
+        ]
+
     def _try_homogeneous_target_assign(
         self,
         remaining_ready: List[Task],
@@ -111,68 +120,74 @@ class _AssignmentMixin:
         used_agents: set[str],
         assigned_tasks: set[str],
     ) -> bool:
-        """Fan a batch of same-``target_team`` tasks out across same-stack free agents,
-        bypassing the Tech-Lead LLM, when there's no contention for those agents.
+        """Fan a batch of tasks that all resolve to the identical free-agent pool out
+        across that pool, bypassing the Tech-Lead LLM, when there's no contention for it.
 
         A roster with multiple workers per stack lets one ``target_team`` legitimately
         match 2+ free ``agent_id``s of the same stack — that is not real ambiguity
         requiring the Tech Lead's judgment, it's several interchangeable workers able to
         take several interchangeable tasks. Real ambiguity is a *choice* between different
         stacks (untargeted tasks) or genuine contention (more same-team tasks than matching
-        free agents, which needs prioritization). This only ever fires for the narrow,
-        unambiguous "N same-stack tasks, >=N same-stack free agents" shape; every other
-        shape (mixed/untargeted tasks, or contention) is left to the caller's existing
-        strict one-candidate-per-task logic.
+        free agents, which needs prioritization). "Same team" is judged by each task's
+        *resolved candidate set* (via ``_matching_free_agents``), not by comparing raw
+        ``target_team`` strings: two tasks spelled e.g. ``"backend"`` and ``"backend_v2"``
+        both resolve to the same ``backend_v2`` agents via ``_target_matches_agent``'s own
+        alias normalization and must be recognized as one homogeneous batch, exactly like
+        every other match in this file already does. This only ever fires for the narrow,
+        unambiguous "N tasks that all resolve to the identical M-agent pool, M>=N" shape;
+        every other shape (mixed pools, untargeted tasks, or contention) is left to the
+        caller's existing strict one-candidate-per-task logic.
 
-        A batch smaller than its matching-agent pool (e.g. one ready task, two free
-        same-stack agents) rotates which agent starts the pairing, tracked per
-        ``target_team`` in ``self._homogeneous_assign_cursor``. Without this, repeated
-        small batches would always pair starting from ``remaining_free``'s fixed
-        roster-order prefix -- i.e. the same first-listed agent every round -- even
-        though every free same-stack agent is an equally valid candidate: a stack with
-        2+ workers would then only ever exercise the first one whenever demand never
-        exceeds a single task at a time.
+        A pool larger than its task batch (e.g. one ready task, two free same-stack
+        agents) picks the least-recently-used matching agent(s) first, ranked by
+        ``self._homogeneous_last_used`` (agent_id -> the ``self._homogeneous_assign_ordinal``
+        value at its last placement here; an agent with no entry ranks oldest, ahead of any
+        placed agent). Ranking by per-agent placement history — not a positional offset
+        into whichever candidate list happens to be live this round — is what keeps this
+        correct as the free/busy set churns: an index/offset rotation desyncs the moment
+        the candidate list's *membership* (not just its length) changes between calls,
+        which can silently starve an agent indefinitely even though it's free every round
+        it's a candidate. Only successful placements update the ranking, so a transient
+        ``_try_assign`` failure for one task never costs its agent its earned priority.
 
+        Preconditions:
+            - ``remaining_ready`` and ``remaining_free`` are the caller's already-filtered
+              pools (unpinned/unassigned ready tasks; free agents not yet used this round)
+              — the same precondition ``_try_deterministic_assign`` documents for its own
+              inputs, inherited unchanged since this is only ever called from there.
         Postconditions:
             - Returns False and makes no assignments unless every task in
-              ``remaining_ready`` shares the same non-empty ``target_team`` and at least
-              that many free agents match it.
-            - Returns True otherwise: matching free agents, rotated by this team's
-              cursor, are paired to tasks 1:1 via ``self._try_assign``, with
-              ``used_agents``/``assigned_tasks`` updated in place for each successful
-              placement. Any excess tasks beyond the matching-agent pool are left
-              unassigned for a later round. The cursor advances by the number of
-              successful placements, wrapping modulo the matching-agent count.
+              ``remaining_ready`` resolves to the exact same non-empty set of matching
+              free agents, and that set has at least as many agents as there are tasks.
+            - Returns True otherwise: every task in ``remaining_ready`` is attempted via
+              ``self._try_assign`` against a least-recently-used-first ordering of the
+              matching agents, with ``used_agents``/``assigned_tasks`` and
+              ``self._homogeneous_last_used``/``self._homogeneous_assign_ordinal`` updated
+              in place for each successful placement. A pool larger than the task batch
+              simply leaves its lowest-priority excess agents unused this round — the size
+              guard above guarantees there is never a task this method fails to attempt.
         """
-        target_teams = {t.target_team for t in remaining_ready}
-        if len(target_teams) != 1:
+        first_team = remaining_ready[0].target_team
+        if not first_team:
             return False
-        target_team = next(iter(target_teams))
-        if not target_team:
-            return False
-
-        matching_free = [
-            agent_id
-            for agent_id in remaining_free
-            if _target_matches_agent(target_team, self.agent_team_keys.get(agent_id, agent_id))
-        ]
-        if len(matching_free) < len(remaining_ready):
+        matching_free = self._matching_free_agents(first_team, remaining_free)
+        if not matching_free or len(matching_free) < len(remaining_ready):
             return False
 
-        cursor_by_team = getattr(self, "_homogeneous_assign_cursor", None)
-        if cursor_by_team is None:
-            cursor_by_team = {}
-            self._homogeneous_assign_cursor = cursor_by_team
-        start = cursor_by_team.get(target_team, 0) % len(matching_free)
-        rotated_free = matching_free[start:] + matching_free[:start]
+        matching_set = set(matching_free)
+        for task in remaining_ready[1:]:
+            if set(self._matching_free_agents(task.target_team, remaining_free)) != matching_set:
+                return False
 
-        placed = 0
-        for task, agent_id in zip(remaining_ready, rotated_free):
+        last_used = self._homogeneous_last_used
+        ordered_free = sorted(matching_free, key=lambda aid: last_used.get(aid, -1))
+
+        for task, agent_id in zip(remaining_ready, ordered_free):
             if self._try_assign(task.id, agent_id):
                 used_agents.add(agent_id)
                 assigned_tasks.add(task.id)
-                placed += 1
-        cursor_by_team[target_team] = (start + placed) % len(matching_free)
+                last_used[agent_id] = self._homogeneous_assign_ordinal
+                self._homogeneous_assign_ordinal += 1
         return True
 
     def _try_deterministic_assign(
@@ -208,10 +223,10 @@ class _AssignmentMixin:
               free agent, or if two such tasks would resolve to the same agent — callers must
               then fall through to the unchanged Tech-Lead LLM path.
             - Returns True when the mapping is unambiguous (directly, or via the homogeneous
-              fast path); in that case every remaining, unpinned ready task placed by that
-              path is attempted via ``self._try_assign``, with ``used_agents`` and
-              ``assigned_tasks`` updated in place for each successful placement, and no LLM
-              call is made.
+              fast path); in that case every task in ``remaining_ready`` is attempted via
+              ``self._try_assign`` (regardless of whether the attempt succeeds), with
+              ``used_agents`` and ``assigned_tasks`` updated in place for each successful
+              placement, and no LLM call is made.
         """
         remaining_ready = [
             t for t in ready if t.id not in assigned_tasks and not self._pinned_agent_for(t)
@@ -227,13 +242,7 @@ class _AssignmentMixin:
 
         agent_for_task: dict[str, str] = {}
         for task in remaining_ready:
-            matches = [
-                agent_id
-                for agent_id in remaining_free
-                if _target_matches_agent(
-                    task.target_team, self.agent_team_keys.get(agent_id, agent_id)
-                )
-            ]
+            matches = self._matching_free_agents(task.target_team, remaining_free)
             if len(matches) != 1:
                 return False
             agent_for_task[task.id] = matches[0]

@@ -958,6 +958,13 @@ class CodingTeamSwarm(
           ``pause_strategy="return"`` it guarantees at most one worker-escalation pause is
           published per round (see ``_escalate_decision``'s Concurrency note). It is a no-op
           in block mode.
+        - ``_homogeneous_last_used`` (agent_id -> placement ordinal) and
+          ``_homogeneous_assign_ordinal`` back the same-stack fairness ranking in
+          ``swarm_assignment._try_homogeneous_target_assign``; like ``_pause_lock`` and
+          ``_merge_lock`` above, they are per-instance bookkeeping never restored across a
+          resume — a resumed job's fairness history simply restarts empty, which only
+          affects which free same-stack agent is preferred next, never correctness (no
+          agent can ever be double-assigned or a task skipped because of it).
     """
 
     def __init__(
@@ -1008,6 +1015,15 @@ class CodingTeamSwarm(
         self.path = path
         self.agent_ids = agent_ids
         self.agent_team_keys = {w.agent_id: _worker_team_key(w) for w in workers}
+        # Least-recently-used ranking for swarm_assignment._try_homogeneous_target_assign:
+        # agent_id -> the _homogeneous_assign_ordinal value at its last placement through that
+        # fast path. Ranking by per-agent placement history (rather than a positional offset
+        # into whichever free-agent subset happens to be live this round) is what keeps a
+        # same-stack agent from being skipped indefinitely as the free/busy set churns round to
+        # round; an agent with no entry here sorts before any placed agent, so it wins ties the
+        # first time it becomes a candidate. See the class Invariants above.
+        self._homogeneous_last_used: Dict[str, int] = {}
+        self._homogeneous_assign_ordinal = 0
         # Injected implementation engines (build/lint); None → quality gates are skipped.
         self.engine_provider = engine_provider
         # The plan's final spec content (CodingTeamPlanInput.final_spec_content), forwarded to the

@@ -314,6 +314,146 @@ def test_homogeneous_single_task_batches_rotate_across_free_agents(tmp_path):
     ]
 
 
+def test_homogeneous_assign_no_starvation_under_shifting_three_agent_membership(tmp_path):
+    """A rotation ranked by a *positional offset* into each round's free-agent list can
+    still starve an agent once the free set's membership (not just its size) shifts round
+    to round -- e.g. 3 same-stack agents where one (a2) is free every round but a stale
+    offset keeps landing on the other two instead. Drives _try_homogeneous_target_assign
+    directly across exactly that shifting-membership sequence and proves every agent that
+    keeps coming up free eventually gets used -- ranking by per-agent placement history
+    (self._homogeneous_last_used), not list position, is what makes this hold."""
+    tech_lead = _RecordingTechLead()
+    workers = [
+        StubWorker("a1", stack_name="backend_v2"),
+        StubWorker("a2", stack_name="backend_v2"),
+        StubWorker("a3", stack_name="backend_v2"),
+    ]
+    swarm, graph = _make_swarm(tmp_path, tech_lead, workers)
+
+    free_sequence = [
+        ["a1", "a2", "a3"],
+        ["a2", "a3"],
+        ["a1", "a2"],
+        ["a2", "a3"],
+        ["a1", "a2"],
+        ["a2", "a3"],
+        ["a1", "a2"],
+    ]
+    picks = []
+    task_holding: dict[str, str] = {}  # agent_id -> the task it's currently holding
+    for i, free in enumerate(free_sequence):
+        # Keep the graph's real busy/free state consistent with this round's manually
+        # chosen free set: an agent offered as "free" here must actually have its prior
+        # task merged, or the real assign call below would (correctly) reject it.
+        for agent_id in free:
+            prior_task = task_holding.pop(agent_id, None)
+            if prior_task:
+                graph.mark_branch_merged(prior_task)
+
+        task_id = f"t{i}"
+        graph.add_task(task_id, title=f"Task {i}", target_team="backend_v2")
+        used_agents: set[str] = set()
+        assigned_tasks: set[str] = set()
+        result = swarm._try_homogeneous_target_assign(
+            [graph.get_task(task_id)], free, used_agents, assigned_tasks
+        )
+        assert result is True
+        agent_id = graph.get_task(task_id).assigned_agent_id
+        assert agent_id is not None
+        picks.append(agent_id)
+        task_holding[agent_id] = task_id
+
+    # a2 is free in every single round; a purely positional rotation can pick it zero
+    # times here (verified against the prior cursor design). Every agent must appear.
+    assert set(picks) == {"a1", "a2", "a3"}
+    assert picks.count("a2") >= 2
+
+
+def test_homogeneous_batch_recognizes_differently_spelled_same_team(tmp_path):
+    """Two tasks spelled differently but resolving to the identical free-agent pool
+    ("backend" and "backend_v2" both normalize to the backend_v2 agents via
+    _target_matches_agent's own alias handling) are still recognized as one homogeneous
+    batch and fanned out without an LLM call -- grouping must go by each task's resolved
+    candidate set, not by raw target_team string equality, since the Tech Lead's phrasing
+    isn't guaranteed consistent across tasks/rounds."""
+    tech_lead = _RecordingTechLead()
+    workers = [
+        StubWorker("backend_v2-1", stack_name="backend_v2"),
+        StubWorker("backend_v2-2", stack_name="backend_v2"),
+    ]
+    swarm, graph = _make_swarm(tmp_path, tech_lead, workers)
+    graph.add_task("t1", title="First", target_team="backend")
+    graph.add_task("t2", title="Second", target_team="backend_v2")
+
+    swarm._assign_tasks(graph.get_tasks(), ["backend_v2-1", "backend_v2-2"])
+
+    assert tech_lead.assignment_calls == []
+    assert {graph.get_task("t1").assigned_agent_id, graph.get_task("t2").assigned_agent_id} == {
+        "backend_v2-1",
+        "backend_v2-2",
+    }
+
+
+def test_homogeneous_assign_partial_failure_only_advances_the_successful_agent(tmp_path):
+    """If _try_assign fails for one task in an otherwise-homogeneous batch (here: an
+    unsatisfied dependency), the fast path still returns True and places every other
+    task -- and only the agent actually placed earns LRU priority, so the failed
+    placement's agent isn't unfairly pushed to the back of a rotation it never ran."""
+    tech_lead = _RecordingTechLead()
+    workers = [
+        StubWorker("backend_v2-1", stack_name="backend_v2"),
+        StubWorker("backend_v2-2", stack_name="backend_v2"),
+    ]
+    swarm, graph = _make_swarm(tmp_path, tech_lead, workers)
+    graph.add_task("t1", title="First", target_team="backend_v2")
+    graph.add_task("t2", title="Second", target_team="backend_v2", dependencies=["missing"])
+    ready = [graph.get_task("t1"), graph.get_task("t2")]
+
+    used_agents: set[str] = set()
+    assigned_tasks: set[str] = set()
+    result = swarm._try_homogeneous_target_assign(
+        ready, ["backend_v2-1", "backend_v2-2"], used_agents, assigned_tasks
+    )
+
+    assert result is True
+    assert assigned_tasks == {"t1"}
+    assert used_agents == {"backend_v2-1"}
+    assert graph.get_task("t1").assigned_agent_id == "backend_v2-1"
+    assert graph.get_task("t2").assigned_agent_id is None
+    assert swarm._homogeneous_last_used == {"backend_v2-1": 0}
+
+
+def test_try_homogeneous_target_assign_returns_false_when_candidate_sets_differ(tmp_path):
+    """The first task's matching-agent pool being large enough to cover the whole batch
+    isn't sufficient on its own -- every task must resolve to the exact same pool. A
+    later task that matches a disjoint set of agents (a different stack) must still bail
+    out to the caller's fallback, even though the size guard alone would have let it
+    through."""
+    tech_lead = _RecordingTechLead()
+    workers = [
+        StubWorker("backend_v2-1", stack_name="backend_v2"),
+        StubWorker("backend_v2-2", stack_name="backend_v2"),
+        StubWorker("frontend_v2-1", stack_name="frontend_v2"),
+    ]
+    swarm, graph = _make_swarm(tmp_path, tech_lead, workers)
+    graph.add_task("t1", title="Backend", target_team="backend_v2")
+    graph.add_task("t2", title="Frontend", target_team="frontend_v2")
+    ready = [graph.get_task("t1"), graph.get_task("t2")]
+
+    used_agents: set[str] = set()
+    assigned_tasks: set[str] = set()
+    result = swarm._try_homogeneous_target_assign(
+        ready,
+        ["backend_v2-1", "backend_v2-2", "frontend_v2-1"],
+        used_agents,
+        assigned_tasks,
+    )
+
+    assert result is False
+    assert used_agents == set()
+    assert assigned_tasks == set()
+
+
 def test_same_stack_workers_both_do_work_across_rounds_no_starvation(tmp_path):
     """2 same-stack tasks, 2 same-stack workers fan out fairly in round 1 (both used, no
     LLM call). A later-arriving third same-stack task then sits TO_DO while both workers
