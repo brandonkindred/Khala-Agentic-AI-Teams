@@ -169,6 +169,21 @@ class ConvergenceTracker:
             return self._asset_class_history[-tail:]
         return list(self._asset_class_history)
 
+    def _over_represented_classes(self, recent: List[str]) -> Set[str]:
+        """Shared over-representation predicate given an already-sliced window.
+
+        Pre: ``recent`` is the caller's windowed slice (typically
+        :meth:`_recent_asset_class_history`'s return).
+        Post: returns an empty set when fewer than 3 entries have been
+        recorded across the *full* history (not just ``recent``), or when no
+        class exceeds the 40% share of ``recent``.
+        """
+        if len(self._asset_class_history) < 3:
+            return set()
+        counts = Counter(recent)
+        total = len(recent)
+        return {ac for ac, c in counts.items() if c / total > 0.4}
+
     def get_diversity_avoid_classes(self, tail: int = 10) -> Set[str]:
         """Return the asset classes ``get_diversity_directive`` would tell the
         designer to avoid — over-represented in the recent window (>40% share).
@@ -178,27 +193,24 @@ class ConvergenceTracker:
         caller (e.g. a per-attempt asset-category pin) that needs to steer
         *around* the same skew without re-deriving it from the raw history.
 
-        Preconditions:
-          - ``tail >= 1``. A non-positive ``tail`` is clamped to the full
-            history rather than silently reading it via the ``[-0:]`` slice,
-            which returns everything rather than nothing.
+        Args:
+            tail: number of recent asset-class entries to consider.
+                Non-positive values are treated as the full history (see
+                :meth:`_recent_asset_class_history`) rather than the ``[-0:]``
+                slice, which returns everything rather than nothing.
 
         Postconditions:
-          - Returns an empty set when fewer than 3 asset classes have been
-            recorded, or when no class exceeds the 40% share threshold.
+          - Returns an empty set when the asset-class history contains fewer
+            than 3 entries, or when no class exceeds the 40% share threshold.
         """
-        if len(self._asset_class_history) < 3:
-            return set()
-        recent = self._recent_asset_class_history(tail)
-        counts = Counter(recent)
-        total = len(recent)
-        return {ac for ac, c in counts.items() if c / total > 0.4}
+        return self._over_represented_classes(self._recent_asset_class_history(tail))
 
     def get_diversity_directive(self, tail: int = 10) -> Optional[str]:
         """Return a steering directive if asset-class distribution is skewed.
 
-        Preconditions:
-          - ``tail >= 1`` (see :meth:`get_diversity_avoid_classes`).
+        Args:
+            tail: forwarded to :meth:`get_diversity_avoid_classes` (see its
+                behavior note on non-positive values).
 
         Postconditions:
           - Returns ``None`` when no class is over-represented; otherwise a
@@ -207,11 +219,12 @@ class ConvergenceTracker:
             :func:`is_asset_class_steering_directive` recognises it and a
             pinned attempt suppresses it as unsatisfiable.
         """
-        over_represented = self.get_diversity_avoid_classes(tail)
+        recent = self._recent_asset_class_history(tail)
+        over_represented = self._over_represented_classes(recent)
         if not over_represented:
             return None
 
-        total = len(self._recent_asset_class_history(tail))
+        total = len(recent)
         return (
             f"MANDATORY: The last {total} strategies are heavily skewed toward "
             f"{', '.join(sorted(over_represented))}. {ASSET_CLASS_ONLY_STEERING_PHRASE}. "

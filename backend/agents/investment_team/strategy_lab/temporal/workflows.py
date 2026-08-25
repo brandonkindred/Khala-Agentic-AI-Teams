@@ -168,7 +168,9 @@ class StrategyLabCycleWorkflow:
     Preconditions:
         ``cycle_input`` (the sole ``run()`` argument) is a JSON-shaped dict:
         ``prior_records`` (list of ``StrategyLabRecord`` dumps), ``config``
-        (``BacktestConfig`` dump), ``signal_briefs`` (asset-class → dump map),
+        (``BacktestConfig`` dump), ``signal_briefs`` (asset-class → dump map,
+        optional — ``.get(...)``-guarded, so an absent key yields ``None`` and
+        every design attempt in the cycle sees no category-specific brief),
         ``exclude_asset_classes`` (list or ``None``),
         ``convergence_tracker_state`` (``dto`` wire dict — the batch-level
         tracker), and optionally ``workflow_config`` (a

@@ -37,6 +37,7 @@ from ...symbols import (
     STOCK_SYMBOLS,
     classify_symbol,
 )
+from ..exceptions import OrchestratorContractError
 from ..executor.predicate_evaluator import compare
 from ..spec_dsl import (
     INDICATOR_OUTPUT_RANGES,
@@ -648,9 +649,20 @@ class SpecReadinessGate(GateResultsMixin):
         assert backtest_config is None or isinstance(backtest_config, BacktestConfig), (
             "backtest_config override must be a BacktestConfig or None"
         )
-        assert pinned_asset_class is None or pinned_asset_class in PROMPT_ASSET_CLASSES, (
-            "pinned_asset_class must be a canonical PROMPT_ASSET_CLASSES member or None"
-        )
+        if pinned_asset_class is not None and pinned_asset_class not in PROMPT_ASSET_CLASSES:
+            # A non-canonical pin would silently disable Rule 11's enforcement
+            # (the pin check below is a no-op when ``ctx.pinned_asset_class``
+            # doesn't match any spec's normalized class), letting an
+            # off-category spec through undetected. Unlike the other two
+            # preconditions here (internal-shape checks on values this
+            # module constructs itself), a bare ``assert`` is unsafe for this
+            # one: it is also stripped under ``-O``/``PYTHONOPTIMIZE``, so use
+            # the same non-optimizable contract-violation exception the rest
+            # of the strategy lab uses for caller misuse.
+            raise OrchestratorContractError(
+                f"pinned_asset_class must be a canonical PROMPT_ASSET_CLASSES member or "
+                f"None, got {pinned_asset_class!r}"
+            )
         ctx = SpecReadinessCtx(
             spec=spec,
             config=backtest_config or self._backtest_config,

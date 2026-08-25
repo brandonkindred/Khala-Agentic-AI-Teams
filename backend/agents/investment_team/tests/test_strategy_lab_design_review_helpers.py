@@ -232,6 +232,8 @@ def test_revise_returns_rebuilt_spec_and_new_rationale(monkeypatch) -> None:
         strategy_id="rebuilt-id",
         mechanical_repair_count=0,
         drift_collector=None,
+        default_asset_class="stocks",
+        exclude_asset_classes=None,
     )
 
     assert rationale_out == "new rationale"
@@ -261,6 +263,8 @@ def test_revise_forwards_skip_self_review_to_design_agent(monkeypatch) -> None:
         strategy_id="rebuilt-id",
         mechanical_repair_count=0,
         drift_collector=None,
+        default_asset_class="stocks",
+        exclude_asset_classes=None,
     )
     assert captured_kwargs["skip_self_review"] is False
 
@@ -274,5 +278,7 @@ def test_revise_forwards_skip_self_review_to_design_agent(monkeypatch) -> None:
         mechanical_repair_count=0,
         drift_collector=None,
         skip_self_review=True,
+        default_asset_class="stocks",
+        exclude_asset_classes=None,
     )
     assert captured_kwargs["skip_self_review"] is True

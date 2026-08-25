@@ -758,8 +758,10 @@ def test_unsupported_asset_class_is_not_mislabeled_as_a_pin_failure(
     type for an unsupported ``asset_class`` (a "bonds" typo). That is a
     different failure from a category-pin non-convergence and must keep its own
     reporting — relabeling it would mis-attribute every typo-redesign in the
-    fleet to this feature. Exercised on an UNRESTRICTED run, where no pin is
-    even active."""
+    fleet to this feature. Exercised on an unrestricted run, where a random
+    pin IS still active (the pin is unconditional) — verifying that an
+    unsupported asset_class surfaces as spec_unimplementable rather than
+    being mislabeled as a category-pin failure."""
     orch = StrategyLabOrchestrator()
 
     monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict("bonds"), "scripted"))
@@ -859,9 +861,10 @@ def test_readiness_pin_reports_class_alone_when_the_class_is_wrong() -> None:
 
 
 def test_readiness_pin_rejects_a_non_canonical_pin() -> None:
+    from investment_team.strategy_lab.exceptions import OrchestratorContractError
     from investment_team.strategy_lab.quality_gates.spec_readiness import SpecReadinessGate
 
-    with pytest.raises(AssertionError):
+    with pytest.raises(OrchestratorContractError):
         SpecReadinessGate().validate(_readiness_spec("stocks"), pinned_asset_class="bonds")
 
 

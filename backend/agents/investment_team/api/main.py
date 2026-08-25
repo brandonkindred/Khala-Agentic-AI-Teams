@@ -2639,10 +2639,13 @@ def _compute_signal_brief_snapshot(
           always a ``dict`` -- never ``None`` -- even on total failure.
         * Fail-open at every level: on disabled expert /
           provider-initialization failure / market-fetch failure / expert
-          (including its own initialization) failure / provider-cleanup
-          failure it returns a ``{"skipped": True, ...}`` storage (or a
-          degraded-market brief set) rather than raising. A single category's
-          failure never aborts the others.
+          (including its own initialization) failure it returns a
+          ``{"skipped": True, ...}`` storage (or a degraded-market brief set)
+          rather than raising. A single category's failure never aborts the
+          others. A provider-cleanup failure is logged and swallowed without
+          altering the return value — it cannot turn a successful result into
+          a skipped one, since cleanup only runs after the try block has
+          already decided what to return.
     """
     if not _strategy_lab_signal_expert_enabled():
         return {}, {"skipped": True, "skipped_reason": "signal_expert_disabled"}

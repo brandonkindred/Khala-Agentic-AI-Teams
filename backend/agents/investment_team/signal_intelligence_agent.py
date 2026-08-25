@@ -111,11 +111,16 @@ class SignalIntelligenceExpert:
             * Returns a validated :class:`SignalIntelligenceBriefV1`.
             * When ``asset_class`` is given, the prompt names that category as
               the brief's sole subject and the diversity hint is narrowed to
-              it, so the brief cannot advise moving into a different class.
-              A brief is injected verbatim into the design prompt, so an
-              unscoped one is how cross-category evidence reaches a design
-              attempt that is pinned to a single category.
+              it, guiding the model to confine every theme and hypothesis to
+              the scoped category. A brief is injected verbatim into the
+              design prompt, so an unscoped one is how cross-category
+              evidence reaches a design attempt that is pinned to a single
+              category.
         """
+        if asset_class is not None:
+            assert asset_class in PROMPT_ASSET_CLASSES, (
+                f"asset_class must be a canonical PROMPT_ASSET_CLASSES member, got {asset_class!r}"
+            )
         prior_text = format_prior_results(prior_results)
         # ``exclude`` narrows the hint's menu to the scoped class; without it
         # the hint enumerates all five categories and actively nudges away

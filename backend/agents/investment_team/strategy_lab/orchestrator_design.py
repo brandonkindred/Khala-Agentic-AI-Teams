@@ -1381,8 +1381,8 @@ class DesignMixin:
         mechanical_repair_count: int,
         drift_collector: Optional[_DriftCollector],
         skip_self_review: bool = False,
-        default_asset_class: str = "stocks",
-        exclude_asset_classes: Optional[List[str]] = None,
+        default_asset_class: str,
+        exclude_asset_classes: Optional[List[str]],
     ) -> Tuple[StrategySpec, str]:
         """Revise the spec from the round's critique, flagging regressions.
 
@@ -1398,6 +1398,16 @@ class DesignMixin:
         computes it as "this round's readiness gate passed AND no mechanical
         repair fired this round", so a structurally clean revision skips the
         designer's internal self-review LLM call.
+
+        Both ``default_asset_class`` and ``exclude_asset_classes`` are
+        required (no default) — this is the single-category pin's own revise
+        step, so the caller must supply the attempt's actual pinned category
+        and its run-level exclusions rather than risk a silent fallback to a
+        hardcoded class. Forwarded verbatim to :meth:`_build_spec_from_dict`:
+        ``default_asset_class`` is the pinned category an omitted/blank
+        ``asset_class`` in the designer's revised payload resolves to;
+        ``exclude_asset_classes`` constrains symbol-based class inference so
+        an inferred class can never land on one the user excluded.
         Raises: ``DesignBudgetExhausted`` with the latest spec / rationale /
         repair count attached — revise has not yet produced a new spec, so the
         latest fully-realised spec is the current (post mechanical-repair) one.
