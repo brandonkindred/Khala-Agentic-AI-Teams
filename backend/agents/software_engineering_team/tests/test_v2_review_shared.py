@@ -453,22 +453,33 @@ def test_run_review_shared_review_context_none_for_every_tool_agent(
     == None: build_shared_tool_agent_review_system_content always returns None
     today (neither current_files nor task_description is safe to place in the
     system prompt -- see that function's docstring), and this must hold
-    consistently across every tool agent in the same call, not just some."""
-    from software_engineering_team.backend_code_v2_team.models import (
-        ToolAgentKind,
-        ToolAgentPhaseOutput,
-    )
+    consistently across every tool agent in the same call, not just some.
+
+    Uses a tiny local stand-in for the tool-agent "kind" (dict key) instead of
+    importing the real backend_code_v2_team.models.ToolAgentKind:
+    _run_tool_agents_review's fold step (_fold_tool_agent_output) only ever
+    accesses kind.value, and dict keys must be hashable (SimpleNamespace is
+    not), so a real per-team enum buys nothing here and only adds an
+    unrelated, heavy import."""
+
+    class _Kind:
+        def __init__(self, value):
+            self.value = value
 
     config = _build_config()
     captured: list = []
 
     def _capture(kind_name):
+        kind = _Kind(kind_name)
         agent = MagicMock()
         agent.review.side_effect = lambda phase_inp: (
             captured.append((kind_name, phase_inp.shared_review_context))
-            or ToolAgentPhaseOutput(issues=[], recommendations=[])
+            or SimpleNamespace(issues=[], recommendations=[])
         )
-        return agent
+        return kind, agent
+
+    qa_kind, qa_agent = _capture("qa")
+    security_kind, security_agent = _capture("security")
 
     run_review(
         config=config,
@@ -477,8 +488,8 @@ def test_run_review_shared_review_context_none_for_every_tool_agent(
         execution_result=_execution_result({"x.py": "code"}),
         repo_path=tmp_path,
         tool_agents={
-            ToolAgentKind.TESTING_QA: _capture("qa"),
-            ToolAgentKind.SECURITY: _capture("security"),
+            qa_kind: qa_agent,
+            security_kind: security_agent,
         },
         language="python",
         **_noop_runners(),
