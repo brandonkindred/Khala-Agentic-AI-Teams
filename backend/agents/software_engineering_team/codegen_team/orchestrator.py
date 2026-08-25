@@ -315,8 +315,10 @@ class CodegenDevelopmentAgent(ConfigDrivenV2DevelopmentAgent):
         Execute the full 5-phase lifecycle for this instance's stack with
         per-microtask review gates.
 
-        Each microtask must pass full review (code quality, QA, security, build, lint)
-        before the next microtask can begin.
+        Each microtask must pass full review (code quality, QA, security, build)
+        before the next microtask can begin. Lint findings are reviewed and
+        reported but only gate progression when the stack's review config sets
+        ``passed_includes_lint_review=True``.
 
         Args:
             repo_path: Path to the checked-out repo the workflow writes into.
