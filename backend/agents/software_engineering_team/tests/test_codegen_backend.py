@@ -946,6 +946,8 @@ class TestCodegenDevelopmentAgent:
         assert "skip.py" not in code
 
     def test_read_repo_code_empty(self, tmp_path):
+        """_read_repo_code returns a "No code files" placeholder when the repo tree
+        contains no files matching the stack's configured extensions."""
         from software_engineering_team.codegen_team.orchestrator import CodegenDevelopmentAgent
 
         agent = CodegenDevelopmentAgent(MagicMock(), "backend")
@@ -976,6 +978,10 @@ class TestCodegenDevelopmentAgent:
         assert "f19.py" not in out
 
     def test_build_tool_runners(self):
+        """Config-driven tool-agent registry yields runnable agents plus git/build
+        helpers. Verifies that _build_backend_tool_agents returns the expected
+        tool-agent kinds (including git branch management and build specialist) and
+        that _build_tool_runners filters them down to the runnable subset."""
         from software_engineering_team.codegen_team.orchestrator import (
             CodegenDevelopmentAgent,
             _build_backend_tool_agents,
