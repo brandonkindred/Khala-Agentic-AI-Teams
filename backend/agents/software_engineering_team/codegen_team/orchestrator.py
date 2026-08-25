@@ -315,8 +315,14 @@ class CodegenDevelopmentAgent(ConfigDrivenV2DevelopmentAgent):
         Execute the full 5-phase lifecycle for this instance's stack with
         per-microtask review gates.
 
-        Each microtask must pass Code Review, QA, and Security review before
-        the next microtask can begin (see ``run_execution_with_review_gates``).
+        Each microtask must pass Code Review, QA, and Security review to
+        complete successfully (see ``run_execution_with_review_gates``); this
+        is a per-microtask requirement, not a hard barrier between
+        microtasks — independent microtasks in the same wave run
+        concurrently via ``parallel_map``, and ``review_config.on_failure ==
+        "skip_continue"`` lets execution continue past a failed one (only
+        ``"stop"``, or a security failure with
+        ``security_failure_always_stops``, halts the run).
         Build and lint gating within that loop is stack-specific: the
         frontend's Code Review gate also runs build and lint checks and fails
         the microtask on either (see ``run_microtask_review``); the backend's
