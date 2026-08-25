@@ -592,6 +592,41 @@ def _run_tail_passes(
     )
 
 
+def _run_spec_compliance_single_pass(
+    *,
+    llm: LLMClient,
+    input_data: CodeReviewInput,
+    deduped: List[CodeReviewIssue],
+    spec_compliance_single_pass: bool,
+) -> Optional[str]:
+    """Run the dedicated post-dedupe spec-compliance single pass, once.
+
+    Runs over the final deduped issue list instead of relying on the
+    (now-empty) per-chunk ``spec_compliance_notes``. ``spec_compliance_single_pass``
+    already folds in the ``CODE_REVIEW`` profile restriction (computed by the
+    caller before dedupe/cap/approval-reconcile run).
+
+    Preconditions:
+        - ``deduped`` is the final merged, capped, approval-reconciled issue
+          list (post-``_dedupe_issues``/``_cap_issues``/``_reconcile_approval``);
+          this function must be called after those steps, not before.
+
+    Postconditions:
+        - Returns ``None`` when ``spec_compliance_single_pass`` is False, or
+          when the pass itself raises (logged, not propagated) — both cases
+          tell the caller's ``_merge_narrative`` to fall back to today's
+          per-chunk-sourced behavior unchanged.
+        - Otherwise returns the synthesized spec-compliance notes string.
+    """
+    if not spec_compliance_single_pass:
+        return None
+    try:
+        return synthesize_spec_compliance(llm, input_data=input_data, issues=deduped)
+    except Exception:
+        logger.exception("CodeReviewCoordinator: spec-compliance single pass failed; falling back")
+        return None
+
+
 def _compact_for_review(
     text: str,
     max_chars: int,
@@ -1103,24 +1138,12 @@ def run_coordinator(
     all_llm_approved = all(outcome.approved_flags)
     approved, deduped = _reconcile_approval(all_llm_approved, deduped)
 
-    # CODE_REVIEW_SPEC_COMPLIANCE_PASS: run the dedicated single pass once, over
-    # the final deduped issue list, instead of relying on the (now-empty)
-    # per-chunk spec_compliance_notes. ``spec_compliance_single_pass`` already
-    # folds in the CODE_REVIEW profile restriction (see its computation above).
-    # ``None`` (flag/profile off, or the pass itself failed) tells
-    # ``_merge_narrative`` to fall back to today's per-chunk-sourced behavior
-    # unchanged.
-    single_pass_spec_notes: Optional[str] = None
-    if spec_compliance_single_pass:
-        try:
-            single_pass_spec_notes = synthesize_spec_compliance(
-                llm, input_data=input_data, issues=deduped
-            )
-        except Exception:
-            logger.exception(
-                "CodeReviewCoordinator: spec-compliance single pass failed; falling back"
-            )
-            single_pass_spec_notes = None
+    single_pass_spec_notes = _run_spec_compliance_single_pass(
+        llm=llm,
+        input_data=input_data,
+        deduped=deduped,
+        spec_compliance_single_pass=spec_compliance_single_pass,
+    )
 
     merged_summary, spec_notes = _merge_narrative(
         llm,

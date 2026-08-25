@@ -246,9 +246,15 @@ class CybersecurityExpertAgent:
         followed by the per-gate role instructions — the schema hint, task
         description, context, and architecture. The code under review is
         untrusted repository content and must stay in the user message, not
-        be elevated to system-level instructions. The words "security" and
-        "vulnerabilities" MUST appear somewhere in the prompt because
-        ``DummyLLMClient.complete_json`` pattern-matches on them
+        be elevated to system-level instructions. The trusted task
+        description and architecture overview stay in the user message too
+        (not a ``CacheBreakpoint`` system segment): ``run_single_shot_review``'s
+        underlying ``LLMClient.complete_json`` implementations
+        (Claude/Ollama/RunPod/Dummy) do not consume a ``system_prompt_content``
+        kwarg — it would be silently dropped on the wire, so this content
+        must stay where every implementation actually reads it. The words
+        "security" and "vulnerabilities" MUST appear somewhere in the prompt
+        because ``DummyLLMClient.complete_json`` pattern-matches on them
         (order-independent substring check) to return a deterministic stub
         in tests — see llm_service/README.md "Migration rule: keep pattern
         anchors in the user prompt".
