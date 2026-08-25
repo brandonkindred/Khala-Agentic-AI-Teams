@@ -435,6 +435,12 @@ def _run_architecture_for_planning(
           ``client_context["tech_constraints"]`` (the ``ClientContext.tech_constraints``
           gathered during Planning intake/discovery) when present and non-empty, falling
           back to ``_DEFAULT_TECHNOLOGY_PREFERENCES`` otherwise.
+        - ``project_overview`` is constructed via ``build_project_overview(prd_content,
+          client_context)`` (the shared Planning/SE helper) and passed to
+          ``ArchitectureInput.project_overview``.
+        - ``features_and_functionality_doc`` passed to the architecture agent is
+          ``project_overview["features_and_functionality_doc"]``, normalized to ``None``
+          when falsy.
     Invariants:
         - Never propagates an exception into the Planning workflow.
     """

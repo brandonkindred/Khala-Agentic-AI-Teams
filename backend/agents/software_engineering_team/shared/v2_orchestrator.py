@@ -1023,8 +1023,9 @@ class ConfigDrivenV2DevelopmentAgent(BaseV2DevelopmentAgent):
     Invariants: ``self.config`` is set once at construction and never
     reassigned; every config-derived property/method below (``default_language``,
     ``conventions_for``, ``tool_agent_kinds``, ``extra_review_clause``,
-    ``_stack_profile``, ``_read_repo_code``, ``_detect_tooling``) is a pure
-    read through it (or through the ``StackProfile`` it composes), so two
+    ``_stack_profile``, ``_read_repo_code``, ``_detect_tooling``,
+    ``build_task_requirements``, ``_validate_tool_agents``) is a pure read
+    through it (or through the ``StackProfile`` it composes), so two
     instances built from the same config always agree. The tool-agent
     builder hook (``_build_tool_agents``) and its wrapper
     (``_build_and_validate_tool_agents``) are deliberately excluded because
