@@ -52,7 +52,13 @@ from ..models import (
     StrategySpec,
 )
 from ..signal_intelligence_models import SignalIntelligenceBriefV1
-from ..strategy_lab_context import normalize_asset_class, normalize_asset_class_strict
+from ..strategy_lab_context import (
+    PROMPT_ASSET_CLASSES,
+    filter_records_by_asset_class,
+    normalize_asset_class,
+    normalize_asset_class_strict,
+    select_asset_category,
+)
 from ._orchestrator_helpers import (
     _DesignAttemptState,
     _DesignPersistContext,
@@ -625,12 +631,25 @@ class DesignMixin:
         stop_reason = "budget_exhausted"
         loop_telemetry: Dict[str, Any] = {}
 
+        # Pin this attempt to exactly one asset category, randomly chosen from
+        # the categories the user allowed at run start (recovered as the
+        # complement of ``exclude_asset_classes`` — see
+        # ``select_asset_category``). Scoping ``prior_records`` to that
+        # category keeps the designer from reasoning over prior strategies,
+        # performance, and rationale belonging to unrelated categories, and
+        # pinning ``exclude_asset_classes`` to every other class hard-forces
+        # the design agent onto the selected one instead of leaving it free
+        # to pick among every allowed class.
+        selected_category = select_asset_category(exclude_asset_classes)
+        category_prior_records = filter_records_by_asset_class(prior_records, selected_category)
+        pinned_exclude_asset_classes = [c for c in PROMPT_ASSET_CLASSES if c != selected_category]
+
         try:
             strategy_dict, rationale = self.design_agent.run(
-                prior_records=prior_records,
+                prior_records=category_prior_records,
                 signal_brief=signal_brief,
                 convergence_directives=directives or None,
-                exclude_asset_classes=exclude_asset_classes,
+                exclude_asset_classes=pinned_exclude_asset_classes,
                 regime_summary=regime_summary,
             )
             spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
@@ -696,6 +715,7 @@ class DesignMixin:
                 "budget_exhausted",
                 getattr(exc, "mechanical_repair_count", 0),
             )
+            budget_telemetry["asset_category"] = selected_category
             # Mirror the normal-exit path: emit the per-cycle ``design_loop``
             # summary so live ``on_phase`` consumers see the stop reason and
             # ledger totals on budget-exhausted cycles too, not just per-round
@@ -712,6 +732,7 @@ class DesignMixin:
                 loop_telemetry=budget_telemetry,
             )
 
+        loop_telemetry["asset_category"] = selected_category
         return _DesignLoopOutcome(
             spec=spec,
             rationale=rationale,

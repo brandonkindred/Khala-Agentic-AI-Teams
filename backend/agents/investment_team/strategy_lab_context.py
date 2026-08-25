@@ -6,6 +6,7 @@ Used by strategy ideation and signal intelligence to avoid circular imports.
 
 from __future__ import annotations
 
+import random
 from typing import Iterable, List, Optional
 
 from .models import StrategyLabRecord
@@ -221,6 +222,65 @@ def excluded_for_allowed(allowed: Optional[Iterable[str]]) -> List[str]:
         return []
     allowed_set = set(allowed)
     return [c for c in PROMPT_ASSET_CLASSES if c not in allowed_set]
+
+
+def select_asset_category(
+    exclude_asset_classes: Optional[Iterable[str]], *, rng: Optional[random.Random] = None
+) -> str:
+    """Randomly pick exactly one asset category for a design attempt.
+
+    Each design attempt must commit to a single asset category rather than
+    leaving the designer free to mix strategies across every category the
+    user allowed. The allowed set is recovered as the complement of
+    ``exclude_asset_classes`` within :data:`PROMPT_ASSET_CLASSES` — the exact
+    inverse of :func:`excluded_for_allowed`, so this reconstructs the user's
+    original ``allowed_asset_classes`` selection without needing it threaded
+    through separately.
+
+    Preconditions:
+      - ``exclude_asset_classes`` is ``None`` or an iterable of canonical
+        class labels, and does not exclude every class in
+        :data:`PROMPT_ASSET_CLASSES` (the API boundary already rejects an
+        empty allowed-category selection, so this should be unreachable).
+
+    Postconditions:
+      - Returns one class from :data:`PROMPT_ASSET_CLASSES` not present in
+        ``exclude_asset_classes``.
+
+    Raises:
+      ValueError: if every class in :data:`PROMPT_ASSET_CLASSES` is excluded,
+        leaving no category to select from.
+    """
+    excluded_set = set(exclude_asset_classes or ())
+    allowed = [c for c in PROMPT_ASSET_CLASSES if c not in excluded_set]
+    if not allowed:
+        raise ValueError(
+            "select_asset_category: no asset category remains after applying "
+            f"exclude_asset_classes={sorted(excluded_set)}"
+        )
+    chooser = rng or random
+    return chooser.choice(allowed)
+
+
+def filter_records_by_asset_class(
+    records: List[StrategyLabRecord], asset_class: str
+) -> List[StrategyLabRecord]:
+    """Restrict prior records to those matching a single asset category.
+
+    Used to scope the design agent's "prior strategy results" context to the
+    category selected for the current attempt (see
+    :func:`select_asset_category`), so it never reasons over hypotheses,
+    rationale, or performance data from unrelated asset categories.
+
+    Preconditions:
+      - ``records`` is a list of ``StrategyLabRecord``; ``asset_class`` is a
+        canonical label (typically the output of :func:`select_asset_category`).
+
+    Postconditions:
+      - Returns the subset of ``records`` whose (normalized) strategy asset
+        class equals ``asset_class``, preserving input order.
+    """
+    return [r for r in records if normalize_asset_class(r.strategy.asset_class) == asset_class]
 
 
 def format_prior_results(records: List[StrategyLabRecord], *, max_records: int = 50) -> str:
