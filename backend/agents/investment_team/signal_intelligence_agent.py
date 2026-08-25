@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import List
+from typing import List, Optional
 
 from strands import Agent
 
@@ -15,7 +15,11 @@ from llm_service import get_strands_model
 from .market_lab_data.models import MarketLabContext
 from .models import StrategyLabRecord
 from .signal_intelligence_models import SignalIntelligenceBriefV1
-from .strategy_lab_context import asset_class_mix_hint, format_prior_results
+from .strategy_lab_context import (
+    PROMPT_ASSET_CLASSES,
+    asset_class_mix_hint,
+    format_prior_results,
+)
 
 _SIGNAL_SYSTEM = (
     "You are a Signal Intelligence Expert for a **simulated** strategy research lab. "
@@ -91,13 +95,57 @@ class SignalIntelligenceExpert:
         self,
         prior_results: List[StrategyLabRecord],
         market_context: MarketLabContext,
+        *,
+        asset_class: Optional[str] = None,
     ) -> SignalIntelligenceBriefV1:
+        """Synthesize the per-batch signal brief from prior lab results.
+
+        Preconditions:
+            * ``prior_results`` are the records the brief may reason over. When
+              ``asset_class`` is given the caller must have already filtered
+              them to that class — this method does not re-filter.
+            * ``asset_class``, when given, is a canonical asset-class label
+              naming the single category this brief is scoped to.
+
+        Postconditions:
+            * Returns a validated :class:`SignalIntelligenceBriefV1`.
+            * When ``asset_class`` is given, the prompt names that category as
+              the brief's sole subject and the diversity hint is narrowed to
+              it, so the brief cannot advise moving into a different class.
+              A brief is injected verbatim into the design prompt, so an
+              unscoped one is how cross-category evidence reaches a design
+              attempt that is pinned to a single category.
+        """
         prior_text = format_prior_results(prior_results)
-        mix_hint = asset_class_mix_hint(prior_results)
+        # ``exclude`` narrows the hint's menu to the scoped class; without it
+        # the hint enumerates all five categories and actively nudges away
+        # from whichever one is "heavy" — which, on a single-category brief,
+        # is always the scoped class itself.
+        mix_hint = asset_class_mix_hint(
+            prior_results,
+            exclude=(
+                [c for c in PROMPT_ASSET_CLASSES if c != asset_class]
+                if asset_class is not None
+                else None
+            ),
+        )
         market_block = market_context.as_prompt_text()
+        scope_block = (
+            f"""## Scope — SINGLE ASSET CATEGORY
+This brief covers **{asset_class}** and nothing else. Every prior result below is a
+{asset_class} strategy. Asset categories are not interchangeable: their microstructure,
+session hours, liquidity, and volatility regimes differ, so evidence drawn from one
+does not transfer to another. Do NOT reference, compare against, or recommend any
+other asset category — confine every theme, hypothesis, trade structure, and piece of
+prior evidence to {asset_class}.
+
+"""
+            if asset_class is not None
+            else ""
+        )
 
         prompt = f"""\
-## Prior Strategy Results
+{scope_block}## Prior Strategy Results
 {prior_text}
 
 ## Asset-class diversity hint

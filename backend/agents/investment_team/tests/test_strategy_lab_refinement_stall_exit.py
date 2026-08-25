@@ -63,7 +63,9 @@ _VALID_CODE = (
 
 def _spec_dict() -> Dict[str, Any]:
     return {
-        "asset_class": "stocks",
+        # No "asset_class": the design loop pins each attempt to one
+        # randomly-selected category and an omitted class inherits that
+        # pin, so this payload stays valid whichever category is drawn.
         "hypothesis": "RSI signal strategy",
         "signal_definition": "sig",
         "entry_rules": [_rsi_entry_dict()],

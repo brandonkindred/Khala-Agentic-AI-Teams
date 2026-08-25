@@ -16,6 +16,15 @@ mechanical repairs, exposed via :func:`repair_spec`:
 * **Position-cap bound** (readiness Rule 8): clamp
   ``risk_limits.max_position_pct`` down to
   :data:`spec_readiness.MAX_POSITION_PCT_CEILING`.
+* **Asset-category pin, symbol half** (readiness Rule 11): when the caller
+  passes ``pinned_asset_class`` and the spec *already declares* that class,
+  drop any ``target_symbols`` entry that unambiguously belongs to a different
+  class. The class half of Rule 11 — a spec declaring the *wrong* category —
+  is deliberately **not** repaired here: rewriting ``asset_class`` in place
+  would relabel a crypto strategy as a stocks one while leaving crypto logic
+  intact, which is precisely the cross-category contamination the pin exists
+  to prevent. That violation stays a readiness critical so the design loop's
+  own ``revise`` round rebuilds the strategy for the pinned category.
 
 The custom-code decision is a separate, *readiness-gated* concern handled by
 :func:`select_code_path`: it trial-compiles a spec and, on :class:`CompilerError`,
@@ -37,7 +46,8 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
 from ..models import BacktestConfig, StrategySpec
-from ..strategy_lab_context import normalize_asset_class_strict
+from ..strategy_lab_context import normalize_asset_class, normalize_asset_class_strict
+from ..symbols import classify_symbol
 from .quality_gates.spec_readiness import (
     _FULL_TIMEFRAME_ASSET_CLASSES,
     MAX_POSITION_PCT_CEILING,
@@ -79,6 +89,7 @@ def repair_spec(
     spec: StrategySpec,
     *,
     config: Optional[BacktestConfig] = None,
+    pinned_asset_class: Optional[str] = None,
 ) -> RepairOutcome:
     """Apply the in-scope deterministic *mechanical* repairs to ``spec``.
 
@@ -94,6 +105,9 @@ def repair_spec(
       - ``spec`` is a constructed :class:`StrategySpec`.
       - ``config`` is a :class:`BacktestConfig` or ``None`` (accepted for a
         uniform call site; the current repairs do not consult it).
+      - ``pinned_asset_class`` is a canonical asset-class label naming the
+        single category the caller's design attempt is restricted to, or
+        ``None`` when no pin applies.
 
     Postconditions:
       - Returns a :class:`RepairOutcome`. When no repair applies, the input
@@ -105,6 +119,9 @@ def repair_spec(
         ``actions == []`` (idempotent) — barring external state changes.
       - The returned spec is never mutated in place; edits are made on a deep
         copy.
+      - ``spec.asset_class`` is never rewritten, with or without a pin — see
+        the module docstring for why the class half of Rule 11 is left to the
+        readiness-critique path.
     """
     assert isinstance(spec, StrategySpec), "spec must be a StrategySpec"
     assert config is None or isinstance(config, BacktestConfig), (
@@ -154,6 +171,39 @@ def repair_spec(
         updates["risk_limits"] = spec.risk_limits.model_copy(
             update={"max_position_pct": MAX_POSITION_PCT_CEILING}
         )
+
+    # --- Rule 11 (symbol half): stray off-category tickers under a pin.
+    # Only applies once the spec already declares the pinned class — a spec
+    # declaring the wrong class is a readiness critical the design loop's
+    # revise round owns, and stripping symbols from it would destroy the very
+    # evidence the reviser needs to rebuild the strategy.
+    if (
+        pinned_asset_class is not None
+        and normalize_asset_class(spec.asset_class) == pinned_asset_class
+    ):
+        # ``classify_symbol`` returns None for cross-asset ETFs (GLD, QQQ, ...)
+        # that legitimately trade in more than one category; only an
+        # unambiguous mismatch is stripped.
+        kept = [
+            sym
+            for sym in spec.target_symbols
+            if (cls := classify_symbol(sym)) is None or cls == pinned_asset_class
+        ]
+        if len(kept) != len(spec.target_symbols):
+            actions.append(
+                RepairAction(
+                    rule="asset_category_pin_symbols",
+                    field="target_symbols",
+                    before=list(spec.target_symbols),
+                    after=kept,
+                    reason=(
+                        f"target_symbols contained tickers outside the pinned asset "
+                        f"category '{pinned_asset_class}'; dropped them so the backtest "
+                        f"universe matches the declared class."
+                    ),
+                )
+            )
+            updates["target_symbols"] = kept
 
     if not actions:
         return RepairOutcome(spec=spec, actions=[])

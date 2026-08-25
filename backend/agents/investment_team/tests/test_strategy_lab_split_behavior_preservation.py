@@ -85,7 +85,9 @@ def _spec_dict() -> Dict[str, Any]:
     no-op against ``_CONFORMANT_CODE``.
     """
     return {
-        "asset_class": "stocks",
+        # No "asset_class": the design loop pins each attempt to one
+        # randomly-selected category and an omitted class inherits that
+        # pin, so this payload stays valid whichever category is drawn.
         "hypothesis": "RSI mean reversion on a small universe",
         "signal_definition": "RSI(14) crossings",
         "timeframe": "1d",
@@ -773,9 +775,13 @@ def test_design_attempt_happy_path_preserves_spec_code_trades_metrics_gates(
     record = orch._run_design_attempt(
         prior_records=[],
         config=_config(),
-        signal_brief=None,
+        signal_briefs=None,
         emit=lambda *a, **k: None,
-        exclude_asset_classes=None,
+        # Pin the attempt to stocks so the expected spec below is
+        # deterministic: without a restriction the design loop draws a
+        # category at random and the payload (which declares none) inherits
+        # whichever one it drew.
+        exclude_asset_classes=["crypto", "forex", "futures", "commodities"],
         directives=[],
     )
 
@@ -831,9 +837,13 @@ def test_design_attempt_no_market_data_preserves_failed_record_outputs(
     record = orch._run_design_attempt(
         prior_records=[],
         config=_config(),
-        signal_brief=None,
+        signal_briefs=None,
         emit=lambda *a, **k: None,
-        exclude_asset_classes=None,
+        # Pin the attempt to stocks so the expected spec below is
+        # deterministic: without a restriction the design loop draws a
+        # category at random and the payload (which declares none) inherits
+        # whichever one it drew.
+        exclude_asset_classes=["crypto", "forex", "futures", "commodities"],
         directives=[],
     )
 
@@ -866,7 +876,9 @@ def test_design_attempt_design_not_ready_preserves_short_circuit_record(
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "2")
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS", "10")
     bad_spec = {
-        "asset_class": "stocks",
+        # No "asset_class": the design loop pins each attempt to one
+        # randomly-selected category and an omitted class inherits that
+        # pin, so this payload stays valid whichever category is drawn.
         "hypothesis": "test",
         "signal_definition": "sig",
         "entry_rules": [],
@@ -893,9 +905,13 @@ def test_design_attempt_design_not_ready_preserves_short_circuit_record(
     record = orch._run_design_attempt(
         prior_records=[],
         config=_config(),
-        signal_brief=None,
+        signal_briefs=None,
         emit=lambda *a, **k: None,
-        exclude_asset_classes=None,
+        # Pin the attempt to stocks so the expected spec below is
+        # deterministic: without a restriction the design loop draws a
+        # category at random and the payload (which declares none) inherits
+        # whichever one it drew.
+        exclude_asset_classes=["crypto", "forex", "futures", "commodities"],
         directives=[],
     )
 

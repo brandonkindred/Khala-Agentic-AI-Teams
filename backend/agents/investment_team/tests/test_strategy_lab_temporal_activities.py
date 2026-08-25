@@ -2238,38 +2238,62 @@ def test_run_design_attempt_activity_checkpoint_delete_failure_is_swallowed(monk
 # ---------------------------------------------------------------------------
 
 
-def test_compute_signal_brief_activity_serializes_brief_and_storage(monkeypatch):
-    """compute_signal_brief_activity returns the signal brief as a serialized
-    dict and passes the storage metadata through unchanged."""
+def test_compute_signal_brief_activity_serializes_per_category_briefs(monkeypatch):
+    """compute_signal_brief_activity serializes one brief per asset category
+    and passes the storage metadata through unchanged."""
     from investment_team.api import main as api_main
 
     class _FakeBrief:
+        def __init__(self, asset_class: str) -> None:
+            self._asset_class = asset_class
+
         def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
-            return {"brief_version": "v1"}
+            return {"brief_version": "v1", "asset_class": self._asset_class}
 
-    monkeypatch.setattr(
-        api_main,
-        "_compute_signal_brief_snapshot",
-        lambda benchmark_symbol: (_FakeBrief(), {"stored": True, "sym": benchmark_symbol}),
+    seen: Dict[str, Any] = {}
+
+    def _snapshot(benchmark_symbol, exclude_asset_classes=None):
+        seen["benchmark"] = benchmark_symbol
+        seen["exclude"] = exclude_asset_classes
+        return ({"stocks": _FakeBrief("stocks")}, {"stored": True})
+
+    monkeypatch.setattr(api_main, "_compute_signal_brief_snapshot", _snapshot)
+    out = act.compute_signal_brief_activity(
+        {"benchmark_symbol": "SPY", "exclude_asset_classes": ["crypto"]}
     )
-    out = act.compute_signal_brief_activity("SPY")
-    assert out["signal_brief"] == {"brief_version": "v1"}
-    assert out["signal_brief_storage"] == {"stored": True, "sym": "SPY"}
+    assert out["signal_briefs"] == {"stocks": {"brief_version": "v1", "asset_class": "stocks"}}
+    assert out["signal_brief_storage"] == {"stored": True}
+    # The user's category restriction must reach the brief producer, so an
+    # excluded category never gets a brief the design loop could read.
+    assert seen == {"benchmark": "SPY", "exclude": ["crypto"]}
 
 
-def test_compute_signal_brief_activity_handles_none_brief(monkeypatch):
-    """compute_signal_brief_activity correctly surfaces a None brief without
-    failing and still returns the storage metadata."""
+def test_compute_signal_brief_activity_handles_no_briefs(monkeypatch):
+    """An empty brief map surfaces without failing, storage still returned."""
     from investment_team.api import main as api_main
 
     monkeypatch.setattr(
         api_main,
         "_compute_signal_brief_snapshot",
-        lambda benchmark_symbol: (None, {"skipped": True}),
+        lambda benchmark_symbol, exclude_asset_classes=None: ({}, {"skipped": True}),
+    )
+    out = act.compute_signal_brief_activity({"benchmark_symbol": "SPY"})
+    assert out["signal_briefs"] == {}
+    assert out["signal_brief_storage"] == {"skipped": True}
+
+
+def test_compute_signal_brief_activity_accepts_a_legacy_bare_symbol(monkeypatch):
+    """A workflow-history replay predating the params dict passes a bare
+    benchmark string; it must still resolve rather than raise."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main,
+        "_compute_signal_brief_snapshot",
+        lambda benchmark_symbol, exclude_asset_classes=None: ({}, {"sym": benchmark_symbol}),
     )
     out = act.compute_signal_brief_activity("SPY")
-    assert out["signal_brief"] is None
-    assert out["signal_brief_storage"] == {"skipped": True}
+    assert out["signal_brief_storage"] == {"sym": "SPY"}
 
 
 def test_is_run_cancelled_activity_delegates(monkeypatch):
@@ -2938,8 +2962,8 @@ def test_compute_signal_brief_snapshot_disabled_returns_skip(monkeypatch):
     from investment_team.api import main as api_main
 
     monkeypatch.setattr(api_main, "_strategy_lab_signal_expert_enabled", lambda: False)
-    brief, storage = api_main._compute_signal_brief_snapshot("SPY")
-    assert brief is None
+    briefs, storage = api_main._compute_signal_brief_snapshot("SPY")
+    assert briefs == {}
     assert storage == {"skipped": True, "skipped_reason": "signal_expert_disabled"}
 
 
@@ -2955,9 +2979,9 @@ def test_compute_signal_brief_snapshot_fails_open_on_provider_init_failure(monke
 
     monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _boom_provider)
 
-    brief, storage = api_main._compute_signal_brief_snapshot("SPY")
+    briefs, storage = api_main._compute_signal_brief_snapshot("SPY")
 
-    assert brief is None
+    assert briefs == {}
     assert storage["skipped"] is True
     assert storage["skipped_reason"] == "provider_init_failed"
     assert "provider config invalid" in storage["error"]
@@ -2989,9 +3013,9 @@ def test_compute_signal_brief_snapshot_fails_open_on_expert_init_failure(monkeyp
     monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _FakeProvider)
     monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _boom_expert)
 
-    brief, storage = api_main._compute_signal_brief_snapshot("SPY")
+    briefs, storage = api_main._compute_signal_brief_snapshot("SPY")
 
-    assert brief is None
+    assert briefs == {}
     assert storage["skipped"] is True
     assert storage["skipped_reason"] == "expert_failed"
     assert "expert init failed" in storage["error"]
@@ -3023,9 +3047,9 @@ def test_compute_signal_brief_snapshot_survives_provider_close_failure(monkeypat
     monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _boom_expert)
 
     # Must not raise despite close() also failing.
-    brief, storage = api_main._compute_signal_brief_snapshot("SPY")
+    briefs, storage = api_main._compute_signal_brief_snapshot("SPY")
 
-    assert brief is None
+    assert briefs == {}
     assert storage["skipped"] is True
     assert storage["skipped_reason"] == "expert_failed"
 
@@ -3052,20 +3076,22 @@ def test_compute_signal_brief_snapshot_success_survives_provider_close_failure(m
             return {"brief_version": "v1"}
 
     class _FakeExpert:
-        def produce_signal_brief(self, prior_records, market_ctx):
+        def produce_signal_brief(self, prior_records, market_ctx, *, asset_class=None):
             return _FakeBrief()
 
     monkeypatch.setattr(api_main, "_strategy_lab_records", {})
     monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _FakeProvider)
     monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
 
-    # Must not raise despite close() failing, and must return the brief the
-    # try block already produced -- not a fail-open fallback tuple.
-    brief, storage = api_main._compute_signal_brief_snapshot("SPY")
+    # Must not raise despite close() failing, and must return the briefs the
+    # try block already produced -- not a fail-open fallback tuple. Only the
+    # allowed categories get one, so the restriction is visible in the result.
+    briefs, storage = api_main._compute_signal_brief_snapshot("SPY", ["crypto", "forex"])
 
-    assert isinstance(brief, _FakeBrief)
+    assert sorted(briefs) == ["commodities", "futures", "stocks"]
+    assert all(isinstance(b, _FakeBrief) for b in briefs.values())
     assert storage.get("skipped") is not True
-    assert storage["brief_version"] == "v1"
+    assert storage["by_asset_class"]["stocks"]["brief_version"] == "v1"
 
 
 def test_is_strategy_lab_run_externally_stopped_reads_job_status(monkeypatch):

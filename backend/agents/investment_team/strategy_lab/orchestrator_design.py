@@ -58,7 +58,7 @@ from ..strategy_lab_context import (
     normalize_asset_class,
     normalize_asset_class_strict,
     select_asset_category,
-    strip_offcategory_symbols,
+    select_signal_brief,
 )
 from ._orchestrator_helpers import (
     _DesignAttemptState,
@@ -76,7 +76,7 @@ from .alignment_findings import AlignmentFinding
 from .backtest_cache import BacktestCache
 from .budget_config import StrategyLabBudgetConfig
 from .exceptions import OrchestratorContractError, SpecImplementabilityError
-from .market_regime import RegimeSummary
+from .market_regime import RegimeSummary, filter_regime_summary
 from .mechanical_repair import RepairAction, demote_code_path, repair_spec, select_code_path
 from .phases import Phase
 from .quality_gates.convergence_tracker import is_asset_class_steering_directive
@@ -147,7 +147,12 @@ def _coerce_expectancy_forecast(raw: Any) -> Optional[ExpectancyForecast]:
     return None
 
 
-def build_spec_from_dict(strategy_dict: Dict[str, Any], *, strategy_id: str) -> "StrategySpec":
+def build_spec_from_dict(
+    strategy_dict: Dict[str, Any],
+    *,
+    strategy_id: str,
+    default_asset_class: str = "stocks",
+) -> "StrategySpec":
     """Construct a ``StrategySpec`` from a design-agent JSON payload.
 
     Pre: ``strategy_dict`` is the JSON dict returned by
@@ -163,8 +168,15 @@ def build_spec_from_dict(strategy_dict: Dict[str, Any], *, strategy_id: str) -> 
     commodity/metal/energy, cryptocurrency/cryptocurrencies) are
     canonicalized before construction so a clean mapping never trips the
     strict ``StrategySpec`` validator. A missing or blank ``asset_class``
-    likewise resolves to the default ``stocks`` rather than being treated as
+    resolves to ``default_asset_class`` rather than being treated as
     unsupported, so it never triggers a spurious redesign.
+
+    ``default_asset_class`` is the category the caller's design attempt is
+    pinned to. Filling an *omitted* field from the pin is not a relabel: the
+    payload expressed no choice, and the pin is the only correct value it
+    could have had. A payload that names a *different* class is left exactly
+    as authored — readiness Rule 11 then rejects it so the strategy gets
+    rebuilt for the pinned category rather than silently reassigned to it.
 
     A *genuinely unsupported* class the strict normalizer rejects (e.g.
     ``bonds``) is NOT silently coerced to ``stocks`` — doing so would run
@@ -185,9 +197,14 @@ def build_spec_from_dict(strategy_dict: Dict[str, Any], *, strategy_id: str) -> 
         SpecImplementabilityError: the payload names an unsupported
             ``asset_class`` that no alias maps to a tradeable class.
     """
-    raw_asset_class = strategy_dict.get("asset_class", "stocks")
+    assert default_asset_class in PROMPT_ASSET_CLASSES, (
+        "default_asset_class must be a canonical PROMPT_ASSET_CLASSES member"
+    )
+    # ``or`` alone would let a whitespace-only value through as an authored
+    # choice; a blank field expresses no choice, so it inherits the pin.
+    raw_asset_class = str(strategy_dict.get("asset_class") or "").strip() or default_asset_class
     asset_class = normalize_asset_class(raw_asset_class)
-    # A missing/blank asset_class is the documented default (``stocks``), which
+    # A missing/blank asset_class is the documented default, which
     # ``normalize_asset_class`` already produced above — it is not an unsupported
     # class, so it must not trip the strict validator and force a redesign. Only a
     # genuinely-named-but-unknown class (e.g. ``bonds``) routes to redesign. The
@@ -573,7 +590,7 @@ class DesignMixin:
         self,
         *,
         prior_records: List[StrategyLabRecord],
-        signal_brief: Optional[SignalIntelligenceBriefV1],
+        signal_briefs: Optional[Dict[str, SignalIntelligenceBriefV1]],
         directives: List[str],
         exclude_asset_classes: Optional[List[str]],
         config: BacktestConfig,
@@ -633,76 +650,75 @@ class DesignMixin:
         stop_reason = "budget_exhausted"
         loop_telemetry: Dict[str, Any] = {}
 
-        # When the user restricted generation to a subset of categories
-        # (``exclude_asset_classes`` non-empty — the complement of their
-        # ``allowed_asset_classes`` selection), pin this attempt to exactly
-        # one of the allowed categories, randomly chosen (see
-        # ``select_asset_category``). Scoping ``prior_records`` to that
-        # category keeps the designer from reasoning over prior strategies,
-        # performance, and rationale belonging to unrelated categories, and
-        # pinning ``exclude_asset_classes`` to every other class hard-forces
-        # the design agent onto the selected one instead of leaving it free
-        # to pick among every allowed class. An unrestricted run (no
-        # ``allowed_asset_classes`` selection) keeps the prior free-choice
-        # behavior — mixing categories is only a problem when the user
-        # actually asked for a subset.
-        # The convergence tracker's diversity directive (below) separately
-        # tells the designer to avoid whichever asset class is over-
-        # represented in recent history. Bias the pin away from that same
-        # set so the two steering mechanisms don't contradict each other —
-        # see the ``directives`` filtering right after selection.
-        diversity_avoid_classes = (
-            self.convergence_tracker.get_diversity_avoid_classes()
-            if exclude_asset_classes
-            else set()
+        # ── Asset-category pin ───────────────────────────────────────────
+        # Every design attempt commits to exactly ONE asset category, chosen
+        # at random from the categories the user selected at run start
+        # (``exclude_asset_classes`` is the complement of that selection
+        # within ``PROMPT_ASSET_CLASSES``; an unrestricted run means every
+        # category is allowed, not that no pin applies).
+        #
+        # The pin is unconditional because asset categories are not
+        # interchangeable: forex microstructure, crypto's 24/7 sessions, and
+        # equity market hours make a "learning" drawn from one category
+        # actively misleading in another. An attempt that reasoned over a
+        # blended cross-category history would produce conclusions that hold
+        # for no category in particular, whether or not the user narrowed the
+        # menu. So every attempt gets one category and sees only that
+        # category's evidence.
+        #
+        # Three things follow from the pin, all of them hard restrictions
+        # rather than prompt-level requests:
+        #   * ``prior_records`` is filtered to the pinned category, so the
+        #     "Prior Strategy Results" analysis cannot reference another one.
+        #   * ``exclude_asset_classes`` handed to the designer forbids every
+        #     other class, rather than leaving it free among the allowed set.
+        #   * The readiness gate enforces the pin (Rule 11), so a spec that
+        #     drifts off-category can never be marked ready and therefore can
+        #     never reach code synthesis or be persisted as a strategy.
+        #
+        # The convergence tracker's diversity directive separately tells the
+        # designer to avoid whichever asset class is over-represented in
+        # recent history. Bias the pin away from that same set so the two
+        # steering mechanisms don't contradict each other — see the
+        # ``directives`` filtering right after selection.
+        diversity_avoid_classes = self.convergence_tracker.get_diversity_avoid_classes()
+        selected_category: str = select_asset_category(
+            exclude_asset_classes, avoid=diversity_avoid_classes
         )
-        selected_category: Optional[str] = (
-            select_asset_category(exclude_asset_classes, avoid=diversity_avoid_classes)
-            if exclude_asset_classes
-            else None
-        )
-        if selected_category is not None:
-            category_prior_records = filter_records_by_asset_class(prior_records, selected_category)
-            pinned_exclude_asset_classes = [
-                c for c in PROMPT_ASSET_CLASSES if c != selected_category
-            ]
-        else:
-            category_prior_records = prior_records
-            pinned_exclude_asset_classes = exclude_asset_classes
+        category_prior_records = filter_records_by_asset_class(prior_records, selected_category)
+        pinned_exclude_asset_classes = [c for c in PROMPT_ASSET_CLASSES if c != selected_category]
+        # Scope the two cross-category analysis surfaces the designer is also
+        # handed. Both are computed once per batch/cycle over every asset
+        # class; without this the designer reads a signal brief whose
+        # "evidence from priors" and diversity hint span categories it is
+        # forbidden to use, and a regime block quoting four irrelevant markets.
+        category_signal_brief = select_signal_brief(signal_briefs, selected_category)
+        category_regime_summary = filter_regime_summary(regime_summary, selected_category)
 
-        attempt_directives = directives
-        if selected_category is not None:
-            # A pinned attempt cannot satisfy ANY "change asset class"
-            # directive — ``pinned_exclude_asset_classes`` already forbids
-            # every class but the pinned one — so drop them all rather than
-            # hand the designer a self-contradictory prompt ("use something
-            # other than X" alongside "MANDATORY EXCLUSION: only X is
-            # allowed"). This covers the stall directive as well as the
-            # diversity one; the predicate lives with the text it matches
-            # (see ``convergence_tracker``) so a reword cannot silently stop
-            # it matching.
-            attempt_directives = [d for d in directives if not is_asset_class_steering_directive(d)]
+        # A pinned attempt cannot satisfy ANY "change asset class" directive —
+        # ``pinned_exclude_asset_classes`` already forbids every class but the
+        # pinned one — so drop them all rather than hand the designer a
+        # self-contradictory prompt ("use something other than X" alongside
+        # "MANDATORY EXCLUSION: only X is allowed"). This covers the stall
+        # directive as well as the diversity one; the predicate lives with the
+        # text it matches (see ``convergence_tracker``) so a reword cannot
+        # silently stop it matching.
+        attempt_directives = [d for d in directives if not is_asset_class_steering_directive(d)]
 
         try:
             strategy_dict, rationale = self.design_agent.run(
                 prior_records=category_prior_records,
-                signal_brief=signal_brief,
+                signal_brief=category_signal_brief,
                 convergence_directives=attempt_directives or None,
                 exclude_asset_classes=pinned_exclude_asset_classes,
-                regime_summary=regime_summary,
+                regime_summary=category_regime_summary,
             )
-            spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
-            spec, rationale = self._reconcile_asset_category(
-                spec,
-                rationale,
-                selected_category=selected_category,
-                review_round=-1,
-                emit=emit,
-                drift_collector=drift_collector,
-                config=config,
-                strategy_id=strategy_id,
-                all_gate_results=all_gate_results,
+            spec = self._build_spec_from_dict(
+                strategy_dict, strategy_id=strategy_id, default_asset_class=selected_category
             )
+            # No post-hoc correction here: a spec that came back off-category
+            # is caught by readiness Rule 11 on the very first round below and
+            # answered by that round's own ``revise`` call.
 
             # ═══ Phase 1 → 2 transition: DESIGN → DESIGN_REVIEW ═══════════
             # The initial DesignAgent invocation has produced a spec draft;
@@ -730,37 +746,6 @@ class DesignMixin:
                 drift_collector=drift_collector,
                 selected_category=selected_category,
             )
-        except SpecImplementabilityError as exc:
-            # A category-pin non-convergence raised by ``_reconcile_asset_category``
-            # (either the pre-loop call above or the in-loop one). It unwinds past
-            # the ``scope=design_loop`` telemetry emit and past
-            # ``_orchestrate_design_and_review``, which builds the design context
-            # only on a normal return — so without this the persisted
-            # ``failed: spec_unimplementable`` record would report design_rounds=0
-            # and no critiques even when real review rounds ran. Attach the audit
-            # bundle from the state this frame still holds, and emit the loop
-            # summary the raise skipped, before re-raising.
-            #
-            # Keyed on the explicit marker, NOT on the exception type: the same
-            # type is raised by ``build_spec_from_dict`` for an unsupported
-            # ``asset_class`` (a ``bonds`` typo), which is a different failure
-            # and must keep its own reporting rather than being relabeled as a
-            # category-pin non-convergence — that would mis-attribute every
-            # typo-redesign in the fleet to this feature.
-            if getattr(exc, "asset_category_unconverged", False) and exc.design_context is None:
-                pin_telemetry = _design_loop_telemetry_summary(
-                    ledger, len(critique_history), "asset_category_unconverged"
-                )
-                if selected_category is not None:
-                    pin_telemetry["asset_category"] = selected_category
-                emit("telemetry", {"scope": "design_loop", **pin_telemetry})
-                exc.design_context = _DesignPersistContext(
-                    rounds=len(critique_history),
-                    critiques=list(critique_history),
-                    stop_reason="asset_category_unconverged",
-                    loop_telemetry=pin_telemetry,
-                )
-            raise
         except DesignBudgetExhausted as exc:
             # Per-cycle LLM-call budget hit mid-design. Surface whatever
             # spec/critique state we reached as a not-ready outcome tagged
@@ -778,22 +763,19 @@ class DesignMixin:
             # ``spec`` is None only if the very first ``run()`` tripped — fall
             # back to a defaults spec so the audit record is still well-formed.
             if spec is None:
-                spec = self._build_spec_from_dict({}, strategy_id=strategy_id)
-            # The defaults spec above (and ``latest_spec`` from a trip mid-
-            # revision) bypass the per-response enforcement below the
-            # ``design_agent.run``/``revise`` calls — without this, a
-            # budget-exhausted short-circuit record could persist an
-            # ``asset_class`` outside the category pinned for this attempt
-            # (e.g. the defaults spec always defaults to "stocks").
-            spec = self._enforce_selected_asset_category(
-                spec,
-                selected_category=selected_category,
-                review_round=len(critique_history),
-                emit=emit,
-                drift_collector=drift_collector,
-                config=config,
-                all_gate_results=all_gate_results,
-            )
+                spec = self._build_spec_from_dict(
+                    {}, strategy_id=strategy_id, default_asset_class=selected_category
+                )
+            # The spec is left exactly as the designer produced it, even when
+            # it is off-pin. This exit is a *failure* record
+            # (``status="failed: budget_exhausted"``) that never reaches
+            # synthesis, so relabelling its ``asset_class`` to the pinned
+            # category would only file crypto logic under stocks in the
+            # record store — where the next attempt's category-scoped
+            # prior-record filter would then read it as stocks evidence.
+            # ``asset_category`` in the telemetry below records what this
+            # attempt was pinned to; ``spec.asset_class`` stays honest about
+            # what was actually produced.
             emit(
                 "designing",
                 {
@@ -812,8 +794,7 @@ class DesignMixin:
                 "budget_exhausted",
                 getattr(exc, "mechanical_repair_count", 0),
             )
-            if selected_category is not None:
-                budget_telemetry["asset_category"] = selected_category
+            budget_telemetry["asset_category"] = selected_category
             # Mirror the normal-exit path: emit the per-cycle ``design_loop``
             # summary so live ``on_phase`` consumers see the stop reason and
             # ledger totals on budget-exhausted cycles too, not just per-round
@@ -853,7 +834,7 @@ class DesignMixin:
         ledger: CritiqueLedger,
         emit: PhaseCallback,
         drift_collector: Optional[_DriftCollector],
-        selected_category: Optional[str],
+        selected_category: str,
     ) -> Tuple[StrategySpec, str, bool, str, Dict[str, Any]]:
         """Run the bounded readiness → review → revise rounds.
 
@@ -900,6 +881,7 @@ class DesignMixin:
                     last_readiness_signature=last_readiness_signature,
                     readiness_results=readiness_results,
                     all_gate_results=all_gate_results,
+                    pinned_asset_class=selected_category,
                 )
             )
 
@@ -917,6 +899,7 @@ class DesignMixin:
                 ) = self._run_mechanical_repair_stages(
                     spec=spec,
                     config=config,
+                    pinned_asset_class=selected_category,
                     readiness_results=readiness_results,
                     last_readiness_signature=last_readiness_signature,
                     deterministic_ready=deterministic_ready,
@@ -1003,25 +986,13 @@ class DesignMixin:
                 mechanical_repair_count=mechanical_repair_count,
                 drift_collector=drift_collector,
                 skip_self_review=skip_self_review,
-            )
-            spec, rationale = self._reconcile_asset_category(
-                spec,
-                rationale,
-                selected_category=selected_category,
-                review_round=review_round,
-                emit=emit,
-                drift_collector=drift_collector,
-                config=config,
-                strategy_id=strategy_id,
-                all_gate_results=all_gate_results,
-                mechanical_repair_count=mechanical_repair_count,
+                default_asset_class=selected_category,
             )
 
         loop_telemetry = _design_loop_telemetry_summary(
             ledger, len(critique_history), stop_reason, mechanical_repair_count
         )
-        if selected_category is not None:
-            loop_telemetry["asset_category"] = selected_category
+        loop_telemetry["asset_category"] = selected_category
         emit("telemetry", {"scope": "design_loop", **loop_telemetry})
         return spec, rationale, ready, stop_reason, loop_telemetry
 
@@ -1033,22 +1004,34 @@ class DesignMixin:
         last_readiness_signature: Optional[tuple],
         readiness_results: List[QualityGateResult],
         all_gate_results: List[QualityGateResult],
+        pinned_asset_class: Optional[str] = None,
     ) -> Tuple[List[QualityGateResult], Optional[tuple], bool]:
         """Run the deterministic readiness gate, memoized on the spec signature.
 
         Pre: ``readiness_results`` / ``last_readiness_signature`` carry the
-        previous round's verdict and the spec signature that produced it.
+        previous round's verdict and the spec signature that produced it;
+        ``pinned_asset_class`` is the category this design attempt is pinned
+        to (readiness Rule 11), or ``None`` outside a pinned attempt.
         Post: returns ``(readiness_results, last_readiness_signature,
         deterministic_ready)``. Re-validates (and records the gates onto
         ``all_gate_results`` in place) only when the spec's readiness-relevant
         signature changed since ``last_readiness_signature`` — the gate would
         otherwise return the same verdict. ``deterministic_ready`` is ``True``
-        iff no readiness critical is present.
+        iff no readiness critical is present, so a spec violating the pin is
+        never reported ready.
+
+        The memoization stays sound under a pin because ``asset_class`` and
+        ``target_symbols`` — the only two fields Rule 11 reads — are both part
+        of ``_spec_readiness_signature``, and the pin itself is fixed for the
+        whole attempt.
         """
         signature = _spec_readiness_signature(spec)
         if signature != last_readiness_signature:
             readiness_results = self.spec_readiness_gate.validate(
-                spec, phase="design", backtest_config=config
+                spec,
+                phase="design",
+                backtest_config=config,
+                pinned_asset_class=pinned_asset_class,
             )
             self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
             last_readiness_signature = signature
@@ -1065,6 +1048,7 @@ class DesignMixin:
         deterministic_ready: bool,
         mechanical_repair_count: int,
         review_round: int,
+        pinned_asset_class: Optional[str] = None,
         all_gate_results: List[QualityGateResult],
         drift_collector: Optional[_DriftCollector],
         emit: PhaseCallback,
@@ -1072,8 +1056,12 @@ class DesignMixin:
         """Run the deterministic mechanical pre-flight in two ordered stages.
 
         Stage 1 repairs mechanical readiness criticals (timeframe data
-        availability, position-cap bound) so they never cost an LLM ``revise``
-        round, then re-validates. Stage 2 — only once the spec is readiness-
+        availability, position-cap bound, and — under a pin — stray
+        off-category ``target_symbols``) so they never cost an LLM ``revise``
+        round, then re-validates. The *class* half of the category pin is
+        deliberately not repairable here: a spec declaring the wrong category
+        needs its logic rebuilt, not its label rewritten, so it stays a
+        readiness critical for this round's ``revise`` call to answer. Stage 2 — only once the spec is readiness-
         clean — trial-compiles it and flips ``requires_custom_code`` on
         ``CompilerError`` so a readiness-clean spec that is still outside the
         deterministic-compiler envelope (e.g. a ``volatility_target`` spec
@@ -1097,7 +1085,7 @@ class DesignMixin:
         pre_repair_spec: Optional[StrategySpec] = None
 
         # Stage 1 — mechanical repairs (repair_spec never trial-compiles).
-        outcome = repair_spec(spec, config=config)
+        outcome = repair_spec(spec, config=config, pinned_asset_class=pinned_asset_class)
         if outcome.actions:
             pre_repair_spec = spec.model_copy(deep=True)
             spec = outcome.spec
@@ -1107,7 +1095,10 @@ class DesignMixin:
             repaired_signature = _spec_readiness_signature(spec)
             if repaired_signature != last_readiness_signature:
                 readiness_results = self.spec_readiness_gate.validate(
-                    spec, phase="design", backtest_config=config
+                    spec,
+                    phase="design",
+                    backtest_config=config,
+                    pinned_asset_class=pinned_asset_class,
                 )
                 self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
                 last_readiness_signature = repaired_signature
@@ -1134,7 +1125,10 @@ class DesignMixin:
                 repaired_signature = _spec_readiness_signature(spec)
                 if repaired_signature != last_readiness_signature:
                     readiness_results = self.spec_readiness_gate.validate(
-                        spec, phase="design", backtest_config=config
+                        spec,
+                        phase="design",
+                        backtest_config=config,
+                        pinned_asset_class=pinned_asset_class,
                     )
                     self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
                     last_readiness_signature = repaired_signature
@@ -1280,6 +1274,7 @@ class DesignMixin:
         mechanical_repair_count: int,
         drift_collector: Optional[_DriftCollector],
         skip_self_review: bool = False,
+        default_asset_class: str = "stocks",
     ) -> Tuple[StrategySpec, str]:
         """Revise the spec from the round's critique, flagging regressions.
 
@@ -1317,7 +1312,9 @@ class DesignMixin:
                 mechanical_repair_count=mechanical_repair_count,
             )
             raise
-        spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
+        spec = self._build_spec_from_dict(
+            strategy_dict, strategy_id=strategy_id, default_asset_class=default_asset_class
+        )
         if drift_collector is not None:
             drift_collector.record_spec_change(
                 phase="design_review",
@@ -1329,7 +1326,11 @@ class DesignMixin:
         return spec, rationale
 
     def _build_spec_from_dict(
-        self, strategy_dict: Dict[str, Any], *, strategy_id: str
+        self,
+        strategy_dict: Dict[str, Any],
+        *,
+        strategy_id: str,
+        default_asset_class: str = "stocks",
     ) -> StrategySpec:
         """Thin instance wrapper over :func:`build_spec_from_dict`.
 
@@ -1337,340 +1338,16 @@ class DesignMixin:
         form; the construction logic lives in the module-level function so it
         can be unit-tested without instantiating the orchestrator.
         """
-        return build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
-
-    def _reconcile_asset_category(
-        self,
-        spec: StrategySpec,
-        rationale: str,
-        *,
-        selected_category: Optional[str],
-        review_round: int,
-        emit: PhaseCallback,
-        drift_collector: Optional[_DriftCollector],
-        config: BacktestConfig,
-        strategy_id: str,
-        all_gate_results: List[QualityGateResult],
-        mechanical_repair_count: int = 0,
-    ) -> Tuple[StrategySpec, str]:
-        """Correct a category-pin violation by regenerating the spec, not
-        just relabeling it.
-
-        A mismatched ``asset_class`` usually means the *entire* draft was
-        authored for the wrong category — hypothesis, signal definition,
-        rules, and rationale all tell a story for that category, not
-        ``selected_category``. Only overwriting ``asset_class`` (and
-        clearing ``target_symbols``) would leave that narrative intact and
-        backtest it under a different asset class's default universe,
-        attributing results to the wrong thesis. This spends one real
-        ``DesignAgent.revise`` call — outside the bounded round loop's own
-        ``critique_history``/``CritiqueLedger`` accounting, since it is a
-        pin-violation correction, not a design-quality review round — asking
-        the designer to rebuild the whole spec for ``selected_category``.
-
-        Preconditions:
-          - ``selected_category`` is ``None`` or one of
-            :data:`PROMPT_ASSET_CLASSES`.
-          - ``mechanical_repair_count`` is the caller's real running count
-            (``0`` when called before any repair could have fired, e.g. the
-            pre-loop call site) — forwarded verbatim to
-            :func:`_annotate_budget_exhaustion` on a budget trip so
-            persisted telemetry never under-reports repairs that already
-            happened this cycle.
-
-        Postconditions:
-          - Returns ``(spec, rationale)`` unchanged when ``selected_category``
-            is ``None`` or ``spec``'s normalized asset class already matches.
-          - Otherwise calls ``self.design_agent.revise`` once with a
-            corrective critique. If the regenerated spec matches
-            ``selected_category``, returns it (with its new rationale),
-            appends the fresh readiness validation to ``all_gate_results``
-            via :meth:`record_gates`, emits a ``design_repair`` event, and
-            records the change on ``drift_collector`` when one is present.
-          - If the regeneration itself still violates the pin, a
-            deterministic relabel is deliberately *not* attempted here — it
-            would only fix ``asset_class``, leaving the hypothesis /
-            signal_definition / rules / rationale narrating a different
-            category than the one now forced onto the label, which
-            structural readiness validation cannot detect. Raises
-            :class:`~..exceptions.SpecImplementabilityError` instead (the
-            same exception, and the same ``failure_phase="design"``,
-            :func:`build_spec_from_dict` already raises for an unsupported
-            ``asset_class``), so the caller's existing
-            ``MAX_DESIGN_REENTRIES`` retry loop re-enters with a fresh
-            design attempt rather than a mismatched spec ever being
-            persisted as a successful record. This method never retries the
-            LLM itself more than once — convergence, if it happens, happens
-            via the outer re-entry loop, not a local loop here.
-          - Propagates :class:`DesignBudgetExhausted` (annotated with the
-            pre-regeneration ``spec``/``rationale`` so a trip here still
-            yields a well-formed short-circuit record via the caller's
-            existing handler, which itself runs the mismatched pre-
-            regeneration spec through :meth:`_enforce_selected_asset_category`
-            — a budget-exhausted record is already a failure record, so a
-            relabeled-but-mismatched narrative there is a lesser concern
-            than persisting one as an apparent success).
-        """
-        if selected_category is None:
-            return spec, rationale
-        actual = normalize_asset_class(spec.asset_class)
-        if actual == selected_category:
-            return spec, rationale
-        logger.warning(
-            "Design agent emitted asset_class=%r outside the category %r pinned for this "
-            "design attempt; requesting a corrective regeneration.",
-            spec.asset_class,
-            selected_category,
+        return build_spec_from_dict(
+            strategy_dict, strategy_id=strategy_id, default_asset_class=default_asset_class
         )
-        correction = SpecCritique(
-            ready=False,
-            rationale=(
-                f"This spec's asset_class ({actual}) violates the category pinned for "
-                f"this design attempt ({selected_category})."
-            ),
-            issues=[
-                CritiqueIssue(
-                    field="asset_class",
-                    description=(
-                        f"Rebuild the ENTIRE strategy for asset_class={selected_category}: "
-                        "hypothesis, signal_definition, entry/exit rules, and "
-                        f"target_symbols must all target {selected_category}, not "
-                        f"{actual} — do not just relabel the {actual} thesis."
-                    ),
-                )
-            ],
-        )
-        try:
-            strategy_dict, new_rationale = self.design_agent.revise(
-                spec, correction, prior_critiques=None, skip_self_review=False
-            )
-        except DesignBudgetExhausted as exc:
-            _annotate_budget_exhaustion(
-                exc, spec, rationale=rationale, mechanical_repair_count=mechanical_repair_count
-            )
-            raise
-        regenerated = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
-        regenerated_actual = normalize_asset_class(regenerated.asset_class)
-        if regenerated_actual == selected_category and regenerated.target_symbols:
-            # A matching ``asset_class`` is not proof of a genuine rebuild:
-            # ``_REVISION_USER_TEMPLATE`` tells the designer to "preserve every
-            # aspect of the spec that was NOT criticised", so the common
-            # partial-compliance outcome is a relabeled spec that still carries
-            # the wrong category's tickers. ``resolve_strategy_symbols`` honors
-            # a non-empty ``target_symbols`` verbatim (mismatch is only a logged
-            # warning, and no readiness rule rejects it), so those tickers would
-            # be fetched and backtested under the pinned label — persisting the
-            # exact out-of-category record this whole mechanism prevents.
-            kept = strip_offcategory_symbols(list(regenerated.target_symbols), selected_category)
-            if kept != list(regenerated.target_symbols):
-                logger.warning(
-                    "Corrective regeneration kept off-category target_symbols %s for pinned "
-                    "category %r; dropping the mismatched tickers (kept %s).",
-                    list(regenerated.target_symbols),
-                    selected_category,
-                    kept,
-                )
-                regenerated = regenerated.model_copy(update={"target_symbols": kept})
-        if regenerated_actual != selected_category:
-            # The corrective revision itself still violated the pin (with a
-            # *different* wrong class than the original, in the general
-            # case). A deterministic relabel here would only fix the label —
-            # the hypothesis/signal_definition/rules/rationale would still
-            # narrate `regenerated_actual` (or, if relabeling the original
-            # instead, `actual`), producing a spec that reviews and
-            # backtests coherently but is attributed to the wrong thesis
-            # under a forced label. Readiness validation does not (and
-            # cannot) catch this — it checks structural validity, not
-            # whether a spec's narrative matches its own asset_class. Treat
-            # this the same way ``build_spec_from_dict`` already treats an
-            # unsupported asset_class (see its own ``SpecImplementabilityError``
-            # raise above): fail this attempt and let ``run_cycle``'s
-            # existing MAX_DESIGN_REENTRIES retry loop re-enter with a fresh
-            # design attempt (and a fresh random category pin) rather than
-            # ever persist a mismatched-narrative record as a "success".
-            evidence = (
-                f"Design agent could not converge on asset_class={selected_category!r} for "
-                "this attempt: the initial draft emitted "
-                f"{actual!r} and one corrective revision emitted {regenerated_actual!r} "
-                "instead of the pinned category."
-            )
-            logger.warning(
-                "%s Re-entering design instead of persisting a mismatched spec.", evidence
-            )
-            pin_error = SpecImplementabilityError(
-                evidence,
-                failure_phase="design",
-                last_spec=regenerated,
-                last_code="",
-                drift_collector=drift_collector,
-            )
-            # Marks this as a category-pin non-convergence specifically, so
-            # ``_run_design_loop``'s handler can attach the design-loop audit
-            # bundle without also claiming every other design-phase
-            # ``SpecImplementabilityError`` (e.g. an unsupported ``asset_class``
-            # from ``build_spec_from_dict``) was a pin failure.
-            pin_error.asset_category_unconverged = True
-            raise pin_error
-        readiness_results = self.spec_readiness_gate.validate(
-            regenerated, phase="design", backtest_config=config
-        )
-        self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
-        emit(
-            "design_repair",
-            {
-                "round": review_round,
-                "actions": [
-                    {
-                        "rule": "asset_category_pin",
-                        "field": "asset_class",
-                        "before": actual,
-                        "after": selected_category,
-                        "reason": "regenerated via a corrective revision for the pinned category",
-                    }
-                ],
-                "now_ready": not _has_critical_failures(readiness_results),
-            },
-        )
-        if drift_collector is not None:
-            drift_collector.record_spec_change(
-                phase="design",
-                agent="AssetCategoryEnforcement",
-                before_spec=spec.model_copy(deep=True),
-                after_spec=regenerated,
-                reason="regenerated to match the category pinned for this design attempt",
-            )
-        return regenerated, new_rationale
-
-    def _enforce_selected_asset_category(
-        self,
-        spec: StrategySpec,
-        *,
-        selected_category: Optional[str],
-        review_round: int,
-        emit: PhaseCallback,
-        drift_collector: Optional[_DriftCollector],
-        config: BacktestConfig,
-        all_gate_results: List[QualityGateResult],
-    ) -> StrategySpec:
-        """Deterministically pin ``spec.asset_class`` to the category selected
-        for this design attempt.
-
-        Used only for the budget-exhausted fallback spec (no LLM budget left
-        to call ``revise`` again — see the ``except DesignBudgetExhausted``
-        handler in ``_run_design_loop``), which is already persisted with a
-        ``failed: budget_exhausted`` status: a relabeled-but-mismatched
-        narrative there is a lesser concern than the LLM budget being spent
-        without ever producing a usable spec, and there is no budget left to
-        do better. :meth:`_reconcile_asset_category` — the primary
-        correction path for a live LLM budget — deliberately does *not* fall
-        back to this method when its own corrective regeneration still
-        violates the pin; it raises :class:`~..exceptions.SpecImplementabilityError`
-        instead, since a mismatched narrative must never be persisted as an
-        apparent success (see that method's docstring). A mismatched output
-        is corrected here rather than trusted, mirroring the deterministic
-        mechanical-repair pattern (:func:`..mechanical_repair.repair_spec`)
-        already used elsewhere in this loop for other structural violations.
-
-        Preconditions:
-          - ``selected_category`` is ``None`` (no category restriction is
-            active for this attempt — an unconstrained run, see
-            ``_run_design_loop``) or one of :data:`PROMPT_ASSET_CLASSES`.
-
-        Postconditions:
-          - Returns ``spec`` unchanged when ``selected_category`` is ``None``
-            or its normalized asset class already matches
-            ``selected_category``.
-          - Otherwise returns a copy of ``spec`` with ``asset_class``
-            overwritten to ``selected_category``. Non-empty
-            ``target_symbols`` is cleared in the same correction: an explicit
-            symbol list authored for the wrong category (e.g. ``BTC-USD`` on
-            a spec relabeled from crypto to forex) would otherwise be honored
-            verbatim by ``MarketDataService.resolve_strategy_symbols`` and
-            fetched under the *new* asset class, producing a structurally
-            inconsistent request. Clearing it falls back to that class's
-            default symbol universe (the same fallback an empty
-            ``target_symbols`` already triggers for every other spec).
-            Emits a ``design_repair`` event — ``now_ready`` reflects a fresh
-            :attr:`spec_readiness_gate` validation of the corrected spec,
-            appended to ``all_gate_results`` via :meth:`record_gates` (not
-            just used locally to compute ``now_ready``) — and records the
-            change on ``drift_collector`` when one is present.
-        """
-        if selected_category is None:
-            return spec
-        actual = normalize_asset_class(spec.asset_class)
-        if actual == selected_category:
-            return spec
-        logger.warning(
-            "Design agent emitted asset_class=%r outside the category %r pinned for this "
-            "design attempt; overwriting to enforce the user's category selection.",
-            spec.asset_class,
-            selected_category,
-        )
-        prev_spec = spec.model_copy(deep=True)
-        actions = [
-            {
-                "rule": "asset_category_pin",
-                "field": "asset_class",
-                "before": actual,
-                "after": selected_category,
-                "reason": "design output violated the category pinned for this attempt",
-            }
-        ]
-        updates: Dict[str, Any] = {"asset_class": selected_category}
-        if spec.target_symbols:
-            # Drop only the tickers that unambiguously belong to another class,
-            # matching ``_reconcile_asset_category``. Clearing the list wholesale
-            # would also discard cross-asset ETFs that are perfectly valid under
-            # the pinned class, and an emptied list makes the readiness gate
-            # below manufacture a "hypothesis names unreachable symbols" critical
-            # that is then recorded into ``all_gate_results`` and counted by the
-            # convergence tracker's failure modes — fabricating a repeated
-            # ``spec_readiness`` failure that would steer later design prompts.
-            kept = strip_offcategory_symbols(list(spec.target_symbols), selected_category)
-            if kept != list(spec.target_symbols):
-                actions.append(
-                    {
-                        "rule": "asset_category_pin",
-                        "field": "target_symbols",
-                        "before": list(spec.target_symbols),
-                        "after": kept,
-                        "reason": (
-                            "symbols authored for the wrong asset class were dropped so the "
-                            "fetch matches the pinned category"
-                        ),
-                    }
-                )
-                updates["target_symbols"] = kept
-        spec = spec.model_copy(update=updates)
-        readiness_results = self.spec_readiness_gate.validate(
-            spec, phase="design", backtest_config=config
-        )
-        self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
-        emit(
-            "design_repair",
-            {
-                "round": review_round,
-                "actions": actions,
-                "now_ready": not _has_critical_failures(readiness_results),
-            },
-        )
-        if drift_collector is not None:
-            drift_collector.record_spec_change(
-                phase="design",
-                agent="AssetCategoryEnforcement",
-                before_spec=prev_spec,
-                after_spec=spec,
-                reason="asset_class overwritten to match the category pinned for this design attempt",
-            )
-        return spec
 
     def _run_design_attempt(
         self,
         *,
         prior_records: List[StrategyLabRecord],
         config: BacktestConfig,
-        signal_brief: Optional[SignalIntelligenceBriefV1],
+        signal_briefs: Optional[Dict[str, SignalIntelligenceBriefV1]],
         emit: PhaseCallback,
         exclude_asset_classes: Optional[List[str]],
         directives: List[str],
@@ -1768,7 +1445,7 @@ class DesignMixin:
         else:
             design_phase = self._orchestrate_design_and_review(
                 prior_records=prior_records,
-                signal_brief=signal_brief,
+                signal_briefs=signal_briefs,
                 directives=directives,
                 exclude_asset_classes=exclude_asset_classes,
                 config=config,
@@ -2306,7 +1983,7 @@ class DesignMixin:
         self,
         *,
         prior_records: List[StrategyLabRecord],
-        signal_brief: Optional[SignalIntelligenceBriefV1],
+        signal_briefs: Optional[Dict[str, SignalIntelligenceBriefV1]],
         directives: List[str],
         exclude_asset_classes: Optional[List[str]],
         config: BacktestConfig,
@@ -2329,7 +2006,7 @@ class DesignMixin:
         """
         design_outcome = self._run_design_loop(
             prior_records=prior_records,
-            signal_brief=signal_brief,
+            signal_briefs=signal_briefs,
             directives=directives,
             exclude_asset_classes=exclude_asset_classes,
             config=config,

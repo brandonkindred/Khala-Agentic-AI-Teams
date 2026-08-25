@@ -1894,7 +1894,7 @@ class _FakeOrchestrator:
         *,
         prior_records=None,
         config=None,
-        signal_brief=None,
+        signal_briefs=None,
         on_phase=None,
         exclude_asset_classes=None,
     ):

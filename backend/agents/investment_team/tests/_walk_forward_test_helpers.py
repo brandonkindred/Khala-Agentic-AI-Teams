@@ -218,7 +218,9 @@ def minimal_custom_spec_dict(**overrides: Any) -> Dict[str, Any]:
     reporting a spurious dead-rule critical on these fixtures).
     """
     base: Dict[str, Any] = {
-        "asset_class": "stocks",
+        # No "asset_class": the design loop pins each attempt to one
+        # randomly-drawn allowed category and an omitted class inherits that
+        # pin, so this payload stays valid whichever category is drawn.
         "hypothesis": "h",
         "signal_definition": "s",
         "entry_rules": [

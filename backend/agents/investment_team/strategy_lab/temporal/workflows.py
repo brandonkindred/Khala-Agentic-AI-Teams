@@ -168,7 +168,7 @@ class StrategyLabCycleWorkflow:
     Preconditions:
         ``cycle_input`` (the sole ``run()`` argument) is a JSON-shaped dict:
         ``prior_records`` (list of ``StrategyLabRecord`` dumps), ``config``
-        (``BacktestConfig`` dump), ``signal_brief`` (dump or ``None``),
+        (``BacktestConfig`` dump), ``signal_briefs`` (asset-class → dump map),
         ``exclude_asset_classes`` (list or ``None``),
         ``convergence_tracker_state`` (``dto`` wire dict — the batch-level
         tracker), and optionally ``workflow_config`` (a
@@ -212,7 +212,7 @@ class StrategyLabCycleWorkflow:
     async def run(self, cycle_input: Dict[str, Any]) -> Dict[str, Any]:
         prior_records = cycle_input["prior_records"]
         config_dict = cycle_input["config"]
-        signal_brief = cycle_input.get("signal_brief")
+        signal_briefs = cycle_input.get("signal_briefs")
         exclude_asset_classes = cycle_input.get("exclude_asset_classes")
         tracker_state = cycle_input.get("convergence_tracker_state") or {}
         run_id = cycle_input.get("run_id")
@@ -280,7 +280,7 @@ class StrategyLabCycleWorkflow:
                     "cycle_index": cycle_index,
                     "prior_records": prior_records,
                     "config": config_dict,
-                    "signal_brief": signal_brief,
+                    "signal_briefs": signal_briefs,
                     "exclude_asset_classes": exclude_asset_classes,
                     "directives": directives,
                     "design_attempt": design_attempt,
@@ -638,10 +638,16 @@ class StrategyLabBatchWorkflow:
             # ── Per-batch signal-brief refresh (batch N sees batches 1..N-1) ──
             brief = await _exec(
                 act.compute_signal_brief_activity,
-                params=benchmark_symbol,
+                params={
+                    "benchmark_symbol": benchmark_symbol,
+                    # Only the user's selected categories get a brief — an
+                    # excluded category's brief would be cost paid for
+                    # evidence no design attempt is allowed to use.
+                    "exclude_asset_classes": exclude_asset_classes,
+                },
                 timeout=_ACTIVITY_TIMEOUT,
             )
-            signal_brief = brief.get("signal_brief")
+            signal_briefs = brief.get("signal_briefs")
             signal_brief_storage = brief.get("signal_brief_storage")
 
             batch_start_cycle = batch_idx * batch_size
@@ -666,7 +672,7 @@ class StrategyLabBatchWorkflow:
                         "cycle_index": cycle_index,
                         "prior_records": prior_records,
                         "config": config_dict,
-                        "signal_brief": signal_brief,
+                        "signal_briefs": signal_briefs,
                         "exclude_asset_classes": exclude_asset_classes,
                         "convergence_tracker_state": _snapshot_tracker_wire(primary_tracker_state),
                         "workflow_config": wf_config,

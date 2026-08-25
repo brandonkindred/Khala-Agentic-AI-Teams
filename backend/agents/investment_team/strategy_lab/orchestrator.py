@@ -505,7 +505,7 @@ class StrategyLabOrchestrator(
         self,
         prior_records: List[StrategyLabRecord],
         config: BacktestConfig,
-        signal_brief: Optional[SignalIntelligenceBriefV1] = None,
+        signal_briefs: Optional[Dict[str, SignalIntelligenceBriefV1]] = None,
         on_phase: Optional[PhaseCallback] = None,
         exclude_asset_classes: Optional[List[str]] = None,
     ) -> StrategyLabRecord:
@@ -612,7 +612,7 @@ class StrategyLabOrchestrator(
                     return self._run_design_attempt(
                         prior_records=prior_records,
                         config=config,
-                        signal_brief=signal_brief,
+                        signal_briefs=signal_briefs,
                         emit=emit,
                         exclude_asset_classes=exclude_asset_classes,
                         directives=directives,

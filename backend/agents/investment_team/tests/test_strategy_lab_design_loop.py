@@ -58,7 +58,9 @@ def _config() -> BacktestConfig:
 
 def _spec_dict() -> Dict[str, Any]:
     return {
-        "asset_class": "stocks",
+        # No "asset_class": the design loop pins each attempt to one
+        # randomly-selected category and an omitted class inherits that
+        # pin, so this payload stays valid whichever category is drawn.
         "hypothesis": "RSI mean reversion on a small universe",
         "signal_definition": "RSI(14) crossings",
         "timeframe": "1d",
@@ -535,6 +537,15 @@ def test_design_max_llm_calls_env_parsing(monkeypatch: pytest.MonkeyPatch) -> No
 # ---------------------------------------------------------------------------
 
 
+# Rule 7 (intraday timeframe with no data) only fires on non-equity classes,
+# so ``_mechanical_spec_dict`` must declare forex. Each design attempt is
+# pinned to one randomly-drawn allowed category, so every run_cycle feeding
+# this payload must restrict the run to forex — otherwise the payload's
+# asset_class contradicts the pin and readiness Rule 11 (correctly) rejects it
+# before the mechanical repairs under test are ever reached.
+_FOREX_ONLY = ["stocks", "crypto", "futures", "commodities"]
+
+
 def _mechanical_spec_dict() -> Dict[str, Any]:
     """A spec whose *only* readiness criticals are mechanical: an intraday
     timeframe on forex (Rule 7) and an over-ceiling position cap (Rule 8)."""
@@ -586,6 +597,7 @@ def test_mechanical_only_spec_reaches_ready_with_zero_revise(
 
     events: list = []
     record = orch.run_cycle(
+        exclude_asset_classes=_FOREX_ONLY,
         prior_records=[],
         config=_config(),
         on_phase=lambda phase, data: events.append((phase, data)),
@@ -737,7 +749,7 @@ def test_revise_does_not_skip_self_review_when_mechanical_repair_fires(
     _force_synthesis_skip(monkeypatch, orch, _VALID_CODE)
     _short_circuit_synthesis(monkeypatch)
 
-    orch.run_cycle(prior_records=[], config=_config())
+    orch.run_cycle(prior_records=[], config=_config(), exclude_asset_classes=_FOREX_ONLY)
 
     assert len(revise_calls) == 1
     assert revise_calls[0]["skip_self_review"] is False
@@ -978,7 +990,7 @@ def test_budget_exhaustion_after_repair_preserves_repaired_spec(
 
     monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _market_must_not_run)
 
-    record = orch.run_cycle(prior_records=[], config=_config())
+    record = orch.run_cycle(prior_records=[], config=_config(), exclude_asset_classes=_FOREX_ONLY)
 
     assert record.backtest.status == "failed: budget_exhausted"
     # The repaired spec is preserved (forex/1h/40% draft → 1d/25% after repair).

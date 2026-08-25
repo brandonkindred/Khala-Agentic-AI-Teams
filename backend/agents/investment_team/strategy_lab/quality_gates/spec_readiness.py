@@ -21,6 +21,7 @@ from typing import Any, Callable, ClassVar, Iterable, Iterator, List, Optional
 from ...market_data_service import _max_universe_symbols
 from ...models import BacktestConfig, StrategySpec
 from ...strategy_lab_context import (
+    PROMPT_ASSET_CLASSES,
     WHOLE_LOT_ASSET_CLASSES,
     normalize_asset_class,
     normalize_asset_class_strict,
@@ -34,6 +35,7 @@ from ...symbols import (
     FUTURES_SYMBOLS_BARE,
     OTHER_SYMBOLS,
     STOCK_SYMBOLS,
+    classify_symbol,
 )
 from ..executor.predicate_evaluator import compare
 from ..spec_dsl import (
@@ -266,6 +268,8 @@ _CONCEPT_TERMS_BROAD = re.compile(
     r"rate\s+of\s+change|cci|williams_r|williams)\b",
     re.IGNORECASE,
 )
+
+
 # Map each prose concept to the set of DSL indicator names that satisfy it.
 # A concept is "orphan" iff *none* of its allowed indicators appears in the
 # spec's predicates — so "moving average" is satisfied by either SMA or EMA.
@@ -287,10 +291,7 @@ def extract_known_tickers(text: str) -> set[str]:
         Pure function; no I/O, no mutation of module state.
     """
     assert isinstance(text, str), "text must be a str"
-    return {
-        _canonicalize_ticker(m.group(0))
-        for m in _SYMBOL_REGEX.finditer(text or "")
-    }
+    return {_canonicalize_ticker(m.group(0)) for m in _SYMBOL_REGEX.finditer(text or "")}
 
 
 _CONCEPT_TO_INDICATOR_NAMES: dict[str, frozenset[str]] = {
@@ -429,6 +430,11 @@ class SpecReadinessCtx:
 
     spec: StrategySpec
     config: Optional[BacktestConfig]
+    # The single asset category this design attempt is pinned to, or ``None``
+    # when no pin applies (synthesis phase, refinement, ad-hoc validation).
+    # Set by the design loop from the user's ``allowed_asset_classes``
+    # selection; Rule 11 enforces it.
+    pinned_asset_class: Optional[str] = None
 
 
 # Comparison ops whose truth is monotone in the indicator value, so the
@@ -623,18 +629,33 @@ class SpecReadinessGate(GateResultsMixin):
         *,
         phase: StrategyLabPhase = "design",
         backtest_config: Optional[BacktestConfig] = None,
+        pinned_asset_class: Optional[str] = None,
     ) -> List[QualityGateResult]:
         """Run every readiness rule and return one result list.
 
-        Pre: ``spec`` is a StrategySpec; ``phase`` is a valid phase literal.
+        Pre: ``spec`` is a StrategySpec; ``phase`` is a valid phase literal;
+        ``pinned_asset_class``, when given, is a canonical asset-class label
+        (a member of ``PROMPT_ASSET_CLASSES``) naming the single category the
+        caller's design attempt is restricted to.
         Post: result list is non-empty; every entry carries the caller's
-        ``phase`` and ``gate_name == GATE``.
+        ``phase`` and ``gate_name == GATE``. When ``pinned_asset_class`` is
+        given and the spec violates the pin, at least one *critical* result is
+        present — which is what makes the pin deterministic: the design loop
+        never marks a readiness-critical spec ready, so an off-category spec
+        can never reach code synthesis.
         """
         assert isinstance(spec, StrategySpec), "spec must be a StrategySpec"
         assert backtest_config is None or isinstance(backtest_config, BacktestConfig), (
             "backtest_config override must be a BacktestConfig or None"
         )
-        ctx = SpecReadinessCtx(spec=spec, config=backtest_config or self._backtest_config)
+        assert pinned_asset_class is None or pinned_asset_class in PROMPT_ASSET_CLASSES, (
+            "pinned_asset_class must be a canonical PROMPT_ASSET_CLASSES member or None"
+        )
+        ctx = SpecReadinessCtx(
+            spec=spec,
+            config=backtest_config or self._backtest_config,
+            pinned_asset_class=pinned_asset_class,
+        )
         with self._using_phase(phase):
             results: List[QualityGateResult] = [r for rule in self._RULES for r in rule(self, ctx)]
             if not results:
@@ -1354,6 +1375,69 @@ class SpecReadinessGate(GateResultsMixin):
         return out
 
     # ------------------------------------------------------------------
+    # Rule 11: Asset-category pin — when the design attempt is pinned to one
+    # category (the user selected a subset of asset classes at run start, and
+    # the design loop picked one of them for this attempt), the spec must
+    # declare that category and must not name symbols belonging to a
+    # different one.
+    #
+    # This lives in the readiness gate rather than in a bespoke post-hoc
+    # correction so the fix rides the design loop's own machinery: a critical
+    # here becomes a synthetic critique, which the round's existing
+    # ``DesignAgent.revise`` call answers — no extra LLM call, and the
+    # critique ledger sees the issue like any other, so regression and stall
+    # detection cover it. Because the loop only marks a spec ready when no
+    # readiness critical remains, a spec outside the pinned category can never
+    # reach code synthesis: the restriction is enforced, not merely requested.
+    #
+    # The symbol half is deliberately separated from the class half: an
+    # on-category spec carrying a stray off-category ticker is a *mechanical*
+    # defect that ``mechanical_repair.repair_spec`` strips deterministically
+    # before the reviewer runs, exactly as it does for Rules 7 and 8.
+    # ------------------------------------------------------------------
+    def _check_asset_category_pin(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
+        pinned = ctx.pinned_asset_class
+        if pinned is None:
+            return ()
+        out: List[QualityGateResult] = []
+        actual = normalize_asset_class(ctx.spec.asset_class)
+        if actual != pinned:
+            out.append(
+                self._critical(
+                    f"asset_class is {actual!r} but this design attempt is pinned to "
+                    f"{pinned!r}. Rebuild the ENTIRE strategy for {pinned!r} — hypothesis, "
+                    f"entry/exit rules, indicators, sizing, and target_symbols must all "
+                    f"describe a {pinned!r} strategy. Relabelling the asset class without "
+                    f"redesigning the logic is not acceptable: each asset category has its "
+                    f"own microstructure, session hours, and volatility regime.",
+                    rule_id="asset_category:pin",
+                )
+            )
+            # The symbol check below compares against the *declared* class,
+            # which is already wrong — reporting it too would be noise.
+            return tuple(out)
+        offcategory = sorted(
+            {
+                sym
+                for sym in ctx.spec.target_symbols
+                # ``classify_symbol`` returns None for cross-asset ETFs (GLD,
+                # QQQ, ...) that legitimately trade in more than one category —
+                # only an unambiguous mismatch is a violation.
+                if (cls := classify_symbol(sym)) is not None and cls != pinned
+            }
+        )
+        if offcategory:
+            out.append(
+                self._critical(
+                    f"target_symbols contains {offcategory} which belong to an asset class "
+                    f"other than the pinned {pinned!r}. Every target symbol must be a "
+                    f"{pinned!r} instrument.",
+                    rule_id="asset_category:symbols",
+                )
+            )
+        return tuple(out)
+
+    # ------------------------------------------------------------------
     # Rule registry — declarative list iterated by ``validate``. Order is
     # preserved so error messages remain stable across runs.
     # ------------------------------------------------------------------
@@ -1368,6 +1452,7 @@ class SpecReadinessGate(GateResultsMixin):
         _check_risk_limit_coherence,
         _check_risk_math_reconciliation,
         _check_predicate_reachability,
+        _check_asset_category_pin,
     )
 
     # ------------------------------------------------------------------

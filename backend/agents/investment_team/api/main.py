@@ -152,6 +152,7 @@ from investment_team.strategy_lab.spec_dsl import (
 )
 from investment_team.strategy_lab_context import (
     PROMPT_ASSET_CLASSES,
+    filter_records_by_asset_class,
     normalize_allowed_asset_classes,
     normalize_asset_class,
 )
@@ -2330,7 +2331,7 @@ def _run_one_strategy_lab_cycle(
     config: BacktestConfig,
     orchestrator: "StrategyLabOrchestrator",
     *,
-    precomputed_signal_brief: Optional[SignalIntelligenceBriefV1] = None,
+    precomputed_signal_briefs: Optional[Dict[str, SignalIntelligenceBriefV1]] = None,
     signal_brief_storage: Optional[Dict[str, Any]] = None,
     prior_records: Optional[List[StrategyLabRecord]] = None,
     on_phase: Optional[Callable[[str, Dict[str, Any]], None]] = None,
@@ -2373,7 +2374,7 @@ def _run_one_strategy_lab_cycle(
     record = orchestrator.run_cycle(
         prior_records=prior_records,
         config=config,
-        signal_brief=precomputed_signal_brief,
+        signal_briefs=precomputed_signal_briefs,
         on_phase=on_phase,
         exclude_asset_classes=exclude_asset_classes,
     )
@@ -2558,32 +2559,63 @@ def _strategy_lab_signal_expert_enabled() -> bool:
 
 def _compute_signal_brief_snapshot(
     benchmark_symbol: str,
-) -> tuple[Optional[SignalIntelligenceBriefV1], Dict[str, Any]]:
-    """Build a per-batch signal brief over all currently-persisted prior records.
+    exclude_asset_classes: Optional[List[str]] = None,
+) -> tuple[Dict[str, SignalIntelligenceBriefV1], Dict[str, Any]]:
+    """Build one per-batch signal brief **per allowed asset category**.
 
     Used by the Temporal ``compute_signal_brief_activity``. Called at the start
     of every batch so batch N+1 sees results from batches 1..N (and prior runs).
 
+    One brief per category, rather than one blended brief, because a design
+    attempt is pinned to a single category (see ``_run_design_loop``) and the
+    brief is injected verbatim into its prompt. A brief synthesized over every
+    category's records would carry crypto evidence into a stocks attempt and
+    its diversity hint would push toward categories the attempt is forbidden
+    to use — the analysis surface that made cross-category learnings leak into
+    a restricted run. Each brief here sees only its own category's records, so
+    every category is analyzed independently.
+
+    Cost is bounded by the number of *allowed* categories (at most
+    ``len(PROMPT_ASSET_CLASSES)``) and paid once per batch, not per cycle.
+
     Preconditions:
-        ``benchmark_symbol`` is the run's benchmark ticker.
+        * ``benchmark_symbol`` is the run's benchmark ticker.
+        * ``exclude_asset_classes`` is the complement of the user's
+          ``allowed_asset_classes`` selection within ``PROMPT_ASSET_CLASSES``,
+          or ``None`` when the run is unrestricted (every category allowed).
     Postconditions:
-        Returns ``(brief, storage)``. ``storage`` is always a ``dict`` --
-        never ``None`` -- even on failure. Fail-open: on disabled expert /
-        provider-initialization failure / market-fetch failure / expert
-        (including its own initialization) failure / provider-cleanup
-        failure, it returns ``(None, {"skipped": True, ...})`` (or a
-        degraded-market brief) rather than raising -- every step from
-        provider construction through cleanup is guarded, not just
-        ``expert.produce_signal_brief``'s body.
+        * Returns ``(briefs, storage)``. ``briefs`` maps each allowed
+          canonical category to its brief; a category whose brief could not be
+          produced is simply absent, so the map may be empty. ``storage`` is
+          always a ``dict`` -- never ``None`` -- even on total failure.
+        * Fail-open at every level: on disabled expert /
+          provider-initialization failure / market-fetch failure / expert
+          (including its own initialization) failure / provider-cleanup
+          failure it returns a ``{"skipped": True, ...}`` storage (or a
+          degraded-market brief set) rather than raising. A single category's
+          failure never aborts the others.
     """
     if not _strategy_lab_signal_expert_enabled():
-        return None, {"skipped": True, "skipped_reason": "signal_expert_disabled"}
+        return {}, {"skipped": True, "skipped_reason": "signal_expert_disabled"}
+
+    excluded = set(exclude_asset_classes or ())
+    allowed = [c for c in PROMPT_ASSET_CLASSES if c not in excluded]
+    if not allowed:
+        # Defensive: the API boundary rejects an empty allowed set, so this is
+        # unreachable in a real run. Degrade to the full menu rather than
+        # returning no briefs at all, which would silently strip the design
+        # prompt's signal section.
+        logger.warning(
+            "signal brief: every asset class excluded (%s); falling back to the full menu",
+            sorted(excluded),
+        )
+        allowed = list(PROMPT_ASSET_CLASSES)
 
     try:
         provider = FreeTierMarketDataProvider()
     except Exception as exc:
         logger.warning("Failed to initialize market data provider: %s", exc)
-        return None, {
+        return {}, {
             "skipped": True,
             "skipped_reason": "provider_init_failed",
             "error": str(exc),
@@ -2606,37 +2638,57 @@ def _compute_signal_brief_snapshot(
 
         try:
             expert = SignalIntelligenceExpert()
-            t0 = datetime.now(tz=timezone.utc)
-            brief = expert.produce_signal_brief(prior_for_brief, market_ctx)
-            storage = brief.model_dump(mode="json")
-            prov_text = market_ctx.as_prompt_text()
-            storage["brief_provenance"] = {
-                "expert": "signal_intelligence_v1",
-                "market_snapshot_hash": hashlib.sha256(prov_text.encode()).hexdigest()[:16],
-                "market_fetched_at": market_ctx.fetched_at,
-                "market_degraded": market_ctx.degraded,
-                "duration_ms": int((datetime.now(tz=timezone.utc) - t0).total_seconds() * 1000),
-            }
-            logger.info(
-                "signal_intelligence brief_version=%s keys=%s degraded_market=%s",
-                storage.get("brief_version"),
-                # A cheap top-level-key count in place of len(str(storage)),
-                # which serialized the entire brief to a string on every
-                # call just to measure it.
-                len(storage),
-                market_ctx.degraded,
-            )
-            return brief, storage
         except Exception as exc:
-            # Covers both SignalIntelligenceExpert() construction and
-            # produce_signal_brief() itself -- either is an "expert
-            # subsystem failed" outcome from the caller's perspective.
             logger.warning("Signal intelligence expert failed: %s", exc)
-            return None, {
+            return {}, {
                 "skipped": True,
                 "skipped_reason": "expert_failed",
                 "error": str(exc),
             }
+
+        prov_text = market_ctx.as_prompt_text()
+        market_hash = hashlib.sha256(prov_text.encode()).hexdigest()[:16]
+        briefs: Dict[str, SignalIntelligenceBriefV1] = {}
+        by_class: Dict[str, Any] = {}
+        for asset_class in allowed:
+            # Each category is analyzed over ONLY its own prior records.
+            category_records = filter_records_by_asset_class(prior_for_brief, asset_class)
+            try:
+                t0 = datetime.now(tz=timezone.utc)
+                brief = expert.produce_signal_brief(
+                    category_records, market_ctx, asset_class=asset_class
+                )
+            except Exception as exc:
+                # One category's failure must not cost the others their brief;
+                # the design loop treats a missing entry as "no brief" and
+                # drops the signal section for that category only.
+                logger.warning("Signal intelligence expert failed for %s: %s", asset_class, exc)
+                by_class[asset_class] = {
+                    "skipped": True,
+                    "skipped_reason": "expert_failed",
+                    "error": str(exc),
+                }
+                continue
+            briefs[asset_class] = brief
+            entry = brief.model_dump(mode="json")
+            entry["brief_provenance"] = {
+                "expert": "signal_intelligence_v1",
+                "asset_class": asset_class,
+                "prior_record_count": len(category_records),
+                "market_snapshot_hash": market_hash,
+                "market_fetched_at": market_ctx.fetched_at,
+                "market_degraded": market_ctx.degraded,
+                "duration_ms": int((datetime.now(tz=timezone.utc) - t0).total_seconds() * 1000),
+            }
+            by_class[asset_class] = entry
+
+        logger.info(
+            "signal_intelligence briefs=%s/%s degraded_market=%s",
+            len(briefs),
+            len(allowed),
+            market_ctx.degraded,
+        )
+        return briefs, {"by_asset_class": by_class}
     finally:
         # A cleanup failure here must not replace whatever the try block
         # already decided to return (a brief, or a skipped-with-reason
@@ -5209,7 +5261,9 @@ def _apply_paper_trading_failure(
         session.divergence_analysis = session.error
 
 
-def _fail_paper_trading_session(session_id: str, error: str, divergence_analysis: str = None) -> None:
+def _fail_paper_trading_session(
+    session_id: str, error: str, divergence_analysis: str = None
+) -> None:
     """Mark a paper-trading session ``failed`` (best-effort, idempotent).
 
     Preconditions:

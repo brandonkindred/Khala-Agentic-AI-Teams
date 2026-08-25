@@ -458,144 +458,6 @@ def test_design_loop_keeps_ambiguous_symbols_when_correcting_category(
     assert record.strategy.target_symbols == ["GLD"]
 
 
-def test_design_loop_regenerates_full_spec_when_correction_succeeds(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The primary correction path: a category-pin violation spends one
-    ``DesignAgent.revise`` call asking for a full regeneration (not just a
-    relabel). When that regeneration honors the pin, the regenerated spec —
-    hypothesis, rationale and all — is used as-is; no deterministic
-    overwrite or ``target_symbols`` clearing is needed."""
-    orch = StrategyLabOrchestrator()
-
-    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict("forex"), "scripted"))
-
-    revise_calls: List[Any] = []
-
-    def _revise(spec: Any, critique: Any, **kwargs: Any) -> Tuple[Dict[str, Any], str]:
-        revise_calls.append((spec, critique, kwargs))
-        return (
-            _spec_dict("stocks", target_symbols=["AAPL"]),
-            "regenerated for stocks",
-        )
-
-    monkeypatch.setattr(orch.design_agent, "revise", _revise)
-    monkeypatch.setattr(
-        orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
-    )
-    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
-    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
-    _short_circuit_synthesis(monkeypatch)
-
-    # allowed = {stocks} -> exclude everything else, including forex.
-    record = orch.run_cycle(
-        prior_records=[],
-        config=_config(),
-        exclude_asset_classes=["forex", "crypto", "futures", "commodities"],
-    )
-
-    assert len(revise_calls) == 1
-    _, critique, kwargs = revise_calls[0]
-    assert critique.ready is False
-    assert "stocks" in critique.issues[0].description
-    # The reconciliation call is deliberately kept out of the round loop's
-    # own critique lineage — it's a pin-violation correction, not a review
-    # round, so it must not be threaded prior_critiques.
-    assert kwargs.get("prior_critiques") is None
-
-    assert record.strategy.asset_class == "stocks"
-    assert record.strategy.target_symbols == ["AAPL"]
-    assert record.strategy_rationale == "regenerated for stocks"
-
-
-def test_design_loop_short_circuits_when_correction_cannot_converge(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When even the corrective regeneration still violates the pin, the
-    design agent's output must NEVER be deterministically relabeled and
-    persisted as if it were a successful spec: a relabeled-but-mismatched
-    narrative (e.g. a "stocks"-labeled spec whose hypothesis/rules describe
-    crypto) would review and backtest coherently while being attributed to
-    the wrong thesis — exactly what structural readiness validation cannot
-    catch. Instead the attempt raises SpecImplementabilityError and
-    run_cycle's existing MAX_DESIGN_REENTRIES retry loop re-enters with a
-    fresh design attempt; if every attempt fails to converge, the cycle
-    short-circuits with status="failed: spec_unimplementable" rather than
-    ever persisting a mismatched spec as a success."""
-    from investment_team.strategy_lab.orchestrator import MAX_DESIGN_REENTRIES
-
-    orch = StrategyLabOrchestrator()
-
-    run_calls: List[str] = []
-    revise_calls: List[str] = []
-
-    def _run(**_kw: Any) -> Tuple[Dict[str, Any], str]:
-        run_calls.append("call")
-        return _spec_dict("forex"), "scripted"
-
-    def _revise(*_a: Any, **_kw: Any) -> Tuple[Dict[str, Any], str]:
-        revise_calls.append("call")
-        # Different wrong category than the original, every attempt —
-        # simulating a designer that never converges on the pinned category.
-        return _spec_dict("crypto"), "revised"
-
-    monkeypatch.setattr(orch.design_agent, "run", _run)
-    monkeypatch.setattr(orch.design_agent, "revise", _revise)
-
-    def _review_must_not_run(*_a: Any, **_kw: Any) -> Any:
-        raise AssertionError(
-            "design_review_agent.run must not be reached — the pin-violation "
-            "correction fails before any review round starts"
-        )
-
-    monkeypatch.setattr(orch.design_review_agent, "run", _review_must_not_run)
-    _short_circuit_synthesis(monkeypatch)
-
-    # allowed = {stocks} -> exclude everything else, including forex/crypto.
-    record = orch.run_cycle(
-        prior_records=[],
-        config=_config(),
-        exclude_asset_classes=["forex", "crypto", "futures", "commodities"],
-    )
-
-    assert record.backtest.status == "failed: spec_unimplementable"
-    # Never force-relabeled to the pinned category — the persisted
-    # short-circuit spec is whatever the last failed attempt actually
-    # produced, not a coerced "stocks" label on a crypto narrative.
-    assert record.strategy.asset_class != "stocks"
-    assert len(run_calls) == MAX_DESIGN_REENTRIES + 1
-    assert len(revise_calls) == MAX_DESIGN_REENTRIES + 1
-
-
-def test_enforce_selected_asset_category_clears_stale_target_symbols() -> None:
-    """Non-empty ``target_symbols`` authored for the wrong category must be
-    cleared in the same correction as the ``asset_class`` relabel —
-    otherwise e.g. crypto tickers like "BTC-USD" would be honored verbatim
-    and fetched under the corrected (forex) asset class, a structurally
-    inconsistent request. ``_enforce_selected_asset_category`` is now only
-    reachable via the budget-exhausted fallback (see the module docstring
-    on ``_reconcile_asset_category`` for why its own fallback no longer
-    calls this method), so this is exercised as a direct unit test rather
-    than through ``run_cycle``."""
-    orch = StrategyLabOrchestrator()
-    spec = orch._build_spec_from_dict(
-        _spec_dict("crypto", target_symbols=["BTC-USD"]), strategy_id="test-strat"
-    )
-
-    corrected = orch._enforce_selected_asset_category(
-        spec,
-        selected_category="forex",
-        review_round=1,
-        emit=lambda *_a, **_kw: None,
-        drift_collector=None,
-        config=_config(),
-        all_gate_results=[],
-    )
-
-    assert corrected.asset_class == "forex"
-    assert corrected.target_symbols == []
-
-
 def test_design_loop_enforces_asset_category_on_budget_exhausted_before_first_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -623,125 +485,6 @@ def test_design_loop_enforces_asset_category_on_budget_exhausted_before_first_re
 
     assert record.backtest.status == "failed: budget_exhausted"
     assert record.strategy.asset_class == "forex"
-
-
-def test_design_loop_enforces_asset_category_when_correction_trips_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A category-pin violation's corrective ``revise`` call is a real LLM
-    call and can itself trip the per-cycle budget. The trip must still
-    short-circuit with the pin enforced (via the outer budget handler's
-    ``_enforce_selected_asset_category`` fallback on the pre-regeneration
-    spec), not crash or silently persist the mismatched category."""
-    from investment_team.strategy_lab.agents._llm_budget import DesignBudgetExhausted
-
-    orch = StrategyLabOrchestrator()
-
-    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict("forex"), "scripted"))
-
-    def _revise(*_a: Any, **_kw: Any) -> Tuple[Dict[str, Any], str]:
-        raise DesignBudgetExhausted(1, 1)
-
-    monkeypatch.setattr(orch.design_agent, "revise", _revise)
-
-    # allowed = {stocks} -> exclude everything else, including forex.
-    record = orch.run_cycle(
-        prior_records=[],
-        config=_config(),
-        exclude_asset_classes=["forex", "crypto", "futures", "commodities"],
-    )
-
-    assert record.backtest.status == "failed: budget_exhausted"
-    assert record.strategy.asset_class == "stocks"
-
-
-def test_reconcile_asset_category_forwards_mechanical_repair_count_to_budget_exhaustion(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A budget trip inside the corrective ``revise`` call must annotate the
-    exception with the caller's real accumulated ``mechanical_repair_count``
-    (e.g. repairs already applied earlier in the same design-review round),
-    not a hardcoded 0 — otherwise persisted budget-exhausted telemetry
-    under-reports repairs that already happened this cycle. Exercised as a
-    direct unit test (rather than through ``run_cycle``) since manufacturing
-    a real mechanical repair plus a mid-loop pin violation plus a budget
-    trip through the full pipeline would require an elaborate multi-round
-    setup for a fix that is purely about one forwarded argument."""
-    from investment_team.strategy_lab.agents._llm_budget import DesignBudgetExhausted
-
-    orch = StrategyLabOrchestrator()
-    spec = orch._build_spec_from_dict(_spec_dict("forex"), strategy_id="test-strat")
-
-    def _revise(*_a: Any, **_kw: Any) -> Tuple[Dict[str, Any], str]:
-        raise DesignBudgetExhausted(1, 1)
-
-    monkeypatch.setattr(orch.design_agent, "revise", _revise)
-
-    with pytest.raises(DesignBudgetExhausted) as exc_info:
-        orch._reconcile_asset_category(
-            spec,
-            "scripted",
-            selected_category="stocks",
-            review_round=1,
-            emit=lambda *_a, **_kw: None,
-            drift_collector=None,
-            config=_config(),
-            strategy_id="test-strat",
-            all_gate_results=[],
-            mechanical_repair_count=2,
-        )
-
-    assert exc_info.value.mechanical_repair_count == 2
-
-
-def test_reconcile_asset_category_records_readiness_gates(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The success-path readiness validation must be appended to
-    ``all_gate_results`` via ``record_gates``, not just used locally to
-    compute the ``design_repair`` event's ``now_ready`` flag — otherwise the
-    persisted record's ``quality_gate_results`` and the convergence tracker
-    silently miss this gate's findings for the attempt."""
-    orch = StrategyLabOrchestrator()
-    spec = orch._build_spec_from_dict(_spec_dict("forex"), strategy_id="test-strat")
-
-    monkeypatch.setattr(
-        orch.design_agent, "revise", lambda *_a, **_kw: (_spec_dict("stocks"), "regenerated")
-    )
-
-    all_gate_results: List[Any] = []
-    orch._reconcile_asset_category(
-        spec,
-        "scripted",
-        selected_category="stocks",
-        review_round=1,
-        emit=lambda *_a, **_kw: None,
-        drift_collector=None,
-        config=_config(),
-        strategy_id="test-strat",
-        all_gate_results=all_gate_results,
-    )
-
-    assert all_gate_results
-
-
-def test_enforce_selected_asset_category_records_readiness_gates() -> None:
-    """Same ``record_gates`` requirement for the deterministic-relabel
-    backstop — its own fresh readiness validation must also land in
-    ``all_gate_results``, not only feed the emitted event's ``now_ready``."""
-    orch = StrategyLabOrchestrator()
-    spec = orch._build_spec_from_dict(_spec_dict("forex"), strategy_id="test-strat")
-
-    all_gate_results: List[Any] = []
-    orch._enforce_selected_asset_category(
-        spec,
-        selected_category="stocks",
-        review_round=1,
-        emit=lambda *_a, **_kw: None,
-        drift_collector=None,
-        config=_config(),
-        all_gate_results=all_gate_results,
-    )
-
-    assert all_gate_results
 
 
 def test_design_loop_reconciles_asset_category_after_revise_round(
@@ -995,3 +738,270 @@ def test_unsupported_asset_class_is_not_mislabeled_as_a_pin_failure(
         data.get("stop_reason") == "asset_category_unconverged" for data in design_loop_events
     )
     assert (record.loop_telemetry or {}).get("stop_reason") != "asset_category_unconverged"
+
+
+# ---------------------------------------------------------------------------
+# Readiness Rule 11 — the asset-category pin is enforced by the gate, so a
+# spec outside the pinned category can never be reported ready and therefore
+# can never reach code synthesis.
+# ---------------------------------------------------------------------------
+
+
+def _readiness_spec(asset_class: str, target_symbols: Optional[List[str]] = None) -> StrategySpec:
+    return StrategySpec(
+        strategy_id="strat-pin",
+        authored_by="test",
+        asset_class=asset_class,
+        hypothesis="mean reversion",
+        signal_definition="sig",
+        timeframe="1d",
+        entry_rules=[EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0))],
+        exit_rules=[StopLossRule(pct=0.03)],
+        risk_limits={},
+        speculative=False,
+        target_symbols=target_symbols or [],
+    )
+
+
+def _pin_results(spec: StrategySpec, pinned: Optional[str]) -> List[Any]:
+    from investment_team.strategy_lab.quality_gates.spec_readiness import SpecReadinessGate
+
+    results = SpecReadinessGate().validate(spec, phase="design", pinned_asset_class=pinned)
+    return [r for r in results if (r.rule_id or "").startswith("asset_category:")]
+
+
+def test_readiness_pin_is_inert_without_a_pin() -> None:
+    assert _pin_results(_readiness_spec("crypto"), None) == []
+
+
+def test_readiness_pin_passes_an_on_category_spec() -> None:
+    assert _pin_results(_readiness_spec("stocks"), "stocks") == []
+
+
+def test_readiness_pin_criticals_on_the_wrong_category() -> None:
+    findings = _pin_results(_readiness_spec("crypto"), "stocks")
+    assert len(findings) == 1
+    assert findings[0].severity == "critical"
+    assert findings[0].rule_id == "asset_category:pin"
+    # The message must demand a rebuild, not a relabel — relabelling crypto
+    # logic as stocks is the contamination the pin exists to prevent.
+    assert "Rebuild the ENTIRE strategy" in findings[0].details
+
+
+def test_readiness_pin_accepts_an_alias_spelling_of_the_pinned_class() -> None:
+    assert _pin_results(_readiness_spec("equity"), "stocks") == []
+
+
+def test_readiness_pin_criticals_on_offcategory_symbols() -> None:
+    findings = _pin_results(_readiness_spec("stocks", ["AAPL", "BTC"]), "stocks")
+    assert len(findings) == 1
+    assert findings[0].rule_id == "asset_category:symbols"
+    assert "BTC" in findings[0].details
+
+
+def test_readiness_pin_keeps_ambiguous_cross_asset_etfs() -> None:
+    # GLD / QQQ trade like equities via Yahoo even though their underlying
+    # exposure is a different class — classify_symbol deliberately returns
+    # None for them, so they must not be flagged.
+    assert _pin_results(_readiness_spec("stocks", ["AAPL", "GLD", "QQQ"]), "stocks") == []
+
+
+def test_readiness_pin_reports_class_alone_when_the_class_is_wrong() -> None:
+    # The symbol check compares against the *declared* class, which is already
+    # wrong — reporting both would be noise.
+    findings = _pin_results(_readiness_spec("crypto", ["BTC", "ETH"]), "stocks")
+    assert [f.rule_id for f in findings] == ["asset_category:pin"]
+
+
+def test_readiness_pin_rejects_a_non_canonical_pin() -> None:
+    from investment_team.strategy_lab.quality_gates.spec_readiness import SpecReadinessGate
+
+    with pytest.raises(AssertionError):
+        SpecReadinessGate().validate(_readiness_spec("stocks"), pinned_asset_class="bonds")
+
+
+# ---------------------------------------------------------------------------
+# Mechanical repair — the *symbol* half of the pin is repaired
+# deterministically; the *class* half never is.
+# ---------------------------------------------------------------------------
+
+
+def test_repair_strips_offcategory_symbols_under_a_pin() -> None:
+    from investment_team.strategy_lab.mechanical_repair import repair_spec
+
+    out = repair_spec(
+        _readiness_spec("stocks", ["AAPL", "BTC", "EURUSD=X"]), pinned_asset_class="stocks"
+    )
+    assert out.spec.target_symbols == ["AAPL"]
+    actions = [a for a in out.actions if a.rule == "asset_category_pin_symbols"]
+    assert len(actions) == 1
+    assert actions[0].field == "target_symbols"
+
+
+def test_repair_is_idempotent_under_a_pin() -> None:
+    from investment_team.strategy_lab.mechanical_repair import repair_spec
+
+    once = repair_spec(_readiness_spec("stocks", ["AAPL", "BTC"]), pinned_asset_class="stocks")
+    twice = repair_spec(once.spec, pinned_asset_class="stocks")
+    assert twice.actions == []
+    assert twice.spec is once.spec
+
+
+def test_repair_never_rewrites_asset_class() -> None:
+    from investment_team.strategy_lab.mechanical_repair import repair_spec
+
+    # A spec declaring the WRONG class must be left alone: rewriting the label
+    # would file crypto logic under stocks. The readiness critical owns it.
+    spec = _readiness_spec("crypto", ["BTC", "ETH"])
+    out = repair_spec(spec, pinned_asset_class="stocks")
+    assert out.spec.asset_class == "crypto"
+    assert out.spec.target_symbols == ["BTC", "ETH"]
+    assert [a for a in out.actions if a.rule == "asset_category_pin_symbols"] == []
+
+
+def test_repair_without_a_pin_leaves_symbols_untouched() -> None:
+    from investment_team.strategy_lab.mechanical_repair import repair_spec
+
+    out = repair_spec(_readiness_spec("stocks", ["AAPL", "BTC"]))
+    assert out.spec.target_symbols == ["AAPL", "BTC"]
+
+
+def test_repair_keeps_ambiguous_cross_asset_etfs() -> None:
+    from investment_team.strategy_lab.mechanical_repair import repair_spec
+
+    out = repair_spec(_readiness_spec("stocks", ["GLD", "QQQ"]), pinned_asset_class="stocks")
+    assert out.spec.target_symbols == ["GLD", "QQQ"]
+
+
+# ---------------------------------------------------------------------------
+# select_signal_brief / filter_regime_summary — the two cross-category
+# analysis surfaces handed to the designer alongside prior_records.
+# ---------------------------------------------------------------------------
+
+
+def _brief(theme: str) -> Any:
+    from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
+
+    return SignalIntelligenceBriefV1(brief_version=1, macro_themes=[theme])
+
+
+def test_select_signal_brief_returns_the_pinned_categorys_brief() -> None:
+    from investment_team.strategy_lab_context import select_signal_brief
+
+    briefs = {"stocks": _brief("equities"), "crypto": _brief("digital assets")}
+    assert select_signal_brief(briefs, "stocks").macro_themes == ["equities"]
+
+
+def test_select_signal_brief_never_substitutes_another_category() -> None:
+    from investment_team.strategy_lab_context import select_signal_brief
+
+    # A missing brief must yield None (design prompt omits its signal
+    # section) rather than another category's evidence.
+    assert select_signal_brief({"crypto": _brief("digital assets")}, "stocks") is None
+
+
+def test_select_signal_brief_handles_empty_and_none() -> None:
+    from investment_team.strategy_lab_context import select_signal_brief
+
+    assert select_signal_brief(None, "stocks") is None
+    assert select_signal_brief({}, "stocks") is None
+
+
+def _regime_entry(asset_class: str) -> Any:
+    from investment_team.strategy_lab.market_regime import RegimeEntry
+
+    return RegimeEntry(
+        asset_class=asset_class,
+        benchmark_symbol="X",
+        trend_direction="up",
+        trend_strength="moderate",
+        volatility_regime="normal",
+        close=1.0,
+        sma50=1.0,
+        sma200=1.0,
+        adx=20.0,
+        atr_pct=1.0,
+        atr_pct_percentile=50.0,
+    )
+
+
+def _regime_summary(*asset_classes: str) -> Any:
+    from investment_team.strategy_lab.market_regime import RegimeSummary
+
+    return RegimeSummary(
+        computed_at="2024-01-01T00:00:00Z",
+        entries=[_regime_entry(c) for c in asset_classes],
+    )
+
+
+def test_filter_regime_summary_keeps_only_the_pinned_class() -> None:
+    from investment_team.strategy_lab.market_regime import filter_regime_summary
+
+    out = filter_regime_summary(_regime_summary("stocks", "crypto", "forex"), "stocks")
+    assert [e.asset_class for e in out.entries] == ["stocks"]
+
+
+def test_filter_regime_summary_returns_none_when_nothing_matches() -> None:
+    from investment_team.strategy_lab.market_regime import filter_regime_summary
+
+    # None is the shape every caller already treats as "no regime available",
+    # so the prompt's regime section is absent rather than empty.
+    assert filter_regime_summary(_regime_summary("crypto"), "stocks") is None
+
+
+def test_filter_regime_summary_passes_through_without_a_class() -> None:
+    from investment_team.strategy_lab.market_regime import filter_regime_summary
+
+    summary = _regime_summary("stocks", "crypto")
+    assert filter_regime_summary(summary, None) is summary
+    assert filter_regime_summary(None, "stocks") is None
+
+
+def test_filter_regime_summary_does_not_mutate_its_input() -> None:
+    from investment_team.strategy_lab.market_regime import filter_regime_summary
+
+    summary = _regime_summary("stocks", "crypto")
+    filter_regime_summary(summary, "stocks")
+    assert [e.asset_class for e in summary.entries] == ["stocks", "crypto"]
+
+
+# ---------------------------------------------------------------------------
+# build_spec_from_dict — an OMITTED asset_class defaults to the pin; a
+# DIFFERENT one is left as authored for Rule 11 to reject.
+# ---------------------------------------------------------------------------
+
+
+def test_build_spec_defaults_an_omitted_asset_class_to_the_pin() -> None:
+    from investment_team.strategy_lab.orchestrator_design import build_spec_from_dict
+
+    payload = _spec_dict()
+    payload.pop("asset_class")
+    spec = build_spec_from_dict(payload, strategy_id="s1", default_asset_class="crypto")
+    assert spec.asset_class == "crypto"
+
+
+def test_build_spec_defaults_a_blank_asset_class_to_the_pin() -> None:
+    from investment_team.strategy_lab.orchestrator_design import build_spec_from_dict
+
+    spec = build_spec_from_dict(
+        _spec_dict(asset_class=""), strategy_id="s1", default_asset_class="forex"
+    )
+    assert spec.asset_class == "forex"
+
+
+def test_build_spec_preserves_an_authored_offpin_asset_class() -> None:
+    from investment_team.strategy_lab.orchestrator_design import build_spec_from_dict
+
+    # Silently reassigning an authored class to the pin is exactly the relabel
+    # the design must avoid — Rule 11 rejects it instead.
+    spec = build_spec_from_dict(
+        _spec_dict(asset_class="crypto"), strategy_id="s1", default_asset_class="stocks"
+    )
+    assert spec.asset_class == "crypto"
+
+
+def test_build_spec_rejects_a_non_canonical_default() -> None:
+    from investment_team.strategy_lab.orchestrator_design import build_spec_from_dict
+
+    with pytest.raises(AssertionError):
+        build_spec_from_dict(_spec_dict(), strategy_id="s1", default_asset_class="bonds")

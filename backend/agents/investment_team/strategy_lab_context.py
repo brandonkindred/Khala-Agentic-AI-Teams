@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import logging
 import random
-from typing import Iterable, List, Optional
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
 from .models import StrategyLabRecord
 from .strategy_lab.spec_dsl import AllOf, AnyOf, Predicate, iter_leaf_predicates
+
+if TYPE_CHECKING:  # pragma: no cover - typing-only, avoids a circular import
+    from .signal_intelligence_models import SignalIntelligenceBriefV1
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +250,34 @@ def _canonical_subset(raw: Optional[List[str]]) -> set[str]:
         except ValueError:
             continue
     return out
+
+
+def select_signal_brief(
+    briefs: Optional[Dict[str, "SignalIntelligenceBriefV1"]],
+    asset_class: str,
+) -> Optional["SignalIntelligenceBriefV1"]:
+    """Pick the signal brief synthesized for ``asset_class``.
+
+    The per-batch signal expert produces one brief per allowed category, each
+    built from that category's records alone. A design attempt pinned to a
+    category takes its own brief and no other — a brief is injected verbatim
+    into the design prompt, so handing over another category's would reintroduce
+    exactly the cross-category evidence the pin exists to keep out.
+
+    Preconditions:
+        * ``briefs`` maps canonical asset-class labels to briefs, or is
+          ``None`` / empty when no brief could be produced.
+        * ``asset_class`` is the canonical label this attempt is pinned to.
+
+    Postconditions:
+        * Returns the brief for ``asset_class``, or ``None`` when there is
+          none. ``None`` is a supported outcome the design agent handles by
+          omitting the signal section — never a substitute brief from a
+          different category.
+    """
+    if not briefs:
+        return None
+    return briefs.get(asset_class)
 
 
 def select_asset_category(

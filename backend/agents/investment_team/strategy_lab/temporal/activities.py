@@ -970,7 +970,8 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         ``params`` carries the JSON-shaped attempt inputs:
           - ``prior_records``: list of ``StrategyLabRecord`` JSON dumps.
           - ``config``: ``BacktestConfig`` JSON dump.
-          - ``signal_brief``: ``SignalIntelligenceBriefV1`` JSON dump or ``None``.
+          - ``signal_briefs``: map of asset class → ``SignalIntelligenceBriefV1``
+            JSON dump (one per allowed category), or absent.
           - ``exclude_asset_classes``: list of str or ``None``.
           - ``directives``: list of convergence-directive strings.
           - ``design_attempt``: int re-entry index (0-based).
@@ -1107,9 +1108,17 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         )
     else:
         _batch_cache_cm = contextlib.nullcontext()
-    signal_brief = (
-        SignalIntelligenceBriefV1(**params["signal_brief"]) if params.get("signal_brief") else None
-    )
+    # One brief per asset category, keyed by canonical class name. A cycle
+    # input from a workflow-history replay predating the per-category briefs
+    # carries the old single-brief ``signal_brief`` key; there is no category
+    # to file it under, and filing it under the wrong one would feed a pinned
+    # attempt another category's evidence — so a legacy payload yields no
+    # briefs and the design prompt simply omits its signal section.
+    signal_briefs = {
+        asset_class: SignalIntelligenceBriefV1(**dump)
+        for asset_class, dump in (params.get("signal_briefs") or {}).items()
+        if dump
+    }
     regime_summary = (
         RegimeSummary(**params["regime_summary"]) if params.get("regime_summary") else None
     )
@@ -1430,7 +1439,7 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             record = orch._run_design_attempt(
                 prior_records=prior_records,
                 config=config,
-                signal_brief=signal_brief,
+                signal_briefs=signal_briefs,
                 emit=_design_attempt_progress_checkpoint,
                 exclude_asset_classes=params.get("exclude_asset_classes"),
                 directives=list(params.get("directives") or []),
@@ -1518,16 +1527,21 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @activity.defn(name="strategy_lab_compute_signal_brief")
-def compute_signal_brief_activity(benchmark_symbol: str) -> Dict[str, Any]:
-    """Build the per-batch signal brief over all currently-persisted prior records.
+def compute_signal_brief_activity(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Build one per-batch signal brief per allowed asset category.
 
     Preconditions:
-        ``benchmark_symbol`` is the run's benchmark ticker.
+        ``params`` carries ``benchmark_symbol`` (the run's benchmark ticker)
+        and optionally ``exclude_asset_classes`` (the complement of the user's
+        ``allowed_asset_classes`` selection). A bare string is also accepted
+        for a workflow-history replay predating the params dict.
     Postconditions:
-        Returns ``{"signal_brief": <SignalIntelligenceBriefV1 JSON dump or None>,
-        "signal_brief_storage": <dict or None>}`` — the JSON-shaped pair the batch
-        workflow threads into each cycle's ``signal_brief`` input and into
-        ``finalize_cycle_record_activity``. Delegates to
+        Returns ``{"signal_briefs": {<asset_class>: <SignalIntelligenceBriefV1
+        JSON dump>, ...}, "signal_brief_storage": <dict>}`` — the JSON-shaped
+        pair the batch workflow threads into each cycle's ``signal_briefs``
+        input and into ``finalize_cycle_record_activity``. Only *allowed*
+        categories are computed, so a restricted run never pays for — or
+        produces — a brief for a category the user excluded. Delegates to
         ``investment_team.strategy_lab.orchestrator_api._compute_signal_brief_snapshot``
         (façade over ``api.main``; fail-open — never raises; returns a
         skipped/degraded marker instead), so this activity likewise only raises
@@ -1535,12 +1549,20 @@ def compute_signal_brief_activity(benchmark_symbol: str) -> Dict[str, Any]:
     """
     from investment_team.strategy_lab.orchestrator_api import _compute_signal_brief_snapshot
 
+    if isinstance(params, str):
+        benchmark_symbol, exclude_asset_classes = params, None
+    else:
+        benchmark_symbol = params["benchmark_symbol"]
+        exclude_asset_classes = params.get("exclude_asset_classes")
+
     try:
-        brief, storage = _compute_signal_brief_snapshot(benchmark_symbol)
+        briefs, storage = _compute_signal_brief_snapshot(benchmark_symbol, exclude_asset_classes)
     except Exception as exc:  # noqa: BLE001
         raise _map_exception_to_application_error(exc) from exc
     return {
-        "signal_brief": brief.model_dump(mode="json") if brief is not None else None,
+        "signal_briefs": {
+            asset_class: brief.model_dump(mode="json") for asset_class, brief in briefs.items()
+        },
         "signal_brief_storage": storage,
     }
 

@@ -32,6 +32,7 @@ import pandas as pd
 from pydantic import BaseModel, Field
 
 from ..market_data_service import OHLCVBar
+from ..strategy_lab_context import normalize_asset_class
 from .executor.indicators import adx, atr, sma
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,40 @@ class RegimeSummary(BaseModel):
     degraded: bool = False
     degraded_reason: Optional[str] = None
     entries: List[RegimeEntry] = Field(default_factory=list)
+
+
+def filter_regime_summary(
+    summary: Optional[RegimeSummary], asset_class: Optional[str]
+) -> Optional[RegimeSummary]:
+    """Narrow a cross-asset regime summary to one asset class.
+
+    The regime summary is computed once per cycle across every benchmark, so
+    it renders one line per asset class into the design prompt. A design
+    attempt pinned to a single category must not be shown four other markets'
+    trend and volatility reads: they are irrelevant to its strategy and invite
+    the designer to reason across categories it is forbidden to use.
+
+    Preconditions:
+        * ``summary`` is a :class:`RegimeSummary` or ``None``.
+        * ``asset_class``, when given, is a canonical asset-class label.
+
+    Postconditions:
+        * Returns ``summary`` unchanged when either argument is ``None``.
+        * Otherwise returns a new :class:`RegimeSummary` holding only the
+          entries whose ``asset_class`` matches, preserving their order and
+          the summary's ``computed_at`` / degraded flags. The input is never
+          mutated.
+        * Returns ``None`` when no entry matches — an empty summary carries no
+          information, and ``None`` is the shape every caller already treats
+          as "no regime available", so this keeps the prompt's regime section
+          absent rather than empty.
+    """
+    if summary is None or asset_class is None:
+        return summary
+    entries = [e for e in summary.entries if normalize_asset_class(e.asset_class) == asset_class]
+    if not entries:
+        return None
+    return summary.model_copy(update={"entries": entries})
 
 
 def _classify_trend(close: float, sma50: float, sma200: float) -> str:
