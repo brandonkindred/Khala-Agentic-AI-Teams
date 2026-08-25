@@ -76,27 +76,23 @@ LEVEL_AA_WCAG_22 = {
 }
 
 
-def _get_criterion(sc_id: str):
-    return WCAG_22_CRITERIA.get(sc_id)
-
-
 def test_wcag_22_criteria_is_nonempty():
     assert len(WCAG_22_CRITERIA) > 0
 
 
 def test_get_criterion_known_id():
-    sc = _get_criterion("1.1.1")
+    sc = get_criterion("1.1.1")
     assert sc is not None
     assert sc.sc == "1.1.1"
     assert sc.name == "Non-text Content"
 
 
 def test_get_criterion_unknown_returns_none():
-    assert _get_criterion("9.9.9") is None
+    assert get_criterion("9.9.9") is None
 
 
 def test_criterion_has_required_fields():
-    sc = _get_criterion("1.1.1")
+    sc = get_criterion("1.1.1")
     assert hasattr(sc, "sc")
     assert hasattr(sc, "name")
     assert hasattr(sc, "level")
@@ -105,7 +101,7 @@ def test_criterion_has_required_fields():
 
 
 def test_criterion_techniques_is_list():
-    sc = _get_criterion("1.1.1")
+    sc = get_criterion("1.1.1")
     assert isinstance(sc.techniques, list)
 
 
@@ -114,24 +110,20 @@ def test_all_criteria_ids_unique():
     assert len(ids) == len(set(ids))
 
 
-def test_get_criteria_by_level_a():
-    level_a = [sc for sc in WCAG_22_CRITERIA.values() if sc.level == WCAGLevel.A]
-    assert len(level_a) > 0
-    for sc in level_a:
-        assert sc.level == WCAGLevel.A
-
-
-def test_get_criteria_by_level_aa():
-    level_aa = [sc for sc in WCAG_22_CRITERIA.values() if sc.level == WCAGLevel.AA]
-    assert len(level_aa) > 0
-
-
 def test_get_criteria_by_principle_perceivable():
-    perceivable = [
-        sc for sc in WCAG_22_CRITERIA.values() if sc.principle == WCAGPrinciple.PERCEIVABLE
-    ]
-    assert len(perceivable) > 0
-    assert all(sc.principle == WCAGPrinciple.PERCEIVABLE for sc in perceivable)
+    """Every Principle 1 criterion is reachable through the shipped accessor.
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Asserts the accessor agrees with the table; does not mutate the table.
+    """
+    expected = {
+        sc.sc for sc in WCAG_22_CRITERIA.values() if sc.principle == WCAGPrinciple.PERCEIVABLE
+    }
+    assert {sc.sc for sc in get_criteria_by_principle(WCAGPrinciple.PERCEIVABLE)} == expected
+    assert expected, "Principle 1 must not be empty"
 
 
 def test_get_criteria_by_principle_operable():
@@ -168,9 +160,23 @@ def test_get_level_a_aa_criteria_excludes_aaa():
 
 
 def test_criterion_is_success_criterion_instance():
-    for sc in WCAG_22_CRITERIA.values():
-        assert isinstance(sc, SuccessCriterion)
-        break  # just check the first one
+    """EVERY entry is a SuccessCriterion, not just the first.
+
+    Stopping at the first entry let a malformed later entry (a bare dict, say) pass
+    while other tests raised AttributeError rather than failing cleanly.
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Asserts the type of every entry; does not mutate the table.
+    """
+    wrong = {
+        k: type(v).__name__
+        for k, v in WCAG_22_CRITERIA.items()
+        if not isinstance(v, SuccessCriterion)
+    }
+    assert wrong == {}, f"entries that are not SuccessCriterion: {wrong}"
 
 
 def test_parsing_criterion_absent():

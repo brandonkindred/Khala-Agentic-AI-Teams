@@ -96,20 +96,22 @@ for primitive defects you deliberately chose not to pursue at all.
     just opaque black. (d) The HEX families of (a) and (b) — NOT (c) — appearing as a
     `var()` FALLBACK: `color: var(--kh-text-secondary, #6e7681)` is banned, which
     matters because a hex fallback is easy to reach for when writing a remediation
-    and would fail CI. It is not the house form: bare `var(--token)` outnumbers
-    `var(--token, #hex)` by roughly five to one, and the bare form is what to
-    recommend. An rgba fallback
+    and would fail CI. It is not the house form — bare `var(--token)` outnumbers the
+    hex-fallback form by a wide margin — so recommend the bare token. An rgba fallback
     (`var(--x, rgba(0,0,0,.5))`) slips through, since the fallback patterns
     interpolate the hex alternations only. Everything else
     passes, including `color: #000`. Token drift is therefore NOT a solved problem and lens E has real
-    work — around 90 raw-hex `color:` declarations across some 28 distinct values sit
-    in `src/app` today, `#fff` only a handful of them. Measure it yourself with
-    `grep -rhoE 'color: *#[0-9a-fA-F]{3,6}' user-interface/src/app --include=*.scss`
-    rather than assuming CI caught it — approximate, since `grep -E` cannot express
-    the guard's `(?<![-\w])` anchor and so would also count a `background-color` or
-    `border-color` (there are none today). And `{3,6}` does not MISS an 8-digit alpha
-    hex — it matches the first six digits and reports a value absent from the source,
-    so widen the quantifier if any appear (none do today).
+    work — raw-hex `color:` declarations across a couple of dozen distinct values sit
+    in `src/app` today, `#fff` only a handful of them. Do not take a number from this
+    document; run the census yourself and report what you get:
+    `grep -rhoE 'color: *#[0-9a-fA-F]{3,8}' user-interface/src/app --include=*.scss`
+    Two known imprecisions to correct for by hand. `grep -E` cannot express the
+    guard's `(?<![-\w])` anchor, so the result also counts any property whose name
+    ENDS in `-color` — `background-color`, `border-color`, and custom properties like
+    `--mdc-filled-button-label-text-color`, which the guard skips and you should too.
+    And a `{3,6}` quantifier silently truncates an 8-digit alpha hex to its first six
+    digits, reporting a value absent from the source, which is why the recipe above
+    uses `{3,8}`.
     Its `BURNDOWN` allowlist IS empty, and its
     docstring forbids adding entries to silence a failure, so never propose adding or
     removing one. `#fff` is the single gap the spec documents explicitly ("joins the
@@ -534,9 +536,11 @@ D. STATE COVERAGE
        recoverability list, and a dead end fails it whichever state produced it.
        Check the announcement clause separately rather than assuming it failed: there
        is no toast on this path, but an inline `role="alert"` region announces on its
-       own — 18 templates carry a literal `role="alert"` (22 occurrences) against
-       zero bare `aria-live="assertive"`, and `inline-banner` sets the role
-       dynamically via `[attr.role]`, so a literal grep undercounts. Only where neither a toast nor an alert region fires
+       own, and that is the repo's prevailing form: `role="alert"` is widespread
+       while a bare `aria-live="assertive"` is essentially unused. Count it with
+       `grep -rl 'role="alert"' user-interface/src/app --include=*.html`, and know
+       that a literal grep undercounts — `inline-banner` sets the role dynamically
+       through `[attr.role]`. Only where neither a toast nor an alert region fires
        is the state unannounced. What varies between the four is not the disposition
        but the remedy each needs, which is what your one finding must spell out.
      - Request did not opt out — the interceptor already distinguished 0 / 401 / 403 /
@@ -687,14 +691,15 @@ Close with:
     written:
     it states a preference for NEW code (plain attribute for a constant,
     `[attr.aria-*]` for a computed value) and explicitly declines to enforce it
-    retroactively. BOTH ARE CORRECT and both are in wide use — a couple of dozen
-    templates carry constant values bound through `[attr.aria-*]` — so file no
-    finding for a
+    retroactively. BOTH ARE CORRECT and both are in wide use — many templates carry
+    constant values bound through `[attr.aria-*]` — so file no finding for a
     conversion in EITHER direction; that is a no-op refactor and the kind of style
     preference §8 forbids. If you think one form should govern everywhere, raise it
     under §5's Open questions rather than filing per-attribute findings.
     For an interrupting announcement follow the same file's `aria-live` rule: prefer
-    `role="alert"`, and never pair it with `aria-live="assertive"` on one element.
+    `role="alert"`. Do not file a finding about pairing a role with its implied
+    `aria-live` — redundant, harmless, and done deliberately here for
+    `role="status" aria-live="polite"`.
   - Native semantics before ARIA; ARIA only where no native element does the job.
   - Design by Contract applies to any code you propose, per the repo-wide mandate in
     `CLAUDE.md` ("mandatory for all code and comments"): preconditions, postconditions,

@@ -779,45 +779,115 @@ WCAG_22_CRITERIA: Dict[str, SuccessCriterion] = {
 
 
 def get_criterion(sc: str) -> Optional[SuccessCriterion]:
-    """Get a success criterion by its number."""
+    """Get a success criterion by its number.
+
+    Preconditions:
+        ``sc`` is a criterion number such as "1.1.1"; unknown values are not an error.
+
+    Postconditions:
+        Returns the stored ``SuccessCriterion``, or None if absent (4.1.1 always
+        misses — WCAG 2.2 removed it). The instance is shared and not frozen, so
+        callers must not mutate it.
+    """
     return WCAG_22_CRITERIA.get(sc)
 
 
 @functools.lru_cache(maxsize=8)
 def get_criteria_by_level(level: WCAGLevel) -> List[SuccessCriterion]:
-    """Get all success criteria for a given conformance level."""
+    """Get all success criteria for a given conformance level.
+
+    Preconditions:
+        ``level`` is a ``WCAGLevel`` member.
+
+    Postconditions:
+        Returns every entry at that level.
+        The returned list is the cached, process-shared object — treat it as
+        read-only. Entries are shared ``SuccessCriterion`` instances, never copies.
+    """
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.level == level]
 
 
 @functools.lru_cache(maxsize=8)
 def get_criteria_by_principle(principle: WCAGPrinciple) -> List[SuccessCriterion]:
-    """Get all success criteria for a given principle."""
+    """Get all success criteria for a given principle.
+
+    Preconditions:
+        ``principle`` is a ``WCAGPrinciple`` member.
+
+    Postconditions:
+        Returns every entry under that principle.
+        The returned list is the cached, process-shared object — treat it as
+        read-only. Entries are shared ``SuccessCriterion`` instances, never copies.
+    """
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.principle == principle]
 
 
 @functools.lru_cache(maxsize=1)
 def get_level_a_aa_criteria() -> List[SuccessCriterion]:
-    """Get all Level A and AA success criteria (typical conformance target)."""
+    """Get all Level A and AA success criteria (typical conformance target).
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Returns the complete WCAG 2.2 Level A and AA sets, and no AAA entry.
+        The returned list is the cached, process-shared object — treat it as
+        read-only. Entries are shared ``SuccessCriterion`` instances, never copies.
+    """
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.level in (WCAGLevel.A, WCAGLevel.AA)]
 
 
 @functools.lru_cache(maxsize=1)
 def get_new_in_22_criteria() -> List[SuccessCriterion]:
-    """Get all success criteria new in WCAG 2.2."""
+    """Get all success criteria new in WCAG 2.2.
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Returns every entry flagged ``new_in_22``.
+        The returned list is the cached, process-shared object — treat it as
+        read-only. Entries are shared ``SuccessCriterion`` instances, never copies.
+    """
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.new_in_22]
 
 
 @functools.lru_cache(maxsize=1)
 def get_new_in_21_criteria() -> List[SuccessCriterion]:
-    """Get all success criteria new in WCAG 2.1."""
+    """Get all success criteria new in WCAG 2.1.
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Returns every entry flagged ``new_in_21``.
+        The returned list is the cached, process-shared object — treat it as
+        read-only. Entries are shared ``SuccessCriterion`` instances, never copies.
+    """
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.new_in_21]
 
 
 def get_all_sc_numbers() -> List[str]:
-    """Get all success criterion numbers."""
+    """Get all success criterion numbers.
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Returns every key, in table order. Builds a fresh list per call (uncached).
+    """
     return list(WCAG_22_CRITERIA.keys())
 
 
 def get_guideline_criteria(guideline: str) -> List[SuccessCriterion]:
-    """Get all success criteria for a given guideline number (e.g., '2.4')."""
+    """Get all success criteria for a given guideline number (e.g., '2.4').
+
+    Preconditions:
+        ``guideline`` is a guideline number such as "2.4"; unknown values yield [].
+
+    Postconditions:
+        Returns every entry under that guideline.
+        Builds a fresh list per call (uncached), but the entries themselves are
+        shared ``SuccessCriterion`` instances — treat them as read-only.
+    """
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.guideline == guideline]
