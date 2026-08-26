@@ -280,6 +280,10 @@ def deterministic_self_check(draft: str) -> list[str]:
 
     Preconditions:
         - ``draft`` is a string (may be empty).
+    Postconditions:
+        - Returns a list of human-readable violation description strings.
+        - Returns an empty list when no mechanical violations are detected.
+        - Does not mutate ``draft``.
     Raises:
         TypeError: if ``draft`` is not a string.
     """
@@ -484,8 +488,14 @@ def self_review(draft: str, call_text: CallText) -> str:
     function has no additional failure handling of its own.
 
     Preconditions:
+        - ``draft`` is a string (may be empty).
         - ``call_text`` is a ``(prompt, system_prompt) -> response`` text-completion
           callback (e.g. ``BlogWriterAgent._call_text``).
+    Postconditions:
+        - Returns the draft after applying any deterministic fixes and any
+          LLM self-review fixes.
+        - If either sub-step soft-fails, the original ``draft`` is returned
+          because both sub-steps handle their own failures.
     """
     # Step 1: Deterministic checks
     violations = deterministic_self_check(draft)
