@@ -259,7 +259,7 @@ def _extract_json_array_from_text(
         if i == -1:
             break
         try:
-            value, _end = decoder.raw_decode(text, i)
+            value, end = decoder.raw_decode(text, i)
         except json.JSONDecodeError:
             search_from = i + 1
             continue
@@ -269,7 +269,11 @@ def _extract_json_array_from_text(
                 return dict_elements
             if not value and empty_fallback is None:
                 empty_fallback = value
-        search_from = i + 1
+        # Resume scanning past the decoded value's end, not from i + 1: a
+        # non-matching value can itself contain a nested "[" (e.g. a sub-array
+        # or a string literal that reads as one) that would otherwise be
+        # re-entered and salvaged as if it were a real top-level match.
+        search_from = end
     return empty_fallback
 
 
