@@ -364,8 +364,12 @@ tagged `phase="synthesis"`. Readiness is a different gate — `SpecReadinessGate
 next row.
 
 <sup>b</sup> Four call sites: per refinement round (`orchestrator_synthesis.py`,
-`phase="synthesis"`); unconditionally after every trade-alignment round
-(`orchestrator_alignment.py`, `phase="verification"`); the walk-forward-failure
+`phase="synthesis"`); conditionally within a trade-alignment round
+(`orchestrator_alignment.py`, `phase="verification"`) — only reached once a
+round has a proposed fix that is not already-aligned/round-capped, and only
+after that fix passes the safety gate and successfully re-executes; a round
+that exits earlier (aligned, no fix, round cap, safety rejection, or
+re-execution failure) never reaches it; the walk-forward-failure
 fallback recheck with `dsr_aware=False` (`orchestrator_verification.py`); and
 inside zero-trade repair (`zero_trade_repair.py`), which passes no `phase=` and
 so takes the `"synthesis"` default, emitting `zero_trade_repair_`-prefixed rows.
@@ -512,7 +516,9 @@ flowchart TB
         EV -->|other anomaly| RF
         EV -->|clean| AL{DeterministicAlignmentChecker}
         AL -->|misaligned| TAA[TradeAlignmentAgent<br/>propose_code_fix]
-        TAA --> BT
+        TAA --> ALRE{Safety check → re-execute fix<br/>→ alignment anomaly gates}
+        ALRE -->|clean: commit fix<br/>as new baseline| AL
+        ALRE -->|rejected, failed,<br/>or critical anomaly:<br/>keep prior baseline| VER
         AL -->|aligned| VER[AcceptanceGate · ExitRuleConformanceGate ·<br/>6 realism gates]
         VER --> AN[AnalysisAgent]
         AN --> REC[RecordAssemblyMixin<br/>→ StrategyLabRecord]
