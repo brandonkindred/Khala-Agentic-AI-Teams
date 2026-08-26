@@ -647,6 +647,56 @@ class TestDiscoveryAgent:
         plan = DiscoveryPlan(prospect=sample_prospect, **body.model_dump())
         assert plan.spin_questions.situation == ["s1"]
 
+    def test_prepare_without_dossier_prompt_unchanged(self, sample_prospect: Prospect) -> None:
+        client = CannedLLMClient(
+            [
+                {
+                    "spin_questions": {
+                        "situation": ["s1"],
+                        "problem": ["p1"],
+                        "implication": ["i1"],
+                        "need_payoff": ["n1"],
+                    },
+                    "challenger_insight": "Counterintuitive data…",
+                    "demo_agenda": ["intro", "demo"],
+                    "expected_objections": ["pricing"],
+                    "success_criteria_for_call": "EB confirmed",
+                }
+            ]
+        )
+        agent = DiscoveryAgent(llm_client=client)
+        body = agent.prepare(sample_prospect.model_dump_json(), "{}", "ProductX", "vp")
+        assert isinstance(body, DiscoveryPlanBody)
+        assert "## Prospect Dossier" not in client.calls[0]["prompt"]
+
+    def test_prepare_with_dossier_grounds_prompt(
+        self, sample_prospect: Prospect, sample_dossier: ProspectDossier
+    ) -> None:
+        client = CannedLLMClient(
+            [
+                {
+                    "spin_questions": {
+                        "situation": ["s1"],
+                        "problem": ["p1"],
+                        "implication": ["i1"],
+                        "need_payoff": ["n1"],
+                    },
+                    "challenger_insight": "Counterintuitive data…",
+                    "demo_agenda": ["intro", "demo"],
+                    "expected_objections": ["pricing"],
+                    "success_criteria_for_call": "EB confirmed",
+                }
+            ]
+        )
+        agent = DiscoveryAgent(llm_client=client)
+        body = agent.prepare(
+            sample_prospect.model_dump_json(), "{}", "ProductX", "vp", dossier=sample_dossier
+        )
+        assert isinstance(body, DiscoveryPlanBody)
+        prompt = client.calls[0]["prompt"]
+        assert "## Prospect Dossier" in prompt
+        assert "Acme Corp announced Series B funding" in prompt
+
 
 class TestProposalAgent:
     def test_returns_typed_body(self, sample_prospect: Prospect) -> None:

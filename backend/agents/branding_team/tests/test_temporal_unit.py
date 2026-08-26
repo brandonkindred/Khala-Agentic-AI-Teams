@@ -877,6 +877,34 @@ def test_governance_phase_task_excludes_channel_activation_context() -> None:
     assert "CHANNEL_ACTIVATION_MARKER" not in task
 
 
+def test_phase_task_explicit_empty_context_phases_excludes_all_prior_context(
+    monkeypatch,
+) -> None:
+    """An explicit ``context_phases=()`` deliberately means "no upstream
+    context" and must strip every ``prior_outputs`` entry -- contrast with
+    the default (``None``/omitted), under which every entry is included.
+    This is the None-vs-() distinction ``_PhaseSpec.context_phases`` exists
+    to make expressible."""
+    import branding_team.orchestrator as orch_mod
+
+    monkeypatch.setitem(
+        orch_mod._PHASE_SPEC,
+        BrandPhase.NARRATIVE_MESSAGING,
+        orch_mod._PHASE_SPEC[BrandPhase.NARRATIVE_MESSAGING]._replace(context_phases=()),
+    )
+
+    mission = make_mission()
+    prior_outputs = {
+        BrandPhase.STRATEGIC_CORE.value: {"marker": "STRATEGIC_MARKER"},
+        BrandPhase.VISUAL_IDENTITY.value: {"marker": "VISUAL_MARKER"},
+    }
+    task = orch_phase_task(mission, BrandPhase.NARRATIVE_MESSAGING, prior_outputs)
+
+    assert "STRATEGIC_MARKER" not in task
+    assert "VISUAL_MARKER" not in task
+    assert "upstream" not in task.lower()
+
+
 def test_run_single_phase_rejects_non_runnable_phase() -> None:
     from branding_team.orchestrator import BrandingTeamOrchestrator
 
