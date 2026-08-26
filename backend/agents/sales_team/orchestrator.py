@@ -667,7 +667,11 @@ class SalesPodOrchestrator:
         max_refinements: int = 1,
         confidence_threshold: Optional[float] = None,
     ) -> OutreachSequence:
-        """Emit -> wrap -> critic -> on revise, re-emit up to *max_refinements* times."""
+        """Emit -> wrap -> critic -> on revise, re-emit up to *max_refinements - 1* times.
+
+        The final review-budget iteration is always spent reviewing the current
+        sequence, so the returned sequence is never an unchecked regeneration.
+        """
         threshold = (
             confidence_threshold
             if confidence_threshold is not None
