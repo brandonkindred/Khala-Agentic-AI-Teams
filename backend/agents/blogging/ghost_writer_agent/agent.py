@@ -9,7 +9,7 @@ into first-person narrative snippets passed to the draft agent.
 Architecture:
   - **Evaluator** (`_evaluate_sufficiency`): Assesses whether the conversation has enough
     material for a compelling story. Delegates JSON extraction/retry to
-    ``call_json_with_retry()`` and falls back to a default-dict result on exhausted
+    ``run_json_gate()`` and falls back to a default-dict result on exhausted
     parse retries, unexpected errors, and transient LLM transport errors (so the
     story-phase wrapper cannot silently abandon an in-progress interview).
   - **Interviewer** (`_generate_follow_up`): Generates a single conversational follow-up
@@ -27,7 +27,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from agents.blogging.shared.agent_base import _BlogAgentBase
 from agents.blogging.shared.content_plan import ContentPlan
-from agents.blogging.shared.json_retry import call_json_with_retry
+from agents.blogging.shared.json_retry import run_json_gate
 from strands import Agent
 from temporalio.exceptions import CancelledError
 
@@ -312,10 +312,10 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
     to elicit personal anecdotes from the author.
 
     Uses three specialised LLM roles:
-      - Evaluator: assesses story sufficiency via ``call_json_with_retry``
+      - Evaluator: assesses story sufficiency via ``run_json_gate``
       - Interviewer: generates conversational follow-up questions
       - Narrator: compiles vivid first-person narratives (``_compile_narrative``
-        retries via its own plain-text loop, not ``call_json_with_retry`` —
+        retries via its own plain-text loop, not ``run_json_gate`` —
         left unchanged when the evaluator was migrated)
 
     Preconditions:
@@ -427,7 +427,7 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
             - ``content_plan`` is a populated ``ContentPlan``.
         Postconditions:
             - Returns at most 3 ``StoryGap`` objects.
-            - Uses ``call_json_with_retry`` with ``max_attempts=2``.
+            - Uses ``run_json_gate`` with ``max_attempts=2``.
             - On parse exhaustion, unexpected helper errors, or transient LLM
               transport errors, returns ``[]`` via ``_empty_list_fallback``.
             - Non-object array items are skipped; missing/blank ``seed_question``
@@ -436,20 +436,17 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
         outline_text = self._plan_to_text(content_plan)
         prompt = f"Content plan:\n\n{outline_text}\n\nIdentify story gaps."
 
-        def _agent_factory():
-            return Agent(model=self._model, system_prompt=_FIND_GAPS_SYSTEM)
-
         # Transient LLM errors re-raise from the helper; map them to the same empty
         # fallback here so planning_stage's broad except cannot abandon elicitation
         # mid-flight without clearing interactive story state.
         try:
-            data = call_json_with_retry(
-                _agent_factory,
+            data = run_json_gate(
+                self._model,
+                _FIND_GAPS_SYSTEM,
                 prompt,
                 max_attempts=2,
                 strict_json_suffix=_JSON_RETRY_SUFFIX,
-                on_exhausted=_empty_list_fallback,
-                on_unexpected_error=_empty_list_fallback,
+                fallback_builder=_empty_list_fallback,
                 logger=logger,
             )
         except (LLMRateLimitError, LLMTemporaryError) as e:
@@ -691,7 +688,7 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
         Postconditions:
             - Returns a dict with keys ``sufficient``, ``no_experience``,
               ``story_context``, and ``missing``.
-            - Uses ``call_json_with_retry``; on parse exhaustion, unexpected
+            - Uses ``run_json_gate``; on parse exhaustion, unexpected
               helper errors, transient LLM transport errors, or a non-dict
               payload, returns ``_default_sufficiency_fallback`` so the
               interview loop can continue safely.
@@ -711,19 +708,16 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
             + "\nEvaluate the conversation above. Respond with the JSON object only, no markdown fences."
         )
 
-        def _agent_factory():
-            return Agent(model=self._model, system_prompt=system)
-
         # Same rationale as ``_find_gaps_via_llm``: keep soft fallbacks at this site so
         # transient errors do not escape into planning_stage's skip-on-Exception path.
         try:
-            data = call_json_with_retry(
-                _agent_factory,
+            data = run_json_gate(
+                self._model,
+                system,
                 prompt,
                 max_attempts=2,
                 strict_json_suffix=_JSON_RETRY_SUFFIX,
-                on_exhausted=_default_sufficiency_fallback,
-                on_unexpected_error=_default_sufficiency_fallback,
+                fallback_builder=_default_sufficiency_fallback,
                 logger=logger,
             )
         except (LLMRateLimitError, LLMTemporaryError) as e:
