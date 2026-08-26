@@ -128,12 +128,19 @@ def _run_pipeline_with_tracking(job_id: str, request: FullPipelineRequest) -> No
           Temporal-native ``CancelledError`` escaping the delegated call is
           caught here and terminalized as a cancelled job (never re-raised: the
           bounded async worker pool in ``job_workers.py`` would otherwise catch
-          it with its generic crash handler and mis-record it as failed). Any
-          other exception escaping the delegated call is caught, logged, and
-          turned into a failed job-store entry plus a terminal ``error`` event.
+          it with its generic crash handler and mis-record it as failed). A
+          wrapped/external cancellation surfacing as some other exception type
+          is detected the same way ``run_blog_full_pipeline_job`` detects one
+          (``_is_external_cancellation``, via ``_mark_cancelled_if_external``)
+          and terminalized as cancelled too — this is defensive, since
+          ``run_blog_full_pipeline_job`` already absorbs that case internally
+          and never lets it escape. Any other exception escaping the delegated
+          call is caught, logged, and turned into a failed job-store entry plus
+          a terminal ``error`` event.
     """
     from agents.blogging.api import main as _main
     from agents.blogging.shared.run_pipeline_job import (
+        _mark_cancelled_if_external,
         mark_job_cancelled,
         run_blog_full_pipeline_job,
     )
@@ -153,6 +160,8 @@ def _run_pipeline_with_tracking(job_id: str, request: FullPipelineRequest) -> No
         logger.info("Pipeline cancelled for job %s", job_id)
         mark_job_cancelled(job_id)
     except Exception as e:
+        if _mark_cancelled_if_external(job_id, e):
+            return
         logger.exception("Pipeline failed for job %s", job_id)
         if _main.fail_blog_job is not None:
             _main.fail_blog_job(job_id, error=str(e))
