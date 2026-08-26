@@ -1274,6 +1274,11 @@ def test_classify_symbol_unambiguous_cases() -> None:
     # not treat them as unclassified just because they aren't Yahoo-suffixed.
     assert classify_symbol("DOGE-USDT") == "crypto"
     assert classify_symbol("SOL-USDC") == "crypto"
+    # Bare currency pair outside FOREX_SYMBOLS/FOREX_SYMBOLS_BARE — recognized
+    # by the currency-code heuristic so it isn't silently allowed through an
+    # asset-category pin check as "unclassified".
+    assert classify_symbol("USDNOK") == "forex"
+    assert classify_symbol("usdnok") == "forex"
 
 
 def test_classify_symbol_returns_none_for_ambiguous_or_unknown() -> None:
@@ -1287,6 +1292,10 @@ def test_classify_symbol_returns_none_for_ambiguous_or_unknown() -> None:
     assert classify_symbol("TLT") is None
     # Unknown ticker — don't guess
     assert classify_symbol("NEWCO") is None
+    # Six letters but not two recognized currency codes — still don't guess.
+    assert classify_symbol("NETFLX") is None
+    # Same code repeated isn't a pair.
+    assert classify_symbol("USDUSD") is None
 
 
 def test_find_offcategory_symbols_flags_only_unambiguous_mismatches() -> None:

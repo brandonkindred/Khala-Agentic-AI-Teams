@@ -133,6 +133,31 @@ COMMODITY_SYMBOLS: list[str] = ["GLD", "USO", "SLV", "DBA", "UNG", "PDBC", "DBC"
 # Broad ETFs used as a fallback
 OTHER_SYMBOLS: list[str] = ["GLD", "USO", "TLT", "QQQ", "IWM", "EEM", "GDX", "XLE", "XLF"]
 
+# ISO currency codes recognized by the bare-pair heuristic in classify_symbol,
+# for a currency pair outside FOREX_SYMBOLS/FOREX_SYMBOLS_BARE (e.g. "USDNOK").
+# Deliberately limited to codes that trade as forex majors/minors — a broader
+# set would start colliding with six-letter tickers from other asset classes.
+_FOREX_CURRENCY_CODES: frozenset[str] = frozenset(
+    {
+        "USD",
+        "EUR",
+        "GBP",
+        "JPY",
+        "AUD",
+        "CAD",
+        "NZD",
+        "CHF",
+        "NOK",
+        "SEK",
+        "DKK",
+        "MXN",
+        "ZAR",
+        "SGD",
+        "HKD",
+        "TRY",
+    }
+)
+
 
 def asset_class_default_universe(asset_class: object) -> list[str]:
     """Default symbol universe for an asset class.
@@ -225,6 +250,12 @@ def classify_symbol(symbol: str) -> Optional[str]:
     # pin check) just because it isn't in ``CRYPTO_SYMBOLS`` or Yahoo-suffixed.
     if sym.endswith(("-USD", "-USDT", "-USDC")):
         return "crypto"
+    # Bare currency pair outside the curated lists (e.g. "USDNOK"): six
+    # letters, both halves a recognized currency code, halves distinct.
+    if len(sym) == 6 and sym.isalpha():
+        base, quote = sym[:3], sym[3:]
+        if base != quote and base in _FOREX_CURRENCY_CODES and quote in _FOREX_CURRENCY_CODES:
+            return "forex"
     return None
 
 
