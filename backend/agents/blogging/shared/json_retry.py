@@ -12,7 +12,10 @@ extracts that policy into one parameterized helper, covering every existing
 call site's variant (attempt count, a fresh agent per attempt, backoff, and
 the copy-editor's extra step of unwrapping a wrapped exception before
 classifying its cause) so that callers CAN configure it via parameters
-instead of duplicating the loop.
+instead of duplicating the loop. ``run_json_gate`` goes one step further for
+the common case: it also owns building the ``strands.Agent`` and unwrapping
+a Strands ``EventLoopException``, so a call site only supplies its model,
+prompts, and fallback shape.
 
 Invariants:
     - Exactly one JSON-parse retry policy and one transient-error
@@ -24,6 +27,9 @@ from __future__ import annotations
 import logging
 import time
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Type
+
+from strands import Agent
+from strands.types.exceptions import EventLoopException
 
 from llm_service import LLMJsonParseError, LLMRateLimitError, LLMTemporaryError
 from llm_service.util import extract_json_from_response
@@ -151,3 +157,63 @@ def call_json_with_retry(
     # Unreachable: the loop above always returns or raises before falling through.
     assert last_json_error is not None  # pragma: no cover
     raise last_json_error  # pragma: no cover
+
+
+def _unwrap_event_loop_exception(exc: Exception) -> Exception:
+    """Return the wrapped cause of a Strands ``EventLoopException``, or ``exc`` unchanged."""
+    return exc.original_exception if isinstance(exc, EventLoopException) else exc
+
+
+def run_json_gate(
+    model: Any,
+    system_prompt: str,
+    prompt: str,
+    *,
+    fallback_builder: Callable[[Exception], Dict[str, Any]],
+    strict_json_suffix: str = _DEFAULT_STRICT_JSON_SUFFIX,
+    max_attempts: int = 2,
+    expected_keys: Optional[Sequence[str]] = None,
+    fresh_agent_per_attempt: bool = False,
+    transient_exceptions: Tuple[Type[Exception], ...] = (LLMRateLimitError, LLMTemporaryError),
+    backoff_seconds: Optional[Callable[[int], float]] = None,
+    logger: Optional[logging.Logger] = None,
+) -> Dict[str, Any]:
+    """
+    Build a ``strands.Agent`` and invoke it via :func:`call_json_with_retry`.
+
+    Owns the two pieces of boilerplate every call site otherwise hand-rolls: constructing
+    the ``Agent`` (``Agent(model=model, system_prompt=system_prompt)``) inside the factory
+    ``call_json_with_retry`` requires, and unwrapping a Strands ``EventLoopException`` to its
+    ``original_exception`` before transient-error classification. ``fallback_builder`` is
+    used as both ``on_exhausted`` and ``on_unexpected_error`` — the pattern every current
+    call site needing both hooks already follows (a single fallback shape regardless of
+    which failure produced it).
+
+    Preconditions:
+        - ``model`` is a usable LLM client/model for ``strands.Agent``.
+        - ``system_prompt`` and ``prompt`` are strings; ``prompt`` is non-empty.
+        - ``fallback_builder`` accepts a single ``Exception`` and returns a ``dict``.
+        - ``max_attempts >= 1``.
+
+    Postconditions:
+        - Returns a ``dict``: either a successful JSON parse, or ``fallback_builder``'s
+          result for an exhausted JSON-parse retry or a non-transient unexpected error
+          (including ``Agent`` construction failure).
+        - A transient cause in ``transient_exceptions`` — even when wrapped in
+          ``EventLoopException`` — re-raises unwrapped so the caller's own retry/backoff
+          owns it; it is never passed to ``fallback_builder``.
+    """
+    return call_json_with_retry(
+        lambda: Agent(model=model, system_prompt=system_prompt),
+        prompt,
+        max_attempts=max_attempts,
+        expected_keys=expected_keys,
+        strict_json_suffix=strict_json_suffix,
+        fresh_agent_per_attempt=fresh_agent_per_attempt,
+        transient_exceptions=transient_exceptions,
+        unwrap_exception=_unwrap_event_loop_exception,
+        backoff_seconds=backoff_seconds,
+        on_exhausted=fallback_builder,
+        on_unexpected_error=fallback_builder,
+        logger=logger,
+    )
