@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 # Upper bound on previous-feedback items included in revision prompts.
 # Shared by get_capped_previous_feedback, the draft-stage pipeline, and
-# BlogWriterAgent._build_revise_all_items_prompt.
+# revision.build_revise_all_items_prompt.
 MAX_PREVIOUS_FEEDBACK_ITEMS = 15
 
 
