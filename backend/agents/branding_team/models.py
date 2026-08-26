@@ -40,10 +40,12 @@ each class's docstring.
 
 from __future__ import annotations
 
+import types
 from enum import Enum
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional, Union, get_args, get_origin
 
 from pydantic import BaseModel, Field, create_model
+from pydantic.fields import FieldInfo
 
 from shared.hitl.models import HumanReview as HumanReview  # noqa: F401 — re-export
 
@@ -216,6 +218,139 @@ _STRICT_TWIN_DOC_SUFFIX = (
 
 
 # ---------------------------------------------------------------------------
+# All-Optional derived-twin pattern
+# ---------------------------------------------------------------------------
+# Unlike ``_derive_strict_variant`` (a *subclass* that tightens a subset of
+# fields), ``_optionalize_model`` builds a *from-scratch* twin whose every
+# field is optional/defaulted — for request DTOs and extractor payloads that
+# must represent "nothing supplied" without redeclaring the source model's
+# field list (and risking drift from it). See ``MissionUpdate`` below and
+# ``api.models._BrandingMissionFieldsPartial``, its two call sites.
+
+
+def _unwrap_noneable(annotation: Any) -> Any:
+    """Return the non-None arm of ``Optional[T]`` / ``T | None``, else ``annotation``.
+
+    Preconditions:
+        - ``annotation`` is a typing annotation object.
+    Postconditions:
+        - If ``annotation`` is a union of exactly one non-None type and ``None``,
+          return that non-None type; otherwise return ``annotation`` unchanged.
+    """
+    origin = get_origin(annotation)
+    if origin is Union or origin is types.UnionType:
+        args = get_args(annotation)
+        non_none = [a for a in args if a is not type(None)]
+        if len(args) == len(non_none) + 1 and len(non_none) == 1:
+            return non_none[0]
+    return annotation
+
+
+def _constraint_kwargs(info: FieldInfo) -> dict[str, Any]:
+    """Copy validation metadata that must survive optionalization.
+
+    Preconditions:
+        - ``info`` is a Pydantic v2 ``FieldInfo``.
+    Postconditions:
+        - Returned dict contains only constraint keys present on ``info`` with
+          non-``None`` values from the supported set below (including
+          ``annotated_types`` metadata such as ``MinLen`` / ``MaxLen``).
+    """
+    out: dict[str, Any] = {}
+    for key in (
+        "min_length",
+        "max_length",
+        "ge",
+        "le",
+        "gt",
+        "lt",
+        "pattern",
+        "description",
+        "title",
+    ):
+        value = getattr(info, key, None)
+        if value is not None:
+            out[key] = value
+    # Pydantic v2 stores many Field(...) constraints on ``metadata`` (e.g. MinLen)
+    # rather than as direct FieldInfo attributes.
+    for item in info.metadata:
+        min_length = getattr(item, "min_length", None)
+        if min_length is not None and "min_length" not in out:
+            out["min_length"] = min_length
+        max_length = getattr(item, "max_length", None)
+        if max_length is not None and "max_length" not in out:
+            out["max_length"] = max_length
+        ge = getattr(item, "ge", None)
+        if ge is not None and "ge" not in out:
+            out["ge"] = ge
+        le = getattr(item, "le", None)
+        if le is not None and "le" not in out:
+            out["le"] = le
+        gt = getattr(item, "gt", None)
+        if gt is not None and "gt" not in out:
+            out["gt"] = gt
+        lt = getattr(item, "lt", None)
+        if lt is not None and "lt" not in out:
+            out["lt"] = lt
+    if info.description is not None and "description" not in out:
+        out["description"] = info.description
+    if info.title is not None and "title" not in out:
+        out["title"] = info.title
+    return out
+
+
+def _optionalize_model(
+    base: type[BaseModel],
+    *,
+    name: str,
+    exclude: frozenset[str] = frozenset(),
+    descriptions: Optional[Dict[str, str]] = None,
+) -> type[BaseModel]:
+    """Build an all-Optional twin of ``base`` with defaults forced to ``None``.
+
+    Preconditions:
+        - ``base`` is a Pydantic ``BaseModel`` subclass with a non-empty
+          ``model_fields`` mapping.
+        - ``name`` is a non-empty Python identifier string.
+        - ``exclude`` names only fields that actually exist on ``base``.
+        - When given, ``descriptions`` supplies a non-blank description for
+          every field of ``base`` not in ``exclude`` (and no others) — used
+          to satisfy callers (e.g. ``prompt_spec.py``'s schema-derived
+          prompt rendering) that require every field of a model to declare
+          a description, without hand-duplicating ``base``'s field list to
+          add them.
+    Postconditions:
+        - Returned model has the same field names as ``base`` minus ``exclude``.
+        - Every field is annotated ``Optional[...]`` with default ``None``.
+        - Create-path defaults from ``base`` are not copied.
+        - Supported Field constraints (e.g. ``min_length``) are preserved.
+        - When ``descriptions`` is given, each returned field's description
+          is ``descriptions[field_name]`` (overriding ``base``'s, if any).
+    """
+    assert issubclass(base, BaseModel)
+    assert name.isidentifier()
+    assert base.model_fields, "base model must declare fields"
+    assert exclude <= set(base.model_fields), "exclude must name only base's fields"
+    kept_names = set(base.model_fields) - exclude
+    assert descriptions is None or set(descriptions) == kept_names, (
+        "descriptions must cover exactly base's non-excluded fields"
+    )
+
+    field_definitions: dict[str, Any] = {}
+    for field_name, field_info in base.model_fields.items():
+        if field_name in exclude:
+            continue
+        inner = _unwrap_noneable(field_info.annotation)
+        kwargs = _constraint_kwargs(field_info)
+        if descriptions is not None:
+            description = descriptions[field_name]
+            assert description.strip(), f"descriptions[{field_name!r}] must be non-blank"
+            kwargs["description"] = description
+        field_definitions[field_name] = (Optional[inner], Field(default=None, **kwargs))
+    return create_model(name, __base__=BaseModel, **field_definitions)
+
+
+# ---------------------------------------------------------------------------
 # Shared models
 # ---------------------------------------------------------------------------
 
@@ -345,6 +480,81 @@ class BrandingMission(BrandingMissionFields):
     visual_style: str = ""  # e.g. "minimalist", "maximalist", "editorial"
     typography_preference: str = ""  # e.g. "geometric sans-serif", "humanist serif"
     interface_density: str = ""  # e.g. "spacious/minimalist", "dense/information-rich"
+
+
+# Field-for-field descriptions for ``MissionUpdate``'s ``_optionalize_model``
+# twin below — new content (``BrandingMission``'s own fields carry no
+# descriptions), not a duplicate of the field list itself. Keys must match
+# ``BrandingMission.model_fields`` minus ``wiki_path`` exactly (asserted by
+# ``_optionalize_model``).
+_MISSION_UPDATE_FIELD_DESCRIPTIONS: Dict[str, str] = {
+    "company_name": "the company or product name, if newly learned or changed",
+    "company_description": (
+        "a sentence or two on what the company does and for whom, if newly learned"
+    ),
+    "target_audience": "the primary target audience, if newly learned or changed",
+    "values": "the complete current list of brand values the user has shared so far",
+    "differentiators": "the complete current list of competitive differentiators shared so far",
+    "desired_voice": "the brand's desired voice/tone, if newly learned or changed",
+    "existing_brand_material": (
+        "the complete current list of existing brand material the user has referenced"
+    ),
+    "color_inspiration": "the complete current list of color inspiration references shared so far",
+    "color_palettes": "candidate color palettes presented to the user for selection, if any",
+    "selected_palette_index": (
+        "the index into color_palettes the user selected, or null if none/unselected"
+    ),
+    "visual_style": "the desired visual style (e.g. minimalist, maximalist), if newly learned",
+    "typography_preference": (
+        "the desired typography direction (e.g. geometric sans-serif), if newly learned"
+    ),
+    "interface_density": ("the desired interface density (e.g. spacious, dense), if newly learned"),
+}
+
+# ``wiki_path`` is excluded: it's a pipeline-populated link to the brand's
+# wiki page, not a field the chat assistant's extractor reads/writes.
+_MissionUpdateFields = _optionalize_model(
+    BrandingMission,
+    name="_MissionUpdateFields",
+    exclude=frozenset({"wiki_path"}),
+    descriptions=_MISSION_UPDATE_FIELD_DESCRIPTIONS,
+)
+
+
+class MissionUpdate(_MissionUpdateFields):
+    """One turn's worth of the branding chat extractor's ``BrandingMission`` deltas.
+
+    Mission fields are inherited from ``_MissionUpdateFields`` — an
+    ``_optionalize_model`` twin of ``BrandingMission`` (minus ``wiki_path``,
+    a pipeline-only field) — rather than redeclared here, so this schema
+    cannot silently drift from the canonical mission model or from
+    ``assistant.agent``'s ``_MISSION_STR_FIELDS``/``_MISSION_LIST_FIELDS``/
+    ``_MISSION_STRUCTURED_FIELDS`` (which enumerate the same field set).
+    ``suggested_questions`` is the extractor's own additional output, added
+    here since it has no ``BrandingMission`` counterpart to derive from.
+
+    Every field — inherited and own — is ``Optional`` so an all-empty
+    payload (the extractor found nothing new this turn) validates cleanly,
+    and every field declares a non-blank ``Field(description=...)`` so this
+    model can serve directly as an ``AgentPromptSpec.structured_output``
+    (see ``prompt_spec.py``'s ``_field_lines_from_model``, which asserts
+    exactly that).
+
+    Preconditions:
+        ``selected_palette_index``, when not ``None``, is a plain ``int``
+        (index bounds-checking against ``color_palettes`` is the merge
+        layer's responsibility, not this schema's — the same division of
+        labor ``BrandingMission`` itself uses).
+    Postconditions:
+        Constructing with no arguments (or with every field explicitly
+        ``None``/empty) succeeds and represents "nothing learned this turn".
+        Any subset of fields may be populated independently of the others.
+    """
+
+    suggested_questions: Optional[List[str]] = Field(
+        default=None,
+        description="up to a few natural-language follow-up questions to ask the user next",
+    )
 
 
 # ---------------------------------------------------------------------------

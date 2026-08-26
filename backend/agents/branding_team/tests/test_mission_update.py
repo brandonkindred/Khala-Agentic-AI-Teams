@@ -11,8 +11,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from branding_team.assistant.models import MissionUpdate
-from branding_team.models import ColorPalette
+from branding_team.models import BrandingMission, ColorPalette, MissionUpdate
 
 
 def test_all_empty_payload_validates() -> None:
@@ -120,3 +119,23 @@ def test_field_set_matches_mission_and_suggestions_fields() -> None:
         | {"suggested_questions"}
     )
     assert set(MissionUpdate.model_fields) == expected
+
+
+def test_mission_fields_are_inherited_from_optionalized_branding_mission() -> None:
+    """Mission fields must be inherited from the generated twin, not redeclared.
+
+    Mirrors ``test_update_brand_request_mission_fields_come_from_optionalized_base``
+    in ``test_branding_mission_fields.py`` — same ``_optionalize_model`` pattern,
+    applied to ``BrandingMission`` instead of ``BrandingMissionFields``.
+    """
+    from branding_team.models import _MissionUpdateFields
+
+    assert issubclass(MissionUpdate, _MissionUpdateFields)
+    assert set(_MissionUpdateFields.model_fields) == set(BrandingMission.model_fields) - {
+        "wiki_path"
+    }
+
+
+def test_wiki_path_is_not_a_mission_update_field() -> None:
+    """``wiki_path`` is a pipeline output, not chat-editable — must not leak in."""
+    assert "wiki_path" not in MissionUpdate.model_fields

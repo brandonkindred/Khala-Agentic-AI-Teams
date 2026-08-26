@@ -12,17 +12,16 @@ so it never participates in an import cycle.
 
 from __future__ import annotations
 
-import types
-from typing import Any, Dict, List, Optional, Union, get_args, get_origin
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, create_model
-from pydantic.fields import FieldInfo
+from pydantic import BaseModel, Field
 
 from branding_team.models import (
     BrandCheckRequest,
     BrandingMission,
     BrandingMissionFields,
     TeamOutput,
+    _optionalize_model,
 )
 from branding_team.shared.job_store import JOB_STATUS_PENDING
 from shared.job_contracts import JobListItemBase, JobStatusResponseBase
@@ -52,104 +51,9 @@ class CreateBrandRequest(BrandingMissionFields):
     conversation_id: Optional[str] = None
 
 
-def _unwrap_noneable(annotation: Any) -> Any:
-    """Return the non-None arm of ``Optional[T]`` / ``T | None``, else ``annotation``.
-
-    Preconditions:
-        - ``annotation`` is a typing annotation object.
-    Postconditions:
-        - If ``annotation`` is a union of exactly one non-None type and ``None``,
-          return that non-None type; otherwise return ``annotation`` unchanged.
-    """
-    origin = get_origin(annotation)
-    if origin is Union or origin is types.UnionType:
-        args = get_args(annotation)
-        non_none = [a for a in args if a is not type(None)]
-        if len(args) == len(non_none) + 1 and len(non_none) == 1:
-            return non_none[0]
-    return annotation
-
-
-def _constraint_kwargs(info: FieldInfo) -> dict[str, Any]:
-    """Copy validation metadata that must survive optionalization.
-
-    Preconditions:
-        - ``info`` is a Pydantic v2 ``FieldInfo``.
-    Postconditions:
-        - Returned dict contains only constraint keys present on ``info`` with
-          non-``None`` values from the supported set below (including
-          ``annotated_types`` metadata such as ``MinLen`` / ``MaxLen``).
-    """
-    out: dict[str, Any] = {}
-    for key in (
-        "min_length",
-        "max_length",
-        "ge",
-        "le",
-        "gt",
-        "lt",
-        "pattern",
-        "description",
-        "title",
-    ):
-        value = getattr(info, key, None)
-        if value is not None:
-            out[key] = value
-    # Pydantic v2 stores many Field(...) constraints on ``metadata`` (e.g. MinLen)
-    # rather than as direct FieldInfo attributes.
-    for item in info.metadata:
-        min_length = getattr(item, "min_length", None)
-        if min_length is not None and "min_length" not in out:
-            out["min_length"] = min_length
-        max_length = getattr(item, "max_length", None)
-        if max_length is not None and "max_length" not in out:
-            out["max_length"] = max_length
-        ge = getattr(item, "ge", None)
-        if ge is not None and "ge" not in out:
-            out["ge"] = ge
-        le = getattr(item, "le", None)
-        if le is not None and "le" not in out:
-            out["le"] = le
-        gt = getattr(item, "gt", None)
-        if gt is not None and "gt" not in out:
-            out["gt"] = gt
-        lt = getattr(item, "lt", None)
-        if lt is not None and "lt" not in out:
-            out["lt"] = lt
-    if info.description is not None and "description" not in out:
-        out["description"] = info.description
-    if info.title is not None and "title" not in out:
-        out["title"] = info.title
-    return out
-
-
-def _optionalize_model(base: type[BaseModel], *, name: str) -> type[BaseModel]:
-    """Build an all-Optional twin of ``base`` with defaults forced to ``None``.
-
-    Preconditions:
-        - ``base`` is a Pydantic ``BaseModel`` subclass with a non-empty
-          ``model_fields`` mapping.
-        - ``name`` is a non-empty Python identifier string.
-    Postconditions:
-        - Returned model has the same field names as ``base``.
-        - Every field is annotated ``Optional[...]`` with default ``None``.
-        - Create-path defaults from ``base`` are not copied.
-        - Supported Field constraints (e.g. ``min_length``) are preserved.
-    """
-    assert issubclass(base, BaseModel)
-    assert name.isidentifier()
-    assert base.model_fields, "base model must declare fields"
-
-    field_definitions: dict[str, Any] = {}
-    for field_name, field_info in base.model_fields.items():
-        inner = _unwrap_noneable(field_info.annotation)
-        field_definitions[field_name] = (
-            Optional[inner],
-            Field(default=None, **_constraint_kwargs(field_info)),
-        )
-    return create_model(name, __base__=BaseModel, **field_definitions)
-
-
+# ``_optionalize_model`` (and its ``_unwrap_noneable``/``_constraint_kwargs``
+# helpers) lives in ``branding_team.models`` — the domain models' single
+# source of truth — alongside its other consumer, ``MissionUpdate``.
 _BrandingMissionFieldsPartial = _optionalize_model(
     BrandingMissionFields, name="_BrandingMissionFieldsPartial"
 )
