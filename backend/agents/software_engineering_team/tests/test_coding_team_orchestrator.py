@@ -44,30 +44,12 @@ from software_engineering_team.team_routing import (
 )
 from software_engineering_team.worker_factory import _devops_raw_llm_client, _v2_text_mode_llm
 
-GIT_UTILS = "shared.git.git_utils"
-
+from ._coding_team_orchestrator_doubles import GIT_UTILS
+from ._coding_team_orchestrator_doubles import DefaultGroomTaskMixin as _DefaultGroomTaskMixin
+from ._coding_team_orchestrator_doubles import FakeWorktreeManager as _FakeWorktreeManager
+from ._coding_team_orchestrator_doubles import patch_git as _patch_git
 
 # --------------------------------------------------------------------------- stubs
-
-
-class _DefaultGroomTaskMixin:
-    """Ungroomed-default ``run_groom_task`` for Tech-Lead stubs that don't care about grooming.
-
-    Mirrors the real ``run_groom_task``'s own default/fallback shape, so mixing this in changes no
-    existing assertion for a stub that doesn't otherwise override it.
-    """
-
-    def run_groom_task(
-        self, task_id, task_title, task_description, task_dependencies, plan_context
-    ):
-        return {
-            "acceptance_criteria": [],
-            "out_of_scope": "",
-            "description_enriched": task_description,
-            "priority": "medium",
-            "subtasks": [],
-            "task_dependencies": task_dependencies,
-        }
 
 
 class StubTechLead:
@@ -140,36 +122,6 @@ class StubWorker:
         }
 
 
-class _FakeWorktreeManager:
-    """Test double for coding_team.worktree_manager.WorktreeManager.
-
-    These orchestrator tests stub the implementation workers entirely
-    (StubWorker never touches git), so a real WorktreeManager would pay for
-    (and, for the ~20 call sites with no _patch_git, actually attempt) real
-    `git worktree add` calls against a plain tmp_path with no `.git`. This
-    double gives each agent_id a distinct child directory under the swarm's
-    own tmp_path instead — no git, no filesystem writes outside tmp_path's own
-    pytest-managed cleanup. Real worktree mechanics are covered by
-    test_worktree_manager.py against WorktreeManager itself.
-    """
-
-    def __init__(self, repo_path: Path, agent_ids):
-        self._paths = {aid: Path(repo_path) / f"_wt_{aid}" for aid in agent_ids}
-        self.prepare_calls = 0
-        self.cleanup_calls = 0
-
-    def prepare(self) -> None:
-        self.prepare_calls += 1
-        for path in self._paths.values():
-            path.mkdir(parents=True, exist_ok=True)
-
-    def path_for(self, agent_id: str) -> Path:
-        return self._paths[agent_id]
-
-    def cleanup(self) -> None:
-        self.cleanup_calls += 1
-
-
 def _make_swarm(tmp_path, tech_lead, workers, *, spec_content="", restored_review_cache=None):
     graph = TaskGraphService(job_id="j1")
     swarm = CodingTeamSwarm(
@@ -212,11 +164,6 @@ def test_coding_team_swarm_is_team_lead_shared_state(tmp_path):
     assert swarm.llm_getter is getter
     assert swarm.shared_config == {}
     assert swarm._status_callback is None
-
-
-def _patch_git(monkeypatch, diff: str = "", merge=(True, "ok")):
-    monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: diff)
-    monkeypatch.setattr(f"{GIT_UTILS}.merge_branch", lambda *a, **k: merge)
 
 
 # --------------------------------------------------------------------------- tests

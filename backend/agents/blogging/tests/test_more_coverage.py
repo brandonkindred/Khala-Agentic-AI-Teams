@@ -20,7 +20,7 @@ import pytest
 
 def test_fact_check_run_happy(monkeypatch, tmp_path: Path) -> None:
     from agents.blogging.blog_fact_check_agent import BlogFactCheckAgent
-    from agents.blogging.blog_fact_check_agent import agent as fc_mod
+    from agents.blogging.shared import json_retry as jr_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -38,7 +38,7 @@ def test_fact_check_run_happy(monkeypatch, tmp_path: Path) -> None:
                 }
             )
 
-    monkeypatch.setattr(fc_mod, "Agent", _Agent)
+    monkeypatch.setattr(jr_mod, "Agent", _Agent)
     a = BlogFactCheckAgent(llm_client=object())
     report = a.run(
         "draft text",
@@ -51,7 +51,7 @@ def test_fact_check_run_happy(monkeypatch, tmp_path: Path) -> None:
 
 def test_fact_check_run_normalizes_invalid_status(monkeypatch, tmp_path: Path) -> None:
     from agents.blogging.blog_fact_check_agent import BlogFactCheckAgent
-    from agents.blogging.blog_fact_check_agent import agent as fc_mod
+    from agents.blogging.shared import json_retry as jr_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -60,7 +60,7 @@ def test_fact_check_run_normalizes_invalid_status(monkeypatch, tmp_path: Path) -
         def __call__(self, prompt):
             return json.dumps({"claims_status": "weird", "risk_status": "weird", "notes": None})
 
-    monkeypatch.setattr(fc_mod, "Agent", _Agent)
+    monkeypatch.setattr(jr_mod, "Agent", _Agent)
     a = BlogFactCheckAgent(llm_client=object())
     report = a.run("draft", work_dir=tmp_path)
     assert report.claims_status == "FAIL"
@@ -69,7 +69,7 @@ def test_fact_check_run_normalizes_invalid_status(monkeypatch, tmp_path: Path) -
 
 def test_fact_check_run_json_retry_then_fallback(monkeypatch, tmp_path: Path) -> None:
     from agents.blogging.blog_fact_check_agent import BlogFactCheckAgent
-    from agents.blogging.blog_fact_check_agent import agent as fc_mod
+    from agents.blogging.shared import json_retry as jr_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -78,7 +78,7 @@ def test_fact_check_run_json_retry_then_fallback(monkeypatch, tmp_path: Path) ->
         def __call__(self, prompt):
             return "not json"
 
-    monkeypatch.setattr(fc_mod, "Agent", _Agent)
+    monkeypatch.setattr(jr_mod, "Agent", _Agent)
     a = BlogFactCheckAgent(llm_client=object())
     report = a.run("draft", work_dir=tmp_path)
     assert report.claims_status == "FAIL"
@@ -87,7 +87,7 @@ def test_fact_check_run_json_retry_then_fallback(monkeypatch, tmp_path: Path) ->
 
 def test_fact_check_run_llm_exception_raises(monkeypatch) -> None:
     from agents.blogging.blog_fact_check_agent import BlogFactCheckAgent
-    from agents.blogging.blog_fact_check_agent import agent as fc_mod
+    from agents.blogging.shared import json_retry as jr_mod
     from agents.blogging.shared.errors import FactCheckError
 
     class _Agent:
@@ -97,15 +97,15 @@ def test_fact_check_run_llm_exception_raises(monkeypatch) -> None:
         def __call__(self, prompt):
             raise RuntimeError("connection refused")
 
-    monkeypatch.setattr(fc_mod, "Agent", _Agent)
+    monkeypatch.setattr(jr_mod, "Agent", _Agent)
     a = BlogFactCheckAgent(llm_client=object())
     with pytest.raises(FactCheckError):
         a.run("draft")
 
 
 def test_fact_check_run_from_work_dir(monkeypatch, tmp_path: Path) -> None:
-    from agents.blogging.blog_fact_check_agent import agent as fc_mod
     from agents.blogging.blog_fact_check_agent.agent import run_fact_check_from_work_dir
+    from agents.blogging.shared import json_retry as jr_mod
 
     (tmp_path / "final.md").write_text("# Draft\nbody")
     (tmp_path / "allowed_claims.json").write_text(
@@ -119,15 +119,15 @@ def test_fact_check_run_from_work_dir(monkeypatch, tmp_path: Path) -> None:
         def __call__(self, prompt):
             return json.dumps({"claims_status": "PASS", "risk_status": "PASS", "notes": "ok"})
 
-    monkeypatch.setattr(fc_mod, "Agent", _Agent)
+    monkeypatch.setattr(jr_mod, "Agent", _Agent)
     out = run_fact_check_from_work_dir(tmp_path, llm_client=object())
     assert out.claims_status == "PASS"
 
 
 def test_fact_check_run_from_work_dir_fallback_draft(monkeypatch, tmp_path: Path) -> None:
     """When final.md doesn't exist, try draft_v2.md then draft_v1.md."""
-    from agents.blogging.blog_fact_check_agent import agent as fc_mod
     from agents.blogging.blog_fact_check_agent.agent import run_fact_check_from_work_dir
+    from agents.blogging.shared import json_retry as jr_mod
 
     (tmp_path / "draft_v1.md").write_text("# Draft v1\nbody")
 
@@ -138,7 +138,7 @@ def test_fact_check_run_from_work_dir_fallback_draft(monkeypatch, tmp_path: Path
         def __call__(self, prompt):
             return json.dumps({"claims_status": "PASS", "risk_status": "PASS"})
 
-    monkeypatch.setattr(fc_mod, "Agent", _Agent)
+    monkeypatch.setattr(jr_mod, "Agent", _Agent)
     out = run_fact_check_from_work_dir(tmp_path, llm_client=object())
     assert out.claims_status == "PASS"
 

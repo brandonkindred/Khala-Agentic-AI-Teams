@@ -877,6 +877,100 @@ def test_governance_phase_task_excludes_channel_activation_context() -> None:
     assert "CHANNEL_ACTIVATION_MARKER" not in task
 
 
+def test_phase_task_explicit_empty_context_phases_excludes_all_prior_context(
+    monkeypatch,
+) -> None:
+    """An explicit ``context_phases=()`` deliberately means "no upstream
+    context" and must strip every ``prior_outputs`` entry -- contrast with
+    the default (``None``/omitted), under which every entry is included.
+    This is the None-vs-() distinction ``_PhaseSpec.context_phases`` exists
+    to make expressible."""
+    import branding_team.orchestrator as orch_mod
+
+    monkeypatch.setitem(
+        orch_mod._PHASE_SPEC,
+        BrandPhase.NARRATIVE_MESSAGING,
+        orch_mod._PHASE_SPEC[BrandPhase.NARRATIVE_MESSAGING]._replace(context_phases=()),
+    )
+
+    mission = make_mission()
+    prior_outputs = {
+        BrandPhase.STRATEGIC_CORE.value: {"marker": "STRATEGIC_MARKER"},
+        BrandPhase.VISUAL_IDENTITY.value: {"marker": "VISUAL_MARKER"},
+    }
+    task = orch_phase_task(mission, BrandPhase.NARRATIVE_MESSAGING, prior_outputs)
+
+    assert "STRATEGIC_MARKER" not in task
+    assert "VISUAL_MARKER" not in task
+    assert "upstream" not in task.lower()
+
+
+def _pre_migration_phase_task(mission, phase, prior_outputs):
+    """Oracle mirroring ``_phase_task``'s pre-#7348 filtering condition
+    (``if spec.context_phases:``), which treated the then-default ``()`` and
+    any falsy value as "not configured -- include everything." Kept
+    deliberately separate from the production function's current
+    ``is not None`` check so the regression test below proves behavioral
+    equivalence rather than assuming it."""
+    import json
+
+    from branding_team.graphs.shared import serialize_mission
+    from branding_team.orchestrator import _PHASE_SPEC
+
+    spec = _PHASE_SPEC[phase]
+    if spec.context_phases:  # old truthiness check, pre-#7348
+        allowed = {p.value for p in spec.context_phases}
+        prior_outputs = {k: v for k, v in prior_outputs.items() if k in allowed}
+
+    base = (
+        "Create a comprehensive brand strategy for the following company.\n\n"
+        f"Branding Mission:\n{serialize_mission(mission)}"
+    )
+    if prior_outputs:
+        blocks = "\n\n".join(
+            f"### {name} (approved prior-phase output) ###\n"
+            f"{json.dumps(payload, indent=2, default=str)}"
+            for name, payload in prior_outputs.items()
+        )
+        base += (
+            "\n\nContext from completed upstream phases — build on these and do "
+            f"not contradict them:\n{blocks}"
+        )
+    return base
+
+
+@pytest.mark.parametrize(
+    "phase",
+    [
+        BrandPhase.STRATEGIC_CORE,
+        BrandPhase.NARRATIVE_MESSAGING,
+        BrandPhase.VISUAL_IDENTITY,
+        BrandPhase.CHANNEL_ACTIVATION,
+        BrandPhase.GOVERNANCE,
+    ],
+)
+def test_phase_task_matches_pre_migration_oracle_for_real_config(phase) -> None:
+    """For all 5 real, currently-configured phases (none of which used the
+    then-inexpressible ``context_phases=()`` before #7348), ``_phase_task``'s
+    output must be byte-identical to what the pre-migration
+    ``if spec.context_phases:`` truthiness check would have produced for the
+    same inputs -- proving the None-vs-() mechanism migration (#7348) changed
+    nothing about any phase's actual behavior."""
+    mission = make_mission()
+    prior_outputs = {
+        BrandPhase.STRATEGIC_CORE.value: {"marker": "STRATEGIC_MARKER"},
+        BrandPhase.NARRATIVE_MESSAGING.value: {"marker": "NARRATIVE_MARKER"},
+        BrandPhase.VISUAL_IDENTITY.value: {"marker": "VISUAL_MARKER"},
+        BrandPhase.CHANNEL_ACTIVATION.value: {"marker": "CHANNEL_MARKER"},
+    }
+    prior_outputs.pop(phase.value, None)  # a phase never sees its own output
+
+    actual = orch_phase_task(mission, phase, prior_outputs)
+    expected = _pre_migration_phase_task(mission, phase, prior_outputs)
+
+    assert actual == expected
+
+
 def test_run_single_phase_rejects_non_runnable_phase() -> None:
     from branding_team.orchestrator import BrandingTeamOrchestrator
 

@@ -22,7 +22,7 @@ from agents.blogging.shared.content_planning_loop import (
     run_content_planning_loop,
 )
 from agents.blogging.shared.content_profile import LengthPolicy
-from agents.blogging.shared.json_retry import call_json_with_retry
+from agents.blogging.shared.json_retry import run_json_gate
 from pydantic import ValidationError
 from strands import Agent
 from strands.types.exceptions import EventLoopException
@@ -471,7 +471,7 @@ class BlogWriterAgent(_BlogAgentBase):
             - Transient LLM transport errors (``LLMRateLimitError`` /
               ``LLMTemporaryError``), including when strands wraps them in
               ``EventLoopException``, propagate unwrapped from
-              ``call_json_with_retry`` so the draft-stage retry funnel can catch them.
+              ``run_json_gate`` so the draft-stage retry funnel can catch them.
         Raises:
             ValueError: if ``prompt`` is not a non-empty string.
         """
@@ -483,33 +483,16 @@ class BlogWriterAgent(_BlogAgentBase):
             'Keys: "draft" (string — the full revised blog post in Markdown).'
         )
 
-        def _agent_factory():
-            # Construct Agent inside the invoker so TypeError/ValueError from a
-            # bad model/config land in call_json_with_retry's try block and hit
-            # on_unexpected_error (preserving the prior keep-original behavior).
-            model = self._model
-
-            def _invoke(prompt: str):
-                return Agent(model=model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)(
-                    prompt
-                )
-
-            return _invoke
-
-        def _unwrap(exc: Exception) -> Exception:
-            return exc.original_exception if isinstance(exc, EventLoopException) else exc
-
-        def _empty_fallback(_exc: Exception) -> dict:
-            return {}
-
-        data = call_json_with_retry(
-            _agent_factory,
+        # fresh_agent_per_attempt=True preserves the prior behavior of constructing a
+        # new Agent for every attempt (including retries after a JSON-parse failure).
+        data = run_json_gate(
+            self._model,
+            system_prompt or WRITING_SYSTEM_PROMPT,
             prompt + _SOFT_JSON_INSTRUCTION,
             max_attempts=2,
             strict_json_suffix=strict_json_suffix,
-            unwrap_exception=_unwrap,
-            on_exhausted=_empty_fallback,
-            on_unexpected_error=_empty_fallback,
+            fresh_agent_per_attempt=True,
+            fallback_builder=lambda e: {},
             logger=logger,
         )
         raw_draft = data.get("draft") if isinstance(data, dict) else None
