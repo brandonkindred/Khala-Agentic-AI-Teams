@@ -218,6 +218,7 @@ def test_research_agent_run_checkpoints_candidates_after_fresh_search(
     step 3 (search) computed ``candidates`` but never persisted them, so an
     AgentCache-backed retry after this point still re-ran every web search.
     """
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
     from agents.blogging.blog_research_agent.agent_cache import AgentCache
     from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
@@ -235,6 +236,10 @@ def test_research_agent_run_checkpoints_candidates_after_fresh_search(
     mock_search = MagicMock()
     mock_search.search.return_value = []
     a.web_search = mock_search
+    # Stub arXiv rather than letting the real query run: a live search can return
+    # non-empty results depending on network access/query text, which would make
+    # the academic_papers assertion below environment-dependent.
+    monkeypatch.setattr(ResearchAgent, "_fetch_academic_papers", lambda self, b: [])
 
     a.run(brief)
 
@@ -258,6 +263,7 @@ def test_research_agent_run_resumes_from_empty_candidates_checkpoint(monkeypatch
     cached_state.candidates`), so an empty-but-completed candidates checkpoint looked
     identical to a missing one and the web searches ran again anyway.
     """
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
     from agents.blogging.blog_research_agent.agent_cache import AgentCache
     from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
@@ -272,6 +278,8 @@ def test_research_agent_run_resumes_from_empty_candidates_checkpoint(monkeypatch
     mock_search = MagicMock()
     mock_search.search.return_value = []
     a.web_search = mock_search
+    # Stub arXiv so this test doesn't depend on live network access.
+    monkeypatch.setattr(ResearchAgent, "_fetch_academic_papers", lambda self, b: [])
 
     a.run(brief)
 
