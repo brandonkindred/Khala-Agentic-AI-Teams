@@ -242,6 +242,19 @@ def test_run_json_gate_success_on_first_attempt(monkeypatch):
     assert factory.agents[0].system_prompt == "a system prompt"
 
 
+def test_run_json_gate_retry_then_success_reuses_same_agent(monkeypatch):
+    """A JSON-parse retry (default fresh_agent_per_attempt=False) reuses one Agent instance."""
+    factory = _FakeStrandsAgentFactory(["not json", '{"ok": true}'])
+    monkeypatch.setattr(json_retry_module, "Agent", factory)
+    data = run_json_gate("model", "system", "prompt", max_attempts=2)
+    assert data == {"ok": True}
+    assert len(factory.agents) == 1
+    agent = factory.agents[0]
+    assert agent.calls[0] == "prompt"
+    assert agent.calls[1] != "prompt"
+    assert agent.calls[1].startswith("prompt")
+
+
 def test_run_json_gate_exhausted_uses_fallback_builder(monkeypatch):
     """When on_exhausted/on_unexpected_error are omitted, fallback_builder covers both."""
     factory = _FakeStrandsAgentFactory(["not json", "still not json"])
