@@ -36,6 +36,7 @@ import time
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Type
 
 from strands import Agent
+from strands.models.model import Model
 from strands.types.exceptions import EventLoopException
 
 from llm_service import LLMJsonParseError, LLMRateLimitError, LLMTemporaryError
@@ -172,7 +173,7 @@ def _unwrap_event_loop_exception(exc: Exception) -> Exception:
 
 
 def run_json_gate(
-    model: Any,
+    model: Model,
     system_prompt: str,
     prompt: str,
     *,
@@ -196,6 +197,14 @@ def run_json_gate(
     error's cause — callers never need to declare their own ``_unwrap``
     closure for this.
 
+    ``model`` must already be resolved through the centralized ``llm_service``
+    stack (e.g. ``llm_service.get_strands_model("blog")``) — ``run_json_gate``
+    performs no model resolution of its own, deliberately matching every
+    existing call site's convention of resolving a model once per agent
+    instance (``_BlogAgentBase.__init__``'s ``self._model``) and reusing it
+    across every JSON-gate call that agent makes, rather than re-resolving on
+    each call.
+
     ``fallback_builder``, if given, is used as the default fallback for
     whichever of ``on_exhausted``/``on_unexpected_error`` the caller leaves
     unset; an explicitly supplied ``on_exhausted`` or ``on_unexpected_error``
@@ -216,7 +225,9 @@ def run_json_gate(
         - ``max_attempts >= 1``.
         - ``prompt`` is a non-empty string.
         - ``system_prompt`` is a string (may be empty).
-        - ``model`` is a value acceptable to ``strands.Agent(model=...)``.
+        - ``model`` is a ``strands.models.model.Model`` instance already
+          resolved via ``llm_service`` (e.g. ``get_strands_model``); this
+          function does not perform resolution itself.
         - ``fallback_builder``, ``on_exhausted``, and ``on_unexpected_error``,
           when given, are callables accepting one exception argument.
 
