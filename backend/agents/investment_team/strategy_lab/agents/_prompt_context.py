@@ -9,8 +9,14 @@ shows the LLM the current spec (``refinement.py``, ``design_review.py``,
 ``analysis.py``). Both are extracted here so a wording or computation
 change lands in one place instead of silently drifting across call sites.
 
+``bound_history`` is a third, standalone helper: a bounding policy for
+prior-round history (last N entries verbatim plus a rolling summary of the
+rest). It is not yet wired into ``render_prior_attempts`` or
+``design_review.py``'s ``format_prior_critiques`` — that integration is a
+separate follow-up.
+
 Invariants:
-  * Both helpers are pure — no I/O, no mutation of their arguments.
+  * All three helpers are pure — no I/O, no mutation of their arguments.
   * ``spec_prompt_fields``'s non-defensive branch preserves the exact
     attribute-access formula each call site used before extraction; it
     adds no new tolerance for missing/malformed input.
@@ -18,9 +24,85 @@ Invariants:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
+
+# Per-entry snippet length inside a rolling summary, and the hard cap on the
+# summary string as a whole (the latter is what keeps the summary "rolling"
+# rather than merely per-item-truncated: it stays bounded no matter how many
+# rounds have been dropped).
+_SUMMARY_ENTRY_SNIPPET_CHARS = 60
+_SUMMARY_MAX_CHARS = 240
+
+
+@dataclass(frozen=True)
+class BoundedHistory:
+    """Result of applying a bounding policy to an ordered prior-round history.
+
+    Invariants:
+      * ``kept`` holds the original entry objects (never stringified or
+        copied) in their original relative order — callers may still hand
+        them to a type-specific renderer (e.g. ``render_prior_attempts``,
+        ``format_prior_critiques``).
+      * ``summary == ""`` if and only if no entries were dropped.
+    """
+
+    kept: List[Any]
+    summary: str
+
+
+def bound_history(entries: Optional[List[Any]], keep_last_n: int) -> BoundedHistory:
+    """Bound an ordered prior-round history to the last N entries plus a summary.
+
+    This is a standalone policy function: it decides *how much* prior-round
+    history a prompt should carry, independent of *how* any particular entry
+    type (a plain string, a ``SpecCritique``, ...) is rendered. It performs
+    no LLM call and no I/O — dropped entries are described with a
+    deterministic, length-capped ``str(entry)`` snippet, not a genuine
+    semantic summary.
+
+    Preconditions:
+      * ``keep_last_n`` is a non-negative ``int``. Violating this is a bug
+        in the caller and raises (via ``assert``), it is not coerced.
+      * ``entries`` is ``None`` or a list of anything; elements are never
+        inspected beyond ``str()`` for the entries that get dropped.
+    Postconditions:
+      * ``len(result.kept) == min(len(entries or []), keep_last_n)``.
+      * If ``len(entries or []) <= keep_last_n``: ``result.kept`` is exactly
+        ``entries`` (or ``[]`` for ``None``), unchanged from today's
+        unbounded rendering, and ``result.summary == ""`` — short histories
+        see no behavior change.
+      * Otherwise: ``result.kept`` is the last ``keep_last_n`` entries,
+        verbatim and in original order; ``result.summary`` is a non-empty,
+        length-bounded (``<= _SUMMARY_MAX_CHARS`` characters total — the
+        ellipsis marker is counted inside that cap, not appended past it)
+        string describing the older, dropped entries, oldest first, each
+        numbered by its original 1-indexed round position (matching
+        ``render_prior_attempts``'s ``"Round {n}"`` convention).
+    Invariants: pure — no mutation of ``entries``, no I/O.
+    """
+    assert keep_last_n >= 0, "keep_last_n must be non-negative"
+    all_entries = list(entries) if entries else []
+    if len(all_entries) <= keep_last_n:
+        return BoundedHistory(kept=all_entries, summary="")
+
+    split = len(all_entries) - keep_last_n
+    dropped, kept = all_entries[:split], all_entries[split:]
+    pieces = [f"Round {i + 1}: {_snippet(entry)}" for i, entry in enumerate(dropped)]
+    summary = f"{len(dropped)} earlier round(s) summarized: " + "; ".join(pieces)
+    if len(summary) > _SUMMARY_MAX_CHARS:
+        summary = summary[: _SUMMARY_MAX_CHARS - 1].rstrip() + "…"
+    return BoundedHistory(kept=kept, summary=summary)
+
+
+def _snippet(entry: Any) -> str:
+    """Render one dropped entry as a short, single-line, length-capped snippet."""
+    text = " ".join(str(entry).splitlines()).strip()
+    if len(text) > _SUMMARY_ENTRY_SNIPPET_CHARS:
+        text = text[: _SUMMARY_ENTRY_SNIPPET_CHARS - 1].rstrip() + "…"
+    return text
 
 
 def render_prior_attempts(prior_attempts: Optional[List[str]]) -> str:
@@ -102,4 +184,4 @@ def spec_prompt_fields(spec: Any, *, defensive: bool = False) -> Dict[str, str]:
     }
 
 
-__all__ = ["render_prior_attempts", "spec_prompt_fields"]
+__all__ = ["BoundedHistory", "bound_history", "render_prior_attempts", "spec_prompt_fields"]
