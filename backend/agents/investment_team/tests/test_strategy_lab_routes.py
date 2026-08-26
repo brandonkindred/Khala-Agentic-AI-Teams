@@ -2525,6 +2525,71 @@ def test_list_strategy_lab_runs_falls_back_when_job_service_broken(
     assert any(r["run_id"] == "mem-only" for r in body["runs"])
 
 
+def test_list_strategy_lab_runs_one_malformed_persisted_record_does_not_drop_the_rest(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A persisted record whose normalization raises must not discard the
+    OTHER persisted/in-memory runs already merged.
+
+    Before this endpoint was wired to ``_merge_and_reconcile_records``, any
+    exception raised while merging persisted records was caught by this
+    endpoint's own *outer* ``except Exception`` around the whole
+    reconcile+merge block -- a single malformed record would silently
+    discard every OTHER already-merged persisted entry too, falling all the
+    way back to the in-memory-only snapshot. ``_merge_and_reconcile_records``
+    instead catches a raising ``normalize_persisted`` call per-record, so
+    this asserts every other entry survives.
+    """
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["mem-r"] = {
+        "run_id": "mem-r",
+        "status": "running",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 4,
+        "completed_cycles": 1,
+    }
+
+    class _MixedStub:
+        """Returns persisted jobs unfiltered, including one malformed entry
+        that is not a dict at all -- calling ``.get`` on it raises
+        ``AttributeError`` inside ``normalize_persisted``."""
+
+        def __init__(self, jobs):
+            self._jobs = jobs
+
+        def list_jobs(self, *a, **k):
+            return list(self._jobs)
+
+        def get_job(self, jid):
+            for j in self._jobs:
+                if isinstance(j, dict) and j.get("job_id") == jid:
+                    return dict(j)
+            return None
+
+    stub = _MixedStub(
+        jobs=[
+            {
+                "job_id": "run-good",
+                "status": "running",
+                "data": {
+                    "started_at": "2024-01-02T00:00:00Z",
+                    "total_cycles": 3,
+                    "completed_cycles": 1,
+                },
+            },
+            "not-a-dict-record",
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.get("/strategy-lab/runs")
+
+    assert resp.status_code == 200
+    run_ids = {r["run_id"] for r in resp.json()["runs"]}
+    assert run_ids == {"mem-r", "run-good"}
+
+
 # ---------------------------------------------------------------------------
 # _job_progress_percent
 # ---------------------------------------------------------------------------
@@ -3268,6 +3333,112 @@ def test_concurrent_cleanup_test_avoids_setswitchinterval_and_joins_churn_thread
     assert _asserts_popper_not_alive(src), (
         "concurrent cleanup test must assert not popper.is_alive() after join"
     )
+
+
+def test_list_strategy_lab_jobs_skips_active_run_entry_missing_run_id(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """An ``_active_runs`` entry missing/falsy ``run_id`` no longer 500s.
+
+    Regression guard for a deliberate behavior delta introduced by wiring
+    this endpoint to ``_merge_and_reconcile_records``: the shared helper
+    drops any active entry with a missing/falsy ``run_id`` before this
+    endpoint's formatter ever runs (a precondition ``list_strategy_lab_runs``
+    already relied on) -- previously, this endpoint's own inline loop
+    indexed ``state["run_id"]`` unguarded and would raise ``KeyError``
+    (uncaught, 500) for such an entry.
+    """
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["malformed-key"] = {"status": "running"}
+    api_main._active_runs["run-ok"] = {
+        "run_id": "run-ok",
+        "status": "running",
+        "total_cycles": 4,
+        "completed_cycles": 1,
+        "started_at": "2024-01-01T00:00:00Z",
+    }
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+
+    resp = api_client.get("/strategy-lab/jobs")
+
+    assert resp.status_code == 200
+    job_ids = {j["job_id"] for j in resp.json()["jobs"]}
+    assert job_ids == {"run-ok"}
+
+
+def test_list_strategy_lab_jobs_merge_output_matches_expected_fixture(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Acceptance test for the ``_merge_and_reconcile_records`` wiring.
+
+    Pins the exact response shape for a fixture combining a reconciled
+    in-memory run, a persisted-only completed run, and a malformed persisted
+    record -- the expected values below match what the pre-refactor inline
+    merge/reconcile logic produced for this same fixture, verifying the
+    switch to the shared helper is a zero-observable-behavior-change
+    refactor (aside from the two deltas covered by their own dedicated
+    tests: ``test_list_strategy_lab_jobs_skips_active_run_entry_missing_run_id``
+    and ``test_list_strategy_lab_runs_one_malformed_persisted_record_does_not_drop_the_rest``).
+    """
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["mem-r"] = {
+        "run_id": "mem-r",
+        "status": "running",
+        "total_cycles": 4,
+        "completed_cycles": 1,
+        "started_at": "2024-01-01T00:00:00Z",
+        "current_cycle": {"phase": "ideation", "strategy": {"hypothesis": "a great hypothesis"}},
+    }
+    stub = _StubLabClient(
+        jobs=[
+            # Same id as the in-memory run, still non-terminal -- exercises
+            # reconciliation (completed_cycles refreshed from 1 to 2).
+            {"job_id": "mem-r", "status": "running", "data": {"completed_cycles": 2}},
+            {
+                "job_id": "persisted-c",
+                "status": "completed",
+                "data": {
+                    "started_at": "2024-01-02T00:00:00Z",
+                    "total_cycles": 2,
+                    "completed_cycles": 2,
+                },
+            },
+            # Malformed: non-string job_id fails InvestmentJobSummary's
+            # `job_id: str` validation inside `_persisted_job_to_summary`.
+            {"job_id": 12345, "status": "completed"},
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.get("/strategy-lab/jobs")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    by_id = {j["job_id"]: j for j in body["jobs"]}
+    assert set(by_id) == {"mem-r", "persisted-c"}
+
+    # Reconciled in-memory run: still "running" (non-terminal persisted
+    # status), progress refreshed from the persisted completed_cycles,
+    # label/phase still derived from its own current_cycle (untouched by
+    # reconciliation, since the persisted data has no current_cycle key).
+    mem_r = by_id["mem-r"]
+    assert mem_r["status"] == "running"
+    assert mem_r["progress"] == 50  # 2/4
+    assert mem_r["current_phase"] == "ideation"
+    assert mem_r["label"] == "a great hypothesis"
+    assert mem_r["created_at"] == "2024-01-01T00:00:00Z"
+    assert api_main._active_runs["mem-r"]["completed_cycles"] == 2
+
+    # Persisted-only completed run: current_phase always None, label always
+    # the plain fallback form, created_at from persisted data.
+    persisted_c = by_id["persisted-c"]
+    assert persisted_c["status"] == "completed"
+    assert persisted_c["progress"] == 100
+    assert persisted_c["current_phase"] is None
+    assert persisted_c["label"] == "Strategy batch (2/2)"
+    assert persisted_c["created_at"] == "2024-01-02T00:00:00Z"
 
 
 # ---------------------------------------------------------------------------

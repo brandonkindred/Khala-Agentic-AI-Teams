@@ -8,7 +8,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from functools import lru_cache
-from typing import Any, Callable, Dict, List, Literal, Optional, get_args
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, get_args
 
 import httpx
 from fastapi import HTTPException
@@ -119,6 +119,7 @@ from investment_team.strategy_lab.config import (
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.run_state import (
     DEFAULT_FENCING_GENERATION,
+    _merge_and_reconcile_records,
 )
 from investment_team.strategy_lab.run_state import (
     active_runs as _active_runs,
@@ -3148,14 +3149,17 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
 
     Preconditions:
         - None. ``running_only`` is an optional filter flag.
-        - Every ``_active_runs`` entry has ``run_id`` and ``status`` set --
-          guaranteed by construction, since the only writers of this dict
-          (``_build_run_state`` and ``run_state.normalize_persisted_job``)
-          unconditionally set both, and no mutation site ever removes them.
 
     Postconditions:
-        - Merges in-memory ``_active_runs`` with persisted job-service records,
-          deduplicated by run/job id (in-memory entries take precedence).
+        - Merges in-memory ``_active_runs`` with persisted job-service records
+          via ``_merge_and_reconcile_records``, deduplicated by run/job id
+          (in-memory entries take precedence). An ``_active_runs`` entry with
+          a missing/falsy ``run_id`` is dropped and logged by that shared
+          helper rather than raising -- unlike the documented invariant this
+          endpoint used to rely on (every writer of ``_active_runs`` sets
+          ``run_id``), a violation is now defensively tolerated the same way
+          ``list_strategy_lab_runs`` already tolerates it, instead of
+          surfacing as an unhandled ``KeyError``.
         - Side effect: for each in-memory run whose status is not in
           ``STRATEGY_LAB_TERMINAL_STATUSES``, ``_reconcile_run_progress`` is
           called, refreshing progress fields (and ``status``/``error`` on a
@@ -3179,42 +3183,37 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
           logged around the ``list_jobs()`` call only, and the response falls
           back to the in-memory-only list; in that case this endpoint still
           returns 200. Each persisted record is then converted to an
-          ``InvestmentJobSummary`` independently: a failure building any one
-          record (e.g. a ``ValidationError`` from genuinely malformed data)
-          is logged and that record is skipped -- it does not discard the
-          other persisted records, nor the in-memory ones already collected.
+          ``InvestmentJobSummary`` independently (inside
+          ``_persisted_job_to_summary``, called by the shared helper): a
+          failure building any one record (e.g. a ``ValidationError`` from
+          genuinely malformed data) is caught and logged by the helper and
+          that record is skipped -- it does not discard the other persisted
+          records, nor the in-memory ones already collected.
     """
-    jobs: List[InvestmentJobSummary] = []
 
-    # Reconcile: refresh progress (and, on a terminal transition, status/error)
-    # for every run we think is still active, before snapshotting. Mirrors the
-    # call convention in `list_strategy_lab_runs`: the id set is read under
-    # `_lock`, but `_reconcile_run_progress` itself must be called unlocked
-    # since it acquires `_lock` internally (it is not reentrant).
-    with _lock:
-        running_ids = [
-            rid
-            for rid, r in _active_runs.items()
-            if r.get("status") not in STRATEGY_LAB_TERMINAL_STATUSES
-        ]
-    for rid in running_ids:
-        _reconcile_run_progress(rid)
+    def _active_state_to_summary(state: Dict[str, Any]) -> InvestmentJobSummary:
+        """Format one ``_active_runs`` entry as an ``InvestmentJobSummary``.
 
-    # Single consistent snapshot of in-memory runs, taken under one lock hold
-    # (after reconciliation, so it reflects any refreshed values). Deriving
-    # both the in-memory `jobs` entries and `in_memory_ids` from this same
-    # snapshot (rather than re-reading `_active_runs` under a second
-    # `with _lock:`) prevents a run added/removed between two separate reads
-    # from being omitted from or duplicated in the merged result.
-    with _lock:
-        active_states = list(_active_runs.values())
+        Preconditions:
+            ``state`` is an ``_active_runs`` entry with ``run_id``/``status``
+            set -- guaranteed by construction (the only writers,
+            ``_build_run_state`` and ``run_state.normalize_persisted_job``,
+            unconditionally set both). A violation is a caller bug: this
+            function does not defend against it, matching this repo's
+            Design-by-Contract convention (see ``_merge_and_reconcile_records``,
+            which already drops any entry missing this precondition before
+            this function is ever called).
 
-    # Active in-memory runs
-    for state in active_states:
-        # `current_cycle` can arrive from unvalidated job-service data via
-        # `_reconcile_run_progress` (which copies it in verbatim, with no
-        # shape check), not just first-party code -- guard both levels
-        # before indexing into them.
+        Postconditions:
+            Returns an ``InvestmentJobSummary`` deriving ``label``/
+            ``current_phase`` from ``current_cycle`` (falling back to a plain
+            "Strategy batch (n/total)" label when no hypothesis is present).
+            ``current_cycle`` can arrive from unvalidated job-service data via
+            ``_reconcile_run_progress`` (which copies it in verbatim, with no
+            shape check), not just first-party code -- guarded defensively
+            before indexing into it, so a malformed ``current_cycle``/
+            ``phase`` degrades to ``None`` rather than raising.
+        """
         cycle = state.get("current_cycle")
         cycle = cycle if isinstance(cycle, dict) else None
         phase = cycle.get("phase") if cycle else None
@@ -3228,15 +3227,60 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
         total = state.get("total_cycles", 1)
         progress = _job_progress_percent(completed, total)
         label = hypothesis or f"Strategy batch ({completed}/{total})"
-        jobs.append(
-            InvestmentJobSummary(
-                job_id=state["run_id"],
-                status=state["status"],
-                label=label,
-                progress=progress,
-                current_phase=phase,
-                created_at=state.get("started_at"),
-            )
+        return InvestmentJobSummary(
+            job_id=state["run_id"],
+            status=state["status"],
+            label=label,
+            progress=progress,
+            current_phase=phase,
+            created_at=state.get("started_at"),
+        )
+
+    def _persisted_job_to_summary(job: Dict[str, Any]) -> Tuple[str, InvestmentJobSummary]:
+        """Normalize one persisted job-service record into an ``InvestmentJobSummary``.
+
+        Unlike an active run, a persisted-only job's ``current_phase`` always
+        reports ``None`` and its ``label`` is always the plain "Strategy batch
+        (n/total)" form -- it never derives these from a ``current_cycle``,
+        even if the persisted ``data`` happens to carry one, matching this
+        endpoint's pre-existing (and intentionally simpler) persisted-record
+        formatting.
+
+        Preconditions:
+            ``job`` is a raw job-service record (``list_jobs()`` entry).
+
+        Postconditions:
+            Returns ``(job_id, InvestmentJobSummary(...))``. ``data``
+            (``job["data"]``) defaults to ``{}`` when absent or not a
+            mapping, so a malformed persisted record degrades to sensible
+            defaults rather than raising ``AttributeError``.
+
+        Raises:
+            Whatever ``InvestmentJobSummary(...)`` raises for a genuinely
+            malformed field (e.g. a non-string ``job_id`` failing pydantic
+            validation) -- left to propagate rather than caught here, since
+            ``_merge_and_reconcile_records`` already catches and logs a
+            raising ``normalize_persisted`` call per-record, without
+            discarding any other persisted or in-memory record already
+            merged.
+        """
+        jid = job.get("job_id", "")
+        data = job.get("data", job)
+        if not isinstance(data, dict):
+            # A malformed persisted record (e.g. "data" is a string/list/
+            # None instead of a mapping) must degrade to sensible defaults
+            # below, not raise AttributeError.
+            data = {}
+        completed = data.get("completed_cycles", 0)
+        total = data.get("total_cycles", 1)
+        progress = _job_progress_percent(completed, total)
+        return jid, InvestmentJobSummary(
+            job_id=jid,
+            status=job.get("status", data.get("status", "completed")),
+            label=f"Strategy batch ({completed}/{total})",
+            progress=progress,
+            current_phase=None,
+            created_at=data.get("started_at"),
         )
 
     # Persisted runs from job service (completed runs not in memory). The
@@ -3244,55 +3288,37 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
     # except below -- an expected, transient/environmental failure there
     # (job-service down, or JOB_SERVICE_URL unconfigured) legitimately means
     # "no persisted data available at all", so falling back to the
-    # in-memory-only list for the whole block is correct. Once persisted
-    # has been fetched, each record is converted independently (see the
-    # per-record try/except inside the loop) so one malformed record can't
-    # discard the rest.
+    # in-memory-only list for the whole block is correct. Anything else
+    # (e.g. a TypeError/AttributeError from the client itself) is a
+    # programming error and must propagate instead of being silently
+    # swallowed here.
     try:
         client = _get_lab_run_job_client()
         persisted = client.list_jobs() or []
     except (httpx.HTTPError, RuntimeError) as exc:
-        # httpx.HTTPError: transport/connection/HTTP-status failures from the
-        # job-service client. RuntimeError: JobServiceClient raises this when
-        # JOB_SERVICE_URL is unconfigured. Both are expected, transient/
-        # environmental failure modes -- fall back to the in-memory-only
-        # list. Anything else (e.g. a TypeError/AttributeError from the
-        # client itself) is a programming error and must propagate instead
-        # of being silently swallowed here.
         logger.warning("Failed to load persisted strategy lab runs: %s", exc, exc_info=True)
         persisted = []
 
-    in_memory_ids = {s["run_id"] for s in active_states}
-    for job in persisted:
-        jid = job.get("job_id", "")
-        if jid in in_memory_ids:
-            continue  # already included from in-memory
-        try:
-            data = job.get("data", job)
-            if not isinstance(data, dict):
-                # A malformed persisted record (e.g. "data" is a string/list/
-                # None instead of a mapping) must degrade to sensible
-                # defaults below, not raise AttributeError out of this route.
-                data = {}
-            completed = data.get("completed_cycles", 0)
-            total = data.get("total_cycles", 1)
-            progress = _job_progress_percent(completed, total)
-            jobs.append(
-                InvestmentJobSummary(
-                    job_id=jid,
-                    status=job.get("status", data.get("status", "completed")),
-                    label=f"Strategy batch ({completed}/{total})",
-                    progress=progress,
-                    current_phase=None,
-                    created_at=data.get("started_at"),
-                )
-            )
-        except Exception:
-            # A failure converting THIS ONE persisted record (e.g. a
-            # genuinely malformed payload the isinstance guard above didn't
-            # anticipate) must not discard every other persisted/in-memory
-            # job already collected -- log distinctly and move on.
-            logger.warning("Skipping malformed persisted strategy lab job %s", jid, exc_info=True)
+    merged = _merge_and_reconcile_records(
+        active_runs=_active_runs,
+        lock=_lock,
+        reconcile_fn=_reconcile_run_progress,
+        terminal_statuses=STRATEGY_LAB_TERMINAL_STATUSES,
+        persisted=persisted,
+        normalize_persisted=_persisted_job_to_summary,
+    )
+
+    # `_persisted_job_to_summary` returns an already-built InvestmentJobSummary
+    # as its "record", while merged active entries are still the raw
+    # `_active_runs` state dicts (the helper never normalizes those) -- an
+    # active entry can never be an InvestmentJobSummary instance and a
+    # persisted-normalized one can never be anything else, so `isinstance` is
+    # a safe, exhaustive discriminator between the two origins' differing
+    # formatting rules (see `_persisted_job_to_summary`'s docstring).
+    jobs: List[InvestmentJobSummary] = [
+        record if isinstance(record, InvestmentJobSummary) else _active_state_to_summary(record)
+        for record in merged.values()
+    ]
 
     if running_only:
         jobs = [j for j in jobs if j.status in ("running", "pending")]
@@ -4191,61 +4217,50 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
           in-memory-only snapshot; this endpoint always returns 200. An
           ``_active_runs`` entry missing a truthy ``run_id`` (malformed or
           partially-constructed) is skipped and logged rather than raising
-          ``KeyError``. An entry whose response construction
-          (``_run_state_to_response``) fails -- e.g. a field that cannot be
-          coerced to its response type -- is likewise skipped and logged
-          (``logger.warning``) rather than raising out of this endpoint.
+          ``KeyError``. A persisted record for which normalization
+          (``_normalize_persisted_job``) fails is likewise skipped and
+          logged by ``_merge_and_reconcile_records`` on a per-record basis --
+          it does not discard any other persisted or in-memory record
+          already merged (previously such a failure was caught by this
+          endpoint's own broad ``except Exception``, which discarded every
+          already-merged persisted entry for the whole response). An entry
+          whose response construction (``_run_state_to_response``) fails --
+          e.g. a field that cannot be coerced to its response type -- is
+          likewise skipped and logged (``logger.warning``) rather than
+          raising out of this endpoint.
     """
 
-    def _in_memory_runs_by_id() -> Dict[str, Dict[str, Any]]:
-        """Locked snapshot of ``_active_runs``, keyed by each entry's own ``run_id``.
+    def _persisted_run_to_state(job: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        """Normalize one persisted job-service record to an ``active_runs``-shaped state dict."""
+        rid = job.get("job_id") or job.get("run_id", "")
+        return rid, _normalize_persisted_job(job, fallback_status="running", run_id=rid)
 
-        An entry missing (or with a falsy) ``run_id`` is skipped and logged
-        instead of raising ``KeyError`` -- this endpoint must always return
-        200, and a single malformed entry must not break the whole listing.
-        """
-        with _lock:
-            snapshot = list(_active_runs.items())
-        result: Dict[str, Dict[str, Any]] = {}
-        for key, r in snapshot:
-            rid = r.get("run_id")
-            if not rid:
-                logger.warning("Skipping _active_runs entry %r with missing/falsy run_id", key)
-                continue
-            result[rid] = r
-        return result
-
+    # The persisted-fetch (client construction + list_jobs) is wrapped in a
+    # broad except -- unlike list_strategy_lab_jobs, this endpoint treats any
+    # failure here (not just httpx.HTTPError/RuntimeError) as "no persisted
+    # data available", falling back to the in-memory-only list rather than
+    # propagating. Reconciliation itself never raises (see
+    # _reconcile_run_progress's own "Raises: None" contract), so running it
+    # unconditionally via _merge_and_reconcile_records below, rather than
+    # inside this try, is not observable.
     try:
         client = _get_lab_run_job_client()
-
-        # Reconcile: refresh progress (and, on a terminal transition,
-        # status/error) for every run we think is still active.
-        with _lock:
-            running_ids = [
-                rid
-                for rid, r in _active_runs.items()
-                if r.get("status") not in STRATEGY_LAB_TERMINAL_STATUSES
-            ]
-        for rid in running_ids:
-            _reconcile_run_progress(rid)
-
-        in_memory = _in_memory_runs_by_id()
-
-        # Merge running/pending jobs from the persistent job service that
-        # may not be in _active_runs (e.g. after a server restart).
-        persisted_list = client.list_jobs(statuses=["running", "pending"])
-        for job in persisted_list:
-            rid = job.get("job_id") or job.get("run_id", "")
-            if rid and rid not in in_memory:
-                in_memory[rid] = _normalize_persisted_job(
-                    job, fallback_status="running", run_id=rid
-                )
+        persisted = client.list_jobs(statuses=["running", "pending"]) or []
     except Exception:
         logger.debug("Job service fallback failed for run listing", exc_info=True)
-        in_memory = _in_memory_runs_by_id()
+        persisted = []
+
+    merged = _merge_and_reconcile_records(
+        active_runs=_active_runs,
+        lock=_lock,
+        reconcile_fn=_reconcile_run_progress,
+        terminal_statuses=STRATEGY_LAB_TERMINAL_STATUSES,
+        persisted=persisted,
+        normalize_persisted=_persisted_run_to_state,
+    )
 
     runs: List[StrategyLabRunStatusResponse] = []
-    for rid, r in in_memory.items():
+    for rid, r in merged.items():
         try:
             runs.append(_run_state_to_response(r))
         except Exception:
