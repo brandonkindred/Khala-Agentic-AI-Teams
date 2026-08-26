@@ -313,6 +313,18 @@ def test_format_audience_same_output_for_equivalent_input_shapes(make_audience) 
     )
 
 
+def test_format_audience_object_with_only_hobbies_and_other() -> None:
+    """An object exposing only hobbies/other (no profession/skill_level) is still
+    recognized as audience-like, per the documented contract."""
+    from agents.blogging.shared.audience import format_audience
+
+    class PartialAudience:
+        hobbies = ["reading"]
+        other = "night owl"
+
+    assert format_audience(PartialAudience()) == "interests: reading; night owl"
+
+
 def test_run_pipeline_job_external_cancellation_detection() -> None:
     from agents.blogging.shared import run_pipeline_job as rpj
     from temporalio.exceptions import CancelledError

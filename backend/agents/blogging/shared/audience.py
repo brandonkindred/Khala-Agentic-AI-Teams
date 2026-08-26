@@ -32,8 +32,11 @@ def format_audience(audience: Any) -> Optional[str]:
         return audience.strip() or None
     if isinstance(audience, dict):
         get = audience.get
-    elif hasattr(audience, "profession") or hasattr(audience, "skill_level"):
-        get = lambda key: getattr(audience, key, None)  # noqa: E731
+    elif any(hasattr(audience, attr) for attr in ("profession", "skill_level", "hobbies", "other")):
+
+        def get(key: str) -> Any:
+            return getattr(audience, key, None)
+
     else:
         return None
 
