@@ -727,28 +727,27 @@ def test_writer_build_revise_single_item_prompt_default_length() -> None:
 
 
 def test_fallback_draft_via_json_success(monkeypatch) -> None:
-    """_fallback_draft_via_json invokes call_json_with_retry correctly and returns a stripped draft."""
+    """_fallback_draft_via_json invokes run_json_gate correctly and returns a stripped draft."""
 
     a = _agent()
     captured: dict = {}
 
-    def fake_retry(factory, prompt, **kwargs):
+    def fake_gate(model, system_prompt, prompt, **kwargs):
         captured["max_attempts"] = kwargs.get("max_attempts")
         captured["prompt"] = prompt
         captured["strict"] = kwargs.get("strict_json_suffix", "")
-        assert callable(factory)
-        assert callable(kwargs.get("on_exhausted"))
-        assert callable(kwargs.get("on_unexpected_error"))
-        assert callable(kwargs.get("unwrap_exception"))
+        captured["fresh_agent_per_attempt"] = kwargs.get("fresh_agent_per_attempt")
+        assert callable(kwargs.get("fallback_builder"))
         return {"draft": "  # From JSON  \n"}
 
     monkeypatch.setattr(
-        "agents.blogging.blog_writer_agent.agent.call_json_with_retry",
-        fake_retry,
+        "agents.blogging.blog_writer_agent.agent.run_json_gate",
+        fake_gate,
     )
     out = a._fallback_draft_via_json("revise this draft")
     assert out == "# From JSON"
     assert captured["max_attempts"] == 2
+    assert captured["fresh_agent_per_attempt"] is True
     assert "Respond with valid JSON only" in captured["prompt"]
     assert "draft" in captured["strict"].lower()
 
@@ -774,7 +773,7 @@ def test_fallback_draft_via_json_empty_draft_returns_none(monkeypatch) -> None:
 
     a = _agent()
     monkeypatch.setattr(
-        "agents.blogging.blog_writer_agent.agent.call_json_with_retry",
+        "agents.blogging.blog_writer_agent.agent.run_json_gate",
         lambda *a, **k: {"draft": "   "},
     )
     assert a._fallback_draft_via_json("prompt") is None
@@ -785,57 +784,57 @@ def test_fallback_draft_via_json_missing_draft_returns_none(monkeypatch) -> None
 
     a = _agent()
     monkeypatch.setattr(
-        "agents.blogging.blog_writer_agent.agent.call_json_with_retry",
+        "agents.blogging.blog_writer_agent.agent.run_json_gate",
         lambda *a, **k: {},
     )
     assert a._fallback_draft_via_json("prompt") is None
 
 
 def test_fallback_draft_via_json_exhausted_hook_returns_none(monkeypatch) -> None:
-    """on_exhausted returning {} must yield None (keep original draft at call sites)."""
+    """fallback_builder returning {} on JSON-parse exhaustion yields None (keep original draft)."""
     from llm_service import LLMJsonParseError
 
     a = _agent()
 
-    def fake_retry(factory, prompt, **kwargs):
-        return kwargs["on_exhausted"](LLMJsonParseError("bad json"))
+    def fake_gate(model, system_prompt, prompt, **kwargs):
+        return kwargs["fallback_builder"](LLMJsonParseError("bad json"))
 
     monkeypatch.setattr(
-        "agents.blogging.blog_writer_agent.agent.call_json_with_retry",
-        fake_retry,
+        "agents.blogging.blog_writer_agent.agent.run_json_gate",
+        fake_gate,
     )
     assert a._fallback_draft_via_json("prompt") is None
 
 
 def test_fallback_draft_via_json_unexpected_hook_returns_none(monkeypatch) -> None:
-    """on_unexpected_error returning {} causes _fallback_draft_via_json to return None."""
+    """fallback_builder returning {} on an unexpected error yields None."""
 
     a = _agent()
 
-    def fake_retry(factory, prompt, **kwargs):
+    def fake_gate(model, system_prompt, prompt, **kwargs):
         assert kwargs.get("max_attempts") == 2
-        return kwargs["on_unexpected_error"](RuntimeError("boom"))
+        return kwargs["fallback_builder"](RuntimeError("boom"))
 
     monkeypatch.setattr(
-        "agents.blogging.blog_writer_agent.agent.call_json_with_retry",
-        fake_retry,
+        "agents.blogging.blog_writer_agent.agent.run_json_gate",
+        fake_gate,
     )
     assert a._fallback_draft_via_json("prompt") is None
 
 
 def test_fallback_draft_via_json_transient_reraises(monkeypatch) -> None:
-    """Transient LLM errors from call_json_with_retry are re-raised, not converted to None."""
+    """Transient LLM errors from run_json_gate are re-raised, not converted to None."""
     from llm_service import LLMRateLimitError
 
     a = _agent()
 
-    def fake_retry(factory, prompt, **kwargs):
+    def fake_gate(model, system_prompt, prompt, **kwargs):
         assert kwargs.get("max_attempts") == 2
         raise LLMRateLimitError("rate limited")
 
     monkeypatch.setattr(
-        "agents.blogging.blog_writer_agent.agent.call_json_with_retry",
-        fake_retry,
+        "agents.blogging.blog_writer_agent.agent.run_json_gate",
+        fake_gate,
     )
 
     with pytest.raises(LLMRateLimitError):
@@ -846,9 +845,10 @@ def test_fallback_draft_via_json_unwraps_event_loop_transient(monkeypatch) -> No
     """Strands EventLoopException wrappers must re-raise the unwrapped transient cause.
 
     The draft-stage Temporal funnel retries only on LLMRateLimitError /
-    LLMTemporaryError; re-raising the wrapper would be swallowed by on_unexpected_error
+    LLMTemporaryError; re-raising the wrapper would be swallowed by the fallback
     and silently keep the unrevised draft.
     """
+    from agents.blogging.shared import json_retry as json_retry_mod
     from strands.types.exceptions import EventLoopException
 
     from llm_service import LLMRateLimitError
@@ -863,10 +863,7 @@ def test_fallback_draft_via_json_unwraps_event_loop_transient(monkeypatch) -> No
         def __call__(self, prompt):
             raise EventLoopException(wrapped)
 
-    monkeypatch.setattr(
-        "agents.blogging.blog_writer_agent.agent.Agent",
-        _BoomAgent,
-    )
+    monkeypatch.setattr(json_retry_mod, "Agent", _BoomAgent)
     with pytest.raises(LLMRateLimitError) as excinfo:
         a._fallback_draft_via_json("prompt")
     assert excinfo.value is wrapped
@@ -875,6 +872,7 @@ def test_fallback_draft_via_json_unwraps_event_loop_transient(monkeypatch) -> No
 
 def test_fallback_draft_via_json_agent_construction_error_returns_none(monkeypatch) -> None:
     """Agent construction TypeError is caught by the helper policy and yields None."""
+    from agents.blogging.shared import json_retry as json_retry_mod
 
     a = _agent()
 
@@ -885,8 +883,5 @@ def test_fallback_draft_via_json_agent_construction_error_returns_none(monkeypat
         def __call__(self, prompt):
             raise AssertionError("should not be called")
 
-    monkeypatch.setattr(
-        "agents.blogging.blog_writer_agent.agent.Agent",
-        _BadAgent,
-    )
+    monkeypatch.setattr(json_retry_mod, "Agent", _BadAgent)
     assert a._fallback_draft_via_json("prompt") is None

@@ -1,8 +1,37 @@
 """
 WCAG 2.2 Success Criteria definitions.
 
-Provides structured access to all WCAG 2.2 Level A, AA, and AAA
-success criteria for accessibility auditing.
+Provides structured access to WCAG 2.2 success criteria for accessibility
+auditing. Coverage is complete for Level A (31) and Level AA (24); Level AAA
+is partial (3 of 31), so an AAA lookup usually misses. Absence from this table
+is not evidence that a criterion does not exist — check the specification.
+
+Descriptions are one-line summaries and drop applicability conditions and
+exceptions; ``techniques`` and ``failures`` are pointers into the W3C
+technique catalogue, not a normative mapping. Any judgement that turns on a
+threshold, condition, or exception must go to the criterion's own text.
+
+Preconditions: none — the table is a module-level literal, built at import.
+
+Postconditions: ``WCAG_22_CRITERIA`` maps each success-criterion number to the
+``SuccessCriterion`` describing it; every accessor returns entries drawn from
+it and never mutates it. ``SuccessCriterion`` is not frozen, and every accessor
+— ``get_criterion`` included — hands back the stored instance rather than a
+copy, so callers must treat the entries themselves as read-only: mutating one
+(``get_criterion("2.5.8").failures.append(...)``) corrupts the table for the
+whole process.
+
+Invariants:
+  - Each key equals its entry's ``sc`` field.
+  - Level A holds 31 entries and Level AA holds 24 — the complete WCAG 2.2
+    sets. Level AAA is partial (3 of 31) by choice, not by omission-as-bug.
+  - 4.1.1 Parsing is absent: WCAG 2.2 removed it.
+  - The ``lru_cache``-decorated accessors (``get_criteria_by_level``,
+    ``get_criteria_by_principle``, ``get_level_a_aa_criteria``,
+    ``get_new_in_22_criteria``, ``get_new_in_21_criteria``) hand every caller the
+    same list object, so callers must treat their results as read-only.
+    ``get_all_sc_numbers`` and ``get_guideline_criteria`` are uncached and build a
+    fresh list per call.
 """
 
 import functools
@@ -348,7 +377,10 @@ WCAG_22_CRITERIA: Dict[str, SuccessCriterion] = {
         principle=WCAGPrinciple.OPERABLE,
         guideline="2.3",
         guideline_name="Seizures and Physical Reactions",
-        description="Content does not contain anything that flashes more than three times per second.",
+        description=(
+            "Content does not flash more than three times in any one second period, or the "
+            "flash is below the general flash and red flash thresholds."
+        ),
         techniques=["G15", "G19", "G176"],
         failures=["F23"],
     ),
@@ -536,7 +568,7 @@ WCAG_22_CRITERIA: Dict[str, SuccessCriterion] = {
         guideline_name="Input Modalities",
         description="Targets are at least 24x24 CSS pixels or have sufficient spacing.",
         techniques=["C42"],
-        failures=["F109"],
+        failures=[],
         new_in_22=True,
     ),
     # Principle 3: Understandable
@@ -615,7 +647,10 @@ WCAG_22_CRITERIA: Dict[str, SuccessCriterion] = {
         principle=WCAGPrinciple.UNDERSTANDABLE,
         guideline="3.2",
         guideline_name="Predictable",
-        description="If help mechanisms exist, they are in a consistent location across pages.",
+        description=(
+            "If a help mechanism exists on multiple pages, it occurs in the same "
+            "relative order to other page content, unless the user changed it."
+        ),
         techniques=["G220"],
         failures=[],
         new_in_22=True,
@@ -703,17 +738,9 @@ WCAG_22_CRITERIA: Dict[str, SuccessCriterion] = {
     ),
     # Principle 4: Robust
     # Guideline 4.1 Compatible
-    "4.1.1": SuccessCriterion(
-        sc="4.1.1",
-        name="Parsing",
-        level=WCAGLevel.A,
-        principle=WCAGPrinciple.ROBUST,
-        guideline="4.1",
-        guideline_name="Compatible",
-        description="Elements have complete start and end tags, are nested correctly, and have unique IDs.",
-        techniques=["G134", "G192", "H74", "H75", "H88", "H93", "H94"],
-        failures=["F17", "F62", "F70", "F77"],
-    ),
+    # 4.1.1 Parsing is deliberately absent: WCAG 2.2 removed it. Markup defects it
+    # once covered are reported under the criterion they actually affect (usually
+    # 4.1.2 Name, Role, Value or 1.3.1 Info and Relationships).
     "4.1.2": SuccessCriterion(
         sc="4.1.2",
         name="Name, Role, Value",
@@ -758,45 +785,157 @@ WCAG_22_CRITERIA: Dict[str, SuccessCriterion] = {
 
 
 def get_criterion(sc: str) -> Optional[SuccessCriterion]:
-    """Get a success criterion by its number."""
+    """Get a success criterion by its number.
+
+    Preconditions:
+        ``sc`` is a ``str`` criterion number such as "1.1.1". Unknown values are not
+        an error and yield ``None``; a non-``str`` is a caller bug and raises.
+
+    Postconditions:
+        Returns the stored ``SuccessCriterion``, or None if absent (4.1.1 always
+        misses — WCAG 2.2 removed it). The instance is shared and not frozen, so
+        callers must not mutate it.
+    """
+    assert isinstance(sc, str), f"sc must be a str criterion number, got {type(sc).__name__}"
     return WCAG_22_CRITERIA.get(sc)
 
 
-@functools.lru_cache(maxsize=8)
 def get_criteria_by_level(level: WCAGLevel) -> List[SuccessCriterion]:
-    """Get all success criteria for a given conformance level."""
+    """Get all success criteria for a given conformance level.
+
+    Preconditions:
+        ``level`` is a ``WCAGLevel`` member. A bare string such as "AA" is a caller
+        bug and raises rather than returning an empty list, which would read as a
+        genuine absence of criteria at that level.
+
+    Postconditions:
+        Returns every entry at that level.
+        See the module Invariants for the cached, process-shared, unfrozen-entry
+        contract shared by every ``lru_cache``-decorated accessor here.
+    """
+    # Validate BEFORE the cached call: lru_cache hashes its argument to build the
+    # cache key before the wrapped body runs, so an unhashable `level` would
+    # otherwise surface as an opaque TypeError from inside functools instead of
+    # this documented AssertionError.
+    assert isinstance(level, WCAGLevel), f"level must be a WCAGLevel, got {type(level).__name__}"
+    return _get_criteria_by_level_cached(level)
+
+
+@functools.lru_cache(maxsize=8)
+def _get_criteria_by_level_cached(level: WCAGLevel) -> List[SuccessCriterion]:
+    """Cached body of ``get_criteria_by_level``, called only after validation.
+
+    Preconditions:
+        ``level`` is a ``WCAGLevel`` member — enforced by the caller before this
+        function is reached, so its argument is always hashable.
+
+    Postconditions:
+        Returns every entry at that level. See the module Invariants for the
+        cached, process-shared, unfrozen-entry contract this accessor shares.
+    """
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.level == level]
 
 
-@functools.lru_cache(maxsize=8)
 def get_criteria_by_principle(principle: WCAGPrinciple) -> List[SuccessCriterion]:
-    """Get all success criteria for a given principle."""
+    """Get all success criteria for a given principle.
+
+    Preconditions:
+        ``principle`` is a ``WCAGPrinciple`` member. A bare string is a caller bug and
+        raises rather than returning an empty list.
+
+    Postconditions:
+        Returns every entry under that principle.
+        See the module Invariants for the cached, process-shared, unfrozen-entry
+        contract shared by every ``lru_cache``-decorated accessor here.
+    """
+    assert isinstance(principle, WCAGPrinciple), (
+        f"principle must be a WCAGPrinciple, got {type(principle).__name__}"
+    )
+    return _get_criteria_by_principle_cached(principle)
+
+
+@functools.lru_cache(maxsize=8)
+def _get_criteria_by_principle_cached(principle: WCAGPrinciple) -> List[SuccessCriterion]:
+    """Cached body of ``get_criteria_by_principle``, called only after validation.
+
+    Preconditions:
+        ``principle`` is a ``WCAGPrinciple`` member — enforced by the caller before
+        this function is reached, so its argument is always hashable.
+
+    Postconditions:
+        Returns every entry under that principle. See the module Invariants for
+        the cached, process-shared, unfrozen-entry contract this accessor shares.
+    """
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.principle == principle]
 
 
 @functools.lru_cache(maxsize=1)
 def get_level_a_aa_criteria() -> List[SuccessCriterion]:
-    """Get all Level A and AA success criteria (typical conformance target)."""
+    """Get all Level A and AA success criteria (typical conformance target).
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Returns the complete WCAG 2.2 Level A and AA sets, and no AAA entry. See
+        the module Invariants for this accessor's cache-sharing contract.
+    """
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.level in (WCAGLevel.A, WCAGLevel.AA)]
 
 
 @functools.lru_cache(maxsize=1)
 def get_new_in_22_criteria() -> List[SuccessCriterion]:
-    """Get all success criteria new in WCAG 2.2."""
+    """Get all success criteria new in WCAG 2.2.
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Returns every entry flagged ``new_in_22``. See the module Invariants for
+        this accessor's cache-sharing contract.
+    """
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.new_in_22]
 
 
 @functools.lru_cache(maxsize=1)
 def get_new_in_21_criteria() -> List[SuccessCriterion]:
-    """Get all success criteria new in WCAG 2.1."""
+    """Get all success criteria new in WCAG 2.1.
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Returns every entry flagged ``new_in_21``. See the module Invariants for
+        this accessor's cache-sharing contract.
+    """
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.new_in_21]
 
 
 def get_all_sc_numbers() -> List[str]:
-    """Get all success criterion numbers."""
+    """Get all success criterion numbers.
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Returns every key, in table order. Builds a fresh list per call (uncached).
+    """
     return list(WCAG_22_CRITERIA.keys())
 
 
 def get_guideline_criteria(guideline: str) -> List[SuccessCriterion]:
-    """Get all success criteria for a given guideline number (e.g., '2.4')."""
+    """Get all success criteria for a given guideline number (e.g., '2.4').
+
+    Preconditions:
+        ``guideline`` is a ``str`` guideline number such as "2.4". Unknown values
+        yield ``[]``; a non-``str`` is a caller bug and raises.
+
+    Postconditions:
+        Returns every entry under that guideline.
+        Builds a fresh list per call (uncached), but the entries themselves are
+        shared ``SuccessCriterion`` instances — treat them as read-only.
+    """
+    assert isinstance(guideline, str), (
+        f"guideline must be a str guideline number, got {type(guideline).__name__}"
+    )
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.guideline == guideline]

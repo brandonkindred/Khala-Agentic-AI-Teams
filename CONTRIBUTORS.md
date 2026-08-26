@@ -151,10 +151,10 @@ def process_spec(repo_path: Path, use_cache: bool = True) -> Optional[dict]:
 
 The Software Engineering team enforces these rules in generated code; contributors should align with them:
 
-- **Design by Contract:** Preconditions, postconditions, invariants on public APIs
+- **Design by Contract:** Preconditions, postconditions, invariants — documented under those headers. `CLAUDE.md` makes this mandatory repo-wide for every function, method, and module; this team enforces it in the code it generates.
 - **SOLID:** Single responsibility, Open/Closed, Liskov, Interface segregation, Dependency inversion
 - **Documentation:** Comment blocks on classes/methods: purpose, usage, constraints
-- **Test coverage:** Minimum 85% where applicable
+- **Test coverage:** Minimum 90% line coverage — `CLAUDE.md` sets this as a hard floor for backend and frontend alike, and CI enforces it.
 - **Git:** Work on `development` branch; Conventional Commits for messages
 
 ### TypeScript / Angular (UI)
@@ -162,7 +162,7 @@ The Software Engineering team enforces these rules in generated code; contributo
 - **Style:** Follow Angular style guide and project `tsconfig`/lint rules.
 - **Components:** Prefer standalone components. Use `@Input()` / `@Output()` for data flow.
 - **Services:** One service per API. Use `HttpClient` with typed interfaces.
-- **Accessibility:** Use `[attr.aria-*]`, `aria-label`, `aria-live` where appropriate. See [user-interface/docs/ACCESSIBILITY.md](user-interface/docs/ACCESSIBILITY.md).
+- **Accessibility:** Give controls accessible names and announce dynamic content; plain `aria-*` attributes and `[attr.aria-*]` bindings are both correct. See [user-interface/docs/ACCESSIBILITY.md](user-interface/docs/ACCESSIBILITY.md) for which to use where.
 
 ### Commit Messages
 

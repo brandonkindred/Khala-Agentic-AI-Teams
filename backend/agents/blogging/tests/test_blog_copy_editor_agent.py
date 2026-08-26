@@ -251,7 +251,7 @@ def test_blog_copy_editor_agent_reports_write_failure(tmp_path: Path) -> None:
 @pytest.mark.parametrize("kind", ["rate_limit", "temporary"])
 def test_copy_editor_transient_error_reraises(monkeypatch, kind) -> None:
     """A transient LLM-transport error propagates unwrapped (delegated to Temporal), no fallback."""
-    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.shared import json_retry as json_retry_mod
 
     from llm_service import LLMRateLimitError, LLMTemporaryError
 
@@ -264,7 +264,7 @@ def test_copy_editor_transient_error_reraises(monkeypatch, kind) -> None:
         def __call__(self, prompt):
             raise err_cls("transient outage")
 
-    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    monkeypatch.setattr(json_retry_mod, "Agent", _Agent)
     agent = BlogCopyEditorAgent(
         llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
     )
@@ -275,7 +275,7 @@ def test_copy_editor_transient_error_reraises(monkeypatch, kind) -> None:
 @pytest.mark.parametrize("kind", ["rate_limit", "temporary"])
 def test_copy_editor_event_loop_exception_unwraps_transient(monkeypatch, kind) -> None:
     """strands EventLoopException must re-raise the unwrapped transient cause."""
-    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.shared import json_retry as json_retry_mod
     from strands.types.exceptions import EventLoopException
 
     from llm_service import LLMRateLimitError, LLMTemporaryError
@@ -290,7 +290,7 @@ def test_copy_editor_event_loop_exception_unwraps_transient(monkeypatch, kind) -
         def __call__(self, prompt):
             raise EventLoopException(cause)
 
-    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    monkeypatch.setattr(json_retry_mod, "Agent", _Agent)
     agent = BlogCopyEditorAgent(
         llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
     )
@@ -302,7 +302,7 @@ def test_copy_editor_event_loop_exception_unwraps_transient(monkeypatch, kind) -
 def test_copy_editor_unexpected_error_degrades_to_fallback(monkeypatch) -> None:
     """A non-transient, non-JSON LLM/programming error degrades to a manual-review
     fallback (approved, no feedback) instead of crashing the draft stage."""
-    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.shared import json_retry as json_retry_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -311,7 +311,7 @@ def test_copy_editor_unexpected_error_degrades_to_fallback(monkeypatch) -> None:
         def __call__(self, prompt):
             raise RuntimeError("unexpected model failure")
 
-    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    monkeypatch.setattr(json_retry_mod, "Agent", _Agent)
     agent = BlogCopyEditorAgent(
         llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
     )
@@ -332,7 +332,7 @@ def test_copy_editor_run_empty_json_object_uses_advisory_fallback(monkeypatch) -
     That keeps approved=True with no feedback so callers do not loop on a false
     rejection with zero actionable items (unlike a real must_fix response).
     """
-    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.shared import json_retry as json_retry_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -341,7 +341,7 @@ def test_copy_editor_run_empty_json_object_uses_advisory_fallback(monkeypatch) -
         def __call__(self, prompt):
             return "{}"
 
-    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    monkeypatch.setattr(json_retry_mod, "Agent", _Agent)
     agent = BlogCopyEditorAgent(
         llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
     )
@@ -362,7 +362,7 @@ def test_copy_editor_run_empty_json_object_uses_advisory_fallback(monkeypatch) -
 
 def test_copy_editor_json_parse_failure_degrades_to_fallback(monkeypatch) -> None:
     """When the model never returns parseable JSON, the fallback approves (no no-op rewrite)."""
-    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.shared import json_retry as json_retry_mod
 
     from llm_service import LLMJsonParseError
 
@@ -373,7 +373,7 @@ def test_copy_editor_json_parse_failure_degrades_to_fallback(monkeypatch) -> Non
         def __call__(self, prompt):
             raise LLMJsonParseError("not json")
 
-    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    monkeypatch.setattr(json_retry_mod, "Agent", _Agent)
     agent = BlogCopyEditorAgent(
         llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
     )
@@ -541,7 +541,7 @@ def test_non_bool_approved_defaults_to_false(monkeypatch, raw_approved) -> None:
     string "false", a non-empty list, or a nonzero int to True. Only a real
     bool True should approve the draft.
     """
-    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.shared import json_retry as json_retry_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -552,7 +552,7 @@ def test_non_bool_approved_defaults_to_false(monkeypatch, raw_approved) -> None:
                 {"approved": raw_approved, "summary": "reviewed", "feedback_items": []}
             )
 
-    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    monkeypatch.setattr(json_retry_mod, "Agent", _Agent)
     agent = BlogCopyEditorAgent(
         llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
     )
@@ -564,7 +564,7 @@ def test_non_bool_approved_defaults_to_false(monkeypatch, raw_approved) -> None:
 
 def test_bool_true_approved_is_approved(monkeypatch) -> None:
     """A real bool True `approved` with no blocking feedback approves the draft."""
-    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.shared import json_retry as json_retry_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -573,7 +573,7 @@ def test_bool_true_approved_is_approved(monkeypatch) -> None:
         def __call__(self, prompt):
             return json.dumps({"approved": True, "summary": "reviewed", "feedback_items": []})
 
-    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    monkeypatch.setattr(json_retry_mod, "Agent", _Agent)
     agent = BlogCopyEditorAgent(
         llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
     )
@@ -591,7 +591,7 @@ def test_missing_approved_falls_back_to_severity_counts(monkeypatch) -> None:
     means approved defaults to True; a blocking item means approved defaults
     to False. Neither case includes an `approved` key in the LLM response.
     """
-    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.shared import json_retry as json_retry_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -602,7 +602,7 @@ def test_missing_approved_falls_back_to_severity_counts(monkeypatch) -> None:
 
     def _make_agent(items):
         cls = type("_Agent", (_Agent,), {"_items": items})
-        monkeypatch.setattr(ce_mod, "Agent", cls)
+        monkeypatch.setattr(json_retry_mod, "Agent", cls)
         return BlogCopyEditorAgent(
             llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
         )
@@ -632,7 +632,7 @@ def test_non_list_feedback_items_falls_back_to_empty(monkeypatch) -> None:
     passed straight through to `_parse_feedback_items`, silently dropping all
     feedback instead of being treated as the empty/invalid response it is.
     """
-    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.shared import json_retry as json_retry_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -641,7 +641,7 @@ def test_non_list_feedback_items_falls_back_to_empty(monkeypatch) -> None:
         def __call__(self, prompt):
             return json.dumps({"summary": "reviewed", "feedback_items": {"issue": "not a list"}})
 
-    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    monkeypatch.setattr(json_retry_mod, "Agent", _Agent)
     agent = BlogCopyEditorAgent(
         llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
     )
@@ -660,7 +660,7 @@ def test_non_string_summary_falls_back_to_default(monkeypatch) -> None:
     (or dict, or other non-string) previously raised AttributeError from `.strip()`
     instead of degrading gracefully.
     """
-    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.shared import json_retry as json_retry_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -669,7 +669,7 @@ def test_non_string_summary_falls_back_to_default(monkeypatch) -> None:
         def __call__(self, prompt):
             return json.dumps({"summary": ["not", "a", "string"], "feedback_items": []})
 
-    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    monkeypatch.setattr(json_retry_mod, "Agent", _Agent)
     agent = BlogCopyEditorAgent(
         llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
     )

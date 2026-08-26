@@ -24,30 +24,11 @@ from software_engineering_team.pause_cycle import (
 )
 from software_engineering_team.task_graph import TaskGraphService
 
-GIT_UTILS = "shared.git.git_utils"
-
+from ._coding_team_orchestrator_doubles import DefaultGroomTaskMixin as _DefaultGroomTaskMixin
+from ._coding_team_orchestrator_doubles import FakeWorktreeManager as _FakeWorktreeManager
+from ._coding_team_orchestrator_doubles import patch_git as _patch_git
 
 # --------------------------------------------------------------------------- helpers / stubs
-
-
-class _DefaultGroomTaskMixin:
-    """Ungroomed-default ``run_groom_task`` for Tech-Lead stubs that don't care about grooming.
-
-    Mirrors the real ``run_groom_task``'s own default/fallback shape, so mixing this in changes no
-    existing assertion for a stub that doesn't otherwise override it.
-    """
-
-    def run_groom_task(
-        self, task_id, task_title, task_description, task_dependencies, plan_context
-    ):
-        return {
-            "acceptance_criteria": [],
-            "out_of_scope": "",
-            "description_enriched": task_description,
-            "priority": "medium",
-            "subtasks": [],
-            "task_dependencies": task_dependencies,
-        }
 
 
 class StubTechLead:
@@ -72,11 +53,6 @@ class StubTechLead:
                 {"agent_id": a, "task_id": t["id"]} for t, a in zip(ready_tasks, free_agents)
             ]
         }
-
-
-def _patch_git(monkeypatch, diff: str = "", merge=(True, "ok")):
-    monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: diff)
-    monkeypatch.setattr(f"{GIT_UTILS}.merge_branch", lambda *a, **k: merge)
 
 
 def _answer_all(job: Dict[str, Any], option: str = "yes"):
@@ -829,32 +805,6 @@ def test_already_resolved_entry_questions_do_not_pause(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- swarm escalation (real swarm)
-
-
-class _FakeWorktreeManager:
-    """Test double for coding_team.worktree_manager.WorktreeManager.
-
-    These orchestrator tests stub the implementation workers entirely (they
-    never touch git), so a real WorktreeManager would pay for (and, without
-    _patch_git, actually attempt) real `git worktree add` calls against a
-    plain tmp_path with no `.git`. This double gives each agent_id a distinct
-    child directory under the swarm's own tmp_path instead — no git, no
-    filesystem writes outside tmp_path's own pytest-managed cleanup. Real
-    worktree mechanics are covered by test_worktree_manager.py.
-    """
-
-    def __init__(self, repo_path: Path, agent_ids):
-        self._paths = {aid: Path(repo_path) / f"_wt_{aid}" for aid in agent_ids}
-
-    def prepare(self) -> None:
-        for path in self._paths.values():
-            path.mkdir(parents=True, exist_ok=True)
-
-    def path_for(self, agent_id: str) -> Path:
-        return self._paths[agent_id]
-
-    def cleanup(self) -> None:
-        pass
 
 
 def _make_swarm(tmp_path, tech_lead, workers):
