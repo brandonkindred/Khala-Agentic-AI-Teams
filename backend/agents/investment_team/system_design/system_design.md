@@ -159,7 +159,7 @@ five gates plus a final promotion step, in strict order. Short-circuit
 semantics: any `reject` terminates the checklist; missing validation forces
 `revise`; failure to unlock a live precondition falls back to `paper`.
 
-| # | Gate | Condition | Result |
+| # | Step | Condition | Result |
 |---|---|---|---|
 | 1 | Separation of duties | `proposer_agent_id == approver.agent_id` | `reject` |
 | 2 | Risk veto | `risk_veto == True` | `reject` |
