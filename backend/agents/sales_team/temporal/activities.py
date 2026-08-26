@@ -239,8 +239,8 @@ def prepare_sales_pipeline_activity(job_id: str, request: dict[str, Any]) -> dic
           explicit arguments, and carrying up to 100 of them inside every
           activity's ctx input would silently amplify workflow history.
     """
-    from job_service_client import JOB_STATUS_FAILED, JOB_STATUS_RUNNING
-    from sales_team.job_runner import CLEAN_TERMINAL_STATUSES, job_manager
+    from job_service_client import JOB_STATUS_RUNNING
+    from sales_team.job_runner import job_manager
     from sales_team.learning_engine import format_insights_for_prompt
     from sales_team.models import SalesPipelineRequest
     from sales_team.outcome_store import load_current_insights
@@ -254,17 +254,12 @@ def prepare_sales_pipeline_activity(job_id: str, request: dict[str, Any]) -> dic
 
     carried = pipeline_request.model_copy(update={"existing_prospects": []})
 
-    status = _job_status(job_id)
-    if status is None:
-        raise RuntimeError(f"Sales pipeline job {job_id} not found at prepare")
-    if status == JOB_STATUS_FAILED:
-        raise ApplicationError(
-            f"Sales pipeline job {job_id} was already FAILED before start", non_retryable=True
-        )
-    if status in CLEAN_TERMINAL_STATUSES:
-        activity.logger.info(
-            "Sales job %s already terminal (%s) at prepare; stopping run", job_id, status
-        )
+    guard = _terminal_guard(
+        job_id,
+        phase="sales_prepare",
+        missing_msg=f"Sales pipeline job {job_id} not found at prepare",
+    )
+    if guard is _GuardOutcome.STOP:
         return SalesRunContext(request=carried, job_id=job_id, stopped=True).model_dump(mode="json")
 
     job_manager.update_job(
