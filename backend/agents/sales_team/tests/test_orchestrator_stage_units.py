@@ -151,6 +151,24 @@ def test_discovery_one_uses_qual_json_or_empty(orch, ctx):
     assert isinstance(plan, DiscoveryPlan)
     # no qualification => empty json object passed to the agent
     assert orch.discovery.prepare.call_args.args[1] == "{}"
+    # dossier defaults to None => forwarded as None, no new failure mode
+    assert orch.discovery.prepare.call_args.kwargs["dossier"] is None
+
+
+def test_discovery_one_passes_dossier_through(orch, ctx):
+    orch.discovery.prepare.return_value = DiscoveryPlanBody(spin_questions=SPINQuestions())
+    dossier = ProspectDossier(
+        dossier_id="d1",
+        prospect_id="prs_1",
+        full_name="J",
+        current_title="VP",
+        current_company="Acme",
+        executive_summary="s",
+        confidence=0.9,
+    )
+    plan = orch.discovery_one(_PROSPECT, None, ctx, dossier)
+    assert isinstance(plan, DiscoveryPlan)
+    assert orch.discovery.prepare.call_args.kwargs["dossier"] is dossier
 
 
 def test_close_one_wraps_body(orch, ctx):

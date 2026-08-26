@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from job_service_client import JobServiceClient
@@ -221,6 +221,97 @@ def normalize_persisted_job(
     data["run_id"] = run_id if run_id is not None else (job.get("job_id") or job.get("run_id", ""))
     data.setdefault("status", job.get("status", fallback_status))
     return data
+
+
+# TODO: `list_strategy_lab_jobs` and `list_strategy_lab_runs` in `api.main`
+# still carry their own copies of the algorithm this helper extracts, each
+# with its own `normalize_persisted` shape and terminal-status set. Wiring
+# both to delegate here and deleting their duplicated inline logic is a
+# tracked follow-up, staged separately so this extraction step lands with no
+# behavior change to either route.
+def _merge_and_reconcile_records(
+    *,
+    active_runs: Dict[str, Dict[str, Any]],
+    lock: threading.Lock,
+    reconcile_fn: Callable[[str], None],
+    terminal_statuses: Iterable[str],
+    persisted: List[Dict[str, Any]],
+    normalize_persisted: Callable[[Dict[str, Any]], Tuple[str, Dict[str, Any]]],
+) -> Dict[str, Dict[str, Any]]:
+    """Merge in-memory run state with persisted job-service records, reconciling progress.
+
+    Extracted from the near-identical merge/reconcile/tolerate-malformed
+    algorithm duplicated across ``list_strategy_lab_jobs`` and
+    ``list_strategy_lab_runs`` in ``api.main``, generalized over its input
+    record shape (``active_runs`` values and ``persisted`` entries are opaque
+    dicts to this function) so it can serve both endpoints' differing
+    response models. Fetching ``persisted`` and handling job-service-level
+    failures (exception types, log level, in-memory-only fallback) stays the
+    caller's responsibility, since that policy differs between the two
+    endpoints today -- this function only merges records it's handed.
+
+    Preconditions:
+        - ``active_runs`` and ``lock`` are a matched pair: ``lock`` guards
+          all reads of ``active_runs`` (this function never mutates
+          ``active_runs`` itself).
+        - ``reconcile_fn`` refreshes ``active_runs[run_id]`` in place (e.g.
+          ``_reconcile_run_progress``) and must not be called while ``lock``
+          is held by this function (mirrors both duplicated call sites'
+          comment that the reconcile function is not reentrant).
+        - ``normalize_persisted`` maps one ``persisted`` entry to
+          ``(run_id, record)``; it may raise on a malformed entry rather than
+          returning a sentinel.
+
+    Postconditions:
+        - Returns a new ``Dict[str, Dict[str, Any]]`` keyed by ``run_id``,
+          containing every ``active_runs`` entry with a truthy ``run_id``
+          (an entry missing or with a falsy ``run_id`` is skipped and
+          logged, not included), plus every ``persisted`` entry that
+          normalizes to a truthy ``run_id`` not already present from
+          ``active_runs`` (in-memory entries always take precedence over
+          persisted ones with the same id).
+        - Side effect: ``reconcile_fn(run_id)`` is called once, outside
+          ``lock``, for every ``active_runs`` entry whose ``status`` is not
+          in ``terminal_statuses`` at the time of the first snapshot -- this
+          refreshes progress fields (and possibly ``status``) before the
+          second snapshot is taken, matching both duplicated call sites'
+          two-snapshot pattern.
+        - Does not mutate ``active_runs``, ``persisted``, or any record
+          object taken from either -- values are referenced, not copied.
+
+    Raises:
+        - None. A ``persisted`` entry for which ``normalize_persisted``
+          raises is logged (``logger.warning``) and skipped; it does not
+          discard any other persisted or in-memory record already merged.
+    """
+    terminal = set(terminal_statuses)
+
+    with lock:
+        running_ids = [rid for rid, r in active_runs.items() if r.get("status") not in terminal]
+    for rid in running_ids:
+        reconcile_fn(rid)
+
+    with lock:
+        snapshot = list(active_runs.items())
+
+    merged: Dict[str, Dict[str, Any]] = {}
+    for key, record in snapshot:
+        rid = record.get("run_id")
+        if not rid:
+            logger.warning("Skipping active run entry %r with missing/falsy run_id", key)
+            continue
+        merged[rid] = record
+
+    for job in persisted:
+        try:
+            rid, normalized = normalize_persisted(job)
+        except Exception:
+            logger.warning("Skipping malformed persisted record: %r", job, exc_info=True)
+            continue
+        if rid and rid not in merged:
+            merged[rid] = normalized
+
+    return merged
 
 
 def _load_run_from_job_service_strict(run_id: str) -> Optional[Dict[str, Any]]:
