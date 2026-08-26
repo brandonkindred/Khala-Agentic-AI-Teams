@@ -347,6 +347,16 @@ class _PhaseSpec(NamedTuple):
             ``_phase_task``). Every phase's value below is the evidence/
             story-driven set from #6953: the minimal upstream context that
             phase's agent prompts actually reference.
+        mission_fields: Which ``BrandingMission`` fields this phase's cache
+            key depends on. ``None`` (the default) means "not configured —
+            no filtering, hash the entire mission" — every phase's implicit
+            value today, since no phase's allowlist has been populated yet.
+            An explicit frozenset, including the empty frozenset
+            ``frozenset()``, means "hash exactly this set of mission
+            fields" — ``frozenset()`` deliberately means "no mission field
+            is relevant to this phase's cache key." ``phase_input_hash``
+            applies this distinction when computing
+            ``_run_phases_with_cache``'s per-phase cache key.
     """
 
     builder_fn: Callable[[], Any]
@@ -354,6 +364,7 @@ class _PhaseSpec(NamedTuple):
     model_cls: type[BaseModel]
     merge_fn: Optional[Callable[[Any, type[BaseModel]], Optional[BaseModel]]] = None
     context_phases: Optional[tuple[BrandPhase, ...]] = None
+    mission_fields: Optional[frozenset[str]] = None
 
 
 # Per-phase spec, keyed by BrandPhase in PHASE_ORDER order. This is the single
@@ -697,7 +708,11 @@ class BrandingTeamOrchestrator:
                 continue
 
             input_hash = phase_input_hash(
-                phase, mission, upstream_models, _PHASE_SPEC[phase].context_phases
+                phase,
+                mission,
+                upstream_models,
+                _PHASE_SPEC[phase].context_phases,
+                _PHASE_SPEC[phase].mission_fields,
             )
             cached_output = cache.get(phase, input_hash)
             if cached_output is not None:
