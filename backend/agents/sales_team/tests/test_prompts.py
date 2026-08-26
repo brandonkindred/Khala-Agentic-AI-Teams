@@ -225,14 +225,21 @@ def test_nurture_task_template_matches_fstring() -> None:
 
 
 def test_discovery_task_template_matches_fstring() -> None:
-    ctx = dict(prospect_json="P", qualification_json="Q", product_name="N", value_proposition="V")
+    ctx = dict(
+        prospect_json="P",
+        qualification_json="Q",
+        product_name="N",
+        value_proposition="V",
+        dossier_section="",
+    )
     formatted = DISCOVERY_TASK_TEMPLATE.format(**ctx)
     expected = (
         f"Prepare a complete discovery call guide for:\nProspect: {ctx['prospect_json']}\n"
         f"Qualification context: {ctx['qualification_json']}\n\n"
         f"Product: {ctx['product_name']}\n"
         f"Value proposition: {ctx['value_proposition']}\n\n"
-        "Write SPIN questions in all four categories, craft a Challenger Sale insight-led opener, "
+        "Write SPIN questions in all four categories, craft a Challenger Sale insight-led opener "
+        "(grounded in the Prospect Dossier signals above when present), "
         "build a tailored demo agenda (features tied to confirmed pains only), "
         "list expected objections, and define success criteria for this call. "
         "Use the learning context above (if any) to pre-populate expected_objections with "
@@ -241,6 +248,22 @@ def test_discovery_task_template_matches_fstring() -> None:
         "challenger_insight, demo_agenda, expected_objections, success_criteria_for_call."
     )
     assert formatted == expected
+
+
+def test_discovery_task_template_includes_dossier_section_when_present() -> None:
+    ctx = dict(
+        prospect_json="P",
+        qualification_json="Q",
+        product_name="N",
+        value_proposition="V",
+        dossier_section="\n## Prospect Dossier (confidence: 0.80)\n",
+    )
+    formatted = DISCOVERY_TASK_TEMPLATE.format(**ctx)
+    assert "## Prospect Dossier (confidence: 0.80)" in formatted
+    context_idx = formatted.index("Qualification context: Q")
+    product_idx = formatted.index("Product: N")
+    dossier_idx = formatted.index("## Prospect Dossier")
+    assert context_idx < dossier_idx < product_idx
 
 
 def test_proposal_task_template_matches_fstring() -> None:
