@@ -27,7 +27,6 @@ from .design_review import (
     DesignReviewError,
     SpecCritique,
 )
-from .diff_format import diff_or_full
 from .refinement import RefinementAgent
 
 __all__ = [
@@ -38,7 +37,6 @@ __all__ = [
     "SpecCritique",
     "CodeSynthesisAgent",
     "CodeSynthesisError",
-    "diff_or_full",
     "RefinementAgent",
     "TradeAlignmentAgent",
     "TradeAlignmentReport",

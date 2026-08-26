@@ -7,7 +7,7 @@ and a near-total-rewrite (falls back to full text).
 
 from __future__ import annotations
 
-from investment_team.strategy_lab.agents.diff_format import diff_or_full
+from investment_team.strategy_lab.agents._diff_format import diff_or_full
 
 
 def test_no_previous_round_returns_full_text():
