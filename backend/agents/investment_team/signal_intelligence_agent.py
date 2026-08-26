@@ -52,7 +52,7 @@ def _signal_json_instructions(asset_class: Optional[str]) -> str:
     )
     return f"""\
 Return ONLY a JSON object with these keys (no markdown):
-{{{{
+{{
   "brief_version": 1,
   "macro_themes": ["short bullet", "..."],
   "micro_themes": ["..."],
@@ -63,7 +63,7 @@ Return ONLY a JSON object with these keys (no markdown):
   "evidence_from_market_data": "which snapshot lines (FX, macro, crypto) you use, or 'none' if degraded/empty",
   "confidence": "low" | "medium" | "high",
   "unsupported_claims": ["optional list of things you cannot verify from inputs"]
-}}}}
+}}
 """
 
 

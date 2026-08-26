@@ -2620,7 +2620,13 @@ def _compute_signal_brief_snapshot(
     every category is analyzed independently. The shared per-batch market
     snapshot is likewise scoped per category (``MarketLabContext.scoped_to``)
     before each call, since it carries single-class fields (FX rates, a
-    crypto headline) alongside genuinely shared macro context.
+    crypto headline) alongside genuinely shared macro context. A fresh
+    ``SignalIntelligenceExpert`` is constructed per category rather than
+    reused across the loop, since its underlying Strands ``Agent`` retains
+    conversation history across calls — reuse would let one category's
+    prompt/response persist as prior turns in the next category's call,
+    reopening the same cross-category leak the record/market scoping exists
+    to close.
 
     Cost is bounded by the number of *allowed* categories with at least one
     prior record (at most ``len(PROMPT_ASSET_CLASSES)``) and paid once per
@@ -2639,11 +2645,13 @@ def _compute_signal_brief_snapshot(
           produced is simply absent, so the map may be empty. ``storage`` is
           always a ``dict`` -- never ``None`` -- even on total failure.
         * Fail-open at every level: on disabled expert /
-          provider-initialization failure / market-fetch failure / expert
-          (including its own initialization) failure it returns a
-          ``{"skipped": True, ...}`` storage (or a degraded-market brief set)
-          rather than raising. A single category's failure never aborts the
-          others. A provider-cleanup failure is logged and swallowed without
+          provider-initialization failure / market-fetch failure it returns a
+          top-level ``{"skipped": True, ...}`` storage rather than raising.
+          A per-category expert construction or ``produce_signal_brief``
+          failure (including its own precondition assertion — see below)
+          instead skips only that category's entry in ``by_asset_class``; a
+          single category's failure never aborts the others. A
+          provider-cleanup failure is logged and swallowed without
           altering the return value — it cannot turn a successful result into
           a skipped one, since cleanup only runs after the try block has
           already decided what to return.
@@ -2692,16 +2700,6 @@ def _compute_signal_brief_snapshot(
             )
         prior_for_brief = _snapshot_prior_records()
 
-        try:
-            expert = SignalIntelligenceExpert()
-        except Exception as exc:
-            logger.warning("Signal intelligence expert failed: %s", exc)
-            return {}, {
-                "skipped": True,
-                "skipped_reason": "expert_failed",
-                "error": str(exc),
-            }
-
         briefs: Dict[str, SignalIntelligenceBriefV1] = {}
         by_class: Dict[str, Any] = {}
         for asset_class in allowed:
@@ -2740,6 +2738,18 @@ def _compute_signal_brief_snapshot(
                 market_hash = hashlib.sha256(
                     category_market_ctx.as_prompt_text().encode()
                 ).hexdigest()[:16]
+                # A fresh expert per category, not one shared across the loop:
+                # SignalIntelligenceExpert wraps a Strands ``Agent``, which
+                # accumulates conversation history across calls by default
+                # (calling it with no input replays existing history). Reusing
+                # one instance would let a stocks brief's prompt/response
+                # linger as prior conversation turns in the crypto category's
+                # call, silently reintroducing the cross-category
+                # contamination this whole per-category scoping mechanism
+                # exists to prevent. Construction itself is cheap (local model
+                # config resolution, no network call), so retrying it once per
+                # category costs nothing.
+                expert = SignalIntelligenceExpert()
                 t0 = datetime.now(tz=timezone.utc)
                 brief = expert.produce_signal_brief(
                     category_records, category_market_ctx, asset_class=asset_class

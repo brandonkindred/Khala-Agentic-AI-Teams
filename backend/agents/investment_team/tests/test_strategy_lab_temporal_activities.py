@@ -3128,9 +3128,10 @@ def test_compute_signal_brief_snapshot_fails_open_on_provider_init_failure(monke
 
 
 def test_compute_signal_brief_snapshot_fails_open_on_expert_init_failure(monkeypatch):
-    """Fail-open must cover SignalIntelligenceExpert() construction, which sits
-    inside the outer try but was previously outside the inner try/except that
-    only guarded produce_signal_brief's body."""
+    """Fail-open must cover SignalIntelligenceExpert() construction. Construction
+    now happens per category (a fresh expert per category, not one reused
+    across the loop -- see the isolation test below), so a construction
+    failure is a per-category skip, not a whole-function abort."""
     from investment_team.api import main as api_main
 
     closed = []
@@ -3149,16 +3150,20 @@ def test_compute_signal_brief_snapshot_fails_open_on_expert_init_failure(monkeyp
     def _boom_expert():
         raise RuntimeError("expert init failed")
 
-    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(
+        api_main, "_snapshot_prior_records", lambda *, reverse=False: [_signal_brief_prior_record("stocks")]
+    )
     monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _FakeProvider)
     monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _boom_expert)
 
-    briefs, storage = api_main._compute_signal_brief_snapshot("SPY")
+    briefs, storage = api_main._compute_signal_brief_snapshot("SPY", ["crypto", "forex", "futures", "commodities"])
 
     assert briefs == {}
-    assert storage["skipped"] is True
-    assert storage["skipped_reason"] == "expert_failed"
-    assert "expert init failed" in storage["error"]
+    assert storage["by_asset_class"]["stocks"] == {
+        "skipped": True,
+        "skipped_reason": "expert_failed",
+        "error": "expert init failed",
+    }
     # provider.close() still runs even though expert init failed.
     assert closed == [True]
 
@@ -3182,16 +3187,18 @@ def test_compute_signal_brief_snapshot_survives_provider_close_failure(monkeypat
     def _boom_expert():
         raise RuntimeError("expert failed too")
 
-    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(
+        api_main, "_snapshot_prior_records", lambda *, reverse=False: [_signal_brief_prior_record("stocks")]
+    )
     monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _FakeProvider)
     monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _boom_expert)
 
     # Must not raise despite close() also failing.
-    briefs, storage = api_main._compute_signal_brief_snapshot("SPY")
+    briefs, storage = api_main._compute_signal_brief_snapshot("SPY", ["crypto", "forex", "futures", "commodities"])
 
     assert briefs == {}
-    assert storage["skipped"] is True
-    assert storage["skipped_reason"] == "expert_failed"
+    assert storage["by_asset_class"]["stocks"]["skipped"] is True
+    assert storage["by_asset_class"]["stocks"]["skipped_reason"] == "expert_failed"
 
 
 def test_compute_signal_brief_snapshot_success_survives_provider_close_failure(monkeypatch):
@@ -3403,6 +3410,49 @@ def test_compute_signal_brief_snapshot_isolates_one_categorys_expert_failure(mon
     # ...while the sibling category's brief is entirely unaffected.
     assert "crypto" in briefs
     assert storage["by_asset_class"]["crypto"]["brief_version"] == "v1"
+
+
+def test_compute_signal_brief_snapshot_constructs_a_fresh_expert_per_category(monkeypatch):
+    """A single SignalIntelligenceExpert wraps a Strands Agent, which retains
+    conversation history across calls -- reusing one instance across
+    categories would let a stocks brief's prompt/response leak into crypto's
+    call as prior conversation turns, silently reintroducing cross-category
+    contamination despite the per-category record/market scoping. Must
+    construct a distinct instance for every category."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main,
+        "_snapshot_prior_records",
+        lambda *, reverse=False: [
+            _signal_brief_prior_record("stocks"),
+            _signal_brief_prior_record("crypto"),
+            _signal_brief_prior_record("forex"),
+        ],
+    )
+
+    constructed: List[Any] = []
+
+    class _FakeBrief:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"brief_version": "v1"}
+
+    class _FakeExpert:
+        def __init__(self):
+            constructed.append(self)
+
+        def produce_signal_brief(self, prior_records, market_ctx, *, asset_class=None):
+            return _FakeBrief()
+
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _signal_brief_fake_provider())
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
+
+    briefs, _storage = api_main._compute_signal_brief_snapshot("SPY", ["futures", "commodities"])
+
+    assert sorted(briefs) == ["crypto", "forex", "stocks"]
+    # One fresh instance per category -- never fewer (reused), never shared.
+    assert len(constructed) == 3
+    assert len({id(e) for e in constructed}) == 3
 
 
 def test_compute_signal_brief_snapshot_isolates_a_scoped_to_failure(monkeypatch):
