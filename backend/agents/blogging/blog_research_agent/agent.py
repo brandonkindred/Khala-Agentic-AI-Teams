@@ -293,22 +293,49 @@ class ResearchAgent(_BlogAgentBase):
                 similar_future = executor.submit(
                     contextvars.copy_context().run, _resolve_similar_topics
                 )
-                notes = notes_future.result()
-                academic_papers = academic_future.result()
-                similar_topics = similar_future.result()
 
-            # Persist newly-computed checkpoints sequentially (see comment above).
+                # Collect every future's outcome independently (not `a = f.result();
+                # b = g.result()` in sequence) so one step's exception can't skip
+                # retrieving — and therefore checkpointing — its siblings' already
+                # -completed results. `with ThreadPoolExecutor` waits for all three to
+                # finish regardless on exit, so the arXiv/LLM calls run to completion
+                # either way; losing their output here would just make a Temporal
+                # retry repeat that same completed work for nothing.
+                results: dict[str, Any] = {}
+                errors: dict[str, Exception] = {}
+                for name, future in (
+                    ("notes", notes_future),
+                    ("academic_papers", academic_future),
+                    ("similar_topics", similar_future),
+                ):
+                    try:
+                        results[name] = future.result()
+                    except Exception as e:
+                        errors[name] = e
+
             if self.cache:
-                if not notes_is_cached:
-                    self.cache.save_checkpoint(brief_input, "notes", notes=notes)
-                if not academic_papers_is_cached:
+                if "notes" in results and not notes_is_cached:
+                    self.cache.save_checkpoint(brief_input, "notes", notes=results["notes"])
+                if "academic_papers" in results and not academic_papers_is_cached:
                     self.cache.save_checkpoint(
-                        brief_input, "academic_papers", academic_papers=academic_papers
+                        brief_input, "academic_papers", academic_papers=results["academic_papers"]
                     )
-                if not similar_topics_is_cached:
+                if "similar_topics" in results and not similar_topics_is_cached:
                     self.cache.save_checkpoint(
-                        brief_input, "similar_topics", similar_topics=similar_topics
+                        brief_input, "similar_topics", similar_topics=results["similar_topics"]
                     )
+
+            if errors:
+                # Preserve the original priority (notes, then academic_papers, then
+                # similar_topics) so which exception surfaces doesn't change now that
+                # all three are collected instead of failing fast on the first.
+                for name in ("notes", "academic_papers", "similar_topics"):
+                    if name in errors:
+                        raise errors[name]
+
+            notes = results["notes"]
+            academic_papers = results["academic_papers"]
+            similar_topics = results["similar_topics"]
 
             # Step 10: Compile document (Blog Post Research format)
             _report("Compiling research document...", 0.95)

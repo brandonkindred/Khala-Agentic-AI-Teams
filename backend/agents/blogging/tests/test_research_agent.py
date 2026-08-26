@@ -366,6 +366,67 @@ def test_research_agent_run_resumes_academic_papers_and_similar_topics(
     assert out.similar_topics == ["cached topic"]
 
 
+def test_research_agent_run_checkpoints_siblings_when_notes_raises(monkeypatch, tmp_path) -> None:
+    """When notes synthesis raises, the concurrently-computed academic_papers and
+    similar_topics results must still be checkpointed rather than discarded.
+
+    Regression test: collecting the three futures' results in sequence
+    (`notes_future.result(); academic_future.result(); ...`) meant an exception
+    from notes_future.result() skipped retrieving (and therefore saving) the other
+    two futures' already-completed results, even though the ThreadPoolExecutor
+    context manager waits for them to finish regardless. A Temporal retry would
+    then repeat the arXiv/LLM calls for work that had, in fact, already succeeded.
+    """
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import AcademicPaper, ResearchBriefInput
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="notes raises brief", max_results=3)
+    cache.save_checkpoint(brief, "normalized", normalized={"topic": "cached"})
+    cache.save_checkpoint(brief, "queries", queries=[{"query_text": "q", "intent": "overview"}])
+    cache.save_checkpoint(brief, "candidates", candidates=[])
+    cache.save_checkpoint(brief, "documents", documents=[])
+    cache.save_checkpoint(brief, "scored_docs", scored_docs=[])
+    cache.save_checkpoint(brief, "references", references=[])
+
+    a = _make_agent(monkeypatch, [])
+    a.cache = cache
+
+    monkeypatch.setattr(
+        ResearchAgent,
+        "_synthesize_overview",
+        lambda self, b, refs: (_ for _ in ()).throw(RuntimeError("LLM transport error")),
+    )
+    monkeypatch.setattr(
+        ResearchAgent,
+        "_fetch_academic_papers",
+        lambda self, b: [
+            AcademicPaper(
+                title="Fresh Paper",
+                url="https://arxiv.org/abs/9999",
+                overview_or_summary="fresh abstract",
+            )
+        ],
+    )
+    monkeypatch.setattr(ResearchAgent, "_get_similar_topics", lambda self, b, refs: ["fresh topic"])
+
+    with pytest.raises(RuntimeError, match="LLM transport error"):
+        a.run(brief)
+
+    checkpoint = cache.load_checkpoint(brief)
+    assert checkpoint is not None
+    assert checkpoint.notes is None
+    assert checkpoint.academic_papers == [
+        {
+            "title": "Fresh Paper",
+            "url": "https://arxiv.org/abs/9999",
+            "overview_or_summary": "fresh abstract",
+        }
+    ]
+    assert checkpoint.similar_topics == ["fresh topic"]
+
+
 def test_research_agent_synthesize_overview_no_references() -> None:
     from agents.blogging.blog_research_agent.agent import ResearchAgent
     from agents.blogging.blog_research_agent.models import ResearchBriefInput
