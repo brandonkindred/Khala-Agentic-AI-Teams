@@ -40,12 +40,11 @@ try:
 except ImportError:  # pragma: no cover - optional adapter absent in some test harnesses
     LLMClientModel = None  # type: ignore[misc, assignment]
 
-from . import self_review
-from .feedback_tracker import MAX_PREVIOUS_FEEDBACK_ITEMS, PersistentFeedbackItem
+from . import revision, self_review
+from .feedback_tracker import PersistentFeedbackItem
 from .models import (
     ReviseWriterInput,
     RevisionPlan,
-    RevisionPlanChange,
     UncertaintyQuestion,
     WriterInput,
     WriterOutput,
@@ -758,325 +757,6 @@ class BlogWriterAgent(_BlogAgentBase):
             line += f"\n   Suggestion: {suggestion}"
         return line
 
-    def _build_revise_all_items_prompt(
-        self,
-        draft: str,
-        feedback_items: list[Any],
-        revision_plan: str,
-        style_guide_text: str,
-        revise_input: ReviseWriterInput,
-    ) -> str:
-        """Build one revision prompt that applies every copy-editor feedback item.
-
-        Postconditions:
-            - Returns a prompt string embedding the brand/style sections, the
-              content plan, every feedback item formatted via
-              ``_format_feedback_item_line``, ``revision_plan`` as planning
-              context, and the current draft.
-            - When present on ``revise_input``: ``revise_input.persistent_issues``
-              is inserted before the feedback block; ``previous_feedback_items``
-              (capped at ``MAX_PREVIOUS_FEEDBACK_ITEMS``) is inserted after it;
-              ``selected_title`` and ``elicited_stories`` are each appended as
-              their own labeled section near the end (title before stories);
-              and ``tone_or_purpose`` / ``audience`` are each prepended as a
-              single labeled line at the very front (tone_or_purpose before
-              audience). Absent fields are omitted rather than left blank.
-        """
-        brand_section = self._brand_section_for_prompt()
-        feedback_lines = [
-            self._format_feedback_item_line(item, i)
-            for i, item in enumerate(feedback_items, start=1)
-        ]
-        feedback_block = "\n\n".join(feedback_lines)
-
-        cp = compact_text(
-            revise_input.outline_for_prompt(), COMPACT_OUTLINE_CHARS, self._model, "content plan"
-        )
-        prompt_parts = [
-            REVISION_TASK_INSTRUCTIONS,
-            "",
-            "---",
-            "BRAND AND STYLE (mandatory for every sentence):",
-            "---",
-            brand_section,
-            "",
-            "---",
-            "STYLE GUIDE (follow in the revised draft):",
-            "---",
-            style_guide_text,
-            "",
-            "---",
-            "CONTENT PLAN (preserve section intent and narrative flow):",
-            "---",
-            cp,
-            "",
-        ]
-        # Persistent issues — placed BEFORE current feedback for higher LLM attention.
-        if revise_input.persistent_issues:
-            pi_lines = []
-            for i, pi in enumerate(revise_input.persistent_issues, 1):
-                location = getattr(pi, "location", None)
-                loc = f" [{location}]" if location else ""
-                occurrence_count = getattr(pi, "occurrence_count", 0)
-                severity = getattr(pi, "severity", "unknown")
-                category = getattr(pi, "category", "")
-                line = (
-                    f"{i}. [{severity}] {category}{loc} "
-                    f"(flagged {occurrence_count} times): {getattr(pi, 'issue', '')}"
-                )
-                suggestion = getattr(pi, "suggestion", None)
-                if suggestion:
-                    line += f'\n   REQUIRED FIX: "{suggestion}"'
-                pi_lines.append(line)
-            prompt_parts.extend(
-                [
-                    "---",
-                    "PERSISTENT ISSUES — THESE HAVE FAILED TO BE FIXED AND MUST BE RESOLVED THIS ITERATION:",
-                    "---",
-                    "\n\n".join(pi_lines),
-                    "",
-                ]
-            )
-        prompt_parts.extend(
-            [
-                "---",
-                "REVISION PLAN (execute this plan before writing):",
-                "---",
-                revision_plan.strip() or "No explicit plan generated; apply all feedback directly.",
-                "",
-                "---",
-                "COPY EDITOR FEEDBACK (apply every numbered item below):",
-                "---",
-                feedback_block,
-                "",
-            ]
-        )
-        if revise_input.previous_feedback_items:
-            prev_lines = []
-            for i, item in enumerate(
-                revise_input.previous_feedback_items[:MAX_PREVIOUS_FEEDBACK_ITEMS], 1
-            ):
-                location = getattr(item, "location", None)
-                loc = f" [{location}]" if location else ""
-                severity = getattr(item, "severity", "unknown")
-                category = getattr(item, "category", "")
-                issue = getattr(item, "issue", "")
-                prev_lines.append(f"{i}. [{severity}] {category}{loc}: {issue}")
-            prompt_parts.extend(
-                [
-                    "---",
-                    "RECENTLY RESOLVED FEEDBACK (do NOT regress on these):",
-                    "---",
-                    "\n\n".join(prev_lines),
-                    "",
-                ]
-            )
-        prompt_parts.extend(
-            [
-                "---",
-                "CURRENT DRAFT:",
-                "---",
-                draft,
-            ]
-        )
-        prefixes: list[str] = []
-        if revise_input.tone_or_purpose:
-            prefixes.append(f"Tone/Purpose: {revise_input.tone_or_purpose}")
-        if revise_input.audience:
-            prefixes.append(f"Audience: {revise_input.audience}")
-        if prefixes:
-            prompt_parts = prefixes + prompt_parts
-        if revise_input.selected_title:  # pragma: no cover - prompt-assembly branch when selected_title is supplied; covered by integration tests.
-            prompt_parts.extend(
-                [
-                    "",
-                    "---",
-                    f"AUTHOR-CHOSEN TITLE (preserve this exact H1): {revise_input.selected_title}",
-                ]
-            )
-        if revise_input.elicited_stories:
-            prompt_parts.extend(
-                [
-                    "",
-                    "---",
-                    "AUTHOR'S PERSONAL STORIES (preserve these in the revision):\n"
-                    + revise_input.elicited_stories,
-                ]
-            )
-        length_block = (
-            revise_input.length_guidance.strip()
-            if (revise_input.length_guidance or "").strip()
-            else (
-                f"TARGET LENGTH: Aim for roughly {revise_input.target_word_count} words "
-                f"(acceptable range: {int(revise_input.target_word_count * 0.75)}–{int(revise_input.target_word_count * 1.3)} words). "
-                "Apply all feedback above without significantly expanding the post beyond this target."
-            )
-        )
-        prompt_parts.extend(
-            [
-                "",
-                "---",
-                length_block,
-                "",
-                "---",
-                'Use this format: first line {"draft": 0}, then ---DRAFT---, then the full revised blog post in Markdown.',
-            ]
-        )
-        return "\n".join(prompt_parts)
-
-    def _build_revision_plan_prompt(
-        self, draft: str, feedback_items: list[Any], revise_input: ReviseWriterInput
-    ) -> str:
-        """Build a prompt that asks the LLM for a structured revision plan.
-
-        Preconditions:
-            - ``draft`` is the current Markdown draft text.
-            - ``feedback_items`` is a sequence of items that each expose
-              ``severity``, ``category``, and ``issue`` (and optionally
-              ``location`` / ``suggestion``) for ``_format_feedback_item_line``.
-            - ``revise_input`` provides the content plan via
-              ``outline_for_prompt()``.
-        Postconditions:
-            - Returns a prompt string that instructs the model to return JSON
-              matching the ``RevisionPlan`` schema (``summary``, ordered
-              ``changes`` with ``section`` / ``feedback_ids`` / ``action`` /
-              ``rationale``, and ``risks``), with feedback referenced by
-              1-based index and ``must_fix`` severity prioritized.
-        """
-        feedback_lines = [
-            self._format_feedback_item_line(item, i)
-            for i, item in enumerate(feedback_items, start=1)
-        ]
-        cp = compact_text(
-            revise_input.outline_for_prompt(), COMPACT_OUTLINE_CHARS, self._model, "content plan"
-        )
-        parts = [
-            "Analyse ALL feedback items and create a structured revision plan for this draft.",
-            "Return valid JSON matching this schema exactly:",
-            "{",
-            '  "summary": "One-paragraph overview of the revision strategy",',
-            '  "changes": [',
-            "    {",
-            '      "section": "Which section or location this change targets",',
-            '      "feedback_ids": [1, 2],',
-            '      "action": "rewrite | delete | merge | add | rephrase | restructure",',
-            '      "rationale": "Why this change is needed"',
-            "    }",
-            "  ],",
-            '  "risks": ["Potential regressions or trade-offs"]',
-            "}",
-            "",
-            "List changes in priority order (must_fix severity first).",
-            "Reference feedback items by their 1-based index number.",
-            "",
-            "---",
-            "CONTENT PLAN:",
-            "---",
-            cp,
-            "",
-            "---",
-            "FEEDBACK ITEMS:",
-            "---",
-            "\n\n".join(feedback_lines),
-            "",
-            "---",
-            "CURRENT DRAFT:",
-            "---",
-            draft,
-        ]
-        return "\n".join(parts)
-
-    def _generate_revision_plan(
-        self,
-        draft: str,
-        feedback_items: list[Any],
-        revise_input: ReviseWriterInput,
-    ) -> RevisionPlan:
-        """Build a structured revision plan, with a plain-text fallback.
-
-        Calls the JSON-oriented LLM path first and converts its response to a
-        ``RevisionPlan``. Non-transient LLM/parse failures fall back to a
-        plain-text plan; transient LLM errors are unwrapped and re-raised.
-        Unexpected programming errors (non-``LLMError``) propagate rather than
-        being swallowed into the unstructured fallback.
-        """
-        prompt = self._build_revision_plan_prompt(draft, feedback_items, revise_input)
-        try:
-            data = self._call_agent_json(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
-            if data is None or not isinstance(data, dict):
-                return RevisionPlan(summary="Planning produced no output.", changes=[], risks=[])
-            changes: list[RevisionPlanChange] = []
-            changes_raw = data.get("changes") or []
-            if not isinstance(changes_raw, list):
-                logger.warning("Revision plan 'changes' is not a list: %r", changes_raw)
-                changes_raw = []
-            for c in changes_raw:
-                if not isinstance(c, dict):
-                    continue
-                try:
-                    changes.append(RevisionPlanChange(**c))
-                except (TypeError, ValueError, ValidationError) as change_exc:
-                    logger.debug("Skipping malformed revision plan change: %s", change_exc)
-                    continue
-            risks_raw = data.get("risks") or []
-            if not isinstance(risks_raw, list):
-                logger.warning("Revision plan 'risks' is not a list: %r", risks_raw)
-                risks_raw = []
-            # Normalize model fields before RevisionPlan construction so a
-            # non-string summary / non-string risk entry is treated as a
-            # structured-response failure (plain-text fallback) rather than a
-            # programming error that aborts the draft pipeline.
-            summary_raw = data.get("summary", "")
-            if summary_raw is None:
-                summary = ""
-            elif isinstance(summary_raw, str):
-                summary = summary_raw
-            else:
-                raise LLMJsonParseError(
-                    f"Revision plan 'summary' must be a string, got {type(summary_raw).__name__}",
-                    response_preview=repr(summary_raw)[:200],
-                )
-            risks: list[str] = []
-            for risk in risks_raw:
-                if isinstance(risk, str):
-                    risks.append(risk)
-                else:
-                    raise LLMJsonParseError(
-                        f"Revision plan 'risks' entries must be strings, got {type(risk).__name__}",
-                        response_preview=repr(risk)[:200],
-                    )
-            try:
-                return RevisionPlan(
-                    summary=summary,
-                    changes=changes,
-                    risks=risks,
-                )
-            except ValidationError as plan_exc:
-                raise LLMJsonParseError(
-                    f"Revision plan failed schema validation: {plan_exc}",
-                    response_preview=repr(data)[:200],
-                ) from plan_exc
-        except Exception as e:
-            cause = _unwrap_llm_cause(e)
-            if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
-                raise cause
-            if not isinstance(cause, LLMError):
-                raise
-            logger.warning(
-                "Structured revision planning failed: %s — falling back to unstructured", cause
-            )
-            # Graceful degradation: try plain-text plan
-            try:
-                plain = self._call_text(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
-                return RevisionPlan(summary=(plain or "").strip(), changes=[], risks=[])
-            except Exception as fallback_exc:
-                fallback_cause = _unwrap_llm_cause(fallback_exc)
-                if isinstance(fallback_cause, (LLMRateLimitError, LLMTemporaryError)):
-                    raise fallback_cause
-                if not isinstance(fallback_cause, LLMError):
-                    raise
-                return RevisionPlan(summary="Revision planning failed.", changes=[], risks=[])
-
     def _build_revise_single_item_prompt(
         self,
         draft: str,
@@ -1292,7 +972,14 @@ class BlogWriterAgent(_BlogAgentBase):
         # ── Step 1+2: Analyse feedback and create structured revision plan ──
         if on_llm_request:
             on_llm_request(f"Analysing {num_items} feedback items and creating revision plan...")
-        revision_plan: RevisionPlan = self._generate_revision_plan(draft, items, revise_input)
+        revision_plan: RevisionPlan = revision.generate_revision_plan(
+            draft,
+            items,
+            revise_input,
+            call_json=self._call_agent_json,
+            call_text=self._call_text,
+            llm=self._model,
+        )
         logger.info(
             "Revision plan: %s planned changes, %s risks identified",
             len(revision_plan.changes),
@@ -1333,12 +1020,14 @@ class BlogWriterAgent(_BlogAgentBase):
             )
         plan_text = "".join(plan_parts)
 
-        prompt = self._build_revise_all_items_prompt(
+        prompt = revision.build_revise_all_items_prompt(
             draft,
             items,
             plan_text,
             style_guide_text,
             revise_input,
+            brand_section=self._brand_section_for_prompt(),
+            llm=self._model,
         )
         current_draft = draft
         primary_succeeded = False
