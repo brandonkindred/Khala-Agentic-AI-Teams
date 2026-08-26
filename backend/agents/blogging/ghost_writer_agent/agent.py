@@ -427,7 +427,6 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
             - ``content_plan`` is a populated ``ContentPlan``.
         Postconditions:
             - Returns at most 3 ``StoryGap`` objects.
-            - Uses ``run_json_gate`` with ``max_attempts=2``.
             - On parse exhaustion, unexpected helper errors, or transient LLM
               transport errors, returns ``[]`` via ``_empty_list_fallback``.
             - Non-object array items are skipped; missing/blank ``seed_question``
@@ -444,7 +443,7 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
                 self._model,
                 _FIND_GAPS_SYSTEM,
                 prompt,
-                max_attempts=2,
+                max_attempts=2,  # one retry with a stricter JSON-only suffix on parse failure
                 strict_json_suffix=_JSON_RETRY_SUFFIX,
                 fallback_builder=_empty_list_fallback,
                 logger=logger,
@@ -688,10 +687,10 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
         Postconditions:
             - Returns a dict with keys ``sufficient``, ``no_experience``,
               ``story_context``, and ``missing``.
-            - Uses ``run_json_gate``; on parse exhaustion, unexpected
-              helper errors, transient LLM transport errors, or a non-dict
-              payload, returns ``_default_sufficiency_fallback`` so the
-              interview loop can continue safely.
+            - On parse exhaustion, unexpected helper errors, transient LLM
+              transport errors, or a non-dict payload, returns
+              ``_default_sufficiency_fallback`` so the interview loop can
+              continue safely.
         """
         system = (
             _EVALUATE_SUFFICIENCY_SYSTEM
