@@ -133,6 +133,13 @@ def _split_sentences_for_staccato(para: str) -> list[str]:
         - Mid-sentence abbreviation/decimal periods are not treated as sentence
           boundaries; a real sentence-ending period after an abbreviation
           (next token capitalized, or end of text) is preserved.
+        - Abbreviations and decimal numbers are replaced by internal
+          ``_ABBREV_PROTECT`` placeholder tokens (e.g. ``egPLACEHOLDER``,
+          ``NUMPLACEHOLDER``) before splitting, to avoid false sentence
+          boundaries. The placeholders are NOT restored: returned sentences
+          contain them verbatim. Callers only use the results for word-count
+          streak detection (``deterministic_self_check``), which is
+          unaffected by this substitution.
     """
     protected = para
     for pattern, token in _ABBREV_PROTECT:
@@ -163,7 +170,10 @@ def _extract_draft_after_marker(raw_response: Optional[str]) -> str:
     first line {\"draft\": 0}, then ---DRAFT---, then the full blog post in Markdown.
     Falls back to scanning the response for extractable JSON (whole-response,
     fenced, or prose-wrapped, via ``extract_json_from_response``) and returning
-    the value of its \"draft\" key.
+    the value of its \"draft\" key, but only when that value is a non-empty
+    string; a non-string value (including the literal ``0`` sentinel used in
+    the hybrid marker line) or an empty string is treated the same as no
+    fallback match and yields ``\"\"``.
     """
     if not raw_response or not isinstance(raw_response, str):
         return ""
@@ -484,7 +494,7 @@ def self_review(draft: str, call_text: CallText) -> str:
     """Run deterministic check then LLM self-review. Returns cleaned draft.
 
     Both sub-steps (``fix_deterministic_violations``, ``llm_self_review``)
-    already return the original draft on their own soft-fail paths, so this
+    already return their own *input* draft unchanged on a soft-fail, so this
     function has no additional failure handling of its own.
 
     Preconditions:
@@ -494,8 +504,14 @@ def self_review(draft: str, call_text: CallText) -> str:
     Postconditions:
         - Returns the draft after applying any deterministic fixes and any
           LLM self-review fixes.
-        - If either sub-step soft-fails, the original ``draft`` is returned
-          because both sub-steps handle their own failures.
+        - If ``fix_deterministic_violations`` soft-fails, it returns the
+          original ``draft`` unchanged, and ``llm_self_review`` then runs on
+          that same original draft.
+        - If ``llm_self_review`` soft-fails, it returns its own input
+          unchanged — the deterministically-fixed draft when Step 1 ran and
+          succeeded, or the original ``draft`` when Step 1 did not run (no
+          violations) or itself soft-failed. It is NOT always the original
+          ``draft`` passed to ``self_review``.
     """
     # Step 1: Deterministic checks
     violations = deterministic_self_check(draft)
