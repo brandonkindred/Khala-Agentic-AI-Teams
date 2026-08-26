@@ -1002,7 +1002,11 @@ class SalesPodOrchestrator:
         return nurture_seqs
 
     def discovery_one(
-        self, p: Prospect, qual: Optional[QualificationScore], ctx: _RunContext
+        self,
+        p: Prospect,
+        qual: Optional[QualificationScore],
+        ctx: _RunContext,
+        dossier: Optional[ProspectDossier] = None,
     ) -> DiscoveryPlan:
         """Prepare one prospect's discovery plan. Raises on failure.
 
@@ -1012,9 +1016,16 @@ class SalesPodOrchestrator:
             - ``qual`` is the matching ``QualificationScore`` for ``p`` or
               ``None`` (an empty ``"{}"`` is passed to the agent in that case,
               preserving the prior behaviour).
+            - ``dossier`` is the matching ``ProspectDossier`` for ``p`` or
+              ``None`` when no dossier is saved; defaults to ``None`` so
+              existing callers (e.g. the ``sales_discovery_one`` activity)
+              keep working unmodified.
 
         Postconditions:
             - Returns a ``DiscoveryPlan`` whose ``prospect`` is ``p``.
+            - ``dossier`` is forwarded to ``DiscoveryAgent.prepare`` as-is;
+              ``None`` produces the same plan as before dossier support
+              existed.
         """
         qual_json = qual.model_dump_json(indent=2) if qual else "{}"
         body = self.discovery.prepare(
@@ -1023,6 +1034,7 @@ class SalesPodOrchestrator:
             ctx.product,
             ctx.vp,
             ctx.insights_ctx,
+            dossier=dossier,
         )
         return DiscoveryPlan(prospect=p, **body.model_dump())
 
@@ -1031,6 +1043,7 @@ class SalesPodOrchestrator:
         ctx: _RunContext,
         qualified_prospects: List[Prospect],
         qualified: List[QualificationScore],
+        dossier_map: dict[str, ProspectDossier],
     ) -> List[DiscoveryPlan]:
         """Run the discovery stage for all qualified prospects in parallel.
 
@@ -1040,6 +1053,11 @@ class SalesPodOrchestrator:
             - ``qualified`` is a list of ``QualificationScore`` objects, typically a
               subset of all scored prospects from the qualification stage; entries
               without an ``id`` are silently excluded from the lookup dict.
+            - ``dossier_map`` is ``{prospect_id: ProspectDossier}`` for prospects
+              with a saved dossier, typically the map already resolved by
+              ``_run_outreach``; if empty (e.g. the outreach stage was
+              skipped), it is re-resolved here via
+              ``load_dossiers_for_prospects``.
 
         Postconditions:
             - Returns a list whose length is ≤ ``len(qualified_prospects)``; any
@@ -1049,6 +1067,9 @@ class SalesPodOrchestrator:
             - If a prospect has no matching ``QualificationScore`` in ``qualified``,
               an empty JSON object (``"{}"``) is passed to ``discovery.prepare``,
               which is expected to handle this gracefully.
+            - A prospect with no entry in the resolved ``dossier_map`` still
+              produces a discovery plan (``dossier`` degrades to ``None``); this
+              is not a new failure mode and never skips the stage.
         """
         ctx.update("discovery", STAGE_PROGRESS["discovery"][0])
         logger.info(
@@ -1057,10 +1078,14 @@ class SalesPodOrchestrator:
             len(qualified_prospects),
         )
         qual_by_prospect_id = index_by_prospect_id(qualified, lambda q: q.prospect)
+        if not dossier_map:
+            dossier_map = self.load_dossiers_for_prospects(qualified_prospects)
 
         def _one(p: Prospect) -> Optional[DiscoveryPlan]:
             try:
-                return self.discovery_one(p, qual_by_prospect_id.get(p.id), ctx)
+                return self.discovery_one(
+                    p, qual_by_prospect_id.get(p.id), ctx, dossier_map.get(p.id)
+                )
             except Exception:
                 logger.exception("sales.discovery.failed prospect_id=%s", p.id)
                 return None
@@ -1261,7 +1286,9 @@ class SalesPodOrchestrator:
 
         # Stage 5 — Discovery
         if self._should_run(PipelineStage.DISCOVERY, ctx.entry) and qualified_prospects:
-            result.discovery_plans = self._run_discovery(ctx, qualified_prospects, qualified)
+            result.discovery_plans = self._run_discovery(
+                ctx, qualified_prospects, qualified, dossier_map
+            )
 
         # Stage 6 — Proposal
         if self._should_run(PipelineStage.PROPOSAL, ctx.entry) and qualified_prospects:

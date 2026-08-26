@@ -162,9 +162,10 @@ def test_per_prospect_argument_pairing(monkeypatch):
     # outreach: [ctx, prospect, dossier] — dossier matches the prospect
     for _ctx, prospect, dossier in rec.args_for(acts.outreach_one_activity):
         assert dossier == {"d": prospect["id"]}
-    # discovery: [ctx, prospect, qual] — qual's embedded prospect is the same one
-    for _ctx, prospect, qual in rec.args_for(acts.discovery_one_activity):
+    # discovery: [ctx, prospect, qual, dossier] — both keyed to the prospect
+    for _ctx, prospect, qual, dossier in rec.args_for(acts.discovery_one_activity):
         assert qual["prospect"]["id"] == prospect["id"]
+        assert dossier == {"d": prospect["id"]}
     # proposal: [ctx, prospect, dossier, qual] — both keyed to the prospect
     for _ctx, prospect, dossier, qual in rec.args_for(acts.proposal_one_activity):
         assert dossier == {"d": prospect["id"]}
@@ -369,17 +370,22 @@ def test_all_nurture_skips_advance_stages(monkeypatch):
     assert rec.count(acts.close_one_activity) == 0
 
 
-def test_proposal_stage_reloads_dossiers_when_first_load_empty(monkeypatch):
+def test_discovery_stage_reloads_dossiers_when_first_load_empty(monkeypatch):
     """Thread-path parity: an empty first dossier load (e.g. transient outage)
-    is retried at the proposal boundary so proposals can still get grounding."""
+    is retried at the discovery boundary (the first stage after outreach to
+    consult the map) so discovery — and, since the map is now populated,
+    proposal too — can still get grounding."""
     rec = _Recorder(
         prospects=[_prospect("p1")],
         dossier_map={},
         dossier_maps=[{}, {"p1": {"d": "p1"}}],  # first load empty, reload populated
     )
     _run(monkeypatch, rec)
-    assert rec.count(acts.load_dossiers_activity) == 2  # initial + proposal reload
-    # proposal received the reloaded dossier for its prospect
+    assert rec.count(acts.load_dossiers_activity) == 2  # initial + discovery reload
+    # discovery received the reloaded dossier for its prospect
+    ((_ctx, _p, _qual, dossier),) = rec.args_for(acts.discovery_one_activity)
+    assert dossier == {"d": "p1"}
+    # proposal reuses the same (already-populated) map — no second reload
     ((_ctx, prospect, dossier, _qual),) = rec.args_for(acts.proposal_one_activity)
     assert dossier == {"d": "p1"}
 
