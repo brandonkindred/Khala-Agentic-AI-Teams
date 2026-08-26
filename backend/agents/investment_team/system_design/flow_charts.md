@@ -180,9 +180,15 @@ sequenceDiagram
 - Two market-data dependencies are folded inside the activities above rather
   than drawn as participants. `compute_signal_brief_activity` builds a
   `MarketLabContext` through `FreeTierMarketDataProvider.fetch_context(...)`
-  and reads the prior `StrategyLabRecord`s before the LLM call — a provider
-  outage surfaces as a null brief with `skipped_reason="provider_init_failed"`,
-  not as an error. The `execute strategy_code` step fetches OHLCV through
+  and reads the prior `StrategyLabRecord`s before the LLM call — every step is
+  fail-open, not as an error, but the two failure modes are not the same:
+  `FreeTierMarketDataProvider()` construction failing (a config/init problem)
+  nulls the brief with `skipped_reason="provider_init_failed"`; an ordinary
+  fetch/feed outage in `fetch_context(...)` after successful construction
+  instead degrades to `MarketLabContext(degraded=True, degraded_reason=...)`
+  and still proceeds to call `SignalIntelligenceExpert` — so a market-data
+  outage typically still returns a real (degraded-input) brief, not a null
+  one. The `execute strategy_code` step fetches OHLCV through
   `MarketDataService` (see [`market_data_flow.md`](./market_data_flow.md)).
 - `_active_runs` is an in-memory read cache. All four **GET** surfaces —
   `/strategy-lab/runs`, `.../runs/{id}/status`, `/strategy-lab/jobs`, and
