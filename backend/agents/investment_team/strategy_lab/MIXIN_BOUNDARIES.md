@@ -163,3 +163,26 @@ assembly) is unchanged by every step above — each was either a field-for-field
 merge (Step 1) or a verbatim relocation (Steps 2-3), verified by running the
 full `investment_team` test suite (4835 passed, 10 skipped, ~95.7% coverage,
 comfortably above the 90% floor) after each step.
+
+## Note: "dependency-free" here means orchestrator/mixin-free, not sandbox-safe
+
+This audit predates the Temporal port. "Dependency-free" above means only
+that `_orchestrator_helpers.py`'s functions don't import from `orchestrator.py`
+or any mixin — never a claim that the module has no runtime dependencies at
+all. It imports `..execution.metrics`, `..market_data_service`, and
+`..trading_service.modes.sandbox_compat` at its own top level for its other
+functions, and that last one transitively reaches `shared.postgres.client`'s
+module-scope `threading.Lock()` call — fine for thread mode, but a genuine
+`RestrictedWorkflowAccessError` if anything reachable from workflow code
+imports it (even via a deferred import), because the temporalio sandbox
+intercepts every import workflow code triggers.
+
+`cycle_control.py` is the module for logic that must additionally be
+Temporal-workflow-sandbox-safe (`run_cycle`'s directive-gathering and
+terminal-guard functions, reused by `StrategyLabCycleWorkflow.run` via
+`temporal/dto.py`'s deferred-import adapters) — it has zero runtime
+dependencies beyond `typing`, with real type references
+`TYPE_CHECKING`-guarded so they're never evaluated at import time. Put new
+sandbox-reachable pure logic there, not in `_orchestrator_helpers.py`; the
+latter stays fine for pure logic that only thread mode (or an activity,
+which runs outside the sandbox) ever calls.
