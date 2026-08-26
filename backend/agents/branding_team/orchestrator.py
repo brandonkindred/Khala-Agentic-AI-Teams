@@ -337,10 +337,13 @@ class _PhaseSpec(NamedTuple):
             ``_extract_phase_output`` trusts any non-``None`` return as a
             successful, non-degraded extraction.
         context_phases: Which upstream ``BrandPhase``s' outputs this phase
-            should receive as context. Defaults to ``()`` (no filtering —
-            every prior output is included; this remains STRATEGIC_CORE's
-            value since it has no upstream phases at all). ``_phase_task``
-            filters ``prior_outputs`` down to this set when non-empty (see
+            should receive as context. ``None`` (the default) means "not
+            configured — no filtering, include every prior output"; this
+            remains STRATEGIC_CORE's implicit value since it has no upstream
+            phases at all. An explicit tuple, including the empty tuple
+            ``()``, means "filter to exactly this set" — ``()`` deliberately
+            means "include no upstream context." ``_phase_task`` applies this
+            distinction when building a downstream phase's task string (see
             ``_phase_task``). Every phase's value below is the evidence/
             story-driven set from #6953: the minimal upstream context that
             phase's agent prompts actually reference.
@@ -350,7 +353,7 @@ class _PhaseSpec(NamedTuple):
     node_id: str
     model_cls: type[BaseModel]
     merge_fn: Optional[Callable[[Any, type[BaseModel]], Optional[BaseModel]]] = None
-    context_phases: tuple[BrandPhase, ...] = ()
+    context_phases: Optional[tuple[BrandPhase, ...]] = None
 
 
 # Per-phase spec, keyed by BrandPhase in PHASE_ORDER order. This is the single
@@ -776,15 +779,16 @@ class BrandingTeamOrchestrator:
               extended with the serialized upstream outputs when present so an
               isolated downstream phase sees the context the sequential edge would
               otherwise carry (a superset — never less context).
-            - When ``phase``'s ``_PHASE_SPEC`` entry has a non-empty
+            - When ``phase``'s ``_PHASE_SPEC`` entry has a non-``None``
               ``context_phases``, only ``prior_outputs`` entries whose key
-              matches one of those upstream phases' values are included.
-              When ``context_phases`` is empty (the default), every entry in
+              matches one of those upstream phases' values are included —
+              an empty tuple means none are included. When ``context_phases``
+              is ``None`` (the default — "not configured"), every entry in
               ``prior_outputs`` is included — unchanged, backward-compatible
               behavior.
         """
         spec = _PHASE_SPEC[phase]
-        if spec.context_phases:
+        if spec.context_phases is not None:
             allowed = {p.value for p in spec.context_phases}
             prior_outputs = {k: v for k, v in prior_outputs.items() if k in allowed}
 
