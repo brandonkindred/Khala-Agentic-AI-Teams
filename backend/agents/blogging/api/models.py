@@ -1,5 +1,7 @@
 """Pydantic request/response models for the blogging API, plus their small
-model-building helpers (``_format_audience``, ``_blog_job_dict_to_status_response``).
+model-building helpers (``_format_audience`` — a thin wrapper around the
+shared ``agents.blogging.shared.audience.format_audience`` — and
+``_blog_job_dict_to_status_response``).
 
 Nothing here is monkeypatched by the test suite directly, so routers import these
 names at plain module top level; ``api.main`` re-exports all of them because a few
@@ -10,6 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Union
 
+from agents.blogging.shared.audience import format_audience
 from agents.blogging.shared.content_profile import ContentProfile, SeriesContext
 from pydantic import BaseModel, Field
 
@@ -44,20 +47,7 @@ class TitleChoiceResponse(BaseModel):
 
 def _format_audience(audience: Optional[Union[AudienceDetails, str]]) -> str:
     """Convert audience input to a string for the agents."""
-    if audience is None:
-        return ""
-    if isinstance(audience, str):
-        return audience.strip()
-    parts = []
-    if audience.skill_level:
-        parts.append(f"skill level: {audience.skill_level}")
-    if audience.profession:
-        parts.append(f"profession: {audience.profession}")
-    if audience.hobbies:
-        parts.append(f"interests: {', '.join(audience.hobbies)}")
-    if audience.other:
-        parts.append(audience.other)
-    return "; ".join(parts) if parts else ""
+    return format_audience(audience) or ""
 
 
 class FullPipelineRequest(BaseModel):
