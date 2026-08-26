@@ -115,6 +115,7 @@ from .agents.refinement import (
 from .agents.zero_trade_repair import ZeroTradeRepairAgent
 from .alignment_findings import AlignmentFinding
 from .budget_config import StrategyLabBudgetConfig
+from .cycle_control import gather_convergence_directives, require_short_circuit_inputs
 from .exceptions import SpecImplementabilityError
 from .market_regime import RegimeSummary, compute_regime_summary
 from .orchestrator_alignment import AlignmentMixin
@@ -1632,16 +1633,6 @@ from ._orchestrator_helpers import (  # noqa: E402,F401  — keep at file end
     _SynthesisLoopOutcome,
     _VerificationOutcome,
     publishability_skip_reason,
-)
-
-# ──────────────────────────────────────────────────────────────────────────
-# Re-exports — these symbols live in :mod:`cycle_control`. See that module's
-# docstring for why this logic is kept out of ``_orchestrator_helpers``
-# (import-safety for the Temporal workflow sandbox).
-# ──────────────────────────────────────────────────────────────────────────
-from .cycle_control import (  # noqa: E402,F401  — keep at file end
-    gather_convergence_directives,
-    require_short_circuit_inputs,
 )
 
 # ──────────────────────────────────────────────────────────────────────────
