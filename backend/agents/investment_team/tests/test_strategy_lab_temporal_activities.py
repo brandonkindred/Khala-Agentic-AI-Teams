@@ -3546,6 +3546,17 @@ def test_compute_signal_brief_activity_maps_unexpected_error(monkeypatch):
         act.compute_signal_brief_activity("SPY")
 
 
+def test_compute_signal_brief_activity_maps_malformed_dict_params():
+    """A dict `params` missing the required `benchmark_symbol` key must raise
+    ApplicationError (non-retryable), not a raw KeyError -- extracting the
+    fields now runs inside the same try/except as the snapshot delegate
+    call, so a malformed payload fails fast instead of being retried by
+    Temporal as if it were a transient failure."""
+    with pytest.raises(ApplicationError) as exc_info:
+        act.compute_signal_brief_activity({"exclude_asset_classes": ["forex"]})
+    assert exc_info.value.non_retryable is True
+
+
 def test_finalize_cycle_record_activity_maps_malformed_record_parse_error():
     """A malformed `record` payload (missing required fields) raises inside
     `StrategyLabRecord.parse_persisted`, which now runs inside the same

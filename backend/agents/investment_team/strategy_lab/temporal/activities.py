@@ -1554,13 +1554,12 @@ def compute_signal_brief_activity(params: Any) -> Dict[str, Any]:
     """
     from investment_team.strategy_lab.orchestrator_api import _compute_signal_brief_snapshot
 
-    if isinstance(params, str):
-        benchmark_symbol, exclude_asset_classes = params, None
-    else:
-        benchmark_symbol = params["benchmark_symbol"]
-        exclude_asset_classes = params.get("exclude_asset_classes")
-
     try:
+        if isinstance(params, str):
+            benchmark_symbol, exclude_asset_classes = params, None
+        else:
+            benchmark_symbol = params["benchmark_symbol"]
+            exclude_asset_classes = params.get("exclude_asset_classes")
         briefs, storage = _compute_signal_brief_snapshot(benchmark_symbol, exclude_asset_classes)
     except Exception as exc:  # noqa: BLE001
         raise _map_exception_to_application_error(exc) from exc
