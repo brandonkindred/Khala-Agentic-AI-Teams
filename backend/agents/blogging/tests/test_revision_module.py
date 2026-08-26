@@ -234,6 +234,38 @@ def test_build_revise_all_items_prompt_default_length_block() -> None:
     assert "(acceptable range: 750–1300 words)" in prompt
 
 
+def test_build_revise_all_items_prompt_includes_allowed_claims_section() -> None:
+    """A non-empty allowed_claims_section is embedded in the prompt."""
+    revise_input = _make_revise_input()
+    claims_section = "---\nALLOWED CLAIMS...\n---\n- [c1] Some claim."
+    prompt = rev.build_revise_all_items_prompt(
+        draft="# Draft\n\nBody.",
+        feedback_items=[],
+        revision_plan="Fix things.",
+        style_guide_text="Style Guide",
+        revise_input=revise_input,
+        brand_section="Brand Spec",
+        llm=None,
+        allowed_claims_section=claims_section,
+    )
+    assert claims_section in prompt
+
+
+def test_build_revise_all_items_prompt_omits_allowed_claims_section_by_default() -> None:
+    """The default (empty) allowed_claims_section adds nothing to the prompt."""
+    revise_input = _make_revise_input()
+    prompt = rev.build_revise_all_items_prompt(
+        draft="# Draft\n\nBody.",
+        feedback_items=[],
+        revision_plan="Fix things.",
+        style_guide_text="Style Guide",
+        revise_input=revise_input,
+        brand_section="Brand Spec",
+        llm=None,
+    )
+    assert "ALLOWED CLAIMS" not in prompt
+
+
 # ---------------------------------------------------------------------------
 # generate_revision_plan
 # ---------------------------------------------------------------------------

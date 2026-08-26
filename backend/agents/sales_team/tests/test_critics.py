@@ -782,19 +782,20 @@ class TestOrchestratorCriticRefinement:
         assert len(critic_llm.calls) == 0
         assert len(critic_llm.reasoning_calls) == 0
 
-    def test_proposal_refines_once_when_critic_revises(
+    def test_proposal_default_budget_reviews_once_and_never_regenerates(
         self,
         sample_prospect: Prospect,
         sample_dossier: ProspectDossier,
         sample_qualification: QualificationScore,
     ) -> None:
-        proposal_llm = CannedLLMClient(
-            [
-                _good_proposal_body(),  # initial
-                _good_proposal_body(),  # refined
-            ]
+        """With the shipped default max_refinements=1, the review budget is
+        spent entirely on the one review call — there is no budget left to
+        check a regenerated draft, so the initial (reviewed) proposal is
+        returned as-is rather than an unreviewed regeneration."""
+        proposal_llm = CannedLLMClient([_good_proposal_body()])  # initial emit only
+        critic_llm = CannedLLMClient(
+            [_fail_proposal_report("proposal.next_steps.concrete")]  # rejects initial
         )
-        critic_llm = CannedLLMClient([_fail_proposal_report("proposal.next_steps.concrete")])
         orch = SalesPodOrchestrator()
         orch.proposal = ProposalAgent(llm_client=proposal_llm)
         orch.proposal_critic = ProposalCriticAgent(llm_client=critic_llm)
@@ -812,9 +813,57 @@ class TestOrchestratorCriticRefinement:
             sample_qualification,
         )
 
-        assert len(proposal_llm.calls) == 2
+        # One proposal emit + one critic review — no regeneration, since
+        # there's no budget left to review its output.
+        assert len(proposal_llm.calls) == 1
         assert len(critic_llm.calls) == 1
         assert len(critic_llm.reasoning_calls) == 1
+        assert proposal.executive_summary
+
+    def test_proposal_refines_once_when_budget_allows_a_second_review(
+        self,
+        sample_prospect: Prospect,
+        sample_dossier: ProspectDossier,
+        sample_qualification: QualificationScore,
+    ) -> None:
+        """With max_refinements=2, a FAIL on the first review leaves budget
+        for a second review, so the agent regenerates once and that
+        regenerated draft is itself reviewed before being returned."""
+        proposal_llm = CannedLLMClient(
+            [
+                _good_proposal_body(),  # initial
+                _good_proposal_body(),  # refined
+            ]
+        )
+        critic_llm = CannedLLMClient(
+            [
+                _fail_proposal_report("proposal.next_steps.concrete"),  # rejects initial
+                _pass_proposal_report(),  # approves the refined regeneration
+            ]
+        )
+        orch = SalesPodOrchestrator()
+        orch.proposal = ProposalAgent(llm_client=proposal_llm)
+        orch.proposal_critic = ProposalCriticAgent(llm_client=critic_llm)
+
+        proposal = orch._generate_proposal_with_critic(
+            sample_prospect,
+            "Acme Pipeline",
+            "Lift outbound velocity",
+            25000.0,
+            "Discovery: needs reporting",
+            "Beta Inc saw 3x demos",
+            "Acme is expanding into EMEA",
+            None,
+            sample_dossier,
+            sample_qualification,
+            max_refinements=2,
+        )
+
+        # Two proposal emits + two critic reviews — the regenerated draft was
+        # itself reviewed (and approved) before being returned.
+        assert len(proposal_llm.calls) == 2
+        assert len(critic_llm.calls) == 2
+        assert len(critic_llm.reasoning_calls) == 2
         assert proposal.executive_summary
         assert "Reviewer feedback to address" in proposal_llm.calls[1]["prompt"]
         assert "proposal.next_steps.concrete" in proposal_llm.calls[1]["prompt"]
@@ -827,7 +876,10 @@ class TestOrchestratorCriticRefinement:
     ) -> None:
         # Only one good response queued — the refine call will raise AssertionError
         # from the canned client; the critic-gated helper must catch and return
-        # the original proposal rather than crash the prospect's slot.
+        # the original proposal rather than crash the prospect's slot. Budget of
+        # 2 is required so the loop actually reaches the regenerate step — at
+        # budget 1 the loop now breaks (budget-exhausted) before ever calling
+        # write() a second time, so this path would otherwise go untested.
         proposal_llm = CannedLLMClient([_good_proposal_body()])
         critic_llm = CannedLLMClient([_fail_proposal_report("proposal.roi.arithmetic")])
         orch = SalesPodOrchestrator()
@@ -845,6 +897,7 @@ class TestOrchestratorCriticRefinement:
             None,
             sample_dossier,
             sample_qualification,
+            max_refinements=2,
         )
 
         # Original proposal returned despite refine failure.

@@ -204,6 +204,8 @@ def test_writer_run_threads_allowed_claims_into_self_review(monkeypatch) -> None
 
 def test_build_revise_all_items_prompt_includes_allowed_claims() -> None:
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent import revision
+    from agents.blogging.blog_writer_agent.agent import _render_allowed_claims_section
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
 
     a = make_writer_agent()
@@ -220,12 +222,15 @@ def test_build_revise_all_items_prompt_includes_allowed_claims() -> None:
         content_plan=_minimal_plan(),
         allowed_claims=SAMPLE_ALLOWED_CLAIMS,
     )
-    prompt = a._build_revise_all_items_prompt(
+    prompt = revision.build_revise_all_items_prompt(
         revise_input.draft,
         revise_input.feedback_items,
         "revision plan text",
         a._style_prompt,
         revise_input,
+        brand_section=a._brand_section_for_prompt(),
+        llm=a._model,
+        allowed_claims_section=_render_allowed_claims_section(revise_input.allowed_claims),
     )
     assert "ALLOWED CLAIMS" in prompt
     assert "- [c2] The median deploy takes 4 minutes." in prompt
@@ -233,6 +238,7 @@ def test_build_revise_all_items_prompt_includes_allowed_claims() -> None:
 
 def test_build_revise_all_items_prompt_omits_allowed_claims_when_absent() -> None:
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent import revision
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
 
     a = make_writer_agent()
@@ -243,12 +249,14 @@ def test_build_revise_all_items_prompt_omits_allowed_claims_when_absent() -> Non
         ],
         content_plan=_minimal_plan(),
     )
-    prompt = a._build_revise_all_items_prompt(
+    prompt = revision.build_revise_all_items_prompt(
         revise_input.draft,
         revise_input.feedback_items,
         "revision plan text",
         a._style_prompt,
         revise_input,
+        brand_section=a._brand_section_for_prompt(),
+        llm=a._model,
     )
     assert "ALLOWED CLAIMS" not in prompt
 

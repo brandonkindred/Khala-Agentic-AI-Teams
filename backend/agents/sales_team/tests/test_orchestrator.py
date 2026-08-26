@@ -1461,6 +1461,57 @@ def test_proposal_critic_fail_then_refine(
     assert proposal.roi_model.payback_months == 6.0
 
 
+def test_proposal_critic_default_budget_returns_reviewed_proposal_unrefined(
+    stub_orch,
+    sample_prospect: Prospect,
+    sample_dossier: ProspectDossier,
+) -> None:
+    """With the shipped default max_refinements=1, a FAIL leaves no review
+    budget to check a regeneration, so proposal.write is called exactly
+    once and the (unapproved-but-reviewed) initial proposal is returned —
+    never an unreviewed regeneration."""
+    from sales_team.models import CriticViolation, ProposalCriticReport
+
+    call_count = {"n": 0}
+
+    def _write_side_effect(*a, **kw):
+        call_count["n"] += 1
+        return _proposal_body()
+
+    stub_orch.proposal.write.side_effect = _write_side_effect
+    stub_orch.proposal_critic.review.return_value = ProposalCriticReport(
+        status="FAIL",
+        approved=False,
+        violations=[
+            CriticViolation(
+                rule_id="proposal.roi.arithmetic",
+                severity="must_fix",
+                description="ROI math wrong",
+                suggested_fix="fix the multiplication",
+            )
+        ],
+    )
+
+    proposal = stub_orch._generate_proposal_with_critic(
+        sample_prospect,
+        "p",
+        "v",
+        25000.0,
+        "",
+        "",
+        "",
+        None,
+        sample_dossier,
+        None,
+        max_refinements=1,
+    )
+
+    assert call_count["n"] == 1
+    assert stub_orch.proposal_critic.review.call_count == 1
+    assert proposal is not None
+    assert proposal.roi_model.payback_months == 6.0
+
+
 def test_propose_only_forwards_config_critic_refinements(
     monkeypatch: pytest.MonkeyPatch, stub_orch, sample_prospect
 ) -> None:
