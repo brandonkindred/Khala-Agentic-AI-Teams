@@ -1614,6 +1614,16 @@ def test_embedded_schema_matches_format_constraint() -> None:
     assert ZERO_TRADE_REPAIR_SCHEMA["required"] == ["root_cause_category"]
 
 
+def test_wire_schema_category_enum_matches_canonical_zero_trade_category() -> None:
+    """``_ZeroTradeRepairWire.root_cause_category`` is a local Literal (kept
+    local so ``_response_schemas`` stays decoupled from ``models``, mirroring
+    the ``_ExpectancyForecastWire`` / ``risk_limits`` rationale in that file)
+    rather than importing ``ZeroTradeCategory`` directly. This test is the
+    guard that keeps the two lists from drifting apart."""
+    schema_categories = frozenset(ZERO_TRADE_REPAIR_SCHEMA["properties"]["root_cause_category"]["enum"])
+    assert schema_categories == frozenset(get_args(ZeroTradeCategory))
+
+
 def test_run_propagates_budget_exhaustion_not_fallback_report(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
