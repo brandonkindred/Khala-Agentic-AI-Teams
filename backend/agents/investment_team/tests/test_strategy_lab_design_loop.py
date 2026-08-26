@@ -34,6 +34,7 @@ from investment_team.strategy_lab.spec_dsl import (
     Predicate,
     SignalExitRule,
 )
+from investment_team.strategy_lab_context import PROMPT_ASSET_CLASSES
 
 # These tests drive a real orchestrator end-to-end; the marker auto-applies
 # the readiness fetch stub from conftest.
@@ -543,7 +544,7 @@ def test_design_max_llm_calls_env_parsing(monkeypatch: pytest.MonkeyPatch) -> No
 # this payload must restrict the run to forex — otherwise the payload's
 # asset_class contradicts the pin and readiness Rule 11 (correctly) rejects it
 # before the mechanical repairs under test are ever reached.
-_EXCLUDE_ALL_BUT_FOREX = ["stocks", "crypto", "futures", "commodities"]
+_EXCLUDE_ALL_BUT_FOREX = [c for c in PROMPT_ASSET_CLASSES if c != "forex"]
 
 
 def _mechanical_spec_dict() -> Dict[str, Any]:

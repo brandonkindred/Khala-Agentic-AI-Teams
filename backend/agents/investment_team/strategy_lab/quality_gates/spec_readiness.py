@@ -1447,8 +1447,10 @@ class SpecReadinessGate(GateResultsMixin):
                     rule_id="asset_category:pin",
                 )
             )
-            # The symbol check below compares against the *declared* class,
-            # which is already wrong — reporting it too would be noise.
+            # The declared asset_class is already wrong relative to the pin;
+            # checking symbols against the pinned class here too would just
+            # repeat that same mismatch as noise, so stop after the class
+            # critical.
             return out
         offcategory = sorted(find_offcategory_symbols(ctx.spec.target_symbols, pinned))
         if offcategory:

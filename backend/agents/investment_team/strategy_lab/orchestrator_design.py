@@ -1110,7 +1110,10 @@ class DesignMixin:
         Pre: ``readiness_results`` / ``last_readiness_signature`` carry the
         previous round's verdict and the spec signature that produced it;
         ``pinned_asset_class`` is the category this design attempt is pinned
-        to (readiness Rule 11), or ``None`` outside a pinned attempt.
+        to (readiness Rule 11) — every design attempt is unconditionally
+        pinned in production, so the single production call site always
+        supplies one; ``None`` is accepted for a direct/test invocation with
+        no pin.
         Post: returns ``(readiness_results, last_readiness_signature,
         deterministic_ready)``. Re-validates (and records the gates onto
         ``all_gate_results`` in place) only when the spec's readiness-relevant

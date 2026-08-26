@@ -110,13 +110,19 @@ def test_select_ignores_a_bare_string_rather_than_iterating_characters() -> None
     call site actually excludes "stocks", for the mundane reason that it's a
     valid list item) and cannot catch a character-iteration bug at all.
     """
-    # No character of "stocks" resolves to a class, so nothing is excluded
-    # and every category — including "stocks" itself — stays selectable; the
-    # invariant under test is that the function doesn't crash or treat
-    # {'s', 't', 'o', 'c', 'k'} as meaningful exclusions.
-    for _ in range(20):
-        picked = select_asset_category("stocks")  # type: ignore[arg-type]
-        assert picked in PROMPT_ASSET_CLASSES
+    # A bare string must normalize to the SAME behavior as no exclusion at
+    # all (same seeded rng -> same pick every time) -- not to the same
+    # exclusion as the equivalent one-item list ["stocks"], which really
+    # would exclude "stocks". Character-iterating "stocks" excludes nothing
+    # (none of {'s','t','o','c','k'} resolve to a class), so a correct
+    # implementation is indistinguishable from passing no exclusion; the
+    # equality check catches a bug that iterated the string into some other
+    # incidental (and wrong) exclusion.
+    for seed in range(20):
+        from_none = select_asset_category(None, rng=random.Random(seed))
+        from_string = select_asset_category("stocks", rng=random.Random(seed))  # type: ignore[arg-type]
+        assert from_string == from_none
+        assert from_string in PROMPT_ASSET_CLASSES
 
 
 def test_select_avoid_steers_away_from_over_represented_classes() -> None:

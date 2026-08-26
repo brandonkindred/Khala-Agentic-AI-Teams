@@ -209,7 +209,8 @@ def classify_symbol(symbol: str) -> Optional[str]:
     curated-list match is certain; a heuristic match is best-effort and can
     in principle collide with an out-of-list ticker from another class (e.g.
     a hypothetical six-letter stock ticker that happens to spell two
-    currency codes) — see the suffix-heuristic block below.
+    currency codes, caught by the bare-pair heuristic) — see the heuristic
+    block below.
 
     Used to detect ``target_symbols`` vs ``asset_class`` mismatches (e.g.
     a strategy with ``asset_class="stocks"`` requesting ``target_symbols=["BTC"]``)
