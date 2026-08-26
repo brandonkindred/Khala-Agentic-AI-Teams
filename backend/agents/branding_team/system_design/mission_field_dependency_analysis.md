@@ -218,12 +218,20 @@ not evidence-based today, and is flagged for a product decision rather
 than silently assumed.
 
 **Recommended field allowlist:** `()` — no `BrandingMission` field is
-referenced by any Phase 3 agent prompt today. Unlike the sibling
-document's `context_phases` empty-tuple trap (where `()` already means
-"no filtering" for a different, pre-existing mechanism), no mission-field
-allowlist mechanism exists in code today — this epic is what introduces
-one — so an empty recommendation here does not collide with any existing
-default-value semantics.
+referenced by any Phase 3 agent prompt today. The sibling document's
+original `context_phases` empty-tuple ambiguity (where `()` and "not
+configured" were indistinguishable and both meant "no filtering") has
+since been fixed in `orchestrator.py`/`shared/memoization.py`:
+`_phase_task` now filters `prior_outputs` whenever `context_phases is not
+None` (`orchestrator.py:791-793`), so an explicit `()` means "filter to
+this empty set — include nothing," and only `None` (the default) means
+"not configured, include everything." No mission-field allowlist
+mechanism exists in code today — this epic is what introduces one — and
+it should adopt the same `None`-vs-explicit-tuple convention for
+consistency rather than reintroduce the ambiguity that was just fixed for
+`context_phases`. Under that convention, this document's recommended `()`
+for this phase means exactly what it says: filter to zero mission
+fields.
 
 ## Phase 4 — Experience & Channel Activation (9 factories via 4 `AgentPromptSpec` sites, `agents.py:787-1023`)
 
