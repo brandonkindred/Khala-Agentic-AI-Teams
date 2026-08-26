@@ -39,7 +39,7 @@ def test_fact_check_with_work_dir(tmp_path):
 
 def test_fact_check_on_llm_request_callback(monkeypatch) -> None:
     """on_llm_request callback is invoked before the LLM call."""
-    from agents.blogging.blog_fact_check_agent import agent as fc_mod
+    from agents.blogging.shared import json_retry as jr_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -48,7 +48,7 @@ def test_fact_check_on_llm_request_callback(monkeypatch) -> None:
         def __call__(self, prompt):
             return json.dumps({"claims_status": "PASS", "risk_status": "PASS"})
 
-    monkeypatch.setattr(fc_mod, "Agent", _Agent)
+    monkeypatch.setattr(jr_mod, "Agent", _Agent)
     seen: list[str] = []
     agent = BlogFactCheckAgent(llm_client=object())
     agent.run("Some draft.", on_llm_request=lambda msg: seen.append(msg))
@@ -59,7 +59,7 @@ def test_fact_check_on_llm_request_callback(monkeypatch) -> None:
 def test_fact_check_transient_error_reraises(monkeypatch, kind) -> None:
     """A transient LLM-transport error propagates unwrapped (delegated to Temporal),
     rather than being masked as a terminal FactCheckError."""
-    from agents.blogging.blog_fact_check_agent import agent as fc_mod
+    from agents.blogging.shared import json_retry as jr_mod
 
     from llm_service import LLMRateLimitError, LLMTemporaryError
 
@@ -72,7 +72,7 @@ def test_fact_check_transient_error_reraises(monkeypatch, kind) -> None:
         def __call__(self, prompt):
             raise err_cls("transient outage")
 
-    monkeypatch.setattr(fc_mod, "Agent", _Agent)
+    monkeypatch.setattr(jr_mod, "Agent", _Agent)
     agent = BlogFactCheckAgent(llm_client=object())
     with pytest.raises(err_cls):
         agent.run("Some draft text.")
@@ -80,7 +80,7 @@ def test_fact_check_transient_error_reraises(monkeypatch, kind) -> None:
 
 def test_fact_check_exhausted_json_fallback(monkeypatch, tmp_path) -> None:
     """Repeated invalid JSON yields a FAIL/FAIL fallback report and writes the artifact."""
-    from agents.blogging.blog_fact_check_agent import agent as fc_mod
+    from agents.blogging.shared import json_retry as jr_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -89,7 +89,7 @@ def test_fact_check_exhausted_json_fallback(monkeypatch, tmp_path) -> None:
         def __call__(self, prompt):
             return "not json at all"
 
-    monkeypatch.setattr(fc_mod, "Agent", _Agent)
+    monkeypatch.setattr(jr_mod, "Agent", _Agent)
     agent = BlogFactCheckAgent(llm_client=object())
     report = agent.run("draft", work_dir=tmp_path)
     assert report.claims_status == "FAIL"
@@ -99,7 +99,7 @@ def test_fact_check_exhausted_json_fallback(monkeypatch, tmp_path) -> None:
 
 def test_fact_check_unexpected_error_raises_fact_check_error(monkeypatch) -> None:
     """A non-transient, non-JSON error is wrapped as FactCheckError with cause=."""
-    from agents.blogging.blog_fact_check_agent import agent as fc_mod
+    from agents.blogging.shared import json_retry as jr_mod
     from agents.blogging.shared.errors import BloggingError, FactCheckError
 
     root = ValueError("unexpected LLM failure")
@@ -111,7 +111,7 @@ def test_fact_check_unexpected_error_raises_fact_check_error(monkeypatch) -> Non
         def __call__(self, prompt):
             raise root
 
-    monkeypatch.setattr(fc_mod, "Agent", _Agent)
+    monkeypatch.setattr(jr_mod, "Agent", _Agent)
     agent = BlogFactCheckAgent(llm_client=object())
     with pytest.raises(FactCheckError) as exc_info:
         agent.run("draft")
@@ -139,7 +139,7 @@ def test_agent_fact_check_error_accepts_cause_kwarg() -> None:
 
 def test_fact_check_normalizes_invalid_status_fail_closed(monkeypatch) -> None:
     """Unrecognized claims/risk status values fail closed as FAIL."""
-    from agents.blogging.blog_fact_check_agent import agent as fc_mod
+    from agents.blogging.shared import json_retry as jr_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -148,7 +148,7 @@ def test_fact_check_normalizes_invalid_status_fail_closed(monkeypatch) -> None:
         def __call__(self, prompt):
             return json.dumps({"claims_status": "UNCLEAR", "risk_status": "REVIEW"})
 
-    monkeypatch.setattr(fc_mod, "Agent", _Agent)
+    monkeypatch.setattr(jr_mod, "Agent", _Agent)
     agent = BlogFactCheckAgent(llm_client=object())
     report = agent.run("draft")
     assert report.claims_status == "FAIL"
@@ -157,8 +157,8 @@ def test_fact_check_normalizes_invalid_status_fail_closed(monkeypatch) -> None:
 
 def test_run_fact_check_from_work_dir(monkeypatch, tmp_path) -> None:
     """Public work_dir entrypoint reads draft + allowed_claims and returns a report."""
-    from agents.blogging.blog_fact_check_agent import agent as fc_mod
     from agents.blogging.blog_fact_check_agent import run_fact_check_from_work_dir
+    from agents.blogging.shared import json_retry as jr_mod
 
     (tmp_path / "final.md").write_text("Test draft content.")
     (tmp_path / "allowed_claims.json").write_text('{"claims": []}')
@@ -170,7 +170,7 @@ def test_run_fact_check_from_work_dir(monkeypatch, tmp_path) -> None:
         def __call__(self, prompt):
             return json.dumps({"claims_status": "PASS", "risk_status": "PASS"})
 
-    monkeypatch.setattr(fc_mod, "Agent", _Agent)
+    monkeypatch.setattr(jr_mod, "Agent", _Agent)
     report = run_fact_check_from_work_dir(tmp_path, llm_client=object())
     assert report.claims_status in ("PASS", "FAIL")
     assert report.risk_status in ("PASS", "FAIL")
