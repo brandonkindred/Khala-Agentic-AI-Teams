@@ -366,6 +366,22 @@ def test_discovery_one_passes_optional_qual(orch_mock, fake_job_client):
     orch_mock.discovery_one.return_value = _dumpable({"prospect": {"id": "prs_1"}})
     acts.discovery_one_activity(_ctx_dict(), _PROSPECT.model_dump(mode="json"), None)
     assert orch_mock.discovery_one.call_args.args[1] is None
+    # dossier defaults to None when omitted
+    assert orch_mock.discovery_one.call_args.args[3] is None
+
+
+def test_discovery_one_reconstructs_dossier_and_qual(orch_mock, fake_job_client):
+    fake_job_client.create_job("job-1", status="running")
+    orch_mock.discovery_one.return_value = _dumpable({"prospect": {"id": "prs_1"}})
+    acts.discovery_one_activity(
+        _ctx_dict(),
+        _PROSPECT.model_dump(mode="json"),
+        _score().model_dump(mode="json"),
+        _dossier_dict(),
+    )
+    call = orch_mock.discovery_one.call_args
+    assert isinstance(call.args[1], QualificationScore)
+    assert isinstance(call.args[3], ProspectDossier)
 
 
 def test_proposal_one_reconstructs_dossier_and_qual(orch_mock, fake_job_client):
