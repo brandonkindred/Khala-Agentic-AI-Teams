@@ -53,7 +53,8 @@ class CreateBrandRequest(BrandingMissionFields):
 
 # ``_optionalize_model`` (and its ``_unwrap_noneable``/``_constraint_kwargs``
 # helpers) lives in ``branding_team.models`` — the domain models' single
-# source of truth — alongside its other consumer, ``MissionUpdate``.
+# source of truth. Its consumers are ``_BrandingMissionFieldsPartial`` in
+# this API module and ``MissionUpdate`` in ``branding_team.assistant.models``.
 _BrandingMissionFieldsPartial = _optionalize_model(
     BrandingMissionFields, name="_BrandingMissionFieldsPartial"
 )

@@ -249,6 +249,14 @@ def _unwrap_noneable(annotation: Any) -> Any:
     return annotation
 
 
+# Numeric/length constraints that Pydantic v2 may store either as direct
+# ``FieldInfo`` attributes or as ``annotated_types`` metadata items (e.g.
+# ``MinLen``/``MaxLen``) — checked in both places below. ``pattern``,
+# ``description``, and ``title`` are direct-attribute-only and handled
+# separately since metadata items never carry them.
+_CONSTRAINT_KEYS = ("min_length", "max_length", "ge", "le", "gt", "lt")
+
+
 def _constraint_kwargs(info: FieldInfo) -> dict[str, Any]:
     """Copy validation metadata that must survive optionalization.
 
@@ -260,45 +268,21 @@ def _constraint_kwargs(info: FieldInfo) -> dict[str, Any]:
           ``annotated_types`` metadata such as ``MinLen`` / ``MaxLen``).
     """
     out: dict[str, Any] = {}
-    for key in (
-        "min_length",
-        "max_length",
-        "ge",
-        "le",
-        "gt",
-        "lt",
-        "pattern",
-        "description",
-        "title",
-    ):
+    for key in _CONSTRAINT_KEYS:
         value = getattr(info, key, None)
         if value is not None:
             out[key] = value
     # Pydantic v2 stores many Field(...) constraints on ``metadata`` (e.g. MinLen)
     # rather than as direct FieldInfo attributes.
     for item in info.metadata:
-        min_length = getattr(item, "min_length", None)
-        if min_length is not None and "min_length" not in out:
-            out["min_length"] = min_length
-        max_length = getattr(item, "max_length", None)
-        if max_length is not None and "max_length" not in out:
-            out["max_length"] = max_length
-        ge = getattr(item, "ge", None)
-        if ge is not None and "ge" not in out:
-            out["ge"] = ge
-        le = getattr(item, "le", None)
-        if le is not None and "le" not in out:
-            out["le"] = le
-        gt = getattr(item, "gt", None)
-        if gt is not None and "gt" not in out:
-            out["gt"] = gt
-        lt = getattr(item, "lt", None)
-        if lt is not None and "lt" not in out:
-            out["lt"] = lt
-    if info.description is not None and "description" not in out:
-        out["description"] = info.description
-    if info.title is not None and "title" not in out:
-        out["title"] = info.title
+        for key in _CONSTRAINT_KEYS:
+            value = getattr(item, key, None)
+            if value is not None and key not in out:
+                out[key] = value
+    for key in ("pattern", "description", "title"):
+        value = getattr(info, key, None)
+        if value is not None:
+            out[key] = value
     return out
 
 
