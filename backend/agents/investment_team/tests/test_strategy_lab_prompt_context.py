@@ -16,6 +16,8 @@ import pytest
 
 from investment_team.models import RiskLimits, StrategySpec
 from investment_team.strategy_lab.agents._prompt_context import (
+    BoundedHistory,
+    bound_history,
     render_prior_attempts,
     spec_prompt_fields,
 )
@@ -184,3 +186,120 @@ def test_spec_prompt_fields_defensive_true_none_rules_render_empty_string() -> N
     fields = spec_prompt_fields(fake_spec, defensive=True)
     assert fields["entry_rules"] == ""
     assert fields["exit_rules"] == ""
+
+
+# ---------------------------------------------------------------------------
+# bound_history
+# ---------------------------------------------------------------------------
+
+
+def test_bound_history_none_entries_is_empty_history() -> None:
+    result = bound_history(None, keep_last_n=5)
+    assert result == BoundedHistory(kept=[], summary="")
+
+
+def test_bound_history_empty_list_is_empty_history() -> None:
+    result = bound_history([], keep_last_n=5)
+    assert result == BoundedHistory(kept=[], summary="")
+
+
+def test_bound_history_empty_history_with_zero_keep() -> None:
+    assert bound_history([], keep_last_n=0) == BoundedHistory(kept=[], summary="")
+
+
+@pytest.mark.parametrize(
+    "entries,keep_last_n",
+    [
+        (["a"], 1),
+        (["a", "b"], 2),
+        (["a", "b"], 5),
+        (["a", "b", "c", "d"], 10),
+    ],
+)
+def test_bound_history_short_history_unchanged_and_no_summary(
+    entries: List[str], keep_last_n: int
+) -> None:
+    """len(entries) <= keep_last_n -> kept is the input verbatim, no summary."""
+    result = bound_history(entries, keep_last_n)
+    assert result.kept == entries
+    assert result.summary == ""
+
+
+def test_bound_history_short_history_kept_entries_are_the_original_objects() -> None:
+    """Verbatim means the same objects, not copies or stringified entries."""
+    a, b = object(), object()
+    result = bound_history([a, b], keep_last_n=5)
+    assert result.kept[0] is a
+    assert result.kept[1] is b
+
+
+def test_bound_history_exact_boundary_len_equals_keep_last_n() -> None:
+    entries = ["a", "b", "c"]
+    result = bound_history(entries, keep_last_n=3)
+    assert result.kept == entries
+    assert result.summary == ""
+
+
+def test_bound_history_over_history_keeps_last_n_verbatim_in_order() -> None:
+    entries = [f"entry-{i}" for i in range(10)]
+    result = bound_history(entries, keep_last_n=3)
+    assert result.kept == ["entry-7", "entry-8", "entry-9"]
+
+
+def test_bound_history_over_history_kept_entries_are_the_original_objects() -> None:
+    a, b, c, d = object(), object(), object(), object()
+    result = bound_history([a, b, c, d], keep_last_n=2)
+    assert result.kept[0] is c
+    assert result.kept[1] is d
+
+
+def test_bound_history_over_history_summary_mentions_dropped_count() -> None:
+    entries = [f"entry-{i}" for i in range(10)]
+    result = bound_history(entries, keep_last_n=3)
+    assert "7 earlier round(s)" in result.summary
+
+
+def test_bound_history_over_history_summary_numbers_dropped_rounds_from_one() -> None:
+    entries = ["first", "second", "third", "fourth"]
+    result = bound_history(entries, keep_last_n=1)
+    assert "Round 1: first" in result.summary
+    assert "Round 2: second" in result.summary
+    assert "Round 3: third" in result.summary
+    assert "fourth" not in result.summary
+
+
+def test_bound_history_keep_last_n_zero_drops_everything() -> None:
+    entries = ["a", "b", "c"]
+    result = bound_history(entries, keep_last_n=0)
+    assert result.kept == []
+    assert "3 earlier round(s)" in result.summary
+
+
+def test_bound_history_summary_is_length_bounded_regardless_of_round_count() -> None:
+    """The rolling summary stays capped even with hundreds of dropped rounds,
+    which is what makes it 'rolling' rather than merely per-item-truncated."""
+    entries = [f"a very long prior-round entry description number {i}" * 3 for i in range(500)]
+    result = bound_history(entries, keep_last_n=2)
+    assert len(result.kept) == 2
+    assert len(result.summary) <= 240  # _SUMMARY_MAX_CHARS, ellipsis included in the cap
+
+
+def test_bound_history_summary_single_line_no_embedded_newlines() -> None:
+    entries = ["line one\nline two", "b", "c"]
+    result = bound_history(entries, keep_last_n=1)
+    assert "\n" not in result.summary
+
+
+def test_bound_history_summary_strips_carriage_returns_too() -> None:
+    """CRLF and bare CR are also line separators, not just bare LF."""
+    entries = ["line one\r\nline two", "line three\rline four", "b"]
+    result = bound_history(entries, keep_last_n=1)
+    assert "\r" not in result.summary
+    assert "\n" not in result.summary
+    assert "line one line two" in result.summary
+    assert "line three line four" in result.summary
+
+
+def test_bound_history_negative_keep_last_n_raises() -> None:
+    with pytest.raises(AssertionError):
+        bound_history(["a"], keep_last_n=-1)

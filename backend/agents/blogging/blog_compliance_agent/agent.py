@@ -17,8 +17,7 @@ from typing import Any, Callable, Dict, Optional, Union
 from agents.blogging.shared.agent_base import _BlogAgentBase
 from agents.blogging.shared.artifacts import read_artifact, read_latest_draft, write_artifact
 from agents.blogging.shared.brand_spec import load_brand_spec_prompt
-from agents.blogging.shared.json_retry import call_json_with_retry
-from strands import Agent
+from agents.blogging.shared.json_retry import run_json_gate
 
 from .models import ComplianceReport, Violation
 from .prompts import COMPLIANCE_PROMPT
@@ -127,24 +126,17 @@ class BlogComplianceAgent(_BlogAgentBase):
         if on_llm_request:
             on_llm_request("Checking compliance with brand guidelines...")
 
-        def _agent_factory():
-            return Agent(
-                model=self._model,
-                system_prompt="You are a brand compliance evaluator.",
-            )
-
         prompt_for_helper = prompt + _ALWAYS_ON_JSON_INSTRUCTION
 
         def _fallback_dict(exc: Exception) -> Dict[str, Any]:
             return _fallback_compliance_report(exc).to_dict()
 
-        data = call_json_with_retry(
-            _agent_factory,
+        data = run_json_gate(
+            self._model,
+            "You are a brand compliance evaluator.",
             prompt_for_helper,
-            max_attempts=2,
             strict_json_suffix=_JSON_RETRY_SUFFIX,
-            on_exhausted=_fallback_dict,
-            on_unexpected_error=_fallback_dict,
+            fallback_builder=_fallback_dict,
             logger=logger,
         )
 
