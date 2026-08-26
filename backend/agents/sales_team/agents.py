@@ -527,13 +527,31 @@ class CloserAgent:
         product_name: str,
         value_proposition: str,
         insights_context: Optional[str] = None,
+        dossier: Optional[ProspectDossier] = None,
     ) -> ClosingStrategyBody:
+        """Develop a closing strategy for a prospect.
+
+        Preconditions:
+            - ``dossier``, when provided, is the ``ProspectDossier`` for the
+              same prospect as ``prospect_json``; ``None`` (the default)
+              means no dossier research is available yet.
+
+        Postconditions:
+            - Returns a ``ClosingStrategyBody``. When ``dossier`` is not
+              ``None``, the prompt embeds its rendered ``## Prospect
+              Dossier`` block (via ``render_dossier_for_prompt``) so
+              objection handling and closing strategy can reference its
+              signals. When ``dossier`` is ``None``, the prompt is
+              byte-identical to today's dossier-less prompt.
+        """
+        dossier_section = f"\n{render_dossier_for_prompt(dossier)}\n" if dossier is not None else ""
         prompt = _with_insights(
             CLOSER_TASK_TEMPLATE.format(
                 prospect_json=prospect_json,
                 proposal_json=proposal_json,
                 product_name=product_name,
                 value_proposition=value_proposition,
+                dossier_section=dossier_section,
             ),
             insights_context,
         )

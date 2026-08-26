@@ -750,6 +750,52 @@ class TestCloserAgent:
         strat = ClosingStrategy(prospect=sample_prospect, **body.model_dump())
         assert strat.recommended_close_technique == CloseType.SUMMARY
 
+    def test_develop_strategy_without_dossier_prompt_unchanged(self, sample_prospect: Prospect) -> None:
+        client = CannedLLMClient(
+            [
+                {
+                    "recommended_close_technique": "summary",
+                    "close_script": "Shall we sign?",
+                    "objection_handlers": [
+                        {"objection": "price", "response": "ROI", "feel_felt_found": None}
+                    ],
+                    "urgency_framing": "Q-end",
+                    "walk_away_criteria": "no budget",
+                    "emotional_intelligence_notes": "analytical",
+                }
+            ]
+        )
+        agent = CloserAgent(llm_client=client)
+        body = agent.develop_strategy(sample_prospect.model_dump_json(), "{}", "ProductX", "vp")
+        assert isinstance(body, ClosingStrategyBody)
+        assert "## Prospect Dossier" not in client.calls[0]["prompt"]
+
+    def test_develop_strategy_with_dossier_grounds_prompt(
+        self, sample_prospect: Prospect, sample_dossier: ProspectDossier
+    ) -> None:
+        client = CannedLLMClient(
+            [
+                {
+                    "recommended_close_technique": "summary",
+                    "close_script": "Shall we sign?",
+                    "objection_handlers": [
+                        {"objection": "price", "response": "ROI", "feel_felt_found": None}
+                    ],
+                    "urgency_framing": "Q-end",
+                    "walk_away_criteria": "no budget",
+                    "emotional_intelligence_notes": "analytical",
+                }
+            ]
+        )
+        agent = CloserAgent(llm_client=client)
+        body = agent.develop_strategy(
+            sample_prospect.model_dump_json(), "{}", "ProductX", "vp", dossier=sample_dossier
+        )
+        assert isinstance(body, ClosingStrategyBody)
+        prompt = client.calls[0]["prompt"]
+        assert "## Prospect Dossier" in prompt
+        assert "Acme Corp announced Series B funding" in prompt
+
 
 class TestSalesCoachAgent:
     def test_returns_full_coaching_report(self, sample_prospect: Prospect) -> None:
