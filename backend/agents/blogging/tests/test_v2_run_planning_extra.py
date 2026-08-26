@@ -7,6 +7,22 @@ from pathlib import Path
 import pytest
 
 
+def _patch_stub_research_agent(monkeypatch, v2) -> None:
+    """Patch ``v2.ResearchAgent`` with a no-op stub for tests that don't exercise research."""
+    from agents.blogging.blog_research_agent.models import ResearchAgentOutput
+
+    class _StubResearchAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def run(self, _brief):
+            return ResearchAgentOutput(
+                query_plan=[], references=[], compiled_document="stub research"
+            )
+
+    monkeypatch.setattr(v2, "ResearchAgent", _StubResearchAgent)
+
+
 def _make_planning_result(iterations: int = 1, critic_report: dict | None = None):
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
@@ -45,6 +61,7 @@ def test_run_planning_writes_artifacts_and_returns_result(monkeypatch, tmp_path:
             return ppr
 
     monkeypatch.setattr(v2, "BlogWriterAgent", _FakeAgent)
+    _patch_stub_research_agent(monkeypatch, v2)
     monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "brand")
     monkeypatch.setattr(v2, "load_style_file", lambda _p: "style")
     monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: object())
@@ -67,6 +84,165 @@ def test_run_planning_writes_artifacts_and_returns_result(monkeypatch, tmp_path:
     assert (work_dir / "plan_critic_report.json").exists()
 
 
+def test_run_planning_runs_research_and_writes_packet(monkeypatch, tmp_path: Path) -> None:
+    """ResearchAgent.run() is invoked and its compiled_document persisted as
+    research_packet.md, with progress reported via job_updater."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.models import (
+        ResearchAgentOutput,
+        ResearchBriefInput,
+        ResearchReference,
+    )
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
+
+    ppr = _make_planning_result()
+    compiled_doc = "# Blog Post Research\n\n## Sources\n\n1. https://example.com\n-- summary\n"
+    research_output = ResearchAgentOutput(
+        query_plan=[],
+        references=[
+            ResearchReference(
+                url="https://example.com",
+                title="Example",
+                summary="summary",
+                key_points=["point"],
+            )
+        ],
+        compiled_document=compiled_doc,
+    )
+
+    class _FakePlanAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def plan_content(self, *_a, **_kw):
+            return ppr
+
+    research_calls: list = []
+
+    class _FakeResearchAgent:
+        def __init__(self, **kw):
+            research_calls.append(("init", kw))
+
+        def run(self, brief_input):
+            research_calls.append(("run", brief_input))
+            return research_output
+
+    updates: list = []
+
+    monkeypatch.setattr(v2, "BlogWriterAgent", _FakePlanAgent)
+    monkeypatch.setattr(v2, "ResearchAgent", _FakeResearchAgent)
+    monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "brand")
+    monkeypatch.setattr(v2, "load_style_file", lambda _p: "style")
+    monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: None)
+
+    work_dir = tmp_path / "wd"
+    brief = ResearchBriefInput(
+        brief="b", audience="devs", tone_or_purpose="informative", max_results=5
+    )
+
+    result = v2.run_planning(
+        brief,
+        work_dir=work_dir,
+        llm_client=object(),
+        length_policy=resolve_length_policy(content_profile=ContentProfile.standard_article),
+        series_context=None,
+        job_updater=lambda **kw: updates.append(kw),
+    )
+
+    assert result is ppr
+    # ResearchAgent.run() was called with the pipeline's brief unchanged.
+    assert research_calls[0][0] == "init"
+    assert research_calls[1] == ("run", brief)
+    assert (work_dir / "research_packet.md").read_text(encoding="utf-8") == compiled_doc
+    research_updates = [u for u in updates if u.get("phase") == "research"]
+    assert len(research_updates) == 2
+    assert research_updates[0]["status_text"] == "Researching topic..."
+    assert "1 reference" in research_updates[1]["status_text"]
+
+
+def test_run_planning_research_zero_references_writes_fallback_packet(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A research run with no references still writes research_packet.md (using the
+    agent's own "no sources found" fallback text) and reports 0 references."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.models import ResearchAgentOutput, ResearchBriefInput
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
+
+    ppr = _make_planning_result()
+    compiled_doc = "# Blog Post Research\n\n## Sources\n\n(No web sources found.)\n"
+
+    class _FakePlanAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def plan_content(self, *_a, **_kw):
+            return ppr
+
+    class _FakeResearchAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def run(self, _brief):
+            return ResearchAgentOutput(query_plan=[], references=[], compiled_document=compiled_doc)
+
+    updates: list = []
+
+    monkeypatch.setattr(v2, "BlogWriterAgent", _FakePlanAgent)
+    monkeypatch.setattr(v2, "ResearchAgent", _FakeResearchAgent)
+    monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "brand")
+    monkeypatch.setattr(v2, "load_style_file", lambda _p: "style")
+    monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: None)
+
+    work_dir = tmp_path / "wd"
+
+    result = v2.run_planning(
+        ResearchBriefInput(brief="b", max_results=5),
+        work_dir=work_dir,
+        llm_client=object(),
+        length_policy=resolve_length_policy(content_profile=ContentProfile.standard_article),
+        series_context=None,
+        job_updater=lambda **kw: updates.append(kw),
+    )
+
+    assert result is ppr
+    assert (work_dir / "research_packet.md").read_text(encoding="utf-8") == compiled_doc
+    research_updates = [u for u in updates if u.get("phase") == "research"]
+    assert "0 reference" in research_updates[1]["status_text"]
+
+
+def test_run_planning_research_progress_reraises_cancelled_error(monkeypatch) -> None:
+    """A CancelledError from job_updater during the research progress report must
+    propagate (never be swallowed), matching _make_update's own CancelledError
+    handling for planning's own progress reports."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.models import ResearchAgentOutput, ResearchBriefInput
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
+    from temporalio.exceptions import CancelledError
+
+    class _FakeResearchAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def run(self, _brief):
+            return ResearchAgentOutput(query_plan=[], references=[], compiled_document="doc")
+
+    def cancelling_updater(**_kw):
+        raise CancelledError("job cancelled")
+
+    monkeypatch.setattr(v2, "ResearchAgent", _FakeResearchAgent)
+
+    with pytest.raises(CancelledError):
+        v2.run_planning(
+            ResearchBriefInput(brief="b", max_results=5),
+            work_dir=None,
+            llm_client=object(),
+            length_policy=resolve_length_policy(content_profile=ContentProfile.standard_article),
+            series_context=None,
+            job_updater=cancelling_updater,
+        )
+
+
 def test_run_planning_without_work_dir_or_critic_report(monkeypatch) -> None:
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.blog_research_agent.models import ResearchBriefInput
@@ -82,6 +258,7 @@ def test_run_planning_without_work_dir_or_critic_report(monkeypatch) -> None:
             return ppr
 
     monkeypatch.setattr(v2, "BlogWriterAgent", _FakeAgent)
+    _patch_stub_research_agent(monkeypatch, v2)
     monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "brand")
     monkeypatch.setattr(v2, "load_style_file", lambda _p: "style")
     monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: None)
@@ -112,6 +289,7 @@ def test_run_planning_job_updater_swallows_errors(monkeypatch, tmp_path: Path) -
             return ppr
 
     monkeypatch.setattr(v2, "BlogWriterAgent", _FakeAgent)
+    _patch_stub_research_agent(monkeypatch, v2)
     monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "")
     monkeypatch.setattr(v2, "load_style_file", lambda _p: "")
     monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: None)
@@ -144,6 +322,7 @@ def test_run_planning_propagates_blogging_error(monkeypatch) -> None:
             raise PlanningError("planner died", failure_reason="X")
 
     monkeypatch.setattr(v2, "BlogWriterAgent", _FakeAgent)
+    _patch_stub_research_agent(monkeypatch, v2)
     monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "")
     monkeypatch.setattr(v2, "load_style_file", lambda _p: "")
     monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: None)
@@ -173,6 +352,7 @@ def test_run_planning_wraps_unknown_exception(monkeypatch) -> None:
             raise RuntimeError("transport failed")
 
     monkeypatch.setattr(v2, "BlogWriterAgent", _FakeAgent)
+    _patch_stub_research_agent(monkeypatch, v2)
     monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "")
     monkeypatch.setattr(v2, "load_style_file", lambda _p: "")
     monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: None)
@@ -209,6 +389,7 @@ def test_run_planning_reraises_transient_llm_errors(monkeypatch, err_cls_name) -
             raise cause
 
     monkeypatch.setattr(v2, "BlogWriterAgent", _FakeAgent)
+    _patch_stub_research_agent(monkeypatch, v2)
     monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "")
     monkeypatch.setattr(v2, "load_style_file", lambda _p: "")
     monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: None)

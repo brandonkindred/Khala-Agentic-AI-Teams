@@ -262,6 +262,10 @@ def run_planning(
         - ``brief`` is a valid ``ResearchBriefInput``.
         - ``llm_client`` and ``length_policy`` are resolved (non-None).
     Postconditions:
+        - Runs ``ResearchAgent.run(brief)`` and, when ``work_dir`` is set, persists
+          its compiled document as ``research_packet.md`` under ``work_dir`` (before
+          the planning artifacts below); reports a "research" phase progress message
+          via ``job_updater`` before and after the research call.
         - Returns a ``PlanningPhaseResult`` (content plan with title candidates,
           sections, requirements analysis, and planning telemetry).
     Raises:
@@ -276,6 +280,7 @@ def run_planning(
     # Deferred import: see module docstring.
     from agents.blogging.agent_implementations.blog_writing_process_v2 import (
         BlogWriterAgent,
+        ResearchAgent,
         load_brand_spec_prompt,
         load_style_file,
     )
@@ -286,6 +291,37 @@ def run_planning(
     # Same progress-callback as the stage functions use; _make_update is the single
     # source of the swallow-but-reraise-CancelledError update logic.
     _update = _make_update(job_updater)
+
+    def _report_research(status_text: str) -> None:
+        # Reported on its own "research" phase (not a BlogPhase member, same
+        # convention as the "story_elicitation"/"title_selection" raw job_updater
+        # calls elsewhere in this module) since it doesn't have its own slice of the
+        # overall progress bar. Guarded the same way _make_update guards phase
+        # updates, so a failing job_updater can't abort research/planning.
+        if not job_updater:
+            return
+        try:
+            job_updater(phase="research", progress=0, status_text=status_text)
+        except CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("Failed to update job status: %s", e)
+
+    # Research: run before planning so a compiled research document is available
+    # as an artifact.
+    _report_research("Researching topic...")
+
+    research_agent = ResearchAgent(llm_client=llm_client)
+    research_output = research_agent.run(brief)
+
+    if work_dir is not None:
+        write_artifact(work_dir, "research_packet.md", research_output.compiled_document or "")
+        logger.info(
+            "Persisted research_packet.md (%d reference(s))",
+            len(research_output.references),
+        )
+
+    _report_research(f"Research complete ({len(research_output.references)} reference(s))")
 
     _update(
         BlogPhase.PLANNING,
