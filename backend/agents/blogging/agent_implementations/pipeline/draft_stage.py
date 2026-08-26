@@ -46,6 +46,10 @@ def run_draft_stage(
 ) -> Optional[Tuple[PlanningPhaseResult, Optional["WriterOutput"], PipelineStatus]]:
     """Draft stage: initial draft, interactive review, and the copy-edit loop.
 
+    Also reads an optional ``allowed_claims.json`` artifact from ``ctx.work_dir``
+    and threads it into the writer/revision prompts so factual claims can be
+    tagged with ``[CLAIM:id]``.
+
     Preconditions:
         - The planning stage populated ``ctx.plan``/``ctx.planning_phase_result``/
           ``ctx.elicited_stories_text``.
@@ -56,6 +60,12 @@ def run_draft_stage(
           job store they are skipped and the draft proceeds straight to the automated
           copy-edit loop (the story-placeholder skip is logged, since unfilled
           placeholders visibly degrade the output).
+        - An optional ``allowed_claims.json`` artifact may exist in ``ctx.work_dir``.
+          If present and a dict, its contents are passed to the draft writer and
+          subsequent revision calls (including ``revise_from_user_feedback``) as
+          ``allowed_claims``; a missing or non-dict artifact (or no ``work_dir`` at
+          all) is a no-op (matching the fact-check/validator gates' handling of the
+          same artifact).
     Postconditions:
         - On success sets ``ctx.draft_result`` (and the possibly-updated
           ``ctx.elicited_stories_text``) and returns None.
