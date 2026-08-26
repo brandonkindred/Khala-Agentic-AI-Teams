@@ -115,6 +115,7 @@ flowchart LR
   CycleWF --> SLO
   BatchWF -->|"after awaiting the wave's<br/>child workflows"| Finalize
   Finalize --> PTA
+  Finalize -.->|"publishable + paper<br/>trade succeeds"| B8
   Finalize --> B4
   Finalize --> B6
   Finalize --> B7
