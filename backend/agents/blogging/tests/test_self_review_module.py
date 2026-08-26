@@ -412,3 +412,41 @@ def test_self_review_skips_fix_when_no_violations() -> None:
     out = sr.self_review(draft, call_text)
     assert out == draft
     assert calls["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# _extract_json_array_from_text (internal helper, direct coverage)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_json_array_from_text_does_not_salvage_from_inside_decoded_value() -> None:
+    """Regression: after a successful decode of a non-matching array, the scanner
+    must not re-enter that already-decoded span looking for a nested match. The
+    outer array's own top-level elements are a list and a string (neither a
+    dict), so it correctly does not match required_keys — but its first element
+    is itself an array containing a dict with a truthy "issue" key. A real match
+    must not be salvaged from inside an already-rejected value.
+    """
+    text = '[[{"issue": "wrongly-salvaged", "fix": "z"}], "sibling"]'
+    assert sr._extract_json_array_from_text(text, required_keys=("issue",)) is None
+
+
+def test_extract_json_array_from_text_resumes_after_decoded_value_not_inside_it() -> None:
+    """The scanner resumes past a decoded (non-matching) value's end, not from
+    just after its opening bracket — so it finds the real match that follows
+    a non-matching value, rather than a nested array salvaged from inside it.
+    """
+    text = (
+        '[[{"issue": "wrongly-salvaged", "fix": "z"}], "sibling"] '
+        'then [{"issue": "real", "fix": "y"}]'
+    )
+    result = sr._extract_json_array_from_text(text, required_keys=("issue",))
+    assert result == [{"issue": "real", "fix": "y"}]
+
+
+def test_banned_phrase_pattern_loop_variables_do_not_leak_into_module_namespace() -> None:
+    """The ``for _phrase in BANNED_PHRASES`` pattern-compilation loop must not
+    leave its loop variables as module attributes after import."""
+    assert not hasattr(sr, "_phrase")
+    assert not hasattr(sr, "_escaped")
+    assert len(sr._BANNED_PHRASE_PATTERNS) == len(sr.BANNED_PHRASES)
