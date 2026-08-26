@@ -1046,6 +1046,28 @@ def test_filter_regime_summary_does_not_mutate_its_input() -> None:
     assert [e.asset_class for e in summary.entries] == ["stocks", "crypto"]
 
 
+def test_filter_regime_summary_scrubs_degraded_reason_naming_other_categories() -> None:
+    # degraded_reason names the specific benchmark ticker of whichever OTHER
+    # category failed to classify (e.g. "could not classify: ES=F
+    # (insufficient bars)") -- carrying it through verbatim into a
+    # stocks-pinned prompt would leak a futures ticker straight past the
+    # pin's own "do not reference any other asset category" instruction.
+    from investment_team.strategy_lab.market_regime import RegimeSummary, filter_regime_summary
+
+    summary = RegimeSummary(
+        computed_at="2024-01-01T00:00:00Z",
+        degraded=True,
+        degraded_reason="could not classify: ES=F (insufficient bars)",
+        entries=[_regime_entry("stocks")],
+    )
+    out = filter_regime_summary(summary, "stocks")
+    assert out.degraded is False
+    assert out.degraded_reason is None
+    # The original, unscoped summary is untouched.
+    assert summary.degraded is True
+    assert summary.degraded_reason == "could not classify: ES=F (insufficient bars)"
+
+
 # ---------------------------------------------------------------------------
 # build_spec_from_dict — an OMITTED asset_class defaults to the pin; a
 # DIFFERENT one is left as authored for Rule 11 to reject.

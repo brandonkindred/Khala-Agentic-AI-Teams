@@ -134,8 +134,20 @@ def filter_regime_summary(
         * Returns ``summary`` unchanged when either argument is ``None``.
         * Otherwise returns a new :class:`RegimeSummary` holding only the
           entries whose ``asset_class`` matches, preserving their order and
-          the summary's ``computed_at`` / degraded flags. The input is never
-          mutated.
+          the summary's ``computed_at``. The input is never mutated.
+        * The returned summary always has ``degraded=False`` /
+          ``degraded_reason=None``, regardless of the input's degraded state.
+          ``degraded_reason`` names the specific benchmark ticker of
+          whichever *other* categories failed to classify (e.g. ``"could not
+          classify: ES=F (insufficient bars)"``) — carrying it through
+          verbatim into a category-scoped prompt would leak a cross-category
+          identifier straight past the pin's own "do not reference any other
+          asset category" instruction. Reaching this branch already proves
+          the pinned category's own benchmark classified successfully (a
+          failed pinned benchmark means no matching entry, which returns
+          ``None`` below instead), so the aggregate degraded state — which
+          only ever describes *other*, now-stripped categories — no longer
+          applies to this scoped view.
         * Returns ``None`` when no entry matches — an empty summary carries no
           information, and ``None`` is the shape every caller already treats
           as "no regime available", so this keeps the prompt's regime section
@@ -146,7 +158,7 @@ def filter_regime_summary(
     entries = [e for e in summary.entries if normalize_asset_class(e.asset_class) == asset_class]
     if not entries:
         return None
-    return summary.model_copy(update={"entries": entries})
+    return summary.model_copy(update={"entries": entries, "degraded": False, "degraded_reason": None})
 
 
 def _classify_trend(close: float, sma50: float, sma200: float) -> str:

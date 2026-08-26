@@ -35,7 +35,7 @@ from ...symbols import (
     FUTURES_SYMBOLS_BARE,
     OTHER_SYMBOLS,
     STOCK_SYMBOLS,
-    classify_symbol,
+    find_offcategory_symbols,
 )
 from ..executor.predicate_evaluator import compare
 from ..spec_dsl import (
@@ -1449,16 +1449,7 @@ class SpecReadinessGate(GateResultsMixin):
             # The symbol check below compares against the *declared* class,
             # which is already wrong — reporting it too would be noise.
             return out
-        offcategory = sorted(
-            {
-                sym
-                for sym in ctx.spec.target_symbols
-                # ``classify_symbol`` returns None for cross-asset ETFs (GLD,
-                # QQQ, ...) that legitimately trade in more than one category —
-                # only an unambiguous mismatch is a violation.
-                if (cls := classify_symbol(sym)) is not None and cls != pinned
-            }
-        )
+        offcategory = sorted(find_offcategory_symbols(ctx.spec.target_symbols, pinned))
         if offcategory:
             out.append(
                 self._critical(

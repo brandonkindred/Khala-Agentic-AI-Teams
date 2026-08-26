@@ -152,6 +152,7 @@ from investment_team.strategy_lab.spec_dsl import (
 )
 from investment_team.strategy_lab_context import (
     PROMPT_ASSET_CLASSES,
+    allowed_asset_classes,
     filter_records_by_asset_class,
     normalize_allowed_asset_classes,
     normalize_asset_class,
@@ -2646,22 +2647,25 @@ def _compute_signal_brief_snapshot(
           altering the return value — it cannot turn a successful result into
           a skipped one, since cleanup only runs after the try block has
           already decided what to return.
+        * The one exception to "never raises": an ``AssertionError`` from the
+          per-category expert call (a precondition violation, not an
+          external failure) propagates rather than being folded into a
+          ``"skipped": True`` entry — a contract violation is a bug in this
+          function's own construction of its call, and DbC forbids silently
+          coercing that into a routine fail-open outcome.
     """
     if not _strategy_lab_signal_expert_enabled():
         return {}, {"skipped": True, "skipped_reason": "signal_expert_disabled"}
 
-    excluded = set(exclude_asset_classes or ())
-    allowed = [c for c in PROMPT_ASSET_CLASSES if c not in excluded]
-    if not allowed:
-        # Defensive: the API boundary rejects an empty allowed set, so this is
-        # unreachable in a real run. Degrade to the full menu rather than
-        # returning no briefs at all, which would silently strip the design
-        # prompt's signal section.
-        logger.warning(
-            "signal brief: every asset class excluded (%s); falling back to the full menu",
-            sorted(excluded),
-        )
-        allowed = list(PROMPT_ASSET_CLASSES)
+    # ``allowed_asset_classes`` is the single source of truth for this
+    # complement-with-fallback computation (shared with the design loop's own
+    # category pin) — including its alias normalization, which a hand-rolled
+    # ``set(exclude_asset_classes or ())`` here would silently skip for an
+    # exclusion expressed as a known alias (e.g. "equity" instead of
+    # "stocks"). Its own defensive fallback-to-full-menu-with-a-warning
+    # covers the (API-boundary-unreachable) all-excluded case.
+    allowed_set = allowed_asset_classes(exclude_asset_classes)
+    allowed = [c for c in PROMPT_ASSET_CLASSES if c in allowed_set]
 
     try:
         provider = FreeTierMarketDataProvider()
@@ -2716,22 +2720,39 @@ def _compute_signal_brief_snapshot(
                     "skipped_reason": "no_prior_records",
                 }
                 continue
-            # ``fx_rates``/``crypto_snapshot`` are single asset-class-specific
-            # fields on the shared per-batch snapshot; passing the unscoped
-            # context here would render explicit FX/crypto evidence into
-            # (say) a stocks-only brief's prompt, directly contradicting its
-            # own "covers stocks and nothing else" scope instruction. Scoping
-            # per category closes that path; genuinely shared macro fields
-            # (yields, sentiment) still reach every category.
-            category_market_ctx = market_ctx.scoped_to(asset_class)
-            market_hash = hashlib.sha256(
-                category_market_ctx.as_prompt_text().encode()
-            ).hexdigest()[:16]
             try:
+                # ``fx_rates``/``crypto_snapshot`` are single asset-class-specific
+                # fields on the shared per-batch snapshot; passing the unscoped
+                # context here would render explicit FX/crypto evidence into
+                # (say) a stocks-only brief's prompt, directly contradicting its
+                # own "covers stocks and nothing else" scope instruction. Scoping
+                # per category closes that path; genuinely shared macro fields
+                # (yields, sentiment) still reach every category.
+                #
+                # Computed inside this try, not before it: a failure here
+                # (``scoped_to``/``as_prompt_text``) must degrade only this
+                # category, exactly like a ``produce_signal_brief`` failure —
+                # letting it escape uncaught would propagate out of this
+                # whole function, breaking its documented "never raises"
+                # contract and failing the entire batch's Temporal activity
+                # over one category's brief.
+                category_market_ctx = market_ctx.scoped_to(asset_class)
+                market_hash = hashlib.sha256(
+                    category_market_ctx.as_prompt_text().encode()
+                ).hexdigest()[:16]
                 t0 = datetime.now(tz=timezone.utc)
                 brief = expert.produce_signal_brief(
                     category_records, category_market_ctx, asset_class=asset_class
                 )
+            except AssertionError:
+                # A precondition violation (e.g. produce_signal_brief's own
+                # ``asset_class in PROMPT_ASSET_CLASSES`` check) is a bug in
+                # this loop's caller-side construction of ``asset_class``,
+                # not an external/transient failure -- per this codebase's
+                # Design by Contract rule, a contract violation must never be
+                # silently coerced into a routine fail-open skip. Let it
+                # propagate rather than mislabeling it "expert_failed".
+                raise
             except Exception as exc:
                 # One category's failure must not cost the others their brief;
                 # the design loop treats a missing entry as "no brief" and

@@ -32,7 +32,7 @@ Adding new symbols:
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Iterable, Optional
 
 # Yahoo Finance ticker mapping for crypto symbols (symbol → yfinance ticker)
 YAHOO_CRYPTO_TICKERS: dict[str, str] = {
@@ -226,6 +226,32 @@ def classify_symbol(symbol: str) -> Optional[str]:
     if sym.endswith(("-USD", "-USDT", "-USDC")):
         return "crypto"
     return None
+
+
+def find_offcategory_symbols(symbols: Iterable[str], pinned_asset_class: str) -> set[str]:
+    """The subset of ``symbols`` that unambiguously belong to a different class.
+
+    Single source of truth for the asset-category pin's symbol check, shared
+    by the two places that independently need it from opposite ends: the
+    quality gate that flags a mismatch as a readiness critical
+    (``spec_readiness._check_asset_category_pin``) and the mechanical repair
+    step that strips a minority mismatch (``mechanical_repair.repair_spec``).
+    Keeping this predicate in one place means a future change to
+    classification (a new suffix heuristic, a new cross-asset-ETF exemption)
+    can never desynchronize what one flags from what the other strips.
+
+    Preconditions:
+      - ``symbols`` is an iterable of ticker strings.
+      - ``pinned_asset_class`` is a canonical asset-class label.
+
+    Postconditions:
+      - Returns the set of symbols whose :func:`classify_symbol` result is
+        not ``None`` and does not equal ``pinned_asset_class``. A symbol
+        ``classify_symbol`` cannot unambiguously classify (a cross-asset ETF
+        like ``GLD``/``QQQ``, or a genuinely unrecognized ticker) is never
+        included — it is treated as allowed, not as off-category.
+    """
+    return {sym for sym in symbols if (cls := classify_symbol(sym)) is not None and cls != pinned_asset_class}
 
 
 def canonical_symbol(symbol: str, asset_class: object) -> str:

@@ -53,7 +53,7 @@ from typing import Any, List, Optional
 
 from ..models import BacktestConfig, StrategySpec
 from ..strategy_lab_context import normalize_asset_class, normalize_asset_class_strict
-from ..symbols import classify_symbol
+from ..symbols import find_offcategory_symbols
 from .quality_gates.spec_readiness import (
     _FULL_TIMEFRAME_ASSET_CLASSES,
     MAX_POSITION_PCT_CEILING,
@@ -187,14 +187,12 @@ def repair_spec(
         pinned_asset_class is not None
         and normalize_asset_class(spec.asset_class) == pinned_asset_class
     ):
-        # ``classify_symbol`` returns None for cross-asset ETFs (GLD, QQQ, ...)
-        # that legitimately trade in more than one category; only an
-        # unambiguous mismatch is stripped.
-        kept = [
-            sym
-            for sym in spec.target_symbols
-            if (cls := classify_symbol(sym)) is None or cls == pinned_asset_class
-        ]
+        # ``find_offcategory_symbols`` (shared with readiness Rule 11's own
+        # symbol check, so the two can never disagree) excludes cross-asset
+        # ETFs (GLD, QQQ, ...) that legitimately trade in more than one
+        # category; only an unambiguous mismatch is stripped.
+        offcategory = find_offcategory_symbols(spec.target_symbols, pinned_asset_class)
+        kept = [sym for sym in spec.target_symbols if sym not in offcategory]
         # Only repair a MINORITY mismatch — at least one symbol must survive.
         # Stripping every symbol is not "a stray ticker"; it means the whole
         # explicit universe contradicts the declared class, which is the same

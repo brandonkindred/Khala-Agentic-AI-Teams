@@ -55,6 +55,7 @@ from ..signal_intelligence_models import SignalIntelligenceBriefV1
 from ..strategy_lab_context import (
     PROMPT_ASSET_CLASSES,
     allowed_asset_classes,
+    excluded_for_allowed,
     filter_records_by_asset_class,
     normalize_asset_class,
     normalize_asset_class_strict,
@@ -757,7 +758,7 @@ class DesignMixin:
             exclude_asset_classes, avoid=diversity_avoid_classes
         )
         category_prior_records = filter_records_by_asset_class(prior_records, selected_category)
-        pinned_exclude_asset_classes = [c for c in PROMPT_ASSET_CLASSES if c != selected_category]
+        pinned_exclude_asset_classes = excluded_for_allowed([selected_category])
         # Scope the two cross-category analysis surfaces the designer is also
         # handed. Both are computed once per batch/cycle over every asset
         # class; without this the designer reads a signal brief whose

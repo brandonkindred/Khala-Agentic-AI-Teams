@@ -18,6 +18,7 @@ from .signal_intelligence_models import SignalIntelligenceBriefV1
 from .strategy_lab_context import (
     PROMPT_ASSET_CLASSES,
     asset_class_mix_hint,
+    excluded_for_allowed,
     format_prior_results,
 )
 
@@ -151,11 +152,7 @@ class SignalIntelligenceExpert:
         # is always the scoped class itself.
         mix_hint = asset_class_mix_hint(
             prior_results,
-            exclude=(
-                [c for c in PROMPT_ASSET_CLASSES if c != asset_class]
-                if asset_class is not None
-                else None
-            ),
+            exclude=excluded_for_allowed([asset_class] if asset_class is not None else None),
         )
         market_block = market_context.as_prompt_text()
         scope_block = (

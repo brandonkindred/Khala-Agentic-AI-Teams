@@ -3295,6 +3295,208 @@ def test_compute_signal_brief_snapshot_success_survives_provider_close_failure(m
     assert storage["by_asset_class"]["stocks"]["brief_version"] == "v1"
 
 
+def _signal_brief_prior_record(asset_class: str):
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    strat = StrategySpec(
+        strategy_id=f"strat-{asset_class}",
+        authored_by="x",
+        asset_class=asset_class,
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    result = BacktestResult(
+        total_return_pct=1.0,
+        annualized_return_pct=1.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=40.0,
+        profit_factor=1.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id=f"bt-{asset_class}",
+        strategy_id=strat.strategy_id,
+        strategy=strat,
+        config=BacktestConfig(start_date="2024-01-01", end_date="2024-02-01"),
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=result,
+        trades=[],
+    )
+    return StrategyLabRecord(
+        lab_record_id=f"lab-{asset_class}",
+        strategy=strat,
+        backtest=bt,
+        is_winning=False,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
+    )
+
+
+def _signal_brief_fake_provider():
+    from investment_team.market_lab_data import MarketLabContext
+
+    class _FakeProvider:
+        def fetch_context(self, request):
+            return MarketLabContext(
+                fetched_at="2024-01-01T00:00:00Z", degraded=False, sources_used=["x"]
+            )
+
+        def close(self):
+            pass
+
+    return _FakeProvider
+
+
+def test_compute_signal_brief_snapshot_isolates_one_categorys_expert_failure(monkeypatch):
+    """produce_signal_brief raising for one category must not cost sibling
+    categories their brief -- this is the PR's own stated purpose for the
+    per-category try/except, previously unexercised by any test (every
+    existing fail-open test only covers construction-time failures, which
+    abort the whole function before this per-category loop even starts)."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main,
+        "_snapshot_prior_records",
+        lambda *, reverse=False: [
+            _signal_brief_prior_record("stocks"),
+            _signal_brief_prior_record("crypto"),
+        ],
+    )
+
+    class _FakeBrief:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"brief_version": "v1"}
+
+    class _FakeExpert:
+        def produce_signal_brief(self, prior_records, market_ctx, *, asset_class=None):
+            if asset_class == "stocks":
+                raise RuntimeError("LLM call failed for stocks")
+            return _FakeBrief()
+
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _signal_brief_fake_provider())
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
+
+    briefs, storage = api_main._compute_signal_brief_snapshot("SPY", ["forex", "futures", "commodities"])
+
+    # The failing category is absent from briefs and carries a skip marker...
+    assert "stocks" not in briefs
+    assert storage["by_asset_class"]["stocks"] == {
+        "skipped": True,
+        "skipped_reason": "expert_failed",
+        "error": "LLM call failed for stocks",
+    }
+    # ...while the sibling category's brief is entirely unaffected.
+    assert "crypto" in briefs
+    assert storage["by_asset_class"]["crypto"]["brief_version"] == "v1"
+
+
+def test_compute_signal_brief_snapshot_isolates_a_scoped_to_failure(monkeypatch):
+    """A failure computing the per-category market-snapshot hash (scoped_to /
+    as_prompt_text, evaluated before produce_signal_brief) must be caught by
+    the same per-category fail-open guard, not escape the function entirely
+    and fail the whole batch's Temporal activity over one category."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main, "_snapshot_prior_records", lambda *, reverse=False: [_signal_brief_prior_record("stocks")]
+    )
+
+    class _FakeExpert:
+        def produce_signal_brief(self, prior_records, market_ctx, *, asset_class=None):
+            raise AssertionError("must not be reached -- scoped_to already failed")
+
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _signal_brief_fake_provider())
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
+
+    from investment_team.market_lab_data import MarketLabContext
+
+    def _boom_scoped_to(self, asset_class):
+        raise ValueError("scoped_to boom")
+
+    monkeypatch.setattr(MarketLabContext, "scoped_to", _boom_scoped_to)
+
+    briefs, storage = api_main._compute_signal_brief_snapshot("SPY", ["crypto", "forex", "futures", "commodities"])
+
+    assert briefs == {}
+    assert storage["by_asset_class"]["stocks"] == {
+        "skipped": True,
+        "skipped_reason": "expert_failed",
+        "error": "scoped_to boom",
+    }
+
+
+def test_compute_signal_brief_snapshot_propagates_an_assertion_error(monkeypatch):
+    """An AssertionError from the per-category expert call is a precondition
+    violation in this function's own construction of its call -- per this
+    codebase's Design by Contract rule, that must propagate rather than be
+    silently folded into a routine "expert_failed" skip marker alongside
+    genuine external/transient failures."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main, "_snapshot_prior_records", lambda *, reverse=False: [_signal_brief_prior_record("stocks")]
+    )
+
+    class _FakeExpert:
+        def produce_signal_brief(self, prior_records, market_ctx, *, asset_class=None):
+            raise AssertionError("asset_class must be a canonical PROMPT_ASSET_CLASSES member")
+
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _signal_brief_fake_provider())
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
+
+    with pytest.raises(AssertionError, match="canonical PROMPT_ASSET_CLASSES member"):
+        api_main._compute_signal_brief_snapshot("SPY", ["crypto", "forex", "futures", "commodities"])
+
+
+def test_compute_signal_brief_snapshot_excludes_an_alias_spelling(monkeypatch):
+    """exclude_asset_classes must exclude an alias spelling (e.g. "equity")
+    the same way it excludes the canonical label -- this only works because
+    the allowed-set computation goes through the shared
+    strategy_lab_context.allowed_asset_classes helper (with its
+    normalize_asset_class_strict alias handling), not a hand-rolled
+    ``set(exclude_asset_classes or ())`` that skips normalization entirely."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main,
+        "_snapshot_prior_records",
+        lambda *, reverse=False: [_signal_brief_prior_record("crypto")],
+    )
+
+    class _FakeBrief:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"brief_version": "v1"}
+
+    class _FakeExpert:
+        def produce_signal_brief(self, prior_records, market_ctx, *, asset_class=None):
+            assert asset_class != "stocks", "an aliased exclusion must still exclude stocks"
+            return _FakeBrief()
+
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _signal_brief_fake_provider())
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
+
+    briefs, _storage = api_main._compute_signal_brief_snapshot(
+        "SPY", ["equity", "forex", "futures", "commodities"]
+    )
+
+    assert "stocks" not in briefs
+
+
 def test_is_strategy_lab_run_externally_stopped_reads_job_status(monkeypatch):
     """The broad check fires for any external stop signal -- cancelled,
     failed, or interrupted alike -- not just a genuine cancellation."""

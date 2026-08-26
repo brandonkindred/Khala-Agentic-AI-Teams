@@ -1289,6 +1289,24 @@ def test_classify_symbol_returns_none_for_ambiguous_or_unknown() -> None:
     assert classify_symbol("NEWCO") is None
 
 
+def test_find_offcategory_symbols_flags_only_unambiguous_mismatches() -> None:
+    """Shared by readiness Rule 11 and mechanical_repair -- must exclude
+    ambiguous/cross-asset ETFs and unrecognized tickers the same way
+    classify_symbol itself does, keeping only a genuine mismatch."""
+    from investment_team.symbols import find_offcategory_symbols
+
+    assert find_offcategory_symbols(["AAPL", "BTC", "MSFT"], "stocks") == {"BTC"}
+    # Cross-asset ETFs (classify_symbol -> None) are never flagged.
+    assert find_offcategory_symbols(["AAPL", "GLD", "QQQ"], "stocks") == set()
+    # An unrecognized ticker is never flagged either -- unclassified is not
+    # the same as off-category.
+    assert find_offcategory_symbols(["AAPL", "NEWCO"], "stocks") == set()
+    # A same-category symbol is never flagged.
+    assert find_offcategory_symbols(["AAPL", "MSFT"], "stocks") == set()
+    # Empty input -> empty output.
+    assert find_offcategory_symbols([], "stocks") == set()
+
+
 def test_resolve_strategy_symbols_warns_on_asset_class_mismatch(caplog) -> None:
     """Issue #523 — a strategy declaring asset_class="stocks" with
     target_symbols=["BTC"] should emit a warning so the operator sees the
