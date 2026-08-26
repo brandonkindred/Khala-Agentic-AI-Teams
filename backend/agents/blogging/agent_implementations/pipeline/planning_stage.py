@@ -6,11 +6,9 @@ from typing import TYPE_CHECKING, Optional, Tuple
 if TYPE_CHECKING:
     from agents.blogging.blog_writer_agent.models import WriterOutput
 
-from agents.blogging.shared.artifacts import write_artifact
 from agents.blogging.shared.content_plan import (
     PlanningInput,
     PlanningPhaseResult,
-    content_plan_to_content_brief_markdown,
     content_plan_to_markdown_doc,
     content_plan_to_outline_markdown,
 )
@@ -27,6 +25,7 @@ from llm_service.interface import LLMRateLimitError, LLMTemporaryError
 from ._common import (
     _extract_plan_keywords,
     _make_update,
+    _persist_content_plan_artifacts,
     _save_narratives_to_story_bank,
     _wait_for_hitl,
     planning_llm_client,
@@ -57,6 +56,12 @@ def run_planning_stage(
           disappeared from the store mid-wait. This tuple sentinel mirrors
           ``run_pipeline``'s return shape so the sequencer forwards it unchanged
           (see ``run_draft_stage`` for the rationale).
+        - Each outline-feedback re-plan round refreshes ``content_plan.json``,
+          ``content_plan.md``, ``outline.md``, ``content_brief.md``, and
+          ``allowed_claims.json`` together (via the same
+          ``_persist_content_plan_artifacts`` helper ``run_planning`` uses),
+          so ``allowed_claims.json`` never goes stale relative to the plan the
+          user is currently reviewing.
     Raises:
         PlanningError: when content planning fails (e.g. max parse retries).
         BloggingError: any other blogging-domain failure from the planning agent
@@ -339,13 +344,11 @@ def run_planning_stage(
 
                 outline_text = content_plan_to_outline_markdown(plan)
 
-                # Persist updated artifacts
+                # Persist updated artifacts (including a refreshed allowed_claims.json,
+                # via the same helper run_planning uses — see its docstring).
                 if work_dir is not None:
-                    write_artifact(work_dir, "content_plan.json", plan.model_dump(mode="json"))
-                    write_artifact(work_dir, "content_plan.md", content_plan_to_markdown_doc(plan))
-                    write_artifact(work_dir, "outline.md", outline_text)
-                    write_artifact(
-                        work_dir, "content_brief.md", content_plan_to_content_brief_markdown(plan)
+                    _persist_content_plan_artifacts(
+                        work_dir, plan, llm_client=llm_client, topic=brief.brief
                     )
 
                 # Present revised outline for another round

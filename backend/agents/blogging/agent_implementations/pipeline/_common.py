@@ -237,6 +237,64 @@ def build_plan_critic_agent(base: LLMClient) -> Optional[BlogPlanCriticAgent]:
     return BlogPlanCriticAgent(llm_client=_plan_critic_llm_client(base))
 
 
+def _persist_content_plan_artifacts(
+    work_dir: Union[str, Path],
+    plan: ContentPlan,
+    *,
+    llm_client: Any,
+    topic: str,
+) -> str:
+    """Persist content-plan artifacts and a freshly extracted allowed_claims.json.
+
+    Single source for the artifact set that must change together whenever the
+    content plan changes: ``run_planning``'s initial persist and
+    ``run_planning_stage``'s outline-approval re-plan loop both call this
+    instead of writing the artifacts separately, so ``allowed_claims.json``
+    can never drift out of sync with the plan text it was derived from.
+
+    The v2 pipeline does not yet run a research stage (``BlogResearchAgent``
+    is not wired in), so there is no compiled research document/reference
+    list available here; ``extract_allowed_claims`` is called against the
+    plan's own markdown with an empty reference list.
+
+    Args:
+        work_dir: Directory to persist artifacts to.
+        plan: The (possibly revised) content plan to persist.
+        llm_client: Resolved LLM client used for claims extraction.
+        topic: Topic/brief text recorded on the persisted ``AllowedClaims``.
+
+    Preconditions:
+        - ``work_dir`` is not None. ``plan`` is a valid ``ContentPlan``.
+          ``llm_client`` is resolved (non-None).
+    Postconditions:
+        - Writes ``content_plan.json``, ``content_plan.md``, ``outline.md``,
+          ``content_brief.md``, and ``allowed_claims.json`` to ``work_dir``.
+        - ``allowed_claims.json`` is always written, even with zero claims,
+          since ``extract_allowed_claims`` never raises.
+        - Returns the ``content_plan.md`` markdown text used as
+          ``extract_allowed_claims``'s ``compiled_document``, so callers that
+          already need it (e.g. for progress updates) can reuse it.
+    """
+    # Deferred import: see module docstring.
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        extract_allowed_claims,
+    )
+
+    content_plan_markdown = content_plan_to_markdown_doc(plan)
+    write_artifact(work_dir, "content_plan.json", plan.model_dump(mode="json"))
+    write_artifact(work_dir, "content_plan.md", content_plan_markdown)
+    write_artifact(work_dir, "outline.md", content_plan_to_outline_markdown(plan))
+    write_artifact(work_dir, "content_brief.md", content_plan_to_content_brief_markdown(plan))
+    logger.info("Persisted content_plan.json, content_plan.md, outline.md, content_brief.md")
+
+    allowed_claims = extract_allowed_claims(
+        llm_client, content_plan_markdown, references=[], topic=topic
+    )
+    write_artifact(work_dir, "allowed_claims.json", allowed_claims.to_dict())
+    logger.info("Persisted allowed_claims.json (%d claim(s))", len(allowed_claims.claims))
+    return content_plan_markdown
+
+
 def run_planning(
     brief: ResearchBriefInput,
     *,
@@ -281,7 +339,6 @@ def run_planning(
     # Deferred import: see module docstring.
     from agents.blogging.agent_implementations.blog_writing_process_v2 import (
         BlogWriterAgent,
-        extract_allowed_claims,
         load_brand_spec_prompt,
         load_style_file,
     )
@@ -374,12 +431,7 @@ def run_planning(
     )
 
     if work_dir is not None:
-        content_plan_markdown = content_plan_to_markdown_doc(plan)
-        write_artifact(work_dir, "content_plan.json", plan.model_dump(mode="json"))
-        write_artifact(work_dir, "content_plan.md", content_plan_markdown)
-        write_artifact(work_dir, "outline.md", content_plan_to_outline_markdown(plan))
-        write_artifact(work_dir, "content_brief.md", content_plan_to_content_brief_markdown(plan))
-        logger.info("Persisted content_plan.json, content_plan.md, outline.md, content_brief.md")
+        _persist_content_plan_artifacts(work_dir, plan, llm_client=llm_client, topic=brief.brief)
         # Persist the critic's final verdict under a stable filename for easy inspection;
         # per-iteration reports (plan_critic_report_v{N}.json) remain in work_dir too.
         if planning_phase_result.plan_critic_report is not None:
@@ -392,21 +444,6 @@ def run_planning(
                 "Persisted plan_critic_report.json (status=%s)",
                 planning_phase_result.plan_critic_report.get("status"),
             )
-
-        # The v2 pipeline does not yet run a research stage (BlogResearchAgent is not
-        # wired in), so there is no compiled research document/reference list here.
-        # extract_allowed_claims never raises: with no real sources to cite, it
-        # degrades to an empty-claims AllowedClaims, and allowed_claims.json is still
-        # written so the fact-check gate/validators (which already read it) can rely
-        # on its presence.
-        allowed_claims = extract_allowed_claims(
-            llm_client,
-            content_plan_markdown,
-            references=[],
-            topic=brief.brief,
-        )
-        write_artifact(work_dir, "allowed_claims.json", allowed_claims.to_dict())
-        logger.info("Persisted allowed_claims.json (%d claim(s))", len(allowed_claims.claims))
 
     return planning_phase_result
 
