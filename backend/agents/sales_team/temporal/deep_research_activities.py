@@ -25,7 +25,6 @@ from temporalio.exceptions import ApplicationError
 from sales_team.temporal.activities import (
     _beating,
     _GuardOutcome,
-    _job_status,
     _job_stopped,
     _terminal_guard,
 )
@@ -66,8 +65,8 @@ def prepare_deep_research_activity(job_id: str, request: dict[str, Any]) -> dict
           ``DeepResearchContext`` carrier (with ``icp_json`` and
           ``companies_requested`` precomputed).
     """
-    from job_service_client import JOB_STATUS_FAILED, JOB_STATUS_RUNNING
-    from sales_team.job_runner import CLEAN_TERMINAL_STATUSES, job_manager
+    from job_service_client import JOB_STATUS_RUNNING
+    from sales_team.job_runner import job_manager
     from sales_team.learning_engine import format_insights_for_prompt
     from sales_team.models import DeepResearchRequest
     from sales_team.outcome_store import load_current_insights
@@ -79,17 +78,12 @@ def prepare_deep_research_activity(job_id: str, request: dict[str, Any]) -> dict
             f"Invalid DeepResearchRequest for job {job_id}: {exc}", non_retryable=True
         ) from exc
 
-    status = _job_status(job_id)
-    if status is None:
-        raise RuntimeError(f"Deep-research job {job_id} not found at prepare")
-    if status == JOB_STATUS_FAILED:
-        raise ApplicationError(
-            f"Deep-research job {job_id} was already FAILED before start", non_retryable=True
-        )
-    if status in CLEAN_TERMINAL_STATUSES:
-        activity.logger.info(
-            "Deep-research job %s already terminal (%s) at prepare; stopping", job_id, status
-        )
+    guard = _terminal_guard(
+        job_id,
+        phase="deep_research_prepare",
+        missing_msg=f"Deep-research job {job_id} not found at prepare",
+    )
+    if guard is _GuardOutcome.STOP:
         return DeepResearchContext(request=dr_request, job_id=job_id, stopped=True).model_dump(
             mode="json"
         )
