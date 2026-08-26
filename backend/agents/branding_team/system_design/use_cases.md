@@ -124,17 +124,18 @@ flowchart LR
   by chatting.
 - **Preconditions:** `llm_service` is configured (or the assistant's
   fallback path will return canned replies — see
-  `assistant/agent.py:188-195`).
+  `assistant/agent.py:respond()`).
 - **Main flow:**
   1. `POST /conversations` (`api/main.py:813`) creates a conversation
      row via `BrandingConversationStore`. An optional
      `initial_message` is processed immediately.
   2. `POST /conversations/{conversation_id}/messages`
      (`api/main.py:902`) is called for each user turn.
-  3. `BrandingAssistantAgent.respond` (`assistant/agent.py:137-199`)
-     sends the prompt to the LLM, parses the reply, mission update, and
-     suggestions (`assistant/agent.py:14-66`), and merges mission
-     fields (`assistant/agent.py:69-123`).
+  3. `BrandingAssistantAgent.respond` (`assistant/agent.py:respond()`)
+     runs two independent LLM calls: a conversation agent for the reply,
+     then a silent `structured_output=MissionUpdate` extraction agent
+     for the mission update and suggestions, and merges mission fields
+     via `_merge_mission_update` (`assistant/agent.py:_merge_mission_update`).
   4. `_run_orchestrator_if_ready` (`api/main.py:360-367`) checks
      whether the mission has the minimal required fields and, if so,
      runs the orchestrator with `approved=false` to refresh output.

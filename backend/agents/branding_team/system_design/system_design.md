@@ -30,8 +30,9 @@ backend/agents/branding_team/
 │                             # sessions, conversations, health
 ├── assistant/
 │   ├── __init__.py          # Lazy init for BrandingConversationStore singleton
-│   ├── agent.py             # BrandingAssistantAgent (LLM-backed conversational flow)
-│   ├── prompts.py           # SYSTEM_PROMPT + USER_TURN_TEMPLATE
+│   ├── agent.py             # BrandingAssistantAgent (two-stage: conversation + silent extraction)
+│   ├── models.py            # MissionUpdate — structured_output schema for the extraction stage
+│   ├── prompts.py           # SYSTEM_PROMPT/USER_TURN_TEMPLATE + EXTRACTION_SYSTEM_PROMPT/EXTRACTION_USER_TEMPLATE
 │   └── store.py             # BrandingConversationStore (messages, mission, latest output)
 ├── adapters/
 │   ├── __init__.py
@@ -450,54 +451,69 @@ LLM service via `get_strands_model()`. Only `BrandComplianceAgent` is
 deterministic post-processing (regex-based brand checks) and does not call
 an LLM.
 
-**Initialization** (`assistant/agent.py:129-135`) happens lazily:
+`BrandingAssistantAgent` itself is **two Strands agents, not one**: a
+conversation stage that produces the free-form reply the user reads, and a
+separate, silent extraction stage that turns the same turn into a validated
+`MissionUpdate` (`assistant/models.py`). Splitting them means the
+user-facing reply is never constrained or contaminated by structured-output
+formatting requirements — the conversation agent is free to write pure
+prose, and the extraction agent's schema can evolve independently.
+
+**Initialization** (`assistant/agent.py:306-345`) happens lazily and builds
+one `strands.Agent` per stage via `graphs/shared.py:build_agent()`:
 
 ```python
-def __init__(self, llm=None):
-    if llm is None:
-        from llm_service import get_client
-        self._llm = get_client("branding_assistant")
-    else:
-        self._llm = llm
+def __init__(self, conversation_llm=None, extraction_llm=None, llm=None):
+    # llm=: legacy kwarg that drives BOTH stages (tests / offline callers).
+    ...
+    if conversation_llm is None:
+        conversation_llm = build_agent(
+            name="conversation", agent_key="branding_assistant",
+            output_mode="text", system_prompt=SYSTEM_PROMPT,
+        )
+    if extraction_llm is None:
+        extraction_llm = build_agent(
+            name="extraction", agent_key="branding_assistant",
+            system_prompt=EXTRACTION_SYSTEM_PROMPT,
+            structured_output=MissionUpdate,
+        )
 ```
 
-The FastAPI app wraps this in a second layer of laziness
-(`api/main.py:72-83`): `assistant_agent` starts as `None`, and
-`_get_assistant_agent()` only imports the real agent on first
-conversation request. If construction fails, the handler returns HTTP
-503 `"Branding assistant is temporarily unavailable"` instead of
-crashing the app — so the rest of the team's endpoints remain usable
-even when `llm_service` is not configured.
+The FastAPI app wraps construction in a second layer of laziness
+(`api/main.py`): `assistant_agent` starts as `None`, and
+`_get_assistant_agent()` only constructs `BrandingAssistantAgent()` (no
+args — both stages default-construct) on first conversation request. If
+construction fails, the handler returns HTTP 503 `"Branding assistant is
+temporarily unavailable"` instead of crashing the app — so the rest of the
+team's endpoints remain usable even when `llm_service` is not configured.
 
-**LLM call** (`assistant/agent.py:181-195`):
+**Stage 1 — conversation** (`assistant/agent.py:respond()`) calls the
+conversation agent with `output_mode="text"` so it never emits JSON on the
+wire, then runs `_strip_accidental_json` as a defensive guard against a
+regressed LLM leaking raw mission JSON to the user; a guard hit or a raised
+exception both fall back to a canned prose reply instead of propagating.
 
-```python
-try:
-    raw = self._llm.complete(
-        prompt,
-        temperature=0.5,
-        system_prompt=SYSTEM_PROMPT,
-        think=True,
-    )
-except Exception:
-    reply_text = "I'm here to help build your brand. Could you tell me your company name and what you do?"
-    suggested_questions = [...]
-    return reply_text, current_mission, suggested_questions
-```
+**Stage 2 — extraction** (`assistant/agent.py:respond()`) calls the
+extraction agent, built with `structured_output=MissionUpdate` — the
+Strands adapter routes this through its tool-calling flow and validates the
+response into a `MissionUpdate` instance before the caller ever sees raw
+text. `_merge_mission_update` (`assistant/agent.py:_merge_mission_update`)
+then merges only the fields the extractor actually populated into the
+current `BrandingMission`; an all-`None`/empty `MissionUpdate` is a
+legitimate no-op ("nothing learned this turn"), not an error.
+`suggested_questions` falls back to `_DEFAULT_SUGGESTIONS` when the
+extractor returns none. If the extraction call raises, or its result
+doesn't carry a valid `MissionUpdate`, `respond()` returns `degraded=True`
+and leaves the mission unchanged — the conversation reply is unaffected
+either way, since the two stages run independently.
 
-**Response parsing** (`assistant/agent.py:14-66`) extracts three things
-from the raw completion:
-
-1. The natural-language reply text shown to the user.
-2. A structured `mission` JSON block (in ```` ```mission ```` or
-   ```` ```json ```` ) that gets merged into `BrandingMission` via
-   `_merge_mission_update` (`assistant/agent.py:69-123`).
-3. A `suggestions` array (in ```` ```suggestions ```` ) that becomes
-   `ConversationStateResponse.suggested_questions`.
-
-The `SYSTEM_PROMPT` in `assistant/prompts.py:11-99` instructs the LLM
-to play brand strategist, follow the 5-phase framework, and emit the
-mission + suggestions blocks.
+Prompts: `SYSTEM_PROMPT`/`USER_TURN_TEMPLATE` (`assistant/prompts.py`)
+drive the conversation stage; `EXTRACTION_SYSTEM_PROMPT`/
+`EXTRACTION_USER_TEMPLATE` drive the extraction stage.
+`EXTRACTION_SYSTEM_PROMPT` is rendered via `render_agent_prompt` bound to
+`MissionUpdate` (`assistant/prompts.py`), so its schema description is
+generated from — and can't drift out of sync with — the same
+`MissionUpdate` model the extraction agent validates against.
 
 ## External integration contracts
 

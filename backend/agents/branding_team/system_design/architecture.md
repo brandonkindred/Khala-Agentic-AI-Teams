@@ -56,10 +56,13 @@ briefed vs. exploratory vs. chat-first) can all reach a consistent
   Postgres instance, accessed via `shared.postgres.get_conn`
   (`store.py:30,103`) with DDL declared in `postgres/__init__.py`.
   Swapping stores does not change the API contract.
-- **Graceful LLM fallback.** The conversational assistant lazy-initializes
-  the shared LLM client and, if the call fails, returns a hard-coded reply
-  and suggested questions instead of surfacing an exception
-  (`assistant/agent.py:181-195`). The FastAPI app also mounts even when
+- **Graceful LLM fallback.** The conversational assistant's two stages
+  (conversation + silent `structured_output=MissionUpdate` extraction, see
+  `system_design.md`'s LLM integration section) lazy-initialize via
+  `graphs/shared.py:build_agent()` and fail independently — either stage
+  raising falls back to a hard-coded reply and default suggested questions,
+  or a `degraded=True` extraction result, instead of surfacing an exception
+  (`assistant/agent.py:respond()`). The FastAPI app also mounts even when
   `llm_service` is unavailable (`api/main.py:72-83`).
 
 ## Component diagram
@@ -212,8 +215,9 @@ Different entry points serve different user states:
   (`api/main.py:758-784`).
 - **Conversation API `POST /conversations`** (`api/main.py:813`) — used
   when the caller has no structured brief at all. The
-  `BrandingAssistantAgent` wraps the shared LLM client, extracts mission
-  fields from free-form text (`assistant/agent.py:14-66`), and reruns
+  `BrandingAssistantAgent` runs a two-stage LLM flow — a conversation agent
+  for the reply, a separate `structured_output=MissionUpdate` extraction
+  agent for mission fields (`assistant/agent.py:respond()`) — and reruns
   the orchestrator whenever the mission becomes complete
   (`api/main.py:360-367`). A brand is auto-created the first time a
   company name shows up (`api/main.py:846-865`).
