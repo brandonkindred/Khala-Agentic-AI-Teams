@@ -106,9 +106,11 @@ def extract_allowed_claims(
         sources_parts.append(f"Source {i}: {title} | {url}")
     sources_text = "\n".join(sources_parts) if sources_parts else "No sources"
 
-    prompt = EXTRACT_CLAIMS_PROMPT.replace("__COMPILED_DOCUMENT__", compiled_document).replace(
-        "__SOURCES_TEXT__", sources_text
-    )
+    # Substitute via partition (not chained .replace()) so a placeholder-like literal
+    # inside compiled_document/sources_text can't be re-matched by a later substitution.
+    before_doc, _, after_doc = EXTRACT_CLAIMS_PROMPT.partition("__COMPILED_DOCUMENT__")
+    middle, _, after_sources = after_doc.partition("__SOURCES_TEXT__")
+    prompt = before_doc + compiled_document + middle + sources_text + after_sources
 
     try:
         data = llm_client.complete_json(

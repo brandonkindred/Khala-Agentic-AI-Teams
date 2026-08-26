@@ -234,3 +234,26 @@ def test_extract_allowed_claims_no_references_uses_placeholder_sources() -> None
 
     assert result == AllowedClaims(topic="", claims=[])
     assert "No sources" in client.calls[0]
+
+
+def test_extract_allowed_claims_document_containing_placeholder_literal_is_preserved() -> None:
+    """A compiled_document containing a placeholder-like literal must not be
+    mangled by a later substitution (regression: chained .replace() would let
+    the __SOURCES_TEXT__ substitution re-match text just inserted from
+    compiled_document)."""
+    client = _StubLLMClient({"claims": []})
+    tricky_document = "This document literally discusses the __SOURCES_TEXT__ token."
+
+    extract_allowed_claims(
+        client,
+        compiled_document=tricky_document,
+        references=_references(),
+        topic="t",
+    )
+
+    prompt = client.calls[0]
+    assert tricky_document in prompt
+    # The real sources section (built from references) must still appear once,
+    # not have overwritten the literal text inside compiled_document.
+    assert "Source One" in prompt
+    assert prompt.count("__SOURCES_TEXT__") == 1
