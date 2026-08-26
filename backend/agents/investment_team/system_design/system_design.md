@@ -155,18 +155,18 @@ returns the current `WorkflowMode` and the audit log.
 ## Orchestrator — promotion gates
 
 `PromotionGateAgent.decide` ([`agents.py`](../agents.py):131-302) runs the
-six gates in strict order. Short-circuit semantics: any `reject` terminates
-the checklist; missing validation forces `revise`; failure to unlock a live
-precondition falls back to `paper`.
+five gates plus a final promotion step, in strict order. Short-circuit
+semantics: any `reject` terminates the checklist; missing validation forces
+`revise`; failure to unlock a live precondition falls back to `paper`.
 
-| # | Gate | Fails when | Outcome on failure |
+| # | Gate | Condition | Result |
 |---|---|---|---|
 | 1 | Separation of duties | `proposer_agent_id == approver.agent_id` | `reject` |
 | 2 | Risk veto | `risk_veto == True` | `reject` |
 | 3 | Validation completeness & pass criteria | Any required check missing or failed | `revise` |
 | 4 | IPS live-trading permission | `ips.live_trading_enabled == False` | fall back to `paper` |
 | 5 | Human live approval | `ips.human_approval_required_for_live and not human_live_approval` | fall back to `paper` |
-| 6 | Promote to live | All gates pass | `live` (recorded as `human_approval = pass`; there is no separate gate member for this step) |
+| 6 | Promote to live | All five gates above passed | `live` (recorded as `human_approval = pass`; there is no separate `PromotionGate` member for this step) |
 
 Every gate records a `GateCheckResult(gate, result, details)` in
 `PromotionDecision.gate_results` and the decision carries an `AuditContext`
