@@ -17,8 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 from agents.blogging.shared.agent_base import _BlogAgentBase
 from agents.blogging.shared.artifacts import read_artifact, read_latest_draft, write_artifact
 from agents.blogging.shared.errors import FactCheckError
-from agents.blogging.shared.json_retry import call_json_with_retry
-from strands import Agent
+from agents.blogging.shared.json_retry import run_json_gate
 
 from llm_service import LLMRateLimitError, LLMTemporaryError
 
@@ -103,12 +102,6 @@ class BlogFactCheckAgent(_BlogAgentBase):
         if on_llm_request:
             on_llm_request("Checking facts and claims...")
 
-        def _agent_factory():
-            return Agent(
-                model=self._model,
-                system_prompt=FACT_CHECK_PROMPT.split("{draft}")[0].strip(),
-            )
-
         prompt_for_helper = prompt + _ALWAYS_ON_JSON_INSTRUCTION
 
         def _on_exhausted(_exc: Exception) -> Dict[str, Any]:
@@ -121,10 +114,10 @@ class BlogFactCheckAgent(_BlogAgentBase):
             }
 
         try:
-            data = call_json_with_retry(
-                _agent_factory,
+            data = run_json_gate(
+                self._model,
+                FACT_CHECK_PROMPT.split("{draft}")[0].strip(),
                 prompt_for_helper,
-                max_attempts=2,
                 strict_json_suffix=_JSON_RETRY_SUFFIX,
                 on_exhausted=_on_exhausted,
                 logger=logger,
