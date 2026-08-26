@@ -322,6 +322,35 @@ def test_run_planning_research_artifact_write_failure_wraps_as_research_error(
     assert exc.value.phase == "research"
 
 
+def test_run_planning_research_cache_setup_failure_wraps_as_research_error(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """An AgentCache construction failure (e.g. work_dir/.research_cache cannot be
+    created) is attributed to research too, since cache setup now happens inside the
+    same try/except as the ResearchAgent.run() call and the artifact write."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.pipeline._common as common_mod
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.shared.errors import ResearchError
+
+    class _BoomAgentCache:
+        def __init__(self, **_kw):
+            raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(common_mod, "AgentCache", _BoomAgentCache)
+
+    with pytest.raises(ResearchError) as exc:
+        v2.run_planning(
+            ResearchBriefInput(brief="b", max_results=5),
+            work_dir=tmp_path / "wd",
+            llm_client=object(),
+            length_policy=None,
+            series_context=None,
+            job_updater=None,
+        )
+    assert exc.value.phase == "research"
+
+
 @pytest.mark.parametrize("err_cls_name", ["LLMRateLimitError", "LLMTemporaryError"])
 def test_run_planning_research_reraises_transient_llm_errors(monkeypatch, err_cls_name) -> None:
     """Transient LLM errors from research must stay unwrapped for Temporal retry,

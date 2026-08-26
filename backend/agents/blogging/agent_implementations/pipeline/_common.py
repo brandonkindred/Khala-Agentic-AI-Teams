@@ -315,16 +315,19 @@ def run_planning(
     # as an artifact. Checkpointed under work_dir (when set) so a Temporal retry of
     # this activity after a transient planning failure resumes research from its
     # last completed step instead of repeating every search/fetch/summarization call.
-    # The artifact write is wrapped alongside the agent call (not after) so a disk
-    # failure here is attributed to phase="research" too, not left to surface as an
-    # unattributed/planning failure.
+    # Cache setup and the artifact write are wrapped alongside the agent call (not
+    # around/after it) so a failure anywhere in this block — cache dir creation, the
+    # agent run, or the artifact write — is attributed to phase="research" too,
+    # instead of surfacing unattributed or misattributed to planning.
     _report_research("Researching topic...")
 
-    research_cache = (
-        AgentCache(cache_dir=Path(work_dir) / ".research_cache") if work_dir is not None else None
-    )
-    research_agent = ResearchAgent(llm_client=llm_client, cache=research_cache)
     try:
+        research_cache = (
+            AgentCache(cache_dir=Path(work_dir) / ".research_cache")
+            if work_dir is not None
+            else None
+        )
+        research_agent = ResearchAgent(llm_client=llm_client, cache=research_cache)
         research_output = research_agent.run(brief)
         if work_dir is not None:
             write_artifact(work_dir, "research_packet.md", research_output.compiled_document or "")

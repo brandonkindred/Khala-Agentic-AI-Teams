@@ -160,8 +160,12 @@ class ResearchAgent(_BlogAgentBase):
                     self.cache.save_checkpoint(brief_input, "queries", queries=queries)
 
             # Step 3: Run searches
+            # candidates is checked for "is not None" rather than truthiness: a
+            # zero-candidate search is a legitimately completed checkpoint, not a
+            # missing one, and re-running it on resume would repeat the web searches
+            # for no reason.
             if (
-                cached_state and cached_state.candidates
+                cached_state and cached_state.candidates is not None
             ):  # pragma: no cover - resume-from-checkpoint branch; see Step 1.
                 logger.info("Using cached candidates (%s)", len(cached_state.candidates))
                 candidates = [CandidateResult(**c) for c in cached_state.candidates]

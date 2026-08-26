@@ -246,6 +246,34 @@ def test_research_agent_run_checkpoints_candidates_after_fresh_search(
     assert checkpoint.last_completed_step == "notes"
 
 
+def test_research_agent_run_resumes_from_empty_candidates_checkpoint(monkeypatch, tmp_path) -> None:
+    """A checkpoint with candidates=[] (a completed search that found nothing) must
+    be treated as resumable, not re-run: `[]` and "no checkpoint" are different states.
+
+    Regression test: the resume check originally used truthiness (`cached_state and
+    cached_state.candidates`), so an empty-but-completed candidates checkpoint looked
+    identical to a missing one and the web searches ran again anyway.
+    """
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="empty candidates brief", max_results=3)
+    cache.save_checkpoint(brief, "normalized", normalized={"topic": "cached"})
+    cache.save_checkpoint(brief, "queries", queries=[{"query_text": "q", "intent": "overview"}])
+    cache.save_checkpoint(brief, "candidates", candidates=[])
+
+    a = _make_agent(monkeypatch, [])
+    a.cache = cache
+    mock_search = MagicMock()
+    mock_search.search.return_value = []
+    a.web_search = mock_search
+
+    a.run(brief)
+
+    mock_search.search.assert_not_called()
+
+
 def test_research_agent_synthesize_overview_no_references() -> None:
     from agents.blogging.blog_research_agent.agent import ResearchAgent
     from agents.blogging.blog_research_agent.models import ResearchBriefInput
