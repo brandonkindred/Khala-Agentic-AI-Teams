@@ -91,6 +91,17 @@ _ACTIVITY_TIMEOUT = timedelta(minutes=10)
 # ``STRATEGY_LAB_DESIGN_MAX_LLM_CALLS`` model round-trips plus backtests), so it
 # needs a far wider ceiling than a single LLM/gate/persist activity.
 _DESIGN_ATTEMPT_TIMEOUT = timedelta(hours=2)
+# compute_signal_brief_activity runs one LLM call per allowed asset category
+# with a prior record, serially (up to 5 -- see PROMPT_ASSET_CLASSES),
+# each individually bounded by the configured LLM timeout (default 60
+# minutes, llm_service.config.resolve_timeout). _ACTIVITY_TIMEOUT's 10
+# minutes was sized for this activity's pre-per-category-loop single call
+# and is no longer enough headroom for the serial worst case -- an activity
+# timeout here would retry the whole activity, re-paying for already-
+# completed calls. Not sized to the full 5x60min extreme (an unrealistic
+# combination that would already indicate a systemic failure), but wide
+# enough for realistic per-call latency with real margin.
+_SIGNAL_BRIEF_ACTIVITY_TIMEOUT = timedelta(hours=1)
 # Server-enforced liveness deadline for the design-attempt activity's
 # heartbeat (activities.py wraps the attempt in a fixed-interval
 # BackgroundHeartbeat, decoupled from ``emit`` checkpoint cadence -- see
@@ -647,7 +658,7 @@ class StrategyLabBatchWorkflow:
                     # evidence no design attempt is allowed to use.
                     "exclude_asset_classes": exclude_asset_classes,
                 },
-                timeout=_ACTIVITY_TIMEOUT,
+                timeout=_SIGNAL_BRIEF_ACTIVITY_TIMEOUT,
             )
             signal_briefs = brief.get("signal_briefs")
             signal_brief_storage = brief.get("signal_brief_storage")
