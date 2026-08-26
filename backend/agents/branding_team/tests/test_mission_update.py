@@ -11,7 +11,8 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from branding_team.models import BrandingMission, ColorPalette, MissionUpdate
+from branding_team.assistant.models import MissionUpdate, _MissionUpdateFields
+from branding_team.models import BrandingMission, ColorPalette
 
 
 def test_all_empty_payload_validates() -> None:
@@ -128,8 +129,6 @@ def test_mission_fields_are_inherited_from_optionalized_branding_mission() -> No
     in ``test_branding_mission_fields.py`` — same ``_optionalize_model`` pattern,
     applied to ``BrandingMission`` instead of ``BrandingMissionFields``.
     """
-    from branding_team.models import _MissionUpdateFields
-
     assert issubclass(MissionUpdate, _MissionUpdateFields)
     assert set(_MissionUpdateFields.model_fields) == set(BrandingMission.model_fields) - {
         "wiki_path"

@@ -224,8 +224,11 @@ _STRICT_TWIN_DOC_SUFFIX = (
 # fields), ``_optionalize_model`` builds a *from-scratch* twin whose every
 # field is optional/defaulted — for request DTOs and extractor payloads that
 # must represent "nothing supplied" without redeclaring the source model's
-# field list (and risking drift from it). See ``MissionUpdate`` below and
-# ``api.models._BrandingMissionFieldsPartial``, its two call sites.
+# field list (and risking drift from it). Call sites: ``api.models``'s
+# ``_BrandingMissionFieldsPartial`` and ``assistant.models``'s
+# ``MissionUpdate`` (each in its own module — an API DTO and a chat-assistant
+# extractor payload respectively — not domain-model concerns, so neither
+# lives here; only the generic transform they share does).
 
 
 def _unwrap_noneable(annotation: Any) -> Any:
@@ -480,81 +483,6 @@ class BrandingMission(BrandingMissionFields):
     visual_style: str = ""  # e.g. "minimalist", "maximalist", "editorial"
     typography_preference: str = ""  # e.g. "geometric sans-serif", "humanist serif"
     interface_density: str = ""  # e.g. "spacious/minimalist", "dense/information-rich"
-
-
-# Field-for-field descriptions for ``MissionUpdate``'s ``_optionalize_model``
-# twin below — new content (``BrandingMission``'s own fields carry no
-# descriptions), not a duplicate of the field list itself. Keys must match
-# ``BrandingMission.model_fields`` minus ``wiki_path`` exactly (asserted by
-# ``_optionalize_model``).
-_MISSION_UPDATE_FIELD_DESCRIPTIONS: Dict[str, str] = {
-    "company_name": "the company or product name, if newly learned or changed",
-    "company_description": (
-        "a sentence or two on what the company does and for whom, if newly learned"
-    ),
-    "target_audience": "the primary target audience, if newly learned or changed",
-    "values": "the complete current list of brand values the user has shared so far",
-    "differentiators": "the complete current list of competitive differentiators shared so far",
-    "desired_voice": "the brand's desired voice/tone, if newly learned or changed",
-    "existing_brand_material": (
-        "the complete current list of existing brand material the user has referenced"
-    ),
-    "color_inspiration": "the complete current list of color inspiration references shared so far",
-    "color_palettes": "candidate color palettes presented to the user for selection, if any",
-    "selected_palette_index": (
-        "the index into color_palettes the user selected, or null if none/unselected"
-    ),
-    "visual_style": "the desired visual style (e.g. minimalist, maximalist), if newly learned",
-    "typography_preference": (
-        "the desired typography direction (e.g. geometric sans-serif), if newly learned"
-    ),
-    "interface_density": ("the desired interface density (e.g. spacious, dense), if newly learned"),
-}
-
-# ``wiki_path`` is excluded: it's a pipeline-populated link to the brand's
-# wiki page, not a field the chat assistant's extractor reads/writes.
-_MissionUpdateFields = _optionalize_model(
-    BrandingMission,
-    name="_MissionUpdateFields",
-    exclude=frozenset({"wiki_path"}),
-    descriptions=_MISSION_UPDATE_FIELD_DESCRIPTIONS,
-)
-
-
-class MissionUpdate(_MissionUpdateFields):
-    """One turn's worth of the branding chat extractor's ``BrandingMission`` deltas.
-
-    Mission fields are inherited from ``_MissionUpdateFields`` — an
-    ``_optionalize_model`` twin of ``BrandingMission`` (minus ``wiki_path``,
-    a pipeline-only field) — rather than redeclared here, so this schema
-    cannot silently drift from the canonical mission model or from
-    ``assistant.agent``'s ``_MISSION_STR_FIELDS``/``_MISSION_LIST_FIELDS``/
-    ``_MISSION_STRUCTURED_FIELDS`` (which enumerate the same field set).
-    ``suggested_questions`` is the extractor's own additional output, added
-    here since it has no ``BrandingMission`` counterpart to derive from.
-
-    Every field — inherited and own — is ``Optional`` so an all-empty
-    payload (the extractor found nothing new this turn) validates cleanly,
-    and every field declares a non-blank ``Field(description=...)`` so this
-    model can serve directly as an ``AgentPromptSpec.structured_output``
-    (see ``prompt_spec.py``'s ``_field_lines_from_model``, which asserts
-    exactly that).
-
-    Preconditions:
-        ``selected_palette_index``, when not ``None``, is a plain ``int``
-        (index bounds-checking against ``color_palettes`` is the merge
-        layer's responsibility, not this schema's — the same division of
-        labor ``BrandingMission`` itself uses).
-    Postconditions:
-        Constructing with no arguments (or with every field explicitly
-        ``None``/empty) succeeds and represents "nothing learned this turn".
-        Any subset of fields may be populated independently of the others.
-    """
-
-    suggested_questions: Optional[List[str]] = Field(
-        default=None,
-        description="up to a few natural-language follow-up questions to ask the user next",
-    )
 
 
 # ---------------------------------------------------------------------------
