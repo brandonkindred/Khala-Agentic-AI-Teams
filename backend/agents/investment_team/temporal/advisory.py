@@ -46,6 +46,19 @@ _ADVISORY_RETRY = RetryPolicy(maximum_attempts=1)
 # of the activity's own start_to_close_timeout below.
 ADVISORY_TIMEOUT = timedelta(minutes=2)
 
+# Human-readable detail strings for the no-checks-supplied fallback in
+# validate_strategy_activity, keyed by check name. The check *names* themselves
+# are derived from ValidationAgent.REQUIRED_CHECKS (the canonical source) so
+# they can't drift; this mapping only supplies cosmetic detail text and falls
+# back to a generic message for any check not listed here.
+_DEFAULT_CHECK_DETAILS = {
+    "backtest_quality": "Sharpe > 1.0",
+    "walk_forward": "Out-of-sample Sharpe > 0.8",
+    "stress_test": "Max DD within limits",
+    "transaction_cost_model": "Net return positive",
+    "liquidity_impact": "Minimal market impact",
+}
+
 
 def _as_model(model_cls: Any, raw: Any) -> Any:
     """Coerce a persisted value into ``model_cls``.
@@ -200,6 +213,7 @@ def validate_strategy_activity(payload: dict[str, Any]) -> dict[str, Any]:
         "failures": list[str]}``. Raises ``ApplicationError`` when the strategy
         is missing.
     """
+    from investment_team.agents import ValidationAgent
     from investment_team.api.main import _lock, _now, _strategies, _validations
     from investment_team.models import ValidationCheck, ValidationReport, ValidationStatus
 
@@ -223,28 +237,16 @@ def validate_strategy_activity(payload: dict[str, Any]) -> dict[str, Any]:
                 ValidationCheck(name=c.get("name", ""), status=status, details=c.get("details", ""))
             )
     else:
+        # Derived from the canonical ValidationAgent.REQUIRED_CHECKS set (rather
+        # than hand-typed) so a rename/addition there can't silently drift from
+        # this no-checks-supplied fallback.
         checks = [
             ValidationCheck(
-                name="backtest_quality", status=ValidationStatus.PASS, details="Sharpe > 1.0"
-            ),
-            ValidationCheck(
-                name="walk_forward",
+                name=name,
                 status=ValidationStatus.PASS,
-                details="Out-of-sample Sharpe > 0.8",
-            ),
-            ValidationCheck(
-                name="stress_test", status=ValidationStatus.PASS, details="Max DD within limits"
-            ),
-            ValidationCheck(
-                name="transaction_cost_model",
-                status=ValidationStatus.PASS,
-                details="Net return positive",
-            ),
-            ValidationCheck(
-                name="liquidity_impact",
-                status=ValidationStatus.PASS,
-                details="Minimal market impact",
-            ),
+                details=_DEFAULT_CHECK_DETAILS.get(name, "Default check passed."),
+            )
+            for name in sorted(ValidationAgent.REQUIRED_CHECKS)
         ]
 
     validation = ValidationReport(
