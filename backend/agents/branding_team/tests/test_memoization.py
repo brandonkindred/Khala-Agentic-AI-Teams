@@ -127,15 +127,33 @@ def test_complete_phase_is_rejected() -> None:
         phase_input_hash(BrandPhase.COMPLETE, make_mission(), {})
 
 
-def test_empty_context_phases_matches_omitted_context_phases() -> None:
-    """Passing ``context_phases=()`` explicitly reproduces the default hash."""
+def test_omitted_context_phases_matches_explicit_none() -> None:
+    """Omitting ``context_phases`` reproduces the hash of passing ``None``
+    explicitly -- ``None`` is the true default sentinel, not just a
+    falsy-equivalent placeholder."""
     mission = make_mission()
     upstream = {BrandPhase.STRATEGIC_CORE: StrategicCoreOutput(brand_purpose="Ship calm software")}
 
-    default = phase_input_hash(BrandPhase.NARRATIVE_MESSAGING, mission, upstream)
-    explicit = phase_input_hash(BrandPhase.NARRATIVE_MESSAGING, mission, upstream, ())
+    omitted = phase_input_hash(BrandPhase.NARRATIVE_MESSAGING, mission, upstream)
+    explicit_none = phase_input_hash(BrandPhase.NARRATIVE_MESSAGING, mission, upstream, None)
 
-    assert default == explicit
+    assert omitted == explicit_none
+
+
+def test_explicit_empty_context_phases_excludes_everything() -> None:
+    """``context_phases=()`` deliberately means "no upstream context" and
+    must differ from the ``None``/omitted default when ``upstream_outputs``
+    is non-empty -- the None-vs-() distinction this function exists to make
+    expressible."""
+    mission = make_mission()
+    upstream = {BrandPhase.STRATEGIC_CORE: StrategicCoreOutput(brand_purpose="Ship calm software")}
+
+    include_all = phase_input_hash(BrandPhase.NARRATIVE_MESSAGING, mission, upstream)
+    include_none = phase_input_hash(BrandPhase.NARRATIVE_MESSAGING, mission, upstream, ())
+    empty_upstream = phase_input_hash(BrandPhase.NARRATIVE_MESSAGING, mission, {})
+
+    assert include_all != include_none
+    assert include_none == empty_upstream
 
 
 def test_context_phases_excludes_unlisted_upstream_output_from_hash() -> None:

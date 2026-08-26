@@ -156,7 +156,7 @@ def test_critic_returns_pass_on_clean_json() -> None:
         ]
     )
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", fake_agent):
+    with patch("agents.blogging.shared.json_retry.Agent", fake_agent):
         report = critic.run(
             plan=_minimal_plan(),
             brand_spec_prompt="Brand spec text.",
@@ -200,7 +200,7 @@ def test_critic_surfaces_violations_and_fails() -> None:
         ]
     )
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", fake_agent):
+    with patch("agents.blogging.shared.json_retry.Agent", fake_agent):
         report = critic.run(
             plan=_minimal_plan(),
             brand_spec_prompt="Brand spec text.",
@@ -237,7 +237,7 @@ def test_critic_approved_invariant_enforced() -> None:
         ]
     )
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", fake_agent):
+    with patch("agents.blogging.shared.json_retry.Agent", fake_agent):
         report = critic.run(
             plan=_minimal_plan(),
             brand_spec_prompt="b",
@@ -250,7 +250,7 @@ def test_critic_approved_invariant_enforced() -> None:
 def test_critic_parse_failure_falls_back_to_fail() -> None:
     fake_agent = _FakeAgentFactory(responses=["not json at all", "also not json"])
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", fake_agent):
+    with patch("agents.blogging.shared.json_retry.Agent", fake_agent):
         report = critic.run(
             plan=_minimal_plan(),
             brand_spec_prompt="b",
@@ -274,7 +274,7 @@ def test_critic_transient_error_reraises(err_cls) -> None:
             raise err_cls("transient outage")
 
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", _BoomAgent):
+    with patch("agents.blogging.shared.json_retry.Agent", _BoomAgent):
         with pytest.raises(err_cls):
             critic.run(
                 plan=_minimal_plan(),
@@ -291,7 +291,7 @@ def test_critic_agent_construction_failure_falls_back() -> None:
             raise RuntimeError("rejected model config")
 
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", _BoomCtor):
+    with patch("agents.blogging.shared.json_retry.Agent", _BoomCtor):
         report = critic.run(
             plan=_minimal_plan(),
             brand_spec_prompt="b",
@@ -318,7 +318,7 @@ def test_critic_event_loop_exception_unwraps_transient(err_cls) -> None:
             raise EventLoopException(cause)
 
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", _BoomAgent):
+    with patch("agents.blogging.shared.json_retry.Agent", _BoomAgent):
         with pytest.raises(err_cls) as exc_info:
             critic.run(
                 plan=_minimal_plan(),
@@ -344,7 +344,7 @@ def test_critic_coerces_non_string_status_to_fail() -> None:
         ]
     )
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", fake_agent):
+    with patch("agents.blogging.shared.json_retry.Agent", fake_agent):
         report = critic.run(
             plan=_minimal_plan(),
             brand_spec_prompt="b",
@@ -376,7 +376,7 @@ def test_critic_coerces_non_string_violation_fields() -> None:
         ]
     )
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", fake_agent):
+    with patch("agents.blogging.shared.json_retry.Agent", fake_agent):
         report = critic.run(
             plan=_minimal_plan(),
             brand_spec_prompt="b",
@@ -403,7 +403,7 @@ def test_critic_coerce_report_unexpected_exception_falls_back() -> None:
         ]
     )
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", fake_agent):
+    with patch("agents.blogging.shared.json_retry.Agent", fake_agent):
         with patch(
             "agents.blogging.blog_plan_critic_agent.agent.PlanViolation",
             side_effect=RuntimeError("boom"),
@@ -433,7 +433,7 @@ def test_critic_persists_report_to_work_dir(tmp_path) -> None:
         ]
     )
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", fake_agent):
+    with patch("agents.blogging.shared.json_retry.Agent", fake_agent):
         critic.run(
             plan=_minimal_plan(),
             brand_spec_prompt="b",
