@@ -50,6 +50,10 @@ def _signal_json_instructions(asset_class: Optional[str]) -> str:
         if asset_class is not None
         else "how to blend signals / asset classes this batch"
     )
+    # json.dumps rather than raw f-string interpolation so pairing_guidance can
+    # never corrupt the surrounding JSON example even if a future edit adds a
+    # quote, newline, or backslash to either branch above.
+    pairing_guidance_json = json.dumps(pairing_guidance)
     return f"""\
 Return ONLY a JSON object with these keys (no markdown):
 {{
@@ -58,7 +62,7 @@ Return ONLY a JSON object with these keys (no markdown):
   "micro_themes": ["..."],
   "high_value_signal_hypotheses": ["testable hypotheses tied to priors and/or snapshot"],
   "trade_structures_benefiting": ["e.g. pairs, spreads, options overlays — conceptual"],
-  "pairing_guidance": "{pairing_guidance}",
+  "pairing_guidance": {pairing_guidance_json},
   "evidence_from_priors": "which prior rows or patterns you rely on, or 'none / first run'",
   "evidence_from_market_data": "which snapshot lines (FX, macro, crypto) you use, or 'none' if degraded/empty",
   "confidence": "low" | "medium" | "high",

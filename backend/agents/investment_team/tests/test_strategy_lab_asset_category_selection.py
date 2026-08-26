@@ -1216,7 +1216,8 @@ def test_build_spec_preserves_an_authored_offpin_asset_class() -> None:
 
 
 def test_build_spec_rejects_a_non_canonical_default() -> None:
+    from investment_team.strategy_lab.exceptions import OrchestratorContractError
     from investment_team.strategy_lab.orchestrator_design import build_spec_from_dict
 
-    with pytest.raises(AssertionError):
+    with pytest.raises(OrchestratorContractError):
         build_spec_from_dict(_spec_dict(), strategy_id="s1", default_asset_class="bonds")

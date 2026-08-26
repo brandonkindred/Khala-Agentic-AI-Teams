@@ -280,7 +280,7 @@ def select_signal_brief(
     return briefs.get(asset_class)
 
 
-def allowed_asset_classes(exclude_asset_classes: Optional[List[str]]) -> frozenset:
+def allowed_asset_classes(exclude_asset_classes: Optional[List[str]]) -> frozenset[str]:
     """Recover the run's user-level allowed-category set from its exclusions.
 
     The complement of ``exclude_asset_classes`` within

@@ -151,7 +151,7 @@ def _coerce_expectancy_forecast(raw: Any) -> Optional[ExpectancyForecast]:
 
 
 def _infer_asset_class_from_symbols(
-    target_symbols: List[str], *, allowed_classes: Optional[frozenset] = None
+    target_symbols: List[str], *, allowed_classes: Optional[frozenset[str]] = None
 ) -> Optional[str]:
     """Infer a single asset class from explicit ``target_symbols``, if unambiguous.
 
@@ -251,9 +251,10 @@ def build_spec_from_dict(
         SpecImplementabilityError: the payload names an unsupported
             ``asset_class`` that no alias maps to a tradeable class.
     """
-    assert default_asset_class in PROMPT_ASSET_CLASSES, (
-        "default_asset_class must be a canonical PROMPT_ASSET_CLASSES member"
-    )
+    if default_asset_class not in PROMPT_ASSET_CLASSES:
+        raise OrchestratorContractError(
+            f"default_asset_class must be a canonical PROMPT_ASSET_CLASSES member, got {default_asset_class!r}"
+        )
     # ``or`` alone would let a whitespace-only value through as an authored
     # choice; a blank field expresses no choice on its own. But explicit
     # target_symbols that unambiguously name a different class than the pin
