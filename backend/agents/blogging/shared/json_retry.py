@@ -12,11 +12,21 @@ extracts that policy into one parameterized helper, covering every existing
 call site's variant (attempt count, a fresh agent per attempt, backoff, and
 the copy-editor's extra step of unwrapping a wrapped exception before
 classifying its cause) so that callers CAN configure it via parameters
-instead of duplicating the loop.
+instead of duplicating the loop. ``call_json_with_retry`` stays
+framework-agnostic — ``AgentFactory``/``AgentInvoker`` are structural
+``Callable`` aliases with no ``strands`` import. ``run_json_gate``, layered
+on top of it below, is the framework-aware entry point most call sites
+actually want: it builds a ``strands.Agent`` from ``model``/``system_prompt``
+and always unwraps ``strands.types.exceptions.EventLoopException`` before
+classifying an error's cause, so call sites no longer need to hand-roll an
+``agent_factory`` closure or an ``_unwrap`` closure themselves.
 
 Invariants:
     - Exactly one JSON-parse retry policy and one transient-error
       classification rule is defined here.
+    - ``run_json_gate`` is the sole place that constructs a ``strands.Agent``
+      and unwraps ``EventLoopException`` for JSON-gate call sites;
+      ``call_json_with_retry`` itself remains framework-agnostic.
 """
 
 from __future__ import annotations
@@ -24,6 +34,9 @@ from __future__ import annotations
 import logging
 import time
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Type
+
+from strands import Agent
+from strands.types.exceptions import EventLoopException
 
 from llm_service import LLMJsonParseError, LLMRateLimitError, LLMTemporaryError
 from llm_service.util import extract_json_from_response
@@ -151,3 +164,94 @@ def call_json_with_retry(
     # Unreachable: the loop above always returns or raises before falling through.
     assert last_json_error is not None  # pragma: no cover
     raise last_json_error  # pragma: no cover
+
+
+def _unwrap_event_loop_exception(exc: Exception) -> Exception:
+    """Unwrap strands' EventLoopException to expose the underlying cause for classification."""
+    return exc.original_exception if isinstance(exc, EventLoopException) else exc
+
+
+def run_json_gate(
+    model: Any,
+    system_prompt: str,
+    prompt: str,
+    *,
+    max_attempts: int = 2,
+    strict_json_suffix: str = _DEFAULT_STRICT_JSON_SUFFIX,
+    fresh_agent_per_attempt: bool = False,
+    fallback_builder: Optional[Callable[[Exception], Dict[str, Any]]] = None,
+    on_exhausted: Optional[Callable[[LLMJsonParseError], Dict[str, Any]]] = None,
+    on_unexpected_error: Optional[Callable[[Exception], Dict[str, Any]]] = None,
+    logger: Optional[logging.Logger] = None,
+) -> Dict[str, Any]:
+    """
+    Run a JSON-gate LLM call against a ``strands.Agent``, with retry, parse-failure
+    handling, and ``EventLoopException`` unwrapping baked in.
+
+    Thin, framework-aware wrapper over :func:`call_json_with_retry`: builds a
+    fresh ``strands.Agent(model=model, system_prompt=system_prompt)`` per the
+    same ``fresh_agent_per_attempt`` semantics as the underlying helper, and
+    always unwraps ``strands.types.exceptions.EventLoopException`` (via
+    ``original_exception``) before ``call_json_with_retry`` classifies an
+    error's cause — callers never need to declare their own ``_unwrap``
+    closure for this.
+
+    ``fallback_builder``, if given, is used as the default fallback for
+    whichever of ``on_exhausted``/``on_unexpected_error`` the caller leaves
+    unset; an explicitly supplied ``on_exhausted`` or ``on_unexpected_error``
+    always takes precedence over ``fallback_builder`` for its own outcome.
+    Leaving all three unset means both a JSON-parse exhaustion and any other
+    non-transient unexpected error propagate to the caller (e.g. to be
+    wrapped in a domain-specific exception), matching
+    ``call_json_with_retry``'s own raise-by-default behavior.
+
+    Only the parameters real call sites use are exposed here
+    (``max_attempts``, ``strict_json_suffix``, ``fresh_agent_per_attempt``,
+    the fallback hooks, and ``logger``). ``expected_keys``, a
+    ``transient_exceptions`` override, and ``backoff_seconds`` are not
+    exposed — no known call site needs them; call ``call_json_with_retry``
+    directly for that case.
+
+    Preconditions:
+        - ``max_attempts >= 1``.
+        - ``prompt`` is a non-empty string.
+        - ``system_prompt`` is a string (may be empty).
+        - ``model`` is a value acceptable to ``strands.Agent(model=...)``.
+        - ``fallback_builder``, ``on_exhausted``, and ``on_unexpected_error``,
+          when given, are callables accepting one exception argument.
+
+    Postconditions:
+        - Returns a ``dict`` on a successful parse, or via whichever of
+          ``on_exhausted``/``on_unexpected_error`` resolves (through an
+          explicit override or ``fallback_builder``) for the failure that
+          occurred; never returns ``None``.
+        - A transient error (after ``EventLoopException`` unwrapping) is
+          always re-raised unwrapped, never routed to a fallback — same as
+          ``call_json_with_retry``.
+        - Otherwise raises the (possibly unwrapped) triggering exception when
+          the corresponding hook resolves to ``None``.
+        - Exactly one ``strands.Agent`` is constructed per attempt when
+          ``fresh_agent_per_attempt=True``; otherwise exactly one ``Agent``
+          total, cached and reused across retries.
+
+    Invariants:
+        - ``EventLoopException`` unwrapping is always applied; it is not a
+          caller-configurable option on this function.
+    """
+
+    def _agent_factory() -> AgentInvoker:
+        return Agent(model=model, system_prompt=system_prompt)
+
+    return call_json_with_retry(
+        _agent_factory,
+        prompt,
+        max_attempts=max_attempts,
+        strict_json_suffix=strict_json_suffix,
+        fresh_agent_per_attempt=fresh_agent_per_attempt,
+        unwrap_exception=_unwrap_event_loop_exception,
+        on_exhausted=on_exhausted if on_exhausted is not None else fallback_builder,
+        on_unexpected_error=on_unexpected_error
+        if on_unexpected_error is not None
+        else fallback_builder,
+        logger=logger,
+    )
