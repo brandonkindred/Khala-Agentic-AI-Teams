@@ -7,9 +7,11 @@ app uses ``FakeJobServiceClient`` and the heavy ``run_pipeline`` is patched.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from ._api_test_utils import api_main as _api_main
@@ -178,6 +180,59 @@ def test_clear_research_cache_helper(tmp_path: Path) -> None:
     work_dir.mkdir()
     _clear_research_cache(str(work_dir))
     assert not (work_dir / ".research_cache").exists()
+
+
+def test_clear_research_cache_helper_propagates_genuine_errors(monkeypatch, tmp_path: Path) -> None:
+    """A real deletion failure (not just "already gone") must propagate rather than
+    be swallowed — silently reporting a successful "from scratch" restart while a
+    stale checkpoint actually survives is worse than failing the restart outright."""
+    from agents.blogging.api.routers.jobs import _clear_research_cache
+
+    def boom(*_a, **_kw):
+        raise PermissionError("read-only filesystem")
+
+    monkeypatch.setattr(shutil, "rmtree", boom)
+
+    work_dir = tmp_path / "job-work-dir"
+    (work_dir / ".research_cache").mkdir(parents=True)
+
+    with pytest.raises(PermissionError):
+        _clear_research_cache(str(work_dir))
+
+
+def test_restart_job_500_when_cache_clear_fails(
+    client: TestClient, monkeypatch, tmp_path: Path
+) -> None:
+    """A cache-clear failure aborts the restart with a 500 and leaves the job record
+    untouched, rather than resetting it to "pending" for a restart that never
+    actually happened."""
+    from agents.blogging.shared import blog_job_store as bjs
+
+    work_dir = tmp_path / "job-work-dir"
+    (work_dir / ".research_cache").mkdir(parents=True)
+
+    job_id = _create_job()
+    bjs.update_blog_job(
+        job_id,
+        status="completed",
+        request_payload={"brief": "x"},
+        work_dir=str(work_dir),
+    )
+
+    monkeypatch.setattr(_api_main, "_submit_async_job", lambda fn, *a, **kw: None)
+
+    from agents.blogging.api.routers import jobs as jobs_router
+
+    def boom(_work_dir):
+        raise OSError("disk error")
+
+    monkeypatch.setattr(jobs_router, "_clear_research_cache", boom)
+
+    r = client.post(f"/job/{job_id}/restart")
+    assert r.status_code == 500
+
+    job = bjs.get_blog_job(job_id)
+    assert job["status"] == "completed"
 
 
 # ---------------------------------------------------------------------------

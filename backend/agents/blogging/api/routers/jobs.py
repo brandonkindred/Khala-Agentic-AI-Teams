@@ -3,7 +3,6 @@ approve/unapprove, and listing."""
 
 from __future__ import annotations
 
-import logging
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -24,8 +23,6 @@ from fastapi.responses import StreamingResponse
 
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
 
-logger = logging.getLogger(__name__)
-
 router = APIRouter()
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "needs_human_review"})
@@ -33,13 +30,14 @@ _BLOG_RESTARTABLE = RESTARTABLE_STATUSES | {"needs_human_review"}
 
 
 def _clear_research_cache(work_dir: Optional[str]) -> None:
-    """Best-effort delete of a job's research checkpoint cache on restart.
+    """Delete a job's research checkpoint cache so a restart is genuinely from scratch.
 
     A restart reuses the job's ``work_dir`` and (for an unchanged brief) the same
     ``ResearchAgent`` cache key, so without this the "from scratch" restart would
     silently resume the previous run's research checkpoints instead of re-running
-    research. Failures are logged and swallowed — a stale cache dir is a resumed
-    research step, not a broken restart.
+    research. A missing cache directory (nothing to clear) is a no-op; any other
+    failure to delete it propagates — reporting the restart as successful while an
+    old checkpoint actually survives would be worse than failing the restart outright.
     """
     if not work_dir:
         return
@@ -48,8 +46,6 @@ def _clear_research_cache(work_dir: Optional[str]) -> None:
         shutil.rmtree(cache_dir)
     except FileNotFoundError:
         pass
-    except OSError as e:
-        logger.warning("Failed to clear research cache at %s on restart: %s", cache_dir, e)
 
 
 @router.get(
@@ -242,10 +238,19 @@ def restart_blog_job(job_id: str) -> StartPipelineResponse:
             status_code=400, detail="Original request payload not available for restart."
         )
 
+    # Clear the research cache before resetting the job record: if this fails, the
+    # job is left untouched (still in its prior terminal state) rather than reset to
+    # "pending" with a restart that never actually happened.
+    try:
+        _clear_research_cache(job.get("work_dir"))
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to clear research cache for restart: {exc}"
+        ) from exc
+
     from agents.blogging.shared.blog_job_store import reset_blog_job
 
     reset_blog_job(job_id)
-    _clear_research_cache(job.get("work_dir"))
 
     request = FullPipelineRequest(**payload)
 

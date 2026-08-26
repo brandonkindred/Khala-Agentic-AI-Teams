@@ -243,7 +243,11 @@ def test_research_agent_run_checkpoints_candidates_after_fresh_search(
     # None (unset) vs [] (checkpointed-but-empty) is the whole point of the regression:
     # before the fix this step's checkpoint was never written at all.
     assert checkpoint.candidates == []
-    assert checkpoint.last_completed_step == "notes"
+    # academic_papers/similar_topics are also checkpointed now (steps 8-9), saved
+    # sequentially after notes once the parallel section's .result()s come back.
+    assert checkpoint.academic_papers == []
+    assert checkpoint.similar_topics == []
+    assert checkpoint.last_completed_step == "similar_topics"
 
 
 def test_research_agent_run_resumes_from_empty_candidates_checkpoint(monkeypatch, tmp_path) -> None:
@@ -272,6 +276,55 @@ def test_research_agent_run_resumes_from_empty_candidates_checkpoint(monkeypatch
     a.run(brief)
 
     mock_search.search.assert_not_called()
+
+
+def test_research_agent_run_resumes_academic_papers_and_similar_topics(
+    monkeypatch, tmp_path
+) -> None:
+    """Cached academic_papers/similar_topics checkpoints must be reused, not
+    recomputed, so a resumed run doesn't redo the arXiv HTTP call or the LLM
+    similar-topics call."""
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="resume tail steps", max_results=3)
+    cache.save_checkpoint(brief, "normalized", normalized={"topic": "cached"})
+    cache.save_checkpoint(brief, "queries", queries=[{"query_text": "q", "intent": "overview"}])
+    cache.save_checkpoint(brief, "candidates", candidates=[])
+    cache.save_checkpoint(brief, "documents", documents=[])
+    cache.save_checkpoint(brief, "scored_docs", scored_docs=[])
+    cache.save_checkpoint(brief, "references", references=[])
+    cache.save_checkpoint(brief, "notes", notes="cached notes")
+    cache.save_checkpoint(
+        brief,
+        "academic_papers",
+        academic_papers=[
+            {
+                "title": "Cached Paper",
+                "url": "https://arxiv.org/abs/1234",
+                "overview_or_summary": "cached abstract",
+            }
+        ],
+    )
+    cache.save_checkpoint(brief, "similar_topics", similar_topics=["cached topic"])
+
+    a = _make_agent(monkeypatch, [])
+    a.cache = cache
+
+    fetch_spy = MagicMock(side_effect=AssertionError("should not re-fetch academic papers"))
+    similar_spy = MagicMock(side_effect=AssertionError("should not recompute similar topics"))
+    monkeypatch.setattr(ResearchAgent, "_fetch_academic_papers", fetch_spy)
+    monkeypatch.setattr(ResearchAgent, "_get_similar_topics", similar_spy)
+
+    out = a.run(brief)
+
+    fetch_spy.assert_not_called()
+    similar_spy.assert_not_called()
+    assert out.notes == "cached notes"
+    assert [p.title for p in out.academic_papers] == ["Cached Paper"]
+    assert out.similar_topics == ["cached topic"]
 
 
 def test_research_agent_synthesize_overview_no_references() -> None:

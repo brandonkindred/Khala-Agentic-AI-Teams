@@ -236,20 +236,46 @@ class ResearchAgent(_BlogAgentBase):
             # Steps 7-9: synthesize overview (LLM), fetch academic papers (arXiv
             # HTTP), and find similar topics (LLM) are mutually independent — none
             # consumes another's output — so run them concurrently instead of as
-            # three sequential round-trips. The notes step keeps its
-            # resume-from-checkpoint short-circuit and checkpoint save.
+            # three sequential round-trips. Each keeps its own resume-from-checkpoint
+            # short-circuit, but — unlike the strictly-sequential steps above — the
+            # checkpoint *save* is deliberately deferred until after all three
+            # `.result()`s come back and done here one at a time: AgentCache.
+            # save_checkpoint() is an unlocked read-modify-write over one shared JSON
+            # file, so three concurrent savers would race and can clobber each
+            # other's (or the earlier steps') already-persisted state.
             _report("Synthesizing overview, searching arXiv, finding similar topics...", 0.78)
 
+            notes_is_cached = bool(
+                cached_state and cached_state.notes is not None
+            )  # pragma: no cover - resume-from-checkpoint branch; see Step 1.
+            academic_papers_is_cached = bool(
+                cached_state and cached_state.academic_papers is not None
+            )  # pragma: no cover - resume-from-checkpoint branch; see Step 1.
+            similar_topics_is_cached = bool(
+                cached_state and cached_state.similar_topics is not None
+            )  # pragma: no cover - resume-from-checkpoint branch; see Step 1.
+
             def _resolve_notes() -> Any:
-                if (
-                    cached_state and cached_state.notes is not None
-                ):  # pragma: no cover - resume-from-checkpoint branch; see Step 1.
+                if notes_is_cached:
                     logger.info("Using cached notes")
                     return cached_state.notes
-                resolved = self._synthesize_overview(brief_input, references)
-                if self.cache:
-                    self.cache.save_checkpoint(brief_input, "notes", notes=resolved)
-                return resolved
+                return self._synthesize_overview(brief_input, references)
+
+            def _resolve_academic_papers() -> List[AcademicPaper]:
+                if academic_papers_is_cached:
+                    logger.info(
+                        "Using cached academic papers (%s)", len(cached_state.academic_papers)
+                    )
+                    return [AcademicPaper(**p) for p in cached_state.academic_papers]
+                return self._fetch_academic_papers(brief_input)
+
+            def _resolve_similar_topics() -> List[str]:
+                if similar_topics_is_cached:
+                    logger.info(
+                        "Using cached similar topics (%s)", len(cached_state.similar_topics)
+                    )
+                    return cached_state.similar_topics
+                return self._get_similar_topics(brief_input, references)
 
             # Run each step inside a copy of this thread's context so the LLM
             # attribution / request-id contextvars propagate to the workers — a
@@ -257,17 +283,27 @@ class ResearchAgent(_BlogAgentBase):
             with ThreadPoolExecutor(max_workers=3) as executor:
                 notes_future = executor.submit(contextvars.copy_context().run, _resolve_notes)
                 academic_future = executor.submit(
-                    contextvars.copy_context().run, self._fetch_academic_papers, brief_input
+                    contextvars.copy_context().run, _resolve_academic_papers
                 )
                 similar_future = executor.submit(
-                    contextvars.copy_context().run,
-                    self._get_similar_topics,
-                    brief_input,
-                    references,
+                    contextvars.copy_context().run, _resolve_similar_topics
                 )
                 notes = notes_future.result()
                 academic_papers = academic_future.result()
                 similar_topics = similar_future.result()
+
+            # Persist newly-computed checkpoints sequentially (see comment above).
+            if self.cache:
+                if not notes_is_cached:
+                    self.cache.save_checkpoint(brief_input, "notes", notes=notes)
+                if not academic_papers_is_cached:
+                    self.cache.save_checkpoint(
+                        brief_input, "academic_papers", academic_papers=academic_papers
+                    )
+                if not similar_topics_is_cached:
+                    self.cache.save_checkpoint(
+                        brief_input, "similar_topics", similar_topics=similar_topics
+                    )
 
             # Step 10: Compile document (Blog Post Research format)
             _report("Compiling research document...", 0.95)

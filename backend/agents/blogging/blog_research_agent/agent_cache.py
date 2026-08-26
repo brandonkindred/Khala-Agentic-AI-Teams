@@ -46,6 +46,12 @@ class AgentCacheState(BaseModel):
     # Step 7: Final notes
     notes: Optional[str] = None
 
+    # Step 8: Academic papers (arXiv)
+    academic_papers: Optional[List[Dict[str, Any]]] = None
+
+    # Step 9: Similar topics
+    similar_topics: Optional[List[str]] = None
+
     # Metadata
     brief_input: Dict[str, Any]  # Original brief input for validation
     last_completed_step: Optional[str] = None  # Name of last completed step
@@ -172,6 +178,13 @@ class AgentCache:
             ]
         elif step_name == "notes" and "notes" in kwargs:
             state.notes = kwargs["notes"]
+        elif step_name == "academic_papers" and "academic_papers" in kwargs:
+            academic_papers = kwargs["academic_papers"]
+            state.academic_papers = [
+                p.model_dump() if hasattr(p, "model_dump") else p for p in academic_papers
+            ]
+        elif step_name == "similar_topics" and "similar_topics" in kwargs:
+            state.similar_topics = kwargs["similar_topics"]
 
         state.last_completed_step = step_name
 
