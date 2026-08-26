@@ -17,12 +17,17 @@ job at prepare/finalize raises.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from sales_team.temporal.activities import _beating, _job_status, _job_stopped
+from sales_team.temporal.activities import (
+    _beating,
+    _GuardOutcome,
+    _job_stopped,
+    _terminal_guard,
+)
 from sales_team.temporal.phase_models import DeepResearchContext
 
 
@@ -60,8 +65,8 @@ def prepare_deep_research_activity(job_id: str, request: dict[str, Any]) -> dict
           ``DeepResearchContext`` carrier (with ``icp_json`` and
           ``companies_requested`` precomputed).
     """
-    from job_service_client import JOB_STATUS_FAILED, JOB_STATUS_RUNNING
-    from sales_team.job_runner import CLEAN_TERMINAL_STATUSES, job_manager
+    from job_service_client import JOB_STATUS_RUNNING
+    from sales_team.job_runner import job_manager
     from sales_team.learning_engine import format_insights_for_prompt
     from sales_team.models import DeepResearchRequest
     from sales_team.outcome_store import load_current_insights
@@ -73,17 +78,12 @@ def prepare_deep_research_activity(job_id: str, request: dict[str, Any]) -> dict
             f"Invalid DeepResearchRequest for job {job_id}: {exc}", non_retryable=True
         ) from exc
 
-    status = _job_status(job_id)
-    if status is None:
-        raise RuntimeError(f"Deep-research job {job_id} not found at prepare")
-    if status == JOB_STATUS_FAILED:
-        raise ApplicationError(
-            f"Deep-research job {job_id} was already FAILED before start", non_retryable=True
-        )
-    if status in CLEAN_TERMINAL_STATUSES:
-        activity.logger.info(
-            "Deep-research job %s already terminal (%s) at prepare; stopping", job_id, status
-        )
+    guard = _terminal_guard(
+        job_id,
+        phase="deep_research_prepare",
+        missing_msg=f"Deep-research job {job_id} not found at prepare",
+    )
+    if guard is _GuardOutcome.STOP:
         return DeepResearchContext(request=dr_request, job_id=job_id, stopped=True).model_dump(
             mode="json"
         )
@@ -253,34 +253,19 @@ def finalize_deep_research_activity(
         - Otherwise persists dossiers + the list (best-effort) and writes
           COMPLETED with the ``DeepResearchResult``.
     """
-    from job_service_client import JOB_STATUS_FAILED
-    from sales_team.job_runner import CLEAN_TERMINAL_STATUSES, write_job_completed
+    from sales_team.job_runner import write_job_completed
     from sales_team.models import Prospect, ProspectDossier
     from sales_team.orchestrator import assemble_and_persist_deep_research
 
     dctx = DeepResearchContext.model_validate(ctx)
     job_id = dctx.job_id
+    missing_msg = f"Deep-research job {job_id} not found at finalize"
 
-    def _terminal_short_circuit() -> Optional[dict[str, Any]]:
-        status = _job_status(job_id)
-        if status is None:
-            raise RuntimeError(f"Deep-research job {job_id} not found at finalize")
-        if status == JOB_STATUS_FAILED:
-            raise ApplicationError(
-                f"Deep-research job {job_id} was marked FAILED during the run", non_retryable=True
-            )
-        if status in CLEAN_TERMINAL_STATUSES:
-            activity.logger.info(
-                "Deep-research job %s terminal (%s) at finalize; not writing COMPLETED",
-                job_id,
-                status,
-            )
-            return {"job_id": job_id}
-        return None
-
-    early = _terminal_short_circuit()
-    if early is not None:
-        return early
+    if (
+        _terminal_guard(job_id, phase="deep_research_finalize", missing_msg=missing_msg)
+        is _GuardOutcome.STOP
+    ):
+        return {"job_id": job_id}
 
     prospects = [Prospect.model_validate(p) for p in final_prospects]
     dossier_map = {
@@ -298,9 +283,11 @@ def finalize_deep_research_activity(
         persist=True,
     )
 
-    early = _terminal_short_circuit()
-    if early is not None:
-        return early
+    if (
+        _terminal_guard(job_id, phase="deep_research_finalize", missing_msg=missing_msg)
+        is _GuardOutcome.STOP
+    ):
+        return {"job_id": job_id}
 
     write_job_completed(job_id, result.model_dump())
     return {"job_id": job_id}

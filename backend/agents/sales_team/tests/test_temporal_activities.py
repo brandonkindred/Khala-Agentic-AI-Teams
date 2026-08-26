@@ -235,6 +235,34 @@ def test_prepare_raises_non_retryable_on_invalid_request(fake_job_client):
     assert fake_job_client.get_job("job-bad")["status"] == "pending"
 
 
+@pytest.mark.parametrize(
+    "status", ["missing", "pending", "failed", "cancelled", "interrupted", "completed"]
+)
+def test_prepare_invokes_terminal_guard_for_every_status(monkeypatch, fake_job_client, status):
+    """Prepare must route every status category through ``_terminal_guard``
+    rather than bypassing it with its own inline branching."""
+    if status != "missing":
+        fake_job_client.create_job("job-1", status=status)
+    monkeypatch.setattr("sales_team.outcome_store.load_current_insights", lambda: None)
+
+    calls = []
+    real_guard = acts._terminal_guard
+
+    def spy(job_id, *, phase, missing_msg):
+        calls.append((job_id, phase))
+        return real_guard(job_id, phase=phase, missing_msg=missing_msg)
+
+    monkeypatch.setattr(acts, "_terminal_guard", spy)
+
+    if status in ("missing", "failed"):
+        with pytest.raises((RuntimeError, ApplicationError)):
+            acts.prepare_sales_pipeline_activity("job-1", _REQUEST)
+    else:
+        acts.prepare_sales_pipeline_activity("job-1", _REQUEST)
+
+    assert calls == [("job-1", "sales_prepare")]
+
+
 # ---------------------------------------------------------------------------
 # sales_prospect
 # ---------------------------------------------------------------------------
@@ -366,6 +394,22 @@ def test_discovery_one_passes_optional_qual(orch_mock, fake_job_client):
     orch_mock.discovery_one.return_value = _dumpable({"prospect": {"id": "prs_1"}})
     acts.discovery_one_activity(_ctx_dict(), _PROSPECT.model_dump(mode="json"), None)
     assert orch_mock.discovery_one.call_args.args[1] is None
+    # dossier defaults to None when omitted
+    assert orch_mock.discovery_one.call_args.args[3] is None
+
+
+def test_discovery_one_reconstructs_dossier_and_qual(orch_mock, fake_job_client):
+    fake_job_client.create_job("job-1", status="running")
+    orch_mock.discovery_one.return_value = _dumpable({"prospect": {"id": "prs_1"}})
+    acts.discovery_one_activity(
+        _ctx_dict(),
+        _PROSPECT.model_dump(mode="json"),
+        _score().model_dump(mode="json"),
+        _dossier_dict(),
+    )
+    call = orch_mock.discovery_one.call_args
+    assert isinstance(call.args[1], QualificationScore)
+    assert isinstance(call.args[3], ProspectDossier)
 
 
 def test_proposal_one_reconstructs_dossier_and_qual(orch_mock, fake_job_client):

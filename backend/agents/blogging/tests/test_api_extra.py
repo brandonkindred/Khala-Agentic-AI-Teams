@@ -306,6 +306,56 @@ def test_run_pipeline_with_tracking_catches_delegate_exception(
     assert "boom" in job["error"]
 
 
+def test_run_pipeline_with_tracking_terminalizes_cancelled_error(
+    client: TestClient, monkeypatch
+) -> None:
+    """A Temporal CancelledError escaping the delegated call is terminalized as a
+    cancelled job here rather than re-raised: the thread-mode bounded worker pool
+    in job_workers.py has no Temporal runtime downstream to interpret a raw
+    CancelledError, so letting it propagate would hit the worker's generic crash
+    handler and mis-record the job as failed instead (the #7313 gap)."""
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import run_pipeline_job as rpj
+    from temporalio.exceptions import CancelledError
+
+    monkeypatch.setattr(rpj, "run_blog_full_pipeline_job", _raise(CancelledError("cancel")))
+
+    job_id = _create_job()
+    req = _api_main.FullPipelineRequest(brief="hi")
+    _api_main._run_pipeline_with_tracking(job_id, req)
+
+    job = bjs.get_blog_job(job_id)
+    assert job["status"] == "cancelled"
+
+
+def test_run_pipeline_with_tracking_terminalizes_wrapped_cancellation(
+    client: TestClient, monkeypatch
+) -> None:
+    """A CancelledError wrapped as the __cause__ of some other exception type is
+    also terminalized as cancelled here (defense in depth, mirroring how
+    run_blog_full_pipeline_job's own generic handler detects one via
+    _is_external_cancellation) rather than falling through to the failure path —
+    even though run_blog_full_pipeline_job already absorbs this case internally
+    and never actually lets it escape to this call site."""
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import run_pipeline_job as rpj
+    from temporalio.exceptions import CancelledError
+
+    def _raise_wrapped_cancel(*args: Any, **kwargs: Any):
+        err = RuntimeError("pipeline wrapped a cancellation")
+        err.__cause__ = CancelledError("cancel")
+        raise err
+
+    monkeypatch.setattr(rpj, "run_blog_full_pipeline_job", _raise_wrapped_cancel)
+
+    job_id = _create_job()
+    req = _api_main.FullPipelineRequest(brief="hi")
+    _api_main._run_pipeline_with_tracking(job_id, req)
+
+    job = bjs.get_blog_job(job_id)
+    assert job["status"] == "cancelled"
+
+
 def test_run_pipeline_with_tracking_delegates_request_dict(
     client: TestClient, monkeypatch, tmp_path: Path
 ) -> None:

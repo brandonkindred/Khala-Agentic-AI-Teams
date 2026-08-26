@@ -121,6 +121,7 @@ for _phrase in BANNED_PHRASES:
         _BANNED_PHRASE_PATTERNS.append((_phrase, re.compile(rf"\b{_escaped}\b")))
     else:
         _BANNED_PHRASE_PATTERNS.append((_phrase, re.compile(rf"\b{_escaped}")))
+del _phrase, _escaped
 
 
 def _split_sentences_for_staccato(para: str) -> list[str]:
@@ -153,9 +154,10 @@ def _unwrap_llm_cause(exc: BaseException) -> BaseException:
     Preconditions:
         - ``exc`` is the exception caught at an LLM call boundary.
     Postconditions:
-        - If ``exc`` is an ``EventLoopException`` with a non-None ``original_exception``,
-          returns that original exception.
-        - Otherwise returns ``exc`` unchanged.
+        - If ``exc`` is an ``EventLoopException`` whose ``original_exception``
+          is itself a ``BaseException``, returns that original exception.
+        - Otherwise (not an ``EventLoopException``, or its ``original_exception``
+          is ``None`` or not a ``BaseException``) returns ``exc`` unchanged.
     """
     if isinstance(exc, EventLoopException):
         original = getattr(exc, "original_exception", None)
@@ -245,7 +247,7 @@ def _extract_json_array_from_text(
         if i == -1:
             break
         try:
-            value, _end = decoder.raw_decode(text, i)
+            value, end = decoder.raw_decode(text, i)
         except json.JSONDecodeError:
             search_from = i + 1
             continue
@@ -255,7 +257,11 @@ def _extract_json_array_from_text(
                 return dict_elements
             if not value and empty_fallback is None:
                 empty_fallback = value
-        search_from = i + 1
+        # Resume scanning past the decoded value's end, not from i + 1: a
+        # non-matching value can itself contain a nested "[" (e.g. a sub-array
+        # or a string literal that reads as one) that would otherwise be
+        # re-entered and salvaged as if it were a real top-level match.
+        search_from = end
     return empty_fallback
 
 
@@ -408,12 +414,17 @@ def llm_self_review(draft: str, call_text: CallText) -> str:
           callback (e.g. ``BlogWriterAgent._call_text``).
     Postconditions:
         - On success, returns the reviewed/fixed draft or the original when no issues.
-        - If the response's JSON parses to a value that is not a list of issue
-          dicts (e.g. a top-level object, or salvaged prose residue with no
-          recoverable issues array), returns the original ``draft`` unchanged.
-        - List elements lacking a truthy ``"issue"`` key are discarded before
-          use (whether the list came directly from ``extract_json_from_response``
-          or from the prose-rescan fallback); if none remain, returns the
+        - Three ways the response can resolve to "issues": (1) it parses to a
+          JSON list, used directly; (2) it parses to a genuine top-level JSON
+          object (the model's real "no issues" response), which returns the
+          original ``draft`` unchanged without further rescanning; (3) it
+          parses to anything else (a scalar, a malformed object, or fails to
+          parse as JSON at all), in which case a prose-rescan
+          (``_extract_json_array_from_text``) attempts to salvage an issues
+          array from the raw text, returning the original ``draft`` unchanged
+          only if no array is recoverable that way either.
+        - Whichever path above produces the list, elements lacking a truthy
+          ``"issue"`` key are discarded before use; if none remain, returns the
           original ``draft`` unchanged.
         - On soft-fail (``LLMError`` excluding types re-raised below, or
           ``json.JSONDecodeError`` / ``TypeError`` / ``ValueError`` / ``AttributeError``),

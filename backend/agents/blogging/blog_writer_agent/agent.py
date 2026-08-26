@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
@@ -41,6 +40,7 @@ try:
 except ImportError:  # pragma: no cover - optional adapter absent in some test harnesses
     LLMClientModel = None  # type: ignore[misc, assignment]
 
+from . import self_review
 from .feedback_tracker import MAX_PREVIOUS_FEEDBACK_ITEMS, PersistentFeedbackItem
 from .models import (
     ReviseWriterInput,
@@ -56,7 +56,6 @@ from .prompts import (
     DRAFT_TASK_INSTRUCTIONS,
     ESCALATION_SUMMARY_PROMPT,
     REVISION_TASK_INSTRUCTIONS,
-    SELF_REVIEW_PROMPT,
     UNCERTAINTY_DETECTION_PROMPT,
     USER_FEEDBACK_REVISION_INSTRUCTIONS,
     WRITING_SYSTEM_PROMPT,
@@ -69,119 +68,14 @@ BATCH_EXECUTE_BACKOFF_BASE_SECONDS = 2.0
 
 _PLACEHOLDER_DRAFT = "# Draft\n\nNo draft was generated. Check the model response or try again."
 
-# ---------------------------------------------------------------------------
-# Deterministic compliance constants
-# ---------------------------------------------------------------------------
-
-BANNED_PHRASES = [
-    "In today's fast-paced world",
-    "In the ever-evolving landscape of",
-    "In an era where",
-    "Now more than ever",
-    "As we navigate",
-    "With the rise of",
-    "As technology continues to evolve",
-    "It's worth noting that",
-    "It's important to understand that",
-    "It bears mentioning",
-    "It's no secret that",
-    "Needless to say",
-    "Of course,",
-    "As mentioned above",
-    "This is a game-changer",
-    "This is incredibly important",
-    "This is essential for success",
-    "Harnessing the power of",
-    "Furthermore,",
-    "Moreover,",
-    "Additionally,",
-    "In conclusion,",
-    "To summarize,",
-]
-
-VAGUE_CITATION_PATTERNS = [
-    r"[Ss]tudies show",
-    r"[Rr]esearch indicates",
-    r"[Ee]xperts agree",
-    r"[Ii]t'?s well[- ]known that",
-    r"[Dd]ata suggests",
-    r"[Mm]any organizations have found",
-    r"[Tt]eams often discover",
-    r"[Aa]ccording to industry best practices",
-    r"[Ss]tatistics show",
-    r"[Ii]t'?s widely recognized",
-]
-
-# Deterministic self-check thresholds (named so rules stay tunable in one place).
-CITATION_LOOKAHEAD_CHARS = 150
-STACCATO_MAX_WORDS = 7
-STACCATO_MIN_STREAK = 3
-MIN_READER_ADDRESS_COUNT = 3
-
-# Source/link markers that clear a vague-citation flag within the lookahead window.
-_CITATION_SOURCE_RE = re.compile(r"\[CLAIM:|https?://|\]\(https?://")
-
-# Reader-address forms counted toward the minimum (includes plural reflexive).
-_READER_ADDRESS_RE = re.compile(r"\byou(?:r|rs|rself|rselves)?\b")
-
 # Soft JSON instruction appended on JSON-oriented LLM calls (shared to avoid drift).
 _SOFT_JSON_INSTRUCTION = "\n\nRespond with valid JSON only, no markdown fences."
-
-# Paragraph split: one-or-more blank lines, tolerant of ``\r\n`` line endings.
-_PARAGRAPH_SPLIT_RE = re.compile(r"\r?\n\s*\r?\n")
-
-# Protect common abbreviations / decimals before staccato sentence splitting.
-# Abbreviation matching is case-insensitive via ``(?i:...)``, but the sentence-
-# boundary lookahead keeps a case-sensitive ``[A-Z]`` so mid-sentence forms like
-# ``e.g. tracing`` stay protected while ``e.g. Tracing`` (new sentence) does not.
-# The same continuation rule applies to ``U.S.`` and titles: protect only when
-# the following token continues the sentence (not whitespace + uppercase, and
-# not end-of-text), so genuine sentence ends keep their terminal period.
-_ABBREV_PROTECT: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"(?i:\be\.g\.)(?!\s+[A-Z]|\s*$)"), "egPLACEHOLDER"),
-    (re.compile(r"(?i:\bi\.e\.)(?!\s+[A-Z]|\s*$)"), "iePLACEHOLDER"),
-    (re.compile(r"(?i:\betc\.)(?!\s+[A-Z]|\s*$)"), "etcPLACEHOLDER"),
-    (re.compile(r"(?i:\bU\.S\.)(?!\s+[A-Z]|\s*$)"), "USPLACEHOLDER"),
-    (re.compile(r"(?i:\bDr\.)(?!\s+[A-Z]|\s*$)"), "DrPLACEHOLDER"),
-    (re.compile(r"(?i:\bMr\.)(?!\s+[A-Z]|\s*$)"), "MrPLACEHOLDER"),
-    (re.compile(r"(?i:\bMrs\.)(?!\s+[A-Z]|\s*$)"), "MrsPLACEHOLDER"),
-    (re.compile(r"(?i:\bMs\.)(?!\s+[A-Z]|\s*$)"), "MsPLACEHOLDER"),
-    (re.compile(r"\d+\.\d+"), "NUMPLACEHOLDER"),
-)
-
-# Precompiled banned-phrase patterns: leading word boundary; trailing boundary only
-# when the phrase ends in an alphanumeric (phrases that end in punctuation, e.g.
-# ``"Of course,"``, keep the punctuation and skip a trailing ``\b``).
-_BANNED_PHRASE_PATTERNS: list[tuple[str, re.Pattern[str]]] = []
-for _phrase in BANNED_PHRASES:
-    _escaped = re.escape(_phrase.lower())
-    if _phrase[-1].isalnum():
-        _BANNED_PHRASE_PATTERNS.append((_phrase, re.compile(rf"\b{_escaped}\b")))
-    else:
-        _BANNED_PHRASE_PATTERNS.append((_phrase, re.compile(rf"\b{_escaped}")))
 
 # Context budget for compaction — content exceeding these thresholds is compacted
 # (LLM-summarised) rather than naively truncated, preserving technical detail.
 # The model context (e.g. 262K tokens ≈ 917K chars) is large enough that
 # compaction should rarely be needed.
 COMPACT_OUTLINE_CHARS = 200_000
-
-
-def _split_sentences_for_staccato(para: str) -> list[str]:
-    """Split ``para`` into sentence-like units, protecting common abbreviations.
-
-    Preconditions:
-        - ``para`` is a non-empty string (caller filters empty paragraphs).
-    Postconditions:
-        - Returns a list of sentence strings (may be length 1 if no boundary found).
-        - Mid-sentence abbreviation/decimal periods are not treated as sentence
-          boundaries; a real sentence-ending period after an abbreviation
-          (next token capitalized, or end of text) is preserved.
-    """
-    protected = para
-    for pattern, token in _ABBREV_PROTECT:
-        protected = pattern.sub(token, protected)
-    return re.split(r"(?<=[.!?])\s+", protected)
 
 
 def _unwrap_llm_cause(exc: BaseException) -> BaseException:
@@ -291,25 +185,6 @@ def _extract_json_array_from_text(
                 empty_fallback = value
         search_from = i + 1
     return empty_fallback
-
-
-def _looks_like_top_level_json_object(text: str) -> bool:
-    """Return True when ``text``'s JSON payload appears to be a top-level object.
-
-    Preconditions:
-        - ``text`` is a string (may be empty).
-    Postconditions:
-        - Returns True only when the entire stripped response is a JSON object;
-          prose and fenced snippets are not treated as top-level objects.
-    """
-    candidate = text.strip()
-    if not candidate.startswith("{"):
-        return False
-    try:
-        value, end = json.JSONDecoder().raw_decode(candidate)
-    except json.JSONDecodeError:
-        return False
-    return isinstance(value, dict) and not candidate[end:].strip()
 
 
 def _write_draft_to_path(draft: str, path: Union[str, Path]) -> None:
@@ -609,76 +484,22 @@ class BlogWriterAgent(_BlogAgentBase):
     def _deterministic_self_check(self, draft: str) -> list[str]:
         """Scan draft for mechanical violations. Returns list of violation descriptions.
 
-        Checks: em/en dashes, banned phrases (``BANNED_PHRASES``), vague citation
-        patterns not followed by a source/link within ``CITATION_LOOKAHEAD_CHARS``,
-        reader-address (``you``/``your``/``yours``/``yourself``/``yourselves``)
-        count below ``MIN_READER_ADDRESS_COUNT``, and staccato prose
-        (``STACCATO_MIN_STREAK``+ consecutive sentences with
-        ``<= STACCATO_MAX_WORDS`` words).
+        Delegates to ``self_review.deterministic_self_check``; see that function
+        (and its ``BANNED_PHRASES`` / ``VAGUE_CITATION_PATTERNS`` / threshold
+        constants) in ``self_review.py`` for the full rule set.
 
         Preconditions:
             - ``draft`` is a string (may be empty).
         Raises:
             TypeError: if ``draft`` is not a string.
         """
-        if not isinstance(draft, str):
-            raise TypeError(f"draft must be a string, got {type(draft).__name__}")
-        violations: list[str] = []
-        draft_lower = draft.lower()
-        paragraphs = [p.strip() for p in _PARAGRAPH_SPLIT_RE.split(draft) if p.strip()]
-
-        # 1. Em/en dashes
-        for i, para in enumerate(paragraphs, 1):
-            if "\u2014" in para or "\u2013" in para:
-                violations.append(f"Em/en dash found in paragraph {i}")
-
-        # 2. Banned phrases (word-boundary aware; see ``_BANNED_PHRASE_PATTERNS``)
-        for phrase, pattern in _BANNED_PHRASE_PATTERNS:
-            if pattern.search(draft_lower):
-                violations.append(f"Banned phrase found: '{phrase}'")
-
-        # 3. Vague citation patterns — only flag if NOT followed by a source/link
-        for pattern in VAGUE_CITATION_PATTERNS:
-            for match in re.finditer(pattern, draft):
-                after = draft[match.end() : match.end() + CITATION_LOOKAHEAD_CHARS]
-                if _CITATION_SOURCE_RE.search(after):
-                    continue
-                violations.append(
-                    f"Vague citation: '{match.group()}' — add an inline link or name a specific source"
-                )
-
-        # 4. Reader address count
-        you_count = len(_READER_ADDRESS_RE.findall(draft_lower))
-        if you_count < MIN_READER_ADDRESS_COUNT:
-            violations.append(
-                f"Reader address 'you/your' appears only {you_count} time(s) — "
-                f"need at least {MIN_READER_ADDRESS_COUNT}"
-            )
-
-        # 5. Staccato detection — consecutive short sentences (once per paragraph streak)
-        for i, para in enumerate(paragraphs, 1):
-            if para.startswith("#"):
-                continue
-            sentences = _split_sentences_for_staccato(para)
-            streak = 0
-            flagged = False
-            for sent in sentences:
-                word_count = len(sent.split())
-                if word_count <= STACCATO_MAX_WORDS:
-                    streak += 1
-                    if streak >= STACCATO_MIN_STREAK and not flagged:
-                        violations.append(
-                            f"Staccato prose in paragraph {i}: {streak}+ consecutive short sentences"
-                        )
-                        flagged = True
-                else:
-                    streak = 0
-                    flagged = False
-
-        return violations
+        return self_review.deterministic_self_check(draft)
 
     def _fix_deterministic_violations(self, draft: str, violations: list[str]) -> str:
         """Call LLM once to fix deterministic violations. Returns cleaned draft.
+
+        Delegates to ``self_review.fix_deterministic_violations``, passing
+        ``self._call_text`` as the text-completion callback.
 
         Preconditions:
             - ``draft`` is a non-empty string when callers intend a real fix (empty is allowed).
@@ -692,35 +513,13 @@ class BlogWriterAgent(_BlogAgentBase):
               ``EventLoopException``) propagate as the unwrapped cause.
             - Unexpected exceptions propagate unchanged.
         """
-        checklist = "\n".join(f"- {v}" for v in violations)
-        prompt = (
-            "Fix ONLY these specific issues in the draft below. Do not change anything else.\n\n"
-            f"ISSUES TO FIX:\n{checklist}\n\n"
-            "---\nCURRENT DRAFT:\n---\n"
-            f"{draft}\n\n"
-            '---\nUse this format: first line {{"draft": 0}}, then ---DRAFT---, '
-            "then the full fixed blog post in Markdown."
-        )
-        try:
-            raw = self._call_text(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
-            fixed = _extract_draft_after_marker(raw)
-            if fixed and fixed.strip():
-                logger.info("Deterministic self-check: fixed %s violations", len(violations))
-                return fixed.strip()
-        except Exception as e:
-            cause = _unwrap_llm_cause(e)
-            if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
-                raise cause
-            if isinstance(
-                cause, (LLMError, json.JSONDecodeError, TypeError, ValueError, AttributeError)
-            ):
-                logger.exception("Deterministic fix LLM call failed")
-            else:
-                raise
-        return draft
+        return self_review.fix_deterministic_violations(draft, violations, self._call_text)
 
     def _llm_self_review(self, draft: str) -> str:
         """Run a focused LLM self-review for subjective violations. Returns cleaned draft.
+
+        Delegates to ``self_review.llm_self_review``, passing ``self._call_text``
+        as the text-completion callback.
 
         Preconditions:
             - ``draft`` is a string (may be empty).
@@ -740,73 +539,14 @@ class BlogWriterAgent(_BlogAgentBase):
               ``EventLoopException``) propagate as the unwrapped cause.
             - Unexpected exceptions propagate unchanged.
         """
-        try:
-            raw = self._call_text(
-                f"Review this draft:\n\n{draft}", system_prompt=SELF_REVIEW_PROMPT
-            )
-            cleaned = raw.strip()
-            # Prefer the shared extractor for fenced / whole-response JSON. It can
-            # raise (extraction fails entirely) or, on success, return a non-list
-            # value in two different situations that must be told apart: a
-            # genuine top-level JSON object (the model's real "no issues"
-            # response) vs. a dict salvaged from prose that isn't the actual
-            # top-level structure (e.g. it snagged the one object inside an
-            # issues array). Only the latter is worth rescanning for a real
-            # array; a genuine top-level object must not be rescanned.
-            issues: Optional[list] = None
-            try:
-                parsed = extract_json_from_response(cleaned)
-            except LLMJsonParseError:
-                issues = _extract_json_array_from_text(cleaned, required_keys=("issue",))
-            else:
-                if isinstance(parsed, list):
-                    issues = [iss for iss in parsed if isinstance(iss, dict) and iss.get("issue")]
-                elif _looks_like_top_level_json_object(cleaned):
-                    logger.info("LLM self-review: no issues found (response was not a JSON array)")
-                    return draft
-                else:
-                    issues = _extract_json_array_from_text(cleaned, required_keys=("issue",))
-            if issues is None:
-                logger.info("LLM self-review: no issues found (response was not a JSON array)")
-                return draft
-            if not issues:
-                logger.info("LLM self-review: draft passed all checks")
-                return draft
-
-            logger.info("LLM self-review found %s issue(s); applying fixes", len(issues))
-            issue_lines = []
-            for i, iss in enumerate(issues, 1):
-                loc = iss.get("location", "")
-                desc = iss.get("issue", "")
-                fix = iss.get("fix", "")
-                issue_lines.append(f"{i}. [{loc}] {desc}\n   Fix: {fix}")
-
-            fix_prompt = (
-                "Fix ONLY these issues found during self-review. Do not change anything else.\n\n"
-                "ISSUES:\n" + "\n\n".join(issue_lines) + "\n\n"
-                "---\nCURRENT DRAFT:\n---\n" + draft + "\n\n"
-                '---\nUse this format: first line {{"draft": 0}}, then ---DRAFT---, '
-                "then the full fixed blog post in Markdown."
-            )
-            raw_fix = self._call_text(fix_prompt, system_prompt=WRITING_SYSTEM_PROMPT)
-            fixed = _extract_draft_after_marker(raw_fix)
-            if fixed and fixed.strip():
-                logger.info("LLM self-review: applied fixes, new length=%s", len(fixed.strip()))
-                return fixed.strip()
-        except Exception as e:
-            cause = _unwrap_llm_cause(e)
-            if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
-                raise cause
-            if isinstance(
-                cause, (LLMError, json.JSONDecodeError, TypeError, ValueError, AttributeError)
-            ):
-                logger.exception("LLM self-review failed")
-            else:
-                raise
-        return draft
+        return self_review.llm_self_review(draft, self._call_text)
 
     def _self_review(self, draft: str) -> str:
         """Run deterministic check then LLM self-review. Returns cleaned draft.
+
+        Orchestrates the three delegating methods above (rather than delegating
+        directly to ``self_review.self_review``) so that each sub-step still runs
+        through this agent's own bound methods.
 
         Both sub-steps (``_fix_deterministic_violations``, ``_llm_self_review``)
         already return the original draft on their own soft-fail paths, so this
