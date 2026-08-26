@@ -57,6 +57,7 @@ from .json_retry import (
     AgentFactory,
     AgentInvoker,
     call_json_with_retry,
+    run_json_gate,
 )
 from .models import (
     PHASE_ORDER,
@@ -109,6 +110,7 @@ __all__ = [
     "AgentFactory",
     "AgentInvoker",
     "call_json_with_retry",
+    "run_json_gate",
     "ContentProfile",
     "LengthPolicy",
     "SeriesContext",

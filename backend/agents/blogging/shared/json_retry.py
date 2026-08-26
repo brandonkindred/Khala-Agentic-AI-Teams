@@ -14,6 +14,11 @@ the copy-editor's extra step of unwrapping a wrapped exception before
 classifying its cause) so that callers CAN configure it via parameters
 instead of duplicating the loop.
 
+Most call sites also hand-roll the same ``Agent(model=..., system_prompt=...)``
+construction and ``EventLoopException`` unwrap around that loop.
+``run_json_gate`` wraps ``call_json_with_retry`` to own both, so a call site
+only supplies its model, system prompt, prompt, and fallback behavior.
+
 Invariants:
     - Exactly one JSON-parse retry policy and one transient-error
       classification rule is defined here.
@@ -24,6 +29,9 @@ from __future__ import annotations
 import logging
 import time
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Type
+
+from strands import Agent
+from strands.types.exceptions import EventLoopException
 
 from llm_service import LLMJsonParseError, LLMRateLimitError, LLMTemporaryError
 from llm_service.util import extract_json_from_response
@@ -151,3 +159,76 @@ def call_json_with_retry(
     # Unreachable: the loop above always returns or raises before falling through.
     assert last_json_error is not None  # pragma: no cover
     raise last_json_error  # pragma: no cover
+
+
+def _unwrap_event_loop_exception(exc: Exception) -> Exception:
+    return exc.original_exception if isinstance(exc, EventLoopException) else exc
+
+
+def run_json_gate(
+    model: Any,
+    system_prompt: str,
+    prompt: str,
+    *,
+    strict_json_suffix: str = _DEFAULT_STRICT_JSON_SUFFIX,
+    fallback_builder: Optional[Callable[[Exception], Dict[str, Any]]] = None,
+    on_exhausted: Optional[Callable[[LLMJsonParseError], Dict[str, Any]]] = None,
+    on_unexpected_error: Optional[Callable[[Exception], Dict[str, Any]]] = None,
+    fresh_agent_per_attempt: bool = False,
+    max_attempts: int = 2,
+    expected_keys: Optional[Sequence[str]] = None,
+    transient_exceptions: Tuple[Type[Exception], ...] = (LLMRateLimitError, LLMTemporaryError),
+    backoff_seconds: Optional[Callable[[int], float]] = None,
+    logger: Optional[logging.Logger] = None,
+) -> Dict[str, Any]:
+    """
+    Invoke a fresh Strands ``Agent(model=model, system_prompt=system_prompt)`` and parse a
+    JSON dict from its response, retrying on parse failure — the "construct an Agent, gate its
+    response through JSON-retry, unwrap the standard strands transport-error wrapper, fail
+    closed on exhaustion/unexpected errors" pattern shared by every blogging gate/report agent.
+
+    This is a thin wrapper over :func:`call_json_with_retry`: it owns ``Agent`` construction
+    and the standard ``EventLoopException`` unwrap (both no longer need to be hand-written per
+    call site), and lets ``fallback_builder`` supply one fallback used for both
+    ``on_exhausted`` and ``on_unexpected_error`` when a caller's failure handling doesn't
+    distinguish between them. Passing ``on_exhausted``/``on_unexpected_error`` explicitly
+    overrides ``fallback_builder`` for that path independently (e.g. two different fallback
+    messages, or only one path having a fallback while the other re-raises) — this method does
+    not otherwise change ``call_json_with_retry``'s retry, backoff, or classification contract.
+
+    Preconditions:
+        - ``model`` is a usable LLM client/config accepted by ``strands.Agent``.
+        - ``system_prompt`` and ``prompt`` are strings; ``prompt`` is non-empty.
+        - ``max_attempts >= 1``.
+    Postconditions:
+        - Returns a ``dict`` on a successful parse or via whichever of
+          ``on_exhausted``/``on_unexpected_error``/``fallback_builder`` applies to the failure
+          that occurred; never returns ``None``.
+        - Otherwise raises the (possibly unwrapped) triggering exception — a transient error
+          (``LLMRateLimitError``/``LLMTemporaryError``, including wrapped in
+          ``EventLoopException``) is always re-raised unwrapped, never swallowed into a
+          fallback, regardless of ``fallback_builder``.
+        - With ``fresh_agent_per_attempt=False`` (default), one ``Agent`` is constructed and
+          reused across attempts; with ``True``, a new ``Agent`` is constructed for every
+          attempt (including retries after a JSON-parse failure).
+    """
+
+    def _agent_factory() -> AgentInvoker:
+        return Agent(model=model, system_prompt=system_prompt)
+
+    return call_json_with_retry(
+        _agent_factory,
+        prompt,
+        max_attempts=max_attempts,
+        expected_keys=expected_keys,
+        strict_json_suffix=strict_json_suffix,
+        fresh_agent_per_attempt=fresh_agent_per_attempt,
+        transient_exceptions=transient_exceptions,
+        unwrap_exception=_unwrap_event_loop_exception,
+        backoff_seconds=backoff_seconds,
+        on_exhausted=on_exhausted if on_exhausted is not None else fallback_builder,
+        on_unexpected_error=(
+            on_unexpected_error if on_unexpected_error is not None else fallback_builder
+        ),
+        logger=logger,
+    )
