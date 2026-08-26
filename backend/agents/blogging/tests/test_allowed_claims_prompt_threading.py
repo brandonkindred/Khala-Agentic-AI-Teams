@@ -284,6 +284,34 @@ def _capturing_stub_writer_class(captured_inputs: list) -> type:
     return _CapturingStubWriter
 
 
+def make_stub_editor_class_that_requests_one_revision() -> type:
+    """A BlogCopyEditorAgent stub that rejects the first draft, approves the second."""
+    from agents.blogging.blog_copy_editor_agent.models import CopyEditorOutput, FeedbackItem
+
+    class _StubEditor:
+        def __init__(self, *a, **kw):
+            self._calls = 0
+
+        def run(self, *a, **kw):
+            self._calls += 1
+            return CopyEditorOutput(
+                approved=self._calls > 1,
+                summary="revise" if self._calls == 1 else "ok",
+                feedback_items=[]
+                if self._calls > 1
+                else [
+                    FeedbackItem(
+                        category="style",
+                        severity="must_fix",
+                        issue="Needs work.",
+                        suggestion="Fix it.",
+                    )
+                ],
+            )
+
+    return _StubEditor
+
+
 def test_run_pipeline_threads_allowed_claims_from_work_dir(monkeypatch, tmp_path: Path) -> None:
     """allowed_claims.json in work_dir reaches both the initial draft and the
     copy-edit-loop revision WriterInput/ReviseWriterInput objects.
@@ -325,34 +353,6 @@ def test_run_pipeline_threads_allowed_claims_from_work_dir(monkeypatch, tmp_path
             f"{kind} call did not receive allowed_claims"
         )
     assert "[CLAIM:c1]" in draft_result.draft
-
-
-def make_stub_editor_class_that_requests_one_revision() -> type:
-    """A BlogCopyEditorAgent stub that rejects the first draft, approves the second."""
-    from agents.blogging.blog_copy_editor_agent.models import CopyEditorOutput
-
-    class _StubEditor:
-        def __init__(self, *a, **kw):
-            self._calls = 0
-
-        def run(self, *a, **kw):
-            self._calls += 1
-            return CopyEditorOutput(
-                approved=self._calls > 1,
-                summary="revise" if self._calls == 1 else "ok",
-                feedback_items=[]
-                if self._calls > 1
-                else [
-                    {
-                        "category": "style",
-                        "severity": "must_fix",
-                        "issue": "Needs work.",
-                        "suggestion": "Fix it.",
-                    }
-                ],
-            )
-
-    return _StubEditor
 
 
 def test_run_pipeline_no_allowed_claims_artifact_is_noop(monkeypatch, tmp_path: Path) -> None:

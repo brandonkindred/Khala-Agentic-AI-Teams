@@ -196,7 +196,7 @@ def _render_allowed_claims_section(allowed_claims: Optional[dict]) -> str:
           claim entries are tolerated (skipped) rather than raising.
     Postconditions:
         - Returns ``""`` when ``allowed_claims`` is ``None``, not a dict, or its
-          ``claims`` list is empty/missing.
+          ``claims`` value is missing, empty, or not a list.
         - Otherwise returns a ``---``-delimited prompt block listing every claim as
           ``- [id] text``, instructing the model to tag claims with the given IDs
           and to invent none.
