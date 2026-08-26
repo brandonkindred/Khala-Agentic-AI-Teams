@@ -123,7 +123,8 @@ unproven-sufficient** starting hypothesis, built from the only static
 evidence available (prompt text), not a guarantee that narrowing the hash
 to exactly these fields is safe. Before any allowlist from this document
 is implemented, its effect on actual output quality should be validated
-empirically — e.g. by extending `scripts/eval_selective_context.py`
+empirically — e.g. by extending
+`backend/agents/branding_team/scripts/eval_selective_context.py`
 (which already A/B-compares full-context vs. selective-context pipeline
 runs via an LLM judge, today scoped to `context_phases`/upstream-phase
 filtering) to also compare full-mission vs. allowlisted-mission runs per
@@ -368,7 +369,8 @@ introduce and populate the allowlist in `phase_input_hash`/`_phase_task`)
 begins — this document does not self-certify that review by existing or
 being merged. Per the Limitation section above, that review should
 include empirical validation (e.g. via an extended
-`scripts/eval_selective_context.py`) before an allowlist derived from
+`backend/agents/branding_team/scripts/eval_selective_context.py`) before
+an allowlist derived from
 these tables is treated as safe to ship, particularly for phases where an
 agent's only mission reference is the generic, unqualified phrase "the
 branding mission."
