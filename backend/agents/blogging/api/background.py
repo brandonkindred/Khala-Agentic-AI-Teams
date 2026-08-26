@@ -115,9 +115,22 @@ def _publish_skip_terminal_event(job_id: str) -> None:
 
 
 def _run_pipeline_with_tracking(job_id: str, request: FullPipelineRequest) -> None:
-    """Run the full pipeline in a background thread with job tracking."""
+    """Run the full pipeline in a background thread with job tracking.
+
+    Preconditions:
+        - ``job_id`` identifies a created job record; ``request`` is a valid
+          ``FullPipelineRequest``.
+    Postconditions:
+        - Delegates to ``run_blog_full_pipeline_job``, which owns all job-store
+          updates and terminal SSE events. Re-raises a Temporal-native
+          ``CancelledError`` untouched (Temporal owns cancellation handling);
+          any other exception escaping the delegated call is caught, logged,
+          and turned into a failed job-store entry plus a terminal ``error``
+          event.
+    """
     from agents.blogging.api import main as _main
     from agents.blogging.shared.run_pipeline_job import run_blog_full_pipeline_job
+    from temporalio.exceptions import CancelledError
 
     if _main._job_already_terminal(job_id):
         logger.info("Skipping pipeline job %s: already terminal/gone before start", job_id)
@@ -129,6 +142,8 @@ def _run_pipeline_with_tracking(job_id: str, request: FullPipelineRequest) -> No
         audience_str = _format_audience(request.audience)
         request_dict["audience"] = audience_str or request_dict.get("audience")
         run_blog_full_pipeline_job(job_id, request_dict)
+    except CancelledError:
+        raise
     except Exception as e:
         logger.exception("Pipeline failed for job %s", job_id)
         if _main.fail_blog_job is not None:
