@@ -306,3 +306,111 @@ def test_context_phases_change_to_included_upstream_output_changes_hash() -> Non
     )
 
     assert baseline != changed
+
+
+def test_omitted_mission_fields_matches_explicit_none() -> None:
+    """Omitting ``mission_fields`` reproduces the hash of passing ``None``
+    explicitly -- ``None`` is the true default sentinel, not just a
+    falsy-equivalent placeholder."""
+    mission = make_mission()
+
+    omitted = phase_input_hash(BrandPhase.STRATEGIC_CORE, mission, {})
+    explicit_none = phase_input_hash(BrandPhase.STRATEGIC_CORE, mission, {}, None, None)
+
+    assert omitted == explicit_none
+
+
+def test_omitted_mission_fields_reproduces_pre_change_digest() -> None:
+    """A call using only the pre-#7349 positional signature (no
+    ``mission_fields`` argument at all) must reproduce the exact digest this
+    function produced before ``mission_fields`` existed -- no silent
+    behavior change for un-migrated phases. This pins a known-good digest
+    computed against ``make_mission()``'s defaults."""
+    digest = phase_input_hash(BrandPhase.STRATEGIC_CORE, make_mission(), {})
+
+    assert digest == "bce443cab64f45a10a8043d1c92e2b69919517582475ea394427de25b1e08e9f"
+
+
+@pytest.mark.parametrize(
+    "allowlisted_field,overrides",
+    [
+        ("company_name", {"company_name": "Different Co"}),
+        ("values", {"values": ["clarity", "trust", "tech", "speed"]}),
+    ],
+)
+def test_allowlisted_mission_field_change_changes_hash(
+    allowlisted_field: str, overrides: dict
+) -> None:
+    """A change to a mission field named in ``mission_fields`` changes the
+    digest."""
+    mission_fields = frozenset({allowlisted_field})
+
+    baseline = phase_input_hash(BrandPhase.STRATEGIC_CORE, make_mission(), {}, None, mission_fields)
+    changed = phase_input_hash(
+        BrandPhase.STRATEGIC_CORE, make_mission(**overrides), {}, None, mission_fields
+    )
+
+    assert baseline != changed
+
+
+def test_non_allowlisted_mission_field_change_does_not_change_hash() -> None:
+    """A change to a mission field NOT named in ``mission_fields`` does not
+    change the digest -- the selective-hashing counterpart to
+    ``test_changed_mission_field_changes_hash``."""
+    mission_fields = frozenset({"company_name"})
+
+    baseline = phase_input_hash(BrandPhase.STRATEGIC_CORE, make_mission(), {}, None, mission_fields)
+    changed = phase_input_hash(
+        BrandPhase.STRATEGIC_CORE,
+        make_mission(values=["clarity", "trust", "tech", "speed"]),
+        {},
+        None,
+        mission_fields,
+    )
+
+    assert baseline == changed
+
+
+def test_explicit_empty_mission_fields_excludes_every_mission_field() -> None:
+    """``mission_fields=frozenset()`` deliberately means "no mission field is
+    relevant" and must differ from the ``None``/omitted default -- the
+    None-vs-empty-frozenset distinction this parameter exists to make
+    expressible."""
+    baseline = phase_input_hash(BrandPhase.STRATEGIC_CORE, make_mission(), {})
+    empty_allowlist = phase_input_hash(
+        BrandPhase.STRATEGIC_CORE, make_mission(), {}, None, frozenset()
+    )
+    empty_allowlist_changed_mission = phase_input_hash(
+        BrandPhase.STRATEGIC_CORE,
+        make_mission(company_name="Different Co"),
+        {},
+        None,
+        frozenset(),
+    )
+
+    assert baseline != empty_allowlist
+    assert empty_allowlist == empty_allowlist_changed_mission
+
+
+def test_mission_fields_set_order_does_not_affect_hash() -> None:
+    """``mission_fields`` built with the same entries in different
+    construction order hashes identically -- frozensets are unordered but
+    the digest must still be canonical."""
+    mission = make_mission()
+
+    a = phase_input_hash(
+        BrandPhase.STRATEGIC_CORE,
+        mission,
+        {},
+        None,
+        frozenset({"company_name", "values"}),
+    )
+    b = phase_input_hash(
+        BrandPhase.STRATEGIC_CORE,
+        mission,
+        {},
+        None,
+        frozenset({"values", "company_name"}),
+    )
+
+    assert a == b

@@ -596,20 +596,24 @@ def nurture_one_activity(ctx: dict[str, Any], prospect: dict[str, Any]) -> dict[
 
 @activity.defn(name="sales_discovery_one")
 def discovery_one_activity(
-    ctx: dict[str, Any], prospect: dict[str, Any], qual: Optional[dict[str, Any]]
+    ctx: dict[str, Any],
+    prospect: dict[str, Any],
+    qual: Optional[dict[str, Any]],
+    dossier: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """Prepare one prospect's discovery plan (``qual`` may be ``None``).
+    """Prepare one prospect's discovery plan (``qual``/``dossier`` may be ``None``).
 
     Postconditions: see :func:`_stage_one`.
     """
-    from sales_team.models import QualificationScore
+    from sales_team.models import ProspectDossier, QualificationScore
 
     qual_obj = QualificationScore.model_validate(qual) if qual is not None else None
+    dossier_obj = ProspectDossier.model_validate(dossier) if dossier is not None else None
     return _stage_one(
         ctx,
         prospect,
         "sales_discovery_one",
-        lambda orch, p, rc: orch.discovery_one(p, qual_obj, rc),
+        lambda orch, p, rc: orch.discovery_one(p, qual_obj, rc, dossier_obj),
     )
 
 

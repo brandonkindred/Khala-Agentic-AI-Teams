@@ -291,7 +291,7 @@ def test_publication_reject_with_force_ready(tmp_path) -> None:
 
 def test_publication_reject_with_llm_followup(tmp_path, monkeypatch) -> None:
     from agents.blogging.blog_publication_agent import BlogPublicationAgent, SubmitDraftInput
-    from agents.blogging.blog_publication_agent import agent as pa_mod
+    from agents.blogging.shared import json_retry as json_retry_mod
 
     from llm_service import DummyLLMClient
 
@@ -308,7 +308,7 @@ def test_publication_reject_with_llm_followup(tmp_path, monkeypatch) -> None:
                 }
             )
 
-    monkeypatch.setattr(pa_mod, "Agent", _Agent)
+    monkeypatch.setattr(json_retry_mod, "Agent", _Agent)
     agent = BlogPublicationAgent(llm_client=DummyLLMClient(), blog_posts_root=tmp_path / "posts")
     sub = agent.submit_draft(SubmitDraftInput(draft="# t\n\nBody"))
     out = agent.reject(sub.submission_id, "weak hook")

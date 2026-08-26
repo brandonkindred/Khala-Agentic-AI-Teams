@@ -155,8 +155,11 @@ def test_revision_loop_stops_after_editor_approval(agent, temp_blog_root, monkey
     monkeypatch.setattr(BlogWriterAgent, "revise", _fake_revise)
     # Convert rejection → structured feedback: return empty so iteration 0 uses
     # only the mocked editor's must_fix item (avoids DummyLLM JSON noise).
+    from agents.blogging.blog_publication_agent import agent as pub_mod
+
     monkeypatch.setattr(
-        "agents.blogging.blog_publication_agent.agent.call_json_with_retry",
+        pub_mod,
+        "run_json_gate",
         lambda *_a, **_kw: {"feedback_items": []},
     )
 
@@ -185,7 +188,7 @@ def test_reject_json_parse_exhaustion_falls_back_ready_to_revise(
     """Unparseable follow-up JSON retries then soft-falls back to ready_to_revise."""
     import json
 
-    from agents.blogging.blog_publication_agent import agent as pub_mod
+    from agents.blogging.shared import json_retry as json_retry_mod
 
     result = agent.submit_draft(
         SubmitDraftInput(
@@ -201,7 +204,7 @@ def test_reject_json_parse_exhaustion_falls_back_ready_to_revise(
         def __call__(self, prompt):
             return "not json at all"
 
-    monkeypatch.setattr(pub_mod, "Agent", _Agent)
+    monkeypatch.setattr(json_retry_mod, "Agent", _Agent)
 
     rejection = agent.reject(result.submission_id, "The intro is too short.")
     assert rejection.ready_to_revise is True
@@ -215,7 +218,7 @@ def test_reject_json_parse_exhaustion_falls_back_ready_to_revise(
 
 def test_reject_questions_string_coerced_to_list(agent, monkeypatch) -> None:
     """A string ``questions`` value from the LLM is split into a list."""
-    from agents.blogging.blog_publication_agent import agent as pub_mod
+    from agents.blogging.shared import json_retry as json_retry_mod
 
     result = agent.submit_draft(
         SubmitDraftInput(
@@ -235,7 +238,7 @@ def test_reject_questions_string_coerced_to_list(agent, monkeypatch) -> None:
                 '"feedback_summary": ""}'
             )
 
-    monkeypatch.setattr(pub_mod, "Agent", _Agent)
+    monkeypatch.setattr(json_retry_mod, "Agent", _Agent)
 
     rejection = agent.reject(result.submission_id, "Tone is wrong.")
     assert rejection.ready_to_revise is False
@@ -245,7 +248,7 @@ def test_reject_questions_string_coerced_to_list(agent, monkeypatch) -> None:
 @pytest.mark.parametrize("kind", ["rate_limit", "temporary"])
 def test_reject_event_loop_exception_unwraps_transient(agent, monkeypatch, kind) -> None:
     """Wrapped transient LLM errors re-raise the unwrapped cause, not soft-fallback."""
-    from agents.blogging.blog_publication_agent import agent as pub_mod
+    from agents.blogging.shared import json_retry as json_retry_mod
     from strands.types.exceptions import EventLoopException
 
     from llm_service import LLMRateLimitError, LLMTemporaryError
@@ -267,7 +270,7 @@ def test_reject_event_loop_exception_unwraps_transient(agent, monkeypatch, kind)
         def __call__(self, prompt):
             raise EventLoopException(cause)
 
-    monkeypatch.setattr(pub_mod, "Agent", _Agent)
+    monkeypatch.setattr(json_retry_mod, "Agent", _Agent)
 
     with pytest.raises(err_cls) as exc_info:
         agent.reject(result.submission_id, "Tone is wrong.")
@@ -278,8 +281,8 @@ def test_reject_event_loop_exception_unwraps_transient(agent, monkeypatch, kind)
 def test_revision_loop_event_loop_exception_unwraps_transient(agent, monkeypatch, kind) -> None:
     """Convert-step wrapped transient errors re-raise instead of synthesizing feedback."""
     from agents.blogging.blog_copy_editor_agent import BlogCopyEditorAgent
-    from agents.blogging.blog_publication_agent import agent as pub_mod
     from agents.blogging.blog_writer_agent import BlogWriterAgent
+    from agents.blogging.shared import json_retry as json_retry_mod
     from strands.types.exceptions import EventLoopException
 
     from llm_service import LLMRateLimitError, LLMTemporaryError
@@ -303,7 +306,7 @@ def test_revision_loop_event_loop_exception_unwraps_transient(agent, monkeypatch
         def __call__(self, prompt):
             raise EventLoopException(cause)
 
-    monkeypatch.setattr(pub_mod, "Agent", _Agent)
+    monkeypatch.setattr(json_retry_mod, "Agent", _Agent)
 
     draft_agent = BlogWriterAgent(
         llm_client=DummyLLMClient(),
@@ -328,8 +331,8 @@ def test_revision_loop_convert_json_parse_exhaustion_synthesizes_must_fix(
     """Unparseable convert JSON falls back to empty items; raw rejection drives revise."""
     from agents.blogging.blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorOutput
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
-    from agents.blogging.blog_publication_agent import agent as pub_mod
     from agents.blogging.blog_writer_agent import BlogWriterAgent, WriterOutput
+    from agents.blogging.shared import json_retry as json_retry_mod
 
     result = agent.submit_draft(
         SubmitDraftInput(
@@ -347,7 +350,7 @@ def test_revision_loop_convert_json_parse_exhaustion_synthesizes_must_fix(
         def __call__(self, prompt):
             return "not json at all"
 
-    monkeypatch.setattr(pub_mod, "Agent", _BadConvertAgent)
+    monkeypatch.setattr(json_retry_mod, "Agent", _BadConvertAgent)
 
     calls = {"editor": 0, "revise": 0}
 
