@@ -340,6 +340,23 @@ def test_format_prior_critiques_output_size_bounded_regardless_of_round_count() 
     assert len(large) < len(small) * 3
 
 
+def test_format_prior_critiques_summary_uses_actual_round_values_not_position() -> None:
+    """Regression test: the design loop's `round` is 0-indexed
+    (`orchestrator_design.py`'s `for review_round in range(max_rounds)`), so
+    a naive positional "Round 1" label for the first *dropped* entry would
+    collide with a kept critique whose real `round` is also 1. The summary
+    must report the dropped entries' actual round numbers instead."""
+    prior = [SpecCritique(ready=False, rationale=f"r{i}", round=i) for i in range(6)]
+    rendered = format_prior_critiques(prior, keep_last_n=5)
+    lines = rendered.split("\n")
+    # Only round 0 is dropped (6 critiques, keep_last_n=5).
+    assert "1 earlier round(s) summarized (rounds 0-0)." in lines[0]
+    # The ambiguous positional label from bound_history's generic summary
+    # ("Round 1: ...") must not appear anywhere in the output.
+    assert "Round 1: r0" not in rendered
+    assert "Round 1: ready=False (0 issues) — r1" in rendered
+
+
 def test_prompt_embeds_response_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     """The review prompt carries the JSON Schema so the wire model, the
     hand-written skeleton, and the downstream coercer cannot drift apart."""

@@ -646,23 +646,36 @@ def format_prior_critiques(
     Post: returns ``"None yet."`` when empty. Otherwise bounds ``prior`` via
     ``bound_history`` first: when ``len(prior) <= keep_last_n`` every
     critique renders exactly as before (no behavior change on short
-    lineages). When ``len(prior) > keep_last_n``, a leading
-    ``"  {bound_history's rolling summary}"`` line is prepended and only the
-    last ``keep_last_n`` critiques are rendered in full. Each rendered
-    critique is one block — a header line (round, ready flag, issue count,
-    truncated rationale) followed by one indented line per issue carrying its
-    severity, field, truncated description, and truncated ``suggested_fix``
-    (when present). Surfacing the per-issue detail — not just the rationale —
-    lets a later revision see *what* an earlier round fixed so it does not
-    silently regress it when the rationale was terse. Shared between
-    :class:`DesignReviewAgent` (showing past rounds to the reviewer) and
-    :meth:`DesignAgent.revise` / :meth:`DesignAgent._with_self_review`
-    (showing them to the designer) so all three see the same lineage view.
+    lineages). When ``len(prior) > keep_last_n``, a leading summary line is
+    prepended reporting how many earlier rounds were dropped and their
+    actual ``round`` value range (e.g. ``"2 earlier round(s) summarized
+    (rounds 0-1)."``), and only the last ``keep_last_n`` critiques are
+    rendered in full. This intentionally does *not* reuse
+    ``bound_history``'s own summary text: that text numbers dropped entries
+    by their position in the dropped slice (1-indexed), which collides with
+    ``c.round`` here — the design loop's ``round`` starts at 0, so a
+    dropped round 0 and a kept round 1 would both be labelled "Round 1".
+    Each rendered critique is one block — a header line (round, ready flag,
+    issue count, truncated rationale) followed by one indented line per
+    issue carrying its severity, field, truncated description, and
+    truncated ``suggested_fix`` (when present). Surfacing the per-issue
+    detail — not just the rationale — lets a later revision see *what* an
+    earlier round fixed so it does not silently regress it when the
+    rationale was terse. Shared between :class:`DesignReviewAgent` (showing
+    past rounds to the reviewer) and :meth:`DesignAgent.revise` /
+    :meth:`DesignAgent._with_self_review` (showing them to the designer) so
+    all three see the same lineage view.
     """
     if not prior:
         return "None yet."
     bounded = bound_history(prior, keep_last_n)
-    lines: List[str] = [f"  {bounded.summary}"] if bounded.summary else []
+    lines: List[str] = []
+    if bounded.summary:
+        dropped = prior[: len(prior) - len(bounded.kept)]
+        lines.append(
+            f"  {len(dropped)} earlier round(s) summarized "
+            f"(rounds {dropped[0].round}-{dropped[-1].round})."
+        )
     for c in bounded.kept:
         lines.append(
             f"  Round {c.round}: ready={c.ready} ({len(c.issues)} issues) — "
