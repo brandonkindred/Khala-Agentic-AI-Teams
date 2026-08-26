@@ -205,7 +205,7 @@ def test_llm_self_review_top_level_object_keeps_original() -> None:
     assert sr._llm_self_review("draft text", call_text) == "draft text"
 
 
-def test_llm_self_review_rate_limit_propagates_unwrapped() -> None:
+def test_llm_self_review_temporary_error_propagates_unwrapped() -> None:
     def rate_limited(prompt, system_prompt=""):
         raise LLMTemporaryError("temporary failure")
 
@@ -254,7 +254,7 @@ def test_unwrap_llm_cause_passthrough_for_plain_exception() -> None:
     assert sr._unwrap_llm_cause(exc) is exc
 
 
-def test_extract_draft_after_marker_rejects_non_string() -> None:
+def test_extract_draft_after_marker_non_string_returns_empty() -> None:
     assert sr._extract_draft_after_marker(None) == ""
     assert sr._extract_draft_after_marker("") == ""
 

@@ -37,8 +37,10 @@ from .prompts import SELF_REVIEW_PROMPT, WRITING_SYSTEM_PROMPT
 logger = logging.getLogger(__name__)
 
 # A callback with the same shape as ``BlogWriterAgent._call_text``:
-# ``(prompt: str, system_prompt: str = "") -> str``.
-CallText = Callable[..., str]
+# ``(prompt: str, system_prompt: str = "") -> str``. A two-argument Callable
+# (rather than ``Callable[..., str]``) so a mismatched callback signature is
+# a type error, not silently accepted.
+CallText = Callable[[str, str], str]
 
 # ---------------------------------------------------------------------------
 # Deterministic compliance constants
