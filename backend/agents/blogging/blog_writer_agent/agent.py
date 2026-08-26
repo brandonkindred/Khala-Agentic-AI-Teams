@@ -312,6 +312,41 @@ def _looks_like_top_level_json_object(text: str) -> bool:
     return isinstance(value, dict) and not candidate[end:].strip()
 
 
+def _render_allowed_claims_section(allowed_claims: Optional[dict]) -> str:
+    """Render allowed_claims.json content as a prompt section, or "" when absent/empty.
+
+    Preconditions:
+        - ``allowed_claims`` is ``None`` or a dict shaped like allowed_claims.json
+          (``{"topic": ..., "claims": [{"id": ..., "text": ...}, ...]}``); malformed
+          claim entries are tolerated (skipped) rather than raising.
+    Postconditions:
+        - Returns ``""`` when ``allowed_claims`` is ``None``, not a dict, or its
+          ``claims`` list is empty/missing.
+        - Otherwise returns a ``---``-delimited prompt block listing every claim as
+          ``- [id] text``, instructing the model to tag claims with the given IDs
+          and to invent none.
+    """
+    if not isinstance(allowed_claims, dict):
+        return ""
+    claims = allowed_claims.get("claims") or []
+    if not isinstance(claims, list):
+        return ""
+    lines = [
+        f"- [{c.get('id')}] {c.get('text')}"
+        for c in claims
+        if isinstance(c, dict) and c.get("id") and c.get("text")
+    ]
+    if not lines:
+        return ""
+    return (
+        "---\n"
+        "ALLOWED CLAIMS (tag every factual/statistical claim with [CLAIM:id] using "
+        "only an ID from this list; never invent an ID; if no claim here supports an "
+        "assertion, rephrase or omit it):\n"
+        "---\n" + "\n".join(lines)
+    )
+
+
 def _write_draft_to_path(draft: str, path: Union[str, Path]) -> None:
     """Write draft content to path; create parent dirs if needed. Log the saved path.
 
@@ -841,6 +876,10 @@ class BlogWriterAgent(_BlogAgentBase):
             - ``draft_input`` is a valid ``WriterInput``.
         Postconditions:
             - Returns a ``WriterOutput`` with a non-empty draft string.
+            - When ``draft_input.allowed_claims`` is a non-empty allowed_claims.json
+              dict, the prompt includes an ALLOWED CLAIMS section (via
+              ``_render_allowed_claims_section``) instructing the model to tag
+              factual/statistical claims with ``[CLAIM:id]``; omitted when absent.
             - Expected LLM parse failures (``LLMJsonParseError``, including when
               Strands wraps them in ``EventLoopException``) soft-fail into a JSON
               fallback, then a placeholder if both paths yield no content.
@@ -908,6 +947,10 @@ class BlogWriterAgent(_BlogAgentBase):
                 "AUTHOR'S PERSONAL STORIES (use these in the relevant sections — do not invent new details beyond what is provided):\n"
                 + draft_input.elicited_stories
             )
+        claims_section = _render_allowed_claims_section(draft_input.allowed_claims)
+        if claims_section:
+            prompt_parts.append("")
+            prompt_parts.append(claims_section)
         if draft_input.audience:
             prompt_parts.append("")
             prompt_parts.append(f"Audience: {draft_input.audience}")
@@ -1038,9 +1081,12 @@ class BlogWriterAgent(_BlogAgentBase):
               (capped at ``MAX_PREVIOUS_FEEDBACK_ITEMS``) is inserted after it;
               ``selected_title`` and ``elicited_stories`` are each appended as
               their own labeled section near the end (title before stories);
-              and ``tone_or_purpose`` / ``audience`` are each prepended as a
-              single labeled line at the very front (tone_or_purpose before
-              audience). Absent fields are omitted rather than left blank.
+              ``allowed_claims`` is rendered via ``_render_allowed_claims_section``
+              and appended as its own section after ``elicited_stories`` when
+              non-empty; and ``tone_or_purpose`` / ``audience`` are each
+              prepended as a single labeled line at the very front
+              (tone_or_purpose before audience). Absent fields are omitted
+              rather than left blank.
         """
         brand_section = self._brand_section_for_prompt()
         feedback_lines = [
@@ -1163,6 +1209,9 @@ class BlogWriterAgent(_BlogAgentBase):
                     + revise_input.elicited_stories,
                 ]
             )
+        claims_section = _render_allowed_claims_section(revise_input.allowed_claims)
+        if claims_section:
+            prompt_parts.extend(["", claims_section])
         length_block = (
             revise_input.length_guidance.strip()
             if (revise_input.length_guidance or "").strip()

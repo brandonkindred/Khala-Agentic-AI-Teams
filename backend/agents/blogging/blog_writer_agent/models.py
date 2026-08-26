@@ -4,7 +4,7 @@ Models for the blog writer agent (write from content plan).
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
 from agents.blogging.shared.content_plan import ContentPlan, content_plan_to_outline_markdown
@@ -120,6 +120,14 @@ class WriterInput(BaseModel):
             "Incorporate these into the relevant sections to personalise the post."
         ),
     )
+    allowed_claims: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "allowed_claims.json content (e.g. {'topic': ..., 'claims': [{'id', 'text', ...}]}). "
+            "When set, the writer must tag every factual/statistical claim with [CLAIM:id] "
+            "using only IDs present here."
+        ),
+    )
 
     def outline_for_prompt(self) -> str:
         """Flattened outline + narrative for LLM prompts (replaces legacy outline-only string)."""
@@ -217,6 +225,14 @@ class ReviseWriterInput(BaseModel):
     elicited_stories: Optional[str] = Field(
         None,
         description="First-person story narratives elicited by the ghost writer agent; preserve in revision.",
+    )
+    allowed_claims: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "allowed_claims.json content (e.g. {'topic': ..., 'claims': [{'id', 'text', ...}]}). "
+            "When set, every factual/statistical claim must stay tagged [CLAIM:id] "
+            "using only IDs present here."
+        ),
     )
 
     def outline_for_prompt(self) -> str:

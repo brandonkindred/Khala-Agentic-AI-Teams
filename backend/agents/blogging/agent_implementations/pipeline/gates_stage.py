@@ -7,7 +7,7 @@ from pathlib import Path
 from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
 from agents.blogging.blog_publication_agent.models import PublishingPack
 from agents.blogging.blog_writer_agent import ReviseWriterInput
-from agents.blogging.shared.artifacts import write_artifact
+from agents.blogging.shared.artifacts import read_artifact, write_artifact
 from agents.blogging.shared.content_profile import build_draft_length_instruction
 from agents.blogging.shared.errors import BloggingError, ComplianceError, DraftError, FactCheckError
 from agents.blogging.shared.models import BlogPhase
@@ -97,6 +97,15 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
     if work_dir is not None:
         write_artifact(work_dir, "final.md", draft_result.draft)
         logger.info("Persisted final.md")
+
+    # Load allowed_claims.json (if present) so a gate-driven rewrite can keep
+    # [CLAIM:id] tags valid; a missing/non-dict artifact is a no-op (matches the
+    # fact-check/validator gates' handling of the same artifact).
+    allowed_claims = (
+        read_artifact(work_dir, "allowed_claims.json", default=None) if work_dir else None
+    )
+    if not isinstance(allowed_claims, dict):
+        allowed_claims = None
 
     # Gates require a work_dir: they persist validator/fact-check/compliance
     # artifacts and drive the closed-loop rewrite off them. When gates are
@@ -455,6 +464,7 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
                     length_guidance=build_draft_length_instruction(length_policy),
                     selected_title=None,
                     elicited_stories=elicited_stories_text or None,
+                    allowed_claims=allowed_claims,
                 )
                 draft_output_path = Path(work_dir) / f"draft_rewrite_{rewrite_iter + 1}.md"
                 draft_result = draft_agent.revise(

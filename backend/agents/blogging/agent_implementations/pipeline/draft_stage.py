@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 from agents.blogging.blog_copy_editor_agent import CopyEditorInput
 from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
 from agents.blogging.blog_writer_agent import ReviseWriterInput, WriterInput
+from agents.blogging.shared.artifacts import read_artifact
 from agents.blogging.shared.blog_job_store import (
     add_blog_pending_questions,
     is_waiting_for_blog_answers,
@@ -98,6 +99,15 @@ def run_draft_stage(
     elicited_stories_text = ctx.elicited_stories_text
     _update = _make_update(job_updater)
 
+    # Load allowed_claims.json (if the planning stage/#7293 has persisted one) so the
+    # writer can tag factual claims with [CLAIM:id]; a missing/non-dict artifact is a
+    # no-op, matching the fact-check/validator gates' handling of the same artifact.
+    allowed_claims = (
+        read_artifact(work_dir, "allowed_claims.json", default=None) if work_dir else None
+    )
+    if not isinstance(allowed_claims, dict):
+        allowed_claims = None
+
     # Draft + Copy Editor loop (load style and brand spec as raw text for draft/editor agents)
     writing_style_content, brand_spec_content = _load_required_guidelines("start drafting")
     draft_agent = BlogWriterAgent(
@@ -141,6 +151,7 @@ def run_draft_stage(
                     length_guidance=build_draft_length_instruction(length_policy),
                     selected_title=None,
                     elicited_stories=elicited_stories_text or None,
+                    allowed_claims=allowed_claims,
                 )
                 draft_output_path = (
                     (Path(work_dir) / f"draft_v{iteration}.md") if work_dir is not None else None
@@ -197,6 +208,7 @@ def run_draft_stage(
                         target_word_count=length_policy.target_word_count,
                         length_guidance=build_draft_length_instruction(length_policy),
                         selected_title=None,
+                        allowed_claims=allowed_claims,
                     ),
                     work_dir=work_dir,
                     iteration=iteration,
@@ -623,6 +635,7 @@ def run_draft_stage(
                     length_guidance=build_draft_length_instruction(length_policy),
                     selected_title=None,
                     elicited_stories=elicited_stories_text or None,
+                    allowed_claims=allowed_claims,
                 )
                 previous_feedback_items = feedback_tracker.get_capped_previous_feedback(
                     max_items=MAX_PREVIOUS_FEEDBACK_ITEMS
