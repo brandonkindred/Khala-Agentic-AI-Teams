@@ -33,15 +33,15 @@ the literally-named class:
   `interface_density` — **14 fields total**.
 - `BrandingMission`, not `BrandingMissionFields`, is the class actually
   hashed and injected into every phase today:
-  - `shared/memoization.py:93-102` — `phase_input_hash`'s payload includes
+  - `shared/memoization.py:97-106` — `phase_input_hash`'s payload includes
     `"mission": mission.model_dump(mode="json")` with no `include`/
     `exclude`, so it dumps every field the runtime instance carries.
     `phase_input_hash` is type-annotated `mission: BrandingMission`.
   - `graphs/shared.py:238-240` — `serialize_mission(mission)` calls
     `mission.model_dump_json()`, again with no `include`/`exclude`.
-  - `orchestrator.py:791-793` (`_phase_task`) calls
+  - `orchestrator.py:795-798` (`_phase_task`) calls
     `serialize_mission(mission)` unconditionally for every phase, and
-    `orchestrator.py:580-583` does the same for the default monolithic-graph
+    `orchestrator.py:583-586` does the same for the default monolithic-graph
     path.
   - `BrandingMissionFields.mission_fields()` (`models.py:318-328`, which
     returns only the 8 base fields via
@@ -102,7 +102,7 @@ citation). That classification answers "which fields does the prompt text
 explicitly ask this agent to use" — it does **not** answer "which fields
 have zero influence on this agent's output."
 
-The distinction matters because `_phase_task` (`orchestrator.py:791-793`)
+The distinction matters because `_phase_task` (`orchestrator.py:795-798`)
 unconditionally injects the *complete*, field-labelled mission JSON into
 every phase's task string today, regardless of what that phase's own
 agent prompts ask for. So an agent whose system prompt says only "the
@@ -255,14 +255,20 @@ default-value semantics.
 
 ## Findings
 
-1. **Only two fields have unambiguous, literal prompt-text citations
-   anywhere in the codebase:** `desired_voice` (Phase 2,
-   `VoicePrinciplesDrafter`) is the single field named by its literal
-   identifier. `values` and `differentiators` are named by explicit
-   paraphrase ("optional seed values" / "optional differentiators") but
-   only in Phase 1's `values_articulator` / `differentiation_mapper`.
-   `company_description` and `target_audience` are named by explicit
-   generic paraphrase, also only in Phase 1.
+1. **One field has a literal field-identifier citation; five fields total
+   are marked `explicit` (`E`) in the summary matrix.** These are two
+   different counts and should not be conflated: `desired_voice` (Phase
+   2, `VoicePrinciplesDrafter`) is the *only* field named by its literal
+   Python identifier anywhere in `agents.py`. `values` and
+   `differentiators` are named by explicit paraphrase ("optional seed
+   values" / "optional differentiators"), and `company_description` and
+   `target_audience` by explicit generic paraphrase — all four only in
+   Phase 1. Per the Method section, both a literal identifier and an
+   unambiguous single-field paraphrase count as `explicit`, so the
+   summary matrix correctly marks all five (`desired_voice`, `values`,
+   `differentiators`, `company_description`, `target_audience`) `E` — one
+   of them by the strongest possible evidence, the other four by
+   paraphrase.
 
 2. **`company_name` is referenced only ambiguously or indirectly,
    everywhere.** No prompt says "company name" in prose; the closest
@@ -301,7 +307,7 @@ default-value semantics.
    anything found in any `AgentPromptSpec`. However, its own docstring
    and the codebase's own commentary confirm it is a plain-Python,
    non-LLM, non-Strands class that "runs outside the graph" via keyword
-   matching (`graphs/shared.py:47`, `orchestrator.py:500`,
+   matching (`graphs/shared.py:47`, `orchestrator.py:503`,
    `tests/test_full_pipeline_first_run_benchmark.py:33`). It is not built
    from an `AgentPromptSpec`, is not one of the graph's 37 agent-role
    factories, and is not consulted by `_phase_task` or
