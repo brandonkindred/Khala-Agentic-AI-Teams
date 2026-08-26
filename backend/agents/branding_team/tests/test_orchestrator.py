@@ -608,7 +608,7 @@ def test_run_phase_forwards_phase_cache_to_run() -> None:
     cache = PhaseOutputCache()
     cache.put(
         BrandPhase.STRATEGIC_CORE,
-        phase_input_hash(BrandPhase.STRATEGIC_CORE, mission, {}),
+        _real_phase_input_hash(BrandPhase.STRATEGIC_CORE, mission, {}),
         cached_output,
     )
     orchestrator = BrandingTeamOrchestrator()
@@ -884,6 +884,16 @@ def test_phase_spec_every_entry_declares_merge_fn() -> None:
     assert set(_PHASE_SPEC) == set(PHASE_ORDER)
     for phase, spec in _PHASE_SPEC.items():
         assert spec.merge_fn is not None, f"{phase} has no merge_fn"
+
+
+def test_phase_spec_every_entry_declares_mission_fields() -> None:
+    """Every phase's mission-field allowlist has been wired in from the
+    accepted mission-field dependency analysis -- ``None`` (the "not
+    configured, use the full mission" default) is no longer valid for any
+    real phase. Guard the invariant so a future phase addition can't
+    silently regress to hashing/serializing the full mission."""
+    for phase, spec in _PHASE_SPEC.items():
+        assert spec.mission_fields is not None, f"{phase} has no mission_fields allowlist"
 
 
 def _leaf_node_result(structured_output) -> MagicMock:
@@ -2493,6 +2503,16 @@ _PHASE_FIXTURES: dict[BrandPhase, Any] = {
 }
 
 
+def _real_phase_input_hash(phase, mission, upstream_outputs) -> str:
+    """``phase_input_hash`` scoped by ``phase``'s real, current ``_PHASE_SPEC``
+    allowlists -- mirrors exactly what ``run``'s cache-key computation does,
+    so cache-test fixtures stay in sync with production filtering."""
+    spec = _PHASE_SPEC[phase]
+    return phase_input_hash(
+        phase, mission, upstream_outputs, spec.context_phases, spec.mission_fields
+    )
+
+
 def _run_single_phase_fixture_side_effect(mission, phase, prior_outputs=None):
     """Stand-in for ``run_single_phase``: return the canned fixture for ``phase``."""
     return _PHASE_FIXTURES[phase](), False
@@ -2526,7 +2546,7 @@ def test_run_with_phase_cache_hit_reuses_output_without_invoking_phase() -> None
     cache = PhaseOutputCache()
     cache.put(
         BrandPhase.STRATEGIC_CORE,
-        phase_input_hash(BrandPhase.STRATEGIC_CORE, mission, {}),
+        _real_phase_input_hash(BrandPhase.STRATEGIC_CORE, mission, {}),
         cached_output,
     )
     orchestrator = BrandingTeamOrchestrator()
@@ -2564,9 +2584,7 @@ def test_run_with_phase_cache_miss_falls_through_and_populates_cache() -> None:
 
     upstream: dict[BrandPhase, Any] = {}
     for phase in PHASE_ORDER:
-        expected_hash = phase_input_hash(
-            phase, mission, upstream, _PHASE_SPEC[phase].context_phases
-        )
+        expected_hash = _real_phase_input_hash(phase, mission, upstream)
         cached = cache.get(phase, expected_hash)
         assert cached is not None
         upstream[phase] = cached
@@ -2630,13 +2648,13 @@ def test_run_with_phase_cache_reuses_multiple_cached_upstream_phases() -> None:
     cached_strategic_core = _full_strategic_core()
     cache.put(
         BrandPhase.STRATEGIC_CORE,
-        phase_input_hash(BrandPhase.STRATEGIC_CORE, mission, {}),
+        _real_phase_input_hash(BrandPhase.STRATEGIC_CORE, mission, {}),
         cached_strategic_core,
     )
     cached_narrative = _full_narrative()
     cache.put(
         BrandPhase.NARRATIVE_MESSAGING,
-        phase_input_hash(
+        _real_phase_input_hash(
             BrandPhase.NARRATIVE_MESSAGING,
             mission,
             {BrandPhase.STRATEGIC_CORE: cached_strategic_core},
@@ -2664,16 +2682,25 @@ def test_run_with_phase_cache_reuses_multiple_cached_upstream_phases() -> None:
 
 
 def test_run_with_phase_cache_cascades_recompute_through_three_phase_chain() -> None:
-    """A changed earliest-phase input (a mission field, which every phase's hash
-    includes) invalidates the STRATEGIC_CORE cache entry and cascades a miss
-    through every downstream phase in a three-phase chain; each recomputed
-    phase's fresh output is written back to the cache for later reuse."""
-    stale_mission = make_mission(company_name="Stale Co")
-    mission = make_mission(company_name="Fresh Co")
+    """A changed earliest-phase input (a mission field on STRATEGIC_CORE's
+    real ``mission_fields`` allowlist) invalidates the STRATEGIC_CORE cache
+    entry; because its recompute produces a different output than what was
+    cached, every downstream phase's cache key (which folds in upstream
+    phase outputs) also misses, cascading the recompute through the whole
+    three-phase chain -- independent of whether a downstream phase's own
+    ``mission_fields`` allowlist was touched. Each recomputed phase's fresh
+    output is written back to the cache for later reuse."""
+    stale_mission = make_mission(company_description="Stale description")
+    mission = make_mission(company_description="Fresh description")
     cache = PhaseOutputCache()
 
     # Pre-populate the cache as if a prior run completed for `stale_mission`,
-    # forming a fully self-consistent hash chain across three phases.
+    # using a stale STRATEGIC_CORE output that differs from what
+    # `_PHASE_FIXTURES` returns on recompute -- so the STRATEGIC_CORE miss
+    # genuinely cascades downstream via an upstream-output-value mismatch,
+    # not merely because every phase's own mission field also happened to
+    # change (that would no longer be true once `mission_fields` narrows
+    # each phase's allowlist).
     stale_upstream: dict[BrandPhase, Any] = {}
     for phase in (
         BrandPhase.STRATEGIC_CORE,
@@ -2681,7 +2708,9 @@ def test_run_with_phase_cache_cascades_recompute_through_three_phase_chain() -> 
         BrandPhase.VISUAL_IDENTITY,
     ):
         stale_output = _PHASE_FIXTURES[phase]()
-        cache.put(phase, phase_input_hash(phase, stale_mission, stale_upstream), stale_output)
+        if phase is BrandPhase.STRATEGIC_CORE:
+            stale_output = stale_output.model_copy(update={"brand_purpose": "stale purpose"})
+        cache.put(phase, _real_phase_input_hash(phase, stale_mission, stale_upstream), stale_output)
         stale_upstream[phase] = stale_output
 
     orchestrator = BrandingTeamOrchestrator()
@@ -2711,7 +2740,7 @@ def test_run_with_phase_cache_cascades_recompute_through_three_phase_chain() -> 
         BrandPhase.NARRATIVE_MESSAGING,
         BrandPhase.VISUAL_IDENTITY,
     ):
-        expected_hash = phase_input_hash(phase, mission, fresh_upstream)
+        expected_hash = _real_phase_input_hash(phase, mission, fresh_upstream)
         cached = cache.get(phase, expected_hash)
         assert cached is not None
         fresh_upstream[phase] = cached
@@ -2749,12 +2778,13 @@ def test_run_called_twice_with_identical_mission_only_invokes_run_single_phase_o
     assert second_result == first_result
 
 
-def test_run_called_twice_with_changed_mission_reinvokes_affected_phases() -> None:
+def test_run_called_twice_with_changed_unallowlisted_mission_field_reinvokes_no_phase() -> None:
     """Two ``run()`` calls sharing one cache: the first populates it for one
-    mission, the second uses a mission with a changed field. Since every
-    phase's hash folds in the full mission, the changed field invalidates
-    every phase, and the second call re-invokes ``run_single_phase`` for all
-    of them again."""
+    mission, the second changes only ``company_name`` -- a field on no
+    phase's real ``mission_fields`` allowlist. This is the epic's whole
+    point: an edit to a field none of the 5 phases' agents reference must
+    not invalidate any phase's cache entry, unlike the old full-mission-hash
+    behavior."""
     first_mission = make_mission(company_name="Northstar Labs")
     second_mission = make_mission(company_name="Different Co")
     cache = PhaseOutputCache()
@@ -2776,11 +2806,44 @@ def test_run_called_twice_with_changed_mission_reinvokes_affected_phases() -> No
             phase_cache=cache,
         )
 
-    assert mock_run_single_phase.call_count == 2 * len(PHASE_ORDER)
+    assert mock_run_single_phase.call_count == len(PHASE_ORDER)
+
+
+def test_run_called_twice_with_changed_allowlisted_mission_field_reinvokes_only_that_phase() -> (
+    None
+):
+    """Contrast with the unallowlisted-field case above: changing
+    ``company_description`` (on STRATEGIC_CORE's real allowlist, on no other
+    phase's) invalidates only STRATEGIC_CORE's cache entry. Because the
+    canned fixture returns an identical output regardless of its mission
+    input, STRATEGIC_CORE's recomputed output hash-matches what downstream
+    phases already cached, so no downstream phase is invalidated either."""
+    first_mission = make_mission(company_description="First description")
+    second_mission = make_mission(company_description="Second description")
+    cache = PhaseOutputCache()
+    orchestrator = BrandingTeamOrchestrator()
+
+    with patch.object(
+        orchestrator, "run_single_phase", side_effect=_run_single_phase_fixture_side_effect
+    ) as mock_run_single_phase:
+        orchestrator.run(
+            mission=first_mission,
+            human_review=HumanReview(approved=True),
+            phase_cache=cache,
+        )
+        assert mock_run_single_phase.call_count == len(PHASE_ORDER)
+
+        orchestrator.run(
+            mission=second_mission,
+            human_review=HumanReview(approved=True),
+            phase_cache=cache,
+        )
+
+    assert mock_run_single_phase.call_count == len(PHASE_ORDER) + 1
     second_call_phases = [
         call.args[1] for call in mock_run_single_phase.call_args_list[len(PHASE_ORDER) :]
     ]
-    assert second_call_phases == list(PHASE_ORDER)
+    assert second_call_phases == [BrandPhase.STRATEGIC_CORE]
 
 
 # ---------------------------------------------------------------------------
