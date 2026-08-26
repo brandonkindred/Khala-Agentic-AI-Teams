@@ -264,6 +264,11 @@ def run_planning(
     Postconditions:
         - Returns a ``PlanningPhaseResult`` (content plan with title candidates,
           sections, requirements analysis, and planning telemetry).
+        - When ``work_dir`` is given, ``allowed_claims.json`` is always written
+          (in addition to the other planning artifacts) since
+          ``extract_allowed_claims`` never raises — a run with no verifiable
+          claims yields a valid ``allowed_claims.json`` with an empty ``claims``
+          list rather than omitting the artifact.
     Raises:
         PlanningError: If content planning fails for a non-transient reason.
         BloggingError: Blogging-domain errors from the planner or plan critic
@@ -276,6 +281,7 @@ def run_planning(
     # Deferred import: see module docstring.
     from agents.blogging.agent_implementations.blog_writing_process_v2 import (
         BlogWriterAgent,
+        extract_allowed_claims,
         load_brand_spec_prompt,
         load_style_file,
     )
@@ -368,8 +374,9 @@ def run_planning(
     )
 
     if work_dir is not None:
+        content_plan_markdown = content_plan_to_markdown_doc(plan)
         write_artifact(work_dir, "content_plan.json", plan.model_dump(mode="json"))
-        write_artifact(work_dir, "content_plan.md", content_plan_to_markdown_doc(plan))
+        write_artifact(work_dir, "content_plan.md", content_plan_markdown)
         write_artifact(work_dir, "outline.md", content_plan_to_outline_markdown(plan))
         write_artifact(work_dir, "content_brief.md", content_plan_to_content_brief_markdown(plan))
         logger.info("Persisted content_plan.json, content_plan.md, outline.md, content_brief.md")
@@ -385,6 +392,21 @@ def run_planning(
                 "Persisted plan_critic_report.json (status=%s)",
                 planning_phase_result.plan_critic_report.get("status"),
             )
+
+        # The v2 pipeline does not yet run a research stage (BlogResearchAgent is not
+        # wired in), so there is no compiled research document/reference list here.
+        # extract_allowed_claims never raises: with no real sources to cite, it
+        # degrades to an empty-claims AllowedClaims, and allowed_claims.json is still
+        # written so the fact-check gate/validators (which already read it) can rely
+        # on its presence.
+        allowed_claims = extract_allowed_claims(
+            llm_client,
+            content_plan_markdown,
+            references=[],
+            topic=brief.brief,
+        )
+        write_artifact(work_dir, "allowed_claims.json", allowed_claims.to_dict())
+        logger.info("Persisted allowed_claims.json (%d claim(s))", len(allowed_claims.claims))
 
     return planning_phase_result
 

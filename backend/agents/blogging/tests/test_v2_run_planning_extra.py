@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -65,6 +66,106 @@ def test_run_planning_writes_artifacts_and_returns_result(monkeypatch, tmp_path:
     assert (work_dir / "content_plan.json").exists()
     assert (work_dir / "outline.md").exists()
     assert (work_dir / "plan_critic_report.json").exists()
+
+
+def test_run_planning_writes_allowed_claims_with_extracted_claims(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.allowed_claims import AllowedClaims, ClaimEntry
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
+
+    ppr = _make_planning_result(critic_report=None)
+    populated = AllowedClaims(
+        topic="b",
+        claims=[
+            ClaimEntry(id="1", text="A verified claim.", citations=["Source 1"], risk_level="low")
+        ],
+    )
+    captured: dict = {}
+
+    def _fake_extract(llm_client, compiled_document, references, topic=""):
+        captured["compiled_document"] = compiled_document
+        captured["references"] = references
+        captured["topic"] = topic
+        return populated
+
+    class _FakeAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def plan_content(self, *_a, **_kw):
+            return ppr
+
+    monkeypatch.setattr(v2, "BlogWriterAgent", _FakeAgent)
+    monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "brand")
+    monkeypatch.setattr(v2, "load_style_file", lambda _p: "style")
+    monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: None)
+    monkeypatch.setattr(v2, "extract_allowed_claims", _fake_extract)
+
+    work_dir = tmp_path / "wd"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    result = v2.run_planning(
+        ResearchBriefInput(brief="b", max_results=5),
+        work_dir=work_dir,
+        llm_client=object(),
+        length_policy=resolve_length_policy(content_profile=ContentProfile.standard_article),
+        series_context=None,
+        job_updater=None,
+    )
+
+    assert result is ppr
+    written = json.loads((work_dir / "allowed_claims.json").read_text())
+    assert written == populated.to_dict()
+    assert written["claims"][0]["text"] == "A verified claim."
+    # No research stage runs in the v2 pipeline today, so extract_allowed_claims is
+    # called with an empty reference list and the brief as topic.
+    assert captured["references"] == []
+    assert captured["topic"] == "b"
+    assert captured["compiled_document"]
+
+
+def test_run_planning_writes_allowed_claims_with_zero_claims(monkeypatch, tmp_path: Path) -> None:
+    """extract_allowed_claims never raises; a zero-claims result still yields a valid artifact."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.allowed_claims import AllowedClaims
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
+
+    ppr = _make_planning_result(critic_report=None)
+
+    class _FakeAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def plan_content(self, *_a, **_kw):
+            return ppr
+
+    monkeypatch.setattr(v2, "BlogWriterAgent", _FakeAgent)
+    monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "brand")
+    monkeypatch.setattr(v2, "load_style_file", lambda _p: "style")
+    monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: None)
+    monkeypatch.setattr(
+        v2, "extract_allowed_claims", lambda *_a, **_kw: AllowedClaims(topic="b", claims=[])
+    )
+
+    work_dir = tmp_path / "wd"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    result = v2.run_planning(
+        ResearchBriefInput(brief="b", max_results=5),
+        work_dir=work_dir,
+        llm_client=object(),
+        length_policy=resolve_length_policy(content_profile=ContentProfile.standard_article),
+        series_context=None,
+        job_updater=None,
+    )
+
+    assert result is ppr
+    written = json.loads((work_dir / "allowed_claims.json").read_text())
+    assert written == {"topic": "b", "claims": []}
 
 
 def test_run_planning_without_work_dir_or_critic_report(monkeypatch) -> None:
