@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from agents.blogging.ghost_writer_agent.models import StoryGap
 
 from agents.blogging.blog_plan_critic_agent import BlogPlanCriticAgent
+from agents.blogging.blog_research_agent.agent_cache import AgentCache
 from agents.blogging.blog_research_agent.models import ResearchBriefInput
 from agents.blogging.shared.artifacts import write_artifact
 from agents.blogging.shared.content_plan import (
@@ -41,7 +42,7 @@ from agents.blogging.shared.content_profile import (
     build_planning_length_context,
     series_context_block,
 )
-from agents.blogging.shared.errors import BloggingError, DraftError, PlanningError
+from agents.blogging.shared.errors import BloggingError, DraftError, PlanningError, ResearchError
 from agents.blogging.shared.models import BlogPhase, get_phase_progress
 from agents.blogging.shared.planning_config import plan_critic_max_iterations
 from agents.blogging.shared.run_pipeline_job import _is_external_cancellation
@@ -269,13 +270,16 @@ def run_planning(
         - Returns a ``PlanningPhaseResult`` (content plan with title candidates,
           sections, requirements analysis, and planning telemetry).
     Raises:
+        ResearchError: If research fails for a non-transient reason (phase="research",
+            so Temporal/thread-mode failure tracking attributes the failure correctly
+            instead of defaulting to "planning").
         PlanningError: If content planning fails for a non-transient reason.
-        BloggingError: Blogging-domain errors from the planner or plan critic
-            propagate unwrapped (not re-wrapped as ``PlanningError``).
+        BloggingError: Blogging-domain errors from the research agent, planner, or
+            plan critic propagate unwrapped (not re-wrapped).
         LLMRateLimitError / LLMTemporaryError: transient LLM-transport failures
-            (including from the plan critic) propagate unwrapped so Temporal's
-            activity funnel can retry the stage instead of treating them as a
-            terminal PlanningError.
+            (including from research and the plan critic) propagate unwrapped so
+            Temporal's activity funnel can retry the stage instead of treating them
+            as a terminal error.
     """
     # Deferred import: see module docstring.
     from agents.blogging.agent_implementations.blog_writing_process_v2 import (
@@ -308,11 +312,23 @@ def run_planning(
             logger.warning("Failed to update job status: %s", e)
 
     # Research: run before planning so a compiled research document is available
-    # as an artifact.
+    # as an artifact. Checkpointed under work_dir (when set) so a Temporal retry of
+    # this activity after a transient planning failure resumes research from its
+    # last completed step instead of repeating every search/fetch/summarization call.
     _report_research("Researching topic...")
 
-    research_agent = ResearchAgent(llm_client=llm_client)
-    research_output = research_agent.run(brief)
+    research_cache = (
+        AgentCache(cache_dir=Path(work_dir) / ".research_cache") if work_dir is not None else None
+    )
+    research_agent = ResearchAgent(llm_client=llm_client, cache=research_cache)
+    try:
+        research_output = research_agent.run(brief)
+    except (BloggingError, LLMRateLimitError, LLMTemporaryError):
+        raise
+    except Exception as e:
+        if _is_external_cancellation(e):
+            raise
+        raise ResearchError(f"Research failed: {e}", cause=e) from e
 
     if work_dir is not None:
         write_artifact(work_dir, "research_packet.md", research_output.compiled_document or "")

@@ -159,6 +159,14 @@ def test_run_planning_runs_research_and_writes_packet(monkeypatch, tmp_path: Pat
     assert research_updates[0]["status_text"] == "Researching topic..."
     assert "1 reference" in research_updates[1]["status_text"]
 
+    # Checkpointed under work_dir so a Temporal retry resumes research instead of
+    # repeating every search/fetch/summarization call from scratch.
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+
+    init_kwargs = research_calls[0][1]
+    assert isinstance(init_kwargs["cache"], AgentCache)
+    assert init_kwargs["cache"].cache_dir == work_dir / ".research_cache"
+
 
 def test_run_planning_research_zero_references_writes_fallback_packet(
     monkeypatch, tmp_path: Path
@@ -241,6 +249,140 @@ def test_run_planning_research_progress_reraises_cancelled_error(monkeypatch) ->
             series_context=None,
             job_updater=cancelling_updater,
         )
+
+
+def test_run_planning_research_failure_wraps_as_research_error(monkeypatch) -> None:
+    """A non-transient ResearchAgent.run() failure is wrapped as ResearchError
+    (phase="research") rather than left to surface under the "planning" phase that
+    Temporal/thread-mode failure tracking otherwise defaults to."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.shared.errors import ResearchError
+
+    class _FailingResearchAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def run(self, _brief):
+            raise RuntimeError("search backend unreachable")
+
+    monkeypatch.setattr(v2, "ResearchAgent", _FailingResearchAgent)
+
+    with pytest.raises(ResearchError) as exc:
+        v2.run_planning(
+            ResearchBriefInput(brief="b", max_results=5),
+            work_dir=None,
+            llm_client=object(),
+            length_policy=None,
+            series_context=None,
+            job_updater=None,
+        )
+    assert exc.value.phase == "research"
+    assert "Research failed" in str(exc.value)
+
+
+@pytest.mark.parametrize("err_cls_name", ["LLMRateLimitError", "LLMTemporaryError"])
+def test_run_planning_research_reraises_transient_llm_errors(monkeypatch, err_cls_name) -> None:
+    """Transient LLM errors from research must stay unwrapped for Temporal retry,
+    same as the planning call's own transient-error handling."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+
+    from llm_service import LLMRateLimitError, LLMTemporaryError
+
+    err_cls = LLMRateLimitError if err_cls_name == "LLMRateLimitError" else LLMTemporaryError
+    cause = err_cls("transient outage")
+
+    class _FailingResearchAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def run(self, _brief):
+            raise cause
+
+    monkeypatch.setattr(v2, "ResearchAgent", _FailingResearchAgent)
+
+    with pytest.raises(err_cls) as exc:
+        v2.run_planning(
+            ResearchBriefInput(brief="b", max_results=5),
+            work_dir=None,
+            llm_client=object(),
+            length_policy=None,
+            series_context=None,
+            job_updater=None,
+        )
+    assert exc.value is cause
+
+
+def test_run_planning_research_reraises_blogging_error(monkeypatch) -> None:
+    """A BloggingError raised directly by research (e.g. a ResearchError from a
+    sub-step) propagates unwrapped rather than being double-wrapped."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.shared.errors import ResearchError
+
+    cause = ResearchError("no sources reachable", sources_found=0)
+
+    class _FailingResearchAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def run(self, _brief):
+            raise cause
+
+    monkeypatch.setattr(v2, "ResearchAgent", _FailingResearchAgent)
+
+    with pytest.raises(ResearchError) as exc:
+        v2.run_planning(
+            ResearchBriefInput(brief="b", max_results=5),
+            work_dir=None,
+            llm_client=object(),
+            length_policy=None,
+            series_context=None,
+            job_updater=None,
+        )
+    assert exc.value is cause
+
+
+def test_run_planning_research_agent_gets_no_cache_without_work_dir(monkeypatch) -> None:
+    """When work_dir is None there's nothing to checkpoint against, so ResearchAgent
+    is constructed with cache=None rather than falling back to a shared/default dir."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.models import ResearchAgentOutput, ResearchBriefInput
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
+
+    ppr = _make_planning_result()
+    research_calls: list = []
+
+    class _FakePlanAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def plan_content(self, *_a, **_kw):
+            return ppr
+
+    class _FakeResearchAgent:
+        def __init__(self, **kw):
+            research_calls.append(kw)
+
+        def run(self, _brief):
+            return ResearchAgentOutput(query_plan=[], references=[], compiled_document="doc")
+
+    monkeypatch.setattr(v2, "BlogWriterAgent", _FakePlanAgent)
+    monkeypatch.setattr(v2, "ResearchAgent", _FakeResearchAgent)
+    monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "brand")
+    monkeypatch.setattr(v2, "load_style_file", lambda _p: "style")
+    monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: None)
+
+    v2.run_planning(
+        ResearchBriefInput(brief="b", max_results=5),
+        work_dir=None,
+        llm_client=object(),
+        length_policy=resolve_length_policy(content_profile=ContentProfile.standard_article),
+        series_context=None,
+        job_updater=None,
+    )
+    assert research_calls[0]["cache"] is None
 
 
 def test_run_planning_without_work_dir_or_critic_report(monkeypatch) -> None:
