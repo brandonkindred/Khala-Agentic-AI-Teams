@@ -21,6 +21,7 @@ from .alignment import (
 from .analysis import AnalysisAgent
 from .code_synthesis import CodeSynthesisAgent, CodeSynthesisError
 from .design import DesignAgent
+from .diff_format import diff_or_full
 from .design_review import (
     CritiqueIssue,
     DesignReviewAgent,
@@ -37,6 +38,7 @@ __all__ = [
     "SpecCritique",
     "CodeSynthesisAgent",
     "CodeSynthesisError",
+    "diff_or_full",
     "RefinementAgent",
     "TradeAlignmentAgent",
     "TradeAlignmentReport",
