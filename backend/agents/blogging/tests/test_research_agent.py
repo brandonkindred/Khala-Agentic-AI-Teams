@@ -208,6 +208,44 @@ def test_research_agent_run_with_cache_resume(monkeypatch, tmp_path) -> None:
     assert out.references == []
 
 
+def test_research_agent_run_checkpoints_candidates_after_fresh_search(
+    monkeypatch, tmp_path
+) -> None:
+    """A fresh (non-cached) search run must checkpoint its candidates, same as every
+    other step, so a resumed run after this point doesn't repeat the web searches.
+
+    Regression test: previously only steps 1, 2, 4, 5, 6, 7 saved a checkpoint —
+    step 3 (search) computed ``candidates`` but never persisted them, so an
+    AgentCache-backed retry after this point still re-ran every web search.
+    """
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="fresh search brief", max_results=3)
+
+    a = _make_agent(
+        monkeypatch,
+        [
+            {"topic": "AI"},
+            {"queries": [{"query_text": "q", "intent": "overview"}]},
+        ],
+    )
+    a.cache = cache
+    mock_search = MagicMock()
+    mock_search.search.return_value = []
+    a.web_search = mock_search
+
+    a.run(brief)
+
+    checkpoint = cache.load_checkpoint(brief)
+    assert checkpoint is not None
+    # None (unset) vs [] (checkpointed-but-empty) is the whole point of the regression:
+    # before the fix this step's checkpoint was never written at all.
+    assert checkpoint.candidates == []
+    assert checkpoint.last_completed_step == "notes"
+
+
 def test_research_agent_synthesize_overview_no_references() -> None:
     from agents.blogging.blog_research_agent.agent import ResearchAgent
     from agents.blogging.blog_research_agent.models import ResearchBriefInput

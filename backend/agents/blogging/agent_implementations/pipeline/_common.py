@@ -296,7 +296,7 @@ def run_planning(
     # source of the swallow-but-reraise-CancelledError update logic.
     _update = _make_update(job_updater)
 
-    def _report_research(status_text: str) -> None:
+    def _report_research(status_text: str, **extra: Any) -> None:
         # Reported on its own "research" phase (not a BlogPhase member, same
         # convention as the "story_elicitation"/"title_selection" raw job_updater
         # calls elsewhere in this module) since it doesn't have its own slice of the
@@ -305,7 +305,7 @@ def run_planning(
         if not job_updater:
             return
         try:
-            job_updater(phase="research", progress=0, status_text=status_text)
+            job_updater(phase="research", progress=0, status_text=status_text, **extra)
         except CancelledError:
             raise
         except Exception as e:
@@ -315,6 +315,9 @@ def run_planning(
     # as an artifact. Checkpointed under work_dir (when set) so a Temporal retry of
     # this activity after a transient planning failure resumes research from its
     # last completed step instead of repeating every search/fetch/summarization call.
+    # The artifact write is wrapped alongside the agent call (not after) so a disk
+    # failure here is attributed to phase="research" too, not left to surface as an
+    # unattributed/planning failure.
     _report_research("Researching topic...")
 
     research_cache = (
@@ -323,6 +326,12 @@ def run_planning(
     research_agent = ResearchAgent(llm_client=llm_client, cache=research_cache)
     try:
         research_output = research_agent.run(brief)
+        if work_dir is not None:
+            write_artifact(work_dir, "research_packet.md", research_output.compiled_document or "")
+            logger.info(
+                "Persisted research_packet.md (%d reference(s))",
+                len(research_output.references),
+            )
     except (BloggingError, LLMRateLimitError, LLMTemporaryError):
         raise
     except Exception as e:
@@ -330,14 +339,10 @@ def run_planning(
             raise
         raise ResearchError(f"Research failed: {e}", cause=e) from e
 
-    if work_dir is not None:
-        write_artifact(work_dir, "research_packet.md", research_output.compiled_document or "")
-        logger.info(
-            "Persisted research_packet.md (%d reference(s))",
-            len(research_output.references),
-        )
-
-    _report_research(f"Research complete ({len(research_output.references)} reference(s))")
+    _report_research(
+        f"Research complete ({len(research_output.references)} reference(s))",
+        research_sources_count=len(research_output.references),
+    )
 
     _update(
         BlogPhase.PLANNING,

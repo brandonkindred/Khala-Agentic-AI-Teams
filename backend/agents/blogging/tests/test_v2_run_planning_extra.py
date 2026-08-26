@@ -158,6 +158,9 @@ def test_run_planning_runs_research_and_writes_packet(monkeypatch, tmp_path: Pat
     assert len(research_updates) == 2
     assert research_updates[0]["status_text"] == "Researching topic..."
     assert "1 reference" in research_updates[1]["status_text"]
+    # research_sources_count is a real job-store field (initialized to 0, surfaced by
+    # the status API) that only this completion update can populate.
+    assert research_updates[1]["research_sources_count"] == 1
 
     # Checkpointed under work_dir so a Temporal retry resumes research instead of
     # repeating every search/fetch/summarization call from scratch.
@@ -279,6 +282,44 @@ def test_run_planning_research_failure_wraps_as_research_error(monkeypatch) -> N
         )
     assert exc.value.phase == "research"
     assert "Research failed" in str(exc.value)
+
+
+def test_run_planning_research_artifact_write_failure_wraps_as_research_error(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A write_artifact() failure for research_packet.md is attributed to research
+    too (not left to surface unattributed / under "planning"), since it happens
+    inside the same try/except as the ResearchAgent.run() call."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.pipeline._common as common_mod
+    from agents.blogging.blog_research_agent.models import ResearchAgentOutput, ResearchBriefInput
+    from agents.blogging.shared.errors import ResearchError
+
+    class _FakeResearchAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def run(self, _brief):
+            return ResearchAgentOutput(query_plan=[], references=[], compiled_document="doc")
+
+    def boom_write_artifact(*_a, **_kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(v2, "ResearchAgent", _FakeResearchAgent)
+    # write_artifact is a direct top-level import in _common.py (not a deferred
+    # v2-shim lookup), so it must be patched on the defining module.
+    monkeypatch.setattr(common_mod, "write_artifact", boom_write_artifact)
+
+    with pytest.raises(ResearchError) as exc:
+        v2.run_planning(
+            ResearchBriefInput(brief="b", max_results=5),
+            work_dir=tmp_path / "wd",
+            llm_client=object(),
+            length_policy=None,
+            series_context=None,
+            job_updater=None,
+        )
+    assert exc.value.phase == "research"
 
 
 @pytest.mark.parametrize("err_cls_name", ["LLMRateLimitError", "LLMTemporaryError"])

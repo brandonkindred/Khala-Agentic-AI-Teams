@@ -174,6 +174,8 @@ class ResearchAgent(_BlogAgentBase):
                         f"Running web search {i + 1}/{n}...", 0.15 + 0.20 * (i + 1) / max(1, n)
                     ),
                 )
+                if self.cache:
+                    self.cache.save_checkpoint(brief_input, "candidates", candidates=candidates)
             _report("Fetching and reading web pages...", 0.38)
 
             # Step 4: Fetch documents
