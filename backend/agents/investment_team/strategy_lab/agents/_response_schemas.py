@@ -147,7 +147,20 @@ class _ZeroTradeRepairWire(BaseModel):
     never emitted by the LLM).
     """
 
-    root_cause_category: str
+    # Mirrors ``models.ZeroTradeCategory``. Kept local here so the schema
+    # module stays decoupled from the heavier models module — same rationale
+    # as ``risk_limits`` in ``_DesignSpecWire`` above. Keep this literal's
+    # members in sync with ``models.ZeroTradeCategory``; a test asserts the
+    # two stay equal.
+    root_cause_category: Literal[
+        "NO_ORDERS_EMITTED",
+        "ALL_ENTRIES_RISK_CAPPED",
+        "ONLY_WARMUP_ORDERS",
+        "ORDERS_REJECTED",
+        "ORDERS_UNFILLED",
+        "ENTRY_WITH_NO_EXIT",
+        "UNKNOWN_ZERO_TRADE_PATH",
+    ]
     evidence: str = ""
     code_issue: Optional[str] = None
     strategy_rule_issue: Optional[str] = None
