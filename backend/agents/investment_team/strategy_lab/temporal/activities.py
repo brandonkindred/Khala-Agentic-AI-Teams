@@ -1526,6 +1526,21 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+_SIGNAL_BRIEF_HEARTBEAT_INTERVAL_S = 20.0
+"""How often the background heartbeat beats during signal-brief synthesis.
+
+``_compute_signal_brief_snapshot`` makes up to ``len(PROMPT_ASSET_CLASSES)``
+LLM calls serially, one per allowed category with a prior record, each
+individually bounded by the configured LLM timeout (default 60 minutes) —
+their aggregate duration isn't itself bounded by a fixed ceiling. Rather than
+guess a ``start_to_close_timeout`` large enough for every combination of
+per-call latencies, this activity heartbeats like ``run_design_attempt_activity``
+does: the workflow's ``heartbeat_timeout`` (``workflows.py``'s
+``_SIGNAL_BRIEF_HEARTBEAT_TIMEOUT``) catches genuine staleness quickly, while
+``start_to_close_timeout`` only needs to bound the true worst case generously.
+"""
+
+
 @activity.defn(name="strategy_lab_compute_signal_brief")
 def compute_signal_brief_activity(params: Any) -> Dict[str, Any]:
     """Build one per-batch signal brief per allowed asset category.
@@ -1550,7 +1565,9 @@ def compute_signal_brief_activity(params: Any) -> Dict[str, Any]:
         ``investment_team.strategy_lab.orchestrator_api._compute_signal_brief_snapshot``
         (façade over ``api.main``; fail-open — never raises; returns a
         skipped/degraded marker instead), so this activity likewise only raises
-        ``ApplicationError`` on a genuinely unexpected exception.
+        ``ApplicationError`` on a genuinely unexpected exception. Heartbeats every
+        ``_SIGNAL_BRIEF_HEARTBEAT_INTERVAL_S`` seconds for the duration of the
+        delegate call — see that constant's docstring.
     """
     from investment_team.strategy_lab.orchestrator_api import _compute_signal_brief_snapshot
 
@@ -1560,7 +1577,15 @@ def compute_signal_brief_activity(params: Any) -> Dict[str, Any]:
         else:
             benchmark_symbol = params["benchmark_symbol"]
             exclude_asset_classes = params.get("exclude_asset_classes")
-        briefs, storage = _compute_signal_brief_snapshot(benchmark_symbol, exclude_asset_classes)
+        with BackgroundHeartbeat(
+            activity.heartbeat,
+            _SIGNAL_BRIEF_HEARTBEAT_INTERVAL_S,
+            copy_context=True,
+            name="strategy-lab-signal-brief-hb",
+        ):
+            briefs, storage = _compute_signal_brief_snapshot(
+                benchmark_symbol, exclude_asset_classes
+            )
     except Exception as exc:  # noqa: BLE001
         raise _map_exception_to_application_error(exc) from exc
     return {

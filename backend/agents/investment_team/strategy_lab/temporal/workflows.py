@@ -92,16 +92,22 @@ _ACTIVITY_TIMEOUT = timedelta(minutes=10)
 # needs a far wider ceiling than a single LLM/gate/persist activity.
 _DESIGN_ATTEMPT_TIMEOUT = timedelta(hours=2)
 # compute_signal_brief_activity runs one LLM call per allowed asset category
-# with a prior record, serially (up to 5 -- see PROMPT_ASSET_CLASSES),
-# each individually bounded by the configured LLM timeout (default 60
-# minutes, llm_service.config.resolve_timeout). _ACTIVITY_TIMEOUT's 10
-# minutes was sized for this activity's pre-per-category-loop single call
-# and is no longer enough headroom for the serial worst case -- an activity
-# timeout here would retry the whole activity, re-paying for already-
-# completed calls. Not sized to the full 5x60min extreme (an unrealistic
-# combination that would already indicate a systemic failure), but wide
-# enough for realistic per-call latency with real margin.
-_SIGNAL_BRIEF_ACTIVITY_TIMEOUT = timedelta(hours=1)
+# with a prior record, serially (up to 5 -- see PROMPT_ASSET_CLASSES), each
+# individually bounded by the configured LLM timeout (default 60 minutes,
+# llm_service.config.resolve_timeout). Their aggregate duration has no fixed
+# ceiling -- a start_to_close_timeout sized for "typical" per-call latency
+# can still be blown by two categories both running long, without needing
+# the full 5x60min extreme. Rather than guess another constant, the activity
+# now heartbeats (activities.py's BackgroundHeartbeat, see
+# _SIGNAL_BRIEF_HEARTBEAT_INTERVAL_S there) so a stalled call is caught by
+# the heartbeat deadline below quickly, and start_to_close only needs to
+# bound the true worst case generously rather than tightly.
+_SIGNAL_BRIEF_ACTIVITY_TIMEOUT = timedelta(hours=6)
+# Server-enforced liveness deadline for compute_signal_brief_activity's
+# heartbeat. Sized generously relative to _SIGNAL_BRIEF_HEARTBEAT_INTERVAL_S
+# (activities.py) so a missed heartbeat window is a real liveness problem,
+# not a slow-but-healthy single LLM call.
+_SIGNAL_BRIEF_HEARTBEAT_TIMEOUT = timedelta(seconds=90)
 # Server-enforced liveness deadline for the design-attempt activity's
 # heartbeat (activities.py wraps the attempt in a fixed-interval
 # BackgroundHeartbeat, decoupled from ``emit`` checkpoint cadence -- see
@@ -148,7 +154,8 @@ async def _exec(
         activity expects, or ``None`` for a no-argument activity.
         ``heartbeat_timeout`` is ``None`` (the default -- no heartbeat
         deadline, matching every non-heartbeating activity) unless ``fn``
-        heartbeats itself (currently only ``run_design_attempt_activity``).
+        heartbeats itself (currently ``run_design_attempt_activity`` and
+        ``compute_signal_brief_activity``).
     Postconditions:
         Returns the activity's result, retried per ``_ACTIVITY_RETRY``.
     """
@@ -659,6 +666,7 @@ class StrategyLabBatchWorkflow:
                     "exclude_asset_classes": exclude_asset_classes,
                 },
                 timeout=_SIGNAL_BRIEF_ACTIVITY_TIMEOUT,
+                heartbeat_timeout=_SIGNAL_BRIEF_HEARTBEAT_TIMEOUT,
             )
             signal_briefs = brief.get("signal_briefs")
             signal_brief_storage = brief.get("signal_brief_storage")
