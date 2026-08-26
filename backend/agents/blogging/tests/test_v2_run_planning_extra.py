@@ -31,6 +31,22 @@ def _make_planning_result(iterations: int = 1, critic_report: dict | None = None
     )
 
 
+def _patch_planning_collaborators(monkeypatch, v2, ppr, *, critic_agent=None):
+    """Patch run_planning's non-claims collaborators shared by the allowed-claims tests."""
+
+    class _FakeAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def plan_content(self, *_a, **_kw):
+            return ppr
+
+    monkeypatch.setattr(v2, "BlogWriterAgent", _FakeAgent)
+    monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "brand")
+    monkeypatch.setattr(v2, "load_style_file", lambda _p: "style")
+    monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: critic_agent)
+
+
 def test_run_planning_writes_artifacts_and_returns_result(monkeypatch, tmp_path: Path) -> None:
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.blog_research_agent.models import ResearchBriefInput
@@ -91,17 +107,7 @@ def test_run_planning_writes_allowed_claims_with_extracted_claims(
         captured["topic"] = topic
         return populated
 
-    class _FakeAgent:
-        def __init__(self, **_kw):
-            pass
-
-        def plan_content(self, *_a, **_kw):
-            return ppr
-
-    monkeypatch.setattr(v2, "BlogWriterAgent", _FakeAgent)
-    monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "brand")
-    monkeypatch.setattr(v2, "load_style_file", lambda _p: "style")
-    monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: None)
+    _patch_planning_collaborators(monkeypatch, v2, ppr)
     monkeypatch.setattr(v2, "extract_allowed_claims", _fake_extract)
 
     work_dir = tmp_path / "wd"
@@ -136,17 +142,7 @@ def test_run_planning_writes_allowed_claims_with_zero_claims(monkeypatch, tmp_pa
 
     ppr = _make_planning_result(critic_report=None)
 
-    class _FakeAgent:
-        def __init__(self, **_kw):
-            pass
-
-        def plan_content(self, *_a, **_kw):
-            return ppr
-
-    monkeypatch.setattr(v2, "BlogWriterAgent", _FakeAgent)
-    monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "brand")
-    monkeypatch.setattr(v2, "load_style_file", lambda _p: "style")
-    monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: None)
+    _patch_planning_collaborators(monkeypatch, v2, ppr)
     monkeypatch.setattr(
         v2, "extract_allowed_claims", lambda *_a, **_kw: AllowedClaims(topic="b", claims=[])
     )
