@@ -1,9 +1,9 @@
-"""Tests for the shared call_json_with_retry() helper."""
+"""Tests for the shared call_json_with_retry() and run_json_gate() helpers."""
 
 from __future__ import annotations
 
 import pytest
-from agents.blogging.shared import call_json_with_retry
+from agents.blogging.shared import call_json_with_retry, run_json_gate
 from agents.blogging.shared import json_retry as json_retry_module
 
 from llm_service import LLMJsonParseError, LLMRateLimitError, LLMTemporaryError
@@ -232,3 +232,122 @@ def test_expected_keys_threaded_through_to_extract_json_from_response(monkeypatc
     factory = _FakeAgentFactory(["irrelevant"])
     call_json_with_retry(factory, "prompt", expected_keys=["required_key"])
     assert seen["expected_keys"] == frozenset({"required_key"})
+
+
+# ---------------------------------------------------------------------------
+# run_json_gate()
+# ---------------------------------------------------------------------------
+
+
+class _FakeStrandsAgent:
+    """Drop-in for strands.Agent's shape: ``Agent(model=..., system_prompt=...)(prompt)``.
+
+    Shares ``calls``/``responses`` with the owning factory (see
+    ``_FakeAgentFactory`` above) so successive agents built by
+    ``fresh_agent_per_attempt`` keep draining the same response queue.
+    """
+
+    def __init__(self, model, system_prompt="", *, calls, responses):
+        self.model = model
+        self.system_prompt = system_prompt
+        self.calls = calls
+        self.responses = responses
+
+    def __call__(self, prompt):
+        self.calls.append(prompt)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+class _FakeStrandsAgentFactory:
+    """Callable matching ``strands.Agent(model, system_prompt=...)``, for patching json_retry's Agent."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.agents: list[_FakeStrandsAgent] = []
+
+    def __call__(self, model, system_prompt=""):
+        agent = _FakeStrandsAgent(model, system_prompt, calls=[], responses=self.responses)
+        self.agents.append(agent)
+        return agent
+
+
+def test_run_json_gate_success_on_first_attempt(monkeypatch):
+    """A well-formed JSON response returns immediately, building the Agent from model/system_prompt."""
+    factory = _FakeStrandsAgentFactory(['{"ok": true}'])
+    monkeypatch.setattr(json_retry_module, "Agent", factory)
+    data = run_json_gate("a-model", "a system prompt", "prompt")
+    assert data == {"ok": True}
+    assert factory.agents[0].model == "a-model"
+    assert factory.agents[0].system_prompt == "a system prompt"
+
+
+def test_run_json_gate_exhausted_uses_fallback_builder(monkeypatch):
+    """When on_exhausted/on_unexpected_error are omitted, fallback_builder covers both."""
+    factory = _FakeStrandsAgentFactory(["not json", "still not json"])
+    monkeypatch.setattr(json_retry_module, "Agent", factory)
+    fallback = {"fallback": True}
+    data = run_json_gate(
+        "model", "system", "prompt", max_attempts=2, fallback_builder=lambda e: fallback
+    )
+    assert data is fallback
+
+
+def test_run_json_gate_unexpected_error_uses_fallback_builder(monkeypatch):
+    """A non-transient, non-JSON exception is handled by fallback_builder too."""
+    factory = _FakeStrandsAgentFactory([RuntimeError("boom")])
+    monkeypatch.setattr(json_retry_module, "Agent", factory)
+    fallback = {"fallback": True}
+    data = run_json_gate("model", "system", "prompt", fallback_builder=lambda e: fallback)
+    assert data is fallback
+
+
+def test_run_json_gate_explicit_hooks_override_fallback_builder_independently(monkeypatch):
+    """Explicit on_exhausted/on_unexpected_error win over fallback_builder, and may differ."""
+    factory = _FakeStrandsAgentFactory(["not json", "not json either"])
+    monkeypatch.setattr(json_retry_module, "Agent", factory)
+    data = run_json_gate(
+        "model",
+        "system",
+        "prompt",
+        max_attempts=2,
+        fallback_builder=lambda e: {"should": "not be used"},
+        on_exhausted=lambda e: {"exhausted": True},
+        on_unexpected_error=lambda e: {"unexpected": True},
+    )
+    assert data == {"exhausted": True}
+
+
+def test_run_json_gate_event_loop_exception_unwraps_transient(monkeypatch):
+    """The standard EventLoopException unwrap is applied without a caller-supplied hook."""
+    from strands.types.exceptions import EventLoopException
+
+    cause = LLMTemporaryError("temporary")
+    factory = _FakeStrandsAgentFactory([EventLoopException(cause)])
+    monkeypatch.setattr(json_retry_module, "Agent", factory)
+    with pytest.raises(LLMTemporaryError) as exc_info:
+        run_json_gate("model", "system", "prompt")
+    assert exc_info.value is cause
+
+
+def test_run_json_gate_fresh_agent_per_attempt_builds_a_new_agent_each_attempt(monkeypatch):
+    """fresh_agent_per_attempt=True is threaded through to call_json_with_retry."""
+    factory = _FakeStrandsAgentFactory(["not json", '{"ok": true}'])
+    monkeypatch.setattr(json_retry_module, "Agent", factory)
+    data = run_json_gate("model", "system", "prompt", max_attempts=2, fresh_agent_per_attempt=True)
+    assert data == {"ok": True}
+    assert len(factory.agents) == 2
+
+
+def test_run_json_gate_agent_construction_failure_uses_fallback_builder(monkeypatch):
+    """A raise from Agent(...) construction is classified like an invoke-time unexpected error."""
+
+    def boom_ctor(model, system_prompt=""):
+        raise RuntimeError("rejected model config")
+
+    monkeypatch.setattr(json_retry_module, "Agent", boom_ctor)
+    fallback = {"fallback": True}
+    data = run_json_gate("model", "system", "prompt", fallback_builder=lambda e: fallback)
+    assert data is fallback

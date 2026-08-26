@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, get_args
 
 from pydantic import BaseModel, Field
 
@@ -261,14 +261,10 @@ def _coerce_report(
     through to generic refinement on a no-op report.
     """
     raw_category = parsed.get("root_cause_category")
-    valid_categories = {
-        "NO_ORDERS_EMITTED",
-        "ONLY_WARMUP_ORDERS",
-        "ORDERS_REJECTED",
-        "ORDERS_UNFILLED",
-        "ENTRY_WITH_NO_EXIT",
-        "UNKNOWN_ZERO_TRADE_PATH",
-    }
+    # Derived from the Literal (not hand-copied) so this set can never drift
+    # from `models.ZeroTradeCategory` — mirrors the `_VALID_SOURCES` idiom in
+    # `quality_gates/code_conformance/ast_helpers.py`.
+    valid_categories = frozenset(get_args(ZeroTradeCategory))
     category = raw_category if raw_category in valid_categories else fallback_category
 
     proposed_code_raw = parsed.get("proposed_code")
