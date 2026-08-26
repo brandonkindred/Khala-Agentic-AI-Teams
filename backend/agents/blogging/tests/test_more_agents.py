@@ -26,8 +26,8 @@ def test_compliance_fallback_report() -> None:
 
 def test_compliance_run_with_no_validator(monkeypatch, tmp_path) -> None:
     """No validator_report → 'No validator report available.' branch."""
-    from agents.blogging.blog_compliance_agent import agent as agent_mod
     from agents.blogging.blog_compliance_agent.agent import BlogComplianceAgent
+    from agents.blogging.shared import json_retry as agent_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -45,8 +45,8 @@ def test_compliance_run_with_no_validator(monkeypatch, tmp_path) -> None:
 
 
 def test_compliance_run_with_validator_summary(monkeypatch, tmp_path) -> None:
-    from agents.blogging.blog_compliance_agent import agent as agent_mod
     from agents.blogging.blog_compliance_agent.agent import BlogComplianceAgent
+    from agents.blogging.shared import json_retry as agent_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -78,8 +78,8 @@ def test_compliance_run_with_validator_summary(monkeypatch, tmp_path) -> None:
 
 def test_compliance_run_fallback_on_persistent_parse_failure(monkeypatch, tmp_path) -> None:
     """When JSON parse fails twice in a round, fallback report is returned."""
-    from agents.blogging.blog_compliance_agent import agent as agent_mod
     from agents.blogging.blog_compliance_agent.agent import BlogComplianceAgent
+    from agents.blogging.shared import json_retry as agent_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -97,8 +97,8 @@ def test_compliance_run_fallback_on_persistent_parse_failure(monkeypatch, tmp_pa
 
 def test_compliance_run_with_exception_fallback(monkeypatch, tmp_path) -> None:
     """A non-transient, non-JSON exception falls back to a fail-closed report (no retry)."""
-    from agents.blogging.blog_compliance_agent import agent as agent_mod
     from agents.blogging.blog_compliance_agent.agent import BlogComplianceAgent
+    from agents.blogging.shared import json_retry as agent_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -116,8 +116,8 @@ def test_compliance_run_with_exception_fallback(monkeypatch, tmp_path) -> None:
 @pytest.mark.parametrize("kind", ["rate_limit", "temporary"])
 def test_compliance_run_transient_error_reraises(monkeypatch, tmp_path, kind) -> None:
     """A transient LLM-transport error re-raises (delegated to Temporal), never fallback."""
-    from agents.blogging.blog_compliance_agent import agent as agent_mod
     from agents.blogging.blog_compliance_agent.agent import BlogComplianceAgent
+    from agents.blogging.shared import json_retry as agent_mod
 
     from llm_service import LLMRateLimitError, LLMTemporaryError
 
@@ -140,8 +140,8 @@ def test_compliance_run_transient_error_reraises(monkeypatch, tmp_path, kind) ->
 
 def test_compliance_status_normalization(monkeypatch, tmp_path) -> None:
     """Unknown status string → coerced to FAIL."""
-    from agents.blogging.blog_compliance_agent import agent as agent_mod
     from agents.blogging.blog_compliance_agent.agent import BlogComplianceAgent
+    from agents.blogging.shared import json_retry as agent_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -163,8 +163,8 @@ def test_compliance_status_normalization(monkeypatch, tmp_path) -> None:
 
 def test_run_compliance_from_work_dir(monkeypatch, tmp_path) -> None:
     """Pull draft + validator_report from disk and run agent."""
-    from agents.blogging.blog_compliance_agent import agent as agent_mod
     from agents.blogging.blog_compliance_agent.agent import run_compliance_from_work_dir
+    from agents.blogging.shared import json_retry as agent_mod
 
     (tmp_path / "final.md").write_text("# Draft\nBody.")
     import json as json_mod
@@ -190,8 +190,8 @@ def test_run_compliance_from_work_dir(monkeypatch, tmp_path) -> None:
 
 def test_run_compliance_from_work_dir_falls_back_to_default_brand(monkeypatch, tmp_path) -> None:
     """When brand_spec_path doesn't exist on disk, falls back to docs/brand_spec_prompt.md."""
-    from agents.blogging.blog_compliance_agent import agent as agent_mod
     from agents.blogging.blog_compliance_agent.agent import run_compliance_from_work_dir
+    from agents.blogging.shared import json_retry as agent_mod
 
     (tmp_path / "final.md").write_text("# Draft\nBody.")
 
