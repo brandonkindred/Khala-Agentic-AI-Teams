@@ -1429,6 +1429,7 @@ class SpecReadinessGate(GateResultsMixin):
     # thing standing between the mismatch and a readiness-clean spec.
     # ------------------------------------------------------------------
     def _check_asset_category_pin(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
+        assert isinstance(ctx.spec, StrategySpec)
         out: List[QualityGateResult] = []
         pinned = ctx.pinned_asset_class
         if pinned is None:

@@ -268,15 +268,19 @@ def build_spec_from_dict(
             strategy_dict.get("target_symbols") or [], allowed_classes=allowed_classes
         )
         raw_asset_class = inferred or default_asset_class
+    # ``normalize_asset_class`` is total — it never raises, always returning a
+    # string (defaulting an unrecognized value to ``"stocks"``) — so computing
+    # it here first is safe regardless of what the strict check below decides.
     asset_class = normalize_asset_class(raw_asset_class)
     # A missing/blank asset_class is the documented default, which
     # ``normalize_asset_class`` already produced above — it is not an unsupported
     # class, so it must not trip the strict validator and force a redesign. Only a
     # genuinely-named-but-unknown class (e.g. ``bonds``) routes to redesign. The
-    # strict check runs on the RAW value so an unknown class is caught before
-    # ``normalize_asset_class`` flattens it to ``stocks``; checking the coerced
-    # value would let ``bonds`` pass as ``stocks`` and be backtested under the
-    # wrong universe/gates.
+    # strict check below compares against ``raw_asset_class`` (not the coerced
+    # ``asset_class`` computed above) so an unknown class is still caught even
+    # though ``normalize_asset_class`` already flattened it to ``"stocks"`` —
+    # checking the coerced value instead would let ``bonds`` pass as ``stocks``
+    # and be backtested under the wrong universe/gates.
     unsupported_class = False
     if str(raw_asset_class or "").strip():
         try:

@@ -32,6 +32,7 @@ from investment_team.strategy_lab.spec_dsl import (
     Predicate,
     SignalExitRule,
 )
+from investment_team.strategy_lab_context import PROMPT_ASSET_CLASSES
 from investment_team.tests.conftest import stub_design_loop, varying_code_refine
 from investment_team.tests.test_strategy_lab_alignment import (
     _aligned_check_result,
@@ -41,6 +42,12 @@ from investment_team.tests.test_strategy_lab_alignment import (
 from investment_team.trading_service.modes.sandbox_compat import StrategyRunResult
 
 pytestmark = pytest.mark.strategy_lab_integration
+
+# Every category but stocks, derived from PROMPT_ASSET_CLASSES rather than
+# hardcoded -- if a new asset class is ever added, it stays excluded here
+# too, instead of silently becoming eligible for these tests' random pin
+# and reintroducing the non-determinism this exclusion exists to prevent.
+_EXCLUDE_ALL_BUT_STOCKS = [c for c in PROMPT_ASSET_CLASSES if c != "stocks"]
 
 
 @pytest.fixture(autouse=True)
@@ -781,7 +788,7 @@ def test_design_attempt_happy_path_preserves_spec_code_trades_metrics_gates(
         # deterministic: without a restriction the design loop draws a
         # category at random and the payload (which declares none) inherits
         # whichever one it drew.
-        exclude_asset_classes=["crypto", "forex", "futures", "commodities"],
+        exclude_asset_classes=_EXCLUDE_ALL_BUT_STOCKS,
         directives=[],
     )
 
@@ -843,7 +850,7 @@ def test_design_attempt_no_market_data_preserves_failed_record_outputs(
         # deterministic: without a restriction the design loop draws a
         # category at random and the payload (which declares none) inherits
         # whichever one it drew.
-        exclude_asset_classes=["crypto", "forex", "futures", "commodities"],
+        exclude_asset_classes=_EXCLUDE_ALL_BUT_STOCKS,
         directives=[],
     )
 
@@ -911,7 +918,7 @@ def test_design_attempt_design_not_ready_preserves_short_circuit_record(
         # deterministic: without a restriction the design loop draws a
         # category at random and the payload (which declares none) inherits
         # whichever one it drew.
-        exclude_asset_classes=["crypto", "forex", "futures", "commodities"],
+        exclude_asset_classes=_EXCLUDE_ALL_BUT_STOCKS,
         directives=[],
     )
 
