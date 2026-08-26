@@ -30,17 +30,78 @@ from typing import Any, Dict
 
 import pytest
 
-from investment_team.tests.test_strategy_lab_temporal_workflows import (
-    _WF_CONFIG,
-    _config_dict,
-    _record_outcome,
-    _reentry_outcome,
-)
+
+def _config_dict(**overrides: Any) -> Dict[str, Any]:
+    """Local copy of ``test_strategy_lab_temporal_workflows.py``'s helper of
+    the same name -- kept file-local rather than imported so this module has
+    no dependency on that file's private (underscore-prefixed) internals.
+    """
+    base = {"start_date": "2023-01-01", "end_date": "2023-12-31"}
+    base.update(overrides)
+    return base
+
+
+_WF_CONFIG = {
+    "design_review_rounds": 20,
+    "design_review_stall_rounds": 3,
+    "mechanical_repair_enabled": True,
+    "code_conformance_retries": 2,
+    "design_max_llm_calls": 120,
+    "regime_summary_enabled": False,
+    "max_design_reentries": 2,
+}
+
+
+def _reentry_outcome(**overrides: Any) -> Dict[str, Any]:
+    """Local copy of ``test_strategy_lab_temporal_workflows.py``'s helper of
+    the same name -- see ``_config_dict``'s docstring for why this module
+    keeps its own copy instead of importing it.
+    """
+    base = {
+        "kind": "reentry",
+        "evidence": "always fails",
+        "last_spec": {"strategy_id": "strat-1"},
+        "last_code": "code",
+        "failure_phase": "evaluation",
+        "design_context": {"rounds": 1, "critiques": [], "stop_reason": "x", "loop_telemetry": {}},
+        "convergence_tracker_state": {"trial_count": 0},
+        "gate_results": [],
+        "budget_calls": 0,
+        "drift": {"spec_history": [], "code_history": [], "gate_timeline": []},
+    }
+    base.update(overrides)
+    return base
+
+
+def _record_outcome(**overrides: Any) -> Dict[str, Any]:
+    """Local copy of ``test_strategy_lab_temporal_workflows.py``'s helper of
+    the same name -- see ``_config_dict``'s docstring for why this module
+    keeps its own copy instead of importing it.
+    """
+    base = {
+        "kind": "record",
+        "record": {"lab_record_id": "rec-1"},
+        "convergence_tracker_state": {"trial_count": 1},
+        "gate_results": [],
+        "budget_calls": 3,
+        "drift": {"spec_history": [], "code_history": [], "gate_timeline": []},
+    }
+    base.update(overrides)
+    return base
 
 
 @contextlib.asynccontextmanager
 async def _workflow_environment():
     """Start a time-skipping ``WorkflowEnvironment`` with no worker attached.
+
+    Duplicated from ``test_coding_team_temporal_workflow.py``'s helper of the
+    same name rather than imported from a shared module: this repo's
+    Temporal tests each build their own small local harness rather than
+    sharing one across test modules (see
+    ``test_strategy_lab_temporal_cancellation.py`` and
+    ``test_strategy_lab_checkpoint_crash_resumption.py``, the two other
+    ``investment_team`` test files with an identical local copy of this same
+    helper -- the latter's docstring states the convention explicitly).
 
     Preconditions:
         - Caller is an async test that will drive the yielded ``env`` and any
@@ -48,9 +109,8 @@ async def _workflow_environment():
     Postconditions:
         - Yields a started ``WorkflowEnvironment``. Skips the test (rather
           than failing) when the ephemeral Temporal test-server binary
-          cannot be downloaded — same egress caveat as
-          ``test_coding_team_temporal_workflow.py``'s helper of the same
-          name. The environment is shut down on exit.
+          cannot be downloaded — same egress caveat as every other copy of
+          this helper. The environment is shut down on exit.
     """
     from temporalio.testing import WorkflowEnvironment
 
@@ -71,8 +131,7 @@ def _make_fake_activities(
     Preconditions:
         - ``design_attempt_outcomes`` is non-empty; each entry is a full
           ``run_design_attempt_activity``-shaped result dict (see
-          ``_reentry_outcome``/``_record_outcome``), consumed in order, one
-          per call, until exhausted.
+          ``_reentry_outcome``/``_record_outcome``).
         - ``config_overrides`` supplies ``_WF_CONFIG``-shaped overrides (e.g.
           ``max_design_reentries``) for the fake config-resolution activity.
     Postconditions:
@@ -83,6 +142,10 @@ def _make_fake_activities(
           ``strategy_lab_build_short_circuit_record`` — the three activities
           ``StrategyLabCycleWorkflow.run`` can reach with
           ``regime_summary_enabled=False`` and no market-data-skip outcome.
+        - ``strategy_lab_run_design_attempt`` returns ``design_attempt_outcomes``
+          in order for the first ``len(design_attempt_outcomes)`` calls, then
+          repeats the final outcome for any further call (it does not raise
+          or stop once exhausted).
     """
     from temporalio import activity
 
