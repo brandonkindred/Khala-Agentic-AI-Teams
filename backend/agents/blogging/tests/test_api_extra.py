@@ -10,7 +10,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import pytest
 from fastapi.testclient import TestClient
 
 from ._api_test_utils import api_main as _api_main
@@ -307,11 +306,14 @@ def test_run_pipeline_with_tracking_catches_delegate_exception(
     assert "boom" in job["error"]
 
 
-def test_run_pipeline_with_tracking_reraises_cancelled_error(
+def test_run_pipeline_with_tracking_terminalizes_cancelled_error(
     client: TestClient, monkeypatch
 ) -> None:
-    """A Temporal CancelledError escaping the delegated call propagates instead
-    of being swallowed and turned into a failed job (the #7313 gap)."""
+    """A Temporal CancelledError escaping the delegated call is terminalized as a
+    cancelled job here rather than re-raised: the thread-mode bounded worker pool
+    in job_workers.py has no Temporal runtime downstream to interpret a raw
+    CancelledError, so letting it propagate would hit the worker's generic crash
+    handler and mis-record the job as failed instead (the #7313 gap)."""
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
     from temporalio.exceptions import CancelledError
@@ -320,11 +322,10 @@ def test_run_pipeline_with_tracking_reraises_cancelled_error(
 
     job_id = _create_job()
     req = _api_main.FullPipelineRequest(brief="hi")
-    with pytest.raises(CancelledError):
-        _api_main._run_pipeline_with_tracking(job_id, req)
+    _api_main._run_pipeline_with_tracking(job_id, req)
 
     job = bjs.get_blog_job(job_id)
-    assert job["status"] != "failed"
+    assert job["status"] == "cancelled"
 
 
 def test_run_pipeline_with_tracking_delegates_request_dict(

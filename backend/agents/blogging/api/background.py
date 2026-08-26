@@ -122,14 +122,21 @@ def _run_pipeline_with_tracking(job_id: str, request: FullPipelineRequest) -> No
           ``FullPipelineRequest``.
     Postconditions:
         - Delegates to ``run_blog_full_pipeline_job``, which owns all job-store
-          updates and terminal SSE events. Re-raises a Temporal-native
-          ``CancelledError`` untouched (Temporal owns cancellation handling);
-          any other exception escaping the delegated call is caught, logged,
-          and turned into a failed job-store entry plus a terminal ``error``
-          event.
+          updates and terminal SSE events. This is the thread-mode boundary —
+          unlike the legacy Temporal activity call site, no Temporal runtime is
+          waiting upstream to interpret a raw ``CancelledError`` — so a
+          Temporal-native ``CancelledError`` escaping the delegated call is
+          caught here and terminalized as a cancelled job (never re-raised: the
+          bounded async worker pool in ``job_workers.py`` would otherwise catch
+          it with its generic crash handler and mis-record it as failed). Any
+          other exception escaping the delegated call is caught, logged, and
+          turned into a failed job-store entry plus a terminal ``error`` event.
     """
     from agents.blogging.api import main as _main
-    from agents.blogging.shared.run_pipeline_job import run_blog_full_pipeline_job
+    from agents.blogging.shared.run_pipeline_job import (
+        mark_job_cancelled,
+        run_blog_full_pipeline_job,
+    )
     from temporalio.exceptions import CancelledError
 
     if _main._job_already_terminal(job_id):
@@ -143,7 +150,8 @@ def _run_pipeline_with_tracking(job_id: str, request: FullPipelineRequest) -> No
         request_dict["audience"] = audience_str or request_dict.get("audience")
         run_blog_full_pipeline_job(job_id, request_dict)
     except CancelledError:
-        raise
+        logger.info("Pipeline cancelled for job %s", job_id)
+        mark_job_cancelled(job_id)
     except Exception as e:
         logger.exception("Pipeline failed for job %s", job_id)
         if _main.fail_blog_job is not None:
