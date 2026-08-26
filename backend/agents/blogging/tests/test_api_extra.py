@@ -345,6 +345,34 @@ def test_run_pipeline_with_tracking_delegates_request_dict(
     assert delegated_dict["target_word_count"] == 800
 
 
+def test_run_pipeline_with_tracking_normalizes_structured_audience(
+    client: TestClient, monkeypatch
+) -> None:
+    """A structured ``AudienceDetails`` audience is formatted the same way as the
+    sync and Temporal call sites (``_format_audience``), not re-derived by
+    ``run_blog_full_pipeline_job``'s own ``_normalize_audience`` (which orders and
+    labels fields differently), so results don't depend on which mode ran the job."""
+    from agents.blogging.shared import run_pipeline_job as rpj
+
+    captured: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        rpj,
+        "run_blog_full_pipeline_job",
+        lambda job_id, request_dict: captured.append((job_id, request_dict)),
+    )
+
+    job_id = _create_job()
+    req = _api_main.FullPipelineRequest(
+        brief="hi",
+        audience=_api_main.AudienceDetails(skill_level="expert", profession="developer"),
+    )
+    _api_main._run_pipeline_with_tracking(job_id, req)
+
+    delegated_dict = captured[0][1]
+    assert delegated_dict["audience"] == _api_main._format_audience(req.audience)
+    assert delegated_dict["audience"] == "skill level: expert; profession: developer"
+
+
 # ---------------------------------------------------------------------------
 # Medium stats sync 200
 # ---------------------------------------------------------------------------

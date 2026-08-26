@@ -125,7 +125,10 @@ def _run_pipeline_with_tracking(job_id: str, request: FullPipelineRequest) -> No
         return
 
     try:
-        run_blog_full_pipeline_job(job_id, request.model_dump(mode="json"))
+        request_dict = request.model_dump(mode="json")
+        audience_str = _format_audience(request.audience)
+        request_dict["audience"] = audience_str or request_dict.get("audience")
+        run_blog_full_pipeline_job(job_id, request_dict)
     except Exception as e:
         logger.exception("Pipeline failed for job %s", job_id)
         if _main.fail_blog_job is not None:
