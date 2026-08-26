@@ -26,9 +26,7 @@ from typing import Any, Callable, Optional, Union
 from agents.blogging.shared.agent_base import _BlogAgentBase
 from agents.blogging.shared.artifacts import write_artifact
 from agents.blogging.shared.content_plan import ContentPlan
-from agents.blogging.shared.json_retry import call_json_with_retry
-from strands import Agent
-from strands.types.exceptions import EventLoopException
+from agents.blogging.shared.json_retry import run_json_gate
 
 from .models import PlanCriticReport, PlanViolation
 from .prompts import PLAN_CRITIC_SYSTEM, PLAN_CRITIC_USER_TEMPLATE
@@ -119,24 +117,17 @@ class BlogPlanCriticAgent(_BlogAgentBase):
             'Keys: "status", "approved", "violations", "notes", "rubric_version".'
         )
 
-        def _agent_factory():
-            return Agent(model=self._model, system_prompt=PLAN_CRITIC_SYSTEM)
-
-        def _unwrap(exc: Exception) -> Exception:
-            return exc.original_exception if isinstance(exc, EventLoopException) else exc
-
         def _fallback_dict(exc: Exception) -> dict[str, Any]:
             return _fallback_report(str(exc)).model_dump(mode="json")
 
-        data = call_json_with_retry(
-            _agent_factory,
+        data = run_json_gate(
+            self._model,
+            PLAN_CRITIC_SYSTEM,
             user_prompt + soft_json_instruction,
             max_attempts=2,
             strict_json_suffix=strict_json_suffix,
             fresh_agent_per_attempt=True,
-            unwrap_exception=_unwrap,
-            on_exhausted=_fallback_dict,
-            on_unexpected_error=_fallback_dict,
+            fallback_builder=_fallback_dict,
             logger=logger,
         )
         report = self._coerce_report(data)

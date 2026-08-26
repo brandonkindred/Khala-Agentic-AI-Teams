@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from ._api_test_utils import api_main as _api_main
 from ._api_test_utils import create_job as _create_job
+from .conftest import setup_artifacts_root
 
 # ``api_main``/``app`` load and the ``patched_client``/``client`` fixtures live in
 # ``_api_test_utils`` and ``conftest.py`` — shared across the API test modules.
@@ -222,7 +223,7 @@ def test_run_pipeline_with_tracking_completes(
     ppr, draft, status = _make_pipeline_doubles()
     monkeypatch.setattr(v2, "run_pipeline", lambda *a, **kw: (ppr, draft, status))
 
-    monkeypatch.setattr(_api_main, "RUN_ARTIFACTS_BASE", tmp_path)
+    setup_artifacts_root(monkeypatch, tmp_path)
     job_id = _create_job()
 
     # Build a request
@@ -239,7 +240,7 @@ def test_run_pipeline_with_tracking_planning_error(
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared.errors import PlanningError
 
-    monkeypatch.setattr(_api_main, "RUN_ARTIFACTS_BASE", tmp_path)
+    setup_artifacts_root(monkeypatch, tmp_path)
     monkeypatch.setattr(v2, "run_pipeline", _raise(PlanningError("nope", failure_reason="x")))
 
     job_id = _create_job()
@@ -256,7 +257,7 @@ def test_run_pipeline_with_tracking_unknown_error(
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.shared import blog_job_store as bjs
 
-    monkeypatch.setattr(_api_main, "RUN_ARTIFACTS_BASE", tmp_path)
+    setup_artifacts_root(monkeypatch, tmp_path)
     monkeypatch.setattr(v2, "run_pipeline", _raise(RuntimeError("kaboom")))
 
     job_id = _create_job()
@@ -264,6 +265,112 @@ def test_run_pipeline_with_tracking_unknown_error(
     _api_main._run_pipeline_with_tracking(job_id, req)
     job = bjs.get_blog_job(job_id)
     assert job["status"] == "failed"
+
+
+def test_run_pipeline_with_tracking_skips_already_terminal_job(
+    client: TestClient, monkeypatch
+) -> None:
+    """The already-terminal preflight check still short-circuits ahead of the delegated call."""
+    from agents.blogging.shared import run_pipeline_job as rpj
+
+    called = False
+
+    def _fail_if_called(job_id, request_dict):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(rpj, "run_blog_full_pipeline_job", _fail_if_called)
+
+    job_id = _create_job(status="failed")
+    req = _api_main.FullPipelineRequest(brief="hi")
+    _api_main._run_pipeline_with_tracking(job_id, req)
+
+    assert called is False
+
+
+def test_run_pipeline_with_tracking_catches_delegate_exception(
+    client: TestClient, monkeypatch
+) -> None:
+    """An exception escaping the delegated call still fails the job instead of propagating."""
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import run_pipeline_job as rpj
+
+    monkeypatch.setattr(rpj, "run_blog_full_pipeline_job", _raise(RuntimeError("boom")))
+
+    job_id = _create_job()
+    req = _api_main.FullPipelineRequest(brief="hi")
+    _api_main._run_pipeline_with_tracking(job_id, req)
+
+    job = bjs.get_blog_job(job_id)
+    assert job["status"] == "failed"
+    assert "boom" in job["error"]
+
+
+def test_run_pipeline_with_tracking_delegates_request_dict(
+    client: TestClient, monkeypatch, tmp_path: Path
+) -> None:
+    """The async runner's core call is a delegation to run_blog_full_pipeline_job,
+    with the request handed over as an equivalent ``model_dump(mode="json")`` dict."""
+    from agents.blogging.shared import run_pipeline_job as rpj
+
+    captured: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        rpj,
+        "run_blog_full_pipeline_job",
+        lambda job_id, request_dict: captured.append((job_id, request_dict)),
+    )
+
+    job_id = _create_job()
+    req = _api_main.FullPipelineRequest(
+        brief="Write about caching",
+        title_concept="Cache Me If You Can",
+        audience="backend engineers",
+        tone_or_purpose="informative",
+        max_results=7,
+        run_gates=False,
+        max_rewrite_iterations=2,
+        length_notes="keep it tight",
+        target_word_count=800,
+    )
+    _api_main._run_pipeline_with_tracking(job_id, req)
+
+    assert captured == [(job_id, req.model_dump(mode="json"))]
+    delegated_job_id, delegated_dict = captured[0]
+    assert delegated_job_id == job_id
+    assert delegated_dict["brief"] == "Write about caching"
+    assert delegated_dict["title_concept"] == "Cache Me If You Can"
+    assert delegated_dict["audience"] == "backend engineers"
+    assert delegated_dict["run_gates"] is False
+    assert delegated_dict["max_rewrite_iterations"] == 2
+    assert delegated_dict["target_word_count"] == 800
+
+
+def test_run_pipeline_with_tracking_normalizes_structured_audience(
+    client: TestClient, monkeypatch
+) -> None:
+    """A structured ``AudienceDetails`` audience is formatted the same way as the
+    sync and Temporal call sites (``_format_audience``), not re-derived by
+    ``run_blog_full_pipeline_job``'s own ``_normalize_audience`` (which orders and
+    labels fields differently), so results don't depend on which mode ran the job."""
+    from agents.blogging.shared import run_pipeline_job as rpj
+
+    captured: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        rpj,
+        "run_blog_full_pipeline_job",
+        lambda job_id, request_dict: captured.append((job_id, request_dict)),
+    )
+
+    job_id = _create_job()
+    req = _api_main.FullPipelineRequest(
+        brief="hi",
+        audience=_api_main.AudienceDetails(skill_level="expert", profession="developer"),
+    )
+    _api_main._run_pipeline_with_tracking(job_id, req)
+
+    delegated_dict = captured[0][1]
+    assert delegated_dict["audience"] == _api_main._format_audience(req.audience)
+    assert delegated_dict["audience"] == "profession: developer; skill_level: expert"
 
 
 # ---------------------------------------------------------------------------
