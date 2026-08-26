@@ -11,9 +11,10 @@ change lands in one place instead of silently drifting across call sites.
 
 ``bound_history`` is a third, standalone helper: a bounding policy for
 prior-round history (last N entries verbatim plus a rolling summary of the
-rest). It is not yet wired into ``render_prior_attempts`` or
-``design_review.py``'s ``format_prior_critiques`` — that integration is a
-separate follow-up.
+rest). It is wired into ``render_prior_attempts`` here and, via the shared
+``_DEFAULT_KEEP_LAST_N`` default, into ``design_review.py``'s
+``format_prior_critiques`` — both renderers cap what they emit to the last
+``_DEFAULT_KEEP_LAST_N`` entries plus a rolling summary of anything older.
 
 Invariants:
   * All three helpers are pure — no I/O, no mutation of their arguments.
@@ -35,6 +36,13 @@ from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 # rounds have been dropped).
 _SUMMARY_ENTRY_SNIPPET_CHARS = 60
 _SUMMARY_MAX_CHARS = 240
+
+# Shared default for how many most-recent prior-round entries a prompt
+# renderer keeps verbatim before falling back to ``bound_history``'s rolling
+# summary for anything older. Both ``render_prior_attempts`` (here) and
+# ``design_review.py``'s ``format_prior_critiques`` default to this so the
+# two renderers stay in sync on one tunable knob.
+_DEFAULT_KEEP_LAST_N = 5
 
 
 @dataclass(frozen=True)
@@ -105,22 +113,34 @@ def _snippet(entry: Any) -> str:
     return text
 
 
-def render_prior_attempts(prior_attempts: Optional[List[str]]) -> str:
-    """Render a numbered list of prior-attempt summaries for a prompt.
+def render_prior_attempts(
+    prior_attempts: Optional[List[str]], *, keep_last_n: int = _DEFAULT_KEEP_LAST_N
+) -> str:
+    """Render a numbered list of prior-attempt summaries for a prompt, bounded.
 
     Preconditions: ``prior_attempts`` is ``None`` or a list. Elements are
     only ever interpolated into an f-string, never inspected, so
     non-string elements are tolerated (stringified), not rejected.
+    ``keep_last_n`` is a non-negative ``int`` (see ``bound_history``).
     Postconditions: returns ``"None yet."`` when ``prior_attempts`` is
-    falsy (``None`` or ``[]``); otherwise one line per entry, 1-indexed
-    and in input order, formatted ``"  Round {n}: {entry}"`` and joined
-    with ``"\\n"``.
+    falsy (``None`` or ``[]``). Otherwise, delegates bounding to
+    ``bound_history``: when ``len(prior_attempts) <= keep_last_n`` the
+    output is byte-identical to the unbounded rendering — one line per
+    entry, 1-indexed and in input order, formatted ``"  Round {n}: {entry}"``
+    and joined with ``"\\n"`` — no behavior change on short histories.
+    When ``len(prior_attempts) > keep_last_n``, a leading
+    ``"  {bound_history's rolling summary}"`` line is prepended, followed by
+    the last ``keep_last_n`` entries rendered the same way but numbered by
+    their **absolute** 1-indexed round position (continuing from the
+    summarized rounds), not renumbered from 1.
     """
-    return (
-        "None yet."
-        if not prior_attempts
-        else "\n".join(f"  Round {i + 1}: {a}" for i, a in enumerate(prior_attempts))
-    )
+    if not prior_attempts:
+        return "None yet."
+    bounded = bound_history(prior_attempts, keep_last_n)
+    offset = len(prior_attempts) - len(bounded.kept)
+    lines = [f"  {bounded.summary}"] if bounded.summary else []
+    lines.extend(f"  Round {offset + i + 1}: {a}" for i, a in enumerate(bounded.kept))
+    return "\n".join(lines)
 
 
 def spec_prompt_fields(spec: Any, *, defensive: bool = False) -> Dict[str, str]:

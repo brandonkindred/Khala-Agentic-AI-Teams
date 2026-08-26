@@ -448,8 +448,7 @@ def finalize_sales_pipeline_activity(ctx: dict[str, Any], result: dict[str, Any]
           COMPLETED with the summary attached. Errors propagate unmarked so
           the workflow's IO retry can actually re-attempt the write.
     """
-    from job_service_client import JOB_STATUS_FAILED
-    from sales_team.job_runner import CLEAN_TERMINAL_STATUSES, write_job_completed
+    from sales_team.job_runner import write_job_completed
     from sales_team.models import Prospect
     from sales_team.orchestrator import (
         NO_PROSPECTS_SUMMARY,
@@ -459,26 +458,13 @@ def finalize_sales_pipeline_activity(ctx: dict[str, Any], result: dict[str, Any]
 
     sctx = SalesRunContext.model_validate(ctx)
     job_id = sctx.job_id
+    missing_msg = f"Sales pipeline job {job_id} not found at finalize"
 
-    def _terminal_short_circuit() -> Optional[dict[str, Any]]:
-        status = _job_status(job_id)
-        if status is None:
-            raise RuntimeError(f"Sales pipeline job {job_id} not found at finalize")
-        if status == JOB_STATUS_FAILED:
-            raise ApplicationError(
-                f"Sales pipeline job {job_id} was marked FAILED during the run",
-                non_retryable=True,
-            )
-        if status in CLEAN_TERMINAL_STATUSES:
-            activity.logger.info(
-                "Sales job %s terminal (%s) at finalize; not writing COMPLETED", job_id, status
-            )
-            return {"job_id": job_id}
-        return None
-
-    early = _terminal_short_circuit()
-    if early is not None:
-        return early
+    if (
+        _terminal_guard(job_id, phase="sales_finalize", missing_msg=missing_msg)
+        is _GuardOutcome.STOP
+    ):
+        return {"job_id": job_id}
 
     prospects_raw = result.get("prospects") or []
     if not prospects_raw:
@@ -501,9 +487,11 @@ def finalize_sales_pipeline_activity(ctx: dict[str, Any], result: dict[str, Any]
     final_result = {**result, "summary": summary}
 
     # A cancel can land while we assembled the summary; don't clobber it.
-    early = _terminal_short_circuit()
-    if early is not None:
-        return early
+    if (
+        _terminal_guard(job_id, phase="sales_finalize", missing_msg=missing_msg)
+        is _GuardOutcome.STOP
+    ):
+        return {"job_id": job_id}
 
     write_job_completed(job_id, final_result)
     return {"job_id": job_id}
@@ -608,20 +596,24 @@ def nurture_one_activity(ctx: dict[str, Any], prospect: dict[str, Any]) -> dict[
 
 @activity.defn(name="sales_discovery_one")
 def discovery_one_activity(
-    ctx: dict[str, Any], prospect: dict[str, Any], qual: Optional[dict[str, Any]]
+    ctx: dict[str, Any],
+    prospect: dict[str, Any],
+    qual: Optional[dict[str, Any]],
+    dossier: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """Prepare one prospect's discovery plan (``qual`` may be ``None``).
+    """Prepare one prospect's discovery plan (``qual``/``dossier`` may be ``None``).
 
     Postconditions: see :func:`_stage_one`.
     """
-    from sales_team.models import QualificationScore
+    from sales_team.models import ProspectDossier, QualificationScore
 
     qual_obj = QualificationScore.model_validate(qual) if qual is not None else None
+    dossier_obj = ProspectDossier.model_validate(dossier) if dossier is not None else None
     return _stage_one(
         ctx,
         prospect,
         "sales_discovery_one",
-        lambda orch, p, rc: orch.discovery_one(p, qual_obj, rc),
+        lambda orch, p, rc: orch.discovery_one(p, qual_obj, rc, dossier_obj),
     )
 
 
