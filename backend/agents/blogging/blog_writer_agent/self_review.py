@@ -129,6 +129,7 @@ for _phrase in BANNED_PHRASES:
         _BANNED_PHRASE_PATTERNS.append((_phrase, re.compile(rf"\b{_escaped}\b")))
     else:
         _BANNED_PHRASE_PATTERNS.append((_phrase, re.compile(rf"\b{_escaped}")))
+del _phrase, _escaped
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +147,12 @@ def _split_sentences_for_staccato(para: str) -> list[str]:
         - Mid-sentence abbreviation/decimal periods are not treated as sentence
           boundaries; a real sentence-ending period after an abbreviation
           (next token capitalized, or end of text) is preserved.
+        - Returned sentences are not restored to their original text: wherever
+          an abbreviation/decimal was protected, the sentence contains the
+          placeholder token (e.g. ``egPLACEHOLDER``, ``USPLACEHOLDER``) instead
+          of the original ``e.g.``/``U.S.``/etc. Word counts are preserved
+          (placeholders are single tokens), which is all the caller (staccato
+          word-count detection) relies on; the literal text is not.
     """
     protected = para
     for pattern, token in _ABBREV_PROTECT:
@@ -159,9 +166,10 @@ def _unwrap_llm_cause(exc: BaseException) -> BaseException:
     Preconditions:
         - ``exc`` is the exception caught at an LLM call boundary.
     Postconditions:
-        - If ``exc`` is an ``EventLoopException`` with a non-None ``original_exception``,
-          returns that original exception.
-        - Otherwise returns ``exc`` unchanged.
+        - If ``exc`` is an ``EventLoopException`` whose ``original_exception``
+          is itself a ``BaseException``, returns that original exception.
+        - Otherwise (not an ``EventLoopException``, or its ``original_exception``
+          is ``None`` or not a ``BaseException``) returns ``exc`` unchanged.
     """
     if isinstance(exc, EventLoopException):
         original = getattr(exc, "original_exception", None)
@@ -176,7 +184,10 @@ def _extract_draft_after_marker(raw_response: Optional[str]) -> str:
     first line {\"draft\": 0}, then ---DRAFT---, then the full blog post in Markdown.
     Falls back to scanning the response for extractable JSON (whole-response,
     fenced, or prose-wrapped, via ``extract_json_from_response``) and returning
-    the value of its \"draft\" key.
+    the string value of its \"draft\" key. Returns \"\" if no marker is present
+    and the JSON fallback's \"draft\" value is missing, non-string, or
+    whitespace-only (a number/bool/null/blank-string \"draft\" value is treated
+    the same as no usable draft, not surfaced to the caller).
     """
     if not raw_response or not isinstance(raw_response, str):
         return ""
@@ -412,12 +423,17 @@ def _llm_self_review(draft: str, call_text: CallText) -> str:
           ``(prompt: str, system_prompt: str = "") -> str``.
     Postconditions:
         - On success, returns the reviewed/fixed draft or the original when no issues.
-        - If the response's JSON parses to a value that is not a list of issue
-          dicts (e.g. a top-level object, or salvaged prose residue with no
-          recoverable issues array), returns the original ``draft`` unchanged.
-        - List elements lacking a truthy ``"issue"`` key are discarded before
-          use (whether the list came directly from ``extract_json_from_response``
-          or from the prose-rescan fallback); if none remain, returns the
+        - Three ways the response can resolve to "issues": (1) it parses to a
+          JSON list, used directly; (2) it parses to a genuine top-level JSON
+          object (the model's real "no issues" response), which returns the
+          original ``draft`` unchanged without further rescanning; (3) it
+          parses to anything else (a scalar, a malformed object, or fails to
+          parse as JSON at all), in which case a prose-rescan
+          (``_extract_json_array_from_text``) attempts to salvage an issues
+          array from the raw text, returning the original ``draft`` unchanged
+          only if no array is recoverable that way either.
+        - Whichever path above produces the list, elements lacking a truthy
+          ``"issue"`` key are discarded before use; if none remain, returns the
           original ``draft`` unchanged.
         - On soft-fail (``LLMError`` excluding types re-raised below, or
           ``json.JSONDecodeError`` / ``TypeError`` / ``ValueError`` / ``AttributeError``),
