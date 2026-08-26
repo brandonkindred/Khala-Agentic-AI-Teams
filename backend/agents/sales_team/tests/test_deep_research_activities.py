@@ -126,6 +126,34 @@ def test_prepare_raises_non_retryable_on_invalid_request(fake_job_client):
     assert fake_job_client.get_job("dr-bad")["status"] == "pending"  # no FAILED write
 
 
+@pytest.mark.parametrize(
+    "status", ["missing", "pending", "failed", "cancelled", "interrupted", "completed"]
+)
+def test_prepare_invokes_terminal_guard_for_every_status(monkeypatch, fake_job_client, status):
+    """Prepare must route every status category through the shared
+    ``_terminal_guard`` rather than a hand-rolled inline check."""
+    if status != "missing":
+        fake_job_client.create_job("dr-1", status=status)
+    monkeypatch.setattr("sales_team.outcome_store.load_current_insights", lambda: None)
+
+    calls = []
+    real_guard = dra._terminal_guard
+
+    def spy(job_id, *, phase, missing_msg):
+        calls.append((job_id, phase))
+        return real_guard(job_id, phase=phase, missing_msg=missing_msg)
+
+    monkeypatch.setattr(dra, "_terminal_guard", spy)
+
+    if status in ("missing", "failed"):
+        with pytest.raises((RuntimeError, ApplicationError)):
+            dra.prepare_deep_research_activity("dr-1", _REQUEST)
+    else:
+        dra.prepare_deep_research_activity("dr-1", _REQUEST)
+
+    assert calls == [("dr-1", "deep_research_prepare")]
+
+
 # ---------------------------------------------------------------------------
 # companies
 # ---------------------------------------------------------------------------
