@@ -42,6 +42,18 @@ class _FakeAgentFactory:
         return agent
 
 
+class _Wrapper(Exception):
+    """A minimal stand-in for a framework wrapper like ``EventLoopException``."""
+
+    def __init__(self, original_exception):
+        super().__init__("wrapped")
+        self.original_exception = original_exception
+
+
+def _unwrap(e):
+    return e.original_exception if isinstance(e, _Wrapper) else e
+
+
 def test_invalid_max_attempts_raises_value_error():
     """max_attempts < 1 raises ValueError, not a bypassable assert."""
     factory = _FakeAgentFactory([])
@@ -103,21 +115,51 @@ def test_transient_error_reraises_immediately_without_consuming_retry():
 
 def test_unwrap_exception_hook_classifies_and_raises_unwrapped_cause():
     """A wrapped transient error is unwrapped, classified as transient, and raised unwrapped."""
-
-    class _Wrapper(Exception):
-        def __init__(self, original_exception):
-            super().__init__("wrapped")
-            self.original_exception = original_exception
-
     cause = LLMTemporaryError("temporary")
     factory = _FakeAgentFactory([_Wrapper(cause)])
 
-    def unwrap(e):
-        return e.original_exception if isinstance(e, _Wrapper) else e
-
     with pytest.raises(LLMTemporaryError) as exc_info:
-        call_json_with_retry(factory, "prompt", unwrap_exception=unwrap)
+        call_json_with_retry(factory, "prompt", unwrap_exception=_unwrap)
     assert exc_info.value is cause
+
+
+def test_wrapped_json_parse_error_retries_with_strict_suffix():
+    """An LLMJsonParseError raised *inside* the agent invocation and wrapped by the
+    framework (e.g. Strands' EventLoopException, via a live model backend that
+    validates JSON before returning) still triggers the same retry-with-strict-suffix
+    policy as a directly-raised one, rather than skipping straight to
+    on_unexpected_error."""
+    wrapped = _Wrapper(LLMJsonParseError("bad json", response_preview="x"))
+    factory = _FakeAgentFactory([wrapped, '{"ok": true}'])
+
+    data = call_json_with_retry(factory, "prompt", max_attempts=2, unwrap_exception=_unwrap)
+
+    assert data == {"ok": True}
+    agent = factory.agents[0]
+    assert agent.prompts[0] == "prompt"
+    assert agent.prompts[1] != "prompt"
+
+
+def test_wrapped_json_parse_error_exhausted_uses_on_exhausted():
+    """Exhausted wrapped JSON-parse failures use on_exhausted, not on_unexpected_error."""
+    factory = _FakeAgentFactory(
+        [
+            _Wrapper(LLMJsonParseError("bad json", response_preview="x")),
+            _Wrapper(LLMJsonParseError("still bad", response_preview="y")),
+        ]
+    )
+    fallback = {"fallback": True}
+
+    data = call_json_with_retry(
+        factory,
+        "prompt",
+        max_attempts=2,
+        unwrap_exception=_unwrap,
+        on_exhausted=lambda e: fallback,
+        on_unexpected_error=lambda e: {"wrong_hook": True},
+    )
+
+    assert data is fallback
 
 
 def test_fresh_agent_per_attempt_builds_a_new_agent_each_attempt():
@@ -240,6 +282,19 @@ def test_run_json_gate_success_on_first_attempt(monkeypatch):
     assert data == {"ok": True}
     assert factory.agents[0].model == "a-model"
     assert factory.agents[0].system_prompt == "a system prompt"
+
+
+def test_run_json_gate_retry_then_success_reuses_same_agent(monkeypatch):
+    """A JSON-parse retry (default fresh_agent_per_attempt=False) reuses one Agent instance."""
+    factory = _FakeStrandsAgentFactory(["not json", '{"ok": true}'])
+    monkeypatch.setattr(json_retry_module, "Agent", factory)
+    data = run_json_gate("model", "system", "prompt", max_attempts=2)
+    assert data == {"ok": True}
+    assert len(factory.agents) == 1
+    agent = factory.agents[0]
+    assert agent.calls[0] == "prompt"
+    assert agent.calls[1] != "prompt"
+    assert agent.calls[1].startswith("prompt")
 
 
 def test_run_json_gate_exhausted_uses_fallback_builder(monkeypatch):

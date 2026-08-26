@@ -13,159 +13,22 @@ import pytest
 from branding_team.assistant.agent import (
     BrandingAssistantAgent,
     _merge_mission_update,
-    _parse_extraction,
     _strip_accidental_json,
 )
+from branding_team.assistant.models import MissionUpdate
 from branding_team.tests.conftest import make_mission
 
 pytestmark = [pytest.mark.integration]
 
 
-def test_parse_extraction_returns_mission_and_suggestions() -> None:
-    raw = json.dumps(
-        {
-            "mission_update": {
-                "company_name": "Acme",
-                "target_audience": "Developers",
-            },
-            "suggested_questions": ["What 3 values matter most?", "Who are your competitors?"],
-        }
-    )
-    mission_update, suggestions, degraded = _parse_extraction(raw)
-    assert mission_update == {"company_name": "Acme", "target_audience": "Developers"}
-    assert suggestions == ["What 3 values matter most?", "Who are your competitors?"]
-    assert degraded is False
+def _extraction_result(**mission_update_kwargs) -> MagicMock:
+    """Build a fake extraction-agent call result exposing ``.structured_output``.
 
-
-def test_parse_extraction_tolerates_markdown_fences() -> None:
-    inner = json.dumps({"mission_update": {"company_name": "Acme"}, "suggested_questions": []})
-    mission_update, suggestions, degraded = _parse_extraction(f"```json\n{inner}\n```")
-    assert mission_update == {"company_name": "Acme"}
-    assert suggestions == []
-    assert degraded is False
-
-
-def test_parse_extraction_extracts_object_from_surrounding_prose() -> None:
-    raw = 'Here is the JSON: {"mission_update": {"company_name": "Acme"}}'
-    mission_update, suggestions, degraded = _parse_extraction(raw)
-    assert mission_update == {"company_name": "Acme"}
-    assert suggestions == []
-    assert degraded is False
-
-
-def test_parse_extraction_returns_empty_on_garbage() -> None:
-    mission_update, suggestions, degraded = _parse_extraction("nothing here")
-    assert mission_update == {}
-    assert suggestions == []
-    assert degraded is True
-
-
-def test_parse_extraction_returns_degraded_on_truncated_json() -> None:
-    """Simulates a max-tokens cutoff: the object is never closed. ``repair=False``
-    means no fuzzy salvage runs, so this must surface as a real parse failure
-    (``degraded=True``), not a silent empty mission update."""
-    raw = '{"mission_update": {"company_name": "Ac'
-    mission_update, suggestions, degraded = _parse_extraction(raw)
-    assert mission_update == {}
-    assert suggestions == []
-    assert degraded is True
-
-
-def test_parse_extraction_returns_degraded_on_malformed_json_like_text() -> None:
-    """JSON-like text with a syntax error (dangling trailing comma) is not
-    strictly valid JSON and must not be silently treated as an
-    empty-but-successful parse."""
-    raw = '{"mission_update": {"company_name": "Acme",}}'
-    mission_update, suggestions, degraded = _parse_extraction(raw)
-    assert mission_update == {}
-    assert suggestions == []
-    assert degraded is True
-
-
-def test_parse_extraction_schema_mismatched_payload_is_degraded() -> None:
-    """Valid-looking JSON that carries none of the extraction schema's keys
-    can't be anchored to a real payload — ``required_keys`` recovery treats
-    this the same as unparseable text (``degraded=True``) rather than
-    silently accepting an unrelated object."""
-    raw = json.dumps({"foo": "bar", "baz": 123})
-    mission_update, suggestions, degraded = _parse_extraction(raw)
-    assert mission_update == {}
-    assert suggestions == []
-    assert degraded is True
-
-
-def test_parse_extraction_returns_degraded_when_mission_update_wrong_type() -> None:
-    """``mission_update`` present but not a dict: ``_coerce_mission`` rejects it
-    and yields an empty mission update. The JSON itself parsed fine, so this
-    stays a non-degraded "shape wrong" case, not a parse failure."""
-    raw = json.dumps({"mission_update": "not-a-dict", "suggested_questions": ["q"]})
-    mission_update, suggestions, degraded = _parse_extraction(raw)
-    assert mission_update == {}
-    assert suggestions == ["q"]
-    assert degraded is False
-
-
-def test_parse_extraction_accepts_top_level_mission_fields() -> None:
-    """Schema-drift fallback: the LLM occasionally omits the ``mission_update``
-    wrapper and emits mission fields at the top level. The parser must
-    promote those fields rather than silently lose the turn's updates."""
-    raw = json.dumps(
-        {
-            "company_name": "Acme",
-            "target_audience": "Developers",
-            "values": ["clarity", "trust"],
-        }
-    )
-    mission_update, suggestions, degraded = _parse_extraction(raw)
-    assert mission_update == {
-        "company_name": "Acme",
-        "target_audience": "Developers",
-        "values": ["clarity", "trust"],
-    }
-    assert suggestions == []
-    assert degraded is False
-
-
-def test_parse_extraction_top_level_fallback_ignores_non_mission_keys() -> None:
-    """The fallback must NOT promote arbitrary non-mission keys."""
-    raw = json.dumps({"company_name": "Acme", "unrelated_field": "ignored"})
-    mission_update, _, _ = _parse_extraction(raw)
-    assert mission_update == {"company_name": "Acme"}
-    assert "unrelated_field" not in mission_update
-
-
-def test_parse_extraction_prefers_mission_update_wrapper_when_present() -> None:
-    """When the model returns the canonical wrapper, the top-level
-    fallback must NOT kick in and overwrite it."""
-    raw = json.dumps(
-        {
-            "mission_update": {"company_name": "Acme"},
-            # Top-level mission keys present but should be ignored — the
-            # wrapper takes precedence.
-            "company_name": "Should-Be-Ignored",
-            "suggested_questions": ["q1"],
-        }
-    )
-    mission_update, suggestions, degraded = _parse_extraction(raw)
-    assert mission_update == {"company_name": "Acme"}
-    assert suggestions == ["q1"]
-    assert degraded is False
-
-
-def test_parse_extraction_top_level_fallback_collects_nested_palettes() -> None:
-    """The reviewer's concrete example: top-level mission with nested
-    ``color_palettes`` list of objects must be preserved verbatim."""
-    raw = json.dumps(
-        {
-            "company_name": "Acme",
-            "color_palettes": [
-                {"name": "warm", "colors": ["#aa3300", "#ffcc99"]},
-            ],
-        }
-    )
-    mission_update, _, _ = _parse_extraction(raw)
-    assert mission_update["company_name"] == "Acme"
-    assert mission_update["color_palettes"] == [{"name": "warm", "colors": ["#aa3300", "#ffcc99"]}]
+    Mirrors the contract ``build_agent(..., structured_output=MissionUpdate)``
+    gives callers: the result of calling the agent carries a validated
+    ``MissionUpdate`` instance on ``.structured_output``.
+    """
+    return MagicMock(structured_output=MissionUpdate(**mission_update_kwargs))
 
 
 def test_strip_accidental_json_suppresses_bare_json_object() -> None:
@@ -272,11 +135,41 @@ def test_merge_mission_update() -> None:
         company_description="To be discussed.",
         target_audience="TBD",
     )
-    update = {"company_name": "Acme", "target_audience": "Developers"}
+    update = MissionUpdate(company_name="Acme", target_audience="Developers")
     merged = _merge_mission_update(current, update)
     assert merged.company_name == "Acme"
     assert merged.target_audience == "Developers"
     assert merged.company_description == "To be discussed."
+
+
+def test_merge_mission_update_replaces_and_dedupes_list_fields() -> None:
+    current = make_mission(values=["old"])
+    update = MissionUpdate(values=["clarity", "trust", "clarity"])
+    merged = _merge_mission_update(current, update)
+    assert merged.values == ["clarity", "trust"]
+
+
+def test_merge_mission_update_sets_color_palettes_and_selected_index() -> None:
+    from branding_team.models import ColorPalette
+
+    current = make_mission()
+    update = MissionUpdate(
+        color_palettes=[
+            ColorPalette(name="Warm", description="cozy", colors=["#a30"], sentiment="warm"),
+            ColorPalette(name="Cool", description="crisp", colors=["#03a"], sentiment="cool"),
+        ],
+        selected_palette_index=1,
+    )
+    merged = _merge_mission_update(current, update)
+    assert [p.name for p in merged.color_palettes] == ["Warm", "Cool"]
+    assert merged.selected_palette_index == 1
+
+
+def test_merge_mission_update_ignores_out_of_range_selected_index() -> None:
+    current = make_mission()
+    update = MissionUpdate(selected_palette_index=3)
+    merged = _merge_mission_update(current, update)
+    assert merged.selected_palette_index is None
 
 
 def test_branding_assistant_agent_two_stage_returns_natural_reply_and_extracts_mission() -> None:
@@ -289,14 +182,12 @@ def test_branding_assistant_agent_two_stage_returns_natural_reply_and_extracts_m
         )
     )
     extraction_llm = MagicMock(
-        return_value=json.dumps(
-            {
-                "mission_update": {"company_name": "Brandon Kindred"},
-                "suggested_questions": [
-                    "What do you want to be known for?",
-                    "Who is your audience?",
-                ],
-            }
+        return_value=_extraction_result(
+            company_name="Brandon Kindred",
+            suggested_questions=[
+                "What do you want to be known for?",
+                "Who is your audience?",
+            ],
         )
     )
     agent = BrandingAssistantAgent(conversation_llm=conversation_llm, extraction_llm=extraction_llm)
@@ -328,11 +219,9 @@ def test_branding_assistant_agent_suppresses_accidental_json_from_conversation_l
         return_value='{"company_name": "Brandon Kindred", "company_description": ""}'
     )
     extraction_llm = MagicMock(
-        return_value=json.dumps(
-            {
-                "mission_update": {"company_name": "Brandon Kindred"},
-                "suggested_questions": ["What do you want to be known for?"],
-            }
+        return_value=_extraction_result(
+            company_name="Brandon Kindred",
+            suggested_questions=["What do you want to be known for?"],
         )
     )
     agent = BrandingAssistantAgent(conversation_llm=conversation_llm, extraction_llm=extraction_llm)
@@ -369,12 +258,13 @@ def test_branding_assistant_agent_handles_extraction_failure_gracefully() -> Non
     assert degraded is True
 
 
-def test_branding_assistant_agent_handles_truncated_extraction_output() -> None:
-    """The extractor returns truncated (not exception-raising) JSON. This must
-    surface as ``degraded=True`` through the full ``respond()`` path rather
-    than an indistinguishable no-op mission update."""
+def test_branding_assistant_agent_handles_malformed_extraction_result() -> None:
+    """The extractor call returns a result with no valid ``.structured_output``
+    (not exception-raising). This must surface as ``degraded=True`` through the
+    full ``respond()`` path rather than an indistinguishable no-op mission
+    update."""
     conversation_llm = MagicMock(return_value="Got it — tell me more about your audience.")
-    extraction_llm = MagicMock(return_value='{"mission_update": {"company_name": "Ac')
+    extraction_llm = MagicMock(return_value=MagicMock(structured_output="not-a-mission-update"))
     agent = BrandingAssistantAgent(conversation_llm=conversation_llm, extraction_llm=extraction_llm)
     mission = make_mission(
         company_name="Acme", company_description="Software company.", target_audience="TBD"
@@ -401,15 +291,13 @@ def test_branding_assistant_agent_legacy_llm_kwarg_drives_both_stages() -> None:
     """
     fake_llm = MagicMock()
 
-    def _side_effect(prompt: str) -> str:
+    def _side_effect(prompt: str):
         # Conversation stage gets the chatty prompt template; extractor gets
         # the EXTRACTION_USER_TEMPLATE which references "Strategist's reply".
         if "Strategist's reply" in prompt:
-            return json.dumps(
-                {
-                    "mission_update": {"company_name": "Acme"},
-                    "suggested_questions": ["What does Acme do?"],
-                }
+            return _extraction_result(
+                company_name="Acme",
+                suggested_questions=["What does Acme do?"],
             )
         return "Acme — got it. What's the work you want to be known for?"
 
@@ -436,7 +324,7 @@ def test_branding_assistant_agent_explicit_kwargs_override_legacy_llm() -> None:
     over the legacy ``llm=`` shim so callers can still inject distinct backends.
     """
     explicit_conv = MagicMock(return_value="Explicit conversation reply.")
-    explicit_extract = MagicMock(return_value=json.dumps({"mission_update": {}}))
+    explicit_extract = MagicMock(return_value=_extraction_result())
     legacy = MagicMock(return_value="should not be called")
 
     agent = BrandingAssistantAgent(

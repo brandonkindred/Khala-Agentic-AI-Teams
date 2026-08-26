@@ -60,6 +60,12 @@ The draft must:
 - Comply with every rule in the writing guidelines (formatting, structure, style).
 - Be publication-ready in structure and quality.
 
+CLAIM TAGGING (factual and statistical claims):
+- If you are given an allowed-claims list, tag every factual or statistical claim with `[CLAIM:id]`, where `id` is one of the IDs in that list.
+- Only use IDs that are present in the allowed-claims list. Never invent an ID.
+- If no allowed claim supports a factual assertion the draft would otherwise make, do not make that claim — rephrase to avoid the unsupported assertion or omit it.
+- If no allowed-claims list is provided, write normally without `[CLAIM:id]` tags.
+
 Before writing, analyze your inputs:
 - What is the content plan's central thesis?
 - Who is the target audience and what tone fits the brand?
@@ -76,6 +82,7 @@ MANDATORY — APPLY EVERY FEEDBACK ITEM:
 - You MUST fix every should_fix item.
 - For consider items, apply the change if it improves the piece.
 - Preserve the draft's structure and substance aligned with the content plan. Only change what the feedback targets.
+- If you are given an allowed-claims list, every factual or statistical claim must stay tagged with `[CLAIM:id]`, using only IDs from that list. Never invent an ID. If a claim has no supporting ID in the list, rephrase to avoid the unsupported assertion or remove it — do not leave it untagged. If no allowed-claims list is provided, this rule does not apply.
 
 PERSISTENT ISSUES — HIGHEST PRIORITY:
 When the prompt includes a "PERSISTENT ISSUES" section, those items have been flagged multiple times. You MUST:
@@ -96,6 +103,7 @@ WHEN FIXING SPECIFIC ISSUE TYPES:
 - To fix a cold/impersonal section: add "you"/"your" or frame advice in terms of what the reader experiences.
 - To fix a paragraph of loosely related facts: identify the central argument, then rewrite so every sentence supports it.
 - To fix off-brand voice: re-read the brand spec and rewrite the section to match the brand's personality and values.
+- To fix an untagged or unsupported factual claim (when an allowed-claims list is provided): check the list for a matching ID and add the `[CLAIM:id]` tag, or, if no allowed claim supports it, rephrase the sentence to avoid the unsupported assertion or remove it.
 
 Before outputting, verify that every numbered feedback item has been addressed."""
 
@@ -165,6 +173,7 @@ The editor (user) has reviewed this draft and provided feedback. Apply their fee
 - Preserve the draft's structure and substance unless the editor specifically asks for structural changes.
 - Maintain compliance with the brand spec (voice and authenticity) and writing guidelines (style rules).
 - Do NOT introduce new content that the editor did not request.
+- If you are given an allowed-claims list, keep every factual or statistical claim tagged with `[CLAIM:id]`, using only IDs from that list. Never invent an ID. If a claim has no supporting ID in the list, rephrase to avoid the unsupported assertion or remove it — do not leave it untagged.
 
 EDITOR'S FEEDBACK:
 {user_feedback}
