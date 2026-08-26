@@ -11,10 +11,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Union
 
 from agents.blogging.shared.agent_base import _BlogAgentBase
-from agents.blogging.shared.json_retry import call_json_with_retry
+from agents.blogging.shared.json_retry import run_json_gate
 from agents.blogging.shared.word_count import count_words
-from strands import Agent
-from strands.types.exceptions import EventLoopException
 
 from .models import CopyEditorInput, CopyEditorOutput, FeedbackItem
 from .prompts import COPY_EDITOR_PROMPT
@@ -226,11 +224,11 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         on_llm_request: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
         """
-        Invoke the editor LLM via the shared JSON-retry helper (up to two attempts).
+        Invoke the editor LLM via the shared JSON-gate helper (up to two attempts).
 
-        This method wires the agent factory, soft/strict JSON prompt suffixes, the
-        ``EventLoopException`` unwrap hook, and fallback factories into
-        ``call_json_with_retry``. Attempt-count, soft-then-strict re-prompt, and
+        This method wires the model, system prompt, soft/strict JSON prompt suffixes,
+        and fallback factories into ``run_json_gate``. Agent construction, the
+        ``EventLoopException`` unwrap, attempt-count, soft-then-strict re-prompt, and
         transient-vs-unexpected classification are owned by that helper's contract;
         this method does not re-implement them.
 
@@ -251,9 +249,9 @@ class BlogCopyEditorAgent(_BlogAgentBase):
               and ``feedback_items``.
             - Does **not** always return: transient LLM errors
               (``LLMRateLimitError`` / ``LLMTemporaryError``, including when strands
-              wraps them in ``EventLoopException``) are re-raised by
-              ``call_json_with_retry`` after this method's unwrap hook classifies the
-              cause — they are never swallowed into a return value.
+              wraps them in ``EventLoopException``) are re-raised by ``run_json_gate``
+              after its unwrap hook classifies the cause — they are never swallowed
+              into a return value.
         """
         if on_llm_request:
             on_llm_request("Reviewing draft for style and clarity...")
@@ -263,18 +261,12 @@ class BlogCopyEditorAgent(_BlogAgentBase):
             "category, severity, location?, issue, suggestion?)."
         )
 
-        def _agent_factory():
-            return Agent(model=self._model, system_prompt=COPY_EDITOR_PROMPT)
-
-        def _unwrap(exc: Exception) -> Exception:
-            return exc.original_exception if isinstance(exc, EventLoopException) else exc
-
-        data = call_json_with_retry(
-            _agent_factory,
+        data = run_json_gate(
+            self._model,
+            COPY_EDITOR_PROMPT,
             prompt + COPY_EDITOR_SOFT_JSON_INSTRUCTION,
             max_attempts=2,
             strict_json_suffix=strict_json_suffix,
-            unwrap_exception=_unwrap,
             on_exhausted=lambda e: _fallback_editor_data(
                 "Copy editor could not parse the model response. Please review the draft manually."
             ),
