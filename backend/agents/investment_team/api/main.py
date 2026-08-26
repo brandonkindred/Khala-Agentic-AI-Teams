@@ -2647,20 +2647,22 @@ def _compute_signal_brief_snapshot(
         * Fail-open at every level: on disabled expert /
           provider-initialization failure / market-fetch failure it returns a
           top-level ``{"skipped": True, ...}`` storage rather than raising.
-          A per-category expert construction or ``produce_signal_brief``
-          failure (including its own precondition assertion — see below)
-          instead skips only that category's entry in ``by_asset_class``; a
+          A per-category *non-assertion* failure — ``scoped_to``,
+          ``as_prompt_text``, expert construction, or ``produce_signal_brief``
+          itself — skips only that category's entry in ``by_asset_class``; a
           single category's failure never aborts the others. A
           provider-cleanup failure is logged and swallowed without
           altering the return value — it cannot turn a successful result into
           a skipped one, since cleanup only runs after the try block has
           already decided what to return.
-        * The one exception to "never raises": an ``AssertionError`` from the
-          per-category expert call (a precondition violation, not an
-          external failure) propagates rather than being folded into a
-          ``"skipped": True`` entry — a contract violation is a bug in this
-          function's own construction of its call, and DbC forbids silently
-          coercing that into a routine fail-open outcome.
+        * The one exception to "never raises": an ``AssertionError`` raised
+          anywhere inside the per-category block (``scoped_to``,
+          ``as_prompt_text``, expert construction, or
+          ``produce_signal_brief``'s own precondition assertion) propagates
+          rather than being folded into a ``"skipped": True`` entry — a
+          precondition violation is a bug in this loop's own construction of
+          its call, not an external/transient failure, and DbC forbids
+          silently coercing that into a routine fail-open outcome.
     """
     if not _strategy_lab_signal_expert_enabled():
         return {}, {"skipped": True, "skipped_reason": "signal_expert_disabled"}
@@ -2727,13 +2729,14 @@ def _compute_signal_brief_snapshot(
                 # per category closes that path; genuinely shared macro fields
                 # (yields, sentiment) still reach every category.
                 #
-                # Computed inside this try, not before it: a failure here
-                # (``scoped_to``/``as_prompt_text``) must degrade only this
-                # category, exactly like a ``produce_signal_brief`` failure —
-                # letting it escape uncaught would propagate out of this
-                # whole function, breaking its documented "never raises"
-                # contract and failing the entire batch's Temporal activity
-                # over one category's brief.
+                # Computed inside this try, not before it: a non-assertion
+                # failure here (``scoped_to``/``as_prompt_text``) degrades
+                # only this category, exactly like a ``produce_signal_brief``
+                # failure — computing it before the try would let it escape
+                # uncaught, failing the entire batch's Temporal activity over
+                # one category's brief. An AssertionError from either call
+                # still propagates via the ``except AssertionError`` below,
+                # same as one from ``produce_signal_brief`` itself.
                 category_market_ctx = market_ctx.scoped_to(asset_class)
                 market_hash = hashlib.sha256(
                     category_market_ctx.as_prompt_text().encode()

@@ -140,6 +140,7 @@ def test_select_avoid_falls_back_to_allowed_when_avoid_covers_everything() -> No
 
 
 def _stub_backtest_result() -> BacktestResult:
+    """A minimal, schema-valid BacktestResult with placeholder metrics."""
     return BacktestResult(
         total_return_pct=10.0,
         annualized_return_pct=5.0,
@@ -155,6 +156,12 @@ def _stub_backtest_result() -> BacktestResult:
 
 
 def _record(asset_class: str, *, status: str = "completed") -> StrategyLabRecord:
+    """Return a minimal, valid StrategyLabRecord for ``asset_class``.
+
+    The strategy, backtest, and lab metadata are wired together with matching
+    IDs. ``status`` overrides the backtest's status to exercise the
+    executed-vs-non-executed filtering in ``filter_records_by_asset_class``.
+    """
     suffix = uuid.uuid4().hex[:6]
     strategy = StrategySpec(
         strategy_id=f"s-{suffix}",
@@ -258,6 +265,7 @@ def test_filter_keeps_executed_but_losing_backtests() -> None:
 
 
 def _config() -> BacktestConfig:
+    """A minimal, valid BacktestConfig for design-loop integration tests."""
     return BacktestConfig(
         start_date="2023-01-01",
         end_date="2023-12-31",
@@ -271,6 +279,7 @@ def _config() -> BacktestConfig:
 def _spec_dict(
     asset_class: str = "forex", target_symbols: Optional[List[str]] = None
 ) -> Dict[str, Any]:
+    """The design-agent JSON payload shape ``build_spec_from_dict`` expects."""
     return {
         "asset_class": asset_class,
         "hypothesis": "RSI mean reversion on a small universe",
@@ -287,6 +296,9 @@ def _spec_dict(
 
 
 def _short_circuit_synthesis(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub ``_fetch_market_data`` to return no data, so the orchestrator
+    short-circuits past code synthesis/backtesting and the design loop
+    itself is what's under test."""
     from investment_team.strategy_lab.orchestrator import _MarketDataFetch
 
     monkeypatch.setattr(
@@ -294,6 +306,21 @@ def _short_circuit_synthesis(monkeypatch: pytest.MonkeyPatch) -> None:
         "_fetch_market_data",
         lambda *_a, **_kw: _MarketDataFetch(data=None, requested_symbols=[], fetched_symbols=[]),
     )
+
+
+def _stubbed_orch(monkeypatch: pytest.MonkeyPatch) -> StrategyLabOrchestrator:
+    """A fresh orchestrator with review/compile/synthesis stubbed to a
+    trivial always-ready happy path, so only the design loop itself (whose
+    ``design_agent.run``/``revise`` a test typically still customizes
+    separately) is exercised."""
+    orch = StrategyLabOrchestrator()
+    monkeypatch.setattr(
+        orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
+    )
+    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
+    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
+    _short_circuit_synthesis(monkeypatch)
+    return orch
 
 
 def test_design_loop_pins_single_category_and_scopes_prior_records(
@@ -306,7 +333,7 @@ def test_design_loop_pins_single_category_and_scopes_prior_records(
     ``prior_records`` scoped to forex-only priors — the stocks/crypto priors
     must never reach it.
     """
-    orch = StrategyLabOrchestrator()
+    orch = _stubbed_orch(monkeypatch)
 
     captured: List[Dict[str, Any]] = []
 
@@ -315,12 +342,6 @@ def test_design_loop_pins_single_category_and_scopes_prior_records(
         return _spec_dict(), "scripted rationale"
 
     monkeypatch.setattr(orch.design_agent, "run", _run)
-    monkeypatch.setattr(
-        orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
-    )
-    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
-    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
-    _short_circuit_synthesis(monkeypatch)
 
     prior_records = [_record("forex"), _record("forex"), _record("stocks"), _record("crypto")]
 
@@ -355,7 +376,7 @@ def test_design_loop_pins_one_of_several_allowed_categories(
     original multi-category exclude list), and ``prior_records`` is scoped
     to that one category only.
     """
-    orch = StrategyLabOrchestrator()
+    orch = _stubbed_orch(monkeypatch)
 
     captured: List[Dict[str, Any]] = []
 
@@ -368,12 +389,6 @@ def test_design_loop_pins_one_of_several_allowed_categories(
         return _spec_dict(allowed), "scripted rationale"
 
     monkeypatch.setattr(orch.design_agent, "run", _run)
-    monkeypatch.setattr(
-        orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
-    )
-    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
-    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
-    _short_circuit_synthesis(monkeypatch)
 
     prior_records = [_record("stocks"), _record("crypto"), _record("forex")]
 
@@ -430,7 +445,7 @@ def test_design_loop_rejects_a_relabeled_regeneration_with_wholesale_offcategory
     therefore declines to touch a wholesale mismatch, readiness Rule 11's
     symbol critical stays live, and the round must keep demanding a genuine
     rebuild rather than accepting the relabel-only response."""
-    orch = StrategyLabOrchestrator()
+    orch = _stubbed_orch(monkeypatch)
 
     monkeypatch.setattr(
         orch.design_agent,
@@ -447,12 +462,6 @@ def test_design_loop_rejects_a_relabeled_regeneration_with_wholesale_offcategory
         ]
     )
     monkeypatch.setattr(orch.design_agent, "revise", lambda *_a, **_kw: next(revise_responses))
-    monkeypatch.setattr(
-        orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
-    )
-    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
-    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
-    _short_circuit_synthesis(monkeypatch)
 
     # allowed = {stocks} -> exclude everything else.
     record = orch.run_cycle(
@@ -474,7 +483,7 @@ def test_design_loop_keeps_ambiguous_symbols_when_correcting_category(
     provider even when their underlying exposure differs, so ``classify_symbol``
     deliberately returns ``None`` for them. They must be kept, not dropped as
     false positives."""
-    orch = StrategyLabOrchestrator()
+    orch = _stubbed_orch(monkeypatch)
 
     monkeypatch.setattr(
         orch.design_agent,
@@ -486,12 +495,6 @@ def test_design_loop_keeps_ambiguous_symbols_when_correcting_category(
         "revise",
         lambda *_a, **_kw: (_spec_dict("stocks", target_symbols=["GLD", "BTC-USD"]), "relabeled"),
     )
-    monkeypatch.setattr(
-        orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
-    )
-    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
-    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
-    _short_circuit_synthesis(monkeypatch)
 
     record = orch.run_cycle(
         prior_records=[],
@@ -588,15 +591,9 @@ def test_design_loop_leaves_matching_asset_class_untouched(
 ) -> None:
     """No spurious correction (and no ``design_repair`` telemetry) when the
     design agent already honors the pinned category."""
-    orch = StrategyLabOrchestrator()
+    orch = _stubbed_orch(monkeypatch)
 
     monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict("stocks"), "scripted"))
-    monkeypatch.setattr(
-        orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
-    )
-    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
-    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
-    _short_circuit_synthesis(monkeypatch)
 
     events: List[Tuple[str, Dict[str, Any]]] = []
     record = orch.run_cycle(
@@ -616,15 +613,9 @@ def test_design_loop_telemetry_includes_asset_category_on_success(
     """Live ``on_phase`` telemetry consumers see ``asset_category`` on the
     ``scope=design_loop`` summary event for a normal (non-budget-exhausted)
     exit — not only in the persisted record's design context."""
-    orch = StrategyLabOrchestrator()
+    orch = _stubbed_orch(monkeypatch)
 
     monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (_spec_dict("stocks"), "scripted"))
-    monkeypatch.setattr(
-        orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
-    )
-    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
-    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
-    _short_circuit_synthesis(monkeypatch)
 
     events: List[Tuple[str, Dict[str, Any]]] = []
     orch.run_cycle(
@@ -651,6 +642,8 @@ def test_design_loop_telemetry_includes_asset_category_on_success(
 
 
 def _skew_convergence_tracker_toward(orch: StrategyLabOrchestrator, asset_class: str) -> None:
+    """Record five ``asset_class`` strategies so the convergence tracker's
+    diversity directive recommends avoiding that over-represented class."""
     for _ in range(5):
         orch.convergence_tracker.record(
             StrategySpec(
@@ -679,7 +672,7 @@ def test_design_loop_drops_diversity_directive_when_pin_forces_over_represented_
     win — the now-impossible-to-satisfy "MUST choose a DIFFERENT asset
     class" directive must be dropped rather than left to contradict the
     "only <category> is allowed" exclusion rule in the same prompt."""
-    orch = StrategyLabOrchestrator()
+    orch = _stubbed_orch(monkeypatch)
     _skew_convergence_tracker_toward(orch, "stocks")
     assert orch.convergence_tracker.get_diversity_avoid_classes() == {"stocks"}
 
@@ -690,12 +683,6 @@ def test_design_loop_drops_diversity_directive_when_pin_forces_over_represented_
         return _spec_dict("stocks"), "scripted"
 
     monkeypatch.setattr(orch.design_agent, "run", _run)
-    monkeypatch.setattr(
-        orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
-    )
-    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
-    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
-    _short_circuit_synthesis(monkeypatch)
 
     # allowed = {stocks} only -> the pin forces stocks despite it being
     # over-represented.
@@ -721,7 +708,7 @@ def test_design_loop_keeps_the_stall_directive_when_pinned(
     category, and ``is_stalled`` stays true until the designer varies, so a
     suppressed directive would be regenerated and re-dropped every cycle with
     the stall never recovering."""
-    orch = StrategyLabOrchestrator()
+    orch = _stubbed_orch(monkeypatch)
     monkeypatch.setattr(orch.convergence_tracker, "is_stalled", lambda: True)
     stall_directive = orch.convergence_tracker.get_stall_directive()
     assert stall_directive is not None
@@ -733,12 +720,6 @@ def test_design_loop_keeps_the_stall_directive_when_pinned(
         return _spec_dict("stocks"), "scripted"
 
     monkeypatch.setattr(orch.design_agent, "run", _run)
-    monkeypatch.setattr(
-        orch.design_review_agent, "run", lambda *_a, **_kw: SpecCritique(ready=True, rationale="ok")
-    )
-    monkeypatch.setattr(orchestrator_module, "compile_strategy", lambda _spec: "VALID_CODE")
-    monkeypatch.setattr(orch.code_synthesis_agent, "run", lambda _spec: "VALID_CODE")
-    _short_circuit_synthesis(monkeypatch)
 
     orch.run_cycle(
         prior_records=[],
