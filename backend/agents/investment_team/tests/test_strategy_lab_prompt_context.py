@@ -281,7 +281,7 @@ def test_bound_history_summary_is_length_bounded_regardless_of_round_count() -> 
     entries = [f"a very long prior-round entry description number {i}" * 3 for i in range(500)]
     result = bound_history(entries, keep_last_n=2)
     assert len(result.kept) == 2
-    assert len(result.summary) <= 241  # _SUMMARY_MAX_CHARS + 1-char ellipsis
+    assert len(result.summary) <= 240  # _SUMMARY_MAX_CHARS, ellipsis included in the cap
 
 
 def test_bound_history_summary_single_line_no_embedded_newlines() -> None:

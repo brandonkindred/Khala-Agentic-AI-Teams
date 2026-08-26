@@ -76,7 +76,8 @@ def bound_history(entries: Optional[List[Any]], keep_last_n: int) -> BoundedHist
         see no behavior change.
       * Otherwise: ``result.kept`` is the last ``keep_last_n`` entries,
         verbatim and in original order; ``result.summary`` is a non-empty,
-        length-bounded (``<= _SUMMARY_MAX_CHARS`` plus an ellipsis marker)
+        length-bounded (``<= _SUMMARY_MAX_CHARS`` characters total — the
+        ellipsis marker is counted inside that cap, not appended past it)
         string describing the older, dropped entries, oldest first, each
         numbered by its original 1-indexed round position (matching
         ``render_prior_attempts``'s ``"Round {n}"`` convention).
