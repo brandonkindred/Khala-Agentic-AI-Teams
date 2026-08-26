@@ -229,6 +229,39 @@ def test_scoped_to_crypto_keeps_crypto_drops_fx() -> None:
     assert "FX" not in text
 
 
+def test_scoped_to_strips_category_specific_sources_and_degraded_reason() -> None:
+    """sources_used/degraded_reason name the same category-specific providers
+    as fx_rates/crypto_snapshot ("frankfurter" for forex, "yahoo_crypto" for
+    crypto) and would otherwise leak which categories' data was fetched even
+    after the data fields themselves are cleared."""
+    ctx = MarketLabContext(
+        fetched_at="2024-01-01T00:00:00Z",
+        degraded=True,
+        degraded_reason="frankfurter_failed, fred_failed, yahoo_crypto_failed",
+        sources_used=["fred_dgs10", "yahoo_crypto"],
+        fx_rates={},
+        macro_snippets=["DGS10=4.2%"],
+        crypto_snapshot="BTC=65000",
+    )
+    # Scoped to stocks: both forex- and crypto-specific ids drop; the
+    # class-agnostic fred_failed/fred_dgs10 survive.
+    stocks_scoped = ctx.scoped_to("stocks")
+    assert stocks_scoped.sources_used == ["fred_dgs10"]
+    assert stocks_scoped.degraded_reason == "fred_failed"
+    assert stocks_scoped.degraded is True
+
+    # Scoped to forex: crypto-specific ids drop, frankfurter's survive.
+    forex_scoped = ctx.scoped_to("forex")
+    assert "yahoo_crypto" not in forex_scoped.sources_used
+    assert forex_scoped.degraded_reason == "frankfurter_failed, fred_failed"
+
+    # When every remaining reason is dropped, degraded flips back to False.
+    healthy = ctx.model_copy(update={"degraded_reason": "yahoo_crypto_failed"})
+    healthy_scoped = healthy.scoped_to("stocks")
+    assert healthy_scoped.degraded_reason is None
+    assert healthy_scoped.degraded is False
+
+
 def test_scoped_to_does_not_mutate_the_original_context() -> None:
     ctx = _scoping_ctx()
     ctx.scoped_to("stocks")

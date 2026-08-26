@@ -13,6 +13,17 @@ class StrategyLabDataRequest(BaseModel):
     benchmark_symbol: str = Field(default="SPY", description="Equity benchmark hint for context")
 
 
+# Source/failure-reason ids whose presence itself names the specific asset
+# class they cover. FreeTierMarketDataProvider.fetch_context
+# (market_lab_data/free_tier.py) is the sole producer of these exact string
+# values; kept here rather than imported to avoid a circular import (that
+# module builds a MarketLabContext).
+_FOREX_SOURCE_IDS = frozenset({"frankfurter"})
+_FOREX_REASON_IDS = frozenset({"frankfurter_failed"})
+_CRYPTO_SOURCE_IDS = frozenset({"yahoo_crypto"})
+_CRYPTO_REASON_IDS = frozenset({"yfinance_missing", "yahoo_crypto_failed"})
+
+
 class MarketLabContext(BaseModel):
     """
     Compact, prompt-friendly snapshot from free-tier APIs.
@@ -58,7 +69,14 @@ class MarketLabContext(BaseModel):
         narrative and, from there, the pinned design prompt it's injected
         into verbatim. ``macro_snippets`` (e.g. the 10-year yield) and
         ``social_sentiment`` are genuinely class-agnostic macro context and
-        stay shared across every category.
+        stay shared across every category. ``sources_used`` and
+        ``degraded_reason`` name the same category-specific providers
+        (``"frankfurter"``/``"frankfurter_failed"`` for forex,
+        ``"yahoo_crypto"``/``"yahoo_crypto_failed"``/``"yfinance_missing"``
+        for crypto) and would otherwise leak which categories' data was
+        fetched even after the data fields themselves are cleared — e.g. a
+        stocks-only brief still rendering ``Sources: frankfurter,
+        yahoo_crypto``. They're filtered the same way.
 
         Preconditions:
             ``asset_class`` is a canonical asset-class label or ``None``
@@ -66,9 +84,11 @@ class MarketLabContext(BaseModel):
         Postconditions:
             Returns a new ``MarketLabContext`` with ``fx_rates`` cleared
             unless ``asset_class == "forex"`` and ``crypto_snapshot`` cleared
-            unless ``asset_class == "crypto"``. Returns ``self`` verbatim
-            (no copy) when ``asset_class`` is ``None``, when neither field
-            is populated, or when both already match the given class.
+            unless ``asset_class == "crypto"``; ``sources_used`` and
+            ``degraded_reason`` have the corresponding category-specific
+            entries removed the same way (``degraded`` is recomputed from
+            what remains). Returns ``self`` verbatim (no copy) when
+            ``asset_class`` is ``None``, or when nothing needed clearing.
         """
         if asset_class is None:
             return self
@@ -77,6 +97,25 @@ class MarketLabContext(BaseModel):
             updates["fx_rates"] = {}
         if self.crypto_snapshot and asset_class != "crypto":
             updates["crypto_snapshot"] = None
+
+        drop_source_ids: set[str] = set()
+        drop_reason_ids: set[str] = set()
+        if asset_class != "forex":
+            drop_source_ids |= _FOREX_SOURCE_IDS
+            drop_reason_ids |= _FOREX_REASON_IDS
+        if asset_class != "crypto":
+            drop_source_ids |= _CRYPTO_SOURCE_IDS
+            drop_reason_ids |= _CRYPTO_REASON_IDS
+
+        if drop_source_ids and any(s in drop_source_ids for s in self.sources_used):
+            updates["sources_used"] = [s for s in self.sources_used if s not in drop_source_ids]
+        if self.degraded_reason and drop_reason_ids:
+            reasons = self.degraded_reason.split(", ")
+            remaining = [r for r in reasons if r not in drop_reason_ids]
+            if remaining != reasons:
+                updates["degraded_reason"] = ", ".join(remaining) if remaining else None
+                updates["degraded"] = bool(remaining)
+
         if not updates:
             return self
         return self.model_copy(update=updates)

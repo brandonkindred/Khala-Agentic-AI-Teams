@@ -48,6 +48,7 @@ parsed from gate-message text — so the rule and its repair cannot drift apart.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
@@ -89,6 +90,27 @@ class RepairOutcome:
 
     spec: StrategySpec
     actions: List[RepairAction] = field(default_factory=list)
+
+
+def _symbol_named_in_thesis(symbol: str, *thesis_text: str) -> bool:
+    """True if ``symbol`` (or its bare root, e.g. ``"DOGE"`` for
+    ``"DOGE-USDT"``) is mentioned by name in ``thesis_text``.
+
+    Preconditions:
+      - ``symbol`` is a ticker string; ``thesis_text`` are free-text spec
+        fields (``hypothesis``, ``signal_definition``) that may be empty.
+    Postconditions:
+      - Returns whether the symbol's root (suffix stripped) appears as a
+        whole word, case-insensitively, in the joined text. Purely a
+        substring/word-boundary check — no semantic understanding of
+        whether the thesis actually depends on the symbol, only whether it
+        names it explicitly.
+    """
+    root = re.split(r"[-=]", symbol, maxsplit=1)[0]
+    if not root:
+        return False
+    pattern = r"\b" + re.escape(root) + r"\b"
+    return bool(re.search(pattern, " ".join(thesis_text), re.IGNORECASE))
 
 
 def repair_spec(
@@ -192,7 +214,19 @@ def repair_spec(
         # ETFs (GLD, QQQ, ...) that legitimately trade in more than one
         # category; only an unambiguous mismatch is stripped.
         offcategory = find_offcategory_symbols(spec.target_symbols, pinned_asset_class)
-        kept = [sym for sym in spec.target_symbols if sym not in offcategory]
+        # A removed symbol the hypothesis/signal_definition names explicitly
+        # (e.g. a "DOGE momentum" thesis targeting ["AAPL", "DOGE-USDT"]) is
+        # not a stray ticker to drop — stripping it would leave the pinned
+        # class's spec still carrying, and about to backtest, an off-category
+        # thesis under a now readiness-clean symbol list. Treat any such
+        # symbol as if it were the whole universe: force a rebuild instead of
+        # a silent partial strip.
+        thesis_bound = {
+            sym
+            for sym in offcategory
+            if _symbol_named_in_thesis(sym, spec.hypothesis, spec.signal_definition)
+        }
+        kept = [sym for sym in spec.target_symbols if sym not in offcategory or sym in thesis_bound]
         # Only repair a MINORITY mismatch — at least one symbol must survive.
         # Stripping every symbol is not "a stray ticker"; it means the whole
         # explicit universe contradicts the declared class, which is the same

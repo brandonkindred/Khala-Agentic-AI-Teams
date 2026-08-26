@@ -882,6 +882,39 @@ def test_repair_strips_offcategory_symbols_under_a_pin() -> None:
     assert actions[0].field == "target_symbols"
 
 
+def test_repair_leaves_a_thesis_bound_offcategory_symbol_in_place() -> None:
+    """A removed symbol the hypothesis names explicitly (e.g. a "DOGE
+    momentum" thesis targeting ["AAPL", "DOGE-USDT"]) is not a stray ticker
+    to drop -- stripping it would leave a readiness-clean stocks spec still
+    built around a crypto thesis. The unrelated stray symbol ("ETH") is
+    still safe to strip on its own."""
+    from investment_team.strategy_lab.mechanical_repair import repair_spec
+    from investment_team.strategy_lab.quality_gates.spec_readiness import SpecReadinessGate
+
+    spec = StrategySpec(
+        strategy_id="strat-thesis-bound",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="DOGE momentum breakout following social sentiment spikes",
+        signal_definition="sig",
+        timeframe="1d",
+        entry_rules=[EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0))],
+        exit_rules=[StopLossRule(pct=0.03)],
+        risk_limits={},
+        speculative=False,
+        target_symbols=["AAPL", "DOGE-USDT", "ETH"],
+    )
+    out = repair_spec(spec, pinned_asset_class="stocks")
+    # ETH (unmentioned) is stripped; DOGE-USDT (thesis-bound) stays, so
+    # Rule 11's symbol critical stays live for it.
+    assert out.spec.target_symbols == ["AAPL", "DOGE-USDT"]
+
+    results = SpecReadinessGate().validate(out.spec, phase="design", pinned_asset_class="stocks")
+    findings = [r for r in results if (r.rule_id or "").startswith("asset_category:")]
+    assert [f.rule_id for f in findings] == ["asset_category:symbols"]
+    assert findings[0].severity == "critical"
+
+
 def test_repair_is_idempotent_under_a_pin() -> None:
     from investment_team.strategy_lab.mechanical_repair import repair_spec
 
