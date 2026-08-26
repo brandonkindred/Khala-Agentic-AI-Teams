@@ -32,6 +32,13 @@ External callers (``zero_trade_repair.py``, the test suite,
 these names via ``investment_team.strategy_lab.orchestrator``.
 ``orchestrator.py`` re-exports them (see the "Re-exports" block near the
 end of that file) so existing import sites keep working.
+
+``gather_convergence_directives`` and ``require_short_circuit_inputs`` are
+``run_cycle``'s directive-gathering and terminal-guard logic, extracted here
+(rather than staying inline) so a future Temporal-mode cycle workflow can
+call the identical, deterministic implementation instead of hand-duplicating
+it — both are pure functions of their arguments with no wall-clock, random,
+or I/O dependency.
 """
 
 from __future__ import annotations
@@ -58,6 +65,7 @@ from ..trading_service.modes.sandbox_compat import StrategyRunResult, run_strate
 from .alignment_findings import entry_rule_id, signal_exit_rule_id
 from .coverage_probe import run_coverage_stage, should_run_probes
 from .exceptions import OrchestratorContractError
+from .quality_gates.convergence_tracker import ConvergenceTracker
 from .quality_gates.models import QualityGateResult
 
 if TYPE_CHECKING:
@@ -901,6 +909,64 @@ def _has_critical_failures(results: Sequence[QualityGateResult]) -> bool:
         first match instead of building the full list.
     """
     return any(not g.passed and g.severity == "critical" for g in results)
+
+
+def gather_convergence_directives(tracker: ConvergenceTracker) -> List[str]:
+    """Gather this cycle's convergence directives from ``tracker``.
+
+    Extracted from ``run_cycle`` (orchestrator.py) so the identical logic can
+    be reused verbatim by the Temporal-mode cycle workflow (a future step).
+
+    Preconditions:
+      - ``tracker`` is a constructed ``ConvergenceTracker``.
+    Postconditions:
+      - Returns a list containing, in order: the stall directive (if any),
+        the diversity directive (if any), then every failure directive.
+    Invariants:
+      - Pure: only reads ``tracker`` state (counters/history), no I/O, no
+        wall-clock or random calls — safe to call from inside a temporalio
+        workflow sandbox.
+    """
+    directives: List[str] = []
+    stall_dir = tracker.get_stall_directive()
+    if stall_dir:
+        directives.append(stall_dir)
+    diversity_dir = tracker.get_diversity_directive()
+    if diversity_dir:
+        directives.append(diversity_dir)
+    directives.extend(tracker.get_failure_directives())
+    return directives
+
+
+def require_short_circuit_inputs(
+    last_spec: Optional[StrategySpec], last_evidence: Optional[str]
+) -> None:
+    """Guard that re-entry exhaustion captured enough state to short-circuit.
+
+    Extracted from ``run_cycle`` (orchestrator.py) so the identical guard can
+    be reused verbatim by the Temporal-mode cycle workflow (a future step).
+
+    Preconditions:
+      - Called only after the design-re-entry loop exhausts
+        ``MAX_DESIGN_REENTRIES`` without returning.
+    Postconditions:
+      - Returns ``None`` when both arguments are non-``None``.
+    Invariants:
+      - Pure: no I/O, no mutation, no wall-clock or random calls — safe to
+        call from inside a temporalio workflow sandbox.
+
+    Raises:
+      ``RuntimeError`` when either argument is ``None`` — every
+      ``SpecImplementabilityError`` raiser is required to set both
+      ``last_spec``/``evidence``, so this is a defensive contract check
+      against a future raiser violating that, not an expected runtime path.
+    """
+    if last_spec is None or last_evidence is None:
+        raise RuntimeError(
+            "SpecImplementabilityError raised without last_spec/evidence; "
+            "cannot build short-circuit record. This is a bug in a refinement "
+            "code path; please file an issue with the run logs."
+        )
 
 
 def _maybe_attach_coverage_report(

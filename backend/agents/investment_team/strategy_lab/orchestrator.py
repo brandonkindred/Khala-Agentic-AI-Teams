@@ -559,14 +559,7 @@ class StrategyLabOrchestrator(
         emit = on_phase or (lambda phase, data: None)
 
         # Gather convergence directives once — appended to on loopback.
-        directives: List[str] = []
-        stall_dir = self.convergence_tracker.get_stall_directive()
-        if stall_dir:
-            directives.append(stall_dir)
-        diversity_dir = self.convergence_tracker.get_diversity_directive()
-        if diversity_dir:
-            directives.append(diversity_dir)
-        directives.extend(self.convergence_tracker.get_failure_directives())
+        directives: List[str] = gather_convergence_directives(self.convergence_tracker)
 
         last_evidence: Optional[str] = None
         last_spec: Optional[StrategySpec] = None
@@ -656,12 +649,7 @@ class StrategyLabOrchestrator(
         # somehow violates the contract — surface a clear runtime error
         # rather than crashing in ``_build_short_circuit_record`` with a
         # misleading traceback.
-        if last_spec is None or last_evidence is None:
-            raise RuntimeError(
-                "SpecImplementabilityError raised without last_spec/evidence; "
-                "cannot build short-circuit record. This is a bug in a refinement "
-                "code path; please file an issue with the run logs."
-            )
+        require_short_circuit_inputs(last_spec, last_evidence)
         return self._build_short_circuit_record(
             spec=last_spec,
             config=config,
@@ -1643,7 +1631,9 @@ from ._orchestrator_helpers import (  # noqa: E402,F401  — keep at file end
     _round_demoted_conformance,
     _SynthesisLoopOutcome,
     _VerificationOutcome,
+    gather_convergence_directives,
     publishability_skip_reason,
+    require_short_circuit_inputs,
 )
 
 # ──────────────────────────────────────────────────────────────────────────
