@@ -4,23 +4,24 @@ Stage 1 — Conversation: a Strands `Agent` configured as a senior brand strateg
 It replies in pure natural language (no JSON, no field names). This is what the
 user reads.
 
-Stage 2 — Extraction: a second Strands `Agent` reads the same turn plus the
-strategist's reply and emits a JSON `mission_update` + `suggested_questions`.
-The user never sees this output. Decoupling extraction from conversation means
-the user-facing reply is never constrained or contaminated by structured-output
-formatting requirements.
+Stage 2 — Extraction: a second Strands `Agent`, built with
+`structured_output=MissionUpdate`, reads the same turn plus the strategist's
+reply and returns a validated `MissionUpdate` (mission deltas +
+`suggested_questions`). The user never sees this output. Decoupling
+extraction from conversation means the user-facing reply is never
+constrained or contaminated by structured-output formatting requirements.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Collection, Dict, List, Optional, Tuple
+from typing import Any, List, Tuple
 
-from branding_team.models import BrandingMission, ColorPalette
-from branding_team.shared.json_recovery import recover_json_object
+from branding_team.models import BrandingMission
 from shared.env_config import env_int
 
+from .models import MissionUpdate
 from .prompts import (
     EXTRACTION_SYSTEM_PROMPT,
     EXTRACTION_USER_TEMPLATE,
@@ -41,53 +42,6 @@ def _coerce_suggestions(value: Any) -> List[str]:
     if isinstance(value, list):
         return [str(s).strip() for s in value if str(s).strip()][:4]
     return []
-
-
-def _coerce_mission(value: Any) -> Dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _loads_lenient(
-    raw: str, required_keys: Optional[Collection[str]] = None
-) -> Optional[Dict[str, Any]]:
-    """Parse an LLM JSON object, tolerating markdown fences / surrounding prose.
-
-    Delegates to the shared ``recover_json_object`` helper (whole-string parse,
-    then a fenced/prose-wrapped balanced ``{...}`` fallback) rather than
-    re-deriving that logic here. Returns the dict, or ``None`` when nothing
-    parseable is found.
-
-    Preconditions:
-        ``required_keys``, when given, anchors recovery on the object that
-        actually carries at least one of them — see ``recover_json_object``.
-    """
-    return recover_json_object(raw, required_keys=required_keys)
-
-
-def _parse_extraction(raw: str) -> Tuple[Dict[str, Any], List[str], bool]:
-    """Parse the silent extractor's JSON output → (mission_update, suggested_questions, degraded).
-
-    Tolerates markdown fences and stray prose around a JSON object. Returns
-    empty values and ``degraded=True`` on parse failure so the caller can
-    surface the degradation instead of treating it as an indistinguishable
-    no-op.
-    """
-    parsed = _loads_lenient(raw, required_keys=_EXTRACTION_KEYS)
-    if parsed is None:
-        logger.warning("Branding extractor produced unparseable output; treating as no-op")
-        return {}, [], True
-
-    mission_update = _coerce_mission(parsed.get("mission_update"))
-    # Schema-drift fallback: when the model omits the ``mission_update``
-    # wrapper and emits mission fields at the top level — a common LLM
-    # output deviation — promote the top-level mission-shaped keys so the
-    # turn's updates aren't silently lost.
-    if not mission_update:
-        top_level_mission = {k: v for k, v in parsed.items() if k in _MISSION_FIELD_NAMES}
-        if top_level_mission:
-            mission_update = top_level_mission
-    suggested_questions = _coerce_suggestions(parsed.get("suggested_questions"))
-    return mission_update, suggested_questions, False
 
 
 # Single source of truth for the mission fields the assistant reads/writes,
@@ -114,13 +68,6 @@ _MISSION_STRUCTURED_FIELDS = ("color_palettes", "selected_palette_index")
 _MISSION_FIELD_NAMES = (
     set(_MISSION_STR_FIELDS) | set(_MISSION_LIST_FIELDS) | set(_MISSION_STRUCTURED_FIELDS)
 )
-
-# Top-level keys a well-formed extraction payload may carry (the canonical
-# ``mission_update``/``suggested_questions`` wrapper, or top-level mission
-# fields via the schema-drift fallback below) — anchors JSON recovery on the
-# object that actually carries the extraction schema when a reply contains
-# more than one JSON object.
-_EXTRACTION_KEYS = {"mission_update", "suggested_questions"} | _MISSION_FIELD_NAMES
 
 # Display order for the brief block rendered into the prompt templates.
 _MISSION_BRIEF_ORDER = (
@@ -251,21 +198,22 @@ def _strip_accidental_json(reply: str) -> str:
     return stripped
 
 
-def _merge_mission_update(current: BrandingMission, update: Dict[str, Any]) -> BrandingMission:
-    """Merge update dict into current mission; only set keys present and non-empty where applicable."""
+def _merge_mission_update(current: BrandingMission, update: MissionUpdate) -> BrandingMission:
+    """Merge one turn's ``MissionUpdate`` deltas into ``current``.
+
+    Only fields the extractor actually populated are applied; an unset
+    (``None``) field on ``update`` means "nothing new this turn" and leaves
+    the corresponding ``current`` field unchanged.
+    """
     data = current.model_dump()
 
     for key in _MISSION_STR_FIELDS:
-        if key not in update:
-            continue
-        val = update[key]
+        val = getattr(update, key)
         if isinstance(val, str) and val.strip():
             data[key] = val.strip()
 
     for key in _MISSION_LIST_FIELDS:
-        if key not in update:
-            continue
-        val = update[key]
+        val = getattr(update, key)
         if isinstance(val, list):
             # The extractor emits the complete list each turn, so we replace
             # (not extend) — that already bounds growth. Dedupe while keeping
@@ -273,29 +221,13 @@ def _merge_mission_update(current: BrandingMission, update: Dict[str, Any]) -> B
             # duplicates in the mission brief.
             data[key] = list(dict.fromkeys(str(x) for x in val if x))
 
-    if "color_palettes" in update:
-        raw_palettes = update["color_palettes"]
-        if isinstance(raw_palettes, list):
-            palettes = []
-            for p in raw_palettes:
-                if isinstance(p, dict):
-                    palettes.append(
-                        ColorPalette(
-                            name=p.get("name", ""),
-                            description=p.get("description", ""),
-                            colors=[str(c) for c in p.get("colors", []) if c],
-                            sentiment=p.get("sentiment", ""),
-                        ).model_dump()
-                    )
-            if palettes:
-                data["color_palettes"] = palettes
+    if isinstance(update.color_palettes, list) and update.color_palettes:
+        data["color_palettes"] = [p.model_dump() for p in update.color_palettes]
 
-    if "selected_palette_index" in update:
-        val = update["selected_palette_index"]
-        if val is None:
-            data["selected_palette_index"] = None
-        elif isinstance(val, int) and 0 <= val < len(data.get("color_palettes", [])):
-            data["selected_palette_index"] = val
+    if isinstance(update.selected_palette_index, int) and 0 <= update.selected_palette_index < len(
+        data.get("color_palettes", [])
+    ):
+        data["selected_palette_index"] = update.selected_palette_index
 
     return BrandingMission(**data)
 
@@ -399,11 +331,14 @@ class BrandingAssistantAgent:
             if extraction_llm is None:
                 from branding_team.graphs.shared import build_agent
 
-                # output_mode="json" (default): the extractor emits strict JSON.
+                # structured_output=MissionUpdate: the Strands adapter routes
+                # through its tool-calling flow and validates the response
+                # into a MissionUpdate instance before we ever see it.
                 extraction_llm = build_agent(
                     name="extraction",
                     agent_key="branding_assistant",
                     system_prompt=EXTRACTION_SYSTEM_PROMPT,
+                    structured_output=MissionUpdate,
                 )
 
         self._conversation_agent = conversation_llm
@@ -422,8 +357,8 @@ class BrandingAssistantAgent:
         user_message: latest user message.
 
         The returned ``degraded`` flag is ``True`` iff this turn's mission
-        extraction was lost — either the extractor call raised, or its output
-        couldn't be parsed (see ``_parse_extraction``) — so the caller can
+        extraction was lost — either the extractor call raised, or its
+        result didn't carry a valid ``MissionUpdate`` — so the caller can
         surface that degradation instead of it being indistinguishable from
         the extractor legitimately having nothing new to report.
         """
@@ -471,12 +406,19 @@ class BrandingAssistantAgent:
             assistant_reply=reply_text,
         )
 
-        mission_update: Dict[str, Any] = {}
+        mission_update = MissionUpdate()
         suggested_questions: List[str] = []
         degraded = False
         try:
-            raw_extraction = str(self._extraction_agent(extraction_prompt)).strip()
-            mission_update, suggested_questions, degraded = _parse_extraction(raw_extraction)
+            extraction_result = self._extraction_agent(extraction_prompt)
+            structured = getattr(extraction_result, "structured_output", None)
+            if not isinstance(structured, MissionUpdate):
+                raise ValueError(
+                    "extraction agent did not return a MissionUpdate "
+                    f"(got {type(structured).__name__ if structured is not None else 'None'})"
+                )
+            mission_update = structured
+            suggested_questions = _coerce_suggestions(mission_update.suggested_questions)
         except Exception:
             logger.exception("Branding extraction LLM failed; conversation reply unaffected")
             degraded = True
