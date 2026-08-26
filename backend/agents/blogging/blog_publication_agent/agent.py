@@ -24,9 +24,7 @@ from agents.blogging.shared.content_plan import (
     RequirementsAnalysis,
     TitleCandidate,
 )
-from agents.blogging.shared.json_retry import call_json_with_retry
-from strands import Agent
-from strands.types.exceptions import EventLoopException
+from agents.blogging.shared.json_retry import run_json_gate
 
 from .models import (
     ApprovalResult,
@@ -60,11 +58,6 @@ _CONVERT_STRICT_JSON_SUFFIX = (
     'Keys: "feedback_items" (array of objects with category, severity, location?, '
     "issue, suggestion?)."
 )
-
-
-def _unwrap_event_loop(exc: Exception) -> Exception:
-    """Unwrap strands EventLoopException so transient LLM causes re-raise correctly."""
-    return exc.original_exception if isinstance(exc, EventLoopException) else exc
 
 
 def _content_plan_from_outline(outline: str) -> ContentPlan:
@@ -255,12 +248,6 @@ class BlogPublicationAgent(_BlogAgentBase):
             latest_feedback=latest_feedback,
         )
 
-        def _agent_factory():
-            return Agent(
-                model=self._model,
-                system_prompt="You help analyze rejection feedback for blog posts.",
-            )
-
         def _reject_fallback(_exc: Exception) -> dict:
             return {
                 "ready_to_revise": True,
@@ -268,12 +255,12 @@ class BlogPublicationAgent(_BlogAgentBase):
                 "feedback_summary": "\n".join(f"- {f}" for f in meta.rejection_feedback),
             }
 
-        data = call_json_with_retry(
-            _agent_factory,
+        data = run_json_gate(
+            self._model,
+            "You help analyze rejection feedback for blog posts.",
             prompt + _SOFT_JSON_INSTRUCTION,
             max_attempts=2,
             strict_json_suffix=_REJECT_STRICT_JSON_SUFFIX,
-            unwrap_exception=_unwrap_event_loop,
             on_exhausted=_reject_fallback,
             on_unexpected_error=_reject_fallback,
             logger=logger,
@@ -324,22 +311,16 @@ class BlogPublicationAgent(_BlogAgentBase):
 
         human_feedback_text = "\n".join(f"- {f}" for f in meta.rejection_feedback)
 
-        def _agent_factory():
-            return Agent(
-                model=self._model,
-                system_prompt="You convert rejection feedback into structured editor feedback.",
-            )
-
         def _convert_fallback(_exc: Exception) -> dict:
             return {"feedback_items": []}
 
-        data = call_json_with_retry(
-            _agent_factory,
+        data = run_json_gate(
+            self._model,
+            "You convert rejection feedback into structured editor feedback.",
             CONVERT_FEEDBACK_TO_EDITOR_PROMPT.format(feedback=human_feedback_text)
             + _SOFT_JSON_INSTRUCTION,
             max_attempts=2,
             strict_json_suffix=_CONVERT_STRICT_JSON_SUFFIX,
-            unwrap_exception=_unwrap_event_loop,
             on_exhausted=_convert_fallback,
             on_unexpected_error=_convert_fallback,
             logger=logger,
