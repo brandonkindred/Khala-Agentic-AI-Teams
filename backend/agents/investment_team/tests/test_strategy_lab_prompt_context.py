@@ -290,6 +290,16 @@ def test_bound_history_summary_single_line_no_embedded_newlines() -> None:
     assert "\n" not in result.summary
 
 
+def test_bound_history_summary_strips_carriage_returns_too() -> None:
+    """CRLF and bare CR are also line separators, not just bare LF."""
+    entries = ["line one\r\nline two", "line three\rline four", "b"]
+    result = bound_history(entries, keep_last_n=1)
+    assert "\r" not in result.summary
+    assert "\n" not in result.summary
+    assert "line one line two" in result.summary
+    assert "line three line four" in result.summary
+
+
 def test_bound_history_negative_keep_last_n_raises() -> None:
     with pytest.raises(AssertionError):
         bound_history(["a"], keep_last_n=-1)

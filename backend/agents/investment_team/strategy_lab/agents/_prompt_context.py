@@ -98,7 +98,7 @@ def bound_history(entries: Optional[List[Any]], keep_last_n: int) -> BoundedHist
 
 def _snippet(entry: Any) -> str:
     """Render one dropped entry as a short, single-line, length-capped snippet."""
-    text = str(entry).replace("\n", " ").strip()
+    text = " ".join(str(entry).splitlines()).strip()
     if len(text) > _SUMMARY_ENTRY_SNIPPET_CHARS:
         text = text[: _SUMMARY_ENTRY_SNIPPET_CHARS - 1].rstrip() + "…"
     return text
