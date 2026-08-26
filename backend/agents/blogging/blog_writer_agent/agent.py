@@ -1849,6 +1849,7 @@ class BlogWriterAgent(_BlogAgentBase):
         target_word_count: int = 1000,
         length_guidance: str = "",
         uncertainty_answers: Optional[dict[str, str]] = None,
+        allowed_claims: Optional[dict] = None,
         on_llm_request: Optional[Callable[[str], None]] = None,
         draft_output_path: Optional[Union[str, Path]] = None,
     ) -> WriterOutput:
@@ -1859,6 +1860,10 @@ class BlogWriterAgent(_BlogAgentBase):
         cycle where the user acts as the editor.
 
         Postconditions:
+            - The prompt includes an ALLOWED CLAIMS section (per
+              ``_render_allowed_claims_section``) when ``allowed_claims`` yields
+              a non-empty rendered section, so `[CLAIM:id]` tags survive this
+              revision path too; omitted otherwise.
             - Returns a ``WriterOutput`` whose ``draft`` field is the original
               ``draft`` unchanged when it is blank.
             - Otherwise retries the text-completion path up to
@@ -1922,6 +1927,9 @@ class BlogWriterAgent(_BlogAgentBase):
             )
         if elicited_stories:
             prompt_parts.extend(["---", "AUTHOR'S PERSONAL STORIES:\n" + elicited_stories, ""])
+        claims_section = _render_allowed_claims_section(allowed_claims)
+        if claims_section:
+            prompt_parts.extend([claims_section, ""])
         if audience:
             prompt_parts.append(f"Audience: {audience}")
         if tone_or_purpose:

@@ -199,6 +199,56 @@ def test_build_revise_all_items_prompt_omits_allowed_claims_when_absent() -> Non
 
 
 # ---------------------------------------------------------------------------
+# revise_from_user_feedback — direct user/editor feedback revision (uncertainty
+# answers, interactive review, escalation), the free-form-kwargs sibling to
+# _build_revise_all_items_prompt.
+# ---------------------------------------------------------------------------
+
+
+def test_revise_from_user_feedback_includes_allowed_claims(monkeypatch) -> None:
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = make_writer_agent()
+    captured = {"prompt": ""}
+
+    def fake_call(self, prompt, system_prompt=""):
+        captured["prompt"] = prompt
+        return '{"draft": 0}\n---DRAFT---\n# Out\nBody with [CLAIM:c1] tag.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake_call)
+
+    out = a.revise_from_user_feedback(
+        draft="# Draft\n\nBody.",
+        user_feedback="Tighten the intro.",
+        content_plan_text="- Intro\n- Body",
+        allowed_claims=SAMPLE_ALLOWED_CLAIMS,
+    )
+    assert "ALLOWED CLAIMS" in captured["prompt"]
+    assert "- [c1] 80% of teams ship weekly." in captured["prompt"]
+    assert "[CLAIM:c1]" in out.draft
+
+
+def test_revise_from_user_feedback_omits_allowed_claims_when_absent(monkeypatch) -> None:
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = make_writer_agent()
+    captured = {"prompt": ""}
+
+    def fake_call(self, prompt, system_prompt=""):
+        captured["prompt"] = prompt
+        return '{"draft": 0}\n---DRAFT---\n# Out\nBody.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake_call)
+
+    a.revise_from_user_feedback(
+        draft="# Draft\n\nBody.",
+        user_feedback="Tighten the intro.",
+        content_plan_text="- Intro\n- Body",
+    )
+    assert "ALLOWED CLAIMS" not in captured["prompt"]
+
+
+# ---------------------------------------------------------------------------
 # End-to-end: run_pipeline loads allowed_claims.json from work_dir and threads
 # it into both the initial WriterInput and the copy-edit-loop ReviseWriterInput.
 # ---------------------------------------------------------------------------

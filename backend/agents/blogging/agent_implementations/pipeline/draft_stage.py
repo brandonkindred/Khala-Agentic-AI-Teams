@@ -302,6 +302,7 @@ def run_draft_stage(
                                 tone_or_purpose=brief.tone_or_purpose,
                                 selected_title=None,
                                 elicited_stories=elicited_stories_text or None,
+                                allowed_claims=allowed_claims,
                                 target_word_count=length_policy.target_word_count,
                                 length_guidance=build_draft_length_instruction(length_policy),
                                 on_llm_request=lambda msg: _update(
@@ -404,6 +405,7 @@ def run_draft_stage(
                         tone_or_purpose=brief.tone_or_purpose,
                         selected_title=None,
                         elicited_stories=elicited_stories_text or None,
+                        allowed_claims=allowed_claims,
                         target_word_count=length_policy.target_word_count,
                         length_guidance=build_draft_length_instruction(length_policy),
                         on_llm_request=lambda msg: _update(BlogPhase.DRAFT_REVIEW, status_text=msg),
@@ -602,6 +604,7 @@ def run_draft_stage(
                             tone_or_purpose=brief.tone_or_purpose,
                             selected_title=None,
                             elicited_stories=elicited_stories_text or None,
+                            allowed_claims=allowed_claims,
                             target_word_count=length_policy.target_word_count,
                             length_guidance=build_draft_length_instruction(length_policy),
                             on_llm_request=lambda msg: _update(
