@@ -515,6 +515,8 @@ flowchart TB
         ZTRA -->|not committed| RF
         EV -->|other anomaly| RF
         EV -->|clean| AL{DeterministicAlignmentChecker}
+        AL -.->|entry-predicate near-miss,<br/>within tolerance| NM[TradeAlignmentAgent<br/>adjudicate_near_miss]
+        NM -.-> AL
         AL -->|misaligned| TAA[TradeAlignmentAgent<br/>propose_code_fix]
         TAA --> ALRE{Safety check → re-execute fix<br/>→ alignment anomaly gates}
         ALRE -->|clean: commit fix<br/>as new baseline| AL

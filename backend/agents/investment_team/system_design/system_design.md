@@ -115,6 +115,8 @@ flowchart LR
   CycleWF --> SLO
   BatchWF -->|"after awaiting the wave's<br/>child workflows"| Finalize
   Finalize --> PTA
+  Finalize --> B4
+  Finalize --> B6
   Finalize --> B7
   BatchWF -->|"progress writes<br/>(persist_run_state_activity)"| B9
   BatchWF --> EventBus

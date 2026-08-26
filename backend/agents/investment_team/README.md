@@ -25,7 +25,7 @@ flowchart LR
   subgraph lab [Strategy Lab track]
     MD[Free-tier market snapshot]
     SL[POST /strategy-lab/run]
-    SIG[SignalIntelligenceExpert<br/>once per batch]
+    SIG[SignalIntelligenceExpert<br/>once per batch-workflow invocation<br/>— a mid-batch resume can re-run it;<br/>see architecture.md §7]
     GP[Generation pipeline<br/>Design ↔ Review → Synthesis →<br/>Alignment → Verification]
     LabRec[(StrategyLabRecord<br/>+ paper trading)]
     ST[POST /strategies]
