@@ -3216,9 +3216,12 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
             ``active_runs`` entry (``run_id``, ``status``, ``completed_cycles``,
             ``total_cycles``, ``started_at``, ``current_cycle=None``), so
             ``_state_dict_to_job_summary`` can format it the same way as an
-            active run. ``data`` (``job["data"]``) defaults to ``{}`` when
-            absent or not a mapping, so a malformed persisted record degrades
-            to sensible defaults rather than raising ``AttributeError``.
+            active run. ``data`` (``job["data"]``) is used when present and a
+            mapping; when absent, the top-level ``job`` dict is used as the
+            data source instead, so a legacy record with no nested ``data``
+            field still exposes its fields; if the resulting value is not a
+            mapping it degrades to ``{}`` rather than raising
+            ``AttributeError``.
         """
         jid = job.get("job_id", "")
         data = job.get("data", job)

@@ -228,6 +228,31 @@ class _StubLabClient:
         self.jobs = list(self.by_id.values())
 
 
+class _UnfilteredStub:
+    """Fake job-service client that returns ``jobs`` unfiltered by ``list_jobs``.
+
+    Unlike ``_StubLabClient``, this does not build a ``job_id``-keyed ``by_id``
+    dict in ``__init__`` -- doing so would crash during test setup (not inside
+    the endpoint code path under test) for a genuinely malformed entry (a
+    non-dict record, or one with an unhashable ``job_id``).
+    """
+
+    def __init__(self, jobs: List[Any], *, tolerate_non_dict: bool = False) -> None:
+        self._jobs = jobs
+        self._tolerate_non_dict = tolerate_non_dict
+
+    def list_jobs(self, *a: Any, **k: Any) -> List[Any]:
+        return list(self._jobs)
+
+    def get_job(self, jid: str) -> Optional[Dict[str, Any]]:
+        for j in self._jobs:
+            if self._tolerate_non_dict and not isinstance(j, dict):
+                continue
+            if j.get("job_id") == jid:
+                return dict(j)
+        return None
+
+
 @pytest.fixture
 def lab_job_client(monkeypatch: pytest.MonkeyPatch) -> "_StubLabClient":
     """Patch ``_get_lab_run_job_client`` to return a fresh, empty ``_StubLabClient``.
@@ -2550,24 +2575,9 @@ def test_list_strategy_lab_runs_one_malformed_persisted_record_does_not_drop_the
         "completed_cycles": 1,
     }
 
-    class _MixedStub:
-        """Returns persisted jobs unfiltered, including one malformed entry
-        that is not a dict at all -- calling ``.get`` on it raises
-        ``AttributeError`` inside ``normalize_persisted``."""
-
-        def __init__(self, jobs):
-            self._jobs = jobs
-
-        def list_jobs(self, *a, **k):
-            return list(self._jobs)
-
-        def get_job(self, jid):
-            for j in self._jobs:
-                if isinstance(j, dict) and j.get("job_id") == jid:
-                    return dict(j)
-            return None
-
-    stub = _MixedStub(
+    # A non-dict entry among the persisted jobs is malformed enough that
+    # ``.get`` on it raises ``AttributeError`` inside ``normalize_persisted``.
+    stub = _UnfilteredStub(
         jobs=[
             {
                 "job_id": "run-good",
@@ -2579,7 +2589,8 @@ def test_list_strategy_lab_runs_one_malformed_persisted_record_does_not_drop_the
                 },
             },
             "not-a-dict-record",
-        ]
+        ],
+        tolerate_non_dict=True,
     )
     monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
 
@@ -2615,27 +2626,10 @@ def test_list_strategy_lab_runs_one_unhashable_persisted_job_id_does_not_500(
         "completed_cycles": 1,
     }
 
-    class _UnhashableIdStub:
-        """Returns persisted jobs unfiltered, including one whose ``job_id``
-        is itself unhashable (a list) -- unlike ``_StubLabClient``, this does
-        not build a ``job_id``-keyed ``by_id`` dict in ``__init__``, which
-        would otherwise crash during test setup rather than inside the
-        endpoint code path under test.
-        """
-
-        def __init__(self, jobs):
-            self._jobs = jobs
-
-        def list_jobs(self, *a, **k):
-            return list(self._jobs)
-
-        def get_job(self, jid):
-            for j in self._jobs:
-                if j.get("job_id") == jid:
-                    return dict(j)
-            return None
-
-    stub = _UnhashableIdStub(
+    # One entry's job_id is itself unhashable (a list) -- _StubLabClient's
+    # __init__ would crash building its job_id-keyed by_id dict, so this
+    # needs the unfiltered stub too.
+    stub = _UnfilteredStub(
         jobs=[
             {
                 "job_id": "run-good",
