@@ -34,12 +34,12 @@ Output JSON only, in this exact format:
 
 RESEARCH DOCUMENT:
 ---
-{compiled_document}
+__COMPILED_DOCUMENT__
 ---
 
 SOURCES (for citations):
 ---
-{sources_text}
+__SOURCES_TEXT__
 ---
 
 JSON output:"""
@@ -72,9 +72,23 @@ def extract_allowed_claims(
     compiled_document: str,
     references: List[Any],
     topic: str = "",
-) -> AllowedClaims:  # pragma: no cover - blocked by latent bug in EXTRACT_CLAIMS_PROMPT.format() — literal JSON braces in the prompt collide with str.format placeholders, so this function raises KeyError before any meaningful work; covered indirectly by integration tests against a fixed prompt.
+) -> AllowedClaims:
     """
     Extract evidence-backed factual claims from research output using the LLM.
+
+    Preconditions:
+        llm_client is not None and exposes a complete_json(prompt, temperature=,
+        objective=, think=) method. compiled_document is a string. references is
+        a list of objects each optionally exposing title/url attributes (e.g.
+        ResearchReference); only the first 15 are used.
+    Postconditions:
+        Always returns an AllowedClaims (never raises). topic is passed through
+        unchanged. On any failure — the LLM call raising, the LLM returning a
+        non-dict, or "claims" being missing/malformed — returns an AllowedClaims
+        with claims=[]. Otherwise returns an AllowedClaims whose claims are the
+        subset of the LLM's "claims" entries that are dicts with non-blank text;
+        citations are coerced to a list and risk_level to one of
+        "low"/"medium"/"high" (defaulting to "low").
 
     Args:
         llm_client: LLM client with complete_json method.
@@ -92,13 +106,14 @@ def extract_allowed_claims(
         sources_parts.append(f"Source {i}: {title} | {url}")
     sources_text = "\n".join(sources_parts) if sources_parts else "No sources"
 
-    prompt = EXTRACT_CLAIMS_PROMPT.format(
-        compiled_document=compiled_document,
-        sources_text=sources_text,
+    prompt = EXTRACT_CLAIMS_PROMPT.replace("__COMPILED_DOCUMENT__", compiled_document).replace(
+        "__SOURCES_TEXT__", sources_text
     )
 
     try:
-        data = llm_client.complete_json(prompt, temperature=0.2, objective="extract allowed claims", think=False)
+        data = llm_client.complete_json(
+            prompt, temperature=0.2, objective="extract allowed claims", think=False
+        )
     except Exception as e:
         logger.warning("Claims extraction failed: %s; returning empty claims", e)
         return AllowedClaims(topic=topic, claims=[])
