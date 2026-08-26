@@ -295,6 +295,51 @@ def test_format_prior_critiques_truncates_long_text() -> None:
     assert ("F" * 161) not in rendered
 
 
+def test_format_prior_critiques_short_lineage_unaffected_by_bounding() -> None:
+    """len(prior) <= keep_last_n -> identical to unbounded rendering."""
+    prior = [SpecCritique(ready=False, rationale=f"r{i}", round=i) for i in range(3)]
+    rendered = format_prior_critiques(prior, keep_last_n=3)
+    assert "earlier round(s) summarized" not in rendered
+    for i in range(3):
+        assert f"Round {i}: ready=False (0 issues) — r{i}" in rendered
+
+
+def test_format_prior_critiques_over_cap_prepends_summary_and_keeps_last_n() -> None:
+    prior = [SpecCritique(ready=False, rationale=f"r{i}", round=i) for i in range(8)]
+    rendered = format_prior_critiques(prior, keep_last_n=3)
+    lines = rendered.split("\n")
+    assert "earlier round(s) summarized" in lines[0]
+    # Only the last 3 critiques (rounds 5, 6, 7) are rendered in full, using
+    # their real `round` field, not a renumbered index.
+    assert "Round 5: ready=False (0 issues) — r5" in rendered
+    assert "Round 6: ready=False (0 issues) — r6" in rendered
+    assert "Round 7: ready=False (0 issues) — r7" in rendered
+    for dropped in range(5):
+        assert f"Round {dropped}: ready=False (0 issues) — r{dropped}" not in rendered
+
+
+def test_format_prior_critiques_output_size_bounded_regardless_of_round_count() -> None:
+    """Benchmark-style test: rendered length stays roughly constant as
+    critique-lineage length grows, instead of growing linearly."""
+
+    def _lineage(n: int) -> List[SpecCritique]:
+        return [
+            SpecCritique(
+                ready=False,
+                rationale="a fairly long rationale describing what went wrong" * 3,
+                round=i,
+                issues=[
+                    CritiqueIssue(field="sizing", severity="warning", description="d" * 100),
+                ],
+            )
+            for i in range(n)
+        ]
+
+    small = format_prior_critiques(_lineage(6), keep_last_n=5)
+    large = format_prior_critiques(_lineage(500), keep_last_n=5)
+    assert len(large) < len(small) * 3
+
+
 def test_prompt_embeds_response_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     """The review prompt carries the JSON Schema so the wire model, the
     hand-written skeleton, and the downstream coercer cannot drift apart."""

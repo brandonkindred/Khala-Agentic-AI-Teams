@@ -33,7 +33,7 @@ from ._llm_budget import DesignBudgetExhausted, charge_active_budget
 from ._llm_envelope import run_structured_agent
 from ._parse_helpers import coerce_strict_bool as _shared_coerce_strict_bool
 from ._parse_helpers import extract_json_object
-from ._prompt_context import spec_prompt_fields
+from ._prompt_context import _DEFAULT_KEEP_LAST_N, bound_history, spec_prompt_fields
 from ._response_schemas import CRITIQUE_SCHEMA
 from .model_factory import get_strands_model
 
@@ -636,13 +636,21 @@ def _format_readiness(results: List[QualityGateResult]) -> tuple[str, List[str]]
 _CRITIQUE_PREVIEW_CHARS = 160
 
 
-def format_prior_critiques(prior: Optional[List[SpecCritique]]) -> str:
+def format_prior_critiques(
+    prior: Optional[List[SpecCritique]], *, keep_last_n: int = _DEFAULT_KEEP_LAST_N
+) -> str:
     """Render past critiques so the reviewer / designer does not re-raise or regress resolved issues.
 
     Pre: ``prior`` is ``None``, ``[]``, or a list of ``SpecCritique``.
-    Post: returns ``"None yet."`` when empty; otherwise one block per
-    critique — a header line (round, ready flag, issue count, truncated
-    rationale) followed by one indented line per issue carrying its
+    ``keep_last_n`` is a non-negative ``int`` (see ``bound_history``).
+    Post: returns ``"None yet."`` when empty. Otherwise bounds ``prior`` via
+    ``bound_history`` first: when ``len(prior) <= keep_last_n`` every
+    critique renders exactly as before (no behavior change on short
+    lineages). When ``len(prior) > keep_last_n``, a leading
+    ``"  {bound_history's rolling summary}"`` line is prepended and only the
+    last ``keep_last_n`` critiques are rendered in full. Each rendered
+    critique is one block — a header line (round, ready flag, issue count,
+    truncated rationale) followed by one indented line per issue carrying its
     severity, field, truncated description, and truncated ``suggested_fix``
     (when present). Surfacing the per-issue detail — not just the rationale —
     lets a later revision see *what* an earlier round fixed so it does not
@@ -653,8 +661,9 @@ def format_prior_critiques(prior: Optional[List[SpecCritique]]) -> str:
     """
     if not prior:
         return "None yet."
-    lines: List[str] = []
-    for c in prior:
+    bounded = bound_history(prior, keep_last_n)
+    lines: List[str] = [f"  {bounded.summary}"] if bounded.summary else []
+    for c in bounded.kept:
         lines.append(
             f"  Round {c.round}: ready={c.ready} ({len(c.issues)} issues) — "
             f"{c.rationale[:_CRITIQUE_PREVIEW_CHARS]}"
