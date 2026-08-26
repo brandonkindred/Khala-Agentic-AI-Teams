@@ -25,7 +25,6 @@ from temporalio.exceptions import ApplicationError
 from sales_team.temporal.activities import (
     _beating,
     _GuardOutcome,
-    _job_status,
     _job_stopped,
     _terminal_guard,
 )
