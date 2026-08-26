@@ -898,6 +898,8 @@ def test_schema_derived_factory_prompt_matches_structured_output_schema(
     assert agent.system_prompt == _expected_prompt_from_schema(spec)
 
 
+_WEBSITE_CHANNEL_DESCRIPTION = dict(branding_agents.CHANNEL_SPECS)["website"]
+
 _PHASE_SPOT_CHECKS: tuple[tuple[str, Callable[[], Agent], type], ...] = (
     ("phase1_discovery_auditor", make_discovery_auditor, BrandDiscoveryAudit),
     ("phase2_storyteller", make_storyteller, BrandStoryOutput),
@@ -905,7 +907,7 @@ _PHASE_SPOT_CHECKS: tuple[tuple[str, Callable[[], Agent], type], ...] = (
     (
         "phase4_website_guide",
         lambda: branding_agents._make_channel_guide(
-            "website", branding_agents._CHANNEL_DESCRIPTIONS["website"], ChannelGuidelineOutput
+            "website", _WEBSITE_CHANNEL_DESCRIPTION, ChannelGuidelineOutput
         ),
         ChannelGuidelineOutput,
     ),
