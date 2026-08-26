@@ -703,6 +703,13 @@ class SalesPodOrchestrator:
                 attempt + 1,
                 max_refinements,
             )
+
+            if attempt == max_refinements - 1:
+                # No review budget left to check a regenerated draft — return
+                # the sequence that was just reviewed rather than ship one
+                # that was never checked.
+                break
+
             refined_ctx = refined_ctx + "\n\nReviewer feedback to address:\n" + feedback
             try:
                 variants = self.outreach.generate_sequence(
