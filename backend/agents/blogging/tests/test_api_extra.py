@@ -137,6 +137,49 @@ def test_restart_job_happy(client: TestClient, monkeypatch) -> None:
     assert job["status"] == "pending"
 
 
+def test_restart_job_clears_research_cache(client: TestClient, monkeypatch, tmp_path: Path) -> None:
+    """Restart must wipe the job's research checkpoint cache, not just job-store
+    fields — otherwise a "from scratch" restart with an unchanged brief would
+    silently resume the previous run's ResearchAgent checkpoints."""
+    from agents.blogging.shared import blog_job_store as bjs
+
+    work_dir = tmp_path / "job-work-dir"
+    cache_dir = work_dir / ".research_cache"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "stale-checkpoint.json").write_text("{}", encoding="utf-8")
+
+    job_id = _create_job()
+    bjs.update_blog_job(
+        job_id,
+        status="completed",
+        request_payload={"brief": "x"},
+        work_dir=str(work_dir),
+    )
+
+    monkeypatch.setattr(_api_main, "_submit_async_job", lambda fn, *a, **kw: None)
+
+    r = client.post(f"/job/{job_id}/restart")
+    assert r.status_code == 200
+    assert not cache_dir.exists()
+
+
+def test_clear_research_cache_helper(tmp_path: Path) -> None:
+    """Unit-level coverage of _clear_research_cache's edge cases: no work_dir,
+    and a work_dir with no research cache yet (nothing to clear either way)."""
+    from agents.blogging.api.routers.jobs import _clear_research_cache
+
+    # No work_dir recorded on the job (e.g. never started) — no-op, doesn't raise.
+    _clear_research_cache(None)
+    _clear_research_cache("")
+
+    # work_dir exists but no .research_cache under it yet (no research ran) —
+    # also a no-op, not an error.
+    work_dir = tmp_path / "job-work-dir"
+    work_dir.mkdir()
+    _clear_research_cache(str(work_dir))
+    assert not (work_dir / ".research_cache").exists()
+
+
 # ---------------------------------------------------------------------------
 # Medium stats background runner
 # ---------------------------------------------------------------------------

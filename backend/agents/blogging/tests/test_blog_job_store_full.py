@@ -122,15 +122,20 @@ def test_reset_blog_job_clears_progress(tmp_path: Path) -> None:
         complete_blog_job,
         get_blog_job,
         reset_blog_job,
+        update_blog_job,
     )
 
     job_id = _make_job(tmp_path)
     complete_blog_job(job_id, outline="X", cache_dir=tmp_path)
+    update_blog_job(job_id, research_sources_count=7, cache_dir=tmp_path)
     reset_blog_job(job_id, cache_dir=tmp_path)
     job = get_blog_job(job_id, cache_dir=tmp_path)
     assert job["status"] == "pending"
     assert job["progress"] == 0
     assert job["outline"] is None
+    # A restarted job must not keep reporting the previous run's research
+    # source count while the new research step is pending/in-flight.
+    assert job["research_sources_count"] == 0
 
 
 def test_approve_unapprove_blog_job(tmp_path: Path) -> None:

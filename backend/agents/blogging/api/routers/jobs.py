@@ -3,7 +3,10 @@ approve/unapprove, and listing."""
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import logging
+import shutil
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from agents.blogging.api.dependencies import get_job
 from agents.blogging.api.models import (
@@ -21,10 +24,32 @@ from fastapi.responses import StreamingResponse
 
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "needs_human_review"})
 _BLOG_RESTARTABLE = RESTARTABLE_STATUSES | {"needs_human_review"}
+
+
+def _clear_research_cache(work_dir: Optional[str]) -> None:
+    """Best-effort delete of a job's research checkpoint cache on restart.
+
+    A restart reuses the job's ``work_dir`` and (for an unchanged brief) the same
+    ``ResearchAgent`` cache key, so without this the "from scratch" restart would
+    silently resume the previous run's research checkpoints instead of re-running
+    research. Failures are logged and swallowed — a stale cache dir is a resumed
+    research step, not a broken restart.
+    """
+    if not work_dir:
+        return
+    cache_dir = Path(work_dir) / ".research_cache"
+    try:
+        shutil.rmtree(cache_dir)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        logger.warning("Failed to clear research cache at %s on restart: %s", cache_dir, e)
 
 
 @router.get(
@@ -220,6 +245,7 @@ def restart_blog_job(job_id: str) -> StartPipelineResponse:
     from agents.blogging.shared.blog_job_store import reset_blog_job
 
     reset_blog_job(job_id)
+    _clear_research_cache(job.get("work_dir"))
 
     request = FullPipelineRequest(**payload)
 
