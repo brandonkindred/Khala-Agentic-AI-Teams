@@ -385,7 +385,11 @@ def test_design_loop_pins_one_of_several_allowed_categories(
         # Honor whichever single category the pin left allowed, so this test
         # exercises prior-record scoping without also tripping the
         # asset-category enforcement/regeneration path (covered separately).
-        (allowed,) = set(PROMPT_ASSET_CLASSES) - set(kwargs["exclude_asset_classes"])
+        allowed_classes = set(PROMPT_ASSET_CLASSES) - set(kwargs["exclude_asset_classes"])
+        assert len(allowed_classes) == 1, (
+            f"expected exactly one allowed class, got {allowed_classes}"
+        )
+        (allowed,) = allowed_classes
         return _spec_dict(allowed), "scripted rationale"
 
     monkeypatch.setattr(orch.design_agent, "run", _run)

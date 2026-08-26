@@ -233,9 +233,10 @@ def excluded_for_allowed(allowed: Optional[Iterable[str]]) -> List[str]:
 def _canonical_subset(raw: Optional[List[str]]) -> set[str]:
     """Normalize a class-name list to the canonical labels it actually names.
 
-    Shared by :func:`select_asset_category` for both its exclusion and its
-    ``avoid`` bias, so an alias (``equity`` / ``fx``) is honored rather than
-    silently matching nothing against :data:`PROMPT_ASSET_CLASSES`.
+    Shared by :func:`allowed_asset_classes` (for ``exclude_asset_classes``)
+    and :func:`select_asset_category` (for its ``avoid`` bias), so an alias
+    (``equity`` / ``fx``) is honored rather than silently matching nothing
+    against :data:`PROMPT_ASSET_CLASSES`.
 
     Preconditions:
       - ``raw`` is ``None`` or a list of scalar values.
