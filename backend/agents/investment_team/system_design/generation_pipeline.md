@@ -398,9 +398,16 @@ assembly from already-computed state. It makes no *agent* (LLM) calls; its one
 gate interaction is `ConvergenceTracker.record(...)`, which files this
 attempt's outcome for later cycles rather than evaluating anything.
 `_assemble_record` builds the happy-path `StrategyLabRecord`;
-`_build_short_circuit_record` builds the equivalent for a cycle that never
-reached a full backtest (budget exhausted, design stalled, spec
-unimplementable after all re-entries). Module-level `_finalize_loop_telemetry`
+`_build_short_circuit_record` always builds the same empty-trades
+representation (it hardcodes `compute_metrics([], ...)` — it takes no
+`trades` parameter at all) for every short-circuit status (`design_stalled`,
+`spec_unimplementable` after all re-entries, and `budget_exhausted`). That
+last status is not limited to "never reached a full backtest": a budget trip
+inside `_orchestrate_refinement_and_alignment` (refinement or alignment) can
+fire *after* one or more real sandbox executions already produced real
+trades, and this builder still discards them in favor of the empty
+representation — so a `failed: budget_exhausted` record's zero trades does
+not mean no execution happened. Module-level `_finalize_loop_telemetry`
 merges the design-loop telemetry with whole-funnel gate pass/fail histograms
 and derives the three-state `code_path`
 (`"not_synthesized" | "compiled" | "custom"`) recorded on the record. The
