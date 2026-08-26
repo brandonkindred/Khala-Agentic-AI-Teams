@@ -250,7 +250,7 @@ def _patch_agent(monkeypatch, side_effect) -> dict:
     Returns a dict that captures the Agent constructor kwargs so tests can assert
     what was passed (e.g. the system prompt).
     """
-    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.shared import json_retry as json_retry_mod
 
     captured: dict = {}
 
@@ -261,7 +261,7 @@ def _patch_agent(monkeypatch, side_effect) -> dict:
         def __call__(self, prompt):
             return side_effect(prompt)
 
-    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    monkeypatch.setattr(json_retry_mod, "Agent", _Agent)
     return captured
 
 

@@ -38,7 +38,7 @@ def _make_input(**kw):
 
 
 def _patch_agent_response(monkeypatch, response_json: dict) -> None:
-    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.shared import json_retry as json_retry_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -47,7 +47,7 @@ def _patch_agent_response(monkeypatch, response_json: dict) -> None:
         def __call__(self, prompt):
             return json.dumps(response_json)
 
-    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    monkeypatch.setattr(json_retry_mod, "Agent", _Agent)
 
 
 def test_copy_editor_length_must_fix_injected(monkeypatch) -> None:
@@ -116,7 +116,7 @@ def test_copy_editor_technical_deep_dive_thin_draft(monkeypatch) -> None:
 
 def test_copy_editor_llm_json_parse_failure_uses_fallback(monkeypatch) -> None:
     """Failure to parse JSON → fallback summary returned."""
-    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.shared import json_retry as json_retry_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -125,7 +125,7 @@ def test_copy_editor_llm_json_parse_failure_uses_fallback(monkeypatch) -> None:
         def __call__(self, prompt):
             return "not json"
 
-    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    monkeypatch.setattr(json_retry_mod, "Agent", _Agent)
     a = _make_agent()
     out = a.run(_make_input(draft="# d\n\nshort"))
     assert "could not parse" in out.summary.lower()
