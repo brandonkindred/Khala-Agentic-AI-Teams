@@ -29,7 +29,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, List, Optional
 
 if TYPE_CHECKING:
-    from .models import StrategySpec
+    from ..models import StrategySpec
     from .quality_gates.convergence_tracker import ConvergenceTracker
 
 
@@ -71,6 +71,10 @@ def require_short_circuit_inputs(
     Preconditions:
       - Called only after the design-re-entry loop exhausts its re-entry
         bound without returning.
+      - ``last_spec`` and ``last_evidence`` are each either the value a
+        ``SpecImplementabilityError`` raiser set, or ``None`` if none was
+        ever raised (or a future raiser violates that contract) — both are
+        legitimately optional inputs, not merely non-``None`` in practice.
     Postconditions:
       - Returns ``None`` when both arguments are non-``None``.
     Invariants:
