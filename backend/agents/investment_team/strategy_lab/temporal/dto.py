@@ -79,7 +79,7 @@ def gather_convergence_directives(tracker: Any) -> List[str]:
     return _gather_convergence_directives(tracker)
 
 
-def require_short_circuit_inputs(last_spec: Optional[Any], last_evidence: Optional[str]) -> None:
+def require_short_circuit_inputs(last_spec: Any, last_evidence: Optional[str]) -> None:
     """Adapter onto ``cycle_control.require_short_circuit_inputs``.
 
     Lets ``StrategyLabCycleWorkflow.run`` share the exact same terminal-guard
