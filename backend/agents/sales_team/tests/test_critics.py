@@ -652,18 +652,17 @@ class TestOrchestratorCriticRefinement:
         orch.outreach_critic = OutreachCriticAgent(llm_client=critic_llm)
         return orch
 
-    def test_outreach_refines_once_when_critic_revises(
+    def test_outreach_default_budget_reviews_once_and_never_regenerates(
         self,
         sample_prospect: Prospect,
         sample_dossier: ProspectDossier,
         sample_icp: IdealCustomerProfile,
     ) -> None:
-        outreach_llm = CannedLLMClient(
-            [
-                _good_variant_payload(),  # initial emit
-                _good_variant_payload(),  # refined emit
-            ]
-        )
+        """With the shipped default max_refinements=1, the review budget is
+        spent entirely on the one review call — there is no budget left to
+        check a regenerated draft, so the initial (reviewed) sequence is
+        returned as-is rather than an unreviewed regeneration."""
+        outreach_llm = CannedLLMClient([_good_variant_payload()])  # initial emit only
         critic_llm = CannedLLMClient(
             [
                 _fail_outreach_report("outreach.day1.cta", "missing CTA"),  # rejects initial
@@ -682,11 +681,53 @@ class TestOrchestratorCriticRefinement:
             sample_icp,
         )
 
-        # Two outreach emits + one critic review (reasoning + formatting pass) =
-        # one bounded refinement.
-        assert len(outreach_llm.calls) == 2
+        # One outreach emit + one critic review (reasoning + formatting pass) —
+        # no regeneration, since there's no budget left to review its output.
+        assert len(outreach_llm.calls) == 1
         assert len(critic_llm.calls) == 1
         assert len(critic_llm.reasoning_calls) == 1
+        assert sequence.variants
+
+    def test_outreach_refines_once_when_budget_allows_a_second_review(
+        self,
+        sample_prospect: Prospect,
+        sample_dossier: ProspectDossier,
+        sample_icp: IdealCustomerProfile,
+    ) -> None:
+        """With max_refinements=2, a FAIL on the first review leaves budget
+        for a second review, so the agent regenerates once and that
+        regenerated draft is itself reviewed before being returned."""
+        outreach_llm = CannedLLMClient(
+            [
+                _good_variant_payload(),  # initial emit
+                _good_variant_payload(),  # refined emit
+            ]
+        )
+        critic_llm = CannedLLMClient(
+            [
+                _fail_outreach_report("outreach.day1.cta", "missing CTA"),  # rejects initial
+                _pass_outreach_report(),  # approves the refined regeneration
+            ]
+        )
+        orch = self._orchestrator_with_canned_clients(outreach_llm, critic_llm)
+
+        sequence = orch._generate_outreach_with_critic(
+            sample_prospect,
+            sample_dossier,
+            "Acme Pipeline",
+            "Lift outbound velocity",
+            "Beta Inc saw 3x demos",
+            "Acme is expanding into EMEA",
+            None,
+            sample_icp,
+            max_refinements=2,
+        )
+
+        # Two outreach emits + two critic reviews — the regenerated draft was
+        # itself reviewed (and approved) before being returned.
+        assert len(outreach_llm.calls) == 2
+        assert len(critic_llm.calls) == 2
+        assert len(critic_llm.reasoning_calls) == 2
         assert sequence.variants
         # Refined emit's prompt carries the critic feedback we returned.
         assert "Reviewer feedback to address" in outreach_llm.calls[1]["prompt"]

@@ -667,7 +667,11 @@ class SalesPodOrchestrator:
         max_refinements: int = 1,
         confidence_threshold: Optional[float] = None,
     ) -> OutreachSequence:
-        """Emit -> wrap -> critic -> on revise, re-emit up to *max_refinements* times."""
+        """Emit -> wrap -> critic -> on revise, re-emit up to *max_refinements - 1* times.
+
+        The final review-budget iteration is always spent reviewing the current
+        sequence, so the returned sequence is never an unchecked regeneration.
+        """
         threshold = (
             confidence_threshold
             if confidence_threshold is not None
@@ -696,6 +700,21 @@ class SalesPodOrchestrator:
                 return sequence
 
             feedback = format_critic_feedback(report.violations, report.notes)
+
+            if attempt == max_refinements - 1:
+                # No review budget left to check a regenerated draft — return
+                # the sequence that was just reviewed rather than ship one
+                # that was never checked.
+                logger.info(
+                    "sales.outreach.critic_rejected_budget_exhausted prospect_id=%s "
+                    "violations=%d attempt=%d/%d",
+                    prospect.id,
+                    report.must_fix_count(),
+                    attempt + 1,
+                    max_refinements,
+                )
+                break
+
             logger.info(
                 "sales.outreach.critic_revise prospect_id=%s violations=%d attempt=%d/%d",
                 prospect.id,

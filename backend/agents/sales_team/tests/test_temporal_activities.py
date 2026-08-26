@@ -96,6 +96,78 @@ def _fake_jobs(monkeypatch: pytest.MonkeyPatch, fake_job_client) -> None:
 
 
 # ---------------------------------------------------------------------------
+# _terminal_guard
+# ---------------------------------------------------------------------------
+
+
+def test_terminal_guard_missing_job_raises_with_missing_msg_verbatim():
+    with pytest.raises(RuntimeError, match="custom missing text"):
+        acts._terminal_guard(
+            "no-such-job", phase="sales_prepare", missing_msg="custom missing text"
+        )
+
+
+def test_terminal_guard_running_returns_proceed(fake_job_client):
+    fake_job_client.create_job("job-1", status="running")
+    result = acts._terminal_guard("job-1", phase="sales_prepare", missing_msg="unused")
+    assert result is acts._GuardOutcome.PROCEED
+
+
+def test_terminal_guard_failed_sales_prepare_message(fake_job_client):
+    fake_job_client.create_job("job-1", status="failed")
+    with pytest.raises(
+        ApplicationError, match="Sales pipeline job job-1 was already FAILED before start"
+    ) as exc_info:
+        acts._terminal_guard("job-1", phase="sales_prepare", missing_msg="unused")
+    assert exc_info.value.non_retryable is True
+
+
+def test_terminal_guard_failed_sales_finalize_message(fake_job_client):
+    fake_job_client.create_job("job-1", status="failed")
+    with pytest.raises(
+        ApplicationError, match="Sales pipeline job job-1 was marked FAILED during the run"
+    ) as exc_info:
+        acts._terminal_guard("job-1", phase="sales_finalize", missing_msg="unused")
+    assert exc_info.value.non_retryable is True
+
+
+def test_terminal_guard_failed_deep_research_prepare_message(fake_job_client):
+    fake_job_client.create_job("job-1", status="failed")
+    with pytest.raises(
+        ApplicationError, match="Deep-research job job-1 was already FAILED before start"
+    ) as exc_info:
+        acts._terminal_guard("job-1", phase="deep_research_prepare", missing_msg="unused")
+    assert exc_info.value.non_retryable is True
+
+
+def test_terminal_guard_failed_deep_research_finalize_message(fake_job_client):
+    fake_job_client.create_job("job-1", status="failed")
+    with pytest.raises(
+        ApplicationError, match="Deep-research job job-1 was marked FAILED during the run"
+    ) as exc_info:
+        acts._terminal_guard("job-1", phase="deep_research_finalize", missing_msg="unused")
+    assert exc_info.value.non_retryable is True
+
+
+def test_terminal_guard_cancelled_returns_stop(fake_job_client):
+    fake_job_client.create_job("job-1", status="cancelled")
+    result = acts._terminal_guard("job-1", phase="sales_finalize", missing_msg="unused")
+    assert result is acts._GuardOutcome.STOP
+
+
+def test_terminal_guard_interrupted_returns_stop(fake_job_client):
+    fake_job_client.create_job("job-1", status="interrupted")
+    result = acts._terminal_guard("job-1", phase="deep_research_finalize", missing_msg="unused")
+    assert result is acts._GuardOutcome.STOP
+
+
+def test_terminal_guard_completed_returns_stop(fake_job_client):
+    fake_job_client.create_job("job-1", status="completed")
+    result = acts._terminal_guard("job-1", phase="sales_prepare", missing_msg="unused")
+    assert result is acts._GuardOutcome.STOP
+
+
+# ---------------------------------------------------------------------------
 # sales_prepare
 # ---------------------------------------------------------------------------
 
@@ -161,6 +233,34 @@ def test_prepare_raises_non_retryable_on_invalid_request(fake_job_client):
     assert ei.value.non_retryable is True
     # prepare did NOT write FAILED (that would defeat retries and pre-empt mark_failed)
     assert fake_job_client.get_job("job-bad")["status"] == "pending"
+
+
+@pytest.mark.parametrize(
+    "status", ["missing", "pending", "failed", "cancelled", "interrupted", "completed"]
+)
+def test_prepare_invokes_terminal_guard_for_every_status(monkeypatch, fake_job_client, status):
+    """Prepare must route every status category through ``_terminal_guard``
+    rather than bypassing it with its own inline branching."""
+    if status != "missing":
+        fake_job_client.create_job("job-1", status=status)
+    monkeypatch.setattr("sales_team.outcome_store.load_current_insights", lambda: None)
+
+    calls = []
+    real_guard = acts._terminal_guard
+
+    def spy(job_id, *, phase, missing_msg):
+        calls.append((job_id, phase))
+        return real_guard(job_id, phase=phase, missing_msg=missing_msg)
+
+    monkeypatch.setattr(acts, "_terminal_guard", spy)
+
+    if status in ("missing", "failed"):
+        with pytest.raises((RuntimeError, ApplicationError)):
+            acts.prepare_sales_pipeline_activity("job-1", _REQUEST)
+    else:
+        acts.prepare_sales_pipeline_activity("job-1", _REQUEST)
+
+    assert calls == [("job-1", "sales_prepare")]
 
 
 # ---------------------------------------------------------------------------

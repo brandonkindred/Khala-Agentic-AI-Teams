@@ -22,6 +22,7 @@ from sales_team.models import (
     Prospect,
     ProspectDossier,
 )
+from sales_team.temporal import activities as acts
 from sales_team.temporal import deep_research_activities as dra
 from sales_team.temporal.phase_models import DeepResearchContext
 
@@ -323,9 +324,35 @@ def test_finalize_skips_completed_when_cancel_lands_during(monkeypatch, fake_job
     )
     fake_job_client.create_job("dr-1", status="running")
     statuses = iter(["running", "cancelled"])
-    monkeypatch.setattr(dra, "_job_status", lambda job_id: next(statuses))
+    # _terminal_guard (defined in sales_team.temporal.activities) resolves
+    # _job_status against its own module, not dra's re-exported reference.
+    monkeypatch.setattr(acts, "_job_status", lambda job_id: next(statuses))
     dra.finalize_deep_research_activity(_dctx(), [], [], [])
     assert fake_job_client.get_job("dr-1")["status"] == "running"  # COMPLETED not written
+
+
+def test_finalize_invokes_terminal_guard_at_both_checkpoints(monkeypatch, fake_job_client):
+    """Finalize must route both the pre- and post-assembly terminal checks
+    through the shared ``_terminal_guard`` rather than a private closure."""
+    _stub_assemble(
+        monkeypatch,
+        DeepResearchResult(product_name="P", total_prospects=0, companies_represented=0),
+        {},
+    )
+    fake_job_client.create_job("dr-1", status="running")
+
+    calls = []
+    real_guard = dra._terminal_guard
+
+    def spy(job_id, *, phase, missing_msg):
+        calls.append((job_id, phase))
+        return real_guard(job_id, phase=phase, missing_msg=missing_msg)
+
+    monkeypatch.setattr(dra, "_terminal_guard", spy)
+
+    dra.finalize_deep_research_activity(_dctx(), [], [], [])
+
+    assert calls == [("dr-1", "deep_research_finalize"), ("dr-1", "deep_research_finalize")]
 
 
 # ---------------------------------------------------------------------------
