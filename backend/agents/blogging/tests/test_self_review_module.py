@@ -224,6 +224,53 @@ def test_llm_self_review_prose_prefixed_array_applies_fix() -> None:
     assert "Better draft" in out
 
 
+def test_llm_self_review_prose_fallback_all_empty_issues_returns_draft_no_second_call() -> None:
+    """A prose-rescanned array whose only element has a falsy ``issue`` is dropped.
+
+    Regression test: the prose-rescan fallback (``_extract_json_array_from_text``)
+    only requires the ``issue`` key to be *present*, not truthy — so it can return
+    a dict like ``{"issue": ""}``. Without post-filtering, that would produce a
+    blank instruction line and an unnecessary second LLM call that could rewrite
+    an otherwise-unchanged draft.
+    """
+    calls = {"n": 0}
+    review_payload = 'Here are the issues: [{"location": "intro", "issue": ""}]'
+
+    def call_text(prompt: str, system_prompt: str = "") -> str:
+        calls["n"] += 1
+        return review_payload
+
+    out = sr.llm_self_review("draft text", call_text)
+    assert out == "draft text"
+    assert calls["n"] == 1
+
+
+def test_llm_self_review_prose_fallback_drops_empty_issue_keeps_valid_one() -> None:
+    """A prose-rescanned array mixing a falsy-``issue`` entry and a real one keeps only the real one."""
+    state = {"i": 0}
+    review_payload = (
+        'Here are the issues: [{"location": "intro", "issue": ""}, '
+        '{"location": "body", "issue": "vague", "fix": "be specific"}]'
+    )
+
+    fix_prompts = []
+
+    def call_text(prompt: str, system_prompt: str = "") -> str:
+        state["i"] += 1
+        if state["i"] == 1:
+            return review_payload
+        fix_prompts.append(prompt)
+        return '{"draft": 0}\n---DRAFT---\n# Better draft\nSpecific text.'
+
+    out = sr.llm_self_review("draft text", call_text)
+    assert "Better draft" in out
+    assert state["i"] == 2
+    # Only the real issue made it into the fix prompt, numbered starting at 1
+    # (the blank-issue entry was filtered out rather than occupying slot 1).
+    assert "1. [body] vague" in fix_prompts[0]
+    assert "2." not in fix_prompts[0].split("---\nCURRENT DRAFT")[0]
+
+
 def test_llm_self_review_non_list_json_returns_draft() -> None:
     """A JSON object (not an array) is treated as no issues."""
     calls = {"n": 0}

@@ -424,6 +424,8 @@ def llm_self_review(draft: str, call_text: CallText) -> str:
             parsed = extract_json_from_response(cleaned)
         except LLMJsonParseError:
             issues = _extract_json_array_from_text(cleaned, required_keys=("issue",))
+            if issues is not None:
+                issues = [iss for iss in issues if iss.get("issue")]
         else:
             if isinstance(parsed, list):
                 issues = [iss for iss in parsed if isinstance(iss, dict) and iss.get("issue")]
@@ -432,6 +434,8 @@ def llm_self_review(draft: str, call_text: CallText) -> str:
                 return draft
             else:
                 issues = _extract_json_array_from_text(cleaned, required_keys=("issue",))
+                if issues is not None:
+                    issues = [iss for iss in issues if iss.get("issue")]
         if issues is None:
             logger.info("LLM self-review: no issues found (response was not a JSON array)")
             return draft
