@@ -282,6 +282,49 @@ def test_run_pipeline_job_helpers(monkeypatch, tmp_path: Path) -> None:
     assert rpj._normalize_audience({}) is None
 
 
+def _dict_audience() -> dict:
+    return {
+        "profession": "dev",
+        "skill_level": "expert",
+        "hobbies": ["a", "b"],
+        "other": "extra",
+    }
+
+
+def _pydantic_audience() -> Any:
+    from agents.blogging.api.models import AudienceDetails
+
+    return AudienceDetails(
+        profession="dev", skill_level="expert", hobbies=["a", "b"], other="extra"
+    )
+
+
+@pytest.mark.parametrize(
+    "make_audience", [_dict_audience, _pydantic_audience], ids=["dict", "AudienceDetails"]
+)
+def test_format_audience_same_output_for_equivalent_input_shapes(make_audience) -> None:
+    """The shared formatter produces identical output for a dict and an equivalent
+    AudienceDetails model — the two input shapes the API layer and the job-runner
+    layer each hand it."""
+    from agents.blogging.shared.audience import format_audience
+
+    assert format_audience(make_audience()) == (
+        "profession: dev; skill_level: expert; interests: a, b; extra"
+    )
+
+
+def test_format_audience_object_with_only_hobbies_and_other() -> None:
+    """An object exposing only hobbies/other (no profession/skill_level) is still
+    recognized as audience-like, per the documented contract."""
+    from agents.blogging.shared.audience import format_audience
+
+    class PartialAudience:
+        hobbies = ["reading"]
+        other = "night owl"
+
+    assert format_audience(PartialAudience()) == "interests: reading; night owl"
+
+
 def test_run_pipeline_job_external_cancellation_detection() -> None:
     from agents.blogging.shared import run_pipeline_job as rpj
     from temporalio.exceptions import CancelledError
@@ -776,9 +819,11 @@ def test_max_previous_feedback_items_constant_is_tracker_default() -> None:
     )
 
     assert MAX_PREVIOUS_FEEDBACK_ITEMS == 15
-    default = inspect.signature(FeedbackTracker.get_capped_previous_feedback).parameters[
-        "max_items"
-    ].default
+    default = (
+        inspect.signature(FeedbackTracker.get_capped_previous_feedback)
+        .parameters["max_items"]
+        .default
+    )
     assert default == MAX_PREVIOUS_FEEDBACK_ITEMS
 
 
