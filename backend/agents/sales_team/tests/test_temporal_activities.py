@@ -96,6 +96,78 @@ def _fake_jobs(monkeypatch: pytest.MonkeyPatch, fake_job_client) -> None:
 
 
 # ---------------------------------------------------------------------------
+# _terminal_guard
+# ---------------------------------------------------------------------------
+
+
+def test_terminal_guard_missing_job_raises_with_missing_msg_verbatim():
+    with pytest.raises(RuntimeError, match="custom missing text"):
+        acts._terminal_guard(
+            "no-such-job", phase="sales_prepare", missing_msg="custom missing text"
+        )
+
+
+def test_terminal_guard_running_returns_proceed(fake_job_client):
+    fake_job_client.create_job("job-1", status="running")
+    result = acts._terminal_guard("job-1", phase="sales_prepare", missing_msg="unused")
+    assert result is acts._GuardOutcome.PROCEED
+
+
+def test_terminal_guard_failed_sales_prepare_message(fake_job_client):
+    fake_job_client.create_job("job-1", status="failed")
+    with pytest.raises(
+        ApplicationError, match="Sales pipeline job job-1 was already FAILED before start"
+    ) as exc_info:
+        acts._terminal_guard("job-1", phase="sales_prepare", missing_msg="unused")
+    assert exc_info.value.non_retryable is True
+
+
+def test_terminal_guard_failed_sales_finalize_message(fake_job_client):
+    fake_job_client.create_job("job-1", status="failed")
+    with pytest.raises(
+        ApplicationError, match="Sales pipeline job job-1 was marked FAILED during the run"
+    ) as exc_info:
+        acts._terminal_guard("job-1", phase="sales_finalize", missing_msg="unused")
+    assert exc_info.value.non_retryable is True
+
+
+def test_terminal_guard_failed_deep_research_prepare_message(fake_job_client):
+    fake_job_client.create_job("job-1", status="failed")
+    with pytest.raises(
+        ApplicationError, match="Deep-research job job-1 was already FAILED before start"
+    ) as exc_info:
+        acts._terminal_guard("job-1", phase="deep_research_prepare", missing_msg="unused")
+    assert exc_info.value.non_retryable is True
+
+
+def test_terminal_guard_failed_deep_research_finalize_message(fake_job_client):
+    fake_job_client.create_job("job-1", status="failed")
+    with pytest.raises(
+        ApplicationError, match="Deep-research job job-1 was marked FAILED during the run"
+    ) as exc_info:
+        acts._terminal_guard("job-1", phase="deep_research_finalize", missing_msg="unused")
+    assert exc_info.value.non_retryable is True
+
+
+def test_terminal_guard_cancelled_returns_stop(fake_job_client):
+    fake_job_client.create_job("job-1", status="cancelled")
+    result = acts._terminal_guard("job-1", phase="sales_finalize", missing_msg="unused")
+    assert result is acts._GuardOutcome.STOP
+
+
+def test_terminal_guard_interrupted_returns_stop(fake_job_client):
+    fake_job_client.create_job("job-1", status="interrupted")
+    result = acts._terminal_guard("job-1", phase="deep_research_finalize", missing_msg="unused")
+    assert result is acts._GuardOutcome.STOP
+
+
+def test_terminal_guard_completed_returns_stop(fake_job_client):
+    fake_job_client.create_job("job-1", status="completed")
+    result = acts._terminal_guard("job-1", phase="sales_prepare", missing_msg="unused")
+    assert result is acts._GuardOutcome.STOP
+
+
+# ---------------------------------------------------------------------------
 # sales_prepare
 # ---------------------------------------------------------------------------
 

@@ -33,7 +33,8 @@ Job-store status ownership (the retry-safe contract):
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from enum import Enum, auto
+from typing import Any, Callable, Literal, Optional
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -125,6 +126,65 @@ def _job_stopped(job_id: str) -> bool:
 
     status = _job_status(job_id)
     return status is None or status in TERMINAL_STATUSES
+
+
+class _GuardOutcome(Enum):
+    """Sentinel returned by ``_terminal_guard`` — never serialized."""
+
+    PROCEED = auto()
+    STOP = auto()
+
+
+_TerminalPhase = Literal[
+    "sales_prepare", "sales_finalize", "deep_research_prepare", "deep_research_finalize"
+]
+
+_FAILED_MESSAGES: dict[_TerminalPhase, str] = {
+    "sales_prepare": "Sales pipeline job {job_id} was already FAILED before start",
+    "sales_finalize": "Sales pipeline job {job_id} was marked FAILED during the run",
+    "deep_research_prepare": "Deep-research job {job_id} was already FAILED before start",
+    "deep_research_finalize": "Deep-research job {job_id} was marked FAILED during the run",
+}
+
+_STOP_LOG_MESSAGES: dict[_TerminalPhase, str] = {
+    "sales_prepare": "Sales job %s already terminal (%s) at prepare; stopping run",
+    "sales_finalize": "Sales job %s terminal (%s) at finalize; not writing COMPLETED",
+    "deep_research_prepare": "Deep-research job %s already terminal (%s) at prepare; stopping",
+    "deep_research_finalize": "Deep-research job %s terminal (%s) at finalize; not writing COMPLETED",
+}
+
+
+def _terminal_guard(job_id: str, *, phase: _TerminalPhase, missing_msg: str) -> _GuardOutcome:
+    """Check whether a job is terminal and decide whether the caller may proceed.
+
+    Preconditions:
+        - ``job_id`` is a job-store id (the row may or may not exist).
+        - ``phase`` identifies the domain+call-site combination (selects the
+          FAILED-message and short-circuit log wording); ``missing_msg`` is
+          the exact message to raise verbatim when the job row is missing.
+    Postconditions:
+        - Job missing -> raises ``RuntimeError(missing_msg)`` (retryable -- a
+          transient store read glitch is retried by the workflow's IO policy).
+        - Job FAILED -> raises non-retryable ``ApplicationError`` (never
+          resurrect a failed job; surface as a failed workflow).
+        - Job in ``CLEAN_TERMINAL_STATUSES`` -> logs at info level and returns
+          ``_GuardOutcome.STOP`` (a cancel/interrupt/already-complete job must
+          short-circuit cleanly; this function does not prescribe what the
+          caller returns for that case).
+        - Otherwise returns ``_GuardOutcome.PROCEED``.
+    """
+    from job_service_client import JOB_STATUS_FAILED
+    from sales_team.job_runner import CLEAN_TERMINAL_STATUSES
+
+    status = _job_status(job_id)
+    if status is None:
+        raise RuntimeError(missing_msg)
+    if status == JOB_STATUS_FAILED:
+        raise ApplicationError(_FAILED_MESSAGES[phase].format(job_id=job_id), non_retryable=True)
+    if status in CLEAN_TERMINAL_STATUSES:
+        activity.logger.info(_STOP_LOG_MESSAGES[phase], job_id, status)
+        return _GuardOutcome.STOP
+    return _GuardOutcome.PROCEED
 
 
 def _orch_and_ctx(sctx: SalesRunContext):
