@@ -40,10 +40,12 @@ each class's docstring.
 
 from __future__ import annotations
 
+import types
 from enum import Enum
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional, Union, get_args, get_origin
 
 from pydantic import BaseModel, Field, create_model
+from pydantic.fields import FieldInfo
 
 from shared.hitl.models import HumanReview as HumanReview  # noqa: F401 — re-export
 
@@ -213,6 +215,126 @@ _STRICT_TWIN_DOC_SUFFIX = (
     "Generated via ``_derive_strict_variant`` — see that helper's docstring "
     "for the shared strict/soft twin pattern this file uses."
 )
+
+
+# ---------------------------------------------------------------------------
+# All-Optional derived-twin pattern
+# ---------------------------------------------------------------------------
+# Unlike ``_derive_strict_variant`` (a *subclass* that tightens a subset of
+# fields), ``_optionalize_model`` builds a *from-scratch* twin whose every
+# field is optional/defaulted — for request DTOs and extractor payloads that
+# must represent "nothing supplied" without redeclaring the source model's
+# field list (and risking drift from it). Call sites: ``api.models``'s
+# ``_BrandingMissionFieldsPartial`` and ``assistant.models``'s
+# ``MissionUpdate`` (each in its own module — an API DTO and a chat-assistant
+# extractor payload respectively — not domain-model concerns, so neither
+# lives here; only the generic transform they share does).
+
+
+def _unwrap_noneable(annotation: Any) -> Any:
+    """Return the non-None arm of ``Optional[T]`` / ``T | None``, else ``annotation``.
+
+    Preconditions:
+        - ``annotation`` is a typing annotation object.
+    Postconditions:
+        - If ``annotation`` is a union of exactly one non-None type and ``None``,
+          return that non-None type; otherwise return ``annotation`` unchanged.
+    """
+    origin = get_origin(annotation)
+    if origin is Union or origin is types.UnionType:
+        args = get_args(annotation)
+        non_none = [a for a in args if a is not type(None)]
+        if len(args) == len(non_none) + 1 and len(non_none) == 1:
+            return non_none[0]
+    return annotation
+
+
+# Numeric/length constraints that Pydantic v2 may store either as direct
+# ``FieldInfo`` attributes or as ``annotated_types`` metadata items (e.g.
+# ``MinLen``/``MaxLen``) — checked in both places below. ``pattern``,
+# ``description``, and ``title`` are direct-attribute-only and handled
+# separately since metadata items never carry them.
+_CONSTRAINT_KEYS = ("min_length", "max_length", "ge", "le", "gt", "lt")
+
+
+def _constraint_kwargs(info: FieldInfo) -> dict[str, Any]:
+    """Copy validation metadata that must survive optionalization.
+
+    Preconditions:
+        - ``info`` is a Pydantic v2 ``FieldInfo``.
+    Postconditions:
+        - Returned dict contains only constraint keys present on ``info`` with
+          non-``None`` values from the supported set below (including
+          ``annotated_types`` metadata such as ``MinLen`` / ``MaxLen``).
+    """
+    out: dict[str, Any] = {}
+    for key in _CONSTRAINT_KEYS:
+        value = getattr(info, key, None)
+        if value is not None:
+            out[key] = value
+    # Pydantic v2 stores many Field(...) constraints on ``metadata`` (e.g. MinLen)
+    # rather than as direct FieldInfo attributes.
+    for item in info.metadata:
+        for key in _CONSTRAINT_KEYS:
+            value = getattr(item, key, None)
+            if value is not None and key not in out:
+                out[key] = value
+    for key in ("pattern", "description", "title"):
+        value = getattr(info, key, None)
+        if value is not None:
+            out[key] = value
+    return out
+
+
+def _optionalize_model(
+    base: type[BaseModel],
+    *,
+    name: str,
+    exclude: frozenset[str] = frozenset(),
+    descriptions: Optional[Dict[str, str]] = None,
+) -> type[BaseModel]:
+    """Build an all-Optional twin of ``base`` with defaults forced to ``None``.
+
+    Preconditions:
+        - ``base`` is a Pydantic ``BaseModel`` subclass with a non-empty
+          ``model_fields`` mapping.
+        - ``name`` is a non-empty Python identifier string.
+        - ``exclude`` names only fields that actually exist on ``base``.
+        - When given, ``descriptions`` supplies a non-blank description for
+          every field of ``base`` not in ``exclude`` (and no others) — used
+          to satisfy callers (e.g. ``prompt_spec.py``'s schema-derived
+          prompt rendering) that require every field of a model to declare
+          a description, without hand-duplicating ``base``'s field list to
+          add them.
+    Postconditions:
+        - Returned model has the same field names as ``base`` minus ``exclude``.
+        - Every field is annotated ``Optional[...]`` with default ``None``.
+        - Create-path defaults from ``base`` are not copied.
+        - Supported Field constraints (e.g. ``min_length``) are preserved.
+        - When ``descriptions`` is given, each returned field's description
+          is ``descriptions[field_name]`` (overriding ``base``'s, if any).
+    """
+    assert issubclass(base, BaseModel)
+    assert name.isidentifier()
+    assert base.model_fields, "base model must declare fields"
+    assert exclude <= set(base.model_fields), "exclude must name only base's fields"
+    kept_names = set(base.model_fields) - exclude
+    assert descriptions is None or set(descriptions) == kept_names, (
+        "descriptions must cover exactly base's non-excluded fields"
+    )
+
+    field_definitions: dict[str, Any] = {}
+    for field_name, field_info in base.model_fields.items():
+        if field_name in exclude:
+            continue
+        inner = _unwrap_noneable(field_info.annotation)
+        kwargs = _constraint_kwargs(field_info)
+        if descriptions is not None:
+            description = descriptions[field_name]
+            assert description.strip(), f"descriptions[{field_name!r}] must be non-blank"
+            kwargs["description"] = description
+        field_definitions[field_name] = (Optional[inner], Field(default=None, **kwargs))
+    return create_model(name, __base__=BaseModel, **field_definitions)
 
 
 # ---------------------------------------------------------------------------
