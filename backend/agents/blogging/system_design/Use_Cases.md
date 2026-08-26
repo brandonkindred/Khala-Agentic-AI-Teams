@@ -93,7 +93,8 @@ sequenceDiagram
     Note over Pipeline: Phase 1: PLANNING (0-15%)
     API->>Pipeline: run_blog_full_pipeline_job()
     Pipeline->>RA: run(ResearchBriefInput)
-    RA-->>Pipeline: research_packet.md
+    RA-->>Pipeline: ResearchAgentOutput<br/>(compiled_document, references, notes)
+    Note over Pipeline: run_planning() writes<br/>research_packet.md to work_dir
     Pipeline->>WA: plan_content(PlanningInput)
     Note over WA: research_digest still defaults to "";<br/>research output not yet routed into PlanningInput
 
