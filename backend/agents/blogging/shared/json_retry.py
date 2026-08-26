@@ -65,26 +65,33 @@ def call_json_with_retry(
     """
     Invoke an agent and parse a JSON dict from its response, retrying on parse failure.
 
-    On each ``LLMJsonParseError`` with attempts remaining, the prompt is
-    resent with ``strict_json_suffix`` appended (this repeats on every
-    subsequent failed attempt, not just the first). Once ``max_attempts`` is
-    exhausted, ``on_exhausted`` (if given) is called with the last error to
-    produce a fallback dict; otherwise the last ``LLMJsonParseError`` is
-    re-raised. ``backoff_seconds``, if given, is a callback taking the
-    zero-based attempt index and returning the number of seconds to sleep
-    before that retry; omit it to skip sleeping between retries.
+    On each ``LLMJsonParseError`` with attempts remaining — raised directly,
+    or recovered by unwrapping a framework wrapper such as
+    ``strands.types.exceptions.EventLoopException`` (a live model backend can
+    raise it *inside* the agent invocation, not just from this function's own
+    post-invoke parse) — the prompt is resent with ``strict_json_suffix``
+    appended (this repeats on every subsequent failed attempt, not just the
+    first). Once ``max_attempts`` is exhausted, ``on_exhausted`` (if given) is
+    called with the last error to produce a fallback dict; otherwise the last
+    ``LLMJsonParseError`` is re-raised. ``backoff_seconds``, if given, is a
+    callback taking the zero-based attempt index and returning the number of
+    seconds to sleep before that retry; omit it to skip sleeping between
+    retries.
 
-    Any other exception ``e`` — including one raised by ``agent_factory()`` —
-    is first passed through ``unwrap_exception`` (identity by default; pass a
-    hook to unwrap a framework wrapper such as
-    ``strands.types.exceptions.EventLoopException`` before classifying the
-    cause). If the unwrapped cause is one of ``transient_exceptions``, it is
-    re-raised immediately and unwrapped — never retried locally — so the
-    caller's own retry/backoff owns it. Otherwise, ``on_unexpected_error``
-    (if given) produces a fallback dict; without it, the unwrapped cause is
-    re-raised. ``agent_factory()`` runs inside the same exception boundary as
-    the invoke so a construction failure (e.g. rejected model config) follows
-    the same fallback path as an invoke-time unexpected error.
+    A directly-raised ``LLMJsonParseError`` is classified as such without
+    calling ``unwrap_exception`` (there is nothing to unwrap). Any other
+    exception ``e`` — including one raised by ``agent_factory()`` — is first
+    passed through ``unwrap_exception`` (identity by default; pass a hook to
+    unwrap a framework wrapper before classifying the cause). If the
+    unwrapped cause is itself an ``LLMJsonParseError``, it is classified and
+    retried exactly like a directly-raised one (above). Otherwise, if it is
+    one of ``transient_exceptions``, it is re-raised immediately and
+    unwrapped — never retried locally — so the caller's own retry/backoff
+    owns it. Otherwise, ``on_unexpected_error`` (if given) produces a
+    fallback dict; without it, the unwrapped cause is re-raised.
+    ``agent_factory()`` runs inside the same exception boundary as the invoke
+    so a construction failure (e.g. rejected model config) follows the same
+    fallback path as an invoke-time unexpected error.
 
     Preconditions:
         - ``max_attempts >= 1``.
@@ -119,30 +126,34 @@ def call_json_with_retry(
                 invoke = agent_factory()
             result = invoke(working_prompt)
             return extract_json_from_response(str(result).strip(), expected_keys=keys)
-        except LLMJsonParseError as e:
-            last_json_error = e
-            attempts_left = max_attempts - attempt - 1
-            if attempts_left > 0:
-                log.warning(
-                    "call_json_with_retry: JSON parse failed (attempt %d/%d), retrying: %s",
-                    attempt + 1,
-                    max_attempts,
-                    e,
-                )
-                if backoff_seconds is not None:
-                    time.sleep(backoff_seconds(attempt))
-                working_prompt = prompt + strict_json_suffix
-                continue
-            log.warning(
-                "call_json_with_retry: JSON parse failed after %d attempt(s): %s",
-                max_attempts,
-                e,
-            )
-            if on_exhausted is not None:
-                return on_exhausted(e)
-            raise
         except Exception as e:
-            cause = unwrap_exception(e)
+            # A directly-raised LLMJsonParseError needs no unwrap; anything else is
+            # passed through unwrap_exception in case it wraps one (e.g. a live model
+            # backend raising it from inside the agent invocation, which Strands wraps
+            # in EventLoopException) — either way it gets the same retry policy below.
+            cause = e if isinstance(e, LLMJsonParseError) else unwrap_exception(e)
+            if isinstance(cause, LLMJsonParseError):
+                last_json_error = cause
+                attempts_left = max_attempts - attempt - 1
+                if attempts_left > 0:
+                    log.warning(
+                        "call_json_with_retry: JSON parse failed (attempt %d/%d), retrying: %s",
+                        attempt + 1,
+                        max_attempts,
+                        cause,
+                    )
+                    if backoff_seconds is not None:
+                        time.sleep(backoff_seconds(attempt))
+                    working_prompt = prompt + strict_json_suffix
+                    continue
+                log.warning(
+                    "call_json_with_retry: JSON parse failed after %d attempt(s): %s",
+                    max_attempts,
+                    cause,
+                )
+                if on_exhausted is not None:
+                    return on_exhausted(cause)
+                raise cause
             if isinstance(cause, transient_exceptions):
                 log.warning(
                     "call_json_with_retry: transient LLM error, re-raising for caller retry: %s",
