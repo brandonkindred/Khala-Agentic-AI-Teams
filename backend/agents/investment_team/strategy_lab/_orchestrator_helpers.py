@@ -35,10 +35,13 @@ end of that file) so existing import sites keep working.
 
 ``gather_convergence_directives`` and ``require_short_circuit_inputs`` are
 ``run_cycle``'s directive-gathering and terminal-guard logic, extracted here
-(rather than staying inline) so a future Temporal-mode cycle workflow can
-call the identical, deterministic implementation instead of hand-duplicating
-it — both are pure functions of their arguments with no wall-clock, random,
-or I/O dependency.
+(rather than staying inline) so both thread-mode ``run_cycle`` and the
+Temporal-mode ``StrategyLabCycleWorkflow.run`` call the identical,
+deterministic implementation instead of hand-duplicating it — both are pure
+functions of their arguments with no wall-clock, random, or I/O dependency.
+The workflow reaches them via ``temporal/dto.py``'s thin adapters (deferred
+import, so ``temporal/workflows.py`` never imports this heavier module at its
+own top level) rather than importing them from here directly.
 """
 
 from __future__ import annotations
@@ -914,8 +917,10 @@ def _has_critical_failures(results: Sequence[QualityGateResult]) -> bool:
 def gather_convergence_directives(tracker: ConvergenceTracker) -> List[str]:
     """Gather this cycle's convergence directives from ``tracker``.
 
-    Extracted from ``run_cycle`` (orchestrator.py) so the identical logic can
-    be reused verbatim by the Temporal-mode cycle workflow (a future step).
+    Extracted from ``run_cycle`` (orchestrator.py) so the identical logic is
+    reused verbatim by the Temporal-mode cycle workflow
+    (``StrategyLabCycleWorkflow.run``, via ``temporal/dto.py``'s adapter of
+    the same name).
 
     Preconditions:
       - ``tracker`` is a constructed ``ConvergenceTracker``.
@@ -943,8 +948,11 @@ def require_short_circuit_inputs(
 ) -> None:
     """Guard that re-entry exhaustion captured enough state to short-circuit.
 
-    Extracted from ``run_cycle`` (orchestrator.py) so the identical guard can
-    be reused verbatim by the Temporal-mode cycle workflow (a future step).
+    Extracted from ``run_cycle`` (orchestrator.py) so the identical guard is
+    reused verbatim by the Temporal-mode cycle workflow
+    (``StrategyLabCycleWorkflow.run``, via ``temporal/dto.py``'s adapter of
+    the same name — that adapter passes a dict, not a ``StrategySpec``, for
+    ``last_spec``; the ``is None`` check below behaves identically either way).
 
     Preconditions:
       - Called only after the design-re-entry loop exhausts
