@@ -70,8 +70,8 @@ def test_compliance_report_has_required_fields(brand_spec_prompt):
 
 def test_run_compliance_from_work_dir(monkeypatch, tmp_path):
     """Public work_dir entrypoint reads draft + brand spec and returns a report."""
-    from agents.blogging.blog_compliance_agent import agent as agent_mod
     from agents.blogging.blog_compliance_agent import run_compliance_from_work_dir
+    from agents.blogging.shared import json_retry as jr_mod
 
     (tmp_path / "final.md").write_text("Test draft.")
     (tmp_path / "brand_spec_prompt.md").write_text("Brand spec content.")
@@ -83,14 +83,14 @@ def test_run_compliance_from_work_dir(monkeypatch, tmp_path):
         def __call__(self, prompt):
             return '{"status": "PASS", "violations": [], "required_fixes": [], "notes": "ok"}'
 
-    monkeypatch.setattr(agent_mod, "Agent", _Agent)
+    monkeypatch.setattr(jr_mod, "Agent", _Agent)
     report = run_compliance_from_work_dir(tmp_path, llm_client=object())
     assert report.status in ("PASS", "FAIL")
 
 
 def test_compliance_on_llm_request_callback(monkeypatch, brand_spec_prompt) -> None:
     """on_llm_request callback is invoked before the LLM call."""
-    from agents.blogging.blog_compliance_agent import agent as comp_mod
+    from agents.blogging.shared import json_retry as jr_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -99,7 +99,7 @@ def test_compliance_on_llm_request_callback(monkeypatch, brand_spec_prompt) -> N
         def __call__(self, prompt):
             return '{"status": "PASS", "violations": [], "required_fixes": [], "notes": "ok"}'
 
-    monkeypatch.setattr(comp_mod, "Agent", _Agent)
+    monkeypatch.setattr(jr_mod, "Agent", _Agent)
     seen: list[str] = []
     agent = BlogComplianceAgent(llm_client=object())
     agent.run("draft", brand_spec_prompt, on_llm_request=lambda msg: seen.append(msg))
@@ -109,7 +109,7 @@ def test_compliance_on_llm_request_callback(monkeypatch, brand_spec_prompt) -> N
 @pytest.mark.parametrize("kind", ["rate_limit", "temporary"])
 def test_compliance_transient_error_reraises(monkeypatch, brand_spec_prompt, kind) -> None:
     """Transient LLM-transport errors re-raise unwrapped (delegated to Temporal)."""
-    from agents.blogging.blog_compliance_agent import agent as comp_mod
+    from agents.blogging.shared import json_retry as jr_mod
 
     from llm_service import LLMRateLimitError, LLMTemporaryError
 
@@ -122,7 +122,7 @@ def test_compliance_transient_error_reraises(monkeypatch, brand_spec_prompt, kin
         def __call__(self, prompt):
             raise err_cls("transient outage")
 
-    monkeypatch.setattr(comp_mod, "Agent", _Agent)
+    monkeypatch.setattr(jr_mod, "Agent", _Agent)
     agent = BlogComplianceAgent(llm_client=object())
     with pytest.raises(err_cls):
         agent.run("draft", brand_spec_prompt)
@@ -130,7 +130,7 @@ def test_compliance_transient_error_reraises(monkeypatch, brand_spec_prompt, kin
 
 def test_compliance_exhausted_json_fallback(monkeypatch, brand_spec_prompt, tmp_path) -> None:
     """Repeated invalid JSON yields a FAIL fallback report and writes the artifact."""
-    from agents.blogging.blog_compliance_agent import agent as comp_mod
+    from agents.blogging.shared import json_retry as jr_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -139,7 +139,7 @@ def test_compliance_exhausted_json_fallback(monkeypatch, brand_spec_prompt, tmp_
         def __call__(self, prompt):
             return "not json at all"
 
-    monkeypatch.setattr(comp_mod, "Agent", _Agent)
+    monkeypatch.setattr(jr_mod, "Agent", _Agent)
     agent = BlogComplianceAgent(llm_client=object())
     report = agent.run("draft", brand_spec_prompt, work_dir=tmp_path)
     assert report.status == "FAIL"
@@ -148,7 +148,7 @@ def test_compliance_exhausted_json_fallback(monkeypatch, brand_spec_prompt, tmp_
 
 def test_compliance_unexpected_error_fail_closed(monkeypatch, brand_spec_prompt, tmp_path) -> None:
     """Non-transient unexpected errors fail closed via on_unexpected_error (no raise)."""
-    from agents.blogging.blog_compliance_agent import agent as comp_mod
+    from agents.blogging.shared import json_retry as jr_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -157,8 +157,28 @@ def test_compliance_unexpected_error_fail_closed(monkeypatch, brand_spec_prompt,
         def __call__(self, prompt):
             raise ValueError("unexpected failure")
 
-    monkeypatch.setattr(comp_mod, "Agent", _Agent)
+    monkeypatch.setattr(jr_mod, "Agent", _Agent)
     agent = BlogComplianceAgent(llm_client=object())
     report = agent.run("draft", brand_spec_prompt, work_dir=tmp_path)
     assert report.status == "FAIL"
     assert (tmp_path / "compliance_report.json").exists()
+
+
+def test_compliance_wrapped_transient_error_unwraps(monkeypatch, brand_spec_prompt) -> None:
+    """A transient LLM error wrapped in Strands' EventLoopException re-raises unwrapped."""
+    from agents.blogging.shared import json_retry as jr_mod
+    from strands.types.exceptions import EventLoopException
+
+    from llm_service import LLMTemporaryError
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise EventLoopException(LLMTemporaryError("transient outage"))
+
+    monkeypatch.setattr(jr_mod, "Agent", _Agent)
+    agent = BlogComplianceAgent(llm_client=object())
+    with pytest.raises(LLMTemporaryError):
+        agent.run("draft", brand_spec_prompt)

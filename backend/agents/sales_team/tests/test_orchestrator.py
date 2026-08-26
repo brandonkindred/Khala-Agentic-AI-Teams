@@ -300,8 +300,9 @@ def test_generate_outreach_with_critic_keeps_original_when_refine_raises(
     sample_dossier: ProspectDossier,
     sample_icp: IdealCustomerProfile,
 ) -> None:
-    """First emit succeeds, critic asks for revision, refine emit raises →
-    helper returns the original sequence instead of crashing the prospect."""
+    """First emit succeeds, critic asks for revision (with budget left for a
+    second review), refine emit raises → helper returns the original
+    sequence instead of crashing the prospect."""
     from sales_team.models import CriticViolation, OutreachCriticReport
 
     initial = _good_variant_list()
@@ -329,7 +330,15 @@ def test_generate_outreach_with_critic_keeps_original_when_refine_raises(
         ],
     )
     sequence = stub_orch._generate_outreach_with_critic(
-        sample_prospect, sample_dossier, "p", "v", "", "", None, sample_icp
+        sample_prospect,
+        sample_dossier,
+        "p",
+        "v",
+        "",
+        "",
+        None,
+        sample_icp,
+        max_refinements=2,
     )
     # Two outreach calls attempted (initial + refine), but the refine raised
     # and the helper returned the original sequence.
@@ -1282,7 +1291,11 @@ def test_outreach_critic_multi_iteration_refinement(
     sample_dossier: ProspectDossier,
     sample_icp: IdealCustomerProfile,
 ) -> None:
-    """With max_refinements=2, the critic can reject twice and the agent retries."""
+    """With max_refinements=2, the review budget is 2 review calls: attempt 0
+    FAILs and there's budget left, so the agent regenerates once; attempt 1
+    reviews that regeneration and, since no budget remains for a further
+    regenerate+review cycle, its (approving) verdict is returned as the
+    final answer — the returned sequence was always reviewed."""
     from sales_team.models import CriticViolation, OutreachCriticReport
 
     call_count = {"n": 0}
@@ -1293,12 +1306,12 @@ def test_outreach_critic_multi_iteration_refinement(
 
     stub_orch.outreach.generate_sequence.side_effect = _outreach_side_effect
 
-    # Critic rejects twice, then approves on the third review.
+    # Critic rejects the initial draft, then approves the regenerated one.
     review_count = {"n": 0}
 
     def _critic_side_effect(*a, **kw):
         review_count["n"] += 1
-        if review_count["n"] <= 2:
+        if review_count["n"] == 1:
             return OutreachCriticReport(
                 status="FAIL",
                 approved=False,
@@ -1326,15 +1339,62 @@ def test_outreach_critic_multi_iteration_refinement(
         sample_icp,
         max_refinements=2,
     )
-    # 1 initial + 2 refinement emits = 3 outreach calls
-    assert call_count["n"] == 3
-    # 2 reviews (both FAIL) — the third would be the approval but the loop
-    # exhausted its budget, so the last regenerated sequence is returned.
-    # Actually: loop runs range(2) → attempts 0 and 1. On attempt 0: FAIL →
-    # re-emit. On attempt 1: FAIL → re-emit. Loop ends, returns the last
-    # sequence. So 2 reviews, 3 outreach calls.
+    # 1 initial + 1 refinement emit = 2 outreach calls (attempt 1 is the last
+    # iteration, so it never regenerates a third, unreviewed draft).
+    assert call_count["n"] == 2
+    # 2 reviews: the FAIL on the initial draft, then the PASS on the
+    # regenerated one — the returned sequence was reviewed by the 2nd call.
     assert review_count["n"] == 2
     assert sequence.variants  # still has variants
+
+
+def test_outreach_critic_default_budget_returns_reviewed_sequence_unrefined(
+    stub_orch,
+    sample_prospect: Prospect,
+    sample_dossier: ProspectDossier,
+    sample_icp: IdealCustomerProfile,
+) -> None:
+    """With the shipped default max_refinements=1, a FAIL leaves no review
+    budget to check a regeneration, so generate_sequence is called exactly
+    once and the (unapproved-but-reviewed) initial sequence is returned —
+    never an unreviewed regeneration."""
+    from sales_team.models import CriticViolation, OutreachCriticReport
+
+    call_count = {"n": 0}
+
+    def _outreach_side_effect(*a, **kw):
+        call_count["n"] += 1
+        return _good_variant_list()
+
+    stub_orch.outreach.generate_sequence.side_effect = _outreach_side_effect
+    stub_orch.outreach_critic.review.return_value = OutreachCriticReport(
+        status="FAIL",
+        approved=False,
+        violations=[
+            CriticViolation(
+                rule_id="outreach.day1.cta",
+                severity="must_fix",
+                description="no CTA",
+                suggested_fix="add one",
+            )
+        ],
+    )
+
+    sequence = stub_orch._generate_outreach_with_critic(
+        sample_prospect,
+        sample_dossier,
+        "p",
+        "v",
+        "",
+        "",
+        None,
+        sample_icp,
+        max_refinements=1,
+    )
+
+    assert call_count["n"] == 1
+    assert stub_orch.outreach_critic.review.call_count == 1
+    assert sequence.variants
 
 
 def test_proposal_critic_fail_then_refine(
