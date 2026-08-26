@@ -161,6 +161,40 @@ def test_llm_self_review_markdown_fenced_array() -> None:
     assert "Better draft" in out
 
 
+def test_llm_self_review_filters_malformed_entries_from_prose_fallback(monkeypatch) -> None:
+    """Regression: entries recovered via the prose-fallback path
+    (``_extract_json_array_from_text``) that lack a truthy ``"issue"`` field
+    must be filtered out just like the direct-list path, so a malformed
+    sibling dict doesn't survive into the fix prompt as a blank issue line.
+    """
+    from llm_service import LLMJsonParseError
+
+    def raise_parse_error(text):
+        raise LLMJsonParseError("forced", response_preview=text[:50])
+
+    monkeypatch.setattr(sr, "extract_json_from_response", raise_parse_error)
+
+    captured_prompts = []
+
+    def fake(prompt, system_prompt=""):
+        captured_prompts.append(prompt)
+        if len(captured_prompts) == 1:
+            return (
+                'Notes: [{"location": "intro", "issue": "vague", "fix": "be specific"}, '
+                '{"location": "outro", "note": "malformed, no issue field"}]'
+            )
+        return '{"draft": 0}\n---DRAFT---\n# Fixed draft\nDone.'
+
+    out = sr._llm_self_review("draft text", fake)
+    assert "Fixed draft" in out
+    fix_prompt = captured_prompts[1]
+    assert "vague" in fix_prompt
+    assert "malformed, no issue field" not in fix_prompt
+    # Only one numbered issue should appear (the malformed sibling dict must
+    # not have produced a blank "2. [] \n   Fix: " line).
+    assert "2. [" not in fix_prompt
+
+
 def test_llm_self_review_no_array_keeps_original() -> None:
     call_text = lambda prompt, system_prompt="": "just text"  # noqa: E731
     assert sr._llm_self_review("draft text", call_text) == "draft text"

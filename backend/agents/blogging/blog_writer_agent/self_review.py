@@ -442,7 +442,7 @@ def _llm_self_review(draft: str, call_text: CallText) -> str:
             issues = _extract_json_array_from_text(cleaned, required_keys=("issue",))
         else:
             if isinstance(parsed, list):
-                issues = [iss for iss in parsed if isinstance(iss, dict) and iss.get("issue")]
+                issues = parsed
             elif _looks_like_top_level_json_object(cleaned):
                 logger.info("LLM self-review: no issues found (response was not a JSON array)")
                 return draft
@@ -451,6 +451,11 @@ def _llm_self_review(draft: str, call_text: CallText) -> str:
         if issues is None:
             logger.info("LLM self-review: no issues found (response was not a JSON array)")
             return draft
+        # Applied uniformly regardless of which path above produced ``issues``:
+        # ``_extract_json_array_from_text`` only requires that SOME element carry
+        # the required keys, so a malformed sibling dict without a truthy "issue"
+        # can otherwise survive into the fix prompt below as a blank issue line.
+        issues = [iss for iss in issues if isinstance(iss, dict) and iss.get("issue")]
         if not issues:
             logger.info("LLM self-review: draft passed all checks")
             return draft
