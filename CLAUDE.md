@@ -115,6 +115,7 @@ Core, behavior-changing vars only. The complete reference (every var, defaults, 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — detailed architecture with Mermaid diagrams (including the Product Delivery Loop and Unified API lifespan)
 - [`docs/UNIFIED_API_LIFESPAN.md`](docs/UNIFIED_API_LIFESPAN.md) — unified-API lifespan worker/route registration catalog
 - [`docs/ENV_VARS.md`](docs/ENV_VARS.md) — complete environment-variable reference (defaults, backoff math, edge cases)
+- [`docs/prompts/ux-accessibility-review.md`](docs/prompts/ux-accessibility-review.md) — reusable per-team UX & accessibility review prompt (WCAG 2.2 AA, state coverage, finding format)
 - [`backend/agents/software_engineering_team/README.md`](backend/agents/software_engineering_team/README.md) — SE team deep dive
 - [`backend/agents/agent_team_studio/agent_provisioning_team/AGENT_ANATOMY.md`](backend/agents/agent_team_studio/agent_provisioning_team/AGENT_ANATOMY.md) — required structure for AI agents (Input/Output, Tools, Memory, Prompts, Guardrails, Subagents)
 - [`docker/README.md`](docker/README.md) — full-stack setup, ports, env vars, security
