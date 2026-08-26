@@ -180,6 +180,8 @@ def test_market_lab_context_prompt_text_not_truncated() -> None:
 
 
 def _scoping_ctx() -> MarketLabContext:
+    """A MarketLabContext with every category-specific field populated, so
+    each scoping test has something real to strip."""
     return MarketLabContext(
         fetched_at="2024-01-01T00:00:00Z",
         degraded=False,
@@ -198,6 +200,8 @@ def test_scoped_to_stocks_clears_fx_and_crypto_but_keeps_shared_macro() -> None:
     cross-category evidence it was told not to use. Genuinely class-agnostic
     macro fields (yield, sentiment) still reach every category."""
     scoped = _scoping_ctx().scoped_to("stocks")
+    assert not scoped.fx_rates
+    assert scoped.crypto_snapshot is None
     text = scoped.as_prompt_text()
     assert "FX" not in text
     assert "Crypto" not in text
@@ -206,13 +210,21 @@ def test_scoped_to_stocks_clears_fx_and_crypto_but_keeps_shared_macro() -> None:
 
 
 def test_scoped_to_forex_keeps_fx_drops_crypto() -> None:
-    text = _scoping_ctx().scoped_to("forex").as_prompt_text()
+    """Scoping to forex retains FX rates and removes the crypto snapshot."""
+    scoped = _scoping_ctx().scoped_to("forex")
+    assert scoped.fx_rates
+    assert scoped.crypto_snapshot is None
+    text = scoped.as_prompt_text()
     assert "FX" in text
     assert "Crypto" not in text
 
 
 def test_scoped_to_crypto_keeps_crypto_drops_fx() -> None:
-    text = _scoping_ctx().scoped_to("crypto").as_prompt_text()
+    """Scoping to crypto retains the crypto snapshot and removes FX rates."""
+    scoped = _scoping_ctx().scoped_to("crypto")
+    assert not scoped.fx_rates
+    assert scoped.crypto_snapshot is not None
+    text = scoped.as_prompt_text()
     assert "Crypto" in text
     assert "FX" not in text
 
@@ -226,11 +238,14 @@ def test_scoped_to_does_not_mutate_the_original_context() -> None:
 
 
 def test_scoped_to_none_returns_the_same_instance() -> None:
+    """Scoping to None returns the original context instance unchanged."""
     ctx = _scoping_ctx()
     assert ctx.scoped_to(None) is ctx
 
 
 def test_scoped_to_returns_the_same_instance_when_nothing_to_strip() -> None:
+    """Scoping a context with no category-specific fields set returns the
+    same instance -- there's nothing for scoped_to to strip."""
     ctx = MarketLabContext(fetched_at="x", macro_snippets=["DGS10=4.2%"])
     assert ctx.scoped_to("stocks") is ctx
 

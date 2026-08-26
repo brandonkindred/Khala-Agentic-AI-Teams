@@ -204,7 +204,12 @@ def classify_symbol(symbol: str) -> Optional[str]:
     """Issue #523 — best-effort asset-class classification of a single ticker.
 
     Returns one of ``"stocks" | "crypto" | "forex" | "futures" | "commodities"``
-    when the symbol unambiguously belongs to that class, else ``None``.
+    when the symbol is in the matching curated list, or matches a suffix/
+    bare-pair heuristic for a symbol outside those lists, else ``None``. A
+    curated-list match is certain; a heuristic match is best-effort and can
+    in principle collide with an out-of-list ticker from another class (e.g.
+    a hypothetical six-letter stock ticker that happens to spell two
+    currency codes) — see the suffix-heuristic block below.
 
     Used to detect ``target_symbols`` vs ``asset_class`` mismatches (e.g.
     a strategy with ``asset_class="stocks"`` requesting ``target_symbols=["BTC"]``)
@@ -260,7 +265,7 @@ def classify_symbol(symbol: str) -> Optional[str]:
 
 
 def find_offcategory_symbols(symbols: Iterable[str], pinned_asset_class: str) -> set[str]:
-    """The subset of ``symbols`` that unambiguously belong to a different class.
+    """The subset of ``symbols`` that :func:`classify_symbol` places in a different class.
 
     Single source of truth for the asset-category pin's symbol check, shared
     by the two places that independently need it from opposite ends: the
