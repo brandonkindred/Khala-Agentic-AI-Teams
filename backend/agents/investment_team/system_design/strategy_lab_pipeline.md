@@ -94,7 +94,9 @@ look-ahead) still runs and records its findings on `acceptance_reason` and
 the gate timeline — those findings surface as narrative caveats — but they
 never flip `is_winning`.
 
-The **publishable gate** is the paper-trading decision:
+The **publishable gate** decides whether paper trading is attempted at all —
+it is computed entirely from pre-paper-trading criteria and is final at
+`complete`-event time, not an outcome paper trading produces:
 
 ```python
 is_publishable = (
@@ -118,9 +120,12 @@ the joined failing gate codes (veto order: `exit_rule_conformance_failed`,
 ## Phase events
 
 Every cycle emits phase events via the `on_phase(phase, data)` callback. The
-table below is the **`on_phase` contract** — the full set of names a callback
-implementation must handle — not the set a browser receives. Two filters sit
-between them under the current Temporal-only dispatch:
+table below documents the primary pipeline phase names in that raw
+`on_phase` contract — not the set a browser receives. Two additional names,
+`telemetry` and `phase_transition` (see below), are also emitted and are
+deliberately unmapped; an `on_phase` implementation must tolerate any unknown
+phase name rather than assert on a fixed set. Two filters sit between the raw
+callback and a live subscriber under the current Temporal-only dispatch:
 
 - `run_design_attempt_activity`'s progress callback publishes through
   `_PROGRESS_PHASE_MAP` (`temporal/activities.py`), which maps the

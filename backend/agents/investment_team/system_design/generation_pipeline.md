@@ -98,8 +98,12 @@ stable post-design. The spec has three sanctioned mutation paths, all landing
 on the `CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION` boundary (a tighten-only
 refinement merge, a zero-trade repair's whitelisted `risk_limits` commit —
 deliberately allowed to *loosen* when over-tight limits caused the zero-trade
-outcome — and a `requires_custom_code` flip on compiler fallback), and the
-trade-alignment loop after that boundary can commit a rewritten code baseline
+outcome — and `_synthesize_initial_code`'s own `requires_custom_code` flip on
+a `CompilerError` fallback — a distinct, later event from the design-phase
+mechanical-repair pre-flight's promotion described above, which runs before
+the `DESIGN_REVIEW → CODE_SYNTHESIS` transition and is not one of this
+boundary's carve-outs), and the trade-alignment loop after that boundary can
+commit a rewritten code baseline
 (`_commit_alignment_proposal`) that the terminal transition picks up.
 `PhaseTransition`'s `Invariants` block in
 [`../strategy_lab/phases.py`](../strategy_lab/phases.py) is the authoritative
@@ -110,8 +114,11 @@ All four emission sites live in `orchestrator_design.py` and are the only
 `_emit_phase_transition(...)` call sites in the package; in phase order they
 are `DESIGN → DESIGN_REVIEW`, `DESIGN_REVIEW → CODE_SYNTHESIS`,
 `CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION`, and the terminal
-`BACKTEST_AND_VERIFICATION → None`. The mixin that owns the whole-attempt
-sequencer emits every transition, even though the phases themselves execute
+`BACKTEST_AND_VERIFICATION → None`. `DesignMixin` emits every transition —
+not only because it owns the design ↔ review loop below, but because
+`_run_design_attempt` itself, the whole-attempt sequencer that calls into
+every other mixin in turn, is also defined on `DesignMixin`
+(`orchestrator_design.py`) — even though the phases themselves execute
 across all five mixins (below).
 
 ## Design ↔ review loop (DESIGN → DESIGN_REVIEW)
