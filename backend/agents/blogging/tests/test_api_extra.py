@@ -370,7 +370,7 @@ def test_run_pipeline_with_tracking_normalizes_structured_audience(
 
     delegated_dict = captured[0][1]
     assert delegated_dict["audience"] == _api_main._format_audience(req.audience)
-    assert delegated_dict["audience"] == "skill level: expert; profession: developer"
+    assert delegated_dict["audience"] == "profession: developer; skill_level: expert"
 
 
 # ---------------------------------------------------------------------------
