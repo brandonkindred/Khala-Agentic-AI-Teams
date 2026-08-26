@@ -438,3 +438,84 @@ def test_run_pipeline_no_allowed_claims_artifact_is_noop(monkeypatch, tmp_path: 
     assert captured
     for _kind, draft_input in captured:
         assert draft_input.allowed_claims is None
+
+
+# ---------------------------------------------------------------------------
+# gates_stage: the fact-check gate must evaluate the draft against the same
+# allowed-claims list the writer was given.
+# ---------------------------------------------------------------------------
+
+
+def test_gates_stage_threads_allowed_claims_into_fact_check(monkeypatch, tmp_path: Path) -> None:
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_compliance_agent.models import ComplianceReport
+    from agents.blogging.blog_fact_check_agent.models import FactCheckReport
+    from agents.blogging.shared.artifacts import write_artifact
+
+    from ._content_plan_test_utils import make_minimal_planning_phase_result
+    from .conftest import make_stub_writer_class
+
+    monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: make_minimal_planning_phase_result())
+    monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "guidelines text")
+    monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda *a, **kw: "brand")
+    monkeypatch.setattr(v2, "BlogWriterAgent", make_stub_writer_class())
+    monkeypatch.setattr(v2, "BlogCopyEditorAgent", make_stub_editor_class())
+
+    class _ValidatorStub:
+        status = "PASS"
+        checks = []
+
+        def model_dump(self):
+            return {"status": "PASS", "checks": []}
+
+    monkeypatch.setattr(v2, "run_validators_from_work_dir", lambda wd: _ValidatorStub())
+    monkeypatch.setattr(
+        v2,
+        "BlogComplianceAgent",
+        type(
+            "_Compliance",
+            (),
+            {
+                "__init__": lambda self, *a, **kw: None,
+                "run": lambda self, *a, **kw: ComplianceReport(
+                    status="PASS", violations=[], required_fixes=[], notes="ok"
+                ),
+            },
+        ),
+    )
+
+    captured_kwargs = {}
+
+    class _CapturingFactCheck:
+        def __init__(self, *a, **kw):
+            pass
+
+        def run(self, draft, **kwargs):
+            captured_kwargs.update(kwargs)
+            return FactCheckReport(
+                claims_status="PASS",
+                risk_status="PASS",
+                risk_flags=[],
+                required_disclaimers=[],
+                unverified_claims=[],
+                claims=[],
+            )
+
+    monkeypatch.setattr(v2, "BlogFactCheckAgent", _CapturingFactCheck)
+
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+
+    work_dir = tmp_path / "wd"
+    work_dir.mkdir()
+    write_artifact(work_dir, "allowed_claims.json", SAMPLE_ALLOWED_CLAIMS)
+
+    brief = ResearchBriefInput(brief="Topic about AI", audience="devs", max_results=10)
+    _, _, status = v2.run_pipeline(
+        brief,
+        work_dir=work_dir,
+        run_gates=True,
+        max_rewrite_iterations=1,
+        draft_editor_iterations=1,
+    )
+    assert status == "PASS"
+    assert captured_kwargs.get("allowed_claims") == SAMPLE_ALLOWED_CLAIMS

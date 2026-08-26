@@ -98,9 +98,10 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
         write_artifact(work_dir, "final.md", draft_result.draft)
         logger.info("Persisted final.md")
 
-    # Load allowed_claims.json (if present) so a gate-driven rewrite can keep
-    # [CLAIM:id] tags valid; a missing/non-dict artifact is a no-op (matches the
-    # fact-check/validator gates' handling of the same artifact).
+    # Load allowed_claims.json (if present) so the fact-check gate evaluates the
+    # draft against the same list the writer was given, and so a gate-driven
+    # rewrite can keep [CLAIM:id] tags valid; a missing/non-dict artifact is a
+    # no-op (matches validators' handling of the same artifact).
     allowed_claims = (
         read_artifact(work_dir, "allowed_claims.json", default=None) if work_dir else None
     )
@@ -178,6 +179,7 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
             try:
                 report = fact_check_agent.run(
                     draft,
+                    allowed_claims=allowed_claims,
                     require_disclaimer_for=require_disclaimer_for,
                     work_dir=work_dir,
                     on_llm_request=lambda msg: _update(BlogPhase.FACT_CHECK, status_text=msg),

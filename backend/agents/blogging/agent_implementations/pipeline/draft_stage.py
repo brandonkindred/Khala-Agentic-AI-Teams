@@ -99,9 +99,10 @@ def run_draft_stage(
     elicited_stories_text = ctx.elicited_stories_text
     _update = _make_update(job_updater)
 
-    # Load allowed_claims.json (if the planning stage/#7293 has persisted one) so the
-    # writer can tag factual claims with [CLAIM:id]; a missing/non-dict artifact is a
-    # no-op, matching the fact-check/validator gates' handling of the same artifact.
+    # Load allowed_claims.json (if a prior pipeline step has persisted one — see
+    # ARTIFACT_PRODUCER in shared/artifacts.py) so the writer can tag factual claims
+    # with [CLAIM:id]; a missing/non-dict artifact is a no-op, matching the
+    # fact-check/validator gates' handling of the same artifact.
     allowed_claims = (
         read_artifact(work_dir, "allowed_claims.json", default=None) if work_dir else None
     )
