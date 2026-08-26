@@ -37,15 +37,12 @@ from investment_team.strategy_lab._orchestrator_helpers import (
     _parse_bar_date,
     _resolve_vix_provider,
     _SynthesisLoopOutcome,
-    gather_convergence_directives,
-    require_short_circuit_inputs,
 )
 from investment_team.strategy_lab.orchestrator_alignment import _AlignmentRoundOutcome
 from investment_team.strategy_lab.orchestrator_synthesis import (
     _AnomalyRecoveryOutcome,
     _SynthesisEvaluateResult,
 )
-from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
 from investment_team.trading_service.modes.sandbox_compat import StrategyRunResult
 
@@ -470,52 +467,3 @@ def test_distinct_subclasses_with_identical_base_fields_are_not_equal() -> None:
         spec=spec, code="code", trades=trades, metrics=metrics, terminate=False
     )
     assert alignment_loop != alignment_round
-
-
-# ---------------------------------------------------------------------------
-# gather_convergence_directives — run_cycle's directive-gathering, extracted
-# ---------------------------------------------------------------------------
-
-
-def test_gather_convergence_directives_empty_for_fresh_tracker() -> None:
-    tracker = ConvergenceTracker()
-    assert gather_convergence_directives(tracker) == []
-
-
-def test_gather_convergence_directives_orders_stall_diversity_failure() -> None:
-    tracker = ConvergenceTracker(window_size=5)
-    failing_gate = _gate(name="risk_gate", passed=False, severity="critical")
-    for _ in range(5):
-        tracker.record(_spec(), [failing_gate])
-
-    directives = gather_convergence_directives(tracker)
-
-    assert len(directives) == 3
-    assert directives[0].startswith("WARNING: Strategy ideation is converging")
-    assert "heavily skewed toward stocks" in directives[1]
-    assert "Gate 'risk_gate' has failed 5 times" in directives[2]
-
-
-# ---------------------------------------------------------------------------
-# require_short_circuit_inputs — run_cycle's terminal guard, extracted
-# ---------------------------------------------------------------------------
-
-
-def test_require_short_circuit_inputs_passes_when_both_present() -> None:
-    require_short_circuit_inputs(_spec(), "some evidence")
-
-
-@pytest.mark.parametrize(
-    "last_spec, last_evidence",
-    [
-        (None, "some evidence"),
-        (_spec(), None),
-        (None, None),
-    ],
-)
-def test_require_short_circuit_inputs_raises_when_missing(last_spec, last_evidence) -> None:
-    with pytest.raises(
-        RuntimeError,
-        match="SpecImplementabilityError raised without last_spec/evidence",
-    ):
-        require_short_circuit_inputs(last_spec, last_evidence)

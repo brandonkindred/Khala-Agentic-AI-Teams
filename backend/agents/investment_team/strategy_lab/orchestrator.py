@@ -1631,8 +1631,16 @@ from ._orchestrator_helpers import (  # noqa: E402,F401  — keep at file end
     _round_demoted_conformance,
     _SynthesisLoopOutcome,
     _VerificationOutcome,
-    gather_convergence_directives,
     publishability_skip_reason,
+)
+
+# ──────────────────────────────────────────────────────────────────────────
+# Re-exports — these symbols live in :mod:`cycle_control`. See that module's
+# docstring for why this logic is kept out of ``_orchestrator_helpers``
+# (import-safety for the Temporal workflow sandbox).
+# ──────────────────────────────────────────────────────────────────────────
+from .cycle_control import (  # noqa: E402,F401  — keep at file end
+    gather_convergence_directives,
     require_short_circuit_inputs,
 )
 

@@ -29,11 +29,12 @@ calling the attempt activity, branch on its structured
 branches on the ``except SpecImplementabilityError``, and on re-entry
 exhaustion assemble the ``failed: spec_unimplementable`` short-circuit record.
 The directive-gathering and terminal-guard steps call the exact same
-``_orchestrator_helpers`` functions ``run_cycle`` calls, via the ``dto`` module's
+``cycle_control`` functions ``run_cycle`` calls, via the ``dto`` module's
 thin adapters (``dto.gather_convergence_directives`` /
-``dto.require_short_circuit_inputs`` — see ``dto.py``'s module docstring for
-why the import is deferred there rather than at this module's top), so there
-is one implementation shared by both modes, not two hand-kept-in-sync copies.
+``dto.require_short_circuit_inputs`` — see ``dto.py``'s and
+``cycle_control.py``'s module docstrings for why the import is deferred there
+rather than at this module's top), so there is one implementation shared by
+both modes, not two hand-kept-in-sync copies.
 Drift copy-on-entry / merge-on-completion across attempts is plain dict
 work here: ``_DriftCollector.snapshot()`` hands each attempt a fresh *empty*
 child collector by design, so copy-on-entry is simply an empty drift dict, and
