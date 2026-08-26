@@ -360,7 +360,20 @@ def deterministic_self_check(draft: str) -> list[str]:
     return violations
 
 
-def fix_deterministic_violations(draft: str, violations: list[str], call_text: CallText) -> str:
+_CLAIMS_PRESERVATION_NOTE = (
+    "\n\n---\nPRESERVE ALL [CLAIM:id] TAGS exactly as they appear in the draft above — do "
+    "not remove, renumber, or reassign any of them. If this fix requires adding a new "
+    "factual or statistical claim, tag it with an ID from the allowed-claims list below "
+    "(never invent one); if no listed claim supports it, rephrase or omit it instead.\n"
+)
+
+
+def fix_deterministic_violations(
+    draft: str,
+    violations: list[str],
+    call_text: CallText,
+    allowed_claims_section: str = "",
+) -> str:
     """Call the LLM once to fix deterministic violations. Returns cleaned draft.
 
     Preconditions:
@@ -368,8 +381,14 @@ def fix_deterministic_violations(draft: str, violations: list[str], call_text: C
         - ``violations`` is a list of human-readable violation strings (may be empty).
         - ``call_text`` is a ``(prompt, system_prompt) -> response`` text-completion
           callback (e.g. ``BlogWriterAgent._call_text``).
+        - ``allowed_claims_section`` is the caller's already-rendered allowed-claims
+          prompt block (e.g. via ``agent._render_allowed_claims_section``), or ``""``
+          when no allowed-claims artifact was supplied.
     Postconditions:
         - On success with extractable fixed draft, returns that stripped draft.
+        - When ``allowed_claims_section`` is non-empty, the fix prompt instructs the
+          model to preserve existing ``[CLAIM:id]`` tags and includes the section, so
+          this mechanical rewrite pass cannot silently drop or corrupt claim tagging.
         - On soft-fail (``LLMError`` excluding types re-raised below, or
           ``json.JSONDecodeError`` / ``TypeError`` / ``ValueError`` / ``AttributeError``),
           logs with traceback via ``logger.exception`` and returns the original ``draft``.
@@ -378,11 +397,15 @@ def fix_deterministic_violations(draft: str, violations: list[str], call_text: C
         - Unexpected exceptions propagate unchanged.
     """
     checklist = "\n".join(f"- {v}" for v in violations)
+    claims_block = (
+        _CLAIMS_PRESERVATION_NOTE + allowed_claims_section if allowed_claims_section else ""
+    )
     prompt = (
         "Fix ONLY these specific issues in the draft below. Do not change anything else.\n\n"
         f"ISSUES TO FIX:\n{checklist}\n\n"
         "---\nCURRENT DRAFT:\n---\n"
-        f"{draft}\n\n"
+        f"{draft}\n"
+        f"{claims_block}\n"
         '---\nUse this format: first line {{"draft": 0}}, then ---DRAFT---, '
         "then the full fixed blog post in Markdown."
     )
@@ -405,15 +428,26 @@ def fix_deterministic_violations(draft: str, violations: list[str], call_text: C
     return draft
 
 
-def llm_self_review(draft: str, call_text: CallText) -> str:
+def llm_self_review(
+    draft: str,
+    call_text: CallText,
+    allowed_claims_section: str = "",
+) -> str:
     """Run a focused LLM self-review for subjective violations. Returns cleaned draft.
 
     Preconditions:
         - ``draft`` is a string (may be empty).
         - ``call_text`` is a ``(prompt, system_prompt) -> response`` text-completion
           callback (e.g. ``BlogWriterAgent._call_text``).
+        - ``allowed_claims_section`` is the caller's already-rendered allowed-claims
+          prompt block (e.g. via ``agent._render_allowed_claims_section``), or ``""``
+          when no allowed-claims artifact was supplied.
     Postconditions:
         - On success, returns the reviewed/fixed draft or the original when no issues.
+        - When issues are found and ``allowed_claims_section`` is non-empty, the fix
+          prompt instructs the model to preserve existing ``[CLAIM:id]`` tags and
+          includes the section, so this rewrite pass cannot silently drop or corrupt
+          claim tagging.
         - Three ways the response can resolve to "issues": (1) it parses to a
           JSON list, used directly; (2) it parses to a genuine top-level JSON
           object (the model's real "no issues" response), which returns the
@@ -476,10 +510,13 @@ def llm_self_review(draft: str, call_text: CallText) -> str:
             fix = iss.get("fix", "")
             issue_lines.append(f"{i}. [{loc}] {desc}\n   Fix: {fix}")
 
+        claims_block = (
+            _CLAIMS_PRESERVATION_NOTE + allowed_claims_section if allowed_claims_section else ""
+        )
         fix_prompt = (
             "Fix ONLY these issues found during self-review. Do not change anything else.\n\n"
             "ISSUES:\n" + "\n\n".join(issue_lines) + "\n\n"
-            "---\nCURRENT DRAFT:\n---\n" + draft + "\n\n"
+            "---\nCURRENT DRAFT:\n---\n" + draft + "\n" + claims_block + "\n"
             '---\nUse this format: first line {{"draft": 0}}, then ---DRAFT---, '
             "then the full fixed blog post in Markdown."
         )
@@ -501,7 +538,7 @@ def llm_self_review(draft: str, call_text: CallText) -> str:
     return draft
 
 
-def self_review(draft: str, call_text: CallText) -> str:
+def self_review(draft: str, call_text: CallText, allowed_claims_section: str = "") -> str:
     """Run deterministic check then LLM self-review. Returns cleaned draft.
 
     Both sub-steps (``fix_deterministic_violations``, ``llm_self_review``)
@@ -512,6 +549,9 @@ def self_review(draft: str, call_text: CallText) -> str:
         - ``draft`` is a string (may be empty).
         - ``call_text`` is a ``(prompt, system_prompt) -> response`` text-completion
           callback (e.g. ``BlogWriterAgent._call_text``).
+        - ``allowed_claims_section`` is the caller's already-rendered allowed-claims
+          prompt block, or ``""`` when no allowed-claims artifact was supplied;
+          forwarded unchanged to both sub-steps.
     Postconditions:
         - Returns the draft after applying any deterministic fixes and any
           LLM self-review fixes.
@@ -528,9 +568,9 @@ def self_review(draft: str, call_text: CallText) -> str:
     violations = deterministic_self_check(draft)
     if violations:
         logger.info("Deterministic self-check found %s violation(s)", len(violations))
-        draft = fix_deterministic_violations(draft, violations, call_text)
+        draft = fix_deterministic_violations(draft, violations, call_text, allowed_claims_section)
 
     # Step 2: LLM self-review for subjective issues
-    draft = llm_self_review(draft, call_text)
+    draft = llm_self_review(draft, call_text, allowed_claims_section)
 
     return draft

@@ -74,11 +74,26 @@ def test_render_allowed_claims_section_non_dict_returns_empty() -> None:
     assert _render_allowed_claims_section([1, 2, 3]) == ""
 
 
-def test_render_allowed_claims_section_empty_claims_returns_empty() -> None:
-    from agents.blogging.blog_writer_agent.agent import _render_allowed_claims_section
+def test_render_allowed_claims_section_present_but_empty_is_restrictive() -> None:
+    """A dict artifact with no usable claims is distinct from no artifact at all:
+    it must render a restrictive "make no claims" instruction, not "" (which the
+    writer's own prompt treats as "no allowed-claims list was checked, write
+    normally")."""
+    from agents.blogging.blog_writer_agent.agent import (
+        _NO_ALLOWED_CLAIMS_SECTION,
+        _render_allowed_claims_section,
+    )
 
-    assert _render_allowed_claims_section({"topic": "x", "claims": []}) == ""
-    assert _render_allowed_claims_section({"topic": "x"}) == ""
+    for allowed_claims in (
+        {"topic": "x", "claims": []},
+        {"topic": "x"},
+        {"topic": "x", "claims": "not a list"},
+    ):
+        section = _render_allowed_claims_section(allowed_claims)
+        assert section == _NO_ALLOWED_CLAIMS_SECTION
+        assert "ALLOWED CLAIMS" in section
+        assert "none available" in section
+        assert "Do not make any factual or statistical claims" in section
 
 
 def test_render_allowed_claims_section_populated() -> None:
@@ -101,6 +116,18 @@ def test_render_allowed_claims_section_skips_malformed_entries() -> None:
     assert "No id." not in section
 
 
+def test_render_allowed_claims_section_all_malformed_is_restrictive() -> None:
+    from agents.blogging.blog_writer_agent.agent import (
+        _NO_ALLOWED_CLAIMS_SECTION,
+        _render_allowed_claims_section,
+    )
+
+    section = _render_allowed_claims_section(
+        {"claims": [{"id": "", "text": "No id."}, {"id": "c1", "text": ""}, "not a dict"]}
+    )
+    assert section == _NO_ALLOWED_CLAIMS_SECTION
+
+
 # ---------------------------------------------------------------------------
 # BlogWriterAgent.run() — initial draft
 # ---------------------------------------------------------------------------
@@ -117,7 +144,9 @@ def test_writer_run_includes_allowed_claims_when_provided(monkeypatch) -> None:
         return '{"draft": 0}\n---DRAFT---\n# Out\nBody with [CLAIM:c1] tag.'
 
     monkeypatch.setattr(BlogWriterAgent, "_call_text", fake_call)
-    monkeypatch.setattr(BlogWriterAgent, "_self_review", lambda self, d: d)
+    monkeypatch.setattr(
+        BlogWriterAgent, "_self_review", lambda self, d, allowed_claims_section="": d
+    )
 
     out = a.run(_writer_input(allowed_claims=SAMPLE_ALLOWED_CLAIMS))
     assert "ALLOWED CLAIMS" in captured["prompt"]
@@ -136,10 +165,36 @@ def test_writer_run_omits_allowed_claims_section_when_absent(monkeypatch) -> Non
         return '{"draft": 0}\n---DRAFT---\n# Out\nBody.'
 
     monkeypatch.setattr(BlogWriterAgent, "_call_text", fake_call)
-    monkeypatch.setattr(BlogWriterAgent, "_self_review", lambda self, d: d)
+    monkeypatch.setattr(
+        BlogWriterAgent, "_self_review", lambda self, d, allowed_claims_section="": d
+    )
 
     a.run(_writer_input())
     assert "ALLOWED CLAIMS" not in captured["prompt"]
+
+
+def test_writer_run_threads_allowed_claims_into_self_review(monkeypatch) -> None:
+    """run() passes the rendered ALLOWED CLAIMS section into _self_review, so a
+    post-generation rewrite pass is told to preserve [CLAIM:id] tags too."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = make_writer_agent()
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_text",
+        lambda self, p, system_prompt="": '{"draft": 0}\n---DRAFT---\n# Out\nBody.',
+    )
+    captured = {}
+
+    def fake_self_review(self, draft, allowed_claims_section=""):
+        captured["allowed_claims_section"] = allowed_claims_section
+        return draft
+
+    monkeypatch.setattr(BlogWriterAgent, "_self_review", fake_self_review)
+
+    a.run(_writer_input(allowed_claims=SAMPLE_ALLOWED_CLAIMS))
+    assert "ALLOWED CLAIMS" in captured["allowed_claims_section"]
+    assert "- [c1] 80% of teams ship weekly." in captured["allowed_claims_section"]
 
 
 # ---------------------------------------------------------------------------

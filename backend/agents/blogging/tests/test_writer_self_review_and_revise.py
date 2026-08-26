@@ -432,9 +432,9 @@ def test_writer_self_review_combines_both(monkeypatch) -> None:
     calls = []
     original_fix = BlogWriterAgent._fix_deterministic_violations
 
-    def spy_fix(self, draft, violations):
+    def spy_fix(self, draft, violations, allowed_claims_section=""):
         calls.append(draft)
-        return original_fix(self, draft, violations)
+        return original_fix(self, draft, violations, allowed_claims_section)
 
     monkeypatch.setattr(BlogWriterAgent, "_fix_deterministic_violations", spy_fix)
     # Force at least one violation
