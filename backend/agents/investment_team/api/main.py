@@ -2644,10 +2644,15 @@ def _compute_signal_brief_snapshot(
           canonical category to its brief; a category whose brief could not be
           produced is simply absent, so the map may be empty. ``storage`` is
           always a ``dict`` -- never ``None`` -- even on total failure.
-        * Fail-open at every level: on disabled expert /
-          provider-initialization failure / market-fetch failure it returns a
-          top-level ``{"skipped": True, ...}`` storage rather than raising.
-          A per-category *non-assertion* failure — ``scoped_to``,
+        * Fail-open at every level: on a disabled expert or a
+          provider-initialization failure, returns a top-level
+          ``{"skipped": True, ...}`` storage rather than raising. A
+          market-fetch failure does not short-circuit the same way — it
+          builds a ``degraded=True`` ``MarketLabContext`` (no fetched data,
+          ``degraded_reason`` set) and continues into the per-category loop
+          below, so briefs still get computed from priors alone, only
+          missing market evidence. A per-category *non-assertion* failure —
+          ``scoped_to``,
           ``as_prompt_text``, expert construction, or ``produce_signal_brief``
           itself — skips only that category's entry in ``by_asset_class``; a
           single category's failure never aborts the others. A
