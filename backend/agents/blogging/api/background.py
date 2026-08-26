@@ -1,11 +1,12 @@
 """Background drivers shared by the pipeline, medium_stats, and jobs routers.
 
 ``_run_pipeline_with_tracking`` is the async /full-pipeline-async job body — also
-re-dispatched by the jobs router's resume/restart routes. ``_publish_terminal_event``/
-``_publish_skip_terminal_event`` are the SSE-stream terminal-event helpers shared by
-the pipeline and medium_stats background jobs. ``_import_run_pipeline``/
-``_prepare_pipeline_input`` are small helpers shared by the sync and async pipeline
-routes.
+re-dispatched by the jobs router's resume/restart routes. It delegates the actual
+pipeline run to ``run_blog_full_pipeline_job`` (the same entry point the legacy
+Temporal activity uses). ``_publish_terminal_event``/``_publish_skip_terminal_event``
+are the SSE-stream terminal-event helpers shared by the pipeline and medium_stats
+background jobs. ``_import_run_pipeline``/``_prepare_pipeline_input`` are small
+helpers used by the sync pipeline route.
 
 Every collaborator here that ``api.main`` re-exports (and that the test suite
 monkeypatches on ``main`` — ``RUN_ARTIFACTS_BASE``, the blog_job_store helpers,
@@ -23,12 +24,7 @@ from typing import Any, Callable, Tuple
 
 from agents.blogging.api.models import FullPipelineRequest, _format_audience
 from agents.blogging.blog_research_agent.models import ResearchBriefInput
-from agents.blogging.shared.content_plan import (
-    content_plan_summary_text,
-    content_plan_to_outline_markdown,
-)
 from agents.blogging.shared.content_profile import LengthPolicy, resolve_length_policy
-from agents.blogging.shared.errors import PlanningError
 
 logger = logging.getLogger(__name__)
 
@@ -118,99 +114,18 @@ def _publish_skip_terminal_event(job_id: str) -> None:
         )
 
 
-def _run_pipeline_with_tracking(
-    job_id: str, request: FullPipelineRequest
-) -> None:  # pragma: no cover - background-thread pipeline driver; depends on the v2 orchestrator (which is itself omitted from coverage as an agent_implementations script) and on live job-store + SSE side effects. Hot paths are exercised end-to-end by integration tests; the request-validation and error-handling branches at the API boundary are covered by the synchronous /full-pipeline tests.
+def _run_pipeline_with_tracking(job_id: str, request: FullPipelineRequest) -> None:
     """Run the full pipeline in a background thread with job tracking."""
     from agents.blogging.api import main as _main
+    from agents.blogging.shared.run_pipeline_job import run_blog_full_pipeline_job
 
     if _main._job_already_terminal(job_id):
         logger.info("Skipping pipeline job %s: already terminal/gone before start", job_id)
         _main._publish_skip_terminal_event(job_id)
         return
+
     try:
-        run_pipeline = _import_run_pipeline()
-
-        work_dir = _main.RUN_ARTIFACTS_BASE / job_id
-        work_dir.mkdir(parents=True, exist_ok=True)
-
-        brief_input, length_policy = _prepare_pipeline_input(request)
-
-        def job_updater(**kwargs: Any) -> None:
-            """Update job status in the job store and broadcast to SSE subscribers."""
-            if _main.update_blog_job is not None:
-                try:
-                    _main.update_blog_job(job_id, **kwargs)
-                except Exception as e:
-                    logger.warning("Failed to update job %s: %s", job_id, e)
-            try:
-                from agents.blogging.shared.job_event_bus import publish
-
-                publish(job_id, kwargs, event_type="update")
-            except Exception:
-                pass
-
-        # Mark job as started
-        if _main.start_blog_job is not None:
-            _main.start_blog_job(job_id)
-        job_updater(work_dir=str(work_dir))
-
-        try:
-            planning_phase_result, draft_result, status = run_pipeline(
-                brief_input,
-                work_dir=work_dir,
-                run_gates=request.run_gates,
-                max_rewrite_iterations=request.max_rewrite_iterations,
-                job_updater=job_updater,
-                job_id=job_id,
-                length_policy=length_policy,
-            )
-
-            plan = planning_phase_result.content_plan
-            outline = content_plan_to_outline_markdown(plan)
-            title_choices = [
-                {"title": tc.title, "probability_of_success": tc.probability_of_success}
-                for tc in plan.title_candidates
-            ]
-            draft_preview = draft_result.draft
-
-            final_status = (
-                _main.JOB_STATUS_COMPLETED if status == "PASS" else _main.JOB_STATUS_NEEDS_REVIEW
-            )
-            if _main.complete_blog_job is not None:
-                _main.complete_blog_job(
-                    job_id,
-                    status=final_status,
-                    title_choices=title_choices,
-                    outline=outline,
-                    draft_preview=draft_preview,
-                    content_plan_summary=content_plan_summary_text(plan),
-                    planning_iterations_used=planning_phase_result.planning_iterations_used,
-                    parse_retry_count=planning_phase_result.parse_retry_count,
-                    planning_wall_ms_total=planning_phase_result.planning_wall_ms_total,
-                )
-            _main._publish_terminal_event(job_id, "complete", status=final_status)
-
-        except PlanningError as e:
-            logger.exception("Pipeline planning failed for job %s", job_id)
-            if _main.fail_blog_job is not None:
-                _main.fail_blog_job(
-                    job_id,
-                    error=str(e),
-                    failed_phase="planning",
-                    planning_failure_reason=getattr(e, "failure_reason", None),
-                )
-            _main._publish_terminal_event(job_id, "error", error=str(e), failed_phase="planning")
-        except _main.BloggingError as e:
-            logger.exception("Pipeline failed for job %s", job_id)
-            if _main.fail_blog_job is not None:
-                _main.fail_blog_job(job_id, error=str(e), failed_phase=getattr(e, "phase", None))
-            _main._publish_terminal_event(job_id, "error", error=str(e))
-        except Exception as e:
-            logger.exception("Unexpected error in pipeline for job %s", job_id)
-            if _main.fail_blog_job is not None:
-                _main.fail_blog_job(job_id, error=str(e))
-            _main._publish_terminal_event(job_id, "error", error=str(e))
+        run_blog_full_pipeline_job(job_id, request.model_dump(mode="json"))
     except Exception as e:
         logger.exception("Pipeline failed for job %s", job_id)
         if _main.fail_blog_job is not None:
