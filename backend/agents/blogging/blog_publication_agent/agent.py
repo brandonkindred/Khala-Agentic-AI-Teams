@@ -261,8 +261,7 @@ class BlogPublicationAgent(_BlogAgentBase):
             prompt + _SOFT_JSON_INSTRUCTION,
             max_attempts=2,
             strict_json_suffix=_REJECT_STRICT_JSON_SUFFIX,
-            on_exhausted=_reject_fallback,
-            on_unexpected_error=_reject_fallback,
+            fallback_builder=_reject_fallback,
             logger=logger,
         )
 
@@ -321,8 +320,7 @@ class BlogPublicationAgent(_BlogAgentBase):
             + _SOFT_JSON_INSTRUCTION,
             max_attempts=2,
             strict_json_suffix=_CONVERT_STRICT_JSON_SUFFIX,
-            on_exhausted=_convert_fallback,
-            on_unexpected_error=_convert_fallback,
+            fallback_builder=_convert_fallback,
             logger=logger,
         )
 
