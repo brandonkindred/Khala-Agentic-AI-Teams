@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, Optional
 
 from temporalio.exceptions import CancelledError
 
+from agents.blogging.shared.audience import format_audience
 from shared.concurrency import BackgroundHeartbeat
 
 logger = logging.getLogger(__name__)
@@ -58,22 +59,7 @@ def _normalize_audience(audience: Any) -> Optional[str]:
     Postconditions:
         - Returns a trimmed string, or None when the input is empty/unusable.
     """
-    if audience is None:
-        return None
-    if isinstance(audience, str):
-        return audience.strip() or None
-    if isinstance(audience, dict):
-        parts = []
-        if audience.get("profession"):
-            parts.append(f"profession: {audience['profession']}")
-        if audience.get("skill_level"):
-            parts.append(f"skill_level: {audience['skill_level']}")
-        if audience.get("hobbies"):
-            parts.append(f"interests: {', '.join(audience['hobbies'])}")
-        if audience.get("other"):
-            parts.append(audience["other"])
-        return "; ".join(parts) if parts else None
-    return None
+    return format_audience(audience)
 
 
 def _is_external_cancellation(exc: BaseException) -> bool:
