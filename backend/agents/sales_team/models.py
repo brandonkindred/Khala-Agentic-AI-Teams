@@ -111,11 +111,13 @@ class SalesPipelineConfig(BaseModel):
         ge=0,
         le=5,
         description=(
-            "Max critic review calls per prospect when a critic returns FAIL "
-            "(bounds review calls, not regenerate calls — the final review-budget "
-            "iteration is always spent re-reviewing the current draft rather than "
-            "emitting an unchecked regeneration). Worst case per prospect: "
-            "1 generate + up to max_refinements x (1 review + 1 regenerate) LLM calls."
+            "Max critic review passes per prospect when a critic returns FAIL "
+            "(bounds review passes, not regenerate calls — the final review-budget "
+            "pass is always spent re-reviewing the current draft rather than "
+            "emitting an unchecked regeneration). Worst case per prospect: 1 generate "
+            "call, up to max_refinements review passes, and up to "
+            "(max_refinements - 1) regenerate calls; each review pass itself issues "
+            "a reasoning LLM call plus a formatting LLM call."
         ),
     )
 
