@@ -62,7 +62,7 @@ flowchart LR
     VA[ValidationAgent]
     PGate[PromotionGateAgent]
     IC[InvestmentCommitteeAgent]
-    SIE[SignalIntelligenceExpert<br/>once per batch]
+    SIE[SignalIntelligenceExpert<br/>once per batch, not per<br/>batch-workflow invocation —<br/>see architecture.md §7]
     CycleWF[StrategyLabCycleWorkflow<br/>per-cycle child workflow]
     SLO["StrategyLabOrchestrator<br/>4-phase pipeline — see architecture.md §11<br/>and generation_pipeline.md"]
     Finalize[finalize_cycle_record_activity<br/>paper-trade + persist]

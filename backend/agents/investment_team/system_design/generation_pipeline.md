@@ -15,10 +15,10 @@ view and §11 (orchestrator composition).
 
 Everything below through "Record assembly" happens inside **one Temporal
 activity**, `run_design_attempt_activity`
-(`run_design_attempt_activity` in [`../strategy_lab/temporal/activities.py`](../strategy_lab/temporal/activities.py)),
+([`../strategy_lab/temporal/activities.py`](../strategy_lab/temporal/activities.py)),
 a thin wrapper around
 `StrategyLabOrchestrator._run_design_attempt`
-(`_run_design_attempt` in [`../strategy_lab/orchestrator_design.py`](../strategy_lab/orchestrator_design.py)).
+([`../strategy_lab/orchestrator_design.py`](../strategy_lab/orchestrator_design.py)).
 That activity's own scope ends at record assembly: it returns the assembled
 `StrategyLabRecord` (JSON-dumped) to the calling `StrategyLabCycleWorkflow`
 as `{"kind": "record", "record": ...}` — it does **not** persist that record
@@ -100,7 +100,7 @@ refinement merge, a zero-trade repair's whitelisted `risk_limits` commit —
 deliberately allowed to *loosen* when over-tight limits caused the zero-trade
 outcome — and `_synthesize_initial_code`'s own `requires_custom_code` flip on
 a `CompilerError` fallback — a distinct, later event from the design-phase
-mechanical-repair pre-flight's promotion described above, which runs before
+mechanical-repair pre-flight's promotion described below, which runs before
 the `DESIGN_REVIEW → CODE_SYNTHESIS` transition and is not one of this
 boundary's carve-outs), and the trade-alignment loop after that boundary can
 commit a rewritten code baseline
@@ -502,11 +502,11 @@ flowchart TB
         CS -->|yes: compiled DSL| SYN
         CS -->|CompilerError:<br/>requires_custom_code=True| CSA
         CSA --> SYN
-        SYN[Pre-execution synthesis gates:<br/>CodeSafety · CodeConformance ·<br/>PredicateConformance · Reachability ·<br/>TargetSymbolCoverage.check_fetch]
+        SYN[Pre-execution synthesis gates:<br/>CodeSafety · CodeConformance ·<br/>PredicateConformance · Reachability ·<br/>TargetSymbolCoverageGate.check_fetch]
         SYN -->|fail| RF[RefinementAgent]
         RF --> SYN
         SYN -->|pass| BT[Execute in sandbox<br/>→ trade ledger]
-        BT --> POST{Post-execution, still synthesis phase:<br/>TargetSymbolCoverage.check_trades<br/>— critical?}
+        BT --> POST{Post-execution, still synthesis phase:<br/>TargetSymbolCoverageGate.check_trades<br/>— critical?}
         POST -->|critical: coverage| SCX[Critical coverage failure<br/>→ short-circuit]
         POST -->|clean| EV{critical anomaly<br/>or zero trades?}
         EV -->|ENTRY_WITH_NO_EXIT| REDES[SpecImplementabilityError<br/>→ phase back to DESIGN]
@@ -526,6 +526,6 @@ flowchart TB
         AN --> REC[RecordAssemblyMixin<br/>→ StrategyLabRecord]
     end
 
-    SIE[SignalIntelligenceExpert<br/>once per batch] -.->|signal_brief| D
+    SIE[SignalIntelligenceExpert<br/>once per batch, not per<br/>batch-workflow invocation —<br/>see architecture.md §7] -.->|signal_brief| D
     REC -->|"is_publishable AND<br/>paper_trading_enabled"| PTA[PaperTradingAgent<br/>post-cycle, outside this activity]
 ```
