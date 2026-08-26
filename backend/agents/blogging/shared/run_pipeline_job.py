@@ -9,9 +9,9 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from agents.blogging.shared.audience import format_audience
 from temporalio.exceptions import CancelledError
 
-from agents.blogging.shared.audience import format_audience
 from shared.concurrency import BackgroundHeartbeat
 
 logger = logging.getLogger(__name__)

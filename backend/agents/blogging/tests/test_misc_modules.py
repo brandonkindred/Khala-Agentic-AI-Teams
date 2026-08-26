@@ -294,10 +294,14 @@ def _dict_audience() -> dict:
 def _pydantic_audience() -> Any:
     from agents.blogging.api.models import AudienceDetails
 
-    return AudienceDetails(profession="dev", skill_level="expert", hobbies=["a", "b"], other="extra")
+    return AudienceDetails(
+        profession="dev", skill_level="expert", hobbies=["a", "b"], other="extra"
+    )
 
 
-@pytest.mark.parametrize("make_audience", [_dict_audience, _pydantic_audience], ids=["dict", "AudienceDetails"])
+@pytest.mark.parametrize(
+    "make_audience", [_dict_audience, _pydantic_audience], ids=["dict", "AudienceDetails"]
+)
 def test_format_audience_same_output_for_equivalent_input_shapes(make_audience) -> None:
     """The shared formatter produces identical output for a dict and an equivalent
     AudienceDetails model — the two input shapes the API layer and the job-runner
@@ -803,9 +807,11 @@ def test_max_previous_feedback_items_constant_is_tracker_default() -> None:
     )
 
     assert MAX_PREVIOUS_FEEDBACK_ITEMS == 15
-    default = inspect.signature(FeedbackTracker.get_capped_previous_feedback).parameters[
-        "max_items"
-    ].default
+    default = (
+        inspect.signature(FeedbackTracker.get_capped_previous_feedback)
+        .parameters["max_items"]
+        .default
+    )
     assert default == MAX_PREVIOUS_FEEDBACK_ITEMS
 
 
