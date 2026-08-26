@@ -30,6 +30,8 @@ from strands import Agent
 
 from branding_team import models as m
 from branding_team.agents import (
+    CHANNEL_SPECS,
+    _make_channel_guide,
     make_approval_workflow_designer,
     make_archetype_analyst,
     make_asset_wiki_planner,
@@ -44,7 +46,6 @@ from branding_team.agents import (
     make_message_mapper,
     make_persona_builder,
     make_photography_video_director,
-    make_social_guide,
     make_storyteller,
     make_training_planner,
     make_typography_builder,
@@ -52,6 +53,13 @@ from branding_team.agents import (
     make_voice_principles_drafter,
     make_voice_tone_builder,
 )
+
+_SOCIAL_CHANNEL_DESCRIPTION = dict(CHANNEL_SPECS)["social"]
+
+
+def _make_social_guide() -> Agent:
+    return _make_channel_guide("social", _SOCIAL_CHANNEL_DESCRIPTION, m.ChannelGuidelineOutput)
+
 
 # Each row: (label, model class owning the field, field name, MIN const, MAX
 # const, factory whose prompt describes the constraint). ``label`` keeps pytest
@@ -196,7 +204,7 @@ _RANGE_CASES: list[tuple[str, type[BaseModel], str, int, int, Callable[[], Agent
         "dos",
         m.CHANNEL_DOS_MIN,
         m.CHANNEL_DOS_MAX,
-        make_social_guide,
+        _make_social_guide,
     ),
     (
         "channel_donts",
@@ -204,7 +212,7 @@ _RANGE_CASES: list[tuple[str, type[BaseModel], str, int, int, Callable[[], Agent
         "donts",
         m.CHANNEL_DONTS_MIN,
         m.CHANNEL_DONTS_MAX,
-        make_social_guide,
+        _make_social_guide,
     ),
     (
         "channel_content_types",
@@ -212,7 +220,7 @@ _RANGE_CASES: list[tuple[str, type[BaseModel], str, int, int, Callable[[], Agent
         "content_types",
         m.CHANNEL_CONTENT_TYPES_MIN,
         m.CHANNEL_CONTENT_TYPES_MAX,
-        make_social_guide,
+        _make_social_guide,
     ),
     (
         "brand_experience_principles",
