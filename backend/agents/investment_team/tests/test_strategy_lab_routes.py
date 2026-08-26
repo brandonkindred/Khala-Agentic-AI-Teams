@@ -2696,10 +2696,9 @@ def test_job_progress_percent_clamps_out_of_range_values() -> None:
 def test_job_progress_percent_tolerates_non_numeric_inputs(completed, total) -> None:
     """Regression: malformed in-memory or persisted state (e.g. a
     non-numeric string from durable-record corruption) must not raise
-    TypeError -- list_strategy_lab_jobs's in-memory loop calls this
-    unguarded by any try/except, unlike the persisted-job merge loop, so a
-    raise here would crash the whole endpoint despite its own documented
-    "always returns 200" contract."""
+    TypeError -- a raise here would crash whichever record
+    ``list_strategy_lab_jobs``/``list_strategy_lab_runs`` is formatting,
+    despite their own documented "always returns 200" contract."""
     from investment_team.api import main as api_main
 
     assert api_main._job_progress_percent(completed, total) == 0

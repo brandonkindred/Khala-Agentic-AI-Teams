@@ -3182,37 +3182,91 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
           unconfigured ``JOB_SERVICE_URL`` (``RuntimeError``) is caught and
           logged around the ``list_jobs()`` call only, and the response falls
           back to the in-memory-only list; in that case this endpoint still
-          returns 200. Each persisted record is then converted to an
-          ``InvestmentJobSummary`` independently (inside
-          ``_persisted_job_to_summary``, called by the shared helper): a
-          failure building any one record (e.g. a ``ValidationError`` from
-          genuinely malformed data) is caught and logged by the helper and
-          that record is skipped -- it does not discard the other persisted
-          records, nor the in-memory ones already collected.
+          returns 200. Each merged record (in-memory or persisted) is then
+          converted to an ``InvestmentJobSummary`` independently: a failure
+          building any one record (e.g. a ``ValidationError`` from genuinely
+          malformed data) is caught and logged, and that record is skipped --
+          it does not discard any other record already collected.
     """
 
-    def _active_state_to_summary(state: Dict[str, Any]) -> InvestmentJobSummary:
-        """Format one ``_active_runs`` entry as an ``InvestmentJobSummary``.
+    def _persisted_job_to_state(job: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        """Normalize one persisted job-service record into an ``active_runs``-shaped state dict.
+
+        Deliberately does not delegate to the shared ``run_state.normalize_persisted_job``:
+        that helper's id fallback (``job.get("job_id") or job.get("run_id", "")``) and
+        default status (``"running"``) differ from this endpoint's own, narrower
+        semantics -- it dedups strictly on ``job_id`` and defaults an untracked
+        persisted job to ``"completed"``, not ``"running"``. Reusing the shared
+        helper here would silently widen which persisted records this endpoint
+        matches and change their default status, a real behavior change this
+        refactor must not introduce.
+
+        A persisted record's ``current_cycle`` is deliberately always ``None``
+        here, even when the underlying job-service ``data`` happens to carry
+        one -- ``_state_dict_to_job_summary`` derives ``label``/``current_phase``
+        from ``current_cycle``, and a persisted-only job's label/phase have
+        always been the plain fallback form, never hypothesis-derived,
+        regardless of what ``current_cycle`` data might be present.
 
         Preconditions:
-            ``state`` is an ``_active_runs`` entry with ``run_id``/``status``
-            set -- guaranteed by construction (the only writers,
-            ``_build_run_state`` and ``run_state.normalize_persisted_job``,
-            unconditionally set both). A violation is a caller bug: this
-            function does not defend against it, matching this repo's
-            Design-by-Contract convention (see ``_merge_and_reconcile_records``,
-            which already drops any entry missing this precondition before
-            this function is ever called).
+            ``job`` is a raw job-service record (``list_jobs()`` entry).
+
+        Postconditions:
+            Returns ``(job_id, state)`` where ``state`` is shaped like an
+            ``active_runs`` entry (``run_id``, ``status``, ``completed_cycles``,
+            ``total_cycles``, ``started_at``, ``current_cycle=None``), so
+            ``_state_dict_to_job_summary`` can format it the same way as an
+            active run. ``data`` (``job["data"]``) defaults to ``{}`` when
+            absent or not a mapping, so a malformed persisted record degrades
+            to sensible defaults rather than raising ``AttributeError``.
+        """
+        jid = job.get("job_id", "")
+        data = job.get("data", job)
+        if not isinstance(data, dict):
+            # A malformed persisted record (e.g. "data" is a string/list/
+            # None instead of a mapping) must degrade to sensible defaults
+            # below, not raise AttributeError.
+            data = {}
+        return jid, {
+            "run_id": jid,
+            "status": job.get("status", data.get("status", "completed")),
+            "completed_cycles": data.get("completed_cycles", 0),
+            "total_cycles": data.get("total_cycles", 1),
+            "started_at": data.get("started_at"),
+            "current_cycle": None,
+        }
+
+    def _state_dict_to_job_summary(state: Dict[str, Any]) -> InvestmentJobSummary:
+        """Format an ``active_runs``-shaped state dict as an ``InvestmentJobSummary``.
+
+        Shared by both merge origins: an in-memory ``_active_runs`` entry and
+        a ``_persisted_job_to_state``-normalized persisted record are the same
+        shape by construction, so one formatter serves both -- a persisted
+        record's ``current_cycle`` is always ``None`` (see
+        ``_persisted_job_to_state``), so it naturally falls back to the plain
+        "Strategy batch (n/total)" label with no hypothesis/phase, matching
+        this endpoint's pre-existing (and intentionally simpler)
+        persisted-record formatting without a separate code path.
+
+        Preconditions:
+            ``state`` is either an ``_active_runs`` entry or a
+            ``_persisted_job_to_state``-normalized dict.
 
         Postconditions:
             Returns an ``InvestmentJobSummary`` deriving ``label``/
-            ``current_phase`` from ``current_cycle`` (falling back to a plain
-            "Strategy batch (n/total)" label when no hypothesis is present).
+            ``current_phase`` from ``current_cycle`` when present.
             ``current_cycle`` can arrive from unvalidated job-service data via
             ``_reconcile_run_progress`` (which copies it in verbatim, with no
             shape check), not just first-party code -- guarded defensively
             before indexing into it, so a malformed ``current_cycle``/
             ``phase`` degrades to ``None`` rather than raising.
+
+        Raises:
+            Whatever ``InvestmentJobSummary(...)`` raises for a genuinely
+            malformed field (e.g. a non-string ``job_id``/``status`` failing
+            pydantic validation) -- left to propagate rather than caught
+            here; the caller catches and logs per-record instead, so one
+            malformed record can't discard any other already collected.
         """
         cycle = state.get("current_cycle")
         cycle = cycle if isinstance(cycle, dict) else None
@@ -3228,59 +3282,12 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
         progress = _job_progress_percent(completed, total)
         label = hypothesis or f"Strategy batch ({completed}/{total})"
         return InvestmentJobSummary(
-            job_id=state["run_id"],
-            status=state["status"],
+            job_id=state.get("run_id", ""),
+            status=state.get("status", "unknown"),
             label=label,
             progress=progress,
             current_phase=phase,
             created_at=state.get("started_at"),
-        )
-
-    def _persisted_job_to_summary(job: Dict[str, Any]) -> Tuple[str, InvestmentJobSummary]:
-        """Normalize one persisted job-service record into an ``InvestmentJobSummary``.
-
-        Unlike an active run, a persisted-only job's ``current_phase`` always
-        reports ``None`` and its ``label`` is always the plain "Strategy batch
-        (n/total)" form -- it never derives these from a ``current_cycle``,
-        even if the persisted ``data`` happens to carry one, matching this
-        endpoint's pre-existing (and intentionally simpler) persisted-record
-        formatting.
-
-        Preconditions:
-            ``job`` is a raw job-service record (``list_jobs()`` entry).
-
-        Postconditions:
-            Returns ``(job_id, InvestmentJobSummary(...))``. ``data``
-            (``job["data"]``) defaults to ``{}`` when absent or not a
-            mapping, so a malformed persisted record degrades to sensible
-            defaults rather than raising ``AttributeError``.
-
-        Raises:
-            Whatever ``InvestmentJobSummary(...)`` raises for a genuinely
-            malformed field (e.g. a non-string ``job_id`` failing pydantic
-            validation) -- left to propagate rather than caught here, since
-            ``_merge_and_reconcile_records`` already catches and logs a
-            raising ``normalize_persisted`` call per-record, without
-            discarding any other persisted or in-memory record already
-            merged.
-        """
-        jid = job.get("job_id", "")
-        data = job.get("data", job)
-        if not isinstance(data, dict):
-            # A malformed persisted record (e.g. "data" is a string/list/
-            # None instead of a mapping) must degrade to sensible defaults
-            # below, not raise AttributeError.
-            data = {}
-        completed = data.get("completed_cycles", 0)
-        total = data.get("total_cycles", 1)
-        progress = _job_progress_percent(completed, total)
-        return jid, InvestmentJobSummary(
-            job_id=jid,
-            status=job.get("status", data.get("status", "completed")),
-            label=f"Strategy batch ({completed}/{total})",
-            progress=progress,
-            current_phase=None,
-            created_at=data.get("started_at"),
         )
 
     # Persisted runs from job service (completed runs not in memory). The
@@ -3305,20 +3312,18 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
         reconcile_fn=_reconcile_run_progress,
         terminal_statuses=STRATEGY_LAB_TERMINAL_STATUSES,
         persisted=persisted,
-        normalize_persisted=_persisted_job_to_summary,
+        normalize_persisted=_persisted_job_to_state,
     )
 
-    # `_persisted_job_to_summary` returns an already-built InvestmentJobSummary
-    # as its "record", while merged active entries are still the raw
-    # `_active_runs` state dicts (the helper never normalizes those) -- an
-    # active entry can never be an InvestmentJobSummary instance and a
-    # persisted-normalized one can never be anything else, so `isinstance` is
-    # a safe, exhaustive discriminator between the two origins' differing
-    # formatting rules (see `_persisted_job_to_summary`'s docstring).
-    jobs: List[InvestmentJobSummary] = [
-        record if isinstance(record, InvestmentJobSummary) else _active_state_to_summary(record)
-        for record in merged.values()
-    ]
+    jobs: List[InvestmentJobSummary] = []
+    for rid, state in merged.items():
+        try:
+            jobs.append(_state_dict_to_job_summary(state))
+        except Exception:
+            # A failure converting THIS ONE record (e.g. a ValidationError
+            # from genuinely malformed data) must not discard every other
+            # record already collected -- log distinctly and move on.
+            logger.warning("Skipping malformed strategy lab job %r", rid, exc_info=True)
 
     if running_only:
         jobs = [j for j in jobs if j.status in ("running", "pending")]
