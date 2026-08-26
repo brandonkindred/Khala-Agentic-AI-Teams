@@ -48,6 +48,13 @@ class DesignBudgetExhausted(Exception):
     ``status="failed: budget_exhausted"``. Carries the configured ``limit``
     and the ``calls_made`` so far for diagnostics and the abort reason.
 
+    :func:`_annotate_budget_exhaustion` may additionally stamp the latest
+    in-loop state onto an instance before it is re-raised: ``latest_spec``
+    (set whenever the annotator runs), and — only when the calling loop
+    supplies them — ``latest_code``, ``latest_rationale``, and
+    ``mechanical_repair_count``. These are not declared in ``__init__`` and
+    are absent on an instance the annotator never touched.
+
     Preconditions:
       ``limit >= 1`` and ``calls_made >= 0`` (the raiser is
       :class:`LLMCallBudget`, which maintains both invariants).
