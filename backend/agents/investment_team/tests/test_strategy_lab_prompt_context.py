@@ -16,6 +16,7 @@ import pytest
 
 from investment_team.models import RiskLimits, StrategySpec
 from investment_team.strategy_lab.agents._prompt_context import (
+    _DEFAULT_KEEP_LAST_N,
     BoundedHistory,
     bound_history,
     render_prior_attempts,
@@ -303,3 +304,54 @@ def test_bound_history_summary_strips_carriage_returns_too() -> None:
 def test_bound_history_negative_keep_last_n_raises() -> None:
     with pytest.raises(AssertionError):
         bound_history(["a"], keep_last_n=-1)
+
+
+# ---------------------------------------------------------------------------
+# render_prior_attempts: bounded (bound_history wiring)
+# ---------------------------------------------------------------------------
+
+
+def test_render_prior_attempts_short_history_unaffected_by_bounding() -> None:
+    """len(prior_attempts) <= keep_last_n -> identical to unbounded rendering,
+    even with an explicit keep_last_n smaller than the module default."""
+    prior_attempts = ["a", "b", "c"]
+    assert render_prior_attempts(prior_attempts, keep_last_n=3) == (
+        "  Round 1: a\n  Round 2: b\n  Round 3: c"
+    )
+
+
+def test_render_prior_attempts_over_cap_prepends_summary_line() -> None:
+    prior_attempts = [f"attempt-{i}" for i in range(8)]
+    result = render_prior_attempts(prior_attempts, keep_last_n=3)
+    lines = result.split("\n")
+    assert "earlier round(s) summarized" in lines[0]
+    assert len(lines) == 1 + 3
+
+
+def test_render_prior_attempts_over_cap_keeps_last_n_with_absolute_round_numbers() -> None:
+    """Kept entries are numbered by their original position in the full
+    list, not renumbered from 1 within the kept tail."""
+    prior_attempts = [f"attempt-{i}" for i in range(8)]
+    result = render_prior_attempts(prior_attempts, keep_last_n=3)
+    assert "  Round 6: attempt-5" in result
+    assert "  Round 7: attempt-6" in result
+    assert "  Round 8: attempt-7" in result
+    assert "Round 9" not in result
+
+
+def test_render_prior_attempts_uses_module_default_keep_last_n() -> None:
+    """Calling without keep_last_n bounds against `_DEFAULT_KEEP_LAST_N`."""
+    prior_attempts = [f"attempt-{i}" for i in range(20)]
+    result = render_prior_attempts(prior_attempts)
+    lines = result.split("\n")
+    assert "earlier round(s) summarized" in lines[0]
+    assert len(lines) == 1 + _DEFAULT_KEEP_LAST_N  # summary line + N kept lines
+    assert "  Round 20: attempt-19" in result
+
+
+def test_render_prior_attempts_output_size_bounded_regardless_of_round_count() -> None:
+    """Benchmark-style test: rendered length stays roughly constant as round
+    count grows, instead of growing linearly with input size."""
+    small = render_prior_attempts([f"attempt-{i}" for i in range(10)], keep_last_n=5)
+    large = render_prior_attempts([f"attempt-{i}" for i in range(500)], keep_last_n=5)
+    assert len(large) < len(small) * 3
