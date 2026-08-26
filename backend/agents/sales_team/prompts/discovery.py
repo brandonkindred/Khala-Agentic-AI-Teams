@@ -60,7 +60,7 @@ Qualification context: {qualification_json}
 Product: {product_name}
 Value proposition: {value_proposition}
 
-Write SPIN questions in all four categories, craft a Challenger Sale insight-led opener (grounded in the Prospect Dossier signals above when present), build a tailored demo agenda (features tied to confirmed pains only), list expected objections, and define success criteria for this call. Use the learning context above (if any) to pre-populate expected_objections with the objections that have most commonly appeared in past deals. Return a JSON object with spin_questions {{situation, problem, implication, need_payoff}}, challenger_insight, demo_agenda, expected_objections, success_criteria_for_call."""
+Write SPIN questions in all four categories, craft a Challenger Sale insight-led opener, build a tailored demo agenda (features tied to confirmed pains only), list expected objections, and define success criteria for this call. Use the learning context above (if any) to pre-populate expected_objections with the objections that have most commonly appeared in past deals. Return a JSON object with spin_questions {{situation, problem, implication, need_payoff}}, challenger_insight, demo_agenda, expected_objections, success_criteria_for_call."""
 
 
 FEWSHOT_EXAMPLES: FewShotExamples = []
