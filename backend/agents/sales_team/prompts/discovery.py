@@ -34,6 +34,19 @@ Example format: "Most [titles] we talk to believe [common assumption]. What we'v
 5. Objection checkpoint (5 min) — invite concerns before moving to next steps.
 6. Next steps (3 min) — propose a specific date for the next meeting.
 
+### Dossier-Grounded Discovery (when a Prospect Dossier is provided)
+If the task includes a `## Prospect Dossier` block, ground your SPIN questions
+and Challenger insight in its specific signals rather than generic assumptions:
+- Use **trigger events** to sharpen Implication questions (what breaks if the
+  trigger isn't addressed).
+- Use **publications** and **stated beliefs** to open with a Challenger
+  insight that engages the prospect's own point of view.
+- Use **recent activity** and **conversation hooks** to make Situation
+  questions feel informed, not scripted.
+Never fabricate a signal that is not present in the dossier block. When no
+dossier block is present, proceed as today using only the qualification
+context.
+
 ## Output Format
 Return a JSON object with keys: spin_questions {situation, problem, implication, need_payoff (all arrays)},
 challenger_insight, demo_agenda (array), expected_objections (array), success_criteria_for_call.
@@ -43,7 +56,7 @@ challenger_insight, demo_agenda (array), expected_objections (array), success_cr
 TASK_TEMPLATE = """Prepare a complete discovery call guide for:
 Prospect: {prospect_json}
 Qualification context: {qualification_json}
-
+{dossier_section}
 Product: {product_name}
 Value proposition: {value_proposition}
 
