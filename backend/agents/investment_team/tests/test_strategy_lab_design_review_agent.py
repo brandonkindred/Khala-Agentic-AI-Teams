@@ -350,11 +350,38 @@ def test_format_prior_critiques_summary_uses_actual_round_values_not_position() 
     rendered = format_prior_critiques(prior, keep_last_n=5)
     lines = rendered.split("\n")
     # Only round 0 is dropped (6 critiques, keep_last_n=5).
-    assert "1 earlier round(s) summarized (rounds 0-0)." in lines[0]
+    assert "1 earlier round(s) summarized: Round 0 (0 issues): r0" in lines[0]
     # The ambiguous positional label from bound_history's generic summary
-    # ("Round 1: ...") must not appear anywhere in the output.
-    assert "Round 1: r0" not in rendered
+    # ("Round 1: ...") must not appear as a *kept*-style header for round 0.
+    assert "Round 1: ready=False" not in lines[0]
     assert "Round 1: ready=False (0 issues) — r1" in rendered
+
+
+def test_format_prior_critiques_summary_preserves_dropped_round_content() -> None:
+    """The summary line for dropped rounds is not just a round range — it
+    carries a short snippet (issue count, truncated rationale) per dropped
+    round, so a fix noted in an older round's rationale isn't silently
+    erased just because the round was dropped."""
+    prior = [SpecCritique(ready=False, rationale="fixed the sizing overflow bug", round=0)] + [
+        SpecCritique(ready=False, rationale=f"r{i}", round=i) for i in range(1, 6)
+    ]
+    rendered = format_prior_critiques(prior, keep_last_n=5)
+    assert "fixed the sizing overflow bug" in rendered.split("\n")[0]
+
+
+def test_format_prior_critiques_summary_stays_bounded_with_many_dropped_rounds() -> None:
+    """Benchmark-style test for the dropped-round summary itself: even with
+    hundreds of dropped rounds, each carrying a long rationale, the summary
+    line stays capped instead of growing linearly."""
+    prior = [
+        SpecCritique(ready=False, rationale=f"a long rationale for round {i}" * 5, round=i)
+        for i in range(500)
+    ]
+    rendered = format_prior_critiques(prior, keep_last_n=5)
+    summary_line = rendered.split("\n")[0]
+    # _CRITIQUE_SUMMARY_MAX_CHARS (240) plus the "  N earlier round(s) summarized: " prefix,
+    # whose length varies only with len(str(N)) — bounded regardless of round count.
+    assert len(summary_line) <= 300
 
 
 def test_prompt_embeds_response_schema(monkeypatch: pytest.MonkeyPatch) -> None:

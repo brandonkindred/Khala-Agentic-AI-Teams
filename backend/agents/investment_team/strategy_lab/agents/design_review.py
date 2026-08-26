@@ -635,6 +635,23 @@ def _format_readiness(results: List[QualityGateResult]) -> tuple[str, List[str]]
 
 _CRITIQUE_PREVIEW_CHARS = 160
 
+# Bounds for the rolling summary of *dropped* critiques: each dropped round
+# contributes a short snippet (round number, issue count, truncated
+# rationale) capped at _CRITIQUE_SUMMARY_ENTRY_CHARS, and the joined summary
+# as a whole is capped at _CRITIQUE_SUMMARY_MAX_CHARS so it stays bounded
+# regardless of how many rounds were dropped.
+_CRITIQUE_SUMMARY_ENTRY_CHARS = 60
+_CRITIQUE_SUMMARY_MAX_CHARS = 240
+
+
+def _critique_summary_snippet(c: "SpecCritique") -> str:
+    """Render one dropped critique as a short, single-line, length-capped snippet."""
+    rationale = " ".join(c.rationale.splitlines()).strip()
+    if len(rationale) > _CRITIQUE_SUMMARY_ENTRY_CHARS:
+        rationale = rationale[: _CRITIQUE_SUMMARY_ENTRY_CHARS - 1].rstrip() + "…"
+    header = f"Round {c.round} ({len(c.issues)} issues)"
+    return f"{header}: {rationale}" if rationale else header
+
 
 def format_prior_critiques(
     prior: Optional[List[SpecCritique]], *, keep_last_n: int = _DEFAULT_KEEP_LAST_N
@@ -646,18 +663,23 @@ def format_prior_critiques(
     Post: returns ``"None yet."`` when empty. Otherwise bounds ``prior`` via
     ``bound_history`` first: when ``len(prior) <= keep_last_n`` every
     critique renders exactly as before (no behavior change on short
-    lineages). When ``len(prior) > keep_last_n``, a leading summary line is
-    prepended reporting how many earlier rounds were dropped and their
-    actual ``round`` value range (e.g. ``"2 earlier round(s) summarized
-    (rounds 0-1)."``), and only the last ``keep_last_n`` critiques are
-    rendered in full. This intentionally does *not* reuse
+    lineages). When ``len(prior) > keep_last_n``, a leading
+    ``"  N earlier round(s) summarized: ..."`` line is prepended, followed
+    by only the last ``keep_last_n`` critiques rendered in full. The summary
+    line still carries a short per-round snippet (round number, issue
+    count, truncated rationale) for each dropped critique, capped overall
+    at ``_CRITIQUE_SUMMARY_MAX_CHARS`` characters regardless of how many
+    rounds were dropped, so a fix noted in an older round's rationale isn't
+    silently erased just because the round itself was dropped — only
+    losslessly detailed (per-issue severity/field/fix) once a lineage grows
+    past ``keep_last_n``. This intentionally does *not* reuse
     ``bound_history``'s own summary text: that text numbers dropped entries
     by their position in the dropped slice (1-indexed), which collides with
     ``c.round`` here — the design loop's ``round`` starts at 0, so a
     dropped round 0 and a kept round 1 would both be labelled "Round 1".
-    Each rendered critique is one block — a header line (round, ready flag,
-    issue count, truncated rationale) followed by one indented line per
-    issue carrying its severity, field, truncated description, and
+    Each rendered (kept) critique is one block — a header line (round,
+    ready flag, issue count, truncated rationale) followed by one indented
+    line per issue carrying its severity, field, truncated description, and
     truncated ``suggested_fix`` (when present). Surfacing the per-issue
     detail — not just the rationale — lets a later revision see *what* an
     earlier round fixed so it does not silently regress it when the
@@ -672,10 +694,10 @@ def format_prior_critiques(
     lines: List[str] = []
     if bounded.summary:
         dropped = prior[: len(prior) - len(bounded.kept)]
-        lines.append(
-            f"  {len(dropped)} earlier round(s) summarized "
-            f"(rounds {dropped[0].round}-{dropped[-1].round})."
-        )
+        summary_body = "; ".join(_critique_summary_snippet(c) for c in dropped)
+        if len(summary_body) > _CRITIQUE_SUMMARY_MAX_CHARS:
+            summary_body = summary_body[: _CRITIQUE_SUMMARY_MAX_CHARS - 1].rstrip() + "…"
+        lines.append(f"  {len(dropped)} earlier round(s) summarized: {summary_body}")
     for c in bounded.kept:
         lines.append(
             f"  Round {c.round}: ready={c.ready} ({len(c.issues)} issues) — "
