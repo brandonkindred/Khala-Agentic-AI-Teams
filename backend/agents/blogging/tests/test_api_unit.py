@@ -48,7 +48,7 @@ def test_format_audience_variants() -> None:
         other="loves coffee",
     )
     text = api_main._format_audience(aud)
-    assert "skill level: beginner" in text
+    assert "skill_level: beginner" in text
     assert "profession: dev" in text
     assert "interests: coding, biking" in text
     assert "loves coffee" in text

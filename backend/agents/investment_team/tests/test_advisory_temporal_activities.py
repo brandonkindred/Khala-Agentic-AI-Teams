@@ -222,6 +222,35 @@ def test_validate_strategy_activity_missing_strategy_raises(monkeypatch) -> None
         validate_strategy_activity({"strategy_id": "s1", "request": {}})
 
 
+def test_validate_strategy_activity_default_checks_match_required_checks(monkeypatch) -> None:
+    """The no-checks-supplied fallback in validate_strategy_activity must derive
+    its check names from ValidationAgent.REQUIRED_CHECKS, the canonical set the
+    promotion gate enforces (agents.py), rather than a hand-typed literal list
+    that could silently drift from it."""
+    from investment_team.agents import ValidationAgent
+    from investment_team.api import main as api_main
+    from investment_team.models import StrategySpec
+    from investment_team.temporal.advisory import validate_strategy_activity
+
+    strategy = StrategySpec(
+        strategy_id="s1",
+        authored_by="alice",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    monkeypatch.setattr(api_main, "_strategies", {"s1": strategy})
+    monkeypatch.setattr(api_main, "_validations", {})
+
+    result = validate_strategy_activity({"strategy_id": "s1", "request": {}})
+
+    check_names = {c["name"] for c in result["validation"]["checks"]}
+    assert check_names == ValidationAgent.REQUIRED_CHECKS
+    assert result["passed"] is True
+    assert result["failures"] == []
+
+
 def test_promotion_decision_activity_missing_entities_raise(monkeypatch) -> None:
     from investment_team.api import main as api_main
     from investment_team.temporal.advisory import promotion_decision_activity
