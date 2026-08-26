@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, get_args
 
 import pytest
 
@@ -27,6 +27,7 @@ from investment_team.models import (
     CoverageReport,
     OpenPositionDiagnostic,
     StrategySpec,
+    ZeroTradeCategory,
 )
 from investment_team.strategy_lab import orchestrator as orchestrator_module
 from investment_team.strategy_lab._orchestrator_helpers import _DesignAttemptState
@@ -35,6 +36,7 @@ from investment_team.strategy_lab.agents.zero_trade_repair import (
     _ZERO_TRADE_REPAIR_SCHEMA_JSON,
     ZeroTradeRepairAgent,
     ZeroTradeRepairReport,
+    _coerce_report,
 )
 from investment_team.strategy_lab.exceptions import SpecImplementabilityError
 from investment_team.strategy_lab.orchestrator import (
@@ -1638,3 +1640,33 @@ def test_run_propagates_budget_exhaustion_not_fallback_report(
                 code="# original",
                 diagnostics=BacktestExecutionDiagnostics(zero_trade_category="NO_ORDERS_EMITTED"),
             )
+
+
+# ---------------------------------------------------------------------------
+# `_coerce_report` category round-trip
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("category", get_args(ZeroTradeCategory))
+def test_coerce_report_round_trips_every_canonical_zero_trade_category(
+    category: str,
+) -> None:
+    """Every category in the canonical ZeroTradeCategory Literal must survive
+    `_coerce_report` unchanged rather than being silently overwritten by the
+    fallback — a hand-maintained allow-list that falls out of sync with the
+    Literal would otherwise mask a category the LLM legitimately returns."""
+    parsed: Dict[str, Any] = {"root_cause_category": category}
+
+    report = _coerce_report(parsed, fallback_category="UNKNOWN_ZERO_TRADE_PATH")
+
+    assert report.root_cause_category == category
+
+
+def test_coerce_report_falls_back_on_genuinely_invalid_category() -> None:
+    """A category value that is not one of the canonical ZeroTradeCategory
+    members must still fall back to `fallback_category`."""
+    parsed: Dict[str, Any] = {"root_cause_category": "NOT_A_REAL_CATEGORY"}
+
+    report = _coerce_report(parsed, fallback_category="ORDERS_REJECTED")
+
+    assert report.root_cause_category == "ORDERS_REJECTED"

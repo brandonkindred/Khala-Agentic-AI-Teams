@@ -47,6 +47,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from ...models import ZeroTradeCategory
 from ..spec_dsl import EntryRule, ExitRule, SizingRule
 
 # ---------------------------------------------------------------------------
@@ -147,7 +148,7 @@ class _ZeroTradeRepairWire(BaseModel):
     never emitted by the LLM).
     """
 
-    root_cause_category: str
+    root_cause_category: ZeroTradeCategory
     evidence: str = ""
     code_issue: Optional[str] = None
     strategy_rule_issue: Optional[str] = None
