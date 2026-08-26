@@ -8,6 +8,9 @@ Phase order and display titles are sourced from
 
 from branding_team.graphs.shared import PHASE_ORDER, PHASE_TITLES
 from branding_team.models import BrandPhase
+from branding_team.prompt_spec import AgentPromptSpec, render_agent_prompt
+
+from .models import MissionUpdate
 
 # Parenthetical subtitle for each phase's "GUIDED FLOW" header. Phase order and
 # display title come from ``PHASE_ORDER``/``PHASE_TITLES`` (the single source of
@@ -262,38 +265,23 @@ Reply as the branding lead would — natural language only, no JSON, no code blo
 # Pulls structured BrandingMission updates from the latest turn.
 # ────────────────────────────────────────────────────────────────────────────
 
-EXTRACTION_SYSTEM_PROMPT = """You are a silent extraction tool that runs after a branding strategist replies to a client. You read the latest exchange and the strategist's reply, then output a JSON object describing what (if anything) was newly learned about the brand. The user never sees your output.
+_EXTRACTION_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a silent extraction tool that runs after a branding strategist replies to a "
+        "client. You read the latest exchange and the strategist's reply, then report what (if "
+        "anything) was newly learned about the brand this turn. The user never sees your output. "
+        "Leave a field unset when nothing new was learned for it this turn — do not repeat "
+        "unchanged values. Treat the client's input as inspiration, not a final answer — only set "
+        "a field when the client (or strategist on the client's behalf) explicitly committed to it."
+    ),
+    structured_output=MissionUpdate,
+    closing=(
+        "Only set selected_palette_index when the client clearly chose a loved palette by name or "
+        "index."
+    ),
+)
 
-Output ONLY a JSON object — no prose, no markdown fences — with this shape:
-
-{
-  "mission_update": {
-    "company_name": "...",
-    "company_description": "...",
-    "target_audience": "...",
-    "values": ["..."],
-    "differentiators": ["..."],
-    "desired_voice": "...",
-    "existing_brand_material": ["..."],
-    "color_inspiration": ["..."],
-    "color_palettes": [
-      {"name": "Palette Name", "description": "mood description", "colors": ["color1", "color2"], "sentiment": "warm and energetic"}
-    ],
-    "selected_palette_index": null,
-    "visual_style": "...",
-    "typography_preference": "...",
-    "interface_density": "..."
-  },
-  "suggested_questions": ["Question one?", "Question two?"]
-}
-
-Rules:
-- Include ONLY mission_update keys whose values were newly provided or refined in this turn. Omit everything else. If nothing was learned, use `{}`.
-- Treat the client's input as inspiration, not a final answer — only fill fields the client (or strategist on the client's behalf) explicitly committed to.
-- `selected_palette_index`: only set when the client clearly chose a loved palette by name or index.
-- `suggested_questions`: 2–4 short tap-able follow-ups the client might want to send next, contextually relevant to where the strategist just left the conversation. These appear as quick-reply chips in the UI.
-
-Output the JSON object only. No leading or trailing text."""
+EXTRACTION_SYSTEM_PROMPT = render_agent_prompt(_EXTRACTION_PROMPT)
 
 EXTRACTION_USER_TEMPLATE = """\
 Current brand brief (state before this turn):
@@ -307,5 +295,5 @@ Latest user message: {user_message}
 Strategist's reply just sent to the user:
 {assistant_reply}
 
-Output the JSON object now.\
+Report what (if anything) was newly learned this turn.\
 """
