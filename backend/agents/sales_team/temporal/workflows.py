@@ -280,10 +280,16 @@ class SalesWorkflow:
             and qualified_prospects
             and await _entry_gate("discovery")
         ):
+            if not dossier_map:
+                # Thread-path parity: re-attempt the dossier load at the
+                # discovery boundary so a transient store outage at the first
+                # load doesn't strip grounding from every discovery plan in
+                # the run.
+                dossier_map = await _load_dossiers(qualified_prospects)
             result["discovery_plans"] = await _fan(
                 _act.discovery_one_activity,
                 qualified_prospects,
-                lambda p: [ctx, p, qual_by_id.get(p["id"])],
+                lambda p: [ctx, p, qual_by_id.get(p["id"]), dossier_map.get(p["id"])],
             )
             await _exit_gate("discovery")
 
