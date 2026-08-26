@@ -210,10 +210,10 @@ def test_context_phases_change_to_excluded_upstream_output_does_not_change_hash(
     assert baseline == changed
 
 
-def test_phase4_output_change_does_not_invalidate_phase5_cache() -> None:
-    """Phase 5's real ``context_phases`` excludes Phase 4, so a Phase 4 edit
-    must not change Phase 5's hash (cache hit) -- the wired-up-config
-    counterpart to ``test_context_phases_excludes_unlisted_upstream_output_from_hash``."""
+def test_phase4_output_change_invalidates_phase5_cache() -> None:
+    """Phase 5's real ``context_phases`` is unset (no filtering), so a Phase 4
+    edit must change Phase 5's hash (cache miss) -- the wired-up-config
+    counterpart to ``test_context_phases_change_to_included_upstream_output_changes_hash``."""
     mission = make_mission()
     context_phases = _PHASE_SPEC[BrandPhase.GOVERNANCE].context_phases
     strategic = StrategicCoreOutput(brand_purpose="Ship calm software")
@@ -240,7 +240,7 @@ def test_phase4_output_change_does_not_invalidate_phase5_cache() -> None:
         context_phases=context_phases,
     )
 
-    assert baseline == changed
+    assert baseline != changed
 
 
 @pytest.mark.parametrize(
