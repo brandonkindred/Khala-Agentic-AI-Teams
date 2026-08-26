@@ -90,6 +90,46 @@ identical standard in the opposite direction: those same "values"
 mentions are **not** counted as `BrandingMission.values` references here,
 for consistency with how the sibling document already classified them.
 
+## Limitation — generic mission references and today's unconditional injection
+
+Many of the 32 `AgentPromptSpec`s open with an unqualified phrase like
+"Given a branding mission" or "Using the branding mission ... as context"
+— naming no specific field. Per the confidence rule above, this document
+counts those as **none** for every individual field, since the phrase
+itself is not textual evidence that any *particular* field matters (it is
+boilerplate framing present across most of `agents.py`, not a selective
+citation). That classification answers "which fields does the prompt text
+explicitly ask this agent to use" — it does **not** answer "which fields
+have zero influence on this agent's output."
+
+The distinction matters because `_phase_task` (`orchestrator.py:791-793`)
+unconditionally injects the *complete*, field-labelled mission JSON into
+every phase's task string today, regardless of what that phase's own
+agent prompts ask for. So an agent whose system prompt says only "the
+branding mission" — e.g. `Storyteller`, `TaglineWriter`, `PersonaBuilder`
+in Phase 2, or most of Phase 1's agents — currently receives every
+mission field in its context, including ones its own prompt text never
+names, and nothing in this document's method can rule out the LLM having
+used one of them (e.g. `company_name` or `company_description`) to
+produce its actual output, even without an explicit instruction to. This
+is the same "over-hashing only lowers hit rate; under-hashing could make
+it return a stale hit" asymmetry `phase_input_hash`'s own docstring
+already warns about (`shared/memoization.py:31-39`) — the risk this
+document's recommendations could pose is exactly that under-hashing
+failure mode, not a new one.
+
+This document's recommended allowlists are therefore a **necessary but
+unproven-sufficient** starting hypothesis, built from the only static
+evidence available (prompt text), not a guarantee that narrowing the hash
+to exactly these fields is safe. Before any allowlist from this document
+is implemented, its effect on actual output quality should be validated
+empirically — e.g. by extending `scripts/eval_selective_context.py`
+(which already A/B-compares full-context vs. selective-context pipeline
+runs via an LLM judge, today scoped to `context_phases`/upstream-phase
+filtering) to also compare full-mission vs. allowlisted-mission runs per
+phase, rather than treating this document's tables alone as sufficient
+sign-off.
+
 ## Phase 1 — Strategic Core (6 agents, `agents.py:104-273`)
 
 No upstream phase exists, so every mission-field reference here is a
@@ -272,6 +312,17 @@ default-value semantics.
    reader is not confused by its presence into thinking it contradicts
    the per-phase findings above.
 
+7. **Generic "the branding mission" references cannot be read as "no
+   fields needed."** See the dedicated Limitation section above. Every
+   `none`/`empty` cell in the summary matrix below reflects an absence of
+   *textual* evidence, not a proof of *behavioral* independence — this is
+   most consequential for Phase 1 (5 of 6 agents open with an unqualified
+   "given a branding mission") and Phase 2 (`Storyteller`, `TaglineWriter`,
+   `PersonaBuilder` all cite "the branding mission" with no field named).
+   Implementers should treat this document's recommended allowlists as
+   hypotheses to validate, not settled facts, before narrowing what
+   `phase_input_hash`/`_phase_task` include.
+
 ## Summary matrix — field × phase
 
 `E` = explicit, `A` = ambiguous (not counted in the recommended
@@ -309,4 +360,9 @@ field-allowlist conclusions above must be reviewed and explicitly
 accepted before any dependent implementation work (the code changes that
 introduce and populate the allowlist in `phase_input_hash`/`_phase_task`)
 begins — this document does not self-certify that review by existing or
-being merged.
+being merged. Per the Limitation section above, that review should
+include empirical validation (e.g. via an extended
+`scripts/eval_selective_context.py`) before an allowlist derived from
+these tables is treated as safe to ship, particularly for phases where an
+agent's only mission reference is the generic, unqualified phrase "the
+branding mission."
