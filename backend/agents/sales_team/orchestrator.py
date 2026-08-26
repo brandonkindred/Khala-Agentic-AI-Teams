@@ -700,6 +700,21 @@ class SalesPodOrchestrator:
                 return sequence
 
             feedback = format_critic_feedback(report.violations, report.notes)
+
+            if attempt == max_refinements - 1:
+                # No review budget left to check a regenerated draft — return
+                # the sequence that was just reviewed rather than ship one
+                # that was never checked.
+                logger.info(
+                    "sales.outreach.critic_rejected_budget_exhausted prospect_id=%s "
+                    "violations=%d attempt=%d/%d",
+                    prospect.id,
+                    report.must_fix_count(),
+                    attempt + 1,
+                    max_refinements,
+                )
+                break
+
             logger.info(
                 "sales.outreach.critic_revise prospect_id=%s violations=%d attempt=%d/%d",
                 prospect.id,
@@ -707,13 +722,6 @@ class SalesPodOrchestrator:
                 attempt + 1,
                 max_refinements,
             )
-
-            if attempt == max_refinements - 1:
-                # No review budget left to check a regenerated draft — return
-                # the sequence that was just reviewed rather than ship one
-                # that was never checked.
-                break
-
             refined_ctx = refined_ctx + "\n\nReviewer feedback to address:\n" + feedback
             try:
                 variants = self.outreach.generate_sequence(
