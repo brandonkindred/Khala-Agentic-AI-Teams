@@ -286,6 +286,37 @@ def test_research_agent_run_resumes_from_empty_candidates_checkpoint(monkeypatch
     mock_search.search.assert_not_called()
 
 
+def test_research_agent_run_resumes_from_empty_documents_checkpoint(monkeypatch, tmp_path) -> None:
+    """A checkpoint with documents=[] (every candidate fetch failed or was
+    rejected) must be treated as resumable, not re-fetched: `[]` and "no
+    checkpoint" are different states, same as the candidates fix above.
+    """
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="empty documents brief", max_results=3)
+    cache.save_checkpoint(brief, "normalized", normalized={"topic": "cached"})
+    cache.save_checkpoint(brief, "queries", queries=[{"query_text": "q", "intent": "overview"}])
+    cache.save_checkpoint(
+        brief,
+        "candidates",
+        candidates=[{"title": "Page", "url": "https://example.com/1", "rank": 1}],
+    )
+    cache.save_checkpoint(brief, "documents", documents=[])
+
+    a = _make_agent(monkeypatch, [])
+    a.cache = cache
+    mock_fetcher = MagicMock()
+    a.web_fetcher = mock_fetcher
+    monkeypatch.setattr(ResearchAgent, "_fetch_academic_papers", lambda self, b: [])
+
+    a.run(brief)
+
+    mock_fetcher.fetch.assert_not_called()
+
+
 def test_research_agent_run_resumes_academic_papers_and_similar_topics(
     monkeypatch, tmp_path
 ) -> None:

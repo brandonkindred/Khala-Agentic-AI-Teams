@@ -183,8 +183,11 @@ class ResearchAgent(_BlogAgentBase):
             _report("Fetching and reading web pages...", 0.38)
 
             # Step 4: Fetch documents
+            # documents is checked for "is not None" (see Step 3's candidates comment):
+            # every fetch can legitimately fail/be rejected, and that's still a
+            # completed checkpoint, not a missing one.
             if (
-                cached_state and cached_state.documents
+                cached_state and cached_state.documents is not None
             ):  # pragma: no cover - resume-from-checkpoint branch; see Step 1.
                 logger.info("Using cached documents (%s)", len(cached_state.documents))
                 documents = [SourceDocument(**d) for d in cached_state.documents]
@@ -195,8 +198,9 @@ class ResearchAgent(_BlogAgentBase):
 
             # Step 5: Score documents
             _report("Scoring documents for relevance...", 0.50)
+            # scored_docs: "is not None" for the same reason as documents above.
             if (
-                cached_state and cached_state.scored_docs
+                cached_state and cached_state.scored_docs is not None
             ):  # pragma: no cover - resume-from-checkpoint branch including the legacy 3-tuple shape; see Step 1.
                 logger.info("Using cached scored documents (%s)", len(cached_state.scored_docs))
                 scored_docs = []
@@ -223,8 +227,9 @@ class ResearchAgent(_BlogAgentBase):
 
             # Step 6: Summarize documents
             _report("Summarizing references...", 0.65)
+            # references: "is not None" for the same reason as documents above.
             if (
-                cached_state and cached_state.references
+                cached_state and cached_state.references is not None
             ):  # pragma: no cover - resume-from-checkpoint branch; see Step 1.
                 logger.info("Using cached references (%s)", len(cached_state.references))
                 references = [ResearchReference(**r) for r in cached_state.references]
