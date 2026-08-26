@@ -853,11 +853,11 @@ def test_phase_task_filters_prior_outputs_by_context_phases(monkeypatch) -> None
 
 def test_governance_phase_task_includes_all_upstream_context() -> None:
     """Integration-level check of the real (non-monkeypatched) ``_PHASE_SPEC``
-    values: GOVERNANCE has no ``context_phases`` filter configured, so its
-    task string must include every upstream phase's content -- strategic-core,
-    narrative, visual-identity, and channel-activation alike -- matching what
-    the ``brand_rules_codifier`` and ``asset_wiki_planner`` prompts assume
-    they have."""
+    values: GOVERNANCE's ``context_phases`` is configured to include every
+    upstream phase, so its task string must include strategic-core, narrative,
+    visual-identity, and channel-activation alike -- matching what the
+    ``brand_rules_codifier`` and ``asset_wiki_planner`` prompts assume they
+    have."""
     mission = make_mission()
     prior_outputs = {
         BrandPhase.STRATEGIC_CORE.value: {"marker": "STRATEGIC_MARKER"},
