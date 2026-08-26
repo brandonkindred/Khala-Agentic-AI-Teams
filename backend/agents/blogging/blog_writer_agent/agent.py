@@ -54,7 +54,6 @@ from .prompts import (
     ANALYZE_USER_FEEDBACK_FOR_GUIDELINES_PROMPT,
     DRAFT_TASK_INSTRUCTIONS,
     ESCALATION_SUMMARY_PROMPT,
-    REVISION_TASK_INSTRUCTIONS,
     UNCERTAINTY_DETECTION_PROMPT,
     USER_FEEDBACK_REVISION_INSTRUCTIONS,
     WRITING_SYSTEM_PROMPT,
@@ -757,160 +756,6 @@ class BlogWriterAgent(_BlogAgentBase):
             line += f"\n   Suggestion: {suggestion}"
         return line
 
-    def _build_revise_single_item_prompt(
-        self,
-        draft: str,
-        item: Any,
-        item_index: int,
-        total_items: int,
-        style_guide_text: str,
-        revise_input: ReviseWriterInput,
-    ) -> str:
-        """Build a revision prompt for a single feedback item.
-
-        Postconditions:
-            - Returns a prompt string embedding the brand/style sections, the
-              content plan, the single feedback item formatted via
-              ``_format_feedback_item_line``, and the current draft, instructing
-              the model to change only that one issue.
-        """
-        brand_section = self._brand_section_for_prompt()
-        feedback_line = self._format_feedback_item_line(item, 1)
-        cp = compact_text(
-            revise_input.outline_for_prompt(), COMPACT_OUTLINE_CHARS, self._model, "content plan"
-        )
-        prompt_parts = [
-            REVISION_TASK_INSTRUCTIONS,
-            "",
-            f"You are addressing feedback item {item_index}/{total_items}. "
-            "Focus ONLY on this one issue. Do not change anything else in the draft.",
-            "",
-            "---",
-            "BRAND AND STYLE (mandatory for every sentence):",
-            "---",
-            brand_section,
-            "",
-            "---",
-            "STYLE GUIDE (follow in the revised draft):",
-            "---",
-            style_guide_text,
-            "",
-            "---",
-            "CONTENT PLAN (preserve section intent and narrative flow):",
-            "---",
-            cp,
-            "",
-            "---",
-            "FEEDBACK TO ADDRESS (this is the ONLY change to make):",
-            "---",
-            feedback_line,
-            "",
-        ]
-        if revise_input.selected_title:
-            prompt_parts.extend(
-                [
-                    "",
-                    "---",
-                    f"AUTHOR-CHOSEN TITLE (preserve this exact H1): {revise_input.selected_title}",
-                ]
-            )
-        if revise_input.elicited_stories:
-            prompt_parts.extend(
-                ["", "---", "AUTHOR'S PERSONAL STORIES:\n" + revise_input.elicited_stories]
-            )
-        length_block = (
-            revise_input.length_guidance.strip()
-            if (revise_input.length_guidance or "").strip()
-            else (
-                f"TARGET LENGTH: Aim for roughly {revise_input.target_word_count} words "
-                f"(acceptable range: {int(revise_input.target_word_count * 0.75)}–{int(revise_input.target_word_count * 1.3)} words)."
-            )
-        )
-        prompt_parts.extend(
-            [
-                "",
-                "---",
-                "CURRENT DRAFT:",
-                "---",
-                draft,
-                "",
-                "---",
-                length_block,
-                "",
-                "---",
-                'Use this format: first line {"draft": 0}, then ---DRAFT---, '
-                "then the full revised blog post in Markdown.",
-            ]
-        )
-        return "\n".join(prompt_parts)
-
-    def _revise_single_item(
-        self,
-        draft: str,
-        item: Any,
-        item_index: int,
-        total_items: int,
-        style_guide_text: str,
-        revise_input: ReviseWriterInput,
-    ) -> str:
-        """Apply one feedback item to the draft. Returns revised draft or original on failure."""
-        prompt = self._build_revise_single_item_prompt(
-            draft, item, item_index, total_items, style_guide_text, revise_input
-        )
-        for attempt in range(2):
-            try:
-                raw_response = self._call_text(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
-                revised = _extract_draft_after_marker(raw_response)
-                if revised and revised.strip():
-                    return revised.strip()
-            # The underlying Strands Agent call can surface LLMJsonParseError; retry
-            # without the transient backoff sleep (covered by test_writer_interactive.py).
-            except LLMJsonParseError as e:
-                logger.warning("Revise item %s/%s: %s; retrying.", item_index, total_items, e)
-                if attempt == 0:
-                    time.sleep(0.5)
-            except Exception as e:
-                cause = _unwrap_llm_cause(e)
-                if isinstance(cause, LLMJsonParseError):
-                    logger.warning(
-                        "Revise item %s/%s: %s; retrying.", item_index, total_items, cause
-                    )
-                    if attempt == 0:
-                        time.sleep(0.5)
-                    continue
-                if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
-                    logger.warning(
-                        "Revise item %s/%s: transient error (attempt %s/2); retrying.",
-                        item_index,
-                        total_items,
-                        attempt + 1,
-                    )
-                    time.sleep(2.0 + attempt)
-                    continue
-                raise
-        # Fallback — keep original on unexpected failure; re-raise transient LLM
-        # errors so the draft-stage retry funnel can own backoff.
-        try:
-            fallback = self._fallback_draft_via_json(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
-            if fallback:
-                return fallback
-        except Exception as e:
-            cause = _unwrap_llm_cause(e)
-            if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
-                raise cause
-            logger.warning(
-                "Revise item %s/%s: JSON fallback failed: %s; keeping draft as-is.",
-                item_index,
-                total_items,
-                cause,
-            )
-        logger.warning(
-            "Revise item %s/%s: could not produce revision; keeping draft as-is.",
-            item_index,
-            total_items,
-        )
-        return draft
-
     def revise(
         self,
         revise_input: ReviseWriterInput,
@@ -1039,8 +884,8 @@ class BlogWriterAgent(_BlogAgentBase):
                     current_draft = revised.strip()
                     primary_succeeded = True
                     break
-            # See _revise_single_item: LLMJsonParseError from the Strands Agent call
-            # retries without the transient backoff sleep.
+            # The underlying Strands Agent call can surface LLMJsonParseError; retry
+            # without the transient backoff sleep.
             except LLMJsonParseError as e:
                 logger.warning(
                     "Batch revise failed (attempt %s/%s): %s",
@@ -1343,8 +1188,8 @@ class BlogWriterAgent(_BlogAgentBase):
                     current_draft = revised.strip()
                     primary_succeeded = True
                     break
-            # See _revise_single_item: LLMJsonParseError from the Strands Agent call
-            # retries without the transient backoff sleep (test_revise_from_user_feedback_json_parse_error_skips_sleep).
+            # The underlying Strands Agent call can surface LLMJsonParseError; retry
+            # without the transient backoff sleep (test_revise_from_user_feedback_json_parse_error_skips_sleep).
             except LLMJsonParseError as e:
                 logger.warning(
                     "User-feedback revision failed (attempt %s/%s): %s",
