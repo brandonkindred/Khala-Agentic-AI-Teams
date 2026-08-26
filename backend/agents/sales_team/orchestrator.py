@@ -761,7 +761,11 @@ class SalesPodOrchestrator:
         qualification: Optional[QualificationScore],
         max_refinements: int = 1,
     ) -> SalesProposal:
-        """Emit -> wrap -> critic -> on revise, re-emit up to *max_refinements* times."""
+        """Emit -> wrap -> critic -> on revise, re-emit up to *max_refinements - 1* times.
+
+        The final review-budget iteration is always spent reviewing the current
+        proposal, so the returned proposal is never an unchecked regeneration.
+        """
         body = self.proposal.write(
             prospect.model_dump_json(indent=2),
             product_name,
@@ -781,6 +785,21 @@ class SalesPodOrchestrator:
                 return proposal
 
             feedback = format_critic_feedback(report.violations, report.notes)
+
+            if attempt == max_refinements - 1:
+                # No review budget left to check a regenerated draft — return
+                # the proposal that was just reviewed rather than ship one
+                # that was never checked.
+                logger.info(
+                    "sales.proposal.critic_rejected_budget_exhausted prospect_id=%s "
+                    "violations=%d attempt=%d/%d",
+                    prospect.id,
+                    report.must_fix_count(),
+                    attempt + 1,
+                    max_refinements,
+                )
+                break
+
             logger.info(
                 "sales.proposal.critic_revise prospect_id=%s violations=%d attempt=%d/%d",
                 prospect.id,
