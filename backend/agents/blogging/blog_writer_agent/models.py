@@ -123,7 +123,7 @@ class WriterInput(BaseModel):
     allowed_claims: Optional[Dict[str, Any]] = Field(
         None,
         description=(
-            "allowed_claims.json content (e.g. {'topic': ..., 'claims': [{'id', 'text', ...}]}). "
+            "allowed_claims.json content (e.g. {'topic': 'AI', 'claims': [{'id': 'c1', 'text': '...'}]}). "
             "When set, the writer must tag every factual/statistical claim with [CLAIM:id] "
             "using only IDs present here."
         ),
@@ -229,7 +229,7 @@ class ReviseWriterInput(BaseModel):
     allowed_claims: Optional[Dict[str, Any]] = Field(
         None,
         description=(
-            "allowed_claims.json content (e.g. {'topic': ..., 'claims': [{'id', 'text', ...}]}). "
+            "allowed_claims.json content (e.g. {'topic': 'AI', 'claims': [{'id': 'c1', 'text': '...'}]}). "
             "When set, every factual/statistical claim must stay tagged [CLAIM:id] "
             "using only IDs present here."
         ),

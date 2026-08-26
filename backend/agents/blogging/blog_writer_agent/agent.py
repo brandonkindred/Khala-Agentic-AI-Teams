@@ -876,10 +876,12 @@ class BlogWriterAgent(_BlogAgentBase):
             - ``draft_input`` is a valid ``WriterInput``.
         Postconditions:
             - Returns a ``WriterOutput`` with a non-empty draft string.
-            - When ``draft_input.allowed_claims`` is a non-empty allowed_claims.json
-              dict, the prompt includes an ALLOWED CLAIMS section (via
-              ``_render_allowed_claims_section``) instructing the model to tag
-              factual/statistical claims with ``[CLAIM:id]``; omitted when absent.
+            - The prompt includes an ALLOWED CLAIMS section instructing the model
+              to tag factual/statistical claims with ``[CLAIM:id]`` only when
+              ``_render_allowed_claims_section(draft_input.allowed_claims)``
+              yields a non-empty rendered section (i.e. at least one claim with
+              a non-empty ``id`` and ``text``); omitted when ``allowed_claims``
+              is absent, empty, or every claim entry is malformed.
             - Expected LLM parse failures (``LLMJsonParseError``, including when
               Strands wraps them in ``EventLoopException``) soft-fail into a JSON
               fallback, then a placeholder if both paths yield no content.
