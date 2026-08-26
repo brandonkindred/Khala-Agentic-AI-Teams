@@ -15,7 +15,8 @@ flowchart TD
     ResolveProfile --> LoadBrandSpec[Load brand spec + writing guidelines<br/>Render Jinja2 templates with AuthorProfile]
     LoadBrandSpec --> StartPipeline[Start pipeline<br/>Status: RUNNING]
 
-    StartPipeline --> Planning["BlogWriterAgent.plan_content()<br/>ContentPlan + refine loop<br/>(research_digest defaults to empty)<br/>(BlogPhase.PLANNING, 0-15%)"]
+    StartPipeline --> Research["Research Agent<br/>Persist research_packet.md<br/>(research phase sub-progress, no BlogPhase slice)"]
+    Research --> Planning["BlogWriterAgent.plan_content()<br/>ContentPlan + refine loop<br/>(research_digest defaults to empty)<br/>(BlogPhase.PLANNING, 0-15%)"]
 
     Planning --> PlanOK{Plan<br/>acceptable?}
     PlanOK -->|No| PlanFail([FAILED<br/>PlanningError])
@@ -66,7 +67,7 @@ flowchart TD
 
 **Implementation notes:**
 
-- The research phase shown in earlier versions of this diagram has been removed. `run_pipeline()` builds `PlanningInput` with `research_digest=""` (the default in `shared/content_plan.py:197`) and never calls `BlogResearchAgent`. The research module remains available as a standalone component.
+- `run_planning()` (`pipeline/_common.py`) calls `ResearchAgent.run()` ahead of planning and persists its compiled document as `research_packet.md`, reporting progress on a "research" phase (not a `BlogPhase` slice). The output is not yet fed into planning, though: `run_pipeline()` still builds `PlanningInput` with `research_digest=""` (the default in `shared/content_plan.py:197`) — routing the compiled document into `research_digest` is tracked as a separate follow-up.
 - Planning is done inline by `BlogWriterAgent.plan_content()` (`blog_writer_agent/agent.py:294`), not by a separate `BlogPlanningAgent` class.
 - Validators, fact-check, and compliance all run inside a single loop bounded by `max_rewrite_iterations`. Title selection is only reached after an iteration where every gate returned `PASS`.
 
@@ -446,9 +447,9 @@ flowchart TD
 
 ---
 
-## 10. Research Agent Internal Flow (standalone module)
+## 10. Research Agent Internal Flow
 
-The research agent lives in `blog_research_agent/` and is a fully functional standalone module. It is **not** invoked by `run_pipeline()` in the current v2 path — it is kept available for future re-integration or direct scripted use. The flow below documents how the module works when it is run on its own.
+The research agent lives in `blog_research_agent/` and is invoked by `run_planning()` (see §1, "Research" step) to produce the `research_packet.md` artifact, as well as being usable standalone / via direct scripted use. The flow below documents how the module works internally regardless of caller.
 
 ```mermaid
 flowchart TD
