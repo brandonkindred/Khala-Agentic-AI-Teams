@@ -4233,6 +4233,16 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
     def _persisted_run_to_state(job: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         """Normalize one persisted job-service record to an ``active_runs``-shaped state dict."""
         rid = job.get("job_id") or job.get("run_id", "")
+        try:
+            hash(rid)
+        except TypeError as exc:
+            # An unhashable job_id/run_id (e.g. a list) would otherwise reach
+            # _merge_and_reconcile_records's `rid not in merged` dict-membership
+            # check unguarded and raise TypeError there, 500ing the whole
+            # endpoint instead of being skipped like every other malformed
+            # persisted record. Raising here keeps it inside this callback's
+            # own try/except in the shared helper.
+            raise TypeError(f"persisted run record has unhashable job_id/run_id: {rid!r}") from exc
         return rid, _normalize_persisted_job(job, fallback_status="running", run_id=rid)
 
     # The persisted-fetch (client construction + list_jobs) is wrapped in a

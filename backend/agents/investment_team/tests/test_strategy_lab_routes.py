@@ -2590,6 +2590,74 @@ def test_list_strategy_lab_runs_one_malformed_persisted_record_does_not_drop_the
     assert run_ids == {"mem-r", "run-good"}
 
 
+def test_list_strategy_lab_runs_one_unhashable_persisted_job_id_does_not_500(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A persisted record with a truthy but unhashable ``job_id`` (e.g. a
+    list) must be skipped like any other malformed record, not 500 the
+    whole endpoint.
+
+    Regression test for a Codex review finding on this endpoint's
+    ``_persisted_run_to_state`` callback: ``_merge_and_reconcile_records``'s
+    ``rid not in merged`` dict-membership check sits outside its own
+    try/except, so an unhashable ``rid`` returned unvalidated would raise
+    ``TypeError`` there instead of being caught -- distinct from
+    ``test_list_strategy_lab_runs_one_malformed_persisted_record_does_not_drop_the_rest``,
+    which exercises a non-dict record failing earlier, inside ``.get()``.
+    """
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["mem-r"] = {
+        "run_id": "mem-r",
+        "status": "running",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 4,
+        "completed_cycles": 1,
+    }
+
+    class _UnhashableIdStub:
+        """Returns persisted jobs unfiltered, including one whose ``job_id``
+        is itself unhashable (a list) -- unlike ``_StubLabClient``, this does
+        not build a ``job_id``-keyed ``by_id`` dict in ``__init__``, which
+        would otherwise crash during test setup rather than inside the
+        endpoint code path under test.
+        """
+
+        def __init__(self, jobs):
+            self._jobs = jobs
+
+        def list_jobs(self, *a, **k):
+            return list(self._jobs)
+
+        def get_job(self, jid):
+            for j in self._jobs:
+                if j.get("job_id") == jid:
+                    return dict(j)
+            return None
+
+    stub = _UnhashableIdStub(
+        jobs=[
+            {
+                "job_id": "run-good",
+                "status": "running",
+                "data": {
+                    "started_at": "2024-01-02T00:00:00Z",
+                    "total_cycles": 3,
+                    "completed_cycles": 1,
+                },
+            },
+            {"job_id": ["bad"], "status": "running"},
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.get("/strategy-lab/runs")
+
+    assert resp.status_code == 200
+    run_ids = {r["run_id"] for r in resp.json()["runs"]}
+    assert run_ids == {"mem-r", "run-good"}
+
+
 # ---------------------------------------------------------------------------
 # _job_progress_percent
 # ---------------------------------------------------------------------------
