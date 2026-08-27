@@ -10,7 +10,7 @@ consumption, since neither exists yet (see the module docstring in
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
 import pytest
 from pydantic import ValidationError
@@ -301,7 +301,7 @@ _STAGE_CHECKPOINT_IDS = ["design", "review", "synthesis", "refinement", "alignme
 
 
 @pytest.mark.parametrize("build", _STAGE_CHECKPOINT_BUILDERS, ids=_STAGE_CHECKPOINT_IDS)
-def test_checkpoint_is_frozen(build) -> None:
+def test_checkpoint_is_frozen(build: Callable[..., PipelineCheckpoint]) -> None:
     """Every stage subclass is frozen: assigning the common ``stage`` field
     raises a ``ValidationError`` on each subclass (Pydantic's ``frozen=True``
     rejects rebinding any field, ``stage`` is just the one exercised here)."""
@@ -326,7 +326,7 @@ def test_checkpoint_is_frozen(build) -> None:
     ],
     ids=_STAGE_CHECKPOINT_IDS,
 )
-def test_mismatched_stage_rejected(build, mismatched_stage) -> None:
+def test_mismatched_stage_rejected(build: Callable[..., PipelineCheckpoint], mismatched_stage: PipelineStage) -> None:
     with pytest.raises(ValidationError):
         build(stage=mismatched_stage)
 
@@ -422,7 +422,7 @@ def test_malformed_code_hash_rejected() -> None:
     ],
     ids=["review", "refinement", "alignment"],
 )
-def test_negative_rounds_completed_rejected(build, field_name) -> None:
+def test_negative_rounds_completed_rejected(build: Callable[..., PipelineCheckpoint], field_name: str) -> None:
     with pytest.raises(ValidationError):
         build(**{field_name: -1})
 
