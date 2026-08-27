@@ -173,12 +173,17 @@ class StrategyLabBudgetConfig:
     - ``design_self_revision_rounds`` — ``STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS``
       (default ``1``). Cap on internal design self-revision rounds.
     - ``design_max_llm_calls`` — ``STRATEGY_LAB_DESIGN_MAX_LLM_CALLS``
-      (default ``120``). Per-cycle hard cap enforced by ``LLMCallBudget``
-      across the *entire* design attempt — design, refinement,
-      trade-alignment, and zero-trade repair all charge against it, not
-      the design phase alone; see ``agents/_llm_budget.py``'s
-      ``LLMCallBudget``/``use_budget`` docstrings for the enforcement
-      contract.
+      (default ``120``). Cap enforced by ``LLMCallBudget`` across the
+      *entire* design attempt — design, refinement, trade-alignment, and
+      zero-trade repair all charge against it, not the design phase alone.
+      Not a hard ceiling on a cycle's total charged calls: a Temporal
+      activity retry after the design-phase checkpoint reseeds the budget
+      from the checkpoint's boundary-time count, so post-checkpoint charges
+      (refinement/alignment/repair) are not recorded anywhere the retry can
+      see and are re-issued — a cycle can exceed this value across retries
+      even though each individual counter stays within it. See
+      ``agents/_llm_budget.py``'s ``LLMCallBudget``/``use_budget``
+      docstrings for the exact enforcement and retry-reseed contract.
     - ``refinement_parse_retries`` — ``STRATEGY_LAB_REFINEMENT_PARSE_RETRIES``
       (default ``2``). Re-prompt budget when a refinement response carries no
       recoverable JSON object.
