@@ -36,6 +36,26 @@ Serialization relies entirely on Pydantic's built-in ``model_dump(mode="json")``
 ``DesignAttemptCheckpoint`` and ``phases.PhaseTransition`` to round-trip
 cleanly through both thread-mode (in-process Python objects) and Temporal-mode
 (JSON-serializable activity/workflow payloads).
+
+**What determines this family's field set, stated once and generally (the
+closing answer to any future "but doesn't a real resume also need field X"
+finding — trade-alignment inputs, pre-refinement code snapshots, the
+synthesis-time-mutated backtest config, or anything else in the same shape):
+a field is added here only when an existing, already-established checkpoint
+model in this codebase (``DesignAttemptCheckpoint``) already carries an
+analogous field — ``spec``/``rationale``/``design_context``,
+``spec_history``/``code_history``/``gate_timeline``, ``budget_calls``/
+``gate_results``. Every one of those has been generalized to all five stages
+across this model's review history. Fields with no such precedent — anything
+that only exists as a local variable or a runtime side effect somewhere
+inside ``_run_design_attempt``/``_synthesize_initial_code``/
+``_run_trade_alignment_loop`` and has never before been captured into a
+checkpoint DTO — are deliberately left to whichever future issue actually
+implements capture points and consumption; this issue is pure data-model
+design and has no capture points to observe those effects from (see above).
+Nailing down such a field's shape without that implementation to inform it
+would be guessing, not modeling. This is not a gap to keep finding instances
+of; it is this family's stated scope boundary.**
 """
 
 from __future__ import annotations
