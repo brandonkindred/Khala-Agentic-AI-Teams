@@ -1222,9 +1222,10 @@ def test_web_search_non_200_status(monkeypatch) -> None:
 def test_web_search_transient_status_raises_llm_error(
     monkeypatch, status_code, expected_exc_name
 ) -> None:
-    """429/5xx responses are classified as transient LLM errors (not WebSearchError)
-    so a caller funneling research through Temporal's retry policy retries the
-    activity instead of permanently failing the job on a recoverable outage."""
+    """429/5xx responses are retried locally, and once that budget is exhausted are
+    classified as transient LLM errors (not WebSearchError) so a caller funneling
+    research through Temporal's retry policy retries the activity instead of
+    permanently failing the job on a recoverable outage."""
     from agents.blogging.blog_research_agent.models import SearchQuery
     from agents.blogging.blog_research_agent.tools import web_search
 
@@ -1256,10 +1257,54 @@ def test_web_search_transient_status_raises_llm_error(
             return _Response()
 
     monkeypatch.setattr(web_search.httpx, "Client", _Client)
+    monkeypatch.setattr(web_search.time, "sleep", lambda *_a, **_kw: None)
     s = web_search.OllamaWebSearch(api_key="test-key-placeholder")
     with pytest.raises(expected_exc) as exc:
         s.search(SearchQuery(query_text="hi", intent="discover"), max_results=3)
     assert exc.value.status_code == status_code
+
+
+def test_web_search_transient_status_recovers_within_retry_budget(monkeypatch) -> None:
+    """A 429 that clears on a later attempt returns results normally — the retry
+    resolves it locally, no exception ever reaches the caller."""
+    from agents.blogging.blog_research_agent.models import SearchQuery
+    from agents.blogging.blog_research_agent.tools import web_search
+
+    class _RateLimitedResponse:
+        status_code = 429
+        text = "slow down"
+
+        def json(self):
+            return {}
+
+    class _OkResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"results": [{"title": "A", "url": "https://example.com/a", "content": "x"}]}
+
+    responses = iter([_RateLimitedResponse(), _OkResponse()])
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def post(self, *a, **kw):
+            return next(responses)
+
+    monkeypatch.setattr(web_search.httpx, "Client", _Client)
+    monkeypatch.setattr(web_search.time, "sleep", lambda *_a, **_kw: None)
+    s = web_search.OllamaWebSearch(api_key="test-key-placeholder")
+    out = s.search(SearchQuery(query_text="hi", intent="discover"), max_results=3)
+    assert len(out) == 1
+    assert str(out[0].url) == "https://example.com/a"
 
 
 def test_web_search_happy_path(monkeypatch) -> None:
