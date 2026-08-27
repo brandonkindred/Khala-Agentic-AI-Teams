@@ -22,13 +22,20 @@ Why the attempt-level boundary rather than one activity per phase:
     activity (outside the sandbox) resolves that structurally, rather than
     hand-porting ~600 lines of loop logic and its determinism hazards.
 
-The workflow therefore reproduces only ``run_cycle``'s ~40-line outer body:
-gather the convergence directives (pure tracker reads), loop
-``range(MAX_DESIGN_REENTRIES + 1)`` calling the attempt activity, branch on its
-structured ``{"kind": "record" | "reentry", ...}`` outcome exactly where
-``run_cycle`` branches on the ``except SpecImplementabilityError``, and on
-re-entry exhaustion assemble the ``failed: spec_unimplementable`` short-circuit
-record. Drift copy-on-entry / merge-on-completion across attempts is plain dict
+The workflow therefore re-expresses only ``run_cycle``'s ~40-line outer body:
+gather the convergence directives, loop ``range(MAX_DESIGN_REENTRIES + 1)``
+calling the attempt activity, branch on its structured
+``{"kind": "record" | "reentry", ...}`` outcome exactly where ``run_cycle``
+branches on the ``except SpecImplementabilityError``, and on re-entry
+exhaustion assemble the ``failed: spec_unimplementable`` short-circuit record.
+The directive-gathering and terminal-guard steps call the exact same
+``cycle_control`` functions ``run_cycle`` calls, via the ``dto`` module's
+thin adapters (``dto.gather_convergence_directives`` /
+``dto.require_short_circuit_inputs`` — see ``dto.py``'s and
+``cycle_control.py``'s module docstrings for why the import is deferred there
+rather than at this module's top), so there is one implementation shared by
+both modes, not two hand-kept-in-sync copies.
+Drift copy-on-entry / merge-on-completion across attempts is plain dict
 work here: ``_DriftCollector.snapshot()`` hands each attempt a fresh *empty*
 child collector by design, so copy-on-entry is simply an empty drift dict, and
 merge-on-completion is a list ``extend``.
@@ -57,6 +64,8 @@ from investment_team.strategy_lab.temporal import activities as act
 from investment_team.strategy_lab.temporal.dto import (
     convergence_tracker_from_wire,
     convergence_tracker_to_wire,
+    gather_convergence_directives,
+    require_short_circuit_inputs,
 )
 
 # ``MAX_DESIGN_REENTRIES`` (a plain ``orchestrator`` module constant) is
@@ -250,16 +259,10 @@ class StrategyLabCycleWorkflow:
 
         # Gather convergence directives once from the batch-level tracker
         # (pure counter/set reads — safe in the sandbox), appended to on each
-        # re-entry below. Mirrors run_cycle's directive gathering.
-        directives: List[str] = []
+        # re-entry below. Shares run_cycle's exact directive-gathering
+        # implementation via the dto adapter (see dto.py's module docstring).
         directive_tracker = convergence_tracker_from_wire(tracker_state)
-        stall_dir = directive_tracker.get_stall_directive()
-        if stall_dir:
-            directives.append(stall_dir)
-        diversity_dir = directive_tracker.get_diversity_directive()
-        if diversity_dir:
-            directives.append(diversity_dir)
-        directives.extend(directive_tracker.get_failure_directives())
+        directives: List[str] = gather_convergence_directives(directive_tracker)
 
         # Market-regime read, computed once per cycle and shared across every
         # re-entry (fail-open: ``None`` when disabled or on data failure). The
@@ -358,15 +361,9 @@ class StrategyLabCycleWorkflow:
                 break
             directives.append(f"PREVIOUS SPEC UNIMPLEMENTABLE: {last_evidence}")
 
-        # Re-entry budget exhausted. ``last_spec``/``last_evidence`` are set by
-        # every SpecImplementabilityError raiser; guard defensively in case a
-        # future raiser violates that contract.
-        if last_spec_dict is None or last_evidence is None:
-            raise RuntimeError(
-                "SpecImplementabilityError raised without last_spec/evidence; "
-                "cannot build short-circuit record. This is a bug in a refinement "
-                "code path; please file an issue with the run logs."
-            )
+        # Re-entry budget exhausted. Shares run_cycle's exact terminal-guard
+        # implementation via the dto adapter (see dto.py's module docstring).
+        require_short_circuit_inputs(last_spec_dict, last_evidence)
         result = await _exec(
             act.build_short_circuit_record_activity,
             params={
