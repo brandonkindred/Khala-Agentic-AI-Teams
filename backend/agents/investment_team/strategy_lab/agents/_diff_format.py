@@ -1,8 +1,8 @@
 """Compact code-diff formatting for round-over-round strategy refinement.
 
-First implementation step toward letting ``refinement.py`` resend only the
-delta between refinement rounds instead of the full strategy code every
-round. Standalone utility, not yet wired into any prompt path.
+Lets ``refinement.py`` (see ``RefinementAgent.run``) resend only the delta
+between refinement rounds instead of the full strategy code every round,
+falling back to the full text on the first round or a near-total rewrite.
 """
 
 from __future__ import annotations
