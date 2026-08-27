@@ -383,7 +383,7 @@ these tables is treated as safe to ship, particularly for phases where an
 agent's only mission reference is the generic, unqualified phrase "the
 branding mission."
 
-### Post-review addendum: seven allowlists widened beyond this document's tables
+### Post-review addendum: eight allowlists widened beyond this document's tables
 
 Code review on the implementation PR flagged conclusions in this
 document's tables as carrying a real correctness risk this document's
@@ -479,8 +479,17 @@ widened accordingly rather than following the tables above verbatim:
   receive no actual company name on a cold run, and a rename could reuse
   another company's cached architecture/brand-in-action output on a warm
   run.
+- **GOVERNANCE now also includes `existing_brand_material`.** Same
+  generalization as the other three phases' `existing_brand_material`
+  entries above, applied to the phase where it is arguably most directly
+  relevant: none of GOVERNANCE's four upstream output models preserve the
+  original material list, so `asset_wiki_planner` — whose whole job is
+  asset-management guidance and the brand wiki backlog — would otherwise
+  have no supplied-asset inventory (logo files, decks, other materials) to
+  plan around, even on a cold run.
 
-Every other phase's allowlist (`GOVERNANCE`) ships exactly as recommended
-above. This addendum documents the deviation for future readers of this
+Every phase now has at least one field in this addendum widening its
+allowlist beyond this document's tables. This addendum documents the
+deviations for future readers of this
 document; it does not change any table or finding
 above, which remain the underlying evidence record.

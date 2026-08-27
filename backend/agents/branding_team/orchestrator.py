@@ -401,6 +401,11 @@ class _PhaseSpec(NamedTuple):
             raw company name back, so ``brand_architecture_builder`` — whose
             whole job is naming conventions and brand-architecture rules —
             would otherwise have no company identity to build on.
+            GOVERNANCE additionally includes ``existing_brand_material`` too
+            — none of its four upstream output models preserve the original
+            material list, so ``asset_wiki_planner``, whose whole job is
+            asset-management guidance and the brand wiki backlog, would
+            otherwise have no supplied-asset inventory to plan around.
     """
 
     builder_fn: Callable[[], Any]
@@ -489,7 +494,7 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
             BrandPhase.VISUAL_IDENTITY,
             BrandPhase.CHANNEL_ACTIVATION,
         ),
-        mission_fields=frozenset(),
+        mission_fields=frozenset({"existing_brand_material"}),
     ),
 }
 

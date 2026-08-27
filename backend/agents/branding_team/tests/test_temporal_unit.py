@@ -953,12 +953,14 @@ def test_phase_task_explicit_empty_mission_fields_excludes_every_mission_field(
     assert "Branding Mission:\n{}" in task
 
 
-def test_governance_phase_task_excludes_all_mission_fields() -> None:
+def test_governance_phase_task_includes_only_existing_brand_material() -> None:
     """Integration-level check of the real (non-monkeypatched) ``_PHASE_SPEC``
-    values: GOVERNANCE's ``mission_fields`` is the empty frozenset, so its
-    task string must carry no mission field value even though it still
-    carries allowed upstream-phase context."""
-    mission = make_mission()
+    values: GOVERNANCE's ``mission_fields`` allowlist is
+    ``{"existing_brand_material"}`` (for ``asset_wiki_planner``'s asset
+    inventory), so its task string must carry that field's value but no
+    other mission field, even though it still carries allowed
+    upstream-phase context."""
+    mission = make_mission(existing_brand_material=["ASSET_MARKER"])
     prior_outputs = {
         BrandPhase.STRATEGIC_CORE.value: {"marker": "STRATEGIC_MARKER"},
         BrandPhase.VISUAL_IDENTITY.value: {"marker": "VISUAL_MARKER"},
@@ -966,7 +968,7 @@ def test_governance_phase_task_excludes_all_mission_fields() -> None:
 
     task = orch_phase_task(mission, BrandPhase.GOVERNANCE, prior_outputs)
 
-    assert "Branding Mission:\n{}" in task
+    assert "ASSET_MARKER" in task
     assert "Northstar Labs" not in task
     assert "enterprise product leaders" not in task
     assert "STRATEGIC_MARKER" in task
