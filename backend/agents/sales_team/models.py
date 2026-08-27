@@ -116,12 +116,15 @@ class SalesPipelineConfig(BaseModel):
             "calls — the final review-budget pass is always spent re-reviewing "
             "the current draft rather than emitting an unchecked regeneration). "
             "0 disables the critic entirely for that stage (the initial draft is "
-            "returned as-is, no review or regenerate calls). Otherwise, worst "
-            "case per stage: 1 generate call, up to max_refinements review "
-            "passes, and up to max(0, max_refinements - 1) regenerate calls; "
-            "each review pass itself issues a reasoning LLM call plus a "
-            "formatting LLM call. A prospect that goes through both outreach and "
-            "proposal pays this cost twice, once per stage."
+            "returned as-is; no review or regenerate). Otherwise, each stage "
+            "does 1 generate, up to max_refinements review passes, and up to "
+            "max(0, max_refinements - 1) regenerates; a prospect through both "
+            "outreach and proposal pays this twice, once per stage. This bounds "
+            "pipeline operations, not raw LLM provider calls: a review pass "
+            "issues a reasoning call plus a formatting call, and both "
+            "generation and critic formatting retry on validation failure "
+            "(see complete_validated's correction_attempts), so actual "
+            "provider-call volume runs higher."
         ),
     )
 
