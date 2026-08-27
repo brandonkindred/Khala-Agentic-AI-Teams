@@ -145,12 +145,23 @@ def _signal_brief_activity_timeout(
     Postconditions:
         Returns ``allowed_count * llm_timeout_s * _SIGNAL_BRIEF_TIMEOUT_SAFETY_FACTOR``
         seconds, where ``allowed_count`` is
-        ``_SIGNAL_BRIEF_CATEGORY_COUNT - len(exclude_asset_classes)`` clamped
-        to at least 1 (an all-excluded/malformed list still yields a positive
-        deadline rather than a degenerate zero one). Pure and deterministic —
-        safe to call from workflow code.
+        ``_SIGNAL_BRIEF_CATEGORY_COUNT - len(set(exclude_asset_classes))``
+        clamped to at least 1 (an all-excluded/malformed list still yields a
+        positive deadline rather than a degenerate zero one). Deduplicating
+        before counting matters because an undersized ``allowed_count`` is
+        the dangerous direction here (it undersizes the very deadline this
+        helper exists to size correctly) — a duplicate-laden
+        ``exclude_asset_classes`` (e.g. a caller-side bug repeating an entry)
+        must not inflate the excluded count past the true number of distinct
+        categories excluded. Pure and deterministic — safe to call from
+        workflow code. Does not validate entries against the canonical class
+        set (that would require importing ``strategy_lab_context``, which
+        this sandboxed module avoids — see ``_MAX_DESIGN_REENTRIES_FALLBACK``
+        above); ``exclude_asset_classes`` is always constructed from the
+        validated ``excluded_for_allowed`` path at dispatch time
+        (``start_workflow.py``), never from unvalidated user input.
     """
-    excluded = len(exclude_asset_classes) if exclude_asset_classes else 0
+    excluded = len(set(exclude_asset_classes)) if exclude_asset_classes else 0
     allowed_count = max(1, _SIGNAL_BRIEF_CATEGORY_COUNT - excluded)
     return timedelta(seconds=allowed_count * llm_timeout_s * _SIGNAL_BRIEF_TIMEOUT_SAFETY_FACTOR)
 

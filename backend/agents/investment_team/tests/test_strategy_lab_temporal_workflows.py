@@ -638,3 +638,17 @@ def test_signal_brief_activity_timeout_never_degenerates_to_a_non_positive_deadl
     )
     assert result == timedelta(seconds=1 * 3600.0 * wf._SIGNAL_BRIEF_TIMEOUT_SAFETY_FACTOR)
     assert result > timedelta(0)
+
+
+def test_signal_brief_activity_timeout_deduplicates_the_exclude_list():
+    """A duplicate-laden exclude_asset_classes (e.g. a caller-side bug
+    repeating an entry) must not inflate the excluded count past the true
+    number of distinct categories excluded -- an inflated excluded count
+    undersizes allowed_count, and therefore the deadline, which is the
+    dangerous direction for this helper to get wrong."""
+    from datetime import timedelta
+
+    deduped = wf._signal_brief_activity_timeout(3600.0, ["stocks", "stocks", "crypto"])
+    distinct = wf._signal_brief_activity_timeout(3600.0, ["stocks", "crypto"])
+    assert deduped == distinct
+    assert deduped == timedelta(seconds=3 * 3600.0 * wf._SIGNAL_BRIEF_TIMEOUT_SAFETY_FACTOR)
