@@ -54,7 +54,7 @@ from typing import Any, List, Optional
 
 from ..models import BacktestConfig, StrategySpec
 from ..strategy_lab_context import normalize_asset_class, normalize_asset_class_strict
-from ..symbols import find_offcategory_symbols
+from ..symbols import COINGECKO_IDS, find_offcategory_symbols
 from .quality_gates.spec_readiness import (
     _FULL_TIMEFRAME_ASSET_CLASSES,
     MAX_POSITION_PCT_CEILING,
@@ -94,23 +94,40 @@ class RepairOutcome:
 
 def _symbol_named_in_thesis(symbol: str, *thesis_text: str) -> bool:
     """True if ``symbol`` (or its bare root, e.g. ``"DOGE"`` for
-    ``"DOGE-USDT"``) is mentioned by name in ``thesis_text``.
+    ``"DOGE-USDT"``) — or, for a crypto root, its common English name (e.g.
+    ``"Bitcoin"`` for ``"BTC"``) — is mentioned by name in ``thesis_text``.
 
     Preconditions:
       - ``symbol`` is a ticker string; ``thesis_text`` are free-text spec
         fields (``hypothesis``, ``signal_definition``) that may be empty.
     Postconditions:
-      - Returns whether the symbol's root (suffix stripped) appears as a
-        whole word, case-insensitively, in the joined text. Purely a
-        substring/word-boundary check — no semantic understanding of
-        whether the thesis actually depends on the symbol, only whether it
-        names it explicitly.
+      - Returns whether the symbol's root (suffix stripped), or a known
+        crypto common name derived from :data:`symbols.COINGECKO_IDS` for
+        that root, appears as a whole word, case-insensitively, in the
+        joined text. A thesis naming an off-category asset by its plain
+        name rather than its ticker (e.g. "Bitcoin momentum" targeting
+        ``BTC-USD``) would otherwise go undetected and the symbol would be
+        silently stripped as an unrelated stray ticker. Still purely a
+        lexical check — no semantic understanding of whether the thesis
+        actually depends on the symbol, and non-crypto common names (e.g.
+        "Gold" for ``GLD``) aren't covered since no equivalent name table
+        exists for those asset classes.
     """
     root = re.split(r"[-=]", symbol, maxsplit=1)[0]
     if not root:
         return False
-    pattern = r"\b" + re.escape(root) + r"\b"
-    return bool(re.search(pattern, " ".join(thesis_text), re.IGNORECASE))
+    candidates = {root}
+    common_name = COINGECKO_IDS.get(root.upper())
+    if common_name:
+        # A CoinGecko id can carry a disambiguating suffix (e.g.
+        # "avalanche-2") or be a hyphenated compound (e.g. "matic-network");
+        # only the leading alpha segment is a plausible English name a
+        # hypothesis would actually use.
+        alpha_name = re.match(r"[a-zA-Z]+", common_name)
+        if alpha_name:
+            candidates.add(alpha_name.group(0))
+    text = " ".join(thesis_text)
+    return any(re.search(r"\b" + re.escape(c) + r"\b", text, re.IGNORECASE) for c in candidates)
 
 
 def repair_spec(

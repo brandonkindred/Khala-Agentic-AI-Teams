@@ -924,6 +924,39 @@ def test_repair_leaves_a_thesis_bound_offcategory_symbol_in_place() -> None:
     assert findings[0].severity == "critical"
 
 
+def test_repair_leaves_a_thesis_bound_offcategory_symbol_named_by_common_name_in_place() -> None:
+    """A hypothesis naming the off-category asset by its common English name
+    rather than its ticker (e.g. "Bitcoin momentum" targeting ["AAPL",
+    "BTC-USD"]) must still be recognized as thesis-bound -- otherwise the
+    literal-root-only check misses it, the symbol is silently stripped as an
+    unrelated stray ticker, and the spec is laundered into a readiness-clean
+    stocks-only backtest while the write-up still describes a Bitcoin
+    thesis."""
+    from investment_team.strategy_lab.mechanical_repair import repair_spec
+    from investment_team.strategy_lab.quality_gates.spec_readiness import SpecReadinessGate
+
+    spec = StrategySpec(
+        strategy_id="strat-thesis-bound-common-name",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="Bitcoin momentum breakout following social sentiment spikes",
+        signal_definition="sig",
+        timeframe="1d",
+        entry_rules=[EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0))],
+        exit_rules=[StopLossRule(pct=0.03)],
+        risk_limits={},
+        speculative=False,
+        target_symbols=["AAPL", "BTC-USD"],
+    )
+    out = repair_spec(spec, pinned_asset_class="stocks")
+    assert out.spec.target_symbols == ["AAPL", "BTC-USD"]
+
+    results = SpecReadinessGate().validate(out.spec, phase="design", pinned_asset_class="stocks")
+    findings = [r for r in results if (r.rule_id or "").startswith("asset_category:")]
+    assert [f.rule_id for f in findings] == ["asset_category:symbols"]
+    assert findings[0].severity == "critical"
+
+
 def test_repair_is_idempotent_under_a_pin() -> None:
     from investment_team.strategy_lab.mechanical_repair import repair_spec
 

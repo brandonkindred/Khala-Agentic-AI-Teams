@@ -50,10 +50,23 @@ def _signal_json_instructions(asset_class: Optional[str]) -> str:
         if asset_class is not None
         else "how to blend signals / asset classes this batch"
     )
-    # json.dumps rather than raw f-string interpolation so pairing_guidance can
+    # Mirrors pairing_guidance's own conditional: "options overlays" is a
+    # reasonable example structure for an unscoped, run-wide brief, but a
+    # pinned brief's ## Scope block already forbids referencing any other
+    # asset category — an unconditional "options overlays" example risks the
+    # model suggesting an off-category instrument anyway, so a pinned call
+    # gets a same-category-only example instead.
+    trade_structures_hint = (
+        f"e.g. pairs, spreads, or other structures within {asset_class} only — "
+        "never a different asset class"
+        if asset_class is not None
+        else "e.g. pairs, spreads, options overlays — conceptual"
+    )
+    # json.dumps rather than raw f-string interpolation so these hints can
     # never corrupt the surrounding JSON example even if a future edit adds a
     # quote, newline, or backslash to either branch above.
     pairing_guidance_json = json.dumps(pairing_guidance)
+    trade_structures_hint_json = json.dumps(trade_structures_hint)
     return f"""\
 Return ONLY a JSON object with these keys (no markdown):
 {{
@@ -61,7 +74,7 @@ Return ONLY a JSON object with these keys (no markdown):
   "macro_themes": ["short bullet", "..."],
   "micro_themes": ["..."],
   "high_value_signal_hypotheses": ["testable hypotheses tied to priors and/or snapshot"],
-  "trade_structures_benefiting": ["e.g. pairs, spreads, options overlays — conceptual"],
+  "trade_structures_benefiting": [{trade_structures_hint_json}],
   "pairing_guidance": {pairing_guidance_json},
   "evidence_from_priors": "which prior rows or patterns you rely on, or 'none / first run'",
   "evidence_from_market_data": "which snapshot lines (FX, macro, crypto) you use, or 'none' if degraded/empty",
