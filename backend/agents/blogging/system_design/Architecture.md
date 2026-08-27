@@ -108,6 +108,8 @@ graph LR
 > **Note 2:** `run_planning()` (`pipeline/_common.py`) invokes `ResearchAgent.run()` ahead of content planning and persists its compiled document as the `research_packet.md` artifact when `work_dir` is set. The research output is not yet fed into planning, though: `PlanningInput.research_digest` still defaults to `""` (see `shared/content_plan.py:197`) — routing the compiled document into `research_digest` is tracked as a separate follow-up.
 >
 > **Note 3:** `run_pipeline()` writes a `PublishingPack` artifact but does **not** call the Publication Agent. Publication (approve/unapprove) and Medium stats collection are handled by separate API endpoints.
+>
+> **Note 4:** `allowed_claims.json` is documented (`blog_research_agent/allowed_claims.py`'s module docstring) as a Research Librarian output, but its extraction isn't yet wired to the research call described in Note 2. As an interim measure, planning itself calls `extract_allowed_claims()` against the content plan's own markdown with an empty reference list (see `_persist_content_plan_artifacts()` in `agent_implementations/pipeline/_common.py`, used by both `run_planning()` and `run_planning_stage()`'s outline re-plan loop), producing a citation-free `allowed_claims.json`. This call site should move to consume `ResearchAgent`'s output as a separate follow-up.
 
 ### Pipeline Phase Mapping
 

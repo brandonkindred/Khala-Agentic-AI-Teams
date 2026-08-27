@@ -259,6 +259,80 @@ def build_plan_critic_agent(base: LLMClient) -> Optional[BlogPlanCriticAgent]:
     return BlogPlanCriticAgent(llm_client=_plan_critic_llm_client(base))
 
 
+def _persist_content_plan_artifacts(
+    work_dir: Union[str, Path],
+    plan: ContentPlan,
+    *,
+    llm_client: Any,
+    topic: str,
+    content_plan_markdown: Optional[str] = None,
+) -> str:
+    """Persist content-plan artifacts and a freshly extracted allowed_claims.json.
+
+    Single source for the artifact set that must change together whenever the
+    content plan changes: ``run_planning``'s initial persist and
+    ``run_planning_stage``'s outline-approval re-plan loop both call this
+    instead of writing the artifacts separately, so ``allowed_claims.json``
+    can never drift out of sync with the plan text it was derived from.
+
+    ``run_planning`` runs a research stage (``ResearchAgent``) ahead of this
+    helper, but its compiled document/reference list are not yet threaded
+    through here (a separate follow-up); ``extract_allowed_claims`` is called
+    against the plan's own markdown with an empty reference list.
+
+    Args:
+        work_dir: Directory to persist artifacts to.
+        plan: The (possibly revised) content plan to persist.
+        llm_client: Resolved LLM client used for claims extraction. May be a raw
+            ``LLMClient`` or a Strands ``LLMClientModel`` wrapper (what the
+            pipeline actually passes in production, e.g. via
+            ``get_strands_model``) — either is accepted.
+        topic: Topic/brief text recorded on the persisted ``AllowedClaims``.
+        content_plan_markdown: Pre-computed ``content_plan_to_markdown_doc(plan)``
+            text, when a caller already needed it for something else (e.g. a
+            progress update fired before this call) and wants to avoid
+            recomputing it here. Computed from ``plan`` when omitted.
+
+    Preconditions:
+        - ``work_dir`` is not None. ``plan`` is a valid ``ContentPlan``.
+          ``llm_client`` is resolved (non-None). ``content_plan_markdown``,
+          when given, is ``content_plan_to_markdown_doc(plan)`` for this same
+          ``plan``.
+    Postconditions:
+        - Writes ``content_plan.json``, ``content_plan.md``, ``outline.md``,
+          ``content_brief.md``, and ``allowed_claims.json`` to ``work_dir``.
+        - ``allowed_claims.json`` is always written, even with zero claims,
+          since ``extract_allowed_claims`` never raises.
+        - Returns the ``content_plan.md`` markdown text used as
+          ``extract_allowed_claims``'s ``compiled_document``, so callers that
+          already need it (e.g. for progress updates) can reuse it.
+    """
+    # Deferred import: see module docstring.
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        extract_allowed_claims,
+    )
+
+    if content_plan_markdown is None:
+        content_plan_markdown = content_plan_to_markdown_doc(plan)
+    write_artifact(work_dir, "content_plan.json", plan.model_dump(mode="json"))
+    write_artifact(work_dir, "content_plan.md", content_plan_markdown)
+    write_artifact(work_dir, "outline.md", content_plan_to_outline_markdown(plan))
+    write_artifact(work_dir, "content_brief.md", content_plan_to_content_brief_markdown(plan))
+    logger.info("Persisted content_plan.json, content_plan.md, outline.md, content_brief.md")
+
+    # extract_allowed_claims calls complete_json() directly, which only the backing
+    # LLMClient exposes — a Strands LLMClientModel wrapper (what get_strands_model
+    # returns, and what the pipeline actually passes in production) does not, so it
+    # must be unwrapped first (same pattern as _apply_stage_model_override above).
+    claims_llm_client = llm_client.client if isinstance(llm_client, LLMClientModel) else llm_client
+    allowed_claims = extract_allowed_claims(
+        claims_llm_client, content_plan_markdown, references=[], topic=topic
+    )
+    write_artifact(work_dir, "allowed_claims.json", allowed_claims.to_dict())
+    logger.info("Persisted allowed_claims.json (%d claim(s))", len(allowed_claims.claims))
+    return content_plan_markdown
+
+
 def run_planning(
     brief: ResearchBriefInput,
     *,
@@ -290,6 +364,11 @@ def run_planning(
           via ``job_updater`` before and after the research call.
         - Returns a ``PlanningPhaseResult`` (content plan with title candidates,
           sections, requirements analysis, and planning telemetry).
+        - When ``work_dir`` is given, ``allowed_claims.json`` is always written
+          (in addition to the other planning artifacts) since
+          ``extract_allowed_claims`` never raises — a run with no verifiable
+          claims yields a valid ``allowed_claims.json`` with an empty ``claims``
+          list rather than omitting the artifact.
     Raises:
         ResearchError: If research fails for a non-transient reason (phase="research",
             so Temporal/thread-mode failure tracking attributes the failure correctly
@@ -449,6 +528,7 @@ def run_planning(
         len(plan.title_candidates),
         plan_brief_md,
     )
+    content_plan_markdown = content_plan_to_markdown_doc(plan)
     _update(
         BlogPhase.PLANNING,
         sub_progress=1.0,
@@ -459,15 +539,19 @@ def run_planning(
         planning_iterations_used=planning_phase_result.planning_iterations_used,
         parse_retry_count=planning_phase_result.parse_retry_count,
         planning_wall_ms_total=planning_phase_result.planning_wall_ms_total,
-        content_plan_detail=content_plan_to_markdown_doc(plan),
+        content_plan_detail=content_plan_markdown,
     )
 
     if work_dir is not None:
-        write_artifact(work_dir, "content_plan.json", plan.model_dump(mode="json"))
-        write_artifact(work_dir, "content_plan.md", content_plan_to_markdown_doc(plan))
-        write_artifact(work_dir, "outline.md", content_plan_to_outline_markdown(plan))
-        write_artifact(work_dir, "content_brief.md", content_plan_to_content_brief_markdown(plan))
-        logger.info("Persisted content_plan.json, content_plan.md, outline.md, content_brief.md")
+        # Reuse the markdown already computed above for the progress update, rather
+        # than have _persist_content_plan_artifacts recompute the identical text.
+        _persist_content_plan_artifacts(
+            work_dir,
+            plan,
+            llm_client=llm_client,
+            topic=brief.brief,
+            content_plan_markdown=content_plan_markdown,
+        )
         # Persist the critic's final verdict under a stable filename for easy inspection;
         # per-iteration reports (plan_critic_report_v{N}.json) remain in work_dir too.
         if planning_phase_result.plan_critic_report is not None:

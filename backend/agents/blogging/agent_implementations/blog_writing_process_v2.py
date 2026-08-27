@@ -30,6 +30,7 @@ from agents.blogging.blog_fact_check_agent import BlogFactCheckAgent
 from agents.blogging.blog_plan_critic_agent import BlogPlanCriticAgent
 from agents.blogging.blog_publication_agent.models import PublishingPack
 from agents.blogging.blog_research_agent.agent import ResearchAgent
+from agents.blogging.blog_research_agent.allowed_claims import extract_allowed_claims
 from agents.blogging.blog_research_agent.models import ResearchBriefInput
 from agents.blogging.blog_writer_agent import BlogWriterAgent, ReviseWriterInput, WriterInput
 from agents.blogging.shared.artifacts import write_artifact
@@ -175,6 +176,7 @@ __all__ = [
     "content_plan_to_content_brief_markdown",
     "content_plan_to_markdown_doc",
     "content_plan_to_outline_markdown",
+    "extract_allowed_claims",
     "get_blog_job",
     "get_phase_progress",
     "get_strands_model",
