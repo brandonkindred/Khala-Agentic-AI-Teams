@@ -404,7 +404,9 @@ def default_rsi_spec_dict() -> Dict[str, Any]:
     as-is.
     """
     return {
-        "asset_class": "stocks",
+        # No "asset_class": the design loop pins each attempt to one
+        # randomly-selected category and an omitted class inherits that
+        # pin, so this payload stays valid whichever category is drawn.
         "hypothesis": "RSI mean reversion on a small universe",
         "signal_definition": "RSI(14) crossings",
         "timeframe": "1d",

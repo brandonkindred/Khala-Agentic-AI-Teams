@@ -32,6 +32,7 @@ import pandas as pd
 from pydantic import BaseModel, Field
 
 from ..market_data_service import OHLCVBar
+from ..strategy_lab_context import normalize_asset_class
 from .executor.indicators import adx, atr, sma
 
 logger = logging.getLogger(__name__)
@@ -44,12 +45,21 @@ FetchOHLCV = Callable[[str, str, int], List[OHLCVBar]]
 
 # Representative liquid benchmark per asset class the designer may choose. Kept
 # small and extensible — one fetch per entry, cheap under the content-hashed
-# market-data cache. ``forex``/``futures``/``commodities`` are omitted for now:
-# a single-symbol regime proxy for those classes is less meaningful, and the
-# lab's design space is dominated by stocks and crypto.
+# market-data cache. Each pick matches the same class's default entry
+# elsewhere in the codebase (``symbols.py``'s ``FOREX_SYMBOLS`` /
+# ``FUTURES_SYMBOLS`` / ``COMMODITY_SYMBOLS`` all lead with the identical
+# ticker), so the regime read and the backtest's own default universe agree
+# on "the" representative instrument per class. All five classes are covered
+# so a design attempt pinned to any of them still gets a ``## Market Regime``
+# section — ``filter_regime_summary`` narrows the cross-class summary down to
+# the pinned class alone, so an entry missing here means that pin's regime
+# section renders blank, not merely unfiltered.
 _DEFAULT_BENCHMARKS: dict[str, str] = {
     "stocks": "SPY",
     "crypto": "BTC-USD",
+    "forex": "EURUSD=X",
+    "futures": "ES=F",
+    "commodities": "GLD",
 }
 
 # Lookback (calendar days requested) — enough to warm up a 200-period SMA and
@@ -103,6 +113,52 @@ class RegimeSummary(BaseModel):
     degraded: bool = False
     degraded_reason: Optional[str] = None
     entries: List[RegimeEntry] = Field(default_factory=list)
+
+
+def filter_regime_summary(
+    summary: Optional[RegimeSummary], asset_class: Optional[str]
+) -> Optional[RegimeSummary]:
+    """Narrow a cross-asset regime summary to one asset class.
+
+    The regime summary is computed once per cycle across every benchmark, so
+    it renders one line per asset class into the design prompt. A design
+    attempt pinned to a single category must not be shown four other markets'
+    trend and volatility reads: they are irrelevant to its strategy and invite
+    the designer to reason across categories it is forbidden to use.
+
+    Preconditions:
+        * ``summary`` is a :class:`RegimeSummary` or ``None``.
+        * ``asset_class``, when given, is a canonical asset-class label.
+
+    Postconditions:
+        * Returns ``summary`` unchanged when either argument is ``None``.
+        * Otherwise returns a new :class:`RegimeSummary` holding only the
+          entries whose ``asset_class`` matches, preserving their order and
+          the summary's ``computed_at``. The input is never mutated.
+        * The returned summary always has ``degraded=False`` /
+          ``degraded_reason=None``, regardless of the input's degraded state.
+          ``degraded_reason`` names the specific benchmark ticker of
+          whichever *other* categories failed to classify (e.g. ``"could not
+          classify: ES=F (insufficient bars)"``) — carrying it through
+          verbatim into a category-scoped prompt would leak a cross-category
+          identifier straight past the pin's own "do not reference any other
+          asset category" instruction. Reaching this branch already proves
+          the pinned category's own benchmark classified successfully (a
+          failed pinned benchmark means no matching entry, which returns
+          ``None`` below instead), so the aggregate degraded state — which
+          only ever describes *other*, now-stripped categories — no longer
+          applies to this scoped view.
+        * Returns ``None`` when no entry matches — an empty summary carries no
+          information, and ``None`` is the shape every caller already treats
+          as "no regime available", so this keeps the prompt's regime section
+          absent rather than empty.
+    """
+    if summary is None or asset_class is None:
+        return summary
+    entries = [e for e in summary.entries if normalize_asset_class(e.asset_class) == asset_class]
+    if not entries:
+        return None
+    return summary.model_copy(update={"entries": entries, "degraded": False, "degraded_reason": None})
 
 
 def _classify_trend(close: float, sma50: float, sma200: float) -> str:

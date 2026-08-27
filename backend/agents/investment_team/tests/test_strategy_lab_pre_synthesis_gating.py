@@ -85,7 +85,9 @@ def test_pre_synthesis_critical_failure_short_circuits(monkeypatch: pytest.Monke
     the same: no code execution, no market-data fetch.
     """
     bad_spec_dict = {
-        "asset_class": "stocks",
+        # No "asset_class": the design loop pins each attempt to one
+        # randomly-selected category and an omitted class inherits that
+        # pin, so this payload stays valid whichever category is drawn.
         "hypothesis": "test",
         "signal_definition": "sig",
         "entry_rules": [],  # critical: no entry rules
@@ -131,7 +133,9 @@ def test_pre_synthesis_critical_failure_short_circuits(monkeypatch: pytest.Monke
 def test_pre_synthesis_validator_persisted_even_on_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     """A valid spec records the pre-synthesis pass result and enters the loop."""
     valid_spec_dict = {
-        "asset_class": "stocks",
+        # No "asset_class": the design loop pins each attempt to one
+        # randomly-selected category and an omitted class inherits that
+        # pin, so this payload stays valid whichever category is drawn.
         "hypothesis": "RSI signal strategy",
         "signal_definition": "sig",
         "entry_rules": [_rsi_entry_dict()],
@@ -178,7 +182,9 @@ def test_missing_strategy_code_does_not_short_circuit(monkeypatch: pytest.Monkey
     proceeds into the refinement loop.
     """
     valid_spec_dict_but_no_code = {
-        "asset_class": "stocks",
+        # No "asset_class": the design loop pins each attempt to one
+        # randomly-selected category and an omitted class inherits that
+        # pin, so this payload stays valid whichever category is drawn.
         "hypothesis": "RSI signal strategy",
         "signal_definition": "sig",
         "entry_rules": [_rsi_entry_dict()],
@@ -236,7 +242,9 @@ def test_spec_unimplementable_exhaustion_preserves_design_telemetry(
     from investment_team.strategy_lab.exceptions import SpecImplementabilityError
 
     valid_spec_dict = {
-        "asset_class": "stocks",
+        # No "asset_class": the design loop pins each attempt to one
+        # randomly-selected category and an omitted class inherits that
+        # pin, so this payload stays valid whichever category is drawn.
         "hypothesis": "RSI signal strategy",
         "signal_definition": "sig",
         "entry_rules": [_rsi_entry_dict()],

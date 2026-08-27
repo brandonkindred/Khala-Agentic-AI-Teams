@@ -126,7 +126,7 @@ class _Harness:
 def _default_activity_handlers(**overrides: Any) -> Dict[str, Any]:
     handlers = {
         "compute_signal_brief_activity": lambda a: {
-            "signal_brief": {"brief_version": "v1"},
+            "signal_briefs": {"stocks": {"brief_version": "v1"}},
             "signal_brief_storage": {"stored": True},
         },
         "snapshot_prior_records_activity": lambda a: [],
@@ -266,7 +266,7 @@ def test_each_cycle_gets_its_own_tracker_snapshot_and_shared_prior_records():
     # Each cycle carries its own tracker snapshot + the threaded workflow config.
     assert "convergence_tracker_state" in c0
     assert c0["workflow_config"] == _WF_CONFIG
-    assert c0["signal_brief"] == {"brief_version": "v1"}
+    assert c0["signal_briefs"] == {"stocks": {"brief_version": "v1"}}
 
 
 # ---------------------------------------------------------------------------

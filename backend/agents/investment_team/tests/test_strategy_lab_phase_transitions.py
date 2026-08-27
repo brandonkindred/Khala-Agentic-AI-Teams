@@ -69,7 +69,9 @@ def _config() -> BacktestConfig:
 
 def _spec_dict() -> Dict[str, Any]:
     return {
-        "asset_class": "stocks",
+        # No "asset_class": the design loop pins each attempt to one
+        # randomly-selected category and an omitted class inherits that
+        # pin, so this payload stays valid whichever category is drawn.
         "hypothesis": "RSI mean reversion on a small universe",
         "signal_definition": "RSI(14) crossings",
         "timeframe": "1d",
@@ -475,7 +477,7 @@ def test_run_design_attempt_checkpoint_hook_fires_once_at_design_synthesis_bound
     orch._run_design_attempt(
         prior_records=[],
         config=_config(),
-        signal_brief=None,
+        signal_briefs=None,
         emit=lambda *_a, **_kw: None,
         exclude_asset_classes=None,
         directives=[],
@@ -517,7 +519,7 @@ def test_run_design_attempt_resume_skips_phase_one(monkeypatch: pytest.MonkeyPat
     record = orch._run_design_attempt(
         prior_records=[],
         config=_config(),
-        signal_brief=None,
+        signal_briefs=None,
         emit=lambda *_a, **_kw: None,
         exclude_asset_classes=None,
         directives=[],
@@ -537,7 +539,7 @@ def test_run_design_attempt_rejects_resume_spec_without_design_context() -> None
         orch._run_design_attempt(
             prior_records=[],
             config=_config(),
-            signal_brief=None,
+            signal_briefs=None,
             emit=lambda *_a, **_kw: None,
             exclude_asset_classes=None,
             directives=[],
@@ -688,22 +690,27 @@ def test_build_spec_from_dict_canonicalizes_accepted_aliases() -> None:
     assert orch._build_spec_from_dict(payload, strategy_id="strat-coerce").asset_class == "crypto"
 
 
-def test_build_spec_from_dict_blank_asset_class_defaults_to_stocks() -> None:
-    """A missing or blank ``asset_class`` is the documented default (``stocks``),
-    not an unsupported class. It must canonicalize to ``stocks`` without raising
-    ``SpecImplementabilityError`` so a designer that omits or blanks the field is
-    not forced through a spurious redesign loop."""
+def test_build_spec_from_dict_blank_asset_class_defaults_to_the_pin() -> None:
+    """A missing or blank ``asset_class`` is not an unsupported class: it must
+    resolve to ``default_asset_class`` — the category the design attempt is
+    pinned to — without raising ``SpecImplementabilityError``, so a designer
+    that omits or blanks the field is not forced through a spurious redesign
+    loop. The default is ``stocks`` when no pin is supplied."""
     orch = StrategyLabOrchestrator()
 
     for blank in ("", "   ", None):
-        payload = _spec_dict()
+        payload = dict(_spec_dict())
         payload["asset_class"] = blank
         spec = orch._build_spec_from_dict(payload, strategy_id="strat-blank")
         assert spec.asset_class == "stocks", repr(blank)
+        pinned = orch._build_spec_from_dict(
+            payload, strategy_id="strat-blank", default_asset_class="crypto"
+        )
+        assert pinned.asset_class == "crypto", repr(blank)
 
-    # An absent key falls back to the same ``stocks`` default.
-    payload = _spec_dict()
-    del payload["asset_class"]
+    # An absent key falls back to the same default.
+    payload = dict(_spec_dict())
+    payload.pop("asset_class", None)
     assert orch._build_spec_from_dict(payload, strategy_id="strat-missing").asset_class == "stocks"
 
 

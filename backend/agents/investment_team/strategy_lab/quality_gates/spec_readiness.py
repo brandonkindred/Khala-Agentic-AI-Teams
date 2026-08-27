@@ -21,6 +21,7 @@ from typing import Any, Callable, ClassVar, Iterable, Iterator, List, Optional
 from ...market_data_service import _max_universe_symbols
 from ...models import BacktestConfig, StrategySpec
 from ...strategy_lab_context import (
+    PROMPT_ASSET_CLASSES,
     WHOLE_LOT_ASSET_CLASSES,
     normalize_asset_class,
     normalize_asset_class_strict,
@@ -34,6 +35,7 @@ from ...symbols import (
     FUTURES_SYMBOLS_BARE,
     OTHER_SYMBOLS,
     STOCK_SYMBOLS,
+    find_offcategory_symbols,
 )
 from ..executor.predicate_evaluator import compare
 from ..spec_dsl import (
@@ -266,6 +268,8 @@ _CONCEPT_TERMS_BROAD = re.compile(
     r"rate\s+of\s+change|cci|williams_r|williams)\b",
     re.IGNORECASE,
 )
+
+
 # Map each prose concept to the set of DSL indicator names that satisfy it.
 # A concept is "orphan" iff *none* of its allowed indicators appears in the
 # spec's predicates — so "moving average" is satisfied by either SMA or EMA.
@@ -287,10 +291,7 @@ def extract_known_tickers(text: str) -> set[str]:
         Pure function; no I/O, no mutation of module state.
     """
     assert isinstance(text, str), "text must be a str"
-    return {
-        _canonicalize_ticker(m.group(0))
-        for m in _SYMBOL_REGEX.finditer(text or "")
-    }
+    return {_canonicalize_ticker(m.group(0)) for m in _SYMBOL_REGEX.finditer(text or "")}
 
 
 _CONCEPT_TO_INDICATOR_NAMES: dict[str, frozenset[str]] = {
@@ -429,6 +430,11 @@ class SpecReadinessCtx:
 
     spec: StrategySpec
     config: Optional[BacktestConfig]
+    # The single asset category this design attempt is pinned to, or ``None``
+    # when no pin applies (synthesis phase, refinement, ad-hoc validation).
+    # Set by the design loop from the user's ``allowed_asset_classes``
+    # selection; Rule 11 enforces it.
+    pinned_asset_class: Optional[str] = None
 
 
 # Comparison ops whose truth is monotone in the indicator value, so the
@@ -623,18 +629,55 @@ class SpecReadinessGate(GateResultsMixin):
         *,
         phase: StrategyLabPhase = "design",
         backtest_config: Optional[BacktestConfig] = None,
+        pinned_asset_class: Optional[str] = None,
     ) -> List[QualityGateResult]:
         """Run every readiness rule and return one result list.
 
-        Pre: ``spec`` is a StrategySpec; ``phase`` is a valid phase literal.
+        Pre: ``spec`` is a StrategySpec; ``phase`` is a valid phase literal;
+        ``pinned_asset_class``, when given, is a canonical asset-class label
+        (a member of ``PROMPT_ASSET_CLASSES``) naming the single category the
+        caller's design attempt is restricted to.
         Post: result list is non-empty; every entry carries the caller's
-        ``phase`` and ``gate_name == GATE``.
+        ``phase`` and ``gate_name == GATE``. When ``pinned_asset_class`` is
+        given and the spec violates the pin, at least one *critical* result is
+        present — which is what makes the pin deterministic: the design loop
+        never marks a readiness-critical spec ready, so an off-category spec
+        can never reach code synthesis.
         """
         assert isinstance(spec, StrategySpec), "spec must be a StrategySpec"
         assert backtest_config is None or isinstance(backtest_config, BacktestConfig), (
             "backtest_config override must be a BacktestConfig or None"
         )
-        ctx = SpecReadinessCtx(spec=spec, config=backtest_config or self._backtest_config)
+        if pinned_asset_class is not None and pinned_asset_class not in PROMPT_ASSET_CLASSES:
+            # A non-canonical pin would silently disable Rule 11's enforcement
+            # (the pin check below is a no-op when ``ctx.pinned_asset_class``
+            # doesn't match any spec's normalized class), letting an
+            # off-category spec through undetected. Unlike the other two
+            # preconditions here (internal-shape checks on values this
+            # module constructs itself), a bare ``assert`` is unsafe for this
+            # one: it is also stripped under ``-O``/``PYTHONOPTIMIZE``, so use
+            # the same non-optimizable contract-violation exception the rest
+            # of the strategy lab uses for caller misuse. Imported locally
+            # rather than at module level: this package is re-imported by the
+            # temporalio workflow sandbox (via ``StrategyLabCycleWorkflow``'s
+            # ``convergence_tracker_from_wire`` call), and ``..exceptions``
+            # transitively imports ``llm_service``, whose ``config`` module
+            # calls ``threading.Lock()`` at import time -- restricted inside
+            # the sandbox. ``validate()`` itself only ever runs from the
+            # orchestrator inside an unsandboxed activity, so this import
+            # never actually executes in workflow code, only its module-level
+            # placement would have.
+            from ..exceptions import OrchestratorContractError
+
+            raise OrchestratorContractError(
+                f"pinned_asset_class must be a canonical PROMPT_ASSET_CLASSES member or "
+                f"None, got {pinned_asset_class!r}"
+            )
+        ctx = SpecReadinessCtx(
+            spec=spec,
+            config=backtest_config or self._backtest_config,
+            pinned_asset_class=pinned_asset_class,
+        )
         with self._using_phase(phase):
             results: List[QualityGateResult] = [r for rule in self._RULES for r in rule(self, ctx)]
             if not results:
@@ -1354,6 +1397,74 @@ class SpecReadinessGate(GateResultsMixin):
         return out
 
     # ------------------------------------------------------------------
+    # Rule 11: Asset-category pin — every design attempt is pinned to exactly
+    # one category (drawn from the user's selection at run start, or from the
+    # full default menu when no narrowing was requested), unconditionally.
+    # The spec must declare that category and must not name symbols belonging
+    # to a different one.
+    #
+    # This lives in the readiness gate rather than in a bespoke post-hoc
+    # correction so the fix rides the design loop's own machinery: a critical
+    # here becomes a synthetic critique, which the round's existing
+    # ``DesignAgent.revise`` call answers — no extra LLM call, and the
+    # critique ledger sees the issue like any other, so regression and stall
+    # detection cover it. Because the loop only marks a spec ready when no
+    # readiness critical remains, a spec outside the pinned category can never
+    # reach code synthesis: the restriction is enforced, not merely requested.
+    #
+    # The symbol half is deliberately separated from the class half, and is
+    # checked here even though ``mechanical_repair.repair_spec`` ALSO strips
+    # off-category symbols — the two are not redundant, they cover disjoint
+    # cases. A *minority* mismatch (most symbols on-category, a stray one or
+    # two aren't) is the mechanical case repair_spec handles deterministically
+    # before the reviewer runs, the same way it handles Rules 7 and 8. A
+    # *wholesale* mismatch (every named symbol is off-category) is not a
+    # stray ticker but evidence the whole named universe contradicts the
+    # declared class; repair_spec deliberately leaves it untouched (stripping
+    # to an empty list would fall back to the pinned class's full default
+    # universe, silently laundering the mismatch instead of surfacing it).
+    # This check is what catches that wholesale case: it fires unconditionally
+    # on any off-category symbol, so if repair_spec already handled a minority
+    # mismatch this never sees one; if it didn't (wholesale), this is the only
+    # thing standing between the mismatch and a readiness-clean spec.
+    # ------------------------------------------------------------------
+    def _check_asset_category_pin(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
+        assert isinstance(ctx.spec, StrategySpec)
+        out: List[QualityGateResult] = []
+        pinned = ctx.pinned_asset_class
+        if pinned is None:
+            return out
+        actual = normalize_asset_class(ctx.spec.asset_class)
+        if actual != pinned:
+            out.append(
+                self._critical(
+                    f"asset_class is {actual!r} but this design attempt is pinned to "
+                    f"{pinned!r}. Rebuild the ENTIRE strategy for {pinned!r} — hypothesis, "
+                    f"entry/exit rules, indicators, sizing, and target_symbols must all "
+                    f"describe a {pinned!r} strategy. Relabelling the asset class without "
+                    f"redesigning the logic is not acceptable: each asset category has its "
+                    f"own microstructure, session hours, and volatility regime.",
+                    rule_id="asset_category:pin",
+                )
+            )
+            # The declared asset_class is already wrong relative to the pin;
+            # checking symbols against the pinned class here too would just
+            # repeat that same mismatch as noise, so stop after the class
+            # critical.
+            return out
+        offcategory = sorted(find_offcategory_symbols(ctx.spec.target_symbols, pinned))
+        if offcategory:
+            out.append(
+                self._critical(
+                    f"target_symbols contains {offcategory} which belong to an asset class "
+                    f"other than the pinned {pinned!r}. Every target symbol must be a "
+                    f"{pinned!r} instrument.",
+                    rule_id="asset_category:symbols",
+                )
+            )
+        return out
+
+    # ------------------------------------------------------------------
     # Rule registry — declarative list iterated by ``validate``. Order is
     # preserved so error messages remain stable across runs.
     # ------------------------------------------------------------------
@@ -1368,6 +1479,7 @@ class SpecReadinessGate(GateResultsMixin):
         _check_risk_limit_coherence,
         _check_risk_math_reconciliation,
         _check_predicate_reachability,
+        _check_asset_category_pin,
     )
 
     # ------------------------------------------------------------------
