@@ -356,11 +356,23 @@ class _PhaseSpec(NamedTuple):
             is relevant to this phase." ``phase_input_hash`` applies this
             distinction when computing ``_run_phases_with_cache``'s per-phase
             cache key, and ``_phase_task`` applies it when serializing the
-            mission into a phase's task string. Every phase's value below is
-            the evidence-based allowlist from the mission-field dependency
-            analysis (``system_design/mission_field_dependency_analysis.md``):
-            the minimal mission fields that phase's agent prompts actually
-            reference.
+            mission into a phase's task string. Every phase's value below
+            starts from the evidence-based allowlist in the mission-field
+            dependency analysis
+            (``system_design/mission_field_dependency_analysis.md``) — the
+            mission fields that phase's agent prompts explicitly reference —
+            widened by fields that document itself flagged as ambiguous or
+            unevidenced-but-risky rather than silently excluded: STRATEGIC_CORE
+            additionally includes ``company_name`` (never explicitly cited in
+            prompt text, but excluding it lets two differently-named missions
+            that are otherwise identical share a cache entry and reuse each
+            other's company-specific output) and VISUAL_IDENTITY additionally
+            includes its six visual-identity-only fields (no Phase 3 prompt
+            cites them by name, but they are the mission's only user-supplied
+            visual-preference input, and dropping them would silently stop
+            grounding the moodboard/color/typography agents in a user's actual
+            palette/style selections — a functional regression, not just a
+            cache-scope one).
     """
 
     builder_fn: Callable[[], Any]
@@ -382,7 +394,13 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
         PHASE_OUTPUT_MODELS[BrandPhase.STRATEGIC_CORE],
         merge_fn=functools.partial(_merge_named_fragments, node_merge=_PHASE1_NODE_MERGE),
         mission_fields=frozenset(
-            {"company_description", "target_audience", "values", "differentiators"}
+            {
+                "company_name",
+                "company_description",
+                "target_audience",
+                "values",
+                "differentiators",
+            }
         ),
     ),
     BrandPhase.NARRATIVE_MESSAGING: _PhaseSpec(
@@ -403,7 +421,16 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
             _merge_named_fragments, node_merge=_PHASE3_NODE_MERGE, require_all=True
         ),
         context_phases=(BrandPhase.STRATEGIC_CORE, BrandPhase.NARRATIVE_MESSAGING),
-        mission_fields=frozenset(),
+        mission_fields=frozenset(
+            {
+                "color_inspiration",
+                "color_palettes",
+                "selected_palette_index",
+                "visual_style",
+                "typography_preference",
+                "interface_density",
+            }
+        ),
     ),
     BrandPhase.CHANNEL_ACTIVATION: _PhaseSpec(
         build_phase4_graph,

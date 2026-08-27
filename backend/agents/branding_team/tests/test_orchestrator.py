@@ -2780,13 +2780,17 @@ def test_run_called_twice_with_identical_mission_only_invokes_run_single_phase_o
 
 def test_run_called_twice_with_changed_unallowlisted_mission_field_reinvokes_no_phase() -> None:
     """Two ``run()`` calls sharing one cache: the first populates it for one
-    mission, the second changes only ``company_name`` -- a field on no
-    phase's real ``mission_fields`` allowlist. This is the epic's whole
-    point: an edit to a field none of the 5 phases' agents reference must
-    not invalidate any phase's cache entry, unlike the old full-mission-hash
-    behavior."""
-    first_mission = make_mission(company_name="Northstar Labs")
-    second_mission = make_mission(company_name="Different Co")
+    mission, the second changes only ``existing_brand_material`` -- a field
+    on no phase's real ``mission_fields`` allowlist (unlike ``company_name``,
+    which STRATEGIC_CORE's allowlist deliberately includes despite no prompt
+    citing it, precisely so a rename invalidates its cache entry -- see
+    ``test_run_called_twice_with_changed_company_name_reinvokes_strategic_core_only``
+    below). This is the epic's whole point: an edit to a field none of the 5
+    phases' agents reference (nor any cross-mission-identity concern touches)
+    must not invalidate any phase's cache entry, unlike the old
+    full-mission-hash behavior."""
+    first_mission = make_mission(existing_brand_material=["old logo pack"])
+    second_mission = make_mission(existing_brand_material=["new logo pack"])
     cache = PhaseOutputCache()
     orchestrator = BrandingTeamOrchestrator()
 
@@ -2820,6 +2824,42 @@ def test_run_called_twice_with_changed_allowlisted_mission_field_reinvokes_only_
     phases already cached, so no downstream phase is invalidated either."""
     first_mission = make_mission(company_description="First description")
     second_mission = make_mission(company_description="Second description")
+    cache = PhaseOutputCache()
+    orchestrator = BrandingTeamOrchestrator()
+
+    with patch.object(
+        orchestrator, "run_single_phase", side_effect=_run_single_phase_fixture_side_effect
+    ) as mock_run_single_phase:
+        orchestrator.run(
+            mission=first_mission,
+            human_review=HumanReview(approved=True),
+            phase_cache=cache,
+        )
+        assert mock_run_single_phase.call_count == len(PHASE_ORDER)
+
+        orchestrator.run(
+            mission=second_mission,
+            human_review=HumanReview(approved=True),
+            phase_cache=cache,
+        )
+
+    assert mock_run_single_phase.call_count == len(PHASE_ORDER) + 1
+    second_call_phases = [
+        call.args[1] for call in mock_run_single_phase.call_args_list[len(PHASE_ORDER) :]
+    ]
+    assert second_call_phases == [BrandPhase.STRATEGIC_CORE]
+
+
+def test_run_called_twice_with_changed_company_name_reinvokes_strategic_core_only() -> None:
+    """``company_name`` is on STRATEGIC_CORE's real allowlist even though no
+    agent prompt cites it by name -- it was added specifically so a renamed
+    (or otherwise differently-named) mission can't silently reuse another
+    company's cached strategic/downstream output (see the "Post-review
+    addendum" in ``system_design/mission_field_dependency_analysis.md``).
+    A change to it must invalidate STRATEGIC_CORE's cache entry exactly like
+    ``company_description``'s own dedicated test above."""
+    first_mission = make_mission(company_name="Northstar Labs")
+    second_mission = make_mission(company_name="Different Co")
     cache = PhaseOutputCache()
     orchestrator = BrandingTeamOrchestrator()
 

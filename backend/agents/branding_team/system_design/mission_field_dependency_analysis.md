@@ -382,3 +382,42 @@ an allowlist derived from
 these tables is treated as safe to ship, particularly for phases where an
 agent's only mission reference is the generic, unqualified phrase "the
 branding mission."
+
+### Post-review addendum: two allowlists widened beyond this document's tables
+
+Code review on the implementation PR flagged two of this document's
+`()`/no-evidence conclusions as carrying a real correctness risk this
+document's prompt-text-only method could not see, and the shipped
+allowlists were widened accordingly rather than following the tables
+above verbatim:
+
+- **STRATEGIC_CORE now also includes `company_name`.** This document
+  correctly found no *prompt-text* citation of it (Finding 2), but
+  excluding it from the cache key means two missions that differ only in
+  `company_name` (e.g. an existing brand renamed, or two distinct brands
+  with otherwise-identical mission data) hash identically and share a
+  cache entry — the later run silently reuses strategic/downstream output
+  generated for a different company. That is a cache-correctness risk,
+  not a prompt-grounding question, and the prompt-citation method this
+  document uses cannot rule it out either way — only widening the
+  allowlist can.
+- **VISUAL_IDENTITY now also includes all six visual-identity-only
+  fields** (`color_inspiration`, `color_palettes`,
+  `selected_palette_index`, `visual_style`, `typography_preference`,
+  `interface_density`). Finding 4/the Phase 3 Finding already flagged
+  that these are the mission's only user-supplied visual-preference
+  input and that excluding them "requires a product decision" rather
+  than being silently assumed. Before this document's mechanism existed,
+  `_phase_task` injected the *entire* mission into every phase's task
+  string regardless of prompt-text citation, so these fields already
+  reached the Phase 3 agents as raw context; shipping the recommended
+  `()` would have been the first time they stopped reaching those agents
+  at all — a functional regression a `dummy`-provider test suite cannot
+  catch. Absent the empirical validation this document already
+  recommends before narrowing further, the safer default is to keep
+  grounding Phase 3 in the user's actual color/typography selections.
+
+Every other phase's allowlist (`NARRATIVE_MESSAGING`, `CHANNEL_ACTIVATION`,
+`GOVERNANCE`) ships exactly as recommended above. This addendum documents
+the deviation for future readers of this document; it does not change any
+table or finding above, which remain the underlying evidence record.
