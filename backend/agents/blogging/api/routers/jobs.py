@@ -20,6 +20,7 @@ from agents.blogging.api.models import (
 )
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from pydantic import ValidationError
 
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
 
@@ -249,6 +250,17 @@ def restart_blog_job(job_id: str) -> StartPipelineResponse:
             status_code=400, detail="Original request payload not available for restart."
         )
 
+    # Validate the stored payload before any destructive reset: if request
+    # constraints tightened since the job was created, this raises and the job's
+    # research artifacts / record are left untouched rather than being wiped for a
+    # restart that then aborts without ever launching a replacement run.
+    try:
+        request = FullPipelineRequest(**payload)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Stored request payload is no longer valid: {exc}"
+        ) from exc
+
     # Reset research state before resetting the job record: if this fails, the job
     # is left untouched (still in its prior terminal state) rather than reset to
     # "pending" with a restart that never actually happened.
@@ -262,8 +274,6 @@ def restart_blog_job(job_id: str) -> StartPipelineResponse:
     from agents.blogging.shared.blog_job_store import reset_blog_job
 
     reset_blog_job(job_id)
-
-    request = FullPipelineRequest(**payload)
 
     try:
         from agents.blogging.temporal.start_workflow import start_full_pipeline_workflow

@@ -1153,11 +1153,12 @@ def test_web_search_http_error(monkeypatch) -> None:
 
 
 def test_web_search_non_200_status(monkeypatch) -> None:
+    """A non-retryable status (e.g. 404) still raises the plain WebSearchError."""
     from agents.blogging.blog_research_agent.models import SearchQuery
     from agents.blogging.blog_research_agent.tools import web_search
 
     class _Response:
-        status_code = 500
+        status_code = 404
         text = "boom"
 
         def json(self):
@@ -1180,6 +1181,53 @@ def test_web_search_non_200_status(monkeypatch) -> None:
     s = web_search.OllamaWebSearch(api_key="test-key-placeholder")
     with pytest.raises(web_search.WebSearchError):
         s.search(SearchQuery(query_text="hi", intent="discover"), max_results=3)
+
+
+@pytest.mark.parametrize(
+    "status_code,expected_exc_name",
+    [(429, "LLMRateLimitError"), (500, "LLMTemporaryError"), (503, "LLMTemporaryError")],
+)
+def test_web_search_transient_status_raises_llm_error(
+    monkeypatch, status_code, expected_exc_name
+) -> None:
+    """429/5xx responses are classified as transient LLM errors (not WebSearchError)
+    so a caller funneling research through Temporal's retry policy retries the
+    activity instead of permanently failing the job on a recoverable outage."""
+    from agents.blogging.blog_research_agent.models import SearchQuery
+    from agents.blogging.blog_research_agent.tools import web_search
+
+    from llm_service.interface import LLMRateLimitError, LLMTemporaryError
+
+    expected_exc = (
+        LLMRateLimitError if expected_exc_name == "LLMRateLimitError" else LLMTemporaryError
+    )
+
+    class _Response:
+        text = "boom"
+
+        def json(self):
+            return {}
+
+    _Response.status_code = status_code
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def post(self, *a, **kw):
+            return _Response()
+
+    monkeypatch.setattr(web_search.httpx, "Client", _Client)
+    s = web_search.OllamaWebSearch(api_key="test-key-placeholder")
+    with pytest.raises(expected_exc) as exc:
+        s.search(SearchQuery(query_text="hi", intent="discover"), max_results=3)
+    assert exc.value.status_code == status_code
 
 
 def test_web_search_happy_path(monkeypatch) -> None:

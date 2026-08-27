@@ -256,6 +256,41 @@ def test_restart_job_500_when_research_reset_fails(
     assert job["status"] == "completed"
 
 
+def test_restart_job_400_when_payload_invalid_leaves_state_untouched(
+    client: TestClient, monkeypatch, tmp_path: Path
+) -> None:
+    """An invalid stored request_payload (e.g. request constraints tightened since
+    the job was created) must abort with a 400 before any destructive reset —
+    research state and the job record stay exactly as they were, rather than being
+    wiped for a restart that then aborts without ever launching a replacement run."""
+    from agents.blogging.shared import blog_job_store as bjs
+
+    work_dir = tmp_path / "job-work-dir"
+    cache_dir = work_dir / ".research_cache"
+    cache_dir.mkdir(parents=True)
+    packet_path = work_dir / "research_packet.md"
+    packet_path.write_text("# stale research", encoding="utf-8")
+
+    job_id = _create_job()
+    bjs.update_blog_job(
+        job_id,
+        status="completed",
+        # Missing the required "brief" field — fails FullPipelineRequest validation.
+        request_payload={"max_results": 10},
+        work_dir=str(work_dir),
+    )
+
+    monkeypatch.setattr(_api_main, "_submit_async_job", lambda fn, *a, **kw: None)
+
+    r = client.post(f"/job/{job_id}/restart")
+    assert r.status_code == 400
+
+    assert cache_dir.exists()
+    assert packet_path.exists()
+    job = bjs.get_blog_job(job_id)
+    assert job["status"] == "completed"
+
+
 # ---------------------------------------------------------------------------
 # Medium stats background runner
 # ---------------------------------------------------------------------------

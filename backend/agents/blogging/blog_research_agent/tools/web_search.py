@@ -8,6 +8,8 @@ from typing import List
 import httpx
 from pydantic import HttpUrl
 
+from llm_service.interface import LLMRateLimitError, LLMTemporaryError
+
 from ..models import CandidateResult, SearchQuery
 
 logger = logging.getLogger(__name__)
@@ -68,7 +70,11 @@ class OllamaWebSearch:
         Returns
         -------
         List of CandidateResult, length at most max_results.
-        Raises WebSearchError on API or network failure.
+        Raises LLMRateLimitError on a 429 response, LLMTemporaryError on a 5xx
+        response (both transient — for callers that funnel this through a
+        Temporal retry policy), or WebSearchError on any other API/network
+        failure (missing API key, other non-200 status, exhausted connection
+        retries).
         """
         assert max_results >= 1, "max_results must be at least 1"
         limit = min(max_results, OLLAMA_WEB_SEARCH_MAX_RESULTS)
@@ -110,6 +116,20 @@ class OllamaWebSearch:
         if resp is None:
             raise WebSearchError("Ollama web search failed: no response after retries")
         if resp.status_code != 200:
+            # 429/5xx are transient upstream failures, classified the same way the
+            # Ollama LLM client classifies its own 429/5xx responses, so callers that
+            # funnel research through the Temporal retry policy (LLMRateLimitError/
+            # LLMTemporaryError) retry the activity instead of permanently failing
+            # the job on an outage that would likely succeed on a later attempt.
+            if resp.status_code == 429:
+                raise LLMRateLimitError(
+                    f"Ollama web search rate limited (429): {resp.text}", status_code=429
+                )
+            if 500 <= resp.status_code < 600:
+                raise LLMTemporaryError(
+                    f"Ollama web search server error {resp.status_code}: {resp.text}",
+                    status_code=resp.status_code,
+                )
             raise WebSearchError(
                 f"Ollama web search failed with status {resp.status_code}: {resp.text}"
             )
