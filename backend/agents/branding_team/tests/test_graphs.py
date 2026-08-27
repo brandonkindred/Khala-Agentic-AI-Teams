@@ -17,7 +17,7 @@ from strands import Agent
 from strands.multiagent.graph import Graph
 
 from branding_team.graphs.phase1_strategic_core import build_phase1_graph
-from branding_team.graphs.phase2_narrative import build_phase2_graph, build_phase2_swarm
+from branding_team.graphs.phase2_narrative import build_phase2_graph
 from branding_team.graphs.phase3_visual import build_phase3_graph
 from branding_team.graphs.phase4_channel import build_phase4_graph
 from branding_team.graphs.phase5_governance import build_phase5_graph
@@ -53,12 +53,6 @@ def test_build_phase1_graph_is_a_graph() -> None:
 
 def test_build_phase2_graph_is_a_graph() -> None:
     assert isinstance(build_phase2_graph(), Graph)
-
-
-def test_build_phase2_swarm_alias_returns_graph() -> None:
-    """Phase 2 used to be a Swarm; the alias still works and returns the Graph."""
-    assert build_phase2_swarm is build_phase2_graph
-    assert isinstance(build_phase2_swarm(), Graph)
 
 
 def test_build_phase2_graph_wires_pure_fan_out() -> None:
@@ -246,24 +240,19 @@ def test_phase4_prompts_drop_redundant_json_reminder() -> None:
     factories migrated to ``build_agent(structured_output=...)``.
     """
     from branding_team.agents import (
+        CHANNEL_SPECS,
+        _make_channel_guide,
         make_brand_architecture_builder,
         make_brand_experience_principler,
         make_brand_in_action_illustrator,
-        make_email_guide,
-        make_events_guide,
-        make_internal_guide,
-        make_partnerships_guide,
-        make_social_guide,
-        make_website_guide,
     )
+    from branding_team.models import ChannelGuidelineOutput
+
+    for channel, description in CHANNEL_SPECS:
+        agent = _make_channel_guide(channel, description, ChannelGuidelineOutput)
+        assert "Output valid JSON" not in agent.system_prompt, channel
 
     for factory in (
-        make_website_guide,
-        make_social_guide,
-        make_email_guide,
-        make_events_guide,
-        make_partnerships_guide,
-        make_internal_guide,
         make_brand_architecture_builder,
         make_brand_in_action_illustrator,
         make_brand_experience_principler,
@@ -530,26 +519,21 @@ def test_phase3_factories_use_visual_identity_agent_key() -> None:
 
 def test_phase4_factories_use_channel_activation_agent_key() -> None:
     from branding_team.agents import (
+        CHANNEL_SPECS,
+        _make_channel_guide,
         make_brand_architecture_builder,
         make_brand_experience_principler,
         make_brand_in_action_illustrator,
-        make_email_guide,
-        make_events_guide,
-        make_internal_guide,
-        make_partnerships_guide,
-        make_social_guide,
-        make_website_guide,
     )
+    from branding_team.models import ChannelGuidelineOutput
 
     expected = phase_agent_key(BrandPhase.CHANNEL_ACTIVATION)
+    for channel, description in CHANNEL_SPECS:
+        agent = _make_channel_guide(channel, description, ChannelGuidelineOutput)
+        assert _resolved_agent_key(agent) == expected, channel
+
     for factory in (
         make_brand_experience_principler,
-        make_website_guide,
-        make_social_guide,
-        make_email_guide,
-        make_events_guide,
-        make_partnerships_guide,
-        make_internal_guide,
         make_brand_architecture_builder,
         make_brand_in_action_illustrator,
     ):

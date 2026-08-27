@@ -159,12 +159,20 @@ _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
         branding_agents.make_brand_experience_principler,
         BrandExperiencePrinciplesOutput,
     ),
-    ("website_guide", branding_agents.make_website_guide, ChannelGuidelineOutput),
-    ("social_guide", branding_agents.make_social_guide, ChannelGuidelineOutput),
-    ("email_guide", branding_agents.make_email_guide, ChannelGuidelineOutput),
-    ("events_guide", branding_agents.make_events_guide, ChannelGuidelineOutput),
-    ("partnerships_guide", branding_agents.make_partnerships_guide, ChannelGuidelineOutput),
-    ("internal_guide", branding_agents.make_internal_guide, ChannelGuidelineOutput),
+    *(
+        (
+            f"{channel}_guide",
+            # Bind channel/description in default args so each lambda closes
+            # over its own values rather than the loop's last iteration.
+            (
+                lambda c=channel, d=description: branding_agents._make_channel_guide(
+                    c, d, ChannelGuidelineOutput
+                )
+            ),
+            ChannelGuidelineOutput,
+        )
+        for channel, description in branding_agents.CHANNEL_SPECS
+    ),
     (
         "brand_architecture_builder",
         branding_agents.make_brand_architecture_builder,
@@ -312,12 +320,6 @@ _FACTORIES_WITH_STRUCTURED_OUTPUT: frozenset[str] = frozenset(
         "make_voice_tone_builder",
         "make_design_system_codifier",
         "make_brand_experience_principler",
-        "make_website_guide",
-        "make_social_guide",
-        "make_email_guide",
-        "make_events_guide",
-        "make_partnerships_guide",
-        "make_internal_guide",
         "make_brand_architecture_builder",
         "make_brand_in_action_illustrator",
         "make_ownership_definer",
