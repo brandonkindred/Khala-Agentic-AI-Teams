@@ -38,22 +38,17 @@ from branding_team.agents import (
     make_design_system_codifier,
     make_differentiation_mapper,
     make_discovery_auditor,
-    make_email_guide,
-    make_events_guide,
     make_evolution_framer,
     make_iconography_director,
-    make_internal_guide,
     make_kpi_designer,
     make_logo_specifier,
     make_message_mapper,
     make_moodboard_conceptualist,
     make_ownership_definer,
-    make_partnerships_guide,
     make_persona_builder,
     make_photography_video_director,
     make_positioning_synthesizer,
     make_purpose_vision_writer,
-    make_social_guide,
     make_storyteller,
     make_tagline_writer,
     make_training_planner,
@@ -61,7 +56,6 @@ from branding_team.agents import (
     make_values_articulator,
     make_voice_principles_drafter,
     make_voice_tone_builder,
-    make_website_guide,
 )
 from branding_team.graphs.shared import serialize_mission
 from branding_team.models import (
@@ -314,42 +308,6 @@ _EXPECTED_EVOLUTION_FRAMER_PROMPT = (
 )
 
 
-# Dash-colon field bullets (`- channel: 'website'`) become numbered em-dash
-# lines; ``Context: {description}`` is the spec closing sentence. Same
-# conversion MoodBoardConceptualist used for its parameterized variants.
-def _expected_channel_guide_prompt(channel: str, description: str) -> str:
-    return (
-        f"You are a {channel.title()} Channel Specialist. Define guidelines for the "
-        f"{channel} channel:\n"
-        f"1. channel — '{channel}'\n"
-        f"2. strategy — overall approach for this channel\n"
-        f"3. dos — 3-4 best practices\n"
-        f"4. donts — 3-4 things to avoid\n"
-        f"5. content_types — 3-5 recommended content formats\n"
-        f"6. frequency_guidance — recommended cadence\n"
-        f"Context: {description}"
-    )
-
-
-_EXPECTED_WEBSITE_GUIDE_PROMPT = _expected_channel_guide_prompt(
-    "website", "Company website, landing pages, product pages."
-)
-_EXPECTED_SOCIAL_GUIDE_PROMPT = _expected_channel_guide_prompt(
-    "social", "Social media platforms (LinkedIn, Twitter, Instagram)."
-)
-_EXPECTED_EMAIL_GUIDE_PROMPT = _expected_channel_guide_prompt(
-    "email", "Email marketing, newsletters, transactional emails."
-)
-_EXPECTED_EVENTS_GUIDE_PROMPT = _expected_channel_guide_prompt(
-    "events", "Conferences, webinars, meetups, trade shows."
-)
-_EXPECTED_PARTNERSHIPS_GUIDE_PROMPT = _expected_channel_guide_prompt(
-    "partnerships", "Co-branding, sponsorships, partner marketing."
-)
-_EXPECTED_INTERNAL_GUIDE_PROMPT = _expected_channel_guide_prompt(
-    "internal", "Internal comms, employee branding, onboarding."
-)
-
 # Nested dash-colon bullets (`- context: ...`) collapsed into the
 # ``brand_in_action`` field description, matching Phase 3 logo/color nested
 # member style. Trailing newline dropped (renderer has none).
@@ -520,30 +478,6 @@ def test_kpi_designer_prompt_matches_original_wording() -> None:
 
 def test_evolution_framer_prompt_matches_original_wording() -> None:
     assert make_evolution_framer().system_prompt == _EXPECTED_EVOLUTION_FRAMER_PROMPT
-
-
-def test_website_guide_prompt_matches_spec() -> None:
-    assert make_website_guide().system_prompt == _EXPECTED_WEBSITE_GUIDE_PROMPT
-
-
-def test_social_guide_prompt_matches_spec() -> None:
-    assert make_social_guide().system_prompt == _EXPECTED_SOCIAL_GUIDE_PROMPT
-
-
-def test_email_guide_prompt_matches_spec() -> None:
-    assert make_email_guide().system_prompt == _EXPECTED_EMAIL_GUIDE_PROMPT
-
-
-def test_events_guide_prompt_matches_spec() -> None:
-    assert make_events_guide().system_prompt == _EXPECTED_EVENTS_GUIDE_PROMPT
-
-
-def test_partnerships_guide_prompt_matches_spec() -> None:
-    assert make_partnerships_guide().system_prompt == _EXPECTED_PARTNERSHIPS_GUIDE_PROMPT
-
-
-def test_internal_guide_prompt_matches_spec() -> None:
-    assert make_internal_guide().system_prompt == _EXPECTED_INTERNAL_GUIDE_PROMPT
 
 
 def test_brand_in_action_illustrator_prompt_matches_spec() -> None:
@@ -964,11 +898,19 @@ def test_schema_derived_factory_prompt_matches_structured_output_schema(
     assert agent.system_prompt == _expected_prompt_from_schema(spec)
 
 
+_WEBSITE_CHANNEL_DESCRIPTION = dict(branding_agents.CHANNEL_SPECS)["website"]
+
 _PHASE_SPOT_CHECKS: tuple[tuple[str, Callable[[], Agent], type], ...] = (
     ("phase1_discovery_auditor", make_discovery_auditor, BrandDiscoveryAudit),
     ("phase2_storyteller", make_storyteller, BrandStoryOutput),
     ("phase3_iconography_director", make_iconography_director, IconographyOutput),
-    ("phase4_website_guide", make_website_guide, ChannelGuidelineOutput),
+    (
+        "phase4_website_guide",
+        lambda: branding_agents._make_channel_guide(
+            "website", _WEBSITE_CHANNEL_DESCRIPTION, ChannelGuidelineOutput
+        ),
+        ChannelGuidelineOutput,
+    ),
     ("phase5_ownership_definer", make_ownership_definer, OwnershipOutput),
 )
 _PHASE_SPOT_CHECK_IDS: tuple[str, ...] = tuple(

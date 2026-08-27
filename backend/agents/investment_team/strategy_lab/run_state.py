@@ -223,12 +223,6 @@ def normalize_persisted_job(
     return data
 
 
-# TODO: `list_strategy_lab_jobs` and `list_strategy_lab_runs` in `api.main`
-# still carry their own copies of the algorithm this helper extracts, each
-# with its own `normalize_persisted` shape and terminal-status set. Wiring
-# both to delegate here and deleting their duplicated inline logic is a
-# tracked follow-up, staged separately so this extraction step lands with no
-# behavior change to either route.
 def _merge_and_reconcile_records(
     *,
     active_runs: Dict[str, Dict[str, Any]],
