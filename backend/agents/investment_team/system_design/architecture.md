@@ -368,11 +368,15 @@ orchestrator's internal phase names onto the UI's four-entry stepper — the
 full name inventory and mapping live in
 [`strategy_lab_pipeline.md`](./strategy_lab_pipeline.md)'s "Phase events"
 section) and `publish_run_event_activity`
-(the batch workflow's skipped/finalized/terminal events). Reconciliation
-doesn't depend on either direct-publish path, so a missed one is still
-caught up by the next poll. A polling fallback (`GET /strategy-lab/runs/{run_id}/status`)
-exposes the same reconciled data and is what the UI relies on for updates
-mid-stream.
+(the batch workflow's skipped/finalized/terminal events). Reconciliation is
+state catch-up, not event catch-up: `_STRATEGY_LAB_PROGRESS_FIELDS` includes
+`current_cycle`, but nothing in the Temporal-only dispatch path ever writes
+it to anything but `None` in the persisted record, so a missed direct-publish
+phase update — or the exact skipped/finalized/terminal event shape — isn't
+replayable from polling; a client only recovers the coarser batch/wave
+counters and terminal status the durable record does carry. A polling
+fallback (`GET /strategy-lab/runs/{run_id}/status`) exposes that same
+reconciled state and is what the UI relies on for updates mid-stream.
 
 ### 9. Market data is tiered by free vs pay
 
