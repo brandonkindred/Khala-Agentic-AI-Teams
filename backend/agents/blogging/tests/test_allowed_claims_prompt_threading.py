@@ -524,6 +524,9 @@ def test_run_pipeline_ignores_stale_allowed_claims_from_reused_work_dir(
 
 
 def test_gates_stage_threads_allowed_claims_into_fact_check(monkeypatch, tmp_path: Path) -> None:
+    """When run_gates=True, allowed_claims.json from work_dir is passed to the
+    fact-check agent so the gate evaluates claims against the same allow-list
+    the writer used."""
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.blog_compliance_agent.models import ComplianceReport
     from agents.blogging.blog_fact_check_agent.models import FactCheckReport
