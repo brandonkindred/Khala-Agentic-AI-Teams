@@ -17,6 +17,49 @@ from .models import QualityGateResult
 
 logger = logging.getLogger(__name__)
 
+# The sentence :meth:`ConvergenceTracker.get_diversity_directive` embeds to
+# demand a change of asset class. Owned here (rather than duplicated as a string
+# literal at the consumer) so a reword cannot silently break the pin's
+# suppression filter: both the text and the predicate that recognises it live in
+# this one place.
+#
+# Deliberately does NOT cover ``get_stall_directive``. That directive offers
+# three alternatives — "a fundamentally different trading thesis, asset class,
+# or indicator combination" — two of which a pinned attempt can satisfy, so
+# suppressing it would strip a pinned run of all anti-repetition steering. And
+# a pinned run is *more* prone to stalling, since the pin also scopes the
+# designer's prior-results context to a single category.
+ASSET_CLASS_ONLY_STEERING_PHRASE = "You MUST choose a DIFFERENT asset class"
+
+# Share of a recent window one asset class must exceed to count as
+# "over-represented" for diversity steering (see _over_represented_classes).
+OVER_REPRESENTATION_THRESHOLD = 0.4
+
+
+def is_asset_class_steering_directive(directive: str) -> bool:
+    """True when ``directive`` contains the asset-class-only steering phrase.
+
+    A design attempt pinned to a single asset category cannot satisfy an
+    asset-class-only instruction — the pin's exclusion list already forbids
+    every other class — so the caller drops such a directive rather than
+    handing the designer a prompt that mandates both "use only X" and "use
+    something other than X". This is a plain substring check, not a parse of
+    the directive's structure: it relies on :data:`ASSET_CLASS_ONLY_STEERING_PHRASE`
+    only ever appearing in the asset-class-only directive
+    (:meth:`ConvergenceTracker.get_diversity_directive`) and never in a
+    directive that offers other satisfiable alternatives (e.g.
+    :meth:`ConvergenceTracker.get_stall_directive`, whose wording
+    deliberately avoids the exact phrase) — it does not itself verify that
+    the directive contains nothing else.
+
+    Preconditions:
+      - ``directive`` is a string (a rendered convergence-tracker directive).
+    Postconditions:
+      - Returns ``True`` iff :data:`ASSET_CLASS_ONLY_STEERING_PHRASE` occurs in
+        ``directive``.
+    """
+    return ASSET_CLASS_ONLY_STEERING_PHRASE in directive
+
 
 class ConvergenceTracker:
     """Track strategy diversity and failure repetition across batch cycles.
@@ -120,22 +163,85 @@ class ConvergenceTracker:
     # Directives for ideation
     # ------------------------------------------------------------------
 
-    def get_diversity_directive(self, tail: int = 10) -> Optional[str]:
-        """Return a steering directive if asset-class distribution is skewed."""
-        if len(self._asset_class_history) < 3:
-            return None
+    def _recent_asset_class_history(self, tail: int) -> List[str]:
+        """The windowed slice both diversity methods key their computation on.
 
-        recent = self._asset_class_history[-tail:]
+        Preconditions:
+          - None beyond the type constraint.
+        Postconditions:
+          - Returns the last ``tail`` entries of ``_asset_class_history``, or
+            the full history when ``tail <= 0`` (matching the ``[-0:]``-
+            returns-everything pitfall documented on the two callers).
+            Centralising this one-line slice keeps ``get_diversity_avoid_classes``
+            and ``get_diversity_directive`` from independently recomputing the
+            same window — and risking drift between them — every time either
+            is called.
+        """
+        if tail > 0:
+            return self._asset_class_history[-tail:]
+        return list(self._asset_class_history)
+
+    def _over_represented_classes(self, recent: List[str]) -> Set[str]:
+        """Shared over-representation predicate given an already-sliced window.
+
+        Preconditions:
+          - ``recent`` is the caller's windowed slice (typically
+            :meth:`_recent_asset_class_history`'s return).
+        Postconditions:
+          - Returns an empty set when fewer than 3 entries have been recorded
+            across the *full* history (not just ``recent``), or when no class
+            exceeds ``OVER_REPRESENTATION_THRESHOLD``'s share of ``recent``.
+        """
+        if len(self._asset_class_history) < 3:
+            return set()
         counts = Counter(recent)
         total = len(recent)
+        return {ac for ac, c in counts.items() if c / total > OVER_REPRESENTATION_THRESHOLD}
 
-        over_represented = [ac for ac, c in counts.items() if c / total > 0.4]
+    def get_diversity_avoid_classes(self, tail: int = 10) -> Set[str]:
+        """Return the asset classes ``get_diversity_directive`` would tell the
+        designer to avoid — over-represented in the recent window (>40% share).
+
+        Single source of truth for the over-representation computation, shared
+        by :meth:`get_diversity_directive` (renders it as prompt text) and any
+        caller (e.g. a per-attempt asset-category pin) that needs to steer
+        *around* the same skew without re-deriving it from the raw history.
+
+        Args:
+            tail: number of recent asset-class entries to consider.
+                Non-positive values are treated as the full history (see
+                :meth:`_recent_asset_class_history`) rather than the ``[-0:]``
+                slice, which returns everything rather than nothing.
+
+        Postconditions:
+          - Returns an empty set when the asset-class history contains fewer
+            than 3 entries, or when no class exceeds the 40% share threshold.
+        """
+        return self._over_represented_classes(self._recent_asset_class_history(tail))
+
+    def get_diversity_directive(self, tail: int = 10) -> Optional[str]:
+        """Return a steering directive if asset-class distribution is skewed.
+
+        Args:
+            tail: forwarded to :meth:`get_diversity_avoid_classes` (see its
+                behavior note on non-positive values).
+
+        Postconditions:
+          - Returns ``None`` when no class is over-represented; otherwise a
+            directive naming the over-represented classes in alphabetical
+            order and containing :data:`ASSET_CLASS_ONLY_STEERING_PHRASE`, so
+            :func:`is_asset_class_steering_directive` recognises it and a
+            pinned attempt suppresses it as unsatisfiable.
+        """
+        recent = self._recent_asset_class_history(tail)
+        over_represented = self._over_represented_classes(recent)
         if not over_represented:
             return None
 
+        total = len(recent)
         return (
             f"MANDATORY: The last {total} strategies are heavily skewed toward "
-            f"{', '.join(over_represented)}. You MUST choose a DIFFERENT asset class. "
+            f"{', '.join(sorted(over_represented))}. {ASSET_CLASS_ONLY_STEERING_PHRASE}. "
             f"Consider: {', '.join(ac for ac in ['stocks', 'crypto', 'forex', 'commodities', 'futures'] if ac not in over_represented)}."
         )
 
@@ -152,7 +258,21 @@ class ConvergenceTracker:
         return directives
 
     def get_stall_directive(self) -> Optional[str]:
-        """Return a directive if the tracker detects convergence."""
+        """Return a directive if the tracker detects convergence.
+
+        Deliberately offers three alternatives rather than demanding an
+        asset-class change alone, so it stays satisfiable — and therefore
+        survives the suppression filter — under a single-category pin, where
+        anti-repetition steering matters most (the pin also narrows the
+        designer's prior-results context to one category).
+
+        Preconditions: none.
+        Postconditions:
+          - Returns ``None`` unless :meth:`is_stalled`; otherwise a directive
+            that does NOT contain
+            :data:`ASSET_CLASS_ONLY_STEERING_PHRASE`, so
+            :func:`is_asset_class_steering_directive` leaves it in place.
+        """
         if not self.is_stalled():
             return None
         return (

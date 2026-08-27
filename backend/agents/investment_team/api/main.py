@@ -153,6 +153,8 @@ from investment_team.strategy_lab.spec_dsl import (
 )
 from investment_team.strategy_lab_context import (
     PROMPT_ASSET_CLASSES,
+    allowed_asset_classes,
+    filter_records_by_asset_class,
     normalize_allowed_asset_classes,
     normalize_asset_class,
 )
@@ -2351,7 +2353,7 @@ def _run_one_strategy_lab_cycle(
     config: BacktestConfig,
     orchestrator: "StrategyLabOrchestrator",
     *,
-    precomputed_signal_brief: Optional[SignalIntelligenceBriefV1] = None,
+    precomputed_signal_briefs: Optional[Dict[str, SignalIntelligenceBriefV1]] = None,
     signal_brief_storage: Optional[Dict[str, Any]] = None,
     prior_records: Optional[List[StrategyLabRecord]] = None,
     on_phase: Optional[Callable[[str, Dict[str, Any]], None]] = None,
@@ -2369,6 +2371,18 @@ def _run_one_strategy_lab_cycle(
     does not implement any of that logic itself.
 
     Args:
+        precomputed_signal_briefs: Optional per-category signal-brief map
+            (asset class -> brief), produced once per batch by
+            :func:`_compute_signal_brief_snapshot` and forwarded verbatim to
+            :meth:`StrategyLabOrchestrator.run_cycle` as its ``signal_briefs``
+            argument. The design attempt selects its own pinned category's
+            entry; a missing entry (or ``None``) means no brief for that
+            category. When ``None``, the cycle runs with no signal brief at
+            all (the direct/test-caller path).
+        signal_brief_storage: The same batch's raw storage dict (paired with
+            ``precomputed_signal_briefs``), forwarded to
+            :func:`_finalize_strategy_lab_cycle_record` so it can attach the
+            record's own category's entry to ``signal_intelligence_brief``.
         prior_records: Precomputed prior-record snapshot, supplied by the wave
             driver so the whole table isn't re-read + re-parsed per concurrent
             cycle. Precondition: it must reflect pre-wave state (the caller reads
@@ -2394,7 +2408,7 @@ def _run_one_strategy_lab_cycle(
     record = orchestrator.run_cycle(
         prior_records=prior_records,
         config=config,
-        signal_brief=precomputed_signal_brief,
+        signal_briefs=precomputed_signal_briefs,
         on_phase=on_phase,
         exclude_asset_classes=exclude_asset_classes,
     )
@@ -2470,8 +2484,19 @@ def _finalize_strategy_lab_cycle_record(
         passes ``None`` — SSE progress is a separate concern there).
     Postconditions:
         Returns the same ``record`` with its ``signal_intelligence_brief`` set
-        (when ``signal_brief_storage`` is given and it was empty) and its
-        ``paper_trading_*`` fields resolved — ``skipped`` for non-winning /
+        to *its own asset category's* entry from ``signal_brief_storage``
+        (when given, it was empty, and that category's entry is present AND
+        is actual brief content rather than a ``{"skipped": True, ...}``
+        marker) — never the whole multi-category ``signal_brief_storage``
+        blob, which the strategy-card UI cannot render (it expects one flat
+        brief, not a map keyed by category) and which would attribute every
+        other category's brief to this one record. A category with no prior
+        records, or whose brief computation failed, leaves the field unset
+        rather than storing the marker as if it were brief content. A
+        top-level ``signal_brief_storage`` that isn't a per-category map (the
+        disabled/degraded skip marker) is stored as-is, matching
+        pre-per-category behavior. Also resolves its
+        ``paper_trading_*`` fields — ``skipped`` for non-winning /
         non-publishable / disabled / no-code / no-data cases, ``completed`` on
         success, ``failed`` (non-fatal) on a paper-trading error. The record is
         durably persisted via :func:`_persist_strategy_lab_record` before
@@ -2488,9 +2513,44 @@ def _finalize_strategy_lab_cycle_record(
             except Exception:
                 logger.exception("Strategy lab phase callback failed for phase %s", phase)
 
-    # Attach signal brief before persisting (PersistentDict serializes at assignment)
+    # Attach signal brief before persisting (PersistentDict serializes at assignment).
+    # ``signal_brief_storage`` covers every allowed category in the batch; this
+    # record was pinned to exactly one, so only that category's entry belongs
+    # on it — the whole map would silently replace the single-brief shape the
+    # strategy-card UI renders (one row per brief field) with an unrenderable
+    # nested-by-category blob.
     if signal_brief_storage and not record.signal_intelligence_brief:
-        record.signal_intelligence_brief = signal_brief_storage
+        by_class = signal_brief_storage.get("by_asset_class")
+        if isinstance(by_class, dict):
+            # ``loop_telemetry["asset_category"]`` — set on both the ready and
+            # not-ready exit paths of ``_run_design_loop`` — is the category
+            # the design agent was actually pinned to and received the brief
+            # for. ``record.strategy.asset_class`` is NOT an equivalent
+            # substitute on a short-circuited (never-Rule-11-validated)
+            # record: a non-ready exit (budget_exhausted / design_stalled /
+            # design_not_ready) can persist a draft whose authored class never
+            # converged to the pin, and keying off that wrong class would
+            # attach a different category's brief — misattributing which
+            # evidence the design agent actually used. Falls back to the
+            # declared class only for a legacy/direct-call record with no
+            # telemetry.
+            attempted_category = (
+                record.loop_telemetry.get("asset_category") or record.strategy.asset_class
+            )
+            own_brief = by_class.get(normalize_asset_class(attempted_category))
+            # A per-category entry that itself failed or was skipped (no
+            # prior records, expert error) is a ``{"skipped": True, ...}``
+            # marker, not brief content — the strategy card renders whatever
+            # is here as brief fields, so storing the marker verbatim would
+            # display "skipped"/"skipped_reason"/"error" as if they were
+            # macro themes. Leave the field unset instead; there is genuinely
+            # no brief for this record to show.
+            if isinstance(own_brief, dict) and not own_brief.get("skipped"):
+                record.signal_intelligence_brief = own_brief
+        else:
+            # Disabled/degraded skip marker (e.g. {"skipped": True, ...}) —
+            # not a per-category map, so store it as-is.
+            record.signal_intelligence_brief = signal_brief_storage
 
     # --- Paper-trading step (gated on publishable backtest) ---------------
     # Only publishable winners proceed to paper trading; failures are
@@ -2579,32 +2639,90 @@ def _strategy_lab_signal_expert_enabled() -> bool:
 
 def _compute_signal_brief_snapshot(
     benchmark_symbol: str,
-) -> tuple[Optional[SignalIntelligenceBriefV1], Dict[str, Any]]:
-    """Build a per-batch signal brief over all currently-persisted prior records.
+    exclude_asset_classes: Optional[List[str]] = None,
+) -> tuple[Dict[str, SignalIntelligenceBriefV1], Dict[str, Any]]:
+    """Build one per-batch signal brief **per allowed asset category**.
 
     Used by the Temporal ``compute_signal_brief_activity``. Called at the start
     of every batch so batch N+1 sees results from batches 1..N (and prior runs).
 
+    One brief per category, rather than one blended brief, because a design
+    attempt is pinned to a single category (see ``_run_design_loop``) and the
+    brief is injected verbatim into its prompt. A brief synthesized over every
+    category's records would carry crypto evidence into a stocks attempt and
+    its diversity hint would push toward categories the attempt is forbidden
+    to use — the analysis surface that made cross-category learnings leak into
+    a restricted run. Each brief here sees only its own category's records, so
+    every category is analyzed independently. The shared per-batch market
+    snapshot is likewise scoped per category (``MarketLabContext.scoped_to``)
+    before each call, since it carries single-class fields (FX rates, a
+    crypto headline) alongside genuinely shared macro context. A fresh
+    ``SignalIntelligenceExpert`` is constructed per category rather than
+    reused across the loop, since its underlying Strands ``Agent`` retains
+    conversation history across calls — reuse would let one category's
+    prompt/response persist as prior turns in the next category's call,
+    reopening the same cross-category leak the record/market scoping exists
+    to close.
+
+    Cost is bounded by the number of *allowed* categories with at least one
+    prior record (at most ``len(PROMPT_ASSET_CLASSES)``) and paid once per
+    batch, not per cycle — a category with zero prior records (e.g. every
+    category on a run's first batch) is skipped rather than billed for an
+    evidence-free call; see the loop body.
+
     Preconditions:
-        ``benchmark_symbol`` is the run's benchmark ticker.
+        * ``benchmark_symbol`` is the run's benchmark ticker.
+        * ``exclude_asset_classes`` is the complement of the user's
+          ``allowed_asset_classes`` selection within ``PROMPT_ASSET_CLASSES``,
+          or ``None`` when the run is unrestricted (every category allowed).
     Postconditions:
-        Returns ``(brief, storage)``. ``storage`` is always a ``dict`` --
-        never ``None`` -- even on failure. Fail-open: on disabled expert /
-        provider-initialization failure / market-fetch failure / expert
-        (including its own initialization) failure / provider-cleanup
-        failure, it returns ``(None, {"skipped": True, ...})`` (or a
-        degraded-market brief) rather than raising -- every step from
-        provider construction through cleanup is guarded, not just
-        ``expert.produce_signal_brief``'s body.
+        * Returns ``(briefs, storage)``. ``briefs`` maps each allowed
+          canonical category to its brief; a category whose brief could not be
+          produced is simply absent, so the map may be empty. ``storage`` is
+          always a ``dict`` -- never ``None`` -- even on total failure.
+        * Fail-open at every level: on a disabled expert or a
+          provider-initialization failure, returns a top-level
+          ``{"skipped": True, ...}`` storage rather than raising. A
+          market-fetch failure does not short-circuit the same way — it
+          builds a ``degraded=True`` ``MarketLabContext`` (no fetched data,
+          ``degraded_reason`` set) and continues into the per-category loop
+          below, so briefs still get computed from priors alone, only
+          missing market evidence. A per-category *non-assertion* failure —
+          ``scoped_to``,
+          ``as_prompt_text``, expert construction, or ``produce_signal_brief``
+          itself — skips only that category's entry in ``by_asset_class``; a
+          single category's failure never aborts the others. A
+          provider-cleanup failure is logged and swallowed without
+          altering the return value — it cannot turn a successful result into
+          a skipped one, since cleanup only runs after the try block has
+          already decided what to return.
+        * The one exception to "never raises": an ``AssertionError`` raised
+          anywhere inside the per-category block (``scoped_to``,
+          ``as_prompt_text``, expert construction, or
+          ``produce_signal_brief``'s own precondition assertion) propagates
+          rather than being folded into a ``"skipped": True`` entry — a
+          precondition violation is a bug in this loop's own construction of
+          its call, not an external/transient failure, and DbC forbids
+          silently coercing that into a routine fail-open outcome.
     """
     if not _strategy_lab_signal_expert_enabled():
-        return None, {"skipped": True, "skipped_reason": "signal_expert_disabled"}
+        return {}, {"skipped": True, "skipped_reason": "signal_expert_disabled"}
+
+    # ``allowed_asset_classes`` is the single source of truth for this
+    # complement-with-fallback computation (shared with the design loop's own
+    # category pin) — including its alias normalization, which a hand-rolled
+    # ``set(exclude_asset_classes or ())`` here would silently skip for an
+    # exclusion expressed as a known alias (e.g. "equity" instead of
+    # "stocks"). Its own defensive fallback-to-full-menu-with-a-warning
+    # covers the (API-boundary-unreachable) all-excluded case.
+    allowed_set = allowed_asset_classes(exclude_asset_classes)
+    allowed = [c for c in PROMPT_ASSET_CLASSES if c in allowed_set]
 
     try:
         provider = FreeTierMarketDataProvider()
     except Exception as exc:
         logger.warning("Failed to initialize market data provider: %s", exc)
-        return None, {
+        return {}, {
             "skipped": True,
             "skipped_reason": "provider_init_failed",
             "error": str(exc),
@@ -2625,39 +2743,101 @@ def _compute_signal_brief_snapshot(
             )
         prior_for_brief = _snapshot_prior_records()
 
-        try:
-            expert = SignalIntelligenceExpert()
-            t0 = datetime.now(tz=timezone.utc)
-            brief = expert.produce_signal_brief(prior_for_brief, market_ctx)
-            storage = brief.model_dump(mode="json")
-            prov_text = market_ctx.as_prompt_text()
-            storage["brief_provenance"] = {
+        briefs: Dict[str, SignalIntelligenceBriefV1] = {}
+        by_class: Dict[str, Any] = {}
+        for asset_class in allowed:
+            # Each category is analyzed over ONLY its own prior records.
+            category_records = filter_records_by_asset_class(prior_for_brief, asset_class)
+            if not category_records:
+                # Nothing to analyze yet (e.g. every category on a run's
+                # first batch) -- the expert's whole value is synthesizing
+                # prior results, so an empty-evidence call would just be a
+                # paid LLM round-trip for generic market commentary. Skip it
+                # rather than pay up to len(allowed) calls for zero signal;
+                # the design loop already treats a missing brief as "no
+                # signal section" (see ``select_signal_brief``).
+                by_class[asset_class] = {
+                    "skipped": True,
+                    "skipped_reason": "no_prior_records",
+                }
+                continue
+            try:
+                # ``fx_rates``/``crypto_snapshot`` are single asset-class-specific
+                # fields on the shared per-batch snapshot; passing the unscoped
+                # context here would render explicit FX/crypto evidence into
+                # (say) a stocks-only brief's prompt, directly contradicting its
+                # own "covers stocks and nothing else" scope instruction. Scoping
+                # per category closes that path; genuinely shared macro fields
+                # (yields, sentiment) still reach every category.
+                #
+                # Computed inside this try, not before it: a non-assertion
+                # failure here (``scoped_to``/``as_prompt_text``) degrades
+                # only this category, exactly like a ``produce_signal_brief``
+                # failure — computing it before the try would let it escape
+                # uncaught, failing the entire batch's Temporal activity over
+                # one category's brief. An AssertionError from either call
+                # still propagates via the ``except AssertionError`` below,
+                # same as one from ``produce_signal_brief`` itself.
+                category_market_ctx = market_ctx.scoped_to(asset_class)
+                market_hash = hashlib.sha256(
+                    category_market_ctx.as_prompt_text().encode()
+                ).hexdigest()[:16]
+                # A fresh expert per category, not one shared across the loop:
+                # SignalIntelligenceExpert wraps a Strands ``Agent``, which
+                # accumulates conversation history across calls by default
+                # (calling it with no input replays existing history). Reusing
+                # one instance would let a stocks brief's prompt/response
+                # linger as prior conversation turns in the crypto category's
+                # call, silently reintroducing the cross-category
+                # contamination this whole per-category scoping mechanism
+                # exists to prevent. Construction itself is cheap (local model
+                # config resolution, no network call), so retrying it once per
+                # category costs nothing.
+                expert = SignalIntelligenceExpert()
+                t0 = datetime.now(tz=timezone.utc)
+                brief = expert.produce_signal_brief(
+                    category_records, category_market_ctx, asset_class=asset_class
+                )
+            except AssertionError:
+                # A precondition violation (e.g. produce_signal_brief's own
+                # ``asset_class in PROMPT_ASSET_CLASSES`` check) is a bug in
+                # this loop's caller-side construction of ``asset_class``,
+                # not an external/transient failure -- per this codebase's
+                # Design by Contract rule, a contract violation must never be
+                # silently coerced into a routine fail-open skip. Let it
+                # propagate rather than mislabeling it "expert_failed".
+                raise
+            except Exception as exc:
+                # One category's failure must not cost the others their brief;
+                # the design loop treats a missing entry as "no brief" and
+                # drops the signal section for that category only.
+                logger.warning("Signal intelligence expert failed for %s: %s", asset_class, exc)
+                by_class[asset_class] = {
+                    "skipped": True,
+                    "skipped_reason": "expert_failed",
+                    "error": str(exc),
+                }
+                continue
+            briefs[asset_class] = brief
+            entry = brief.model_dump(mode="json")
+            entry["brief_provenance"] = {
                 "expert": "signal_intelligence_v1",
-                "market_snapshot_hash": hashlib.sha256(prov_text.encode()).hexdigest()[:16],
+                "asset_class": asset_class,
+                "prior_record_count": len(category_records),
+                "market_snapshot_hash": market_hash,
                 "market_fetched_at": market_ctx.fetched_at,
-                "market_degraded": market_ctx.degraded,
+                "market_degraded": category_market_ctx.degraded,
                 "duration_ms": int((datetime.now(tz=timezone.utc) - t0).total_seconds() * 1000),
             }
-            logger.info(
-                "signal_intelligence brief_version=%s keys=%s degraded_market=%s",
-                storage.get("brief_version"),
-                # A cheap top-level-key count in place of len(str(storage)),
-                # which serialized the entire brief to a string on every
-                # call just to measure it.
-                len(storage),
-                market_ctx.degraded,
-            )
-            return brief, storage
-        except Exception as exc:
-            # Covers both SignalIntelligenceExpert() construction and
-            # produce_signal_brief() itself -- either is an "expert
-            # subsystem failed" outcome from the caller's perspective.
-            logger.warning("Signal intelligence expert failed: %s", exc)
-            return None, {
-                "skipped": True,
-                "skipped_reason": "expert_failed",
-                "error": str(exc),
-            }
+            by_class[asset_class] = entry
+
+        logger.info(
+            "signal_intelligence briefs=%s/%s degraded_market=%s",
+            len(briefs),
+            len(allowed),
+            market_ctx.degraded,
+        )
+        return briefs, {"by_asset_class": by_class}
     finally:
         # A cleanup failure here must not replace whatever the try block
         # already decided to return (a brief, or a skipped-with-reason
@@ -5262,7 +5442,9 @@ def _apply_paper_trading_failure(
         session.divergence_analysis = session.error
 
 
-def _fail_paper_trading_session(session_id: str, error: str, divergence_analysis: str = None) -> None:
+def _fail_paper_trading_session(
+    session_id: str, error: str, divergence_analysis: Optional[str] = None
+) -> None:
     """Mark a paper-trading session ``failed`` (best-effort, idempotent).
 
     Preconditions:

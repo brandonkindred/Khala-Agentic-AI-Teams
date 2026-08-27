@@ -68,7 +68,9 @@ def _spec() -> StrategySpec:
 
 def _spec_dict() -> Dict[str, Any]:
     return {
-        "asset_class": "stocks",
+        # No "asset_class": the design loop pins each attempt to one
+        # randomly-selected category and an omitted class inherits that
+        # pin, so this payload stays valid whichever category is drawn.
         "hypothesis": "RSI mean reversion on a small universe",
         "signal_definition": "RSI(14) crossings",
         "timeframe": "1d",
@@ -112,7 +114,7 @@ def test_readiness_validates_and_reports_ready(monkeypatch) -> None:
     monkeypatch.setattr(
         orch.spec_readiness_gate,
         "validate",
-        lambda spec, phase, backtest_config: calls.append(1) or [],
+        lambda spec, phase, backtest_config, pinned_asset_class=None: calls.append(1) or [],
     )
     gates: List[QualityGateResult] = []
 
@@ -138,7 +140,7 @@ def test_readiness_memoized_skips_revalidation(monkeypatch) -> None:
     monkeypatch.setattr(
         orch.spec_readiness_gate,
         "validate",
-        lambda spec, phase, backtest_config: calls.append(1) or [],
+        lambda spec, phase, backtest_config, pinned_asset_class=None: calls.append(1) or [],
     )
     spec = _spec()
     gates: List[QualityGateResult] = []
@@ -170,7 +172,7 @@ def test_readiness_revalidates_on_stale_signature(monkeypatch) -> None:
     monkeypatch.setattr(
         orch.spec_readiness_gate,
         "validate",
-        lambda spec, phase, backtest_config: calls.append(1) or [],
+        lambda spec, phase, backtest_config, pinned_asset_class=None: calls.append(1) or [],
     )
 
     orch._validate_and_memoize_readiness(
@@ -190,7 +192,7 @@ def test_readiness_reports_not_ready_on_critical(monkeypatch) -> None:
     monkeypatch.setattr(
         orch.spec_readiness_gate,
         "validate",
-        lambda spec, phase, backtest_config: [_critical()],
+        lambda spec, phase, backtest_config, pinned_asset_class=None: [_critical()],
     )
 
     _results, _signature, ready = orch._validate_and_memoize_readiness(
@@ -230,6 +232,8 @@ def test_revise_returns_rebuilt_spec_and_new_rationale(monkeypatch) -> None:
         strategy_id="rebuilt-id",
         mechanical_repair_count=0,
         drift_collector=None,
+        default_asset_class="stocks",
+        exclude_asset_classes=None,
     )
 
     assert rationale_out == "new rationale"
@@ -259,6 +263,8 @@ def test_revise_forwards_skip_self_review_to_design_agent(monkeypatch) -> None:
         strategy_id="rebuilt-id",
         mechanical_repair_count=0,
         drift_collector=None,
+        default_asset_class="stocks",
+        exclude_asset_classes=None,
     )
     assert captured_kwargs["skip_self_review"] is False
 
@@ -272,5 +278,7 @@ def test_revise_forwards_skip_self_review_to_design_agent(monkeypatch) -> None:
         mechanical_repair_count=0,
         drift_collector=None,
         skip_self_review=True,
+        default_asset_class="stocks",
+        exclude_asset_classes=None,
     )
     assert captured_kwargs["skip_self_review"] is True

@@ -32,7 +32,7 @@ Adding new symbols:
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Iterable, Optional
 
 # Yahoo Finance ticker mapping for crypto symbols (symbol → yfinance ticker)
 YAHOO_CRYPTO_TICKERS: dict[str, str] = {
@@ -133,6 +133,31 @@ COMMODITY_SYMBOLS: list[str] = ["GLD", "USO", "SLV", "DBA", "UNG", "PDBC", "DBC"
 # Broad ETFs used as a fallback
 OTHER_SYMBOLS: list[str] = ["GLD", "USO", "TLT", "QQQ", "IWM", "EEM", "GDX", "XLE", "XLF"]
 
+# ISO currency codes recognized by the bare-pair heuristic in classify_symbol,
+# for a currency pair outside FOREX_SYMBOLS/FOREX_SYMBOLS_BARE (e.g. "USDNOK").
+# Deliberately limited to codes that trade as forex majors/minors — a broader
+# set would start colliding with six-letter tickers from other asset classes.
+_FOREX_CURRENCY_CODES: frozenset[str] = frozenset(
+    {
+        "USD",
+        "EUR",
+        "GBP",
+        "JPY",
+        "AUD",
+        "CAD",
+        "NZD",
+        "CHF",
+        "NOK",
+        "SEK",
+        "DKK",
+        "MXN",
+        "ZAR",
+        "SGD",
+        "HKD",
+        "TRY",
+    }
+)
+
 
 def asset_class_default_universe(asset_class: object) -> list[str]:
     """Default symbol universe for an asset class.
@@ -179,7 +204,13 @@ def classify_symbol(symbol: str) -> Optional[str]:
     """Issue #523 — best-effort asset-class classification of a single ticker.
 
     Returns one of ``"stocks" | "crypto" | "forex" | "futures" | "commodities"``
-    when the symbol unambiguously belongs to that class, else ``None``.
+    when the symbol is in the matching curated list, or matches a suffix/
+    bare-pair heuristic for a symbol outside those lists, else ``None``. A
+    curated-list match is certain; a heuristic match is best-effort and can
+    in principle collide with an out-of-list ticker from another class (e.g.
+    a hypothetical six-letter stock ticker that happens to spell two
+    currency codes, caught by the bare-pair heuristic) — see the heuristic
+    block below.
 
     Used to detect ``target_symbols`` vs ``asset_class`` mismatches (e.g.
     a strategy with ``asset_class="stocks"`` requesting ``target_symbols=["BTC"]``)
@@ -194,6 +225,14 @@ def classify_symbol(symbol: str) -> Optional[str]:
 
     if sym in OTHER_SYMBOLS:
         return None
+    # A cross-asset ETF can also reach here in its crypto-quote-suffixed form
+    # (e.g. "GLD-USD") if a caller passes a raw, non-canonical ticker instead
+    # of the bare alias -- strip the same three quote suffixes the crypto
+    # heuristic below matches on and re-check OTHER_SYMBOLS before falling
+    # through to that heuristic, so the ETF exemption holds for both forms.
+    for _suffix in ("-USD", "-USDT", "-USDC"):
+        if sym.endswith(_suffix) and sym[: -len(_suffix)] in OTHER_SYMBOLS:
+            return None
 
     matched: list[str] = []
     if sym in STOCK_SYMBOLS:
@@ -217,9 +256,47 @@ def classify_symbol(symbol: str) -> Optional[str]:
         return "forex"
     if sym.endswith("=F"):
         return "futures"
-    if sym.endswith("-USD"):
+    # ``-USD`` is Yahoo's convention (see ``canonical_symbol``); ``-USDT``/
+    # ``-USDC`` are the other quote-currency suffixes that convention
+    # deliberately leaves unstripped, but they name crypto just as
+    # unambiguously — a target symbol like ``DOGE-USDT`` must not be treated
+    # as unclassified (and therefore silently allowed through an asset-class
+    # pin check) just because it isn't in ``CRYPTO_SYMBOLS`` or Yahoo-suffixed.
+    if sym.endswith(("-USD", "-USDT", "-USDC")):
         return "crypto"
+    # Bare currency pair outside the curated lists (e.g. "USDNOK"): six
+    # letters, both halves a recognized currency code, halves distinct.
+    if len(sym) == 6 and sym.isalpha():
+        base, quote = sym[:3], sym[3:]
+        if base != quote and base in _FOREX_CURRENCY_CODES and quote in _FOREX_CURRENCY_CODES:
+            return "forex"
     return None
+
+
+def find_offcategory_symbols(symbols: Iterable[str], pinned_asset_class: str) -> set[str]:
+    """The subset of ``symbols`` that :func:`classify_symbol` places in a different class.
+
+    Single source of truth for the asset-category pin's symbol check, shared
+    by the two places that independently need it from opposite ends: the
+    quality gate that flags a mismatch as a readiness critical
+    (``spec_readiness._check_asset_category_pin``) and the mechanical repair
+    step that strips a minority mismatch (``mechanical_repair.repair_spec``).
+    Keeping this predicate in one place means a future change to
+    classification (a new suffix heuristic, a new cross-asset-ETF exemption)
+    can never desynchronize what one flags from what the other strips.
+
+    Preconditions:
+      - ``symbols`` is an iterable of ticker strings.
+      - ``pinned_asset_class`` is a canonical asset-class label.
+
+    Postconditions:
+      - Returns the set of symbols whose :func:`classify_symbol` result is
+        not ``None`` and does not equal ``pinned_asset_class``. A symbol
+        ``classify_symbol`` cannot unambiguously classify (a cross-asset ETF
+        like ``GLD``/``QQQ``, or a genuinely unrecognized ticker) is never
+        included — it is treated as allowed, not as off-category.
+    """
+    return {sym for sym in symbols if (cls := classify_symbol(sym)) is not None and cls != pinned_asset_class}
 
 
 def canonical_symbol(symbol: str, asset_class: object) -> str:

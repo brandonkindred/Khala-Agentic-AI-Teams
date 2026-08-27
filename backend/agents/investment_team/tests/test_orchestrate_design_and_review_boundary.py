@@ -83,7 +83,7 @@ def test_orchestrate_design_and_review_raises_when_ready_flips_false() -> None:
         with pytest.raises(OrchestratorContractError, match="boundary invariant violated"):
             orch._orchestrate_design_and_review(
                 prior_records=[],
-                signal_brief=None,
+                signal_briefs=None,
                 directives=[],
                 exclude_asset_classes=None,
                 config=default_backtest_config(),

@@ -302,7 +302,11 @@ class StrategyIdeationAgent:
         """
         prior_results = prior_results or []
         prior_text = format_prior_results(prior_results)
-        mix_hint = asset_class_mix_hint(prior_results)
+        # Pass the exclusions through: without them the hint enumerates the
+        # full five-class menu and can actively nudge toward a class the
+        # HARD CONSTRAINT below forbids, handing the model a self-
+        # contradictory prompt.
+        mix_hint = asset_class_mix_hint(prior_results, exclude=exclude_asset_classes)
 
         if exclude_asset_classes:
             excluded = ", ".join(exclude_asset_classes)

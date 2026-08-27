@@ -3255,6 +3255,199 @@ def _make_finalize_test_record(
     )
 
 
+# ---------------------------------------------------------------------------
+# _finalize_strategy_lab_cycle_record: per-category signal-brief attribution
+#
+# ``signal_brief_storage`` covers every allowed asset category in the batch
+# (``{"by_asset_class": {<class>: <brief-dict>, ...}}``); a given record was
+# pinned to exactly one category, so only that category's entry belongs on
+# it. Regression tests: an earlier revision stored the whole multi-category
+# map verbatim on every record, which the strategy-card UI cannot render (it
+# expects one flat brief, one row per field) and which misattributed every
+# other category's brief to a record that was never about that category.
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_attaches_only_the_records_own_category_brief(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "_strategies", {})
+    monkeypatch.setattr(api_main, "_backtests", {})
+
+    record = _make_finalize_test_record("lab-brief-own-category")  # asset_class="equities"
+    storage = {
+        "by_asset_class": {
+            "stocks": {"brief_version": 1, "macro_themes": ["equities"]},
+            "crypto": {"brief_version": 1, "macro_themes": ["digital assets"]},
+        }
+    }
+
+    result = api_main._finalize_strategy_lab_cycle_record(record, signal_brief_storage=storage)
+
+    assert result.signal_intelligence_brief == storage["by_asset_class"]["stocks"]
+    assert "by_asset_class" not in result.signal_intelligence_brief
+
+
+def test_finalize_attaches_the_pinned_categorys_brief_on_a_short_circuited_off_pin_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-ready short-circuit (budget_exhausted/design_stalled/
+    design_not_ready) can persist a draft whose authored asset_class never
+    converged to the pin -- Rule 11 never validated it. Keying the brief
+    lookup off record.strategy.asset_class in that case would attach a
+    DIFFERENT category's brief than the one the design agent actually
+    received, misattributing the evidence shown on the strategy card.
+    loop_telemetry["asset_category"] (set on every _run_design_loop exit
+    path, ready or not) must win instead."""
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "_strategies", {})
+    monkeypatch.setattr(api_main, "_backtests", {})
+
+    strat = StrategySpec(
+        strategy_id="strat-off-pin-draft",
+        authored_by="x",
+        asset_class="crypto",  # never converged to the "stocks" pin
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    result_metrics = BacktestResult(
+        total_return_pct=0.0,
+        annualized_return_pct=0.0,
+        volatility_pct=0.0,
+        sharpe_ratio=0.0,
+        max_drawdown_pct=0.0,
+        win_rate_pct=0.0,
+        profit_factor=0.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id="bt-off-pin-draft",
+        strategy_id=strat.strategy_id,
+        strategy=strat,
+        config=BacktestConfig(start_date="2024-01-01", end_date="2024-02-01"),
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        status="failed: budget_exhausted",
+        result=result_metrics,
+        trades=[],
+    )
+    record = StrategyLabRecord(
+        lab_record_id="lab-off-pin-draft",
+        strategy=strat,
+        backtest=bt,
+        is_winning=False,
+        strategy_rationale="r",
+        analysis_narrative="budget exhausted",
+        created_at="2024-01-01T01:00:00Z",
+        loop_telemetry={"asset_category": "stocks"},
+    )
+    storage = {
+        "by_asset_class": {
+            "stocks": {"brief_version": 1, "macro_themes": ["equities"]},
+            "crypto": {"brief_version": 1, "macro_themes": ["digital assets"]},
+        }
+    }
+
+    out = api_main._finalize_strategy_lab_cycle_record(record, signal_brief_storage=storage)
+
+    assert out.signal_intelligence_brief == storage["by_asset_class"]["stocks"]
+
+
+def test_finalize_stores_degraded_skip_marker_as_is(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-per-category ``signal_brief_storage`` (the disabled/degraded skip
+    marker, which carries no ``by_asset_class`` key) is stored verbatim,
+    matching pre-per-category behavior."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "_strategies", {})
+    monkeypatch.setattr(api_main, "_backtests", {})
+
+    record = _make_finalize_test_record("lab-brief-skip-marker")
+    storage = {"skipped": True, "skipped_reason": "signal_expert_disabled"}
+
+    result = api_main._finalize_strategy_lab_cycle_record(record, signal_brief_storage=storage)
+
+    assert result.signal_intelligence_brief == storage
+
+
+def test_finalize_never_attaches_a_skip_marker_as_brief_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A per-category entry that is itself a ``{"skipped": True, ...}``
+    marker (no prior records, or that category's expert call failed) is not
+    brief content -- the strategy card renders whatever is stored here as
+    brief fields, so storing the marker verbatim would display
+    "skipped"/"skipped_reason"/"error" as if they were macro themes."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "_strategies", {})
+    monkeypatch.setattr(api_main, "_backtests", {})
+
+    record = _make_finalize_test_record("lab-brief-skip-marker-own-category")  # asset_class="equities"
+    storage = {
+        "by_asset_class": {"stocks": {"skipped": True, "skipped_reason": "no_prior_records"}}
+    }
+
+    result = api_main._finalize_strategy_lab_cycle_record(record, signal_brief_storage=storage)
+
+    assert result.signal_intelligence_brief is None
+
+
+def test_finalize_leaves_brief_unset_when_records_category_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the record's own category has no entry in the per-category map
+    (defensive — every allowed category should always be present), the
+    record's brief is left unset rather than populated with another
+    category's data."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "_strategies", {})
+    monkeypatch.setattr(api_main, "_backtests", {})
+
+    record = _make_finalize_test_record("lab-brief-missing-category")  # asset_class="equities"
+    storage = {"by_asset_class": {"crypto": {"brief_version": 1}}}
+
+    result = api_main._finalize_strategy_lab_cycle_record(record, signal_brief_storage=storage)
+
+    assert result.signal_intelligence_brief is None
+
+
+def test_finalize_does_not_overwrite_an_existing_brief(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "_strategies", {})
+    monkeypatch.setattr(api_main, "_backtests", {})
+
+    record = _make_finalize_test_record("lab-brief-preexisting")
+    record.signal_intelligence_brief = {"brief_version": 1, "macro_themes": ["already set"]}
+    storage = {"by_asset_class": {"stocks": {"brief_version": 1, "macro_themes": ["new"]}}}
+
+    result = api_main._finalize_strategy_lab_cycle_record(record, signal_brief_storage=storage)
+
+    assert result.signal_intelligence_brief == {"brief_version": 1, "macro_themes": ["already set"]}
+
+
 def test_finalize_strategy_lab_cycle_record_isolates_raising_on_phase_callback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

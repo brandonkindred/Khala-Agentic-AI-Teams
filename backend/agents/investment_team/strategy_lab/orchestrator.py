@@ -468,28 +468,19 @@ class StrategyLabOrchestrator(
         attempt, and a lazy ``getattr`` default handles any caller that
         invokes this before an attempt has run (e.g. a test exercising a
         round/proposal-evaluation helper directly).
-        Post: returns a list of ``QualityGateResult`` objects whose ``phase``
-        matches this call's ``phase`` regardless of which call originally
-        computed them, so verdicts and metadata are identical to always
-        calling ``anomaly_detector.check`` directly. When a cache hit's
-        cached ``phase`` already equals the requested ``phase``, the
-        returned list *is* the cached list — a zero-cost identity return
-        that shares object identity with ``self._last_anomaly_check`` and
-        with whatever was returned to the previous caller at that phase;
-        the caller's ``record_gates`` mutating it in place (stamping
-        ``refinement_round``, prefixing ``gate_name``) is exactly what this
-        same-phase path relies on being harmless, since same-phase repeat
-        calls are re-stamping the same logical gate result. Only a
-        phase-changing cache hit or a fresh ``anomaly_detector.check`` call
-        returns objects distinct from the cache.
+        Post: returns a list of ``QualityGateResult`` objects distinct from
+        (never a shared reference with) whatever is cached or was returned
+        to any earlier caller — safe for the caller's ``record_gates`` to
+        mutate in place (stamp ``refinement_round``, prefix ``gate_name``)
+        without corrupting the cache or any already-recorded result. The
+        returned gates' ``phase`` matches this call's ``phase`` regardless
+        of which call originally computed them, so verdicts and metadata
+        are identical to always calling ``anomaly_detector.check`` directly.
         """
         signature = hash_metrics_and_trades(metrics, trades)
         cached = getattr(self, "_last_anomaly_check", None)
         if cached is not None and cached[0] == signature:
-            cached_gates = cached[1]
-            if cached_gates and cached_gates[0].phase == phase:
-                return cached_gates
-            return [g.model_copy(update={"phase": phase}) for g in cached_gates]
+            return [g.model_copy(update={"phase": phase}) for g in cached[1]]
         results = self.anomaly_detector.check(
             metrics,
             trades,
@@ -500,13 +491,13 @@ class StrategyLabOrchestrator(
             market_data=market_data,
         )
         self._last_anomaly_check = (signature, [g.model_copy() for g in results])
-        return results
+        return [g.model_copy() for g in results]
 
     def run_cycle(
         self,
         prior_records: List[StrategyLabRecord],
         config: BacktestConfig,
-        signal_brief: Optional[SignalIntelligenceBriefV1] = None,
+        signal_briefs: Optional[Dict[str, SignalIntelligenceBriefV1]] = None,
         on_phase: Optional[PhaseCallback] = None,
         exclude_asset_classes: Optional[List[str]] = None,
     ) -> StrategyLabRecord:
@@ -536,6 +527,15 @@ class StrategyLabOrchestrator(
           - ``prior_records`` is the (possibly empty) sequence of previously
             persisted ``StrategyLabRecord`` rows.
           - ``config`` is a constructed :class:`BacktestConfig`.
+          - ``signal_briefs``, when given, maps canonical asset-class label
+            (e.g. ``"stocks"``, ``"crypto"``) to the
+            :class:`SignalIntelligenceBriefV1` computed from that category's
+            prior records only (see ``_compute_signal_brief_snapshot``). A
+            category with no prior records is simply absent from the map,
+            not present with an empty brief. ``None`` (the default) means no
+            precomputed briefs are available for this cycle; forwarded
+            verbatim to ``_run_design_attempt``, which selects the pinned
+            category's own entry per attempt.
 
         Postconditions:
           - Returns a :class:`StrategyLabRecord` with the final result.
@@ -606,7 +606,7 @@ class StrategyLabOrchestrator(
                     return self._run_design_attempt(
                         prior_records=prior_records,
                         config=config,
-                        signal_brief=signal_brief,
+                        signal_briefs=signal_briefs,
                         emit=emit,
                         exclude_asset_classes=exclude_asset_classes,
                         directives=directives,
