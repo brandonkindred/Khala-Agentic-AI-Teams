@@ -51,6 +51,12 @@ def render_dossier_for_prompt(dossier: ProspectDossier) -> str:
         for ev in _truncate(dossier.trigger_events):
             lines.append(f"- {ev}")
 
+    if dossier.decision_maker_signals:
+        lines.append("### Decision Maker Signals")
+        for sig in _truncate(dossier.decision_maker_signals):
+            evidence_suffix = f" ({sig.evidence_url})" if sig.evidence_url else ""
+            lines.append(f"- [{sig.strength}] {sig.signal}{evidence_suffix}")
+
     if dossier.publications:
         lines.append("### Publications")
         for p in _truncate(dossier.publications):

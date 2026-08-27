@@ -297,7 +297,9 @@ def test_proposal_task_template_matches_fstring() -> None:
 
 
 def test_closer_task_template_matches_fstring() -> None:
-    ctx = dict(prospect_json="P", proposal_json="Q", product_name="X", value_proposition="V")
+    ctx = dict(
+        prospect_json="P", proposal_json="Q", product_name="X", value_proposition="V", dossier_section=""
+    )
     formatted = CLOSER_TASK_TEMPLATE.format(**ctx)
     expected = (
         f"Develop a closing strategy for:\nProspect: {ctx['prospect_json']}\n"
