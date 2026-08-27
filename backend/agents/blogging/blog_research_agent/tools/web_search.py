@@ -71,10 +71,10 @@ class OllamaWebSearch:
         -------
         List of CandidateResult, length at most max_results.
         Raises LLMRateLimitError on a 429 response, LLMTemporaryError on a 5xx
-        response (both transient — for callers that funnel this through a
-        Temporal retry policy), or WebSearchError on any other API/network
-        failure (missing API key, other non-200 status, exhausted connection
-        retries).
+        response or exhausted connection retries (all transient — for callers that
+        funnel this through a Temporal retry policy), or WebSearchError on any
+        other API/network failure (missing API key, other non-200 status, a
+        non-retryable httpx error).
         """
         assert max_results >= 1, "max_results must be at least 1"
         limit = min(max_results, OLLAMA_WEB_SEARCH_MAX_RESULTS)
@@ -107,8 +107,12 @@ class OllamaWebSearch:
                     )
                     time.sleep(wait)
                 else:
-                    raise WebSearchError(
-                        f"HTTP error during Ollama web search after {WEB_SEARCH_MAX_RETRIES + 1} attempts: {exc}"
+                    # A connection outage that outlasts the local retry budget is just
+                    # as transient as a 5xx response (the two are indistinguishable to
+                    # the caller), so it gets the same LLMTemporaryError classification
+                    # rather than a terminal WebSearchError/ResearchError.
+                    raise LLMTemporaryError(
+                        f"Ollama web search connection error after {WEB_SEARCH_MAX_RETRIES + 1} attempts: {exc}"
                     ) from exc
             except httpx.HTTPError as exc:
                 raise WebSearchError(f"HTTP error during Ollama web search: {exc}") from exc

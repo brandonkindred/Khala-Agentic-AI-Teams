@@ -1152,6 +1152,38 @@ def test_web_search_http_error(monkeypatch) -> None:
         s.search(SearchQuery(query_text="hi", intent="discover"), max_results=3)
 
 
+def test_web_search_connection_error_exhausted_retries_raises_llm_temporary_error(
+    monkeypatch,
+) -> None:
+    """A connection outage that outlasts the local retry budget is just as transient
+    as a 5xx response, so it's classified as LLMTemporaryError (not WebSearchError)
+    too — for the same Temporal-retry reason as the 429/5xx classification above."""
+    import httpx
+    from agents.blogging.blog_research_agent.models import SearchQuery
+    from agents.blogging.blog_research_agent.tools import web_search
+
+    from llm_service.interface import LLMTemporaryError
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def post(self, *a, **kw):
+            raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(web_search.httpx, "Client", _Client)
+    monkeypatch.setattr(web_search.time, "sleep", lambda *_a, **_kw: None)
+    s = web_search.OllamaWebSearch(api_key="test-key-placeholder")
+    with pytest.raises(LLMTemporaryError):
+        s.search(SearchQuery(query_text="hi", intent="discover"), max_results=3)
+
+
 def test_web_search_non_200_status(monkeypatch) -> None:
     """A non-retryable status (e.g. 404) still raises the plain WebSearchError."""
     from agents.blogging.blog_research_agent.models import SearchQuery
