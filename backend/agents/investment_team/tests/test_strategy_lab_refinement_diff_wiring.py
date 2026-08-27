@@ -123,13 +123,19 @@ def test_round_over_round_state_diffs_against_immediately_prior_round() -> None:
     round1_code = _big_code()
     round2_code = round1_code.replace("line_10 = 10", "line_10 = 111")
     round3_code = round2_code.replace("line_70 = 70", "line_70 = 777")
-    agent = _CapturingRefinementAgent(scripted_codes=[round2_code, round3_code])
+    round4_code = round3_code.replace("line_20 = 20", "line_20 = 222")
+    agent = _CapturingRefinementAgent(scripted_codes=[round2_code, round3_code, round4_code])
 
     agent.run(spec=_spec(), code=round1_code, failure_phase="execution", failure_details="d1")
     agent.run(spec=_spec(), code=round2_code, failure_phase="execution", failure_details="d2")
+    agent.run(spec=_spec(), code=round3_code, failure_phase="execution", failure_details="d3")
 
-    assert agent._previous_round_code == round2_code
-    round2_prompt = agent.captured_prompts[1]
-    # Diffed against round1 -> round2, so the line_10 edit shows up.
-    assert "line_10" in round2_prompt
-    assert "111" in round2_prompt
+    assert agent._previous_round_code == round3_code
+    assert len(agent.captured_prompts) == 3
+    round3_prompt = agent.captured_prompts[2]
+    # Diffed against round2 -> round3, so the line_70 edit shows up.
+    assert "line_70" in round3_prompt
+    assert "777" in round3_prompt
+    # The older round1 -> round2 edit must not resurface.
+    assert "line_10" not in round3_prompt
+    assert "111" not in round3_prompt
