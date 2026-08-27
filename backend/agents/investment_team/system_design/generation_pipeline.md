@@ -422,9 +422,12 @@ attempt's outcome for later cycles rather than evaluating anything.
 `_assemble_record` builds the happy-path `StrategyLabRecord`;
 `_build_short_circuit_record` always builds the same empty-trades
 representation (it hardcodes `compute_metrics([], ...)` — it takes no
-`trades` parameter at all) for every short-circuit status (`design_stalled`,
-`spec_unimplementable` after all re-entries, and `budget_exhausted`). That
-last status is not limited to "never reached a full backtest": a budget trip
+`trades` parameter at all) for every short-circuit status: `design_not_ready`,
+`design_stalled`, and `budget_exhausted` (design-phase outcomes),
+`spec_validation` (pre-synthesis), `code_synthesis` (custom-code synthesis
+failure after design converged), and `spec_unimplementable` (after all
+re-entries). `budget_exhausted` is not limited to "never reached a full
+backtest": a budget trip
 inside `_orchestrate_refinement_and_alignment` (refinement or alignment) can
 fire *after* one or more real sandbox executions already produced real
 trades, and this builder still discards them in favor of the empty
