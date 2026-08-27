@@ -112,6 +112,25 @@ def _restore_research_state(work_dir: Optional[str], backup_dir: Optional[Path])
         logger.error("Failed to restore research state backup at %s: %s", backup_dir, exc)
 
 
+def _restore_job_record(update_blog_job: Any, job_id: str, original_job: Dict[str, Any]) -> None:
+    """Undo ``reset_blog_job``'s field changes after a downstream restart failure
+    (Temporal/thread-mode dispatch raising), restoring the job record to its
+    pre-restart snapshot rather than leaving it reset to "pending" with cleared
+    status/timestamps/results for a restart that never actually launched a
+    replacement run.
+
+    Preconditions:
+        - ``update_blog_job`` is the job-store update callable (``_main.update_blog_job``).
+        - ``original_job`` is the job dict captured before ``reset_blog_job`` ran.
+    Postconditions:
+        - Merges every field of ``original_job`` (except ``job_id``, which is
+          passed positionally) back onto the job record. Idempotent: safe to call
+          even when ``reset_blog_job`` itself never actually applied (restoring
+          already-original values is a no-op).
+    """
+    update_blog_job(job_id, **{k: v for k, v in original_job.items() if k != "job_id"})
+
+
 def _discard_research_state_backup(backup_dir: Optional[Path]) -> None:
     """Permanently delete a research-state backup once the restart it staged for
     has been dispatched successfully.
@@ -334,9 +353,10 @@ def restart_blog_job(job_id: str) -> StartPipelineResponse:
     # Stage (not delete) research state before resetting the job record: if this
     # fails, the job is left untouched (still in its prior terminal state) rather
     # than reset to "pending" with a restart that never actually happened. Staging
-    # rather than deleting outright means a failure further down (job-store reset,
-    # Temporal/thread-mode dispatch) can restore it instead of the old run's
-    # research state being lost for a restart that never actually happened either.
+    # rather than deleting outright, and snapshotting the pre-reset job record
+    # below, means a failure further down (job-store reset, Temporal/thread-mode
+    # dispatch) can restore both instead of either being lost for a restart that
+    # never actually launched a replacement run.
     work_dir = job.get("work_dir")
     try:
         backup_dir = _stage_research_state(work_dir)
@@ -370,6 +390,7 @@ def restart_blog_job(job_id: str) -> StartPipelineResponse:
         return StartPipelineResponse(job_id=job_id, message="Job restarted from scratch")
     except Exception:
         _restore_research_state(work_dir, backup_dir)
+        _restore_job_record(_main.update_blog_job, job_id, job)
         raise
 
 

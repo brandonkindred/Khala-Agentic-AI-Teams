@@ -277,6 +277,30 @@ def test_discard_research_state_backup_logs_instead_of_raising(monkeypatch, tmp_
     _discard_research_state_backup(backup_dir)  # must not raise
 
 
+def test_restore_job_record_helper(tmp_path: Path) -> None:
+    """_restore_job_record merges every field of the pre-reset snapshot back onto
+    the job record, excluding job_id (passed positionally, not as a kwarg)."""
+    from agents.blogging.api.routers.jobs import _restore_job_record
+
+    calls: list = []
+
+    def fake_update_blog_job(job_id, **kwargs):
+        calls.append((job_id, kwargs))
+
+    original_job = {
+        "job_id": "job-1",
+        "status": "completed",
+        "error": "prior failure",
+        "work_dir": str(tmp_path),
+    }
+
+    _restore_job_record(fake_update_blog_job, "job-1", original_job)
+
+    assert calls == [
+        ("job-1", {"status": "completed", "error": "prior failure", "work_dir": str(tmp_path)})
+    ]
+
+
 def test_restart_job_500_when_research_reset_fails(
     client: TestClient, monkeypatch, tmp_path: Path
 ) -> None:
@@ -350,8 +374,10 @@ def test_restart_job_restores_research_state_when_dispatch_fails(
     client: TestClient, monkeypatch, tmp_path: Path
 ) -> None:
     """If dispatching the replacement run fails (e.g. the thread-pool submit call
-    raises), the staged research state must be restored rather than lost for a
-    restart that never actually launched a replacement run."""
+    raises) after reset_blog_job() already reset the job to "pending", both the
+    staged research state and the job record must be restored — otherwise the job
+    is left "pending" with its prior status/error/results cleared even though no
+    replacement run was ever actually launched."""
     from agents.blogging.shared import blog_job_store as bjs
 
     work_dir = tmp_path / "job-work-dir"
@@ -364,6 +390,7 @@ def test_restart_job_restores_research_state_when_dispatch_fails(
     bjs.update_blog_job(
         job_id,
         status="completed",
+        error="a prior failure message",
         request_payload={"brief": "x"},
         work_dir=str(work_dir),
     )
@@ -377,6 +404,9 @@ def test_restart_job_restores_research_state_when_dispatch_fails(
 
     assert cache_dir.exists()
     assert packet_path.read_text(encoding="utf-8") == "# stale research"
+    job = bjs.get_blog_job(job_id)
+    assert job["status"] == "completed"
+    assert job["error"] == "a prior failure message"
 
 
 def test_restart_job_400_when_payload_invalid_leaves_state_untouched(
