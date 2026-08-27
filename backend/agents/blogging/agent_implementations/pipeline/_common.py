@@ -367,8 +367,14 @@ def run_planning(
             # here wrapped. Re-raise the unwrapped cause so Temporal recognizes it
             # as transient instead of failing the job on a terminal ResearchError.
             raise cause
-        if _is_external_cancellation(e):
-            raise
+        if _is_external_cancellation(cause):
+            # Mirrors the unwrap above: a Temporal cancellation raised inside the
+            # Strands event loop reaches here as EventLoopException(CancelledError),
+            # so _is_external_cancellation must see the unwrapped cause (its
+            # __cause__/__context__ walk can't reach into original_exception) — and
+            # must re-raise that cause, not the EventLoopException wrapper, so the
+            # job is recorded as cancelled rather than as a research failure.
+            raise cause
         raise ResearchError(f"Research failed: {e}", cause=e) from e
 
     _report_research(

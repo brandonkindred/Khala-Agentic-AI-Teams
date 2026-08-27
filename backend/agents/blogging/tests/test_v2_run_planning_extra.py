@@ -456,6 +456,76 @@ def test_run_planning_research_reraises_blogging_error(monkeypatch) -> None:
     assert exc.value is cause
 
 
+def test_run_planning_research_reraises_cancelled_error(monkeypatch) -> None:
+    """A CancelledError raised directly by ResearchAgent.run() (a Temporal runtime
+    cancellation, not a job_updater failure) propagates unwrapped rather than being
+    turned into a terminal ResearchError."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from temporalio.exceptions import CancelledError
+
+    cause = CancelledError("job cancelled")
+
+    class _FailingResearchAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def run(self, _brief):
+            raise cause
+
+    monkeypatch.setattr(v2, "ResearchAgent", _FailingResearchAgent)
+
+    with pytest.raises(CancelledError) as exc:
+        v2.run_planning(
+            ResearchBriefInput(brief="b", max_results=5),
+            work_dir=None,
+            llm_client=object(),
+            length_policy=None,
+            series_context=None,
+            job_updater=None,
+        )
+    assert exc.value is cause
+
+
+def test_run_planning_research_unwraps_strands_cancelled_error(monkeypatch) -> None:
+    """A Temporal cancellation that Strands wraps in EventLoopException (as a live
+    ResearchAgent._call_json() call would raise it) must still be recognized as a
+    cancellation and re-raised unwrapped, not turned into a terminal ResearchError.
+
+    _is_external_cancellation walks __cause__/__context__, which can't see into
+    EventLoopException.original_exception, so the research except-block must test
+    the *unwrapped* cause for cancellation (mirroring the transient-LLM-error unwrap
+    a few lines above it) and re-raise that cause, not the wrapper.
+    """
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from strands.types.exceptions import EventLoopException
+    from temporalio.exceptions import CancelledError
+
+    cause = CancelledError("job cancelled")
+    wrapped = EventLoopException(cause)
+
+    class _FailingResearchAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def run(self, _brief):
+            raise wrapped
+
+    monkeypatch.setattr(v2, "ResearchAgent", _FailingResearchAgent)
+
+    with pytest.raises(CancelledError) as exc:
+        v2.run_planning(
+            ResearchBriefInput(brief="b", max_results=5),
+            work_dir=None,
+            llm_client=object(),
+            length_policy=None,
+            series_context=None,
+            job_updater=None,
+        )
+    assert exc.value is cause
+
+
 def test_run_planning_research_agent_gets_no_cache_without_work_dir(monkeypatch) -> None:
     """When work_dir is None there's nothing to checkpoint against, so ResearchAgent
     is constructed with cache=None rather than falling back to a shared/default dir."""
