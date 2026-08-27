@@ -110,7 +110,22 @@ class SalesPipelineConfig(BaseModel):
         default=1,
         ge=0,
         le=5,
-        description="Max refinement attempts per prospect when a critic returns FAIL.",
+        description=(
+            "Max critic review passes per critic-gated stage (outreach, proposal) "
+            "when a critic returns FAIL (bounds review passes, not regenerate "
+            "calls — the final review-budget pass is always spent re-reviewing "
+            "the current draft rather than emitting an unchecked regeneration). "
+            "0 disables the critic entirely for that stage (the initial draft is "
+            "returned as-is; no review or regenerate). Otherwise, each stage "
+            "does 1 generate, up to max_refinements review passes, and up to "
+            "max(0, max_refinements - 1) regenerates; a prospect through both "
+            "outreach and proposal pays this twice, once per stage. This bounds "
+            "pipeline operations, not raw LLM provider calls: a review pass "
+            "issues a reasoning call plus a formatting call, and both "
+            "generation and critic formatting retry on validation failure "
+            "(see complete_validated's correction_attempts), so actual "
+            "provider-call volume runs higher."
+        ),
     )
 
 
