@@ -488,10 +488,12 @@ temporarily unavailable"` instead of crashing the app — so the rest of the
 team's endpoints remain usable even when `llm_service` is not configured.
 
 **Stage 1 — conversation** (`assistant/agent.py:respond()`) calls the
-conversation agent with `output_mode="text"` so it never emits JSON on the
-wire, then runs `_strip_accidental_json` as a defensive guard against a
-regressed LLM leaking raw mission JSON to the user; a guard hit or a raised
-exception both fall back to a canned prose reply instead of propagating.
+conversation agent with `output_mode="text"` so the adapter never forces a
+JSON response format on the wire — this is a request-shaping choice, not a
+guarantee the model won't emit JSON anyway. `_strip_accidental_json` is the
+actual defensive guard against a regressed LLM leaking raw mission JSON to
+the user; a guard hit or a raised exception both fall back to a canned
+prose reply instead of propagating.
 
 **Stage 2 — extraction** (`assistant/agent.py:respond()`) calls the
 extraction agent, built with `structured_output=MissionUpdate` — the
