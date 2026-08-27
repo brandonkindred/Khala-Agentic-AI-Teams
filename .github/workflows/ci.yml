@@ -1100,6 +1100,16 @@ jobs:
           pytest investment_team/tests/test_strategy_lab_temporal_cancellation.py \
             -v --tb=short -m integration
 
+      # StrategyLabCycleWorkflow's determinism-replay guard -- same reasoning
+      # as the cancellation step above (real embedded Temporal test server,
+      # ephemeral-binary-only, so it belongs here rather than the Postgres
+      # integration job).
+      - if: matrix.source == 'investment_team'
+        name: Strategy Lab Temporal workflow replay (integration)
+        run: |
+          pytest investment_team/tests/test_strategy_lab_temporal_workflow_replay.py \
+            -v --tb=short -m integration
+
       # Ship the union coverage data (team + shared_*) to combine-shared-infra.
       # if: always() so a failed own-gate still preserves the artifact; the mv
       # above guarantees the file exists whenever pytest itself passed.

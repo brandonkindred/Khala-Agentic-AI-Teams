@@ -199,6 +199,7 @@ async def _run_cycle_workflow_and_replay(*, design_attempt_outcomes, config_over
         TASK_QUEUE,
         StrategyLabCycleWorkflow,
     )
+    from shared.temporal.worker import _build_workflow_runner
 
     fake_activities = _make_fake_activities(
         design_attempt_outcomes=design_attempt_outcomes, config_overrides=config_overrides
@@ -224,6 +225,12 @@ async def _run_cycle_workflow_and_replay(*, design_attempt_outcomes, config_over
                 workflows=[StrategyLabCycleWorkflow],
                 activities=fake_activities,
                 activity_executor=activity_executor,
+                # See test_strategy_lab_temporal_cancellation.py's identical
+                # worker construction for why this is required: without it,
+                # validating StrategyLabCycleWorkflow re-imports
+                # investment_team's numpy/pandas transitive chain inside the
+                # sandbox's isolated namespace, crashing numpy's C extension.
+                workflow_runner=_build_workflow_runner(),
             )
             async with worker:
                 handle = await env.client.start_workflow(
@@ -235,7 +242,12 @@ async def _run_cycle_workflow_and_replay(*, design_attempt_outcomes, config_over
                 result = await handle.result()
                 history = await handle.fetch_history()
 
-    await Replayer(workflows=[StrategyLabCycleWorkflow]).replay_workflow(history)
+    # Same passthrough runner as the Worker above -- Replayer re-validates the
+    # workflow by re-registering it, hitting the identical numpy/pandas
+    # re-import crash without it.
+    await Replayer(
+        workflows=[StrategyLabCycleWorkflow], workflow_runner=_build_workflow_runner()
+    ).replay_workflow(history)
     return result
 
 
