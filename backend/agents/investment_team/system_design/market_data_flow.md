@@ -627,7 +627,7 @@ from the *current* bar; the close is never used as a decision-time fill price:
 | **MARKET** | always | `bar.open` | `compute_fill_terms` `:241` |
 | **LIMIT** | long: `bar.low <= limit`; short: `bar.high >= limit` | `req.limit_price` exactly (the realistic model drops the legacy `min(bar.open, limit)` "free alpha") | `_limit_reference_price` `:290` |
 | **STOP** | long: `bar.high >= stop`; short: `bar.low <= stop` | long `max(bar.open, stop)`, short `min(bar.open, stop)` — gap-through honoured | `_stop_reference_price` `:305` |
-| **STOP_LIMIT** | two-stage: the stop must trigger, then the limit must be satisfiable on that bar | trigger-then-limit geometry; returns `None` (no fill) when a gap-through takes price past the limit | `stop_limit_reference_price` `:85` |
+| **STOP_LIMIT** | two-stage: the stop must trigger (arming a cross-bar latch on that bar), then the limit must be satisfiable — same bar, or any later bar once armed | trigger-then-limit geometry; `stop_limit_reference_price` alone returns `None` (no fill) on a same-bar gap-through past the limit, but `FillSimulator` then sets `stop_limit_armed`, after which the order rests as a plain limit and keeps re-trying every later bar without needing the stop re-crossed — so the gap-through non-fill isn't terminal | `stop_limit_reference_price` `execution_model.py:85`; latch `fill_simulator.py:266-303` |
 
 **Step 2 — participation cap** (`_raw_participation` `:323`,
 `_qty_fraction_from_participation` `:344`). A single bar can't absorb an
