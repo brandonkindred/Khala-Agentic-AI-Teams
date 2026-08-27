@@ -58,12 +58,16 @@ briefed vs. exploratory vs. chat-first) can all reach a consistent
   Swapping stores does not change the API contract.
 - **Graceful LLM fallback.** The conversational assistant's two stages
   (conversation + silent `structured_output=MissionUpdate` extraction, see
-  `system_design.md`'s LLM integration section) lazy-initialize via
-  `graphs/shared.py:build_agent()` and fail independently — either stage
-  raising falls back to a hard-coded reply and default suggested questions,
-  or a `degraded=True` extraction result, instead of surfacing an exception
-  (`assistant/agent.py:respond()`). The FastAPI app also mounts even when
-  `llm_service` is unavailable (`api/main.py:72-83`).
+  `system_design.md`'s LLM integration section) are each built via
+  `graphs/shared.py:build_agent()` as soon as `BrandingAssistantAgent.__init__`
+  runs — construction itself isn't lazy, only the FastAPI wrapper around it
+  is (`_get_assistant_agent()` defers constructing the assistant until the
+  first conversation request). The two stages fail independently at
+  runtime: either stage raising falls back to a hard-coded reply and
+  default suggested questions, or a `degraded=True` extraction result,
+  instead of surfacing an exception (`assistant/agent.py:respond()`). The
+  FastAPI app also mounts even when `llm_service` is unavailable
+  (`api/main.py:72-83`).
 
 ## Component diagram
 
