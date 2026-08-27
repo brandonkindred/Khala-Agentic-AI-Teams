@@ -346,17 +346,20 @@ def run_planning_stage(
 
                 # Persist updated artifacts (including a refreshed allowed_claims.json,
                 # via the same helper run_planning uses — see its docstring).
+                content_plan_markdown = None
                 if work_dir is not None:
-                    _persist_content_plan_artifacts(
+                    content_plan_markdown = _persist_content_plan_artifacts(
                         work_dir, plan, llm_client=llm_client, topic=brief.brief
                     )
+                if content_plan_markdown is None:
+                    content_plan_markdown = content_plan_to_markdown_doc(plan)
 
                 # Present revised outline for another round
                 _update(
                     BlogPhase.PLANNING,
                     sub_progress=0.8,
                     status_text="Waiting for approval of revised outline...",
-                    content_plan_detail=content_plan_to_markdown_doc(plan),
+                    content_plan_detail=content_plan_markdown,
                 )
                 request_draft_feedback(
                     job_id,

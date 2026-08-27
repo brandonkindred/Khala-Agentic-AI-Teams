@@ -243,6 +243,7 @@ def _persist_content_plan_artifacts(
     *,
     llm_client: Any,
     topic: str,
+    content_plan_markdown: Optional[str] = None,
 ) -> str:
     """Persist content-plan artifacts and a freshly extracted allowed_claims.json.
 
@@ -265,10 +266,16 @@ def _persist_content_plan_artifacts(
             pipeline actually passes in production, e.g. via
             ``get_strands_model``) — either is accepted.
         topic: Topic/brief text recorded on the persisted ``AllowedClaims``.
+        content_plan_markdown: Pre-computed ``content_plan_to_markdown_doc(plan)``
+            text, when a caller already needed it for something else (e.g. a
+            progress update fired before this call) and wants to avoid
+            recomputing it here. Computed from ``plan`` when omitted.
 
     Preconditions:
         - ``work_dir`` is not None. ``plan`` is a valid ``ContentPlan``.
-          ``llm_client`` is resolved (non-None).
+          ``llm_client`` is resolved (non-None). ``content_plan_markdown``,
+          when given, is ``content_plan_to_markdown_doc(plan)`` for this same
+          ``plan``.
     Postconditions:
         - Writes ``content_plan.json``, ``content_plan.md``, ``outline.md``,
           ``content_brief.md``, and ``allowed_claims.json`` to ``work_dir``.
@@ -283,7 +290,8 @@ def _persist_content_plan_artifacts(
         extract_allowed_claims,
     )
 
-    content_plan_markdown = content_plan_to_markdown_doc(plan)
+    if content_plan_markdown is None:
+        content_plan_markdown = content_plan_to_markdown_doc(plan)
     write_artifact(work_dir, "content_plan.json", plan.model_dump(mode="json"))
     write_artifact(work_dir, "content_plan.md", content_plan_markdown)
     write_artifact(work_dir, "outline.md", content_plan_to_outline_markdown(plan))
@@ -425,6 +433,7 @@ def run_planning(
         len(plan.title_candidates),
         plan_brief_md,
     )
+    content_plan_markdown = content_plan_to_markdown_doc(plan)
     _update(
         BlogPhase.PLANNING,
         sub_progress=1.0,
@@ -435,11 +444,19 @@ def run_planning(
         planning_iterations_used=planning_phase_result.planning_iterations_used,
         parse_retry_count=planning_phase_result.parse_retry_count,
         planning_wall_ms_total=planning_phase_result.planning_wall_ms_total,
-        content_plan_detail=content_plan_to_markdown_doc(plan),
+        content_plan_detail=content_plan_markdown,
     )
 
     if work_dir is not None:
-        _persist_content_plan_artifacts(work_dir, plan, llm_client=llm_client, topic=brief.brief)
+        # Reuse the markdown already computed above for the progress update, rather
+        # than have _persist_content_plan_artifacts recompute the identical text.
+        _persist_content_plan_artifacts(
+            work_dir,
+            plan,
+            llm_client=llm_client,
+            topic=brief.brief,
+            content_plan_markdown=content_plan_markdown,
+        )
         # Persist the critic's final verdict under a stable filename for easy inspection;
         # per-iteration reports (plan_critic_report_v{N}.json) remain in work_dir too.
         if planning_phase_result.plan_critic_report is not None:
