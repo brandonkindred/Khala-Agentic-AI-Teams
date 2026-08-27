@@ -969,6 +969,7 @@ class CloserRequest(BaseModel):
     proposal: SalesProposalBody
     product_name: str
     value_proposition: str
+    dossier: Optional[ProspectDossier] = None
 
 
 # ---------------------------------------------------------------------------
