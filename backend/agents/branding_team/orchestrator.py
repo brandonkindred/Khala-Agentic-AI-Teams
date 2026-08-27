@@ -383,7 +383,13 @@ class _PhaseSpec(NamedTuple):
             visual-preference input, and dropping them would silently stop
             grounding the moodboard/color/typography agents in a user's actual
             palette/style selections — a functional regression, not just a
-            cache-scope one). CHANNEL_ACTIVATION additionally includes
+            cache-scope one) and ``existing_brand_material`` too — it can hold
+            visual asset references (e.g. an existing logo file), and
+            ``StrategicCoreOutput`` (Phase 3's only upstream field-carrying
+            context for it) has no field that carries the original materials
+            forward, so Phase 3's moodboard/logo agents would otherwise have
+            no way to see or build on a supplied visual asset.
+            CHANNEL_ACTIVATION additionally includes
             ``company_name`` too, for the same reason as NARRATIVE_MESSAGING:
             none of its upstream output models (``StrategicCoreOutput``,
             ``NarrativeMessagingOutput``, ``VisualIdentityOutput``) echo the
@@ -447,6 +453,7 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
                 "visual_style",
                 "typography_preference",
                 "interface_density",
+                "existing_brand_material",
             }
         ),
     ),

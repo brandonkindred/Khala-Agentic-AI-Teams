@@ -383,7 +383,7 @@ these tables is treated as safe to ship, particularly for phases where an
 agent's only mission reference is the generic, unqualified phrase "the
 branding mission."
 
-### Post-review addendum: five allowlists widened beyond this document's tables
+### Post-review addendum: six allowlists widened beyond this document's tables
 
 Code review on the implementation PR flagged conclusions in this
 document's tables as carrying a real correctness risk this document's
@@ -447,6 +447,18 @@ widened accordingly rather than following the tables above verbatim:
   catch. Absent the empirical validation this document already
   recommends before narrowing further, the safer default is to keep
   grounding Phase 3 in the user's actual color/typography selections.
+- **VISUAL_IDENTITY now also includes `existing_brand_material`.** Same
+  generalization as STRATEGIC_CORE's `existing_brand_material` entry
+  above, applied to the phase whose subject matter it most directly
+  concerns: the field can hold visual asset references (the test fixtures
+  use values like `"logo.svg"`), and `StrategicCoreOutput` — Phase 3's
+  only upstream field-carrying context for it — has no field that carries
+  the original materials forward, only an audit summary. Without it here,
+  the moodboard/logo/color/typography agents have no way to see or build
+  on a supplied visual asset, and (per the same warm-run risk as every
+  other entry in this addendum) a material update can reuse a Phase 3
+  cache entry computed before the update if the upstream audit output
+  happens not to change either.
 - **CHANNEL_ACTIVATION now also includes `company_name`.** Same
   generalization as NARRATIVE_MESSAGING above, applied one phase further
   downstream: none of CHANNEL_ACTIVATION's upstream output models
