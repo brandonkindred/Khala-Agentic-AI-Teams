@@ -104,6 +104,26 @@ def test_render_allowed_claims_section_populated() -> None:
     assert "[CLAIM:id]" in section
     assert "- [c1] 80% of teams ship weekly." in section
     assert "- [c2] The median deploy takes 4 minutes." in section
+    # Preservation guidance for rewrite/self-review contexts lives inside this
+    # same block (not layered on by a separate caller-side wrapper), so it
+    # never contradicts the restrictive no-claims block's "no tags at all".
+    assert "preserve any existing" in section
+
+
+def test_render_allowed_claims_section_restrictive_and_populated_do_not_conflict() -> None:
+    """The restrictive (no-claims) and populated blocks give non-contradictory
+    instructions when naively concatenated by a caller — regression test for a
+    prior bug where a caller-added "preserve all tags" wrapper contradicted the
+    restrictive block's "no [CLAIM:id] tag should appear anywhere"."""
+    from agents.blogging.blog_writer_agent.agent import (
+        _NO_ALLOWED_CLAIMS_SECTION,
+        _render_allowed_claims_section,
+    )
+
+    restrictive = _render_allowed_claims_section({"claims": []})
+    assert restrictive == _NO_ALLOWED_CLAIMS_SECTION
+    assert "No [CLAIM:id] tag should appear" in restrictive
+    assert "preserve" not in restrictive.lower()
 
 
 def test_render_allowed_claims_section_skips_malformed_entries() -> None:

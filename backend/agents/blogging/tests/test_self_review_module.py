@@ -100,8 +100,11 @@ def test_fix_deterministic_violations_no_marker_keeps_original() -> None:
     assert sr.fix_deterministic_violations("orig", ["v"], call_text) == "orig"
 
 
-def test_fix_deterministic_violations_includes_claims_preservation_note() -> None:
-    """A non-empty allowed_claims_section is embedded with a preservation instruction."""
+def test_fix_deterministic_violations_embeds_claims_section_verbatim() -> None:
+    """A non-empty allowed_claims_section is embedded as-is, with no added wrapper
+    text (the section itself carries whatever claims policy applies — see
+    agent._render_allowed_claims_section — so this function must not layer a
+    blanket instruction on top that could contradict it)."""
     captured = {"prompt": ""}
 
     def call_text(prompt: str, system_prompt: str = "") -> str:
@@ -110,12 +113,11 @@ def test_fix_deterministic_violations_includes_claims_preservation_note() -> Non
 
     claims_section = "---\nALLOWED CLAIMS...\n---\n- [c1] Some claim."
     sr.fix_deterministic_violations("orig", ["v"], call_text, claims_section)
-    assert "PRESERVE ALL [CLAIM:id] TAGS" in captured["prompt"]
     assert claims_section in captured["prompt"]
 
 
-def test_fix_deterministic_violations_omits_claims_note_when_absent() -> None:
-    """An empty allowed_claims_section (the default) adds no preservation note."""
+def test_fix_deterministic_violations_omits_claims_block_when_absent() -> None:
+    """An empty allowed_claims_section (the default) adds no claims block at all."""
     captured = {"prompt": ""}
 
     def call_text(prompt: str, system_prompt: str = "") -> str:
@@ -123,7 +125,7 @@ def test_fix_deterministic_violations_omits_claims_note_when_absent() -> None:
         return '{"draft": 0}\n---DRAFT---\n# Fixed\nText.'
 
     sr.fix_deterministic_violations("orig", ["v"], call_text)
-    assert "PRESERVE ALL [CLAIM:id] TAGS" not in captured["prompt"]
+    assert "ALLOWED CLAIMS" not in captured["prompt"]
 
 
 def test_fix_deterministic_violations_soft_fails_permanent_error(caplog) -> None:
@@ -218,9 +220,9 @@ def test_llm_self_review_with_issues_applies_fix() -> None:
     assert state["i"] == 2
 
 
-def test_llm_self_review_fix_prompt_includes_claims_preservation_note() -> None:
+def test_llm_self_review_fix_prompt_embeds_claims_section_verbatim() -> None:
     """When issues are found and allowed_claims_section is set, the fix prompt
-    embeds a preservation instruction and the claims section itself."""
+    embeds the claims section as-is, with no added wrapper text."""
     state = {"i": 0}
     prompts: list[str] = []
 
@@ -234,7 +236,6 @@ def test_llm_self_review_fix_prompt_includes_claims_preservation_note() -> None:
     claims_section = "---\nALLOWED CLAIMS...\n---\n- [c1] Some claim."
     sr.llm_self_review("draft text", call_text, claims_section)
     fix_prompt = prompts[1]
-    assert "PRESERVE ALL [CLAIM:id] TAGS" in fix_prompt
     assert claims_section in fix_prompt
 
 

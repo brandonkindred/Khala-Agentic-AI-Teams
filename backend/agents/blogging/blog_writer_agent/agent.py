@@ -214,8 +214,10 @@ def _render_allowed_claims_section(allowed_claims: Optional[dict]) -> str:
           supportable) must not be treated the same as "no artifact was checked",
           since the latter silently permits unsupported factual claims.
         - Otherwise returns a ``---``-delimited prompt block listing every claim as
-          ``- [id] text``, instructing the model to tag claims with the given IDs
-          and to invent none.
+          ``- [id] text``, instructing the model to tag claims with the given IDs,
+          to invent none, and (self-contained, so any rewrite/revision caller that
+          embeds this block verbatim gets consistent guidance without adding its
+          own wrapper text) to preserve existing ``[CLAIM:id]`` tags when revising.
     """
     if not isinstance(allowed_claims, dict):
         return ""
@@ -233,7 +235,9 @@ def _render_allowed_claims_section(allowed_claims: Optional[dict]) -> str:
         "---\n"
         "ALLOWED CLAIMS (tag every factual/statistical claim with [CLAIM:id] using "
         "only an ID from this list; never invent an ID; if no claim here supports an "
-        "assertion, rephrase or omit it):\n"
+        "assertion, rephrase or omit it; when revising, preserve any existing "
+        "[CLAIM:id] tags exactly — do not remove, renumber, or reassign them "
+        "unless the claim they support is removed from the draft):\n"
         "---\n" + "\n".join(lines)
     )
 

@@ -360,14 +360,6 @@ def deterministic_self_check(draft: str) -> list[str]:
     return violations
 
 
-_CLAIMS_PRESERVATION_NOTE = (
-    "\n\n---\nPRESERVE ALL [CLAIM:id] TAGS exactly as they appear in the draft above — do "
-    "not remove, renumber, or reassign any of them. If this fix requires adding a new "
-    "factual or statistical claim, tag it with an ID from the allowed-claims list below "
-    "(never invent one); if no listed claim supports it, rephrase or omit it instead.\n"
-)
-
-
 def fix_deterministic_violations(
     draft: str,
     violations: list[str],
@@ -383,12 +375,16 @@ def fix_deterministic_violations(
           callback (e.g. ``BlogWriterAgent._call_text``).
         - ``allowed_claims_section`` is the caller's already-rendered allowed-claims
           prompt block (e.g. via ``agent._render_allowed_claims_section``), or ``""``
-          when no allowed-claims artifact was supplied.
+          when no allowed-claims artifact was supplied. This function embeds it
+          verbatim (no added wrapper text) so the block's own self-contained
+          guidance — tag-and-preserve when claims are listed, no tags at all when
+          the artifact is present but empty — is never contradicted by a blanket
+          "preserve everything" instruction layered on top.
     Postconditions:
         - On success with extractable fixed draft, returns that stripped draft.
-        - When ``allowed_claims_section`` is non-empty, the fix prompt instructs the
-          model to preserve existing ``[CLAIM:id]`` tags and includes the section, so
-          this mechanical rewrite pass cannot silently drop or corrupt claim tagging.
+        - When ``allowed_claims_section`` is non-empty, the fix prompt includes it,
+          so this mechanical rewrite pass is bound by whatever claims policy the
+          section states (cannot silently drop, corrupt, or invent claim tagging).
         - On soft-fail (``LLMError`` excluding types re-raised below, or
           ``json.JSONDecodeError`` / ``TypeError`` / ``ValueError`` / ``AttributeError``),
           logs with traceback via ``logger.exception`` and returns the original ``draft``.
@@ -397,9 +393,7 @@ def fix_deterministic_violations(
         - Unexpected exceptions propagate unchanged.
     """
     checklist = "\n".join(f"- {v}" for v in violations)
-    claims_block = (
-        _CLAIMS_PRESERVATION_NOTE + allowed_claims_section if allowed_claims_section else ""
-    )
+    claims_block = f"\n\n{allowed_claims_section}\n" if allowed_claims_section else ""
     prompt = (
         "Fix ONLY these specific issues in the draft below. Do not change anything else.\n\n"
         f"ISSUES TO FIX:\n{checklist}\n\n"
@@ -441,13 +435,15 @@ def llm_self_review(
           callback (e.g. ``BlogWriterAgent._call_text``).
         - ``allowed_claims_section`` is the caller's already-rendered allowed-claims
           prompt block (e.g. via ``agent._render_allowed_claims_section``), or ``""``
-          when no allowed-claims artifact was supplied.
+          when no allowed-claims artifact was supplied. Embedded verbatim (no added
+          wrapper text) so its own self-contained guidance is never contradicted by
+          a blanket "preserve everything" instruction layered on top.
     Postconditions:
         - On success, returns the reviewed/fixed draft or the original when no issues.
         - When issues are found and ``allowed_claims_section`` is non-empty, the fix
-          prompt instructs the model to preserve existing ``[CLAIM:id]`` tags and
-          includes the section, so this rewrite pass cannot silently drop or corrupt
-          claim tagging.
+          prompt includes it, so this rewrite pass is bound by whatever claims
+          policy the section states (cannot silently drop, corrupt, or invent claim
+          tagging).
         - Three ways the response can resolve to "issues": (1) it parses to a
           JSON list, used directly; (2) it parses to a genuine top-level JSON
           object (the model's real "no issues" response), which returns the
@@ -510,9 +506,7 @@ def llm_self_review(
             fix = iss.get("fix", "")
             issue_lines.append(f"{i}. [{loc}] {desc}\n   Fix: {fix}")
 
-        claims_block = (
-            _CLAIMS_PRESERVATION_NOTE + allowed_claims_section if allowed_claims_section else ""
-        )
+        claims_block = f"\n\n{allowed_claims_section}\n" if allowed_claims_section else ""
         fix_prompt = (
             "Fix ONLY these issues found during self-review. Do not change anything else.\n\n"
             "ISSUES:\n" + "\n\n".join(issue_lines) + "\n\n"
