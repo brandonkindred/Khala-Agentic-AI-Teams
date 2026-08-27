@@ -177,11 +177,13 @@ class RefinementAgent:
         The "## Current Code" prompt section sends ``code`` in full on the
         first call on this instance (no previous round to diff against).
         On later calls, it sends a compact unified diff against the ``code``
-        argument of this instance's previous ``run()`` call when
-        ``diff_or_full`` finds one smaller than the full text; otherwise it
-        falls back to the full ``code``. Either way, this method's
-        inputs/outputs are unchanged — the LLM is still asked for, and this
-        method still returns, the complete fixed code.
+        argument of this instance's last *successful* ``run()`` call —
+        whichever of the diff or the full code renders shorter — falling
+        back to the full ``code`` otherwise. State only advances past a
+        successful call, so a failed call never corrupts the next round's
+        diff base. Either way, this method's inputs/outputs are unchanged —
+        the LLM is still asked for, and this method still returns, the
+        complete fixed code.
 
         Raises:
             :class:`~._llm_budget.DesignBudgetExhausted`: If the active per-cycle design
@@ -210,8 +212,19 @@ class RefinementAgent:
         prior_text = render_prior_attempts(prior_attempts)
 
         diffed = diff_or_full(self._previous_round_code, code)
-        code_section = _render_code_section(code, diffed, is_diff=diffed != code)
-        self._previous_round_code = code
+        # Render both candidate sections and keep whichever is actually
+        # shorter, rather than trusting diff_or_full's raw-length decision
+        # alone: for small files, the diff-section preamble and ```diff```
+        # fence can push a "smaller than the raw code" diff past the size
+        # of just sending the full file once rendered. When there's no
+        # previous round (or a near-total rewrite), diff_section degenerates
+        # to the full code wrapped in a diff fence plus the preamble, which
+        # is always longer than full_section — so full_section always wins
+        # there, keeping round 1 byte-identical to the pre-diff-wiring
+        # rendering.
+        diff_section = _render_code_section(code, diffed, is_diff=True)
+        full_section = _render_code_section(code, diffed, is_diff=False)
+        code_section = diff_section if len(diff_section) < len(full_section) else full_section
 
         user_prompt = _REFINEMENT_USER_TEMPLATE.format(
             failure_phase=failure_phase,
@@ -225,6 +238,14 @@ class RefinementAgent:
         )
 
         parsed = self._invoke_and_parse(system_prompt, user_prompt, failure_phase)
+        # Advance the round-over-round diff state only after a successful
+        # invocation: if the call above raises and the caller retries with
+        # unchanged code (see orchestrator._refine's fallback), the next
+        # round must still diff against the last *successful* round's code,
+        # not against `code` itself — diffing code against itself produces
+        # a no-op diff that would strip the actual code content from that
+        # retry's prompt.
+        self._previous_round_code = code
 
         updated_code = parsed.pop("strategy_code", code)
 

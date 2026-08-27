@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+import pytest
+
 from investment_team.models import RiskLimits, StrategySpec
 from investment_team.strategy_lab.agents import refinement as mod
 from investment_team.strategy_lab.agents.refinement import RefinementAgent
@@ -53,7 +55,30 @@ class _CapturingRefinementAgent(RefinementAgent):
         return {"strategy_code": code, "changes_made": f"round {idx + 1} fix"}
 
 
+class _RaisingOnceRefinementAgent(RefinementAgent):
+    """Raises on its first call, then succeeds — simulates a transient LLM failure."""
+
+    def __init__(self, code_after_success: str) -> None:
+        super().__init__()
+        self.captured_prompts: List[str] = []
+        self._code_after_success = code_after_success
+        self._raise_next = True
+
+    def _invoke_and_parse(
+        self, system_prompt: str, user_prompt: str, failure_phase: str
+    ) -> Dict[str, Any]:
+        self.captured_prompts.append(user_prompt)
+        if self._raise_next:
+            self._raise_next = False
+            raise ValueError("simulated transient failure")
+        return {"strategy_code": self._code_after_success, "changes_made": "fixed"}
+
+
 def _big_code(n_lines: int = 80) -> str:
+    return "\n".join(f"line_{i} = {i}" for i in range(n_lines)) + "\n"
+
+
+def _small_code(n_lines: int = 20) -> str:
     return "\n".join(f"line_{i} = {i}" for i in range(n_lines)) + "\n"
 
 
@@ -139,3 +164,61 @@ def test_round_over_round_state_diffs_against_immediately_prior_round() -> None:
     # The older round1 -> round2 edit must not resurface.
     assert "line_10" not in round3_prompt
     assert "111" not in round3_prompt
+
+
+def test_failed_invocation_does_not_advance_diff_state() -> None:
+    """A failed run() call must not corrupt the next round's diff base.
+
+    If the diff state advanced unconditionally (before the LLM call), a
+    caller retrying with the same code after a transient failure (as
+    ``StrategyLabOrchestrator._refine`` does) would cause the retry to diff
+    that code against itself — a no-op diff that strips the actual code
+    content from the one prompt that most needs it intact.
+    """
+    original = _big_code()
+    fixed = original.replace("line_40 = 40", "line_40 = 999")
+    agent = _RaisingOnceRefinementAgent(code_after_success=fixed)
+
+    with pytest.raises(ValueError):
+        agent.run(spec=_spec(), code=original, failure_phase="execution", failure_details="boom")
+
+    assert agent._previous_round_code is None
+
+    # Mirrors the orchestrator's fallback: retry with the SAME code.
+    agent.run(spec=_spec(), code=original, failure_phase="execution", failure_details="boom retry")
+
+    assert len(agent.captured_prompts) == 2
+    retry_prompt = agent.captured_prompts[1]
+    assert f"```python\n{original}\n```" in retry_prompt
+    assert "unified diff against the previous round" not in retry_prompt
+
+
+def test_small_edit_uses_full_code_when_diff_would_render_larger() -> None:
+    """A small file's rendered diff can exceed the rendered full file's size.
+
+    ``diff_or_full`` alone compares raw diff/code lengths, but the actual
+    prompt section adds a preamble and fence to the diff only — for a small
+    file with a single-line edit, that overhead can flip which is smaller.
+    ``run()`` must compare the rendered sections, not trust the raw
+    comparison.
+    """
+    round1_code = _small_code()
+    round2_code = round1_code.replace("line_10 = 10", "line_10 = 999")
+    round3_code = round2_code.replace("line_15 = 15", "line_15 = 888")
+    agent = _CapturingRefinementAgent(scripted_codes=[round2_code, round3_code])
+
+    agent.run(spec=_spec(), code=round1_code, failure_phase="execution", failure_details="d1")
+    agent.run(spec=_spec(), code=round2_code, failure_phase="execution", failure_details="d2")
+
+    round2_prompt = agent.captured_prompts[1]
+
+    # Sanity: at the raw-text level, diff_or_full alone would pick the diff
+    # for this file size (it's smaller than the raw code)...
+    diffed = mod.diff_or_full(round1_code, round2_code)
+    assert diffed != round2_code
+    assert len(diffed) < len(round2_code)
+
+    # ...but run() must still render the full file, since the rendered diff
+    # section (preamble + fences) is larger than the rendered full section.
+    assert f"```python\n{round2_code}\n```" in round2_prompt
+    assert "unified diff against the previous round" not in round2_prompt
