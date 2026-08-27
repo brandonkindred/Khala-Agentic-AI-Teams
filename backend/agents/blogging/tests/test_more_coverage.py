@@ -216,6 +216,42 @@ def test_run_validators_from_work_dir_fallback_draft(tmp_path: Path) -> None:
     assert out is not None
 
 
+def test_run_validators_from_work_dir_explicit_allowed_claims_skips_artifact_read(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When allowed_claims is passed explicitly (including None), work_dir's
+    allowed_claims.json is not read at all -- so a caller that already applied
+    a topic-match guard (e.g. shared.artifacts.load_allowed_claims_for_brief)
+    can't have its decision second-guessed by an independent re-read here."""
+    import agents.blogging.validators.runner as runner
+
+    (tmp_path / "final.md").write_text("# Draft\nBody.")
+    (tmp_path / "brand_spec_prompt.md").write_text("Brand spec")
+    (tmp_path / "allowed_claims.json").write_text('{"claims": [{"id": "c1", "text": "X"}]}')
+
+    calls = []
+    original_read_artifact = runner.read_artifact
+
+    def spy_read_artifact(work_dir, name, **kw):
+        calls.append(name)
+        return original_read_artifact(work_dir, name, **kw)
+
+    monkeypatch.setattr(runner, "read_artifact", spy_read_artifact)
+
+    runner.run_validators_from_work_dir(
+        tmp_path, allowed_claims={"claims": [{"id": "override", "text": "Y"}]}
+    )
+    assert "allowed_claims.json" not in calls
+
+    calls.clear()
+    runner.run_validators_from_work_dir(tmp_path, allowed_claims=None)
+    assert "allowed_claims.json" not in calls
+
+    calls.clear()
+    runner.run_validators_from_work_dir(tmp_path)
+    assert "allowed_claims.json" in calls
+
+
 def test_run_validators_from_work_dir_missing_brand_spec(tmp_path: Path, monkeypatch) -> None:
     """When neither work_dir nor default brand_spec_prompt.md exist, raise."""
     from agents.blogging.validators.runner import run_validators_from_work_dir

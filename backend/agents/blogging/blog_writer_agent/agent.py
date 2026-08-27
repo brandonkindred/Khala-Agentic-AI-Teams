@@ -188,7 +188,7 @@ def _extract_json_array_from_text(
 _NO_ALLOWED_CLAIMS_SECTION = (
     "---\n"
     "ALLOWED CLAIMS: none available. An allowed-claims list was supplied but contains "
-    "no usable claims. Do not make any factual or statistical claims in this draft — "
+    "no usable claims. Do not make any factual or statistical claims in this draft; "
     "rephrase to avoid them or omit them entirely. No [CLAIM:id] tag should appear "
     "anywhere, since no ID is available to use."
 )
@@ -235,7 +235,7 @@ def _render_allowed_claims_section(allowed_claims: Optional[dict]) -> str:
         "ALLOWED CLAIMS (tag every factual/statistical claim with [CLAIM:id] using "
         "only an ID from this list; never invent an ID; if no claim here supports an "
         "assertion, rephrase or omit it; when revising, preserve any existing "
-        "[CLAIM:id] tags exactly — do not remove, renumber, or reassign them "
+        "[CLAIM:id] tags exactly; do not remove, renumber, or reassign them "
         "unless the claim they support is removed from the draft):\n"
         "---\n" + "\n".join(lines)
     )
@@ -750,7 +750,7 @@ class BlogWriterAgent(_BlogAgentBase):
         if claims_section == _NO_ALLOWED_CLAIMS_SECTION:
             numeric_requirement = (
                 "no specific numbers, dollar figures, percentages, or durations (the "
-                "ALLOWED CLAIMS section above forbids factual/statistical claims — do "
+                "ALLOWED CLAIMS section above forbids factual/statistical claims; do "
                 "not invent any to satisfy this); "
             )
         else:

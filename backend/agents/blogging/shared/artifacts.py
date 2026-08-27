@@ -44,7 +44,12 @@ ARTIFACT_PRODUCER: dict[str, dict[str, str]] = {
     "content_plan.json": {"producer_phase": "planning", "producer_agent": "BlogPlanningAgent"},
     "content_plan.md": {"producer_phase": "planning", "producer_agent": "BlogPlanningAgent"},
     "research_packet.md": {"producer_phase": "research", "producer_agent": "BlogResearchAgent"},
-    "allowed_claims.json": {"producer_phase": "research", "producer_agent": "BlogResearchAgent"},
+    "allowed_claims.json": {
+        "producer_phase": "external",
+        "producer_agent": "External input (BlogResearchAgent can build one via "
+        "extract_allowed_claims(), but is currently standalone and not invoked "
+        "by run_pipeline)",
+    },
     "outline.md": {"producer_phase": "planning", "producer_agent": "BlogPlanningAgent"},
     "draft_v1.md": {"producer_phase": "draft_initial", "producer_agent": "BlogWriterAgent"},
     "draft_v2.md": {"producer_phase": "copy_edit", "producer_agent": "BlogCopyEditorAgent"},

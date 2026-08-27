@@ -238,8 +238,14 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
 
             # Deterministic validators run first (non-LLM, and the compliance gate
             # consumes their report). Their failures map to FactCheckError as before.
+            # Pass the already topic-matched allowed_claims through explicitly so
+            # validators' claims-policy check agrees with the fact-check gate above
+            # instead of independently re-reading (and possibly disagreeing with)
+            # work_dir/allowed_claims.json.
             try:
-                validator_report = run_validators_from_work_dir(work_dir)
+                validator_report = run_validators_from_work_dir(
+                    work_dir, allowed_claims=allowed_claims
+                )
             except BloggingError:
                 raise
             except CancelledError:

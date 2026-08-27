@@ -75,7 +75,7 @@ def _common_v2_setup(monkeypatch, validator_status: str = "PASS"):
     monkeypatch.setattr(
         v2,
         "run_validators_from_work_dir",
-        lambda wd: _ValidatorStub(status=validator_status),
+        lambda wd, **kw: _ValidatorStub(status=validator_status),
     )
     return v2
 
@@ -131,7 +131,7 @@ def test_run_pipeline_with_gates_pass_after_one_rewrite(monkeypatch, tmp_path: P
     # Validator: FAIL first, PASS second
     state = {"i": 0}
 
-    def validator_factory(wd):
+    def validator_factory(wd, **kw):
         state["i"] += 1
         return _ValidatorStub(status="PASS" if state["i"] >= 2 else "FAIL")
 

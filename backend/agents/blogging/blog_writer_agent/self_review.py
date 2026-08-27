@@ -382,9 +382,10 @@ def fix_deterministic_violations(
           "preserve everything" instruction layered on top.
     Postconditions:
         - On success with extractable fixed draft, returns that stripped draft.
-        - When ``allowed_claims_section`` is non-empty, the fix prompt includes it,
-          so this mechanical rewrite pass is bound by whatever claims policy the
-          section states (cannot silently drop, corrupt, or invent claim tagging).
+        - When ``allowed_claims_section`` is non-empty, the fix prompt includes it
+          verbatim, instructing the model to follow the claims policy it describes
+          (this is a prompt instruction, not an enforced guarantee: the function
+          does not validate or otherwise check that the model's rewrite obeys it).
         - On soft-fail (``LLMError`` excluding types re-raised below, or
           ``json.JSONDecodeError`` / ``TypeError`` / ``ValueError`` / ``AttributeError``),
           logs with traceback via ``logger.exception`` and returns the original ``draft``.
@@ -441,9 +442,10 @@ def llm_self_review(
     Postconditions:
         - On success, returns the reviewed/fixed draft or the original when no issues.
         - When issues are found and ``allowed_claims_section`` is non-empty, the fix
-          prompt includes it, so this rewrite pass is bound by whatever claims
-          policy the section states (cannot silently drop, corrupt, or invent claim
-          tagging).
+          prompt includes it verbatim, instructing the model to follow the claims
+          policy it describes (a prompt instruction, not an enforced guarantee:
+          the function does not validate or otherwise check that the model's
+          rewrite obeys it).
         - Three ways the response can resolve to "issues": (1) it parses to a
           JSON list, used directly; (2) it parses to a genuine top-level JSON
           object (the model's real "no issues" response), which returns the

@@ -114,6 +114,19 @@ def test_render_allowed_claims_section_populated() -> None:
     assert "preserve any existing" in section
 
 
+def test_render_allowed_claims_section_never_uses_em_or_en_dash() -> None:
+    """The writer's own prompt tells the model "no em dashes or en dashes" --
+    this section (both the populated and restrictive renderings) must not use
+    the very characters it later forbids the model from using."""
+    from agents.blogging.blog_writer_agent.agent import _render_allowed_claims_section
+
+    populated = _render_allowed_claims_section(SAMPLE_ALLOWED_CLAIMS)
+    restrictive = _render_allowed_claims_section({"claims": []})
+    for section in (populated, restrictive):
+        assert "—" not in section  # em dash
+        assert "–" not in section  # en dash
+
+
 def test_render_allowed_claims_section_restrictive_and_populated_do_not_conflict() -> None:
     """The restrictive (no-claims) and populated blocks give non-contradictory
     instructions when naively concatenated by a caller — regression test for a
@@ -616,7 +629,7 @@ def test_gates_stage_threads_allowed_claims_into_fact_check(monkeypatch, tmp_pat
         def model_dump(self):
             return {"status": "PASS", "checks": []}
 
-    monkeypatch.setattr(v2, "run_validators_from_work_dir", lambda wd: _ValidatorStub())
+    monkeypatch.setattr(v2, "run_validators_from_work_dir", lambda wd, **kw: _ValidatorStub())
     monkeypatch.setattr(
         v2,
         "BlogComplianceAgent",
