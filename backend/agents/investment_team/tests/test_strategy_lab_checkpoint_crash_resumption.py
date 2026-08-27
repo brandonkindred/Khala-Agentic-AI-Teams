@@ -48,13 +48,13 @@ second time).
 from __future__ import annotations
 
 import concurrent.futures
-import contextlib
 from typing import Any, Dict
 from unittest import mock
 
 import pytest
 
 from investment_team.strategy_lab.temporal import activities as act
+from shared.temporal.testing import workflow_environment as _workflow_environment
 
 # ---------------------------------------------------------------------------
 # Shared fixture builders
@@ -315,30 +315,6 @@ def test_run_design_attempt_activity_resumes_after_crash_does_not_double_charge_
 # ---------------------------------------------------------------------------
 # Integration: real Temporal retry redispatches after a simulated crash
 # ---------------------------------------------------------------------------
-
-
-@contextlib.asynccontextmanager
-async def _workflow_environment():
-    """Start a time-skipping ``WorkflowEnvironment`` with no worker attached.
-
-    Duplicated from ``test_strategy_lab_temporal_cancellation.py``'s helper of
-    the same name (this repo's Temporal tests each build their own small
-    local harness rather than sharing one across test modules).
-
-    Postconditions:
-        Yields a started ``WorkflowEnvironment``. Skips the test (rather than
-        failing) when the ephemeral Temporal test-server binary cannot be
-        downloaded (offline CI). The environment is shut down on exit.
-    """
-    from temporalio.testing import WorkflowEnvironment
-
-    try:
-        test_env = await WorkflowEnvironment.start_time_skipping()
-    except RuntimeError as exc:
-        pytest.skip(f"Temporal ephemeral test server unavailable (no egress?): {exc}")
-
-    async with test_env as env:
-        yield env
 
 
 @pytest.mark.integration

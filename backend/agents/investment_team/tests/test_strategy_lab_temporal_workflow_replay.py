@@ -25,7 +25,6 @@ during replay.
 
 from __future__ import annotations
 
-import contextlib
 from typing import Any, Dict
 
 import pytest
@@ -42,39 +41,7 @@ from investment_team.tests.strategy_lab_temporal_fixtures import (
 from investment_team.tests.strategy_lab_temporal_fixtures import (
     reentry_outcome as _reentry_outcome,
 )
-
-
-@contextlib.asynccontextmanager
-async def _workflow_environment():
-    """Start a time-skipping ``WorkflowEnvironment`` with no worker attached.
-
-    Duplicated from ``test_coding_team_temporal_workflow.py``'s helper of the
-    same name rather than imported from a shared module: this repo's
-    Temporal tests each build their own small local harness rather than
-    sharing one across test modules (see
-    ``test_strategy_lab_temporal_cancellation.py`` and
-    ``test_strategy_lab_checkpoint_crash_resumption.py``, the two other
-    ``investment_team`` test files with an identical local copy of this same
-    helper -- the latter's docstring states the convention explicitly).
-
-    Preconditions:
-        - Caller is an async test that will drive the yielded ``env`` and any
-          workers itself.
-    Postconditions:
-        - Yields a started ``WorkflowEnvironment``. Skips the test (rather
-          than failing) when the ephemeral Temporal test-server binary
-          cannot be downloaded — same egress caveat as every other copy of
-          this helper. The environment is shut down on exit.
-    """
-    from temporalio.testing import WorkflowEnvironment
-
-    try:
-        test_env = await WorkflowEnvironment.start_time_skipping()
-    except RuntimeError as exc:
-        pytest.skip(f"Temporal ephemeral test server unavailable (no egress?): {exc}")
-
-    async with test_env as env:
-        yield env
+from shared.temporal.testing import workflow_environment as _workflow_environment
 
 
 def _make_fake_activities(
