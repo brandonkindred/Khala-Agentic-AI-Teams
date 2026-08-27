@@ -501,6 +501,31 @@ def _now() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
+def _load_or_404(store: dict, key: str, detail: str, *, missing_if_falsy: bool = True) -> Any:
+    """Look up ``key`` in ``store`` (under ``_lock``), raising 404 if absent.
+
+    Preconditions:
+        ``store`` is one of this module's in-memory dicts guarded by
+        ``_lock``; ``detail`` is the exact client-facing message to use if
+        the key is missing.
+    Postconditions:
+        Returns the stored value when ``key`` is present. Raises
+        ``HTTPException(404, detail=detail)`` verbatim when absent. By
+        default "absent" matches each original call site's falsy check
+        (``missing_if_falsy=True``), so an empty/corrupt persisted record
+        (e.g. ``{}``) 404s rather than being treated as loaded; pass
+        ``missing_if_falsy=False`` for a call site whose original guard
+        was ``is None`` (allowing a falsy-but-present record through to
+        its own downstream error handling instead).
+    """
+    with _lock:
+        value = store.get(key)
+    missing = value is None if not missing_if_falsy else not value
+    if missing:
+        raise HTTPException(status_code=404, detail=detail)
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Strategy Lab run tracking models
 # ---------------------------------------------------------------------------
@@ -1132,11 +1157,7 @@ def create_proposal(request: CreateProposalRequest) -> CreateProposalResponse:
         - ``HTTPException(502)`` if the advisory workflow returns a result
           that is not a dict, or whose ``proposal`` value is not a dict.
     """
-    with _lock:
-        ips = _profiles.get(request.user_id)
-
-    if not ips:
-        raise HTTPException(status_code=404, detail=f"No IPS found for user {request.user_id}")
+    _load_or_404(_profiles, request.user_id, f"No IPS found for user {request.user_id}")
 
     proposal_id = f"prop-{uuid.uuid4().hex[:8]}"
     result = _execute_advisory(
@@ -1192,14 +1213,8 @@ def validate_proposal(
           that is not a dict, whose ``valid`` value is not a bool, or whose
           ``violations`` value is not a list.
     """
-    with _lock:
-        proposal = _proposals.get(proposal_id)
-        ips = _profiles.get(request.user_id)
-
-    if not proposal:
-        raise HTTPException(status_code=404, detail=f"Proposal {proposal_id} not found")
-    if not ips:
-        raise HTTPException(status_code=404, detail=f"No IPS found for user {request.user_id}")
+    _load_or_404(_proposals, proposal_id, f"Proposal {proposal_id} not found")
+    _load_or_404(_profiles, request.user_id, f"No IPS found for user {request.user_id}")
 
     result = _execute_advisory(
         "validate_proposal",
@@ -1296,11 +1311,7 @@ def validate_strategy(
           ``failures``, or whose ``validation``/``passed``/``failures``
           values are not a dict/bool/list respectively.
     """
-    with _lock:
-        strategy = _strategies.get(strategy_id)
-
-    if not strategy:
-        raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
+    _load_or_404(_strategies, strategy_id, f"Strategy {strategy_id} not found")
 
     result = _execute_advisory(
         "validate_strategy",
@@ -1696,19 +1707,17 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
         - ``HTTPException(500)`` if ``decision`` fails ``PromotionDecision``
           validation.
     """
-    with _lock:
-        strategy = _strategies.get(request.strategy_id)
-        validation = _validations.get(request.strategy_id)
-        ips = _profiles.get(request.user_id)
+    _load_or_404(_strategies, request.strategy_id, f"Strategy {request.strategy_id} not found")
 
-    if not strategy:
-        raise HTTPException(status_code=404, detail=f"Strategy {request.strategy_id} not found")
+    with _lock:
+        validation = _validations.get(request.strategy_id)
+
     if not validation:
         raise HTTPException(
             status_code=400, detail=f"Strategy {request.strategy_id} has no validation report"
         )
-    if not ips:
-        raise HTTPException(status_code=404, detail=f"No IPS found for user {request.user_id}")
+
+    _load_or_404(_profiles, request.user_id, f"No IPS found for user {request.user_id}")
 
     result = _execute_advisory(
         "promotion_decision",
@@ -5799,13 +5808,12 @@ def get_paper_trading_session(session_id: str) -> PaperTradingResponse:
         validation exception as an unhandled 500 with no useful client-facing
         detail.
     """
-    with _lock:
-        raw = _paper_trading_sessions.get(session_id)
-
-    if raw is None:
-        raise HTTPException(
-            status_code=404, detail=f"Paper trading session '{session_id}' not found."
-        )
+    raw = _load_or_404(
+        _paper_trading_sessions,
+        session_id,
+        f"Paper trading session '{session_id}' not found.",
+        missing_if_falsy=False,
+    )
 
     try:
         session = PaperTradingSession.parse_persisted(raw)
