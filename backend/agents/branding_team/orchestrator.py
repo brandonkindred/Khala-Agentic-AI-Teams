@@ -377,7 +377,12 @@ class _PhaseSpec(NamedTuple):
             upstream context, has no field that echoes the raw company name
             back, so without this a rename can both go unnoticed by Phase 2's
             cache key and leave its narrative/tagline agents with no company
-            identity in their prompt at all). VISUAL_IDENTITY additionally
+            identity in their prompt at all) and ``existing_brand_material``
+            too — it can hold existing copy (e.g. a current tagline or pasted
+            campaign text), and ``StrategicCoreOutput`` only carries a
+            synthesized audit, not the original materials, so Phase 2's
+            storyteller/tagline agents would otherwise have no way to inspect
+            or preserve supplied language. VISUAL_IDENTITY additionally
             includes its six visual-identity-only fields (no Phase 3 prompt
             cites them by name, but they are the mission's only user-supplied
             visual-preference input, and dropping them would silently stop
@@ -435,7 +440,7 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
             _merge_named_fragments, node_merge=_PHASE2_NODE_MERGE, require_all=True
         ),
         context_phases=(BrandPhase.STRATEGIC_CORE,),
-        mission_fields=frozenset({"company_name", "desired_voice"}),
+        mission_fields=frozenset({"company_name", "desired_voice", "existing_brand_material"}),
     ),
     BrandPhase.VISUAL_IDENTITY: _PhaseSpec(
         build_phase3_graph,

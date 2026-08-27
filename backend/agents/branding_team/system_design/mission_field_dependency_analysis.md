@@ -383,7 +383,7 @@ these tables is treated as safe to ship, particularly for phases where an
 agent's only mission reference is the generic, unqualified phrase "the
 branding mission."
 
-### Post-review addendum: six allowlists widened beyond this document's tables
+### Post-review addendum: seven allowlists widened beyond this document's tables
 
 Code review on the implementation PR flagged conclusions in this
 document's tables as carrying a real correctness risk this document's
@@ -432,6 +432,14 @@ widened accordingly rather than following the tables above verbatim:
   substitutes for that field reaching the downstream phase — only a field
   actually present in a phase's own mission-field allowlist, or echoed by
   name in an upstream output model, is guaranteed to reach it.
+- **NARRATIVE_MESSAGING now also includes `existing_brand_material`.** Same
+  generalization as STRATEGIC_CORE's and VISUAL_IDENTITY's
+  `existing_brand_material` entries, applied to Phase 2: the field can hold
+  existing copy (a current tagline, pasted campaign text), and
+  `StrategicCoreOutput` only carries a synthesized audit, not the original
+  materials, so `Storyteller`/`TaglineWriter` would otherwise have no way
+  to inspect or preserve supplied language, and a material edit that
+  doesn't change the audit output could reuse a stale Phase 2 cache entry.
 - **VISUAL_IDENTITY now also includes all six visual-identity-only
   fields** (`color_inspiration`, `color_palettes`,
   `selected_palette_index`, `visual_style`, `typography_preference`,
