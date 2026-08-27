@@ -605,3 +605,36 @@ def test_default_fencing_generation_matches_run_state():
     from investment_team.strategy_lab import run_state
 
     assert wf._DEFAULT_FENCING_GENERATION == run_state.DEFAULT_FENCING_GENERATION
+
+
+def test_signal_brief_activity_timeout_scales_with_configured_llm_timeout():
+    """The signal-brief activity's start_to_close deadline must grow with an
+    operator's LLM_TIMEOUT override, not stay pinned to a fixed constant --
+    otherwise a large override could make five serial per-category calls
+    exceed a fixed ceiling even though each stays within its own deadline,
+    forcing Temporal to retry the whole activity and repeat paid LLM calls."""
+    from datetime import timedelta
+
+    default_timeout = wf._signal_brief_activity_timeout(3600.0, None)
+    doubled_timeout = wf._signal_brief_activity_timeout(7200.0, None)
+    assert doubled_timeout == default_timeout * 2
+
+    # An excluded category shrinks the allowed count, so the deadline shrinks too.
+    stocks_only = wf._signal_brief_activity_timeout(
+        3600.0, ["crypto", "forex", "futures", "commodities"]
+    )
+    assert stocks_only == timedelta(seconds=1 * 3600.0 * wf._SIGNAL_BRIEF_TIMEOUT_SAFETY_FACTOR)
+    assert stocks_only < default_timeout
+
+
+def test_signal_brief_activity_timeout_never_degenerates_to_a_non_positive_deadline():
+    """An all-excluded (or malformed, over-long) exclude list must still clamp
+    to at least one allowed category rather than yielding a zero/negative
+    start_to_close_timeout, which Temporal would reject outright."""
+    from datetime import timedelta
+
+    result = wf._signal_brief_activity_timeout(
+        3600.0, ["stocks", "crypto", "forex", "futures", "commodities"]
+    )
+    assert result == timedelta(seconds=1 * 3600.0 * wf._SIGNAL_BRIEF_TIMEOUT_SAFETY_FACTOR)
+    assert result > timedelta(0)

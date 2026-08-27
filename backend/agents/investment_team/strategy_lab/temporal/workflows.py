@@ -66,6 +66,11 @@ from investment_team.strategy_lab.temporal.dto import (
 # temporalio sandbox's restricted re-import of this workflow module. This
 # fallback is used only if the config activity somehow omits the value.
 _MAX_DESIGN_REENTRIES_FALLBACK = 2
+# Mirrors llm_service.config.resolve_timeout's own default (3600s / 60min).
+# Used only as a wf_config.get(...) fallback for a workflow history replayed
+# from before resolve_workflow_config_activity started returning
+# "llm_timeout_s" — a fresh dispatch always gets the actually-resolved value.
+_DEFAULT_LLM_TIMEOUT_S_FALLBACK = 3600.0
 
 # Mirrors ``strategy_lab.run_state.DEFAULT_FENCING_GENERATION`` -- duplicated
 # rather than imported for the same reason as ``_MAX_DESIGN_REENTRIES_FALLBACK``
@@ -92,17 +97,55 @@ _ACTIVITY_TIMEOUT = timedelta(minutes=10)
 # needs a far wider ceiling than a single LLM/gate/persist activity.
 _DESIGN_ATTEMPT_TIMEOUT = timedelta(hours=2)
 # compute_signal_brief_activity runs one LLM call per allowed asset category
-# with a prior record, serially (up to 5 -- see PROMPT_ASSET_CLASSES), each
-# individually bounded by the configured LLM timeout (default 60 minutes,
-# llm_service.config.resolve_timeout). Their aggregate duration has no fixed
-# ceiling -- a start_to_close_timeout sized for "typical" per-call latency
-# can still be blown by two categories both running long, without needing
-# the full 5x60min extreme. Rather than guess another constant, the activity
-# now heartbeats (activities.py's BackgroundHeartbeat, see
+# with a prior record, serially (up to _SIGNAL_BRIEF_CATEGORY_COUNT -- see
+# PROMPT_ASSET_CLASSES), each individually bounded by the configured LLM
+# timeout (llm_service.config.resolve_timeout, operator-overridable via
+# LLM_TIMEOUT with no fixed upper bound). Their aggregate duration therefore
+# has no fixed ceiling either -- a start_to_close_timeout sized as a bare
+# constant (e.g. for the *default* 60-minute per-call timeout) could still be
+# blown by an operator raising LLM_TIMEOUT, retrying the whole activity
+# (repeating already-completed paid calls) before failing again. The activity
+# heartbeats (activities.py's BackgroundHeartbeat, see
 # _SIGNAL_BRIEF_HEARTBEAT_INTERVAL_S there) so a stalled call is caught by
-# the heartbeat deadline below quickly, and start_to_close only needs to
-# bound the true worst case generously rather than tightly.
-_SIGNAL_BRIEF_ACTIVITY_TIMEOUT = timedelta(hours=6)
+# the heartbeat deadline quickly regardless -- but start_to_close is derived
+# from the *actual resolved* per-call timeout (threaded through wf_config via
+# resolve_workflow_config_activity, since a workflow may never read env vars
+# itself) times the allowed-category count times a generous safety margin for
+# retries, so it scales with whatever the operator has configured instead of
+# guessing a constant. See _signal_brief_activity_timeout below.
+_SIGNAL_BRIEF_CATEGORY_COUNT = 5
+# Multiplier applied to a single resolved LLM call's timeout, per category, to
+# size the aggregate serial deadline generously above resolve_timeout()'s own
+# floor -- covers the activity's internal per-call retry/backoff overhead atop
+# the raw call latency (mirrors budget_config.py's own generous multiplier for
+# deriving a total LLM budget from a single per-call timeout).
+_SIGNAL_BRIEF_TIMEOUT_SAFETY_FACTOR = 3.0
+
+
+def _signal_brief_activity_timeout(
+    llm_timeout_s: float, exclude_asset_classes: Optional[List[str]]
+) -> timedelta:
+    """Aggregate ``compute_signal_brief_activity`` start_to_close deadline.
+
+    Preconditions:
+        ``llm_timeout_s`` is the resolved per-call LLM timeout in seconds
+        (``wf_config["llm_timeout_s"]``, always > 0 --
+        ``llm_service.config.resolve_timeout`` never returns a non-positive
+        value). ``exclude_asset_classes`` is the run's excluded-category list
+        or ``None``.
+    Postconditions:
+        Returns ``allowed_count * llm_timeout_s * _SIGNAL_BRIEF_TIMEOUT_SAFETY_FACTOR``
+        seconds, where ``allowed_count`` is
+        ``_SIGNAL_BRIEF_CATEGORY_COUNT - len(exclude_asset_classes)`` clamped
+        to at least 1 (an all-excluded/malformed list still yields a positive
+        deadline rather than a degenerate zero one). Pure and deterministic —
+        safe to call from workflow code.
+    """
+    excluded = len(exclude_asset_classes) if exclude_asset_classes else 0
+    allowed_count = max(1, _SIGNAL_BRIEF_CATEGORY_COUNT - excluded)
+    return timedelta(seconds=allowed_count * llm_timeout_s * _SIGNAL_BRIEF_TIMEOUT_SAFETY_FACTOR)
+
+
 # Server-enforced liveness deadline for compute_signal_brief_activity's
 # heartbeat. Sized generously relative to _SIGNAL_BRIEF_HEARTBEAT_INTERVAL_S
 # (activities.py) so a missed heartbeat window is a real liveness problem,
@@ -665,7 +708,10 @@ class StrategyLabBatchWorkflow:
                     # evidence no design attempt is allowed to use.
                     "exclude_asset_classes": exclude_asset_classes,
                 },
-                timeout=_SIGNAL_BRIEF_ACTIVITY_TIMEOUT,
+                timeout=_signal_brief_activity_timeout(
+                    wf_config.get("llm_timeout_s", _DEFAULT_LLM_TIMEOUT_S_FALLBACK),
+                    exclude_asset_classes,
+                ),
                 heartbeat_timeout=_SIGNAL_BRIEF_HEARTBEAT_TIMEOUT,
             )
             signal_briefs = brief.get("signal_briefs")

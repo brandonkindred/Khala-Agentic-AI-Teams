@@ -426,7 +426,7 @@ def resolve_workflow_config_activity() -> Dict[str, Any]:
         Returns ``{"design_review_rounds": int, "design_review_stall_rounds":
         int, "mechanical_repair_enabled": bool, "code_conformance_retries":
         int, "design_max_llm_calls": int, "regime_summary_enabled": bool,
-        "max_design_reentries": int}``.
+        "max_design_reentries": int, "llm_timeout_s": float}``.
         A workflow may never read these env vars itself (``os.*`` is
         restricted at workflow runtime by the temporalio sandbox) — it calls
         this activity once and threads the resolved values through
@@ -434,6 +434,12 @@ def resolve_workflow_config_activity() -> Dict[str, Any]:
         ``max_design_reentries`` is a plain module constant (not env-derived);
         it is surfaced here so the workflow need never import
         ``orchestrator`` (and its heavy transitive graph) into the sandbox.
+        ``llm_timeout_s`` is the per-call LLM timeout
+        (``llm_service.config.resolve_timeout``, operator-overridable via
+        ``LLM_TIMEOUT`` with no fixed upper bound) — the batch workflow uses
+        it to size ``compute_signal_brief_activity``'s ``start_to_close``
+        deadline relative to the true configured per-call ceiling, rather
+        than a fixed constant that a large override could exceed.
     """
     from investment_team.strategy_lab.orchestrator import (
         MAX_DESIGN_REENTRIES,
@@ -446,6 +452,7 @@ def resolve_workflow_config_activity() -> Dict[str, Any]:
     from investment_team.strategy_lab.quality_gates.predicate_conformance import (
         _code_conformance_retries,
     )
+    from llm_service.config import resolve_timeout
 
     return {
         "design_review_rounds": _design_review_rounds(),
@@ -455,6 +462,7 @@ def resolve_workflow_config_activity() -> Dict[str, Any]:
         "design_max_llm_calls": _design_max_llm_calls(),
         "regime_summary_enabled": _env_flag("STRATEGY_LAB_REGIME_SUMMARY_ENABLED"),
         "max_design_reentries": MAX_DESIGN_REENTRIES,
+        "llm_timeout_s": resolve_timeout(),
     }
 
 

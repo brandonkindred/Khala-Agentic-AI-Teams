@@ -149,6 +149,7 @@ def test_resolve_workflow_config_activity_resolves_every_expected_key(monkeypatc
     monkeypatch.delenv("STRATEGY_LAB_CODE_CONFORMANCE_RETRIES", raising=False)
     monkeypatch.delenv("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", raising=False)
     monkeypatch.delenv("STRATEGY_LAB_REGIME_SUMMARY_ENABLED", raising=False)
+    monkeypatch.delenv("LLM_TIMEOUT", raising=False)
 
     result = act.resolve_workflow_config_activity()
     assert result == {
@@ -159,7 +160,15 @@ def test_resolve_workflow_config_activity_resolves_every_expected_key(monkeypatc
         "design_max_llm_calls": 120,
         "regime_summary_enabled": True,
         "max_design_reentries": 2,
+        "llm_timeout_s": 3600.0,
     }
+
+
+def test_resolve_workflow_config_activity_reflects_llm_timeout_override(monkeypatch):
+    monkeypatch.setenv("LLM_TIMEOUT", "5400")
+
+    result = act.resolve_workflow_config_activity()
+    assert result["llm_timeout_s"] == 5400.0
 
 
 # ---------------------------------------------------------------------------
