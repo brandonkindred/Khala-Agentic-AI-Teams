@@ -1,14 +1,13 @@
 """Shared JSON-recovery helper for branding_team LLM call sites.
 
-``orchestrator.py`` (``_parse_model_from_text``) and ``assistant/agent.py``
-(``_loads_lenient``) each independently reimplement "strip markdown fences /
-recover JSON from prose-wrapped text": whole-string parse first, then an
-outermost ``{...}`` slice fallback. This module gives both a single place to
-call instead, delegating to the team-agnostic salvage engine in
-``shared.llm_recovery`` rather than re-deriving the brace-slicing logic here.
+``orchestrator.py`` (``_parse_model_from_text``) needs to "strip markdown
+fences / recover JSON from prose-wrapped text": whole-string parse first,
+then an outermost ``{...}`` slice fallback. This module gives it a single
+place to call instead of re-deriving that logic inline, delegating to the
+team-agnostic salvage engine in ``shared.llm_recovery`` rather than
+re-deriving the brace-slicing logic here.
 
-Wired into both ``orchestrator.py`` (``_parse_model_from_text``) and
-``assistant/agent.py`` (``_loads_lenient``).
+Wired into ``orchestrator.py`` (``_parse_model_from_text``).
 """
 
 from __future__ import annotations
@@ -28,8 +27,7 @@ def recover_json_object(
     A thin, strict wrapper over ``shared.llm_recovery.extract_json_object``
     (``repair=False``): only strictly-valid JSON is accepted (whole-string
     parse, or the authoritative balanced ``{...}`` recovered from fenced or
-    prose-wrapped text) — no fuzzy ``json-repair`` salvage runs, matching the
-    strict two-step behavior both existing call sites hand-roll today.
+    prose-wrapped text) — no fuzzy ``json-repair`` salvage runs.
 
     Preconditions:
         - ``text`` is a ``str`` (may be empty).

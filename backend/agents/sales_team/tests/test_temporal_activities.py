@@ -626,6 +626,28 @@ def test_finalize_skips_completed_when_cancel_lands_during(monkeypatch, fake_job
     assert fake_job_client.get_job("job-1")["status"] == "running"  # COMPLETED not written
 
 
+def test_finalize_invokes_terminal_guard_at_both_checkpoints(monkeypatch, fake_job_client):
+    """Finalize must route both the pre- and post-summary terminal checks
+    through ``_terminal_guard`` rather than a private closure."""
+    monkeypatch.setattr("sales_team.orchestrator.record_prospecting_outcomes", lambda p, j: None)
+    fake_job_client.create_job("job-1", status="running")
+
+    calls = []
+    real_guard = acts._terminal_guard
+
+    def spy(job_id, *, phase, missing_msg):
+        calls.append((job_id, phase))
+        return real_guard(job_id, phase=phase, missing_msg=missing_msg)
+
+    monkeypatch.setattr(acts, "_terminal_guard", spy)
+
+    acts.finalize_sales_pipeline_activity(
+        _ctx_dict(), _result_dict([_PROSPECT.model_dump(mode="json")])
+    )
+
+    assert calls == [("job-1", "sales_finalize"), ("job-1", "sales_finalize")]
+
+
 # ---------------------------------------------------------------------------
 # heartbeat interval clamping
 # ---------------------------------------------------------------------------

@@ -115,6 +115,7 @@ from .agents.refinement import (
 from .agents.zero_trade_repair import ZeroTradeRepairAgent
 from .alignment_findings import AlignmentFinding
 from .budget_config import StrategyLabBudgetConfig
+from .cycle_control import gather_convergence_directives, require_short_circuit_inputs
 from .exceptions import SpecImplementabilityError
 from .market_regime import RegimeSummary, compute_regime_summary
 from .orchestrator_alignment import AlignmentMixin
@@ -559,14 +560,7 @@ class StrategyLabOrchestrator(
         emit = on_phase or (lambda phase, data: None)
 
         # Gather convergence directives once — appended to on loopback.
-        directives: List[str] = []
-        stall_dir = self.convergence_tracker.get_stall_directive()
-        if stall_dir:
-            directives.append(stall_dir)
-        diversity_dir = self.convergence_tracker.get_diversity_directive()
-        if diversity_dir:
-            directives.append(diversity_dir)
-        directives.extend(self.convergence_tracker.get_failure_directives())
+        directives: List[str] = gather_convergence_directives(self.convergence_tracker)
 
         last_evidence: Optional[str] = None
         last_spec: Optional[StrategySpec] = None
@@ -656,12 +650,7 @@ class StrategyLabOrchestrator(
         # somehow violates the contract — surface a clear runtime error
         # rather than crashing in ``_build_short_circuit_record`` with a
         # misleading traceback.
-        if last_spec is None or last_evidence is None:
-            raise RuntimeError(
-                "SpecImplementabilityError raised without last_spec/evidence; "
-                "cannot build short-circuit record. This is a bug in a refinement "
-                "code path; please file an issue with the run logs."
-            )
+        require_short_circuit_inputs(last_spec, last_evidence)
         return self._build_short_circuit_record(
             spec=last_spec,
             config=config,
