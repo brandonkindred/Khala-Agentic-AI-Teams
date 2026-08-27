@@ -373,17 +373,52 @@ def test_malformed_spec_hash_rejected() -> None:
         )
 
 
-def test_negative_rounds_completed_rejected() -> None:
+def test_malformed_code_hash_rejected() -> None:
     spec = _spec()
     with pytest.raises(ValidationError):
-        ReviewCheckpoint(
+        DesignCheckpoint(
             **_identity(),
+            spec_hash=phases.hash_spec(spec),
+            code_hash="too-short",
+            spec=spec,
+            rationale="because",
+        )
+
+
+@pytest.mark.parametrize(
+    "build_kwargs",
+    [
+        lambda spec, rounds: dict(
+            cls=ReviewCheckpoint,
             spec_hash=phases.hash_spec(spec),
             code_hash=_EMPTY_CODE_HASH,
             spec=spec,
             rationale="because",
-            review_rounds_completed=-1,
-        )
+            review_rounds_completed=rounds,
+        ),
+        lambda spec, rounds: dict(
+            cls=RefinementCheckpoint,
+            spec_hash=phases.hash_spec(spec),
+            code_hash=phases.hash_code("code"),
+            code="code",
+            refinement_rounds_completed=rounds,
+        ),
+        lambda spec, rounds: dict(
+            cls=AlignmentCheckpoint,
+            spec_hash=phases.hash_spec(spec),
+            code_hash=phases.hash_code("code"),
+            code="code",
+            alignment_rounds_completed=rounds,
+        ),
+    ],
+    ids=["review", "refinement", "alignment"],
+)
+def test_negative_rounds_completed_rejected(build_kwargs) -> None:
+    spec = _spec()
+    kwargs = build_kwargs(spec, -1)
+    checkpoint_cls = kwargs.pop("cls")
+    with pytest.raises(ValidationError):
+        checkpoint_cls(**_identity(), **kwargs)
 
 
 def test_pipeline_checkpoint_base_class_still_constructible_directly() -> None:

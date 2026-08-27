@@ -41,7 +41,7 @@ cleanly through both thread-mode (in-process Python objects) and Temporal-mode
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, List, Type, Union
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -97,6 +97,9 @@ class PipelineCheckpoint(BaseModel):
         ``strategy_lab.phases.hash_spec`` / ``strategy_lab.phases.hash_code``
         computed from the same spec/code state the checkpoint's payload
         carries (or, before code exists, ``hash_code(None)``).
+      - ``captured_at`` is an ISO-8601 / RFC-3339 UTC timestamp string,
+        matching the ``timestamp: str`` convention already used by
+        ``SpecRevision``/``CodeRevision``/``GateEvent``.
 
     Postconditions:
       - Instances are immutable (``frozen=True``) snapshots: a checkpoint
@@ -149,7 +152,7 @@ class DesignCheckpoint(PipelineCheckpoint):
     stage: PipelineStage = PipelineStage.DESIGN
     spec: StrategySpec
     rationale: str
-    design_context: Dict[str, Any] = Field(default_factory=dict)
+    design_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReviewCheckpoint(PipelineCheckpoint):
@@ -164,8 +167,8 @@ class ReviewCheckpoint(PipelineCheckpoint):
     stage: PipelineStage = PipelineStage.REVIEW
     spec: StrategySpec
     rationale: str
-    design_context: Dict[str, Any] = Field(default_factory=dict)
-    spec_history: List[SpecRevision] = Field(default_factory=list)
+    design_context: dict[str, Any] = Field(default_factory=dict)
+    spec_history: list[SpecRevision] = Field(default_factory=list)
     review_rounds_completed: int = Field(..., ge=0)
 
 
@@ -174,11 +177,12 @@ class SynthesisCheckpoint(PipelineCheckpoint):
 
     Postconditions:
       - ``stage`` is always ``PipelineStage.SYNTHESIS``.
+      - ``code_history`` records every code revision produced so far, oldest first.
     """
 
     stage: PipelineStage = PipelineStage.SYNTHESIS
     code: str
-    code_history: List[CodeRevision] = Field(default_factory=list)
+    code_history: list[CodeRevision] = Field(default_factory=list)
 
 
 class RefinementCheckpoint(PipelineCheckpoint):
@@ -186,11 +190,12 @@ class RefinementCheckpoint(PipelineCheckpoint):
 
     Postconditions:
       - ``stage`` is always ``PipelineStage.REFINEMENT``.
+      - ``code_history`` records every code revision produced so far, oldest first.
     """
 
     stage: PipelineStage = PipelineStage.REFINEMENT
     code: str
-    code_history: List[CodeRevision] = Field(default_factory=list)
+    code_history: list[CodeRevision] = Field(default_factory=list)
     refinement_rounds_completed: int = Field(..., ge=0)
 
 
@@ -199,23 +204,21 @@ class AlignmentCheckpoint(PipelineCheckpoint):
 
     Postconditions:
       - ``stage`` is always ``PipelineStage.ALIGNMENT``.
+      - ``gate_timeline`` records every quality-gate evaluation during alignment
+        so far, oldest first.
     """
 
     stage: PipelineStage = PipelineStage.ALIGNMENT
     code: str
     alignment_rounds_completed: int = Field(..., ge=0)
-    gate_timeline: List[GateEvent] = Field(default_factory=list)
+    gate_timeline: list[GateEvent] = Field(default_factory=list)
 
 
-AnyPipelineCheckpoint = Union[
-    DesignCheckpoint,
-    ReviewCheckpoint,
-    SynthesisCheckpoint,
-    RefinementCheckpoint,
-    AlignmentCheckpoint,
-]
+AnyPipelineCheckpoint = (
+    DesignCheckpoint | ReviewCheckpoint | SynthesisCheckpoint | RefinementCheckpoint | AlignmentCheckpoint
+)
 
-_CHECKPOINT_CLASSES_BY_STAGE: Dict[PipelineStage, Type[PipelineCheckpoint]] = {
+_CHECKPOINT_CLASSES_BY_STAGE: dict[PipelineStage, type[PipelineCheckpoint]] = {
     PipelineStage.DESIGN: DesignCheckpoint,
     PipelineStage.REVIEW: ReviewCheckpoint,
     PipelineStage.SYNTHESIS: SynthesisCheckpoint,
@@ -224,7 +227,7 @@ _CHECKPOINT_CLASSES_BY_STAGE: Dict[PipelineStage, Type[PipelineCheckpoint]] = {
 }
 
 
-def parse_checkpoint(raw: Dict[str, Any]) -> AnyPipelineCheckpoint:
+def parse_checkpoint(raw: dict[str, Any]) -> AnyPipelineCheckpoint:
     """Deserialize a persisted/opaque checkpoint payload to its concrete stage subclass.
 
     Preconditions:
