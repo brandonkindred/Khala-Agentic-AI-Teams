@@ -113,6 +113,15 @@ class PipelineCheckpoint(BaseModel):
         ...]`` rather than a typed gate-result model for the same
         circular-import reason ``DesignAttemptCheckpoint.gate_results``
         documents in ``models.py``.
+      - ``spec_history``/``code_history``/``gate_timeline`` are likewise
+        carried cumulatively at every stage, matching
+        ``DesignAttemptCheckpoint``'s own shape exactly (it carries all
+        three regardless of its own single boundary): record assembly
+        persists all three histories together
+        (``orchestrator_record_assembly.py``), so a checkpoint claiming to
+        be a self-sufficient "latest boundary" snapshot must carry every
+        history entry produced so far, not only the slice a later stage's
+        own loop happens to append to.
 
     Postconditions:
       - Instances are immutable (``frozen=True``) snapshots: a checkpoint's
@@ -170,6 +179,9 @@ class PipelineCheckpoint(BaseModel):
     captured_at: str
     budget_calls: int = Field(..., ge=0)
     gate_results: tuple[dict[str, Any], ...] = Field(default_factory=tuple)
+    spec_history: tuple[SpecRevision, ...] = Field(default_factory=tuple)
+    code_history: tuple[CodeRevision, ...] = Field(default_factory=tuple)
+    gate_timeline: tuple[GateEvent, ...] = Field(default_factory=tuple)
 
     @model_validator(mode="after")
     def _enforce_pinned_stage(self) -> "PipelineCheckpoint":
@@ -210,8 +222,8 @@ class ReviewCheckpoint(PipelineCheckpoint):
     Postconditions:
       - ``stage`` is always ``PipelineStage.REVIEW`` — enforced by
         ``PipelineCheckpoint._enforce_pinned_stage``.
-      - ``spec_history`` records every design-phase spec revision leading to
-        this converged spec, oldest first.
+      - ``spec_history`` (inherited from ``PipelineCheckpoint``) records every
+        design-phase spec revision leading to this converged spec, oldest first.
     """
 
     _pinned_stage: ClassVar[PipelineStage] = PipelineStage.REVIEW
@@ -220,7 +232,6 @@ class ReviewCheckpoint(PipelineCheckpoint):
     spec: StrategySpec
     rationale: str
     design_context: dict[str, Any] = Field(default_factory=dict)
-    spec_history: tuple[SpecRevision, ...] = Field(default_factory=tuple)
     review_rounds_completed: int = Field(..., ge=0)
 
 
@@ -237,7 +248,8 @@ class SynthesisCheckpoint(PipelineCheckpoint):
     Postconditions:
       - ``stage`` is always ``PipelineStage.SYNTHESIS`` — enforced by
         ``PipelineCheckpoint._enforce_pinned_stage``.
-      - ``code_history`` records every code revision produced so far, oldest first.
+      - ``code_history`` (inherited from ``PipelineCheckpoint``) records every
+        code revision produced so far, oldest first.
     """
 
     _pinned_stage: ClassVar[PipelineStage] = PipelineStage.SYNTHESIS
@@ -247,7 +259,6 @@ class SynthesisCheckpoint(PipelineCheckpoint):
     rationale: str
     design_context: dict[str, Any] = Field(default_factory=dict)
     code: str
-    code_history: tuple[CodeRevision, ...] = Field(default_factory=tuple)
 
 
 class RefinementCheckpoint(PipelineCheckpoint):
@@ -260,7 +271,8 @@ class RefinementCheckpoint(PipelineCheckpoint):
     Postconditions:
       - ``stage`` is always ``PipelineStage.REFINEMENT`` — enforced by
         ``PipelineCheckpoint._enforce_pinned_stage``.
-      - ``code_history`` records every code revision produced so far, oldest first.
+      - ``code_history`` (inherited from ``PipelineCheckpoint``) records every
+        code revision produced so far, oldest first.
     """
 
     _pinned_stage: ClassVar[PipelineStage] = PipelineStage.REFINEMENT
@@ -270,7 +282,6 @@ class RefinementCheckpoint(PipelineCheckpoint):
     rationale: str
     design_context: dict[str, Any] = Field(default_factory=dict)
     code: str
-    code_history: tuple[CodeRevision, ...] = Field(default_factory=tuple)
     refinement_rounds_completed: int = Field(..., ge=0)
 
 
@@ -279,19 +290,29 @@ class AlignmentCheckpoint(PipelineCheckpoint):
 
     Carries ``spec``/``rationale``/``design_context`` forward from the design
     boundary for the same reason ``SynthesisCheckpoint`` does — see that
-    class's docstring. Trade-alignment-specific resume inputs (executed
-    trades, backtest metrics, market data, execution status) are deliberately
-    not modeled here: this issue is pure data-model design with no capture
-    points yet, and the precise shape of those inputs is a capture-time
-    decision better made by the sibling issue that actually wires
-    ``_run_trade_alignment_loop`` to a checkpoint, the same way ADR-012 left
-    its own storage-key shape to its implementation sub-issue.
+    class's docstring.
+
+    **Deliberately excluded, final position** (raised and answered twice
+    already in this model's review history — this is the closing word, not
+    an open question): trade-alignment-specific resume inputs that
+    ``_run_trade_alignment_loop`` also consumes at runtime — executed trades,
+    backtest metrics, market data, execution status, conformance state. None
+    of these have any precedent anywhere in this codebase to generalize a
+    field shape from (unlike ``spec_history``/``code_history``/``gate_timeline``/
+    ``budget_calls``/``gate_results``, all of which mirror an existing,
+    already-established ``DesignAttemptCheckpoint`` field). This issue is
+    pure data-model design with no capture points yet; nailing down these
+    fields' representation without a capture-point implementation to inform
+    it would be guessing. That decision belongs to the sibling issue that
+    actually wires ``_run_trade_alignment_loop`` to a checkpoint, the same
+    way ADR-012 left its own storage-key shape to its implementation
+    sub-issue.
 
     Postconditions:
       - ``stage`` is always ``PipelineStage.ALIGNMENT`` — enforced by
         ``PipelineCheckpoint._enforce_pinned_stage``.
-      - ``gate_timeline`` records every quality-gate evaluation during alignment
-        so far, oldest first.
+      - ``gate_timeline`` (inherited from ``PipelineCheckpoint``) records every
+        quality-gate evaluation so far, oldest first.
     """
 
     _pinned_stage: ClassVar[PipelineStage] = PipelineStage.ALIGNMENT
@@ -302,7 +323,6 @@ class AlignmentCheckpoint(PipelineCheckpoint):
     design_context: dict[str, Any] = Field(default_factory=dict)
     code: str
     alignment_rounds_completed: int = Field(..., ge=0)
-    gate_timeline: tuple[GateEvent, ...] = Field(default_factory=tuple)
 
 
 AnyPipelineCheckpoint = (

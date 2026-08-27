@@ -191,12 +191,27 @@ def test_alignment_checkpoint_construction() -> None:
         rationale="because",
         code=code,
         alignment_rounds_completed=3,
+        spec_history=[_spec_revision()],
+        code_history=[_code_revision()],
         gate_timeline=[_gate_event()],
     )
     assert cp.stage == PipelineStage.ALIGNMENT
     assert cp.alignment_rounds_completed == 3
     assert len(cp.gate_timeline) == 1
     assert cp.spec == spec
+
+
+def test_alignment_checkpoint_carries_cumulative_histories() -> None:
+    """The base-class ``spec_history``/``code_history``/``gate_timeline`` fields
+    are cumulative across every stage — an alignment checkpoint isn't limited
+    to only ``gate_timeline``, unlike a per-stage-only history design would be."""
+    cp = _build_alignment_checkpoint(
+        spec_history=[_spec_revision()],
+        code_history=[_code_revision()],
+    )
+    assert len(cp.spec_history) == 1
+    assert len(cp.code_history) == 1
+    assert len(cp.gate_timeline) == 1
 
 
 # ---------------------------------------------------------------------------
