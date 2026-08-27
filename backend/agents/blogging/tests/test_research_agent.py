@@ -366,6 +366,45 @@ def test_research_agent_run_resumes_academic_papers_and_similar_topics(
     assert out.similar_topics == ["cached topic"]
 
 
+def test_research_agent_run_resumes_null_notes_checkpoint(monkeypatch, tmp_path) -> None:
+    """A notes checkpoint saved as None (a legitimate _synthesize_overview outcome
+    — no references, or an unusable LLM response) must still count as "already
+    computed" on resume, not be mistaken for "never checkpointed" and recomputed.
+
+    Regression test: cached_state.notes is None either way notes was never
+    checkpointed or it legitimately completed with a null result, so the resume
+    check must use a separate notes_computed marker rather than `notes is not
+    None`, matching the "is not None" fix already applied to the list-typed
+    steps (which don't have this ambiguity, since `[]` is distinguishable from
+    unset)."""
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="resume null notes", max_results=3)
+    cache.save_checkpoint(brief, "normalized", normalized={"topic": "cached"})
+    cache.save_checkpoint(brief, "queries", queries=[{"query_text": "q", "intent": "overview"}])
+    cache.save_checkpoint(brief, "candidates", candidates=[])
+    cache.save_checkpoint(brief, "documents", documents=[])
+    cache.save_checkpoint(brief, "scored_docs", scored_docs=[])
+    cache.save_checkpoint(brief, "references", references=[])
+    cache.save_checkpoint(brief, "notes", notes=None)
+    cache.save_checkpoint(brief, "academic_papers", academic_papers=[])
+    cache.save_checkpoint(brief, "similar_topics", similar_topics=[])
+
+    a = _make_agent(monkeypatch, [])
+    a.cache = cache
+
+    overview_spy = MagicMock(side_effect=AssertionError("should not recompute overview"))
+    monkeypatch.setattr(ResearchAgent, "_synthesize_overview", overview_spy)
+
+    out = a.run(brief)
+
+    overview_spy.assert_not_called()
+    assert out.notes is None
+
+
 def test_research_agent_run_checkpoints_siblings_when_notes_raises(monkeypatch, tmp_path) -> None:
     """When notes synthesis raises, the concurrently-computed academic_papers and
     similar_topics results must still be checkpointed rather than discarded.

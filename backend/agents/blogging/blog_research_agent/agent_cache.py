@@ -43,8 +43,13 @@ class AgentCacheState(BaseModel):
     # Step 6: Summarized references
     references: Optional[List[Dict[str, Any]]] = None
 
-    # Step 7: Final notes
+    # Step 7: Final notes. _synthesize_overview legitimately returns None (no
+    # references, or an unusable LLM response), so `notes is not None` can't
+    # distinguish "computed as null" from "never checkpointed" the way it can for
+    # the list-typed steps above (where `[]` is falsy but still not None) —
+    # notes_computed carries that distinction explicitly instead.
     notes: Optional[str] = None
+    notes_computed: bool = False
 
     # Step 8: Academic papers (arXiv)
     academic_papers: Optional[List[Dict[str, Any]]] = None
@@ -178,6 +183,7 @@ class AgentCache:
             ]
         elif step_name == "notes" and "notes" in kwargs:
             state.notes = kwargs["notes"]
+            state.notes_computed = True
         elif step_name == "academic_papers" and "academic_papers" in kwargs:
             academic_papers = kwargs["academic_papers"]
             state.academic_papers = [

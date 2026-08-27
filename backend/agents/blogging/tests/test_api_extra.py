@@ -169,64 +169,120 @@ def test_restart_job_clears_research_cache(client: TestClient, monkeypatch, tmp_
     assert not packet_path.exists()
 
 
-def test_reset_research_state_helper(tmp_path: Path) -> None:
-    """Unit-level coverage of _reset_research_state's edge cases: no work_dir, and a
-    work_dir with no research cache/packet yet (nothing to clear either way)."""
-    from agents.blogging.api.routers.jobs import _reset_research_state
+def test_stage_research_state_helper(tmp_path: Path) -> None:
+    """Unit-level coverage of _stage_research_state's edge cases: no work_dir, and a
+    work_dir with no research cache/packet yet (nothing to stage either way)."""
+    from agents.blogging.api.routers.jobs import _stage_research_state
 
     # No work_dir recorded on the job (e.g. never started) — no-op, doesn't raise.
-    _reset_research_state(None)
-    _reset_research_state("")
+    assert _stage_research_state(None) is None
+    assert _stage_research_state("") is None
 
     # work_dir exists but no .research_cache/research_packet.md under it yet (no
     # research ran) — also a no-op, not an error.
     work_dir = tmp_path / "job-work-dir"
     work_dir.mkdir()
-    _reset_research_state(str(work_dir))
+    assert _stage_research_state(str(work_dir)) is None
     assert not (work_dir / ".research_cache").exists()
     assert not (work_dir / "research_packet.md").exists()
 
 
-def test_reset_research_state_helper_propagates_genuine_errors(monkeypatch, tmp_path: Path) -> None:
-    """A real deletion failure (not just "already gone") must propagate rather than
+def test_stage_research_state_helper_propagates_genuine_errors(monkeypatch, tmp_path: Path) -> None:
+    """A real staging failure (not just "already gone") must propagate rather than
     be swallowed — silently reporting a successful "from scratch" restart while
     stale research state actually survives is worse than failing the restart
     outright."""
-    from agents.blogging.api.routers.jobs import _reset_research_state
+    from agents.blogging.api.routers.jobs import _stage_research_state
 
     def boom(*_a, **_kw):
         raise PermissionError("read-only filesystem")
 
-    monkeypatch.setattr(shutil, "rmtree", boom)
+    monkeypatch.setattr(shutil, "move", boom)
 
     work_dir = tmp_path / "job-work-dir"
     (work_dir / ".research_cache").mkdir(parents=True)
 
     with pytest.raises(PermissionError):
-        _reset_research_state(str(work_dir))
+        _stage_research_state(str(work_dir))
 
 
-def test_reset_research_state_helper_removes_stale_packet(tmp_path: Path) -> None:
-    """research_packet.md is deleted too, not just the checkpoint cache dir — the
-    artifact-list/read endpoints expose it purely based on existence."""
-    from agents.blogging.api.routers.jobs import _reset_research_state
+def test_stage_and_discard_research_state_moves_stale_packet_aside(tmp_path: Path) -> None:
+    """research_packet.md is moved aside too, not just the checkpoint cache dir —
+    the artifact-list/read endpoints expose it purely based on existence — and
+    _discard_research_state_backup deletes the staged backup for good."""
+    from agents.blogging.api.routers.jobs import (
+        _discard_research_state_backup,
+        _stage_research_state,
+    )
 
     work_dir = tmp_path / "job-work-dir"
     work_dir.mkdir()
     packet_path = work_dir / "research_packet.md"
     packet_path.write_text("# stale research", encoding="utf-8")
 
-    _reset_research_state(str(work_dir))
+    backup_dir = _stage_research_state(str(work_dir))
 
     assert not packet_path.exists()
+    assert backup_dir is not None
+    assert (backup_dir / "research_packet.md").exists()
+
+    _discard_research_state_backup(backup_dir)
+    assert not backup_dir.exists()
+
+
+def test_restore_research_state_helper(tmp_path: Path) -> None:
+    """_restore_research_state undoes _stage_research_state, moving the cache and
+    packet back to their original location."""
+    from agents.blogging.api.routers.jobs import _restore_research_state, _stage_research_state
+
+    work_dir = tmp_path / "job-work-dir"
+    cache_dir = work_dir / ".research_cache"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "checkpoint.json").write_text("{}", encoding="utf-8")
+    packet_path = work_dir / "research_packet.md"
+    packet_path.write_text("# research", encoding="utf-8")
+
+    backup_dir = _stage_research_state(str(work_dir))
+    assert not cache_dir.exists()
+    assert not packet_path.exists()
+
+    _restore_research_state(str(work_dir), backup_dir)
+
+    assert (cache_dir / "checkpoint.json").read_text(encoding="utf-8") == "{}"
+    assert packet_path.read_text(encoding="utf-8") == "# research"
+    assert not backup_dir.exists()
+
+
+def test_restore_research_state_helper_noop_cases(tmp_path: Path) -> None:
+    """No backup_dir or no work_dir — nothing to restore, doesn't raise."""
+    from agents.blogging.api.routers.jobs import _restore_research_state
+
+    _restore_research_state(None, None)
+    _restore_research_state(str(tmp_path), None)
+
+
+def test_discard_research_state_backup_logs_instead_of_raising(monkeypatch, tmp_path: Path) -> None:
+    """A cleanup failure after a successful restart is logged, not raised — the
+    restart itself already succeeded, so a leftover backup dir shouldn't fail it."""
+    from agents.blogging.api.routers.jobs import _discard_research_state_backup
+
+    def boom(*_a, **_kw):
+        raise PermissionError("read-only filesystem")
+
+    monkeypatch.setattr(shutil, "rmtree", boom)
+
+    backup_dir = tmp_path / ".research_reset_backup"
+    backup_dir.mkdir()
+
+    _discard_research_state_backup(backup_dir)  # must not raise
 
 
 def test_restart_job_500_when_research_reset_fails(
     client: TestClient, monkeypatch, tmp_path: Path
 ) -> None:
-    """A research-state-reset failure aborts the restart with a 500 and leaves the
-    job record untouched, rather than resetting it to "pending" for a restart that
-    never actually happened."""
+    """A research-state-staging failure aborts the restart with a 500 and leaves
+    the job record untouched, rather than resetting it to "pending" for a restart
+    that never actually happened."""
     from agents.blogging.shared import blog_job_store as bjs
 
     work_dir = tmp_path / "job-work-dir"
@@ -247,13 +303,80 @@ def test_restart_job_500_when_research_reset_fails(
     def boom(_work_dir):
         raise OSError("disk error")
 
-    monkeypatch.setattr(jobs_router, "_reset_research_state", boom)
+    monkeypatch.setattr(jobs_router, "_stage_research_state", boom)
 
     r = client.post(f"/job/{job_id}/restart")
     assert r.status_code == 500
 
     job = bjs.get_blog_job(job_id)
     assert job["status"] == "completed"
+
+
+def test_restart_job_restores_research_state_when_job_store_reset_fails(
+    client: TestClient, monkeypatch, tmp_path: Path
+) -> None:
+    """If reset_blog_job() fails after research state was staged (moved aside),
+    the staged cache/packet must be restored rather than lost for a restart that
+    never actually happened."""
+    from agents.blogging.shared import blog_job_store as bjs
+
+    work_dir = tmp_path / "job-work-dir"
+    cache_dir = work_dir / ".research_cache"
+    cache_dir.mkdir(parents=True)
+    packet_path = work_dir / "research_packet.md"
+    packet_path.write_text("# stale research", encoding="utf-8")
+
+    job_id = _create_job()
+    bjs.update_blog_job(
+        job_id,
+        status="completed",
+        request_payload={"brief": "x"},
+        work_dir=str(work_dir),
+    )
+
+    monkeypatch.setattr(_api_main, "_submit_async_job", lambda fn, *a, **kw: None)
+    monkeypatch.setattr(bjs, "reset_blog_job", _raise(RuntimeError("job-store outage")))
+
+    with pytest.raises(RuntimeError, match="job-store outage"):
+        client.post(f"/job/{job_id}/restart")
+
+    assert cache_dir.exists()
+    assert packet_path.read_text(encoding="utf-8") == "# stale research"
+    job = bjs.get_blog_job(job_id)
+    assert job["status"] == "completed"
+
+
+def test_restart_job_restores_research_state_when_dispatch_fails(
+    client: TestClient, monkeypatch, tmp_path: Path
+) -> None:
+    """If dispatching the replacement run fails (e.g. the thread-pool submit call
+    raises), the staged research state must be restored rather than lost for a
+    restart that never actually launched a replacement run."""
+    from agents.blogging.shared import blog_job_store as bjs
+
+    work_dir = tmp_path / "job-work-dir"
+    cache_dir = work_dir / ".research_cache"
+    cache_dir.mkdir(parents=True)
+    packet_path = work_dir / "research_packet.md"
+    packet_path.write_text("# stale research", encoding="utf-8")
+
+    job_id = _create_job()
+    bjs.update_blog_job(
+        job_id,
+        status="completed",
+        request_payload={"brief": "x"},
+        work_dir=str(work_dir),
+    )
+
+    monkeypatch.setattr(
+        _api_main, "_submit_async_job", _raise(RuntimeError("dispatch pool exhausted"))
+    )
+
+    with pytest.raises(RuntimeError, match="dispatch pool exhausted"):
+        client.post(f"/job/{job_id}/restart")
+
+    assert cache_dir.exists()
+    assert packet_path.read_text(encoding="utf-8") == "# stale research"
 
 
 def test_restart_job_400_when_payload_invalid_leaves_state_untouched(

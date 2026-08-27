@@ -275,8 +275,12 @@ class ResearchAgent(_BlogAgentBase):
             # other's (or the earlier steps') already-persisted state.
             _report("Synthesizing overview, searching arXiv, finding similar topics...", 0.78)
 
+            # notes_computed (not "notes is not None"): _synthesize_overview can
+            # legitimately complete with notes=None (no references, or an unusable
+            # LLM response), which is indistinguishable from "never checkpointed"
+            # by value alone — see AgentCacheState.notes_computed.
             notes_is_cached = bool(
-                cached_state and cached_state.notes is not None
+                cached_state and cached_state.notes_computed
             )  # pragma: no cover - resume-from-checkpoint branch; see Step 1.
             academic_papers_is_cached = bool(
                 cached_state and cached_state.academic_papers is not None

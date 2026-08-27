@@ -888,6 +888,7 @@ def test_agent_cache_save_load_clear(tmp_path: Path) -> None:
     assert final.scored_docs[0][1] == 0.9
     assert final.scored_docs[1][1] == 0.5  # legacy mapped
     assert final.notes == "some notes"
+    assert final.notes_computed is True
 
     # Brief mismatch returns None
     different = ResearchBriefInput(brief="Topic about DBs", audience="devs", max_results=10)
@@ -898,6 +899,27 @@ def test_agent_cache_save_load_clear(tmp_path: Path) -> None:
     assert cache.load_checkpoint(brief) is None
     # Clearing again is a no-op
     cache.clear_checkpoint(brief)
+
+
+def test_agent_cache_notes_computed_distinguishes_null_from_unset(tmp_path: Path) -> None:
+    """notes=None is a legitimate completed result (no references, or an unusable
+    LLM response), distinct from a checkpoint where the notes step never ran —
+    notes_computed carries that distinction since `notes is not None` can't."""
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="Topic", max_results=10)
+
+    cache.save_checkpoint(brief, "normalized", normalized={"topic": "Topic"})
+    state = cache.load_checkpoint(brief)
+    assert state.notes is None
+    assert state.notes_computed is False
+
+    cache.save_checkpoint(brief, "notes", notes=None)
+    state = cache.load_checkpoint(brief)
+    assert state.notes is None
+    assert state.notes_computed is True
 
 
 def test_agent_cache_load_corrupt_file(tmp_path: Path) -> None:
