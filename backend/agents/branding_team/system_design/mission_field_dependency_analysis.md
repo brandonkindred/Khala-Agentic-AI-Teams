@@ -382,3 +382,121 @@ an allowlist derived from
 these tables is treated as safe to ship, particularly for phases where an
 agent's only mission reference is the generic, unqualified phrase "the
 branding mission."
+
+### Post-review addendum: nine allowlists widened beyond this document's tables
+
+Code review on the implementation PR flagged conclusions in this
+document's tables as carrying a real correctness risk this document's
+prompt-text-only method could not see, and the shipped allowlists were
+widened accordingly rather than following the tables above verbatim:
+
+- **STRATEGIC_CORE now also includes `company_name`.** This document
+  correctly found no *prompt-text* citation of it (Finding 2), but
+  excluding it from the cache key means two missions that differ only in
+  `company_name` (e.g. an existing brand renamed, or two distinct brands
+  with otherwise-identical mission data) hash identically and share a
+  cache entry — the later run silently reuses strategic/downstream output
+  generated for a different company. That is a cache-correctness risk,
+  not a prompt-grounding question, and the prompt-citation method this
+  document uses cannot rule it out either way — only widening the
+  allowlist can.
+- **STRATEGIC_CORE now also includes `existing_brand_material`.** Finding
+  3 correctly found it "never referenced, anywhere, even ambiguously," but
+  that finding is about prompt-text citation, not about whether the field
+  ever reached an agent — before this document's mechanism existed,
+  `_phase_task` injected the entire mission into every phase's task string
+  regardless of citation, so `existing_brand_material` already reached
+  every Phase 1 agent as raw context, including `discovery_auditor`, whose
+  entire job is auditing *current* brand perception, market position, and
+  SWOT — the closest match anywhere in the pipeline for content field
+  literally named "existing brand material." Shipping the recommended
+  exclusion would have been the first time this field stopped reaching
+  that agent at all, the same category of functional regression the
+  VISUAL_IDENTITY entry below already establishes precedent for. `wiki_path`
+  (Finding 3's other never-referenced field) is not included anywhere: it
+  is a path, not prose content an agent's text prompt can act on, so unlike
+  `existing_brand_material` there is no plausible grounding story for it.
+- **NARRATIVE_MESSAGING now also includes `company_name`.** A first pass
+  reasoned that STRATEGIC_CORE's `company_name` inclusion above was
+  sufficient, since Phase 2 sees STRATEGIC_CORE's output as upstream
+  context — but `StrategicCoreOutput` (`models.py`) has no field that
+  echoes the raw company name back; nothing guarantees a rename actually
+  changes what STRATEGIC_CORE's compositor writes, or that any writer/
+  tagline-style agent downstream ever sees the company's actual name.
+  Without `company_name` directly in this phase's own allowlist, a rename
+  can leave Phase 2's cache entry unaffected *and* its narrative/tagline
+  agents (`Storyteller`, `TaglineWriter`, `MessageMapper`, ...) with no
+  company identity anywhere in their prompt. This generalizes past this
+  one instance: a downstream phase's `mission_fields` allowlist should not
+  assume a field's presence in an *upstream phase's own* allowlist
+  substitutes for that field reaching the downstream phase — only a field
+  actually present in a phase's own mission-field allowlist, or echoed by
+  name in an upstream output model, is guaranteed to reach it.
+- **NARRATIVE_MESSAGING now also includes `existing_brand_material`.** Same
+  generalization as STRATEGIC_CORE's and VISUAL_IDENTITY's
+  `existing_brand_material` entries, applied to Phase 2: the field can hold
+  existing copy (a current tagline, pasted campaign text), and
+  `StrategicCoreOutput` only carries a synthesized audit, not the original
+  materials, so `Storyteller`/`TaglineWriter` would otherwise have no way
+  to inspect or preserve supplied language, and a material edit that
+  doesn't change the audit output could reuse a stale Phase 2 cache entry.
+- **VISUAL_IDENTITY now also includes all six visual-identity-only
+  fields** (`color_inspiration`, `color_palettes`,
+  `selected_palette_index`, `visual_style`, `typography_preference`,
+  `interface_density`). Finding 4/the Phase 3 Finding already flagged
+  that these are the mission's only user-supplied visual-preference
+  input and that excluding them "requires a product decision" rather
+  than being silently assumed. Before this document's mechanism existed,
+  `_phase_task` injected the *entire* mission into every phase's task
+  string regardless of prompt-text citation, so these fields already
+  reached the Phase 3 agents as raw context; shipping the recommended
+  `()` would have been the first time they stopped reaching those agents
+  at all — a functional regression a `dummy`-provider test suite cannot
+  catch. Absent the empirical validation this document already
+  recommends before narrowing further, the safer default is to keep
+  grounding Phase 3 in the user's actual color/typography selections.
+- **VISUAL_IDENTITY now also includes `existing_brand_material`.** Same
+  generalization as STRATEGIC_CORE's `existing_brand_material` entry
+  above, applied to the phase whose subject matter it most directly
+  concerns: the field can hold visual asset references (the test fixtures
+  use values like `"logo.svg"`), and `StrategicCoreOutput` — Phase 3's
+  only upstream field-carrying context for it — has no field that carries
+  the original materials forward, only an audit summary. Without it here,
+  the moodboard/logo/color/typography agents have no way to see or build
+  on a supplied visual asset, and (per the same warm-run risk as every
+  other entry in this addendum) a material update can reuse a Phase 3
+  cache entry computed before the update if the upstream audit output
+  happens not to change either.
+- **CHANNEL_ACTIVATION now also includes `company_name`.** Same
+  generalization as NARRATIVE_MESSAGING above, applied one phase further
+  downstream: none of CHANNEL_ACTIVATION's upstream output models
+  (`StrategicCoreOutput`, `NarrativeMessagingOutput`,
+  `VisualIdentityOutput`) echo the raw company name back, so relying on
+  it "appearing incidentally in upstream prose" is not guaranteed. Without
+  `company_name` directly in this phase's own allowlist,
+  `brand_architecture_builder` — whose whole job is brand-architecture
+  rules, parent-brand relationships, and naming conventions — could
+  receive no actual company name on a cold run, and a rename could reuse
+  another company's cached architecture/brand-in-action output on a warm
+  run.
+- **CHANNEL_ACTIVATION now also includes `existing_brand_material`.** Same
+  generalization as the `existing_brand_material` entries for the other
+  three phases: none of CHANNEL_ACTIVATION's three upstream output models
+  preserve the original material list, so the channel-guide specialists
+  and `brand_in_action_illustrator` cannot inspect existing executions
+  (landing-page copy, campaign assets, prior channel guidelines) that
+  already exist, on either a cold or a warm run.
+- **GOVERNANCE now also includes `existing_brand_material`.** Same
+  generalization as the other three phases' `existing_brand_material`
+  entries above, applied to the phase where it is arguably most directly
+  relevant: none of GOVERNANCE's four upstream output models preserve the
+  original material list, so `asset_wiki_planner` — whose whole job is
+  asset-management guidance and the brand wiki backlog — would otherwise
+  have no supplied-asset inventory (logo files, decks, other materials) to
+  plan around, even on a cold run.
+
+Every phase now has at least one field in this addendum widening its
+allowlist beyond this document's tables. This addendum documents the
+deviations for future readers of this
+document; it does not change any table or finding
+above, which remain the underlying evidence record.

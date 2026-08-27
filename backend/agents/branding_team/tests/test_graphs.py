@@ -619,3 +619,25 @@ def test_serialize_mission_roundtrips_company_name() -> None:
     text = serialize_mission(mission)
     assert mission.company_name in text
     assert mission.company_description in text
+
+
+def test_serialize_mission_include_none_matches_default() -> None:
+    mission = make_mission(company_name="Acme Rebrand Co")
+    assert serialize_mission(mission, include=None) == serialize_mission(mission)
+
+
+def test_serialize_mission_include_filters_to_named_fields() -> None:
+    mission = make_mission(
+        company_name="Acme Rebrand Co",
+        company_description="A strategic studio for enterprise product teams",
+    )
+    text = serialize_mission(mission, include=frozenset({"company_name"}))
+    assert mission.company_name in text
+    assert mission.company_description not in text
+
+
+def test_serialize_mission_include_empty_frozenset_omits_every_field() -> None:
+    mission = make_mission(company_name="Acme Rebrand Co")
+    text = serialize_mission(mission, include=frozenset())
+    assert mission.company_name not in text
+    assert text == "{}"

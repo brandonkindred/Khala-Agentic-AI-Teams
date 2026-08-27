@@ -348,15 +348,69 @@ class _PhaseSpec(NamedTuple):
             story-driven set from #6953: the minimal upstream context that
             phase's agent prompts actually reference.
         mission_fields: Which ``BrandingMission`` fields this phase's cache
-            key depends on. ``None`` (the default) means "not configured —
-            no filtering, hash the entire mission" — every phase's implicit
-            value today, since no phase's allowlist has been populated yet.
+            key and task prompt depend on. ``None`` (the default) means "not
+            configured — no filtering, hash/serialize the entire mission."
             An explicit frozenset, including the empty frozenset
-            ``frozenset()``, means "hash exactly this set of mission
+            ``frozenset()``, means "use exactly this set of mission
             fields" — ``frozenset()`` deliberately means "no mission field
-            is relevant to this phase's cache key." ``phase_input_hash``
-            applies this distinction when computing
-            ``_run_phases_with_cache``'s per-phase cache key.
+            is relevant to this phase." ``phase_input_hash`` applies this
+            distinction when computing ``_run_phases_with_cache``'s per-phase
+            cache key, and ``_phase_task`` applies it when serializing the
+            mission into a phase's task string. Every phase's value below
+            starts from the evidence-based allowlist in the mission-field
+            dependency analysis
+            (``system_design/mission_field_dependency_analysis.md``) — the
+            mission fields that phase's agent prompts explicitly reference —
+            widened by fields that document itself flagged as ambiguous or
+            unevidenced-but-risky rather than silently excluded: STRATEGIC_CORE
+            additionally includes ``company_name`` (never explicitly cited in
+            prompt text, but excluding it lets two differently-named missions
+            that are otherwise identical share a cache entry and reuse each
+            other's company-specific output) and ``existing_brand_material``
+            (never cited by any prompt either, but before this mechanism
+            existed every phase's task string carried the full mission
+            regardless of citation, so it already reached ``discovery_auditor``
+            — whose whole job is auditing *current* brand perception — as raw
+            context; dropping it would be the first time it stops reaching
+            that agent at all). NARRATIVE_MESSAGING additionally includes
+            ``company_name`` too (``StrategicCoreOutput``, Phase 2's only
+            upstream context, has no field that echoes the raw company name
+            back, so without this a rename can both go unnoticed by Phase 2's
+            cache key and leave its narrative/tagline agents with no company
+            identity in their prompt at all) and ``existing_brand_material``
+            too — it can hold existing copy (e.g. a current tagline or pasted
+            campaign text), and ``StrategicCoreOutput`` only carries a
+            synthesized audit, not the original materials, so Phase 2's
+            storyteller/tagline agents would otherwise have no way to inspect
+            or preserve supplied language. VISUAL_IDENTITY additionally
+            includes its six visual-identity-only fields (no Phase 3 prompt
+            cites them by name, but they are the mission's only user-supplied
+            visual-preference input, and dropping them would silently stop
+            grounding the moodboard/color/typography agents in a user's actual
+            palette/style selections — a functional regression, not just a
+            cache-scope one) and ``existing_brand_material`` too — it can hold
+            visual asset references (e.g. an existing logo file), and
+            ``StrategicCoreOutput`` (Phase 3's only upstream field-carrying
+            context for it) has no field that carries the original materials
+            forward, so Phase 3's moodboard/logo agents would otherwise have
+            no way to see or build on a supplied visual asset.
+            CHANNEL_ACTIVATION additionally includes
+            ``company_name`` too, for the same reason as NARRATIVE_MESSAGING:
+            none of its upstream output models (``StrategicCoreOutput``,
+            ``NarrativeMessagingOutput``, ``VisualIdentityOutput``) echo the
+            raw company name back, so ``brand_architecture_builder`` — whose
+            whole job is naming conventions and brand-architecture rules —
+            would otherwise have no company identity to build on, and
+            ``existing_brand_material`` too — none of its three upstream
+            output models preserve the original material list, so its
+            channel specialists and ``brand_in_action_illustrator`` cannot
+            inspect supplied executions (landing-page copy, campaign
+            assets) that already exist. GOVERNANCE additionally includes
+            ``existing_brand_material`` too
+            — none of its four upstream output models preserve the original
+            material list, so ``asset_wiki_planner``, whose whole job is
+            asset-management guidance and the brand wiki backlog, would
+            otherwise have no supplied-asset inventory to plan around.
     """
 
     builder_fn: Callable[[], Any]
@@ -377,6 +431,16 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
         "phase1_strategic_core",
         PHASE_OUTPUT_MODELS[BrandPhase.STRATEGIC_CORE],
         merge_fn=functools.partial(_merge_named_fragments, node_merge=_PHASE1_NODE_MERGE),
+        mission_fields=frozenset(
+            {
+                "company_name",
+                "company_description",
+                "target_audience",
+                "values",
+                "differentiators",
+                "existing_brand_material",
+            }
+        ),
     ),
     BrandPhase.NARRATIVE_MESSAGING: _PhaseSpec(
         build_phase2_graph,
@@ -386,6 +450,7 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
             _merge_named_fragments, node_merge=_PHASE2_NODE_MERGE, require_all=True
         ),
         context_phases=(BrandPhase.STRATEGIC_CORE,),
+        mission_fields=frozenset({"company_name", "desired_voice", "existing_brand_material"}),
     ),
     BrandPhase.VISUAL_IDENTITY: _PhaseSpec(
         build_phase3_graph,
@@ -395,6 +460,17 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
             _merge_named_fragments, node_merge=_PHASE3_NODE_MERGE, require_all=True
         ),
         context_phases=(BrandPhase.STRATEGIC_CORE, BrandPhase.NARRATIVE_MESSAGING),
+        mission_fields=frozenset(
+            {
+                "color_inspiration",
+                "color_palettes",
+                "selected_palette_index",
+                "visual_style",
+                "typography_preference",
+                "interface_density",
+                "existing_brand_material",
+            }
+        ),
     ),
     BrandPhase.CHANNEL_ACTIVATION: _PhaseSpec(
         build_phase4_graph,
@@ -408,6 +484,7 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
             BrandPhase.NARRATIVE_MESSAGING,
             BrandPhase.VISUAL_IDENTITY,
         ),
+        mission_fields=frozenset({"company_name", "existing_brand_material"}),
     ),
     BrandPhase.GOVERNANCE: _PhaseSpec(
         build_phase5_graph,
@@ -422,6 +499,7 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
             BrandPhase.VISUAL_IDENTITY,
             BrandPhase.CHANNEL_ACTIVATION,
         ),
+        mission_fields=frozenset({"existing_brand_material"}),
     ),
 }
 
@@ -806,6 +884,12 @@ class BrandingTeamOrchestrator:
               is ``None`` (the default — "not configured"), every entry in
               ``prior_outputs`` is included — unchanged, backward-compatible
               behavior.
+            - When ``phase``'s ``_PHASE_SPEC`` entry has a non-``None``
+              ``mission_fields``, only those mission fields are serialized
+              into the task string's mission payload — an empty frozenset
+              means no mission fields are included. When ``mission_fields``
+              is ``None`` (the default — "not configured"), the full mission
+              is serialized — unchanged, backward-compatible behavior.
         """
         spec = _PHASE_SPEC[phase]
         if spec.context_phases is not None:
@@ -814,7 +898,7 @@ class BrandingTeamOrchestrator:
 
         base = (
             "Create a comprehensive brand strategy for the following company.\n\n"
-            f"Branding Mission:\n{serialize_mission(mission)}"
+            f"Branding Mission:\n{serialize_mission(mission, include=spec.mission_fields)}"
         )
         if prior_outputs:
             blocks = "\n\n".join(

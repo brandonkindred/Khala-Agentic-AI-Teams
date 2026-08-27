@@ -235,6 +235,15 @@ def phase_order_text() -> str:
 # ---------------------------------------------------------------------------
 
 
-def serialize_mission(mission: Any) -> str:
-    """Serialise a ``BrandingMission`` into a prompt-friendly string."""
-    return mission.model_dump_json(indent=2)
+def serialize_mission(mission: Any, *, include: Optional[frozenset[str]] = None) -> str:
+    """Serialise a ``BrandingMission`` into a prompt-friendly string.
+
+    Preconditions:
+        - ``include``, when not ``None``, names fields present on ``mission``.
+    Postconditions:
+        - Returns JSON containing every field of ``mission`` when ``include``
+          is ``None`` (default, unchanged behavior); returns JSON containing
+          only the named fields when ``include`` is a (possibly empty)
+          frozenset — the empty frozenset serialises to ``"{}"``.
+    """
+    return mission.model_dump_json(indent=2, include=include)

@@ -1,4 +1,4 @@
-"""Cache-hit and cascading-invalidation regression guard for
+"""Cache-hit and selective-invalidation regression guard for
 ``BrandingTeamOrchestrator.run()``, closing the loop Story #6959 opened.
 
 ``test_full_pipeline_first_run_benchmark.py`` proves the uncached ("first
@@ -11,19 +11,20 @@ be compared against:
    run's wall-clock (Task #6978's AC: "second run ... ≤ 7s").
 2. A third run whose mission differs only in a Phase-1-relevant field
    (``company_description``, which feeds ``StrategicCoreOutput``), still
-   reusing the same cache -- Task #6978 frames this as "~Phase 1 time +
-   cascaded downstream re-execution", not a partial-cache-hit. That phrasing
-   is deliberate, not a simplification: ``shared/memoization.py``'s
-   ``phase_input_hash`` hashes the *entire* serialized mission for every
-   phase (see that module's docstring -- there is no per-phase mission-field
-   subsetting anywhere in this codebase), so a change to *any* mission field
-   changes every phase's input hash, not just the phase(s) that field
-   semantically belongs to. A "Phase-1-only" mission change therefore misses
-   on all five phases, exactly like a cold run -- this test asserts that
-   cascade directly (every phase's LLM calls fire again, via the same
-   ``_benchmark_helpers.run_and_assert_cold_baseline`` the cold-run baseline
-   test uses) rather than asserting a partial hit that the current cache
-   design cannot produce.
+   reusing the same cache. ``shared/memoization.py``'s ``phase_input_hash``
+   now accepts a per-phase ``mission_fields`` allowlist (wired into
+   ``orchestrator.py``'s ``_PHASE_SPEC`` from the mission-field dependency
+   analysis), so a change to a field outside a phase's own allowlist no
+   longer touches that phase's input hash. ``company_description`` is on
+   STRATEGIC_CORE's allowlist and no other phase's, so only STRATEGIC_CORE's
+   cache entry misses; every downstream phase's cache key still folds in
+   STRATEGIC_CORE's *output*, and since the dummy provider's structured
+   output is a deterministic function of the request (not the specific
+   mission text), STRATEGIC_CORE's recomputed output is identical to what
+   was cached, so no downstream phase's cache entry is invalidated either.
+   This test asserts exactly that: only STRATEGIC_CORE's six calls (five
+   specialists + one compositor, see ``graphs/phase1_strategic_core.py``)
+   fire again, not the full ``EXPECTED_CALL_COUNT``.
 
 Uses the shared ``_benchmark_helpers`` module (also used by
 ``test_phase2_parallelism_benchmark.py`` and
@@ -64,6 +65,20 @@ from branding_team.tests.conftest import make_mission
 # run's ~9s observed baseline if the cache silently stops taking effect.
 _CACHED_RUN_MAX_WALL_CLOCK_SECONDS = 7.0
 
+# STRATEGIC_CORE's five specialists (one call each, run concurrently) plus
+# its one compositor (a sixth call, sequential after the fan-out) -- see
+# ``graphs/phase1_strategic_core.py``. This is the only phase a
+# STRATEGIC_CORE-allowlisted mission-field change invalidates.
+_STRATEGIC_CORE_CALL_COUNT = 6
+
+# STRATEGIC_CORE's critical-path depth under 1s-per-call mocked latency: one
+# delay for the five-way fan-out (they run concurrently) plus one more for
+# the compositor that depends on all five. Bounds carry generous slack for
+# CI scheduling jitter while still failing well below the ~9s full cold-run
+# baseline if this scenario silently stops being phase-1-only.
+_PHASE_ONE_ONLY_MIN_WALL_CLOCK_SECONDS = 2 * PER_CALL_DELAY_SECONDS * 0.5
+_PHASE_ONE_ONLY_MAX_WALL_CLOCK_SECONDS = 6.0
+
 
 @pytest.mark.bench
 def test_second_identical_run_hits_cache_and_stays_under_seven_seconds() -> None:
@@ -101,12 +116,18 @@ def test_second_identical_run_hits_cache_and_stays_under_seven_seconds() -> None
 
 
 @pytest.mark.bench
-def test_phase_one_relevant_mission_change_cascades_to_every_phase() -> None:
-    """A mission change to a Phase-1-relevant field, reusing the same warm
-    cache, must miss on every phase (not just Phase 1) -- because
-    ``phase_input_hash`` hashes the entire mission for every phase -- firing
-    the full agent count again and taking roughly the cold-run's wall-clock,
-    not a partial-hit fraction of it."""
+def test_phase_one_relevant_mission_change_reinvokes_only_strategic_core() -> None:
+    """A mission change to a field on STRATEGIC_CORE's ``mission_fields``
+    allowlist (``company_description``) and no other phase's, reusing the
+    same warm cache, must miss only STRATEGIC_CORE's cache entry -- and,
+    because the dummy provider's structured output for a given request is
+    deterministic regardless of the mission text, STRATEGIC_CORE's
+    recomputed output matches what every downstream phase's cache key
+    already expects, so no downstream phase is invalidated either. This is
+    the epic's whole point: firing STRATEGIC_CORE's six calls again, not the
+    full pipeline's ``EXPECTED_CALL_COUNT``, and finishing in roughly
+    STRATEGIC_CORE's own critical-path depth rather than the full cold
+    run's wall-clock."""
     orchestrator = BrandingTeamOrchestrator()
     original_mission = make_mission()
     changed_mission = make_mission(
@@ -121,10 +142,22 @@ def test_phase_one_relevant_mission_change_cascades_to_every_phase() -> None:
         executor_thread_name_prefix="partial-change-benchmark",
     ) as harness:
         run_and_assert_cold_baseline(orchestrator, original_mission, human_review, cache, harness)
-        # The assertion below is intentionally the same shape as the cold run
-        # above (via run_and_assert_cold_baseline): a Phase-1-relevant
-        # mission change is expected to behave exactly like a cold run,
-        # since phase_input_hash hashes the whole mission per phase (see
-        # module docstring) and so misses on every one of the five phases,
-        # not just Phase 1.
-        run_and_assert_cold_baseline(orchestrator, changed_mission, human_review, cache, harness)
+
+        calls_before = harness.call_count
+        start = time.monotonic()
+        orchestrator.run(changed_mission, human_review, phase_cache=cache)
+        elapsed = time.monotonic() - start
+
+    calls_made = harness.call_count - calls_before
+    assert calls_made == _STRATEGIC_CORE_CALL_COUNT, (
+        f"expected exactly {_STRATEGIC_CORE_CALL_COUNT} LLM calls (STRATEGIC_CORE only) for a "
+        f"STRATEGIC_CORE-allowlisted-only mission change, got {calls_made} -- either the "
+        "mission_fields allowlist stopped scoping this phase's cache key, or STRATEGIC_CORE's "
+        "recompute stopped matching what downstream phases' cache keys expect"
+    )
+    assert (
+        _PHASE_ONE_ONLY_MIN_WALL_CLOCK_SECONDS <= elapsed <= _PHASE_ONE_ONLY_MAX_WALL_CLOCK_SECONDS
+    ), (
+        f"phase-1-only recompute took {elapsed:.2f}s, outside the expected "
+        f"[{_PHASE_ONE_ONLY_MIN_WALL_CLOCK_SECONDS}, {_PHASE_ONE_ONLY_MAX_WALL_CLOCK_SECONDS}]s window"
+    )

@@ -825,7 +825,9 @@ def test_run_single_phase_uses_shared_graph_timeouts(monkeypatch) -> None:
 def test_run_single_phase_first_phase_has_no_prior_context() -> None:
     mission = make_mission()
     task = orch_phase_task(mission, BrandPhase.STRATEGIC_CORE, {})
-    assert "Northstar Labs" in task
+    # STRATEGIC_CORE's real mission_fields allowlist excludes company_name, so
+    # assert against an allowlisted field's value instead.
+    assert "enterprise product leaders" in task
     assert "upstream" not in task.lower()
 
 
@@ -906,13 +908,87 @@ def test_phase_task_explicit_empty_context_phases_excludes_all_prior_context(
     assert "upstream" not in task.lower()
 
 
+def test_phase_task_filters_mission_by_mission_fields(monkeypatch) -> None:
+    import branding_team.orchestrator as orch_mod
+
+    monkeypatch.setitem(
+        orch_mod._PHASE_SPEC,
+        BrandPhase.STRATEGIC_CORE,
+        orch_mod._PHASE_SPEC[BrandPhase.STRATEGIC_CORE]._replace(
+            mission_fields=frozenset({"company_name"})
+        ),
+    )
+
+    mission = make_mission()
+    task = orch_phase_task(mission, BrandPhase.STRATEGIC_CORE, {})
+
+    assert "Northstar Labs" in task
+    assert "enterprise product leaders" not in task
+    assert "clarity" not in task
+
+
+def test_phase_task_explicit_empty_mission_fields_excludes_every_mission_field(
+    monkeypatch,
+) -> None:
+    """An explicit ``mission_fields=frozenset()`` deliberately means "no
+    mission field is relevant" and must strip every mission value from the
+    task string -- contrast with the default (``None``/omitted), under which
+    the full mission is serialized. This is the None-vs-frozenset()
+    distinction ``_PhaseSpec.mission_fields`` exists to make expressible."""
+    import branding_team.orchestrator as orch_mod
+
+    monkeypatch.setitem(
+        orch_mod._PHASE_SPEC,
+        BrandPhase.STRATEGIC_CORE,
+        orch_mod._PHASE_SPEC[BrandPhase.STRATEGIC_CORE]._replace(mission_fields=frozenset()),
+    )
+
+    mission = make_mission()
+    task = orch_phase_task(mission, BrandPhase.STRATEGIC_CORE, {})
+
+    assert "Northstar Labs" not in task
+    assert "enterprise product leaders" not in task
+    assert "clarity" not in task
+    # The mission section itself is still present, just serialized as "{}".
+    assert "Branding Mission:\n{}" in task
+
+
+def test_governance_phase_task_includes_only_existing_brand_material() -> None:
+    """Integration-level check of the real (non-monkeypatched) ``_PHASE_SPEC``
+    values: GOVERNANCE's ``mission_fields`` allowlist is
+    ``{"existing_brand_material"}`` (for ``asset_wiki_planner``'s asset
+    inventory), so its task string must carry that field's value but no
+    other mission field, even though it still carries allowed
+    upstream-phase context."""
+    mission = make_mission(existing_brand_material=["ASSET_MARKER"])
+    prior_outputs = {
+        BrandPhase.STRATEGIC_CORE.value: {"marker": "STRATEGIC_MARKER"},
+        BrandPhase.VISUAL_IDENTITY.value: {"marker": "VISUAL_MARKER"},
+    }
+
+    task = orch_phase_task(mission, BrandPhase.GOVERNANCE, prior_outputs)
+
+    assert "ASSET_MARKER" in task
+    assert "Northstar Labs" not in task
+    assert "enterprise product leaders" not in task
+    assert "STRATEGIC_MARKER" in task
+    assert "VISUAL_MARKER" in task
+
+
 def _pre_migration_phase_task(mission, phase, prior_outputs):
     """Oracle mirroring ``_phase_task``'s pre-#7348 filtering condition
     (``if spec.context_phases:``), which treated the then-default ``()`` and
     any falsy value as "not configured -- include everything." Kept
     deliberately separate from the production function's current
     ``is not None`` check so the regression test below proves behavioral
-    equivalence rather than assuming it."""
+    equivalence rather than assuming it.
+
+    Mission serialization here still applies the real ``mission_fields``
+    allowlist (mirroring current ``_phase_task``, unrelated to the
+    ``context_phases`` truthiness question this oracle exists to isolate) --
+    otherwise this oracle would drift from production behavior on every real
+    phase now that ``mission_fields`` is populated, defeating the comparison
+    below."""
     import json
 
     from branding_team.graphs.shared import serialize_mission
@@ -925,7 +1001,7 @@ def _pre_migration_phase_task(mission, phase, prior_outputs):
 
     base = (
         "Create a comprehensive brand strategy for the following company.\n\n"
-        f"Branding Mission:\n{serialize_mission(mission)}"
+        f"Branding Mission:\n{serialize_mission(mission, include=spec.mission_fields)}"
     )
     if prior_outputs:
         blocks = "\n\n".join(
