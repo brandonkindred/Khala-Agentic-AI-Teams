@@ -383,13 +383,12 @@ these tables is treated as safe to ship, particularly for phases where an
 agent's only mission reference is the generic, unqualified phrase "the
 branding mission."
 
-### Post-review addendum: two allowlists widened beyond this document's tables
+### Post-review addendum: three allowlists widened beyond this document's tables
 
-Code review on the implementation PR flagged two of this document's
-`()`/no-evidence conclusions as carrying a real correctness risk this
-document's prompt-text-only method could not see, and the shipped
-allowlists were widened accordingly rather than following the tables
-above verbatim:
+Code review on the implementation PR flagged conclusions in this
+document's tables as carrying a real correctness risk this document's
+prompt-text-only method could not see, and the shipped allowlists were
+widened accordingly rather than following the tables above verbatim:
 
 - **STRATEGIC_CORE now also includes `company_name`.** This document
   correctly found no *prompt-text* citation of it (Finding 2), but
@@ -401,6 +400,22 @@ above verbatim:
   not a prompt-grounding question, and the prompt-citation method this
   document uses cannot rule it out either way — only widening the
   allowlist can.
+- **NARRATIVE_MESSAGING now also includes `company_name`.** A first pass
+  reasoned that STRATEGIC_CORE's `company_name` inclusion above was
+  sufficient, since Phase 2 sees STRATEGIC_CORE's output as upstream
+  context — but `StrategicCoreOutput` (`models.py`) has no field that
+  echoes the raw company name back; nothing guarantees a rename actually
+  changes what STRATEGIC_CORE's compositor writes, or that any writer/
+  tagline-style agent downstream ever sees the company's actual name.
+  Without `company_name` directly in this phase's own allowlist, a rename
+  can leave Phase 2's cache entry unaffected *and* its narrative/tagline
+  agents (`Storyteller`, `TaglineWriter`, `MessageMapper`, ...) with no
+  company identity anywhere in their prompt. This generalizes past this
+  one instance: a downstream phase's `mission_fields` allowlist should not
+  assume a field's presence in an *upstream phase's own* allowlist
+  substitutes for that field reaching the downstream phase — only a field
+  actually present in a phase's own mission-field allowlist, or echoed by
+  name in an upstream output model, is guaranteed to reach it.
 - **VISUAL_IDENTITY now also includes all six visual-identity-only
   fields** (`color_inspiration`, `color_palettes`,
   `selected_palette_index`, `visual_style`, `typography_preference`,
@@ -417,7 +432,7 @@ above verbatim:
   recommends before narrowing further, the safer default is to keep
   grounding Phase 3 in the user's actual color/typography selections.
 
-Every other phase's allowlist (`NARRATIVE_MESSAGING`, `CHANNEL_ACTIVATION`,
-`GOVERNANCE`) ships exactly as recommended above. This addendum documents
-the deviation for future readers of this document; it does not change any
-table or finding above, which remain the underlying evidence record.
+Every other phase's allowlist (`CHANNEL_ACTIVATION`, `GOVERNANCE`) ships
+exactly as recommended above. This addendum documents the deviation for
+future readers of this document; it does not change any table or finding
+above, which remain the underlying evidence record.
