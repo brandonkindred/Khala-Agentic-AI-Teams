@@ -510,15 +510,18 @@ flowchart TB
         RC -->|yes: no compile attempt| CSA[CodeSynthesisAgent]
         RC -->|no| CS
         CS{compile_strategy<br/>succeeds?}
-        CS -->|yes: compiled DSL| SYN
+        CS -->|yes: compiled DSL| VG
         CS -->|CompilerError:<br/>requires_custom_code=True| CSA
-        CSA --> SYN
-        SYN[Pre-execution synthesis gates:<br/>CodeSafety · CodeConformance ·<br/>PredicateConformance · Reachability ·<br/>TargetSymbolCoverageGate.check_fetch]
-        SYN -->|fail| RF[RefinementAgent]
-        RF --> SYN
-        SYN -->|pass| BT[Execute in sandbox<br/>→ trade ledger]
+        CSA --> VG
+        VG[Validation gates:<br/>CodeSafety · CodeConformance ·<br/>PredicateConformance]
+        VG -->|fail| RF[RefinementAgent]
+        RF --> VG
+        VG -->|pass| FETCH{TargetSymbolCoverageGate.check_fetch<br/>— once per attempt — critical?}
+        FETCH -->|critical| SCX[Critical coverage failure<br/>→ short-circuit]
+        FETCH -->|clean| REACH[PredicateReachabilityProbe<br/>— records findings only,<br/>never blocks this round]
+        REACH --> BT[Execute in sandbox<br/>→ trade ledger]
         BT --> POST{Post-execution, still synthesis phase:<br/>TargetSymbolCoverageGate.check_trades<br/>— critical?}
-        POST -->|critical: coverage| SCX[Critical coverage failure<br/>→ short-circuit]
+        POST -->|critical: coverage| SCX
         POST -->|clean| EV{critical anomaly<br/>or zero trades?}
         EV -->|ENTRY_WITH_NO_EXIT| REDES[SpecImplementabilityError<br/>→ phase back to DESIGN]
         EV -->|other zero-trade,<br/>market data available| ZTRA[ZeroTradeRepairAgent]

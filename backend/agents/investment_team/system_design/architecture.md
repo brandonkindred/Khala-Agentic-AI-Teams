@@ -396,11 +396,16 @@ prompt-side data shape without destabilizing the backtester.
 ### 10. LLM access goes through the shared service
 
 Most agents take an `LLMClient` from `backend/agents/llm_service/` and call
-`.complete_json(...)`. Strategy Lab's design/review/refinement agents and the
-`SignalIntelligenceExpert` are the exception — they build a Strands `Model`
-via `model_factory.get_strands_model` and are invoked as `Agent(prompt)`,
-which is why `LLM_PROVIDER=dummy` is not safe for this team's Strands agents
-(see below). Platform-wide, provider/base-URL/model resolve from the
+`.complete_json(...)`. Strategy Lab is the exception across the board:
+`DesignAgent`, `DesignReviewAgent`, `RefinementAgent`, `CodeSynthesisAgent`,
+`TradeAlignmentAgent`, `AnalysisAgent`, `ZeroTradeRepairAgent`, and
+`SignalIntelligenceExpert` all build a Strands `Model` via
+`model_factory.get_strands_model` — directly, or through the shared
+`run_single_shot_agent`/`run_json_with_parse_retry` runners — and are invoked
+as `Agent(prompt)`. `PaperTradingAgent` is Strands-backed too, but through a
+separate `llm_service.strands_provider.get_strands_model`, not this team's
+`model_factory`. This is why `LLM_PROVIDER=dummy` is not safe for any of
+Strategy Lab's Strands agents (see below). Platform-wide, provider/base-URL/model resolve from the
 Postgres-backed ordered provider list (`/llm-config` UI → `llm_provider_configs`)
 — per the root `CLAUDE.md`, the sole source of LLM resolution, with
 `LLM_PROVIDER=dummy` as the only env override.
