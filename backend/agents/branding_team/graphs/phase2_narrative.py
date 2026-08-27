@@ -70,8 +70,3 @@ def build_phase2_graph() -> Graph:
         builder.set_entry_point(node_id)
 
     return builder.build()
-
-
-# Back-compat alias — Phase 2 used to be a Swarm; callers that still import
-# the old name get the same pure fan-out Graph.
-build_phase2_swarm = build_phase2_graph
