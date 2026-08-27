@@ -426,7 +426,8 @@ def resolve_workflow_config_activity() -> Dict[str, Any]:
         Returns ``{"design_review_rounds": int, "design_review_stall_rounds":
         int, "mechanical_repair_enabled": bool, "code_conformance_retries":
         int, "design_max_llm_calls": int, "regime_summary_enabled": bool,
-        "max_design_reentries": int, "llm_timeout_s": float}``.
+        "max_design_reentries": int, "llm_timeout_s": float, "llm_max_retries":
+        int}``.
         A workflow may never read these env vars itself (``os.*`` is
         restricted at workflow runtime by the temporalio sandbox) — it calls
         this activity once and threads the resolved values through
@@ -440,6 +441,12 @@ def resolve_workflow_config_activity() -> Dict[str, Any]:
         it to size ``compute_signal_brief_activity``'s ``start_to_close``
         deadline relative to the true configured per-call ceiling, rather
         than a fixed constant that a large override could exceed.
+        ``llm_max_retries`` is the *same* transient-retry ceiling the Ollama
+        client (``llm_service.clients.ollama._parse_retry_config``, the
+        underlying client ``SignalIntelligenceExpert``'s calls actually go
+        through) applies per call — reused here rather than re-derived so a
+        legitimately-retrying (not stalled) call can't outlast a safety
+        margin sized independently of the client's own retry budget.
     """
     from investment_team.strategy_lab.orchestrator import (
         MAX_DESIGN_REENTRIES,
@@ -452,7 +459,10 @@ def resolve_workflow_config_activity() -> Dict[str, Any]:
     from investment_team.strategy_lab.quality_gates.predicate_conformance import (
         _code_conformance_retries,
     )
+    from llm_service.clients.ollama import _parse_retry_config
     from llm_service.config import resolve_timeout
+
+    llm_max_retries, _backoff_base, _backoff_cap = _parse_retry_config()
 
     return {
         "design_review_rounds": _design_review_rounds(),
@@ -463,6 +473,7 @@ def resolve_workflow_config_activity() -> Dict[str, Any]:
         "regime_summary_enabled": _env_flag("STRATEGY_LAB_REGIME_SUMMARY_ENABLED"),
         "max_design_reentries": MAX_DESIGN_REENTRIES,
         "llm_timeout_s": resolve_timeout(),
+        "llm_max_retries": llm_max_retries,
     }
 
 

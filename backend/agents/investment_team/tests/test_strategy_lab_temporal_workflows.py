@@ -615,16 +615,32 @@ def test_signal_brief_activity_timeout_scales_with_configured_llm_timeout():
     forcing Temporal to retry the whole activity and repeat paid LLM calls."""
     from datetime import timedelta
 
-    default_timeout = wf._signal_brief_activity_timeout(3600.0, None)
-    doubled_timeout = wf._signal_brief_activity_timeout(7200.0, None)
+    default_timeout = wf._signal_brief_activity_timeout(3600.0, None, 10)
+    doubled_timeout = wf._signal_brief_activity_timeout(7200.0, None, 10)
     assert doubled_timeout == default_timeout * 2
 
     # An excluded category shrinks the allowed count, so the deadline shrinks too.
     stocks_only = wf._signal_brief_activity_timeout(
-        3600.0, ["crypto", "forex", "futures", "commodities"]
+        3600.0, ["crypto", "forex", "futures", "commodities"], 10
     )
-    assert stocks_only == timedelta(seconds=1 * 3600.0 * wf._SIGNAL_BRIEF_TIMEOUT_SAFETY_FACTOR)
+    assert stocks_only == timedelta(seconds=1 * 3600.0 * 11)
     assert stocks_only < default_timeout
+
+
+def test_signal_brief_activity_timeout_scales_with_configured_retry_ceiling():
+    """The deadline must also grow with an operator's LLM_MAX_RETRIES
+    override -- a legitimately-retrying (not stalled) call, which the
+    heartbeat mechanism does not protect against, must not outlast a safety
+    margin sized independently of the client's own retry budget."""
+    from datetime import timedelta
+
+    default_retries = wf._signal_brief_activity_timeout(3600.0, None, 10)
+    more_retries = wf._signal_brief_activity_timeout(3600.0, None, 20)
+    assert more_retries == timedelta(seconds=5 * 3600.0 * 21)
+    assert more_retries > default_retries
+
+    zero_retries = wf._signal_brief_activity_timeout(3600.0, None, 0)
+    assert zero_retries == timedelta(seconds=5 * 3600.0 * 1)
 
 
 def test_signal_brief_activity_timeout_never_degenerates_to_a_non_positive_deadline():
@@ -634,9 +650,9 @@ def test_signal_brief_activity_timeout_never_degenerates_to_a_non_positive_deadl
     from datetime import timedelta
 
     result = wf._signal_brief_activity_timeout(
-        3600.0, ["stocks", "crypto", "forex", "futures", "commodities"]
+        3600.0, ["stocks", "crypto", "forex", "futures", "commodities"], 10
     )
-    assert result == timedelta(seconds=1 * 3600.0 * wf._SIGNAL_BRIEF_TIMEOUT_SAFETY_FACTOR)
+    assert result == timedelta(seconds=1 * 3600.0 * 11)
     assert result > timedelta(0)
 
 
@@ -648,7 +664,7 @@ def test_signal_brief_activity_timeout_deduplicates_the_exclude_list():
     dangerous direction for this helper to get wrong."""
     from datetime import timedelta
 
-    deduped = wf._signal_brief_activity_timeout(3600.0, ["stocks", "stocks", "crypto"])
-    distinct = wf._signal_brief_activity_timeout(3600.0, ["stocks", "crypto"])
+    deduped = wf._signal_brief_activity_timeout(3600.0, ["stocks", "stocks", "crypto"], 10)
+    distinct = wf._signal_brief_activity_timeout(3600.0, ["stocks", "crypto"], 10)
     assert deduped == distinct
-    assert deduped == timedelta(seconds=3 * 3600.0 * wf._SIGNAL_BRIEF_TIMEOUT_SAFETY_FACTOR)
+    assert deduped == timedelta(seconds=3 * 3600.0 * 11)

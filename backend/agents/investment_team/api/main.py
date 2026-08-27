@@ -2502,7 +2502,22 @@ def _finalize_strategy_lab_cycle_record(
     if signal_brief_storage and not record.signal_intelligence_brief:
         by_class = signal_brief_storage.get("by_asset_class")
         if isinstance(by_class, dict):
-            own_brief = by_class.get(normalize_asset_class(record.strategy.asset_class))
+            # ``loop_telemetry["asset_category"]`` — set on both the ready and
+            # not-ready exit paths of ``_run_design_loop`` — is the category
+            # the design agent was actually pinned to and received the brief
+            # for. ``record.strategy.asset_class`` is NOT an equivalent
+            # substitute on a short-circuited (never-Rule-11-validated)
+            # record: a non-ready exit (budget_exhausted / design_stalled /
+            # design_not_ready) can persist a draft whose authored class never
+            # converged to the pin, and keying off that wrong class would
+            # attach a different category's brief — misattributing which
+            # evidence the design agent actually used. Falls back to the
+            # declared class only for a legacy/direct-call record with no
+            # telemetry.
+            attempted_category = (
+                record.loop_telemetry.get("asset_category") or record.strategy.asset_class
+            )
+            own_brief = by_class.get(normalize_asset_class(attempted_category))
             # A per-category entry that itself failed or was skipped (no
             # prior records, expert error) is a ``{"skipped": True, ...}``
             # marker, not brief content — the strategy card renders whatever

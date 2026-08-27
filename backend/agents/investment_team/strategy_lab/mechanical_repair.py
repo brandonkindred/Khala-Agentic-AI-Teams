@@ -92,32 +92,59 @@ class RepairOutcome:
     actions: List[RepairAction] = field(default_factory=list)
 
 
+# Common English names for the futures/commodity roots in symbols.py's
+# FUTURES_SYMBOLS_BARE / COMMODITY_SYMBOLS (a small, closed universe — 7-9
+# contracts each — unlike stocks, whose thousands of possible company names
+# make an equivalent table impractical to build or keep complete; a stocks
+# thesis naming its off-category holding only by common name, never by
+# ticker, remains an acknowledged gap). Values are the plain-English terms a
+# hypothesis would plausibly use; multi-word phrases are matched as a single
+# whole-word-bounded unit (e.g. "crude oil" won't match a thesis that only
+# says "oil price rally" — a deliberate, conservative choice over guessing at
+# every partial phrasing).
+_NON_CRYPTO_COMMON_NAMES: dict[str, tuple[str, ...]] = {
+    "ES": ("s&p 500", "s&p", "spx"),
+    "NQ": ("nasdaq", "nasdaq 100"),
+    "CL": ("crude oil", "crude", "wti"),
+    "GC": ("gold",),
+    "SI": ("silver",),
+    "ZB": ("treasury bond", "treasury bonds"),
+    "NG": ("natural gas",),
+    "SLV": ("silver",),
+    "DBA": ("agriculture",),
+    "UNG": ("natural gas",),
+}
+
+
 def _symbol_named_in_thesis(symbol: str, *thesis_text: str) -> bool:
     """True if ``symbol`` (or its bare root, e.g. ``"DOGE"`` for
-    ``"DOGE-USDT"``) — or, for a crypto root, its common English name (e.g.
-    ``"Bitcoin"`` for ``"BTC"``) — is mentioned by name in ``thesis_text``.
+    ``"DOGE-USDT"``) — or a known common English name for that root (e.g.
+    ``"Bitcoin"`` for ``"BTC"``, ``"S&P 500"`` for ``"ES"``) — is mentioned by
+    name in ``thesis_text``.
 
     Preconditions:
       - ``symbol`` is a ticker string; ``thesis_text`` are free-text spec
         fields (``hypothesis``, ``signal_definition``) that may be empty.
     Postconditions:
-      - Returns whether the symbol's root (suffix stripped), or a known
-        crypto common name derived from :data:`symbols.COINGECKO_IDS` for
-        that root, appears as a whole word, case-insensitively, in the
-        joined text. A thesis naming an off-category asset by its plain
+      - Returns whether the symbol's root (suffix stripped), a known crypto
+        common name derived from :data:`symbols.COINGECKO_IDS`, or a known
+        futures/commodity common name from :data:`_NON_CRYPTO_COMMON_NAMES`
+        for that root, appears as a whole word/phrase, case-insensitively, in
+        the joined text. A thesis naming an off-category asset by its plain
         name rather than its ticker (e.g. "Bitcoin momentum" targeting
-        ``BTC-USD``) would otherwise go undetected and the symbol would be
-        silently stripped as an unrelated stray ticker. Still purely a
-        lexical check — no semantic understanding of whether the thesis
-        actually depends on the symbol, and non-crypto common names (e.g.
-        "Gold" for ``GLD``) aren't covered since no equivalent name table
-        exists for those asset classes.
+        ``BTC-USD``, or "S&P 500 futures momentum" targeting ``ES=F``) would
+        otherwise go undetected and the symbol would be silently stripped as
+        an unrelated stray ticker. Still purely a lexical check — no semantic
+        understanding of whether the thesis actually depends on the symbol,
+        and stocks common names (e.g. "Apple" for ``AAPL``) aren't covered
+        since no equivalent bounded name table exists for that asset class.
     """
     root = re.split(r"[-=]", symbol, maxsplit=1)[0]
     if not root:
         return False
+    root_upper = root.upper()
     candidates = {root}
-    common_name = COINGECKO_IDS.get(root.upper())
+    common_name = COINGECKO_IDS.get(root_upper)
     if common_name:
         # A CoinGecko id can carry a disambiguating suffix (e.g.
         # "avalanche-2") or be a hyphenated compound (e.g. "matic-network");
@@ -126,6 +153,7 @@ def _symbol_named_in_thesis(symbol: str, *thesis_text: str) -> bool:
         alpha_name = re.match(r"[a-zA-Z]+", common_name)
         if alpha_name:
             candidates.add(alpha_name.group(0))
+    candidates.update(_NON_CRYPTO_COMMON_NAMES.get(root_upper, ()))
     text = " ".join(thesis_text)
     return any(re.search(r"\b" + re.escape(c) + r"\b", text, re.IGNORECASE) for c in candidates)
 

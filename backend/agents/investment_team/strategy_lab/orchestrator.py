@@ -491,7 +491,7 @@ class StrategyLabOrchestrator(
             market_data=market_data,
         )
         self._last_anomaly_check = (signature, [g.model_copy() for g in results])
-        return results
+        return [g.model_copy() for g in results]
 
     def run_cycle(
         self,

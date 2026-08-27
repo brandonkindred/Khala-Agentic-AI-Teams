@@ -180,8 +180,10 @@ def test_market_lab_context_prompt_text_not_truncated() -> None:
 
 
 def _scoping_ctx() -> MarketLabContext:
-    """A MarketLabContext with every category-specific field populated, so
-    each scoping test has something real to strip."""
+    """A MarketLabContext with the main category-specific data fields
+    (fx_rates, crypto_snapshot) populated, so scoping tests have something
+    real to strip. Class-agnostic fields (macro_snippets, social_sentiment)
+    are also included to verify they survive scoping."""
     return MarketLabContext(
         fetched_at="2024-01-01T00:00:00Z",
         degraded=False,
