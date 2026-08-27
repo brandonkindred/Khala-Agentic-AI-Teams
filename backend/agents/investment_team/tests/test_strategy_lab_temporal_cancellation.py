@@ -50,13 +50,14 @@ comprehensive direct-call tests live in
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import threading
 import time
 from typing import Any, Dict
 from unittest import mock
 
 import pytest
+
+from shared.temporal.testing import workflow_environment as _workflow_environment
 
 # Worst-case bound: the stubbed design-attempt loop iterates this many times,
 # sleeping this long between checks, so a totally broken cancellation path
@@ -72,33 +73,6 @@ _TEST_HEARTBEAT_INTERVAL_S = 0.3
 # _TEST_HEARTBEAT_INTERVAL_S but far under both the stub's own 10s ceiling and
 # the real workflow's _DESIGN_ATTEMPT_HEARTBEAT_TIMEOUT (90s).
 _CANCEL_OBSERVED_BOUND_S = 5.0
-
-
-@contextlib.asynccontextmanager
-async def _workflow_environment():
-    """Start a time-skipping ``WorkflowEnvironment`` with no worker attached.
-
-    Preconditions:
-        - Caller is an async test that will drive the yielded ``env`` and any
-          workers itself.
-    Postconditions:
-        - Yields a started ``WorkflowEnvironment``. Skips the test (rather
-          than failing) when the ephemeral Temporal test-server binary cannot
-          be downloaded -- same egress caveat as
-          ``test_coding_team_temporal_workflow.py``'s helper of the same
-          name, the only other place in this repo that drives
-          ``temporalio.testing.WorkflowEnvironment``. The environment is shut
-          down on exit.
-    """
-    from temporalio.testing import WorkflowEnvironment
-
-    try:
-        test_env = await WorkflowEnvironment.start_time_skipping()
-    except RuntimeError as exc:
-        pytest.skip(f"Temporal ephemeral test server unavailable (no egress?): {exc}")
-
-    async with test_env as env:
-        yield env
 
 
 def _make_fake_run_design_attempt(state: Dict[str, Any]):
