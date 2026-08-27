@@ -2,7 +2,7 @@
 
 The store persists ``StageOutcome`` and ``DealOutcome`` records as JSON
 files plus a single ``LearningInsights`` snapshot. The module reads the
-cache root at import time from ``AGENT_CACHE_DIR``, so each test reaches
+cache root at import time from ``AGENT_CACHE``, so each test reaches
 into the module-level path constants and points them at a tmpdir.
 
 These tests cover:
@@ -16,6 +16,8 @@ These tests cover:
 
 from __future__ import annotations
 
+import importlib
+import inspect
 from pathlib import Path
 
 import pytest
@@ -254,6 +256,45 @@ def test_outcome_counts_after_writes(_isolate_store) -> None:
     outcome_store.save_insights(LearningInsights(insights_version=1))
     counts = outcome_store.outcome_counts()
     assert counts == {"stage_outcomes": 1, "deal_outcomes": 1, "has_insights": True}
+
+
+# ---------------------------------------------------------------------------
+# AGENT_CACHE env var resolution
+# ---------------------------------------------------------------------------
+
+
+def test_cache_paths_resolve_under_agent_cache_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The module must read its cache root from AGENT_CACHE (not AGENT_CACHE_DIR)."""
+    monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
+    try:
+        importlib.reload(outcome_store)
+        assert outcome_store._CACHE_ROOT == tmp_path / "sales_team" / "outcomes"
+        assert outcome_store._INSIGHTS_PATH == (
+            tmp_path / "sales_team" / "insights" / "current.json"
+        )
+    finally:
+        monkeypatch.delenv("AGENT_CACHE", raising=False)
+        importlib.reload(outcome_store)
+
+
+_DEAD_ENV_VAR_NAME = "AGENT_CACHE" + "_DIR"
+
+
+def test_agent_cache_dir_env_var_never_read_in_sales_team() -> None:
+    """Regression guard: the dead AGENT_CACHE_DIR name must not reappear in sales_team."""
+    import sales_team
+
+    package_dir = Path(inspect.getfile(sales_team)).parent
+    this_file = Path(__file__).resolve()
+    offenders = [
+        py_file
+        for py_file in package_dir.rglob("*.py")
+        if py_file.resolve() != this_file
+        and _DEAD_ENV_VAR_NAME in py_file.read_text(encoding="utf-8")
+    ]
+    assert not offenders, f"stale {_DEAD_ENV_VAR_NAME} reference(s) found in: {offenders}"
 
 
 # ---------------------------------------------------------------------------
