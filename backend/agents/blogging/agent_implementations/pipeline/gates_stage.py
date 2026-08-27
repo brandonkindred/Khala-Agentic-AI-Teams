@@ -7,7 +7,7 @@ from pathlib import Path
 from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
 from agents.blogging.blog_publication_agent.models import PublishingPack
 from agents.blogging.blog_writer_agent import ReviseWriterInput
-from agents.blogging.shared.artifacts import write_artifact
+from agents.blogging.shared.artifacts import load_allowed_claims_for_brief, write_artifact
 from agents.blogging.shared.content_profile import build_draft_length_instruction
 from agents.blogging.shared.errors import BloggingError, ComplianceError, DraftError, FactCheckError
 from agents.blogging.shared.models import BlogPhase
@@ -94,9 +94,20 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
     _update = _make_update(job_updater)
 
     status: PipelineStatus = "PASS"
+    allowed_claims = None
     if work_dir is not None:
         write_artifact(work_dir, "final.md", draft_result.draft)
         logger.info("Persisted final.md")
+
+        # Load allowed_claims.json (if present, and belonging to the current
+        # brief) so the fact-check gate evaluates the draft against the same
+        # list the writer was given, and so a gate-driven rewrite can keep
+        # [CLAIM:id] tags valid; a missing/non-dict artifact, or a topic
+        # mismatch (a stale artifact from a reused work_dir), is a no-op
+        # (matches validators' handling of the same artifact). Guarded by the
+        # same work_dir check as the write above: there's nothing on disk to
+        # read when there's no work_dir.
+        allowed_claims = load_allowed_claims_for_brief(work_dir, brief.brief)
 
     # Gates require a work_dir: they persist validator/fact-check/compliance
     # artifacts and drive the closed-loop rewrite off them. When gates are
@@ -169,6 +180,7 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
             try:
                 report = fact_check_agent.run(
                     draft,
+                    allowed_claims=allowed_claims,
                     require_disclaimer_for=require_disclaimer_for,
                     work_dir=work_dir,
                     on_llm_request=lambda msg: _update(BlogPhase.FACT_CHECK, status_text=msg),
@@ -229,8 +241,14 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
 
             # Deterministic validators run first (non-LLM, and the compliance gate
             # consumes their report). Their failures map to FactCheckError as before.
+            # Pass the already topic-matched allowed_claims through explicitly so
+            # validators' claims-policy check agrees with the fact-check gate above
+            # instead of independently re-reading (and possibly disagreeing with)
+            # work_dir/allowed_claims.json.
             try:
-                validator_report = run_validators_from_work_dir(work_dir)
+                validator_report = run_validators_from_work_dir(
+                    work_dir, allowed_claims=allowed_claims
+                )
             except BloggingError:
                 raise
             except CancelledError:
@@ -455,6 +473,7 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
                     length_guidance=build_draft_length_instruction(length_policy),
                     selected_title=None,
                     elicited_stories=elicited_stories_text or None,
+                    allowed_claims=allowed_claims,
                 )
                 draft_output_path = Path(work_dir) / f"draft_rewrite_{rewrite_iter + 1}.md"
                 draft_result = draft_agent.revise(

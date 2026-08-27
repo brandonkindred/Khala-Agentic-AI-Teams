@@ -145,6 +145,46 @@ def read_artifact(
     return raw
 
 
+def load_allowed_claims_for_brief(
+    work_dir: Optional[Union[str, Path]],
+    brief_text: str,
+) -> Optional[dict]:
+    """
+    Load allowed_claims.json from work_dir, but only if it belongs to the current brief.
+
+    A work_dir may be reused across runs (e.g. a stable CLI run_dir, or a caller
+    explicitly reusing work_dir for a new topic). Without this check, a stale
+    allowed_claims.json left by an earlier, unrelated brief would silently
+    constrain and validate the new draft's claims.
+
+    Preconditions:
+        brief_text is the current run's brief/topic string (may be "").
+    Postconditions:
+        Returns None when work_dir is falsy, the artifact is missing or not a
+        dict, or its "topic" field doesn't equal brief_text exactly (a stale
+        artifact from a reused work_dir). Otherwise returns ``{"topic": ...,
+        "claims": [...]}`` with "claims" normalized to a list containing only
+        the entries that are dicts with a truthy "id" and "text" — a
+        non-list, missing, or malformed-entry "claims" value is never passed
+        through as-is, so every consumer (writer prompt, fact-check agent)
+        can rely on getting either a well-formed claim list or an empty one,
+        never something that raises when a consumer calls ``.get()`` on an
+        entry.
+    """
+    if not work_dir:
+        return None
+    allowed_claims = read_artifact(work_dir, "allowed_claims.json", default=None)
+    if not isinstance(allowed_claims, dict):
+        return None
+    if allowed_claims.get("topic") != brief_text:
+        return None
+    claims = allowed_claims.get("claims")
+    if not isinstance(claims, list):
+        claims = []
+    sanitized_claims = [c for c in claims if isinstance(c, dict) and c.get("id") and c.get("text")]
+    return {"topic": brief_text, "claims": sanitized_claims}
+
+
 def read_latest_draft(
     work_dir: Union[str, Path],
     preferred: str = "final.md",

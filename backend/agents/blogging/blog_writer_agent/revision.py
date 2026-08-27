@@ -167,6 +167,7 @@ def build_revise_all_items_prompt(
     *,
     brand_section: str,
     llm: Any,
+    allowed_claims_section: str = "",
 ) -> str:
     """Build one revision prompt that applies every copy-editor feedback item.
 
@@ -176,6 +177,10 @@ def build_revise_all_items_prompt(
         - ``llm`` is the ``LLMClient`` passed to ``compact_text`` when the
           content plan exceeds ``COMPACT_OUTLINE_CHARS`` (e.g. an agent's
           ``self._model``).
+        - ``allowed_claims_section`` is the caller's already-rendered
+          allowed-claims prompt block (e.g. via
+          ``agent._render_allowed_claims_section(revise_input.allowed_claims)``),
+          or ``""`` when no allowed-claims artifact was supplied.
     Postconditions:
         - Returns a prompt string embedding the brand/style sections, the
           content plan, every feedback item formatted via
@@ -186,9 +191,11 @@ def build_revise_all_items_prompt(
           (capped at ``MAX_PREVIOUS_FEEDBACK_ITEMS``) is inserted after it;
           ``selected_title`` and ``elicited_stories`` are each appended as
           their own labeled section near the end (title before stories);
-          and ``tone_or_purpose`` / ``audience`` are each prepended as a
-          single labeled line at the very front (tone_or_purpose before
-          audience). Absent fields are omitted rather than left blank.
+          ``allowed_claims_section`` is appended as its own section after
+          ``elicited_stories`` when non-empty; and ``tone_or_purpose`` /
+          ``audience`` are each prepended as a single labeled line at the
+          very front (tone_or_purpose before audience). Absent fields are
+          omitted rather than left blank.
     """
     feedback_lines = [
         _format_feedback_item_line(item, i) for i, item in enumerate(feedback_items, start=1)
@@ -307,6 +314,8 @@ def build_revise_all_items_prompt(
                 + revise_input.elicited_stories,
             ]
         )
+    if allowed_claims_section:
+        prompt_parts.extend(["", allowed_claims_section])
     length_block = (
         revise_input.length_guidance.strip()
         if (revise_input.length_guidance or "").strip()

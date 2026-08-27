@@ -185,6 +185,95 @@ def _extract_json_array_from_text(
     return empty_fallback
 
 
+_NO_ALLOWED_CLAIMS_SECTION = (
+    "---\n"
+    "ALLOWED CLAIMS: none available. An allowed-claims list was supplied but contains "
+    "no usable claims. Do not make any factual or statistical claims in this draft; "
+    "rephrase to avoid them or omit them entirely. No [CLAIM:id] tag should appear "
+    "anywhere, since no ID is available to use."
+)
+
+# Discriminator for how the writer must treat factual/statistical claims. Callers
+# that need to branch on the policy (e.g. run()'s numeric-figure requirement) should
+# use _classify_allowed_claims / this constant set rather than comparing rendered
+# prompt text against _NO_ALLOWED_CLAIMS_SECTION -- a future wording change to that
+# text would otherwise silently break a text-equality-based branch.
+_CLAIMS_POLICY_NONE = "none"  # no allowed-claims artifact was supplied at all
+_CLAIMS_POLICY_RESTRICTIVE = "restrictive"  # artifact supplied but yields no usable claim
+_CLAIMS_POLICY_POPULATED = "populated"  # at least one usable claim
+
+
+def _classify_allowed_claims(allowed_claims: Optional[dict]) -> str:
+    """Classify ``allowed_claims`` into a claims-policy discriminator, independent
+    of how ``_render_allowed_claims_section`` renders that policy as prompt text.
+
+    Preconditions:
+        - Same as ``_render_allowed_claims_section``: ``allowed_claims`` is ``None``
+          or a dict shaped like allowed_claims.json.
+    Postconditions:
+        - Returns ``_CLAIMS_POLICY_NONE`` when ``allowed_claims`` is ``None`` or not
+          a dict.
+        - Returns ``_CLAIMS_POLICY_RESTRICTIVE`` when ``allowed_claims`` is a dict
+          but yields no usable claim (``claims`` missing, empty, not a list, or
+          every entry malformed).
+        - Otherwise returns ``_CLAIMS_POLICY_POPULATED``.
+    """
+    if not isinstance(allowed_claims, dict):
+        return _CLAIMS_POLICY_NONE
+    claims = allowed_claims.get("claims")
+    if not isinstance(claims, list):
+        return _CLAIMS_POLICY_RESTRICTIVE
+    has_usable_claim = any(isinstance(c, dict) and c.get("id") and c.get("text") for c in claims)
+    return _CLAIMS_POLICY_POPULATED if has_usable_claim else _CLAIMS_POLICY_RESTRICTIVE
+
+
+def _render_allowed_claims_section(allowed_claims: Optional[dict]) -> str:
+    """Render allowed_claims.json content as a prompt section, or "" when no artifact
+    was supplied at all.
+
+    Preconditions:
+        - ``allowed_claims`` is ``None`` or a dict shaped like allowed_claims.json
+          (``{"topic": ..., "claims": [{"id": ..., "text": ...}, ...]}``); malformed
+          claim entries are tolerated (skipped) rather than raising.
+    Postconditions:
+        - Returns ``""`` when ``_classify_allowed_claims`` yields
+          ``_CLAIMS_POLICY_NONE`` — i.e. no allowed-claims artifact was supplied at
+          all. The writer prompt's own instructions cover this case (write
+          normally, no ``[CLAIM:id]`` tags).
+        - Returns the restrictive ``_NO_ALLOWED_CLAIMS_SECTION`` block when
+          ``_classify_allowed_claims`` yields ``_CLAIMS_POLICY_RESTRICTIVE`` — a
+          present-but-empty artifact (e.g. extraction ran and found nothing
+          supportable) must not be treated the same as "no artifact was checked",
+          since the latter silently permits unsupported factual claims.
+        - Otherwise (``_CLAIMS_POLICY_POPULATED``) returns a ``---``-delimited
+          prompt block listing every claim as ``- [id] text``, instructing the
+          model to tag claims with the given IDs, to invent none, and
+          (self-contained, so any rewrite/revision caller that embeds this block
+          verbatim gets consistent guidance without adding its own wrapper text)
+          to preserve existing ``[CLAIM:id]`` tags when revising.
+    """
+    policy = _classify_allowed_claims(allowed_claims)
+    if policy == _CLAIMS_POLICY_NONE:
+        return ""
+    if policy == _CLAIMS_POLICY_RESTRICTIVE:
+        return _NO_ALLOWED_CLAIMS_SECTION
+    claims = allowed_claims.get("claims")
+    lines = [
+        f"- [{c.get('id')}] {c.get('text')}"
+        for c in claims
+        if isinstance(c, dict) and c.get("id") and c.get("text")
+    ]
+    return (
+        "---\n"
+        "ALLOWED CLAIMS (tag every factual/statistical claim with [CLAIM:id] using "
+        "only an ID from this list; never invent an ID; if no claim here supports an "
+        "assertion, rephrase or omit it; when revising, preserve any existing "
+        "[CLAIM:id] tags exactly; do not remove, renumber, or reassign them "
+        "unless the claim they support is removed from the draft):\n"
+        "---\n" + "\n".join(lines)
+    )
+
+
 def _write_draft_to_path(draft: str, path: Union[str, Path]) -> None:
     """Write draft content to path; create parent dirs if needed. Log the saved path.
 
@@ -493,7 +582,9 @@ class BlogWriterAgent(_BlogAgentBase):
         """
         return self_review.deterministic_self_check(draft)
 
-    def _fix_deterministic_violations(self, draft: str, violations: list[str]) -> str:
+    def _fix_deterministic_violations(
+        self, draft: str, violations: list[str], allowed_claims_section: str = ""
+    ) -> str:
         """Call LLM once to fix deterministic violations. Returns cleaned draft.
 
         Delegates to ``self_review.fix_deterministic_violations``, passing
@@ -502,8 +593,12 @@ class BlogWriterAgent(_BlogAgentBase):
         Preconditions:
             - ``draft`` is a non-empty string when callers intend a real fix (empty is allowed).
             - ``violations`` is a list of human-readable violation strings (may be empty).
+            - ``allowed_claims_section`` is an already-rendered allowed-claims prompt
+              block (e.g. via ``_render_allowed_claims_section``), or ``""``.
         Postconditions:
             - On success with extractable fixed draft, returns that stripped draft.
+            - When ``allowed_claims_section`` is non-empty, the fix prompt instructs
+              the model to preserve existing ``[CLAIM:id]`` tags.
             - On soft-fail (``LLMError`` excluding types re-raised below, or
               ``json.JSONDecodeError`` / ``TypeError`` / ``ValueError`` / ``AttributeError``),
               logs with traceback via ``logger.exception`` and returns the original ``draft``.
@@ -511,9 +606,11 @@ class BlogWriterAgent(_BlogAgentBase):
               ``EventLoopException``) propagate as the unwrapped cause.
             - Unexpected exceptions propagate unchanged.
         """
-        return self_review.fix_deterministic_violations(draft, violations, self._call_text)
+        return self_review.fix_deterministic_violations(
+            draft, violations, self._call_text, allowed_claims_section
+        )
 
-    def _llm_self_review(self, draft: str) -> str:
+    def _llm_self_review(self, draft: str, allowed_claims_section: str = "") -> str:
         """Run a focused LLM self-review for subjective violations. Returns cleaned draft.
 
         Delegates to ``self_review.llm_self_review``, passing ``self._call_text``
@@ -521,8 +618,12 @@ class BlogWriterAgent(_BlogAgentBase):
 
         Preconditions:
             - ``draft`` is a string (may be empty).
+            - ``allowed_claims_section`` is an already-rendered allowed-claims prompt
+              block (e.g. via ``_render_allowed_claims_section``), or ``""``.
         Postconditions:
             - On success, returns the reviewed/fixed draft or the original when no issues.
+            - When issues are found and ``allowed_claims_section`` is non-empty, the fix
+              prompt instructs the model to preserve existing ``[CLAIM:id]`` tags.
             - If the response's JSON parses to a value that is not a list of issue
               dicts (e.g. a top-level object, or salvaged prose residue with no
               recoverable issues array), returns the original ``draft`` unchanged.
@@ -537,14 +638,20 @@ class BlogWriterAgent(_BlogAgentBase):
               ``EventLoopException``) propagate as the unwrapped cause.
             - Unexpected exceptions propagate unchanged.
         """
-        return self_review.llm_self_review(draft, self._call_text)
+        return self_review.llm_self_review(draft, self._call_text, allowed_claims_section)
 
-    def _self_review(self, draft: str) -> str:
+    def _self_review(self, draft: str, allowed_claims_section: str = "") -> str:
         """Run deterministic check then LLM self-review. Returns cleaned draft.
 
-        Orchestrates the three delegating methods above (rather than delegating
-        directly to ``self_review.self_review``) so that each sub-step still runs
-        through this agent's own bound methods.
+        Orchestrates the delegating methods above (``_fix_deterministic_violations``
+        and ``_llm_self_review``, rather than delegating directly to
+        ``self_review.self_review``) so that each sub-step still runs through this
+        agent's own bound methods.
+
+        ``allowed_claims_section`` is an already-rendered allowed-claims prompt
+        block (e.g. via ``_render_allowed_claims_section``), or ``""``; forwarded
+        unchanged to both sub-steps so a mechanical or subjective rewrite cannot
+        silently drop or corrupt ``[CLAIM:id]`` tagging.
 
         Both sub-steps (``_fix_deterministic_violations``, ``_llm_self_review``)
         already return the original draft on their own soft-fail paths, so this
@@ -554,10 +661,10 @@ class BlogWriterAgent(_BlogAgentBase):
         violations = self._deterministic_self_check(draft)
         if violations:
             logger.info("Deterministic self-check found %s violation(s)", len(violations))
-            draft = self._fix_deterministic_violations(draft, violations)
+            draft = self._fix_deterministic_violations(draft, violations, allowed_claims_section)
 
         # Step 2: LLM self-review for subjective issues
-        draft = self._llm_self_review(draft)
+        draft = self._llm_self_review(draft, allowed_claims_section)
 
         return draft
 
@@ -579,6 +686,21 @@ class BlogWriterAgent(_BlogAgentBase):
             - ``draft_input`` is a valid ``WriterInput``.
         Postconditions:
             - Returns a ``WriterOutput`` with a non-empty draft string.
+            - The prompt includes an ALLOWED CLAIMS section per
+              ``_render_allowed_claims_section(draft_input.allowed_claims)``:
+              a list of ``[CLAIM:id]``-taggable claims when at least one claim
+              has a non-empty ``id`` and ``text``; a restrictive "make no
+              factual/statistical claims" instruction when ``allowed_claims``
+              is a dict but yields no usable claim; omitted entirely only when
+              ``allowed_claims`` is absent (``None``/not a dict).
+            - The same rendered section is passed to ``_self_review``, so the
+              deterministic-fix and LLM-self-review rewrite passes that may run
+              after generation are instructed to preserve existing ``[CLAIM:id]``
+              tags rather than silently dropping or corrupting them.
+            - When the restrictive no-claims policy is in effect, the prompt's
+              "at least one specific number" checklist item is replaced with a
+              "no specific numbers" instruction, so the two mandates never
+              conflict for a quantitative topic.
             - Expected LLM parse failures (``LLMJsonParseError``, including when
               Strands wraps them in ``EventLoopException``) soft-fail into a JSON
               fallback, then a placeholder if both paths yield no content.
@@ -646,20 +768,43 @@ class BlogWriterAgent(_BlogAgentBase):
                 "AUTHOR'S PERSONAL STORIES (use these in the relevant sections — do not invent new details beyond what is provided):\n"
                 + draft_input.elicited_stories
             )
+        claims_section = _render_allowed_claims_section(draft_input.allowed_claims)
+        if claims_section:
+            prompt_parts.append("")
+            prompt_parts.append(claims_section)
         if draft_input.audience:
             prompt_parts.append("")
             prompt_parts.append(f"Audience: {draft_input.audience}")
         if draft_input.tone_or_purpose:
             prompt_parts.append(f"Tone/Purpose: {draft_input.tone_or_purpose}")
+        # The restrictive no-claims policy forbids every factual/statistical assertion,
+        # so the numeric-figure requirement below must not apply when it's in effect —
+        # otherwise the model gets two contradictory mandates for a quantitative topic
+        # and may invent an unsupported number to satisfy this one. Classified from
+        # draft_input.allowed_claims directly (not by comparing claims_section's
+        # rendered text) so a future wording change to _NO_ALLOWED_CLAIMS_SECTION
+        # can't silently break this branch.
+        if _classify_allowed_claims(draft_input.allowed_claims) == _CLAIMS_POLICY_RESTRICTIVE:
+            numeric_requirement = (
+                "no specific numbers, dollar figures, percentages, or durations (the "
+                "ALLOWED CLAIMS section above forbids factual/statistical claims; do "
+                "not invent any to satisfy this); "
+            )
+        else:
+            numeric_requirement = (
+                "at least one specific number (dollar figure, percentage, or duration) "
+                "if the topic supports it; "
+            )
         prompt_parts.append("")
         prompt_parts.append("---")
         prompt_parts.append(
             "Before outputting, ensure: no banned phrases; no em dashes or en dashes; 8th grade reading level; "
             "descriptive headings; first-person opening hook from author-provided stories (or placeholder if none "
             "provided, NEVER fabricate); at least one transparent-failure moment from author stories (or placeholder "
-            "if none, NEVER fabricate); at least one specific number (dollar figure, percentage, or duration) if the "
-            "topic supports it; trade-offs acknowledged; technical concepts introduced through the pain they solve "
-            "(not as definitions); one practical next step in the conclusion. "
+            "if none, NEVER fabricate); "
+            + numeric_requirement
+            + "trade-offs acknowledged; technical concepts "
+            "introduced through the pain they solve (not as definitions); one practical next step in the conclusion. "
             "QUALITY CHECK: Does this sound like the author's voice per the brand spec, not an AI? Would a skeptical reader find the "
             "arguments convincing? Is it actionable and valuable to the target audience? Does it flow logically "
             "from intro to conclusion? "
@@ -722,7 +867,7 @@ class BlogWriterAgent(_BlogAgentBase):
         if draft != _PLACEHOLDER_DRAFT:
             if on_llm_request:
                 on_llm_request("Running self-review...")
-            draft = self._self_review(draft)
+            draft = self._self_review(draft, claims_section)
         if draft_output_path:
             _write_draft_to_path(draft, draft_output_path)
         return WriterOutput(draft=draft)
@@ -873,6 +1018,7 @@ class BlogWriterAgent(_BlogAgentBase):
             revise_input,
             brand_section=self._brand_section_for_prompt(),
             llm=self._model,
+            allowed_claims_section=_render_allowed_claims_section(revise_input.allowed_claims),
         )
         current_draft = draft
         primary_succeeded = False
@@ -1072,6 +1218,7 @@ class BlogWriterAgent(_BlogAgentBase):
         target_word_count: int = 1000,
         length_guidance: str = "",
         uncertainty_answers: Optional[dict[str, str]] = None,
+        allowed_claims: Optional[dict[str, Any]] = None,
         on_llm_request: Optional[Callable[[str], None]] = None,
         draft_output_path: Optional[Union[str, Path]] = None,
     ) -> WriterOutput:
@@ -1082,6 +1229,10 @@ class BlogWriterAgent(_BlogAgentBase):
         cycle where the user acts as the editor.
 
         Postconditions:
+            - The prompt includes an ALLOWED CLAIMS section (per
+              ``_render_allowed_claims_section``) when ``allowed_claims`` yields
+              a non-empty rendered section, so `[CLAIM:id]` tags survive this
+              revision path too; omitted otherwise.
             - Returns a ``WriterOutput`` whose ``draft`` field is the original
               ``draft`` unchanged when it is blank.
             - Otherwise retries the text-completion path up to
@@ -1145,6 +1296,9 @@ class BlogWriterAgent(_BlogAgentBase):
             )
         if elicited_stories:
             prompt_parts.extend(["---", "AUTHOR'S PERSONAL STORIES:\n" + elicited_stories, ""])
+        claims_section = _render_allowed_claims_section(allowed_claims)
+        if claims_section:
+            prompt_parts.extend([claims_section, ""])
         if audience:
             prompt_parts.append(f"Audience: {audience}")
         if tone_or_purpose:

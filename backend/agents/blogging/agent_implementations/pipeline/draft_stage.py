@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 from agents.blogging.blog_copy_editor_agent import CopyEditorInput
 from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
 from agents.blogging.blog_writer_agent import ReviseWriterInput, WriterInput
+from agents.blogging.shared.artifacts import load_allowed_claims_for_brief
 from agents.blogging.shared.blog_job_store import (
     add_blog_pending_questions,
     is_waiting_for_blog_answers,
@@ -45,6 +46,10 @@ def run_draft_stage(
 ) -> Optional[Tuple[PlanningPhaseResult, Optional["WriterOutput"], PipelineStatus]]:
     """Draft stage: initial draft, interactive review, and the copy-edit loop.
 
+    Also reads an optional ``allowed_claims.json`` artifact from ``ctx.work_dir``
+    and threads it into the writer/revision prompts so factual claims can be
+    tagged with ``[CLAIM:id]``.
+
     Preconditions:
         - The planning stage populated ``ctx.plan``/``ctx.planning_phase_result``/
           ``ctx.elicited_stories_text``.
@@ -55,6 +60,20 @@ def run_draft_stage(
           job store they are skipped and the draft proceeds straight to the automated
           copy-edit loop (the story-placeholder skip is logged, since unfilled
           placeholders visibly degrade the output).
+        - An optional ``allowed_claims.json`` artifact may exist in ``ctx.work_dir``.
+          The planning stage now writes it (``run_planning`` /
+          ``_persist_content_plan_artifacts`` call ``extract_allowed_claims()``
+          with ``topic=ctx.brief.brief``), so in the normal pipeline path it is
+          always present with a matching topic by the time this stage runs; it
+          remains optional here (no-op when absent) for callers that invoke this
+          stage without having run planning first (e.g. tests, or a caller that
+          supplies its own artifact). If present, a dict, and its ``"topic"``
+          field equals ``ctx.brief.brief`` exactly, its contents are passed to
+          the draft writer and subsequent revision calls (including
+          ``revise_from_user_feedback``) as ``allowed_claims``; a missing or
+          non-dict artifact, a topic mismatch (a stale artifact from a reused
+          ``work_dir``), or no ``work_dir`` at all is a no-op (matching the
+          fact-check/validator gates' handling of the same artifact).
     Postconditions:
         - On success sets ``ctx.draft_result`` (and the possibly-updated
           ``ctx.elicited_stories_text``) and returns None.
@@ -97,6 +116,15 @@ def run_draft_stage(
     plan = ctx.plan
     elicited_stories_text = ctx.elicited_stories_text
     _update = _make_update(job_updater)
+
+    # Load allowed_claims.json (written by the planning stage via
+    # extract_allowed_claims() — see ARTIFACT_PRODUCER in shared/artifacts.py) so
+    # the writer can tag factual claims with [CLAIM:id]; a missing/non-dict
+    # artifact, or one whose "topic" doesn't match the current brief (a stale
+    # artifact from a reused work_dir, or this stage running without planning
+    # having populated one), is a no-op, matching the fact-check/validator
+    # gates' handling of the same artifact.
+    allowed_claims = load_allowed_claims_for_brief(work_dir, brief.brief)
 
     # Draft + Copy Editor loop (load style and brand spec as raw text for draft/editor agents)
     writing_style_content, brand_spec_content = _load_required_guidelines("start drafting")
@@ -141,6 +169,7 @@ def run_draft_stage(
                     length_guidance=build_draft_length_instruction(length_policy),
                     selected_title=None,
                     elicited_stories=elicited_stories_text or None,
+                    allowed_claims=allowed_claims,
                 )
                 draft_output_path = (
                     (Path(work_dir) / f"draft_v{iteration}.md") if work_dir is not None else None
@@ -197,6 +226,7 @@ def run_draft_stage(
                         target_word_count=length_policy.target_word_count,
                         length_guidance=build_draft_length_instruction(length_policy),
                         selected_title=None,
+                        allowed_claims=allowed_claims,
                     ),
                     work_dir=work_dir,
                     iteration=iteration,
@@ -290,6 +320,7 @@ def run_draft_stage(
                                 tone_or_purpose=brief.tone_or_purpose,
                                 selected_title=None,
                                 elicited_stories=elicited_stories_text or None,
+                                allowed_claims=allowed_claims,
                                 target_word_count=length_policy.target_word_count,
                                 length_guidance=build_draft_length_instruction(length_policy),
                                 on_llm_request=lambda msg: _update(
@@ -392,6 +423,7 @@ def run_draft_stage(
                         tone_or_purpose=brief.tone_or_purpose,
                         selected_title=None,
                         elicited_stories=elicited_stories_text or None,
+                        allowed_claims=allowed_claims,
                         target_word_count=length_policy.target_word_count,
                         length_guidance=build_draft_length_instruction(length_policy),
                         on_llm_request=lambda msg: _update(BlogPhase.DRAFT_REVIEW, status_text=msg),
@@ -590,6 +622,7 @@ def run_draft_stage(
                             tone_or_purpose=brief.tone_or_purpose,
                             selected_title=None,
                             elicited_stories=elicited_stories_text or None,
+                            allowed_claims=allowed_claims,
                             target_word_count=length_policy.target_word_count,
                             length_guidance=build_draft_length_instruction(length_policy),
                             on_llm_request=lambda msg: _update(
@@ -623,6 +656,7 @@ def run_draft_stage(
                     length_guidance=build_draft_length_instruction(length_policy),
                     selected_title=None,
                     elicited_stories=elicited_stories_text or None,
+                    allowed_claims=allowed_claims,
                 )
                 previous_feedback_items = feedback_tracker.get_capped_previous_feedback(
                     max_items=MAX_PREVIOUS_FEEDBACK_ITEMS
