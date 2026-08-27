@@ -1217,7 +1217,7 @@ class BlogWriterAgent(_BlogAgentBase):
         target_word_count: int = 1000,
         length_guidance: str = "",
         uncertainty_answers: Optional[dict[str, str]] = None,
-        allowed_claims: Optional[dict] = None,
+        allowed_claims: Optional[dict[str, Any]] = None,
         on_llm_request: Optional[Callable[[str], None]] = None,
         draft_output_path: Optional[Union[str, Path]] = None,
     ) -> WriterOutput:

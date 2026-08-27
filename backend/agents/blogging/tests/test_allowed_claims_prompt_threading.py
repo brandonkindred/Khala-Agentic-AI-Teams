@@ -215,7 +215,14 @@ def test_render_allowed_claims_section_all_malformed_is_restrictive() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_writer_run_includes_allowed_claims_when_provided(monkeypatch) -> None:
+def _run_writer_capturing_prompt(monkeypatch, draft_body="Body.", **writer_input_overrides):
+    """Run ``BlogWriterAgent.run()`` with ``_call_text`` and ``_self_review`` stubbed
+    (the latter as a passthrough), and return ``(captured_prompt, WriterOutput)``.
+
+    Shared by the ``test_writer_run_*`` cases below that only differ in the
+    ``WriterInput`` overrides they pass and what they assert about the captured
+    prompt text -- avoids repeating the same agent/stub boilerplate five times.
+    """
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = make_writer_agent()
@@ -223,36 +230,31 @@ def test_writer_run_includes_allowed_claims_when_provided(monkeypatch) -> None:
 
     def fake_call(self, prompt, system_prompt=""):
         captured["prompt"] = prompt
-        return '{"draft": 0}\n---DRAFT---\n# Out\nBody with [CLAIM:c1] tag.'
+        return f'{{"draft": 0}}\n---DRAFT---\n# Out\n{draft_body}'
 
     monkeypatch.setattr(BlogWriterAgent, "_call_text", fake_call)
     monkeypatch.setattr(
         BlogWriterAgent, "_self_review", lambda self, d, allowed_claims_section="": d
     )
 
-    out = a.run(_writer_input(allowed_claims=SAMPLE_ALLOWED_CLAIMS))
-    assert "ALLOWED CLAIMS" in captured["prompt"]
-    assert "- [c1] 80% of teams ship weekly." in captured["prompt"]
+    out = a.run(_writer_input(**writer_input_overrides))
+    return captured["prompt"], out
+
+
+def test_writer_run_includes_allowed_claims_when_provided(monkeypatch) -> None:
+    prompt, out = _run_writer_capturing_prompt(
+        monkeypatch,
+        draft_body="Body with [CLAIM:c1] tag.",
+        allowed_claims=SAMPLE_ALLOWED_CLAIMS,
+    )
+    assert "ALLOWED CLAIMS" in prompt
+    assert "- [c1] 80% of teams ship weekly." in prompt
     assert "[CLAIM:c1]" in out.draft
 
 
 def test_writer_run_omits_allowed_claims_section_when_absent(monkeypatch) -> None:
-    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
-
-    a = make_writer_agent()
-    captured = {"prompt": ""}
-
-    def fake_call(self, prompt, system_prompt=""):
-        captured["prompt"] = prompt
-        return '{"draft": 0}\n---DRAFT---\n# Out\nBody.'
-
-    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake_call)
-    monkeypatch.setattr(
-        BlogWriterAgent, "_self_review", lambda self, d, allowed_claims_section="": d
-    )
-
-    a.run(_writer_input())
-    assert "ALLOWED CLAIMS" not in captured["prompt"]
+    prompt, _out = _run_writer_capturing_prompt(monkeypatch)
+    assert "ALLOWED CLAIMS" not in prompt
 
 
 def test_writer_run_threads_allowed_claims_into_self_review(monkeypatch) -> None:
@@ -284,67 +286,27 @@ def test_writer_run_suppresses_numeric_requirement_when_claims_restrictive(monke
     claim, so the prompt's "at least one specific number" checklist item must not
     also appear -- that would tell the model to satisfy two contradictory mandates
     for a quantitative topic (regression test for a bug where both were present)."""
-    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
-
-    a = make_writer_agent()
-    captured = {"prompt": ""}
-
-    def fake_call(self, prompt, system_prompt=""):
-        captured["prompt"] = prompt
-        return '{"draft": 0}\n---DRAFT---\n# Out\nBody.'
-
-    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake_call)
-    monkeypatch.setattr(
-        BlogWriterAgent, "_self_review", lambda self, d, allowed_claims_section="": d
+    prompt, _out = _run_writer_capturing_prompt(
+        monkeypatch, allowed_claims={"topic": "x", "claims": []}
     )
-
-    a.run(_writer_input(allowed_claims={"topic": "x", "claims": []}))
-    assert "at least one specific number" not in captured["prompt"]
-    assert "no specific numbers" in captured["prompt"]
+    assert "at least one specific number" not in prompt
+    assert "no specific numbers" in prompt
 
 
 def test_writer_run_keeps_numeric_requirement_when_claims_populated(monkeypatch) -> None:
     """A populated allowed_claims list permits factual claims, so the numeric-figure
     checklist item must still be present (unlike the restrictive empty-list case)."""
-    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
-
-    a = make_writer_agent()
-    captured = {"prompt": ""}
-
-    def fake_call(self, prompt, system_prompt=""):
-        captured["prompt"] = prompt
-        return '{"draft": 0}\n---DRAFT---\n# Out\nBody.'
-
-    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake_call)
-    monkeypatch.setattr(
-        BlogWriterAgent, "_self_review", lambda self, d, allowed_claims_section="": d
-    )
-
-    a.run(_writer_input(allowed_claims=SAMPLE_ALLOWED_CLAIMS))
-    assert "at least one specific number" in captured["prompt"]
-    assert "no specific numbers" not in captured["prompt"]
+    prompt, _out = _run_writer_capturing_prompt(monkeypatch, allowed_claims=SAMPLE_ALLOWED_CLAIMS)
+    assert "at least one specific number" in prompt
+    assert "no specific numbers" not in prompt
 
 
 def test_writer_run_keeps_numeric_requirement_when_no_artifact(monkeypatch) -> None:
     """No allowed_claims artifact at all -> the writer's default numeric-figure
     guidance still applies (only the restrictive present-but-empty case suppresses
     it)."""
-    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
-
-    a = make_writer_agent()
-    captured = {"prompt": ""}
-
-    def fake_call(self, prompt, system_prompt=""):
-        captured["prompt"] = prompt
-        return '{"draft": 0}\n---DRAFT---\n# Out\nBody.'
-
-    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake_call)
-    monkeypatch.setattr(
-        BlogWriterAgent, "_self_review", lambda self, d, allowed_claims_section="": d
-    )
-
-    a.run(_writer_input())
-    assert "at least one specific number" in captured["prompt"]
+    prompt, _out = _run_writer_capturing_prompt(monkeypatch)
+    assert "at least one specific number" in prompt
 
 
 # ---------------------------------------------------------------------------
