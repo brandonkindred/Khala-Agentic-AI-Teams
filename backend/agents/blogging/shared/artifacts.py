@@ -160,10 +160,16 @@ def load_allowed_claims_for_brief(
     Preconditions:
         brief_text is the current run's brief/topic string (may be "").
     Postconditions:
-        Returns the parsed artifact dict only when work_dir is truthy, the
-        artifact exists, is a dict, and its "topic" field equals brief_text
-        exactly. Returns None otherwise (no work_dir, missing artifact,
-        non-dict content, or a topic mismatch indicating a stale artifact).
+        Returns None when work_dir is falsy, the artifact is missing or not a
+        dict, or its "topic" field doesn't equal brief_text exactly (a stale
+        artifact from a reused work_dir). Otherwise returns ``{"topic": ...,
+        "claims": [...]}`` with "claims" normalized to a list containing only
+        the entries that are dicts with a truthy "id" and "text" — a
+        non-list, missing, or malformed-entry "claims" value is never passed
+        through as-is, so every consumer (writer prompt, fact-check agent)
+        can rely on getting either a well-formed claim list or an empty one,
+        never something that raises when a consumer calls ``.get()`` on an
+        entry.
     """
     if not work_dir:
         return None
@@ -172,7 +178,11 @@ def load_allowed_claims_for_brief(
         return None
     if allowed_claims.get("topic") != brief_text:
         return None
-    return allowed_claims
+    claims = allowed_claims.get("claims")
+    if not isinstance(claims, list):
+        claims = []
+    sanitized_claims = [c for c in claims if isinstance(c, dict) and c.get("id") and c.get("text")]
+    return {"topic": brief_text, "claims": sanitized_claims}
 
 
 def read_latest_draft(

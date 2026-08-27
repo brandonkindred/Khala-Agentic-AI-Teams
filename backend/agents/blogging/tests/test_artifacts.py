@@ -83,3 +83,42 @@ def test_load_allowed_claims_for_brief_non_dict_artifact_is_none(tmp_path: Path)
 def test_load_allowed_claims_for_brief_no_work_dir_is_none() -> None:
     assert load_allowed_claims_for_brief(None, "AI") is None
     assert load_allowed_claims_for_brief("", "AI") is None
+
+
+def test_load_allowed_claims_for_brief_drops_malformed_entries(tmp_path: Path) -> None:
+    """Every downstream consumer (writer prompt, fact-check agent) assumes each
+    claim is a dict with at least "id" and "text" -- a malformed entry reaching
+    them (e.g. a bare string) would crash a .get() call, so the loader must
+    filter malformed entries out rather than passing the raw artifact through."""
+    write_artifact(
+        tmp_path,
+        "allowed_claims.json",
+        {
+            "topic": "AI",
+            "claims": [
+                {"id": "c1", "text": "Valid.", "citations": ["s1"]},
+                "not a dict",
+                {"id": "", "text": "No id."},
+                {"id": "c2", "text": ""},
+                {"text": "No id key at all."},
+            ],
+        },
+    )
+
+    result = load_allowed_claims_for_brief(tmp_path, "AI")
+    assert result == {
+        "topic": "AI",
+        "claims": [{"id": "c1", "text": "Valid.", "citations": ["s1"]}],
+    }
+
+
+def test_load_allowed_claims_for_brief_treats_non_list_claims_as_empty(tmp_path: Path) -> None:
+    write_artifact(tmp_path, "allowed_claims.json", {"topic": "AI", "claims": "not a list"})
+
+    assert load_allowed_claims_for_brief(tmp_path, "AI") == {"topic": "AI", "claims": []}
+
+
+def test_load_allowed_claims_for_brief_treats_missing_claims_key_as_empty(tmp_path: Path) -> None:
+    write_artifact(tmp_path, "allowed_claims.json", {"topic": "AI"})
+
+    assert load_allowed_claims_for_brief(tmp_path, "AI") == {"topic": "AI", "claims": []}

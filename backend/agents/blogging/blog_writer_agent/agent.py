@@ -663,6 +663,10 @@ class BlogWriterAgent(_BlogAgentBase):
               deterministic-fix and LLM-self-review rewrite passes that may run
               after generation are instructed to preserve existing ``[CLAIM:id]``
               tags rather than silently dropping or corrupting them.
+            - When the restrictive no-claims policy is in effect, the prompt's
+              "at least one specific number" checklist item is replaced with a
+              "no specific numbers" instruction, so the two mandates never
+              conflict for a quantitative topic.
             - Expected LLM parse failures (``LLMJsonParseError``, including when
               Strands wraps them in ``EventLoopException``) soft-fail into a JSON
               fallback, then a placeholder if both paths yield no content.
@@ -739,15 +743,31 @@ class BlogWriterAgent(_BlogAgentBase):
             prompt_parts.append(f"Audience: {draft_input.audience}")
         if draft_input.tone_or_purpose:
             prompt_parts.append(f"Tone/Purpose: {draft_input.tone_or_purpose}")
+        # The restrictive no-claims policy forbids every factual/statistical assertion,
+        # so the numeric-figure requirement below must not apply when it's in effect —
+        # otherwise the model gets two contradictory mandates for a quantitative topic
+        # and may invent an unsupported number to satisfy this one.
+        if claims_section == _NO_ALLOWED_CLAIMS_SECTION:
+            numeric_requirement = (
+                "no specific numbers, dollar figures, percentages, or durations (the "
+                "ALLOWED CLAIMS section above forbids factual/statistical claims — do "
+                "not invent any to satisfy this); "
+            )
+        else:
+            numeric_requirement = (
+                "at least one specific number (dollar figure, percentage, or duration) "
+                "if the topic supports it; "
+            )
         prompt_parts.append("")
         prompt_parts.append("---")
         prompt_parts.append(
             "Before outputting, ensure: no banned phrases; no em dashes or en dashes; 8th grade reading level; "
             "descriptive headings; first-person opening hook from author-provided stories (or placeholder if none "
             "provided, NEVER fabricate); at least one transparent-failure moment from author stories (or placeholder "
-            "if none, NEVER fabricate); at least one specific number (dollar figure, percentage, or duration) if the "
-            "topic supports it; trade-offs acknowledged; technical concepts introduced through the pain they solve "
-            "(not as definitions); one practical next step in the conclusion. "
+            "if none, NEVER fabricate); "
+            + numeric_requirement
+            + "trade-offs acknowledged; technical concepts "
+            "introduced through the pain they solve (not as definitions); one practical next step in the conclusion. "
             "QUALITY CHECK: Does this sound like the author's voice per the brand spec, not an AI? Would a skeptical reader find the "
             "arguments convincing? Is it actionable and valuable to the target audience? Does it flow logically "
             "from intro to conclusion? "

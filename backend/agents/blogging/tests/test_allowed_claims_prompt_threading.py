@@ -221,6 +221,74 @@ def test_writer_run_threads_allowed_claims_into_self_review(monkeypatch) -> None
     assert "- [c1] 80% of teams ship weekly." in captured["allowed_claims_section"]
 
 
+def test_writer_run_suppresses_numeric_requirement_when_claims_restrictive(monkeypatch) -> None:
+    """A present-but-empty allowed_claims artifact forbids every factual/statistical
+    claim, so the prompt's "at least one specific number" checklist item must not
+    also appear -- that would tell the model to satisfy two contradictory mandates
+    for a quantitative topic (regression test for a bug where both were present)."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = make_writer_agent()
+    captured = {"prompt": ""}
+
+    def fake_call(self, prompt, system_prompt=""):
+        captured["prompt"] = prompt
+        return '{"draft": 0}\n---DRAFT---\n# Out\nBody.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake_call)
+    monkeypatch.setattr(
+        BlogWriterAgent, "_self_review", lambda self, d, allowed_claims_section="": d
+    )
+
+    a.run(_writer_input(allowed_claims={"topic": "x", "claims": []}))
+    assert "at least one specific number" not in captured["prompt"]
+    assert "no specific numbers" in captured["prompt"]
+
+
+def test_writer_run_keeps_numeric_requirement_when_claims_populated(monkeypatch) -> None:
+    """A populated allowed_claims list permits factual claims, so the numeric-figure
+    checklist item must still be present (unlike the restrictive empty-list case)."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = make_writer_agent()
+    captured = {"prompt": ""}
+
+    def fake_call(self, prompt, system_prompt=""):
+        captured["prompt"] = prompt
+        return '{"draft": 0}\n---DRAFT---\n# Out\nBody.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake_call)
+    monkeypatch.setattr(
+        BlogWriterAgent, "_self_review", lambda self, d, allowed_claims_section="": d
+    )
+
+    a.run(_writer_input(allowed_claims=SAMPLE_ALLOWED_CLAIMS))
+    assert "at least one specific number" in captured["prompt"]
+    assert "no specific numbers" not in captured["prompt"]
+
+
+def test_writer_run_keeps_numeric_requirement_when_no_artifact(monkeypatch) -> None:
+    """No allowed_claims artifact at all -> the writer's default numeric-figure
+    guidance still applies (only the restrictive present-but-empty case suppresses
+    it)."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = make_writer_agent()
+    captured = {"prompt": ""}
+
+    def fake_call(self, prompt, system_prompt=""):
+        captured["prompt"] = prompt
+        return '{"draft": 0}\n---DRAFT---\n# Out\nBody.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake_call)
+    monkeypatch.setattr(
+        BlogWriterAgent, "_self_review", lambda self, d, allowed_claims_section="": d
+    )
+
+    a.run(_writer_input())
+    assert "at least one specific number" in captured["prompt"]
+
+
 # ---------------------------------------------------------------------------
 # _build_revise_all_items_prompt — revision (copy-edit loop / gates rewrite)
 # ---------------------------------------------------------------------------
