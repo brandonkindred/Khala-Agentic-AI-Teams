@@ -501,7 +501,7 @@ def _now() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
-def _load_or_404(store: dict, key: str, detail: str) -> Any:
+def _load_or_404(store: dict, key: str, detail: str, *, missing_if_falsy: bool = True) -> Any:
     """Look up ``key`` in ``store`` (under ``_lock``), raising 404 if absent.
 
     Preconditions:
@@ -510,11 +510,18 @@ def _load_or_404(store: dict, key: str, detail: str) -> Any:
         the key is missing.
     Postconditions:
         Returns the stored value when ``key`` is present. Raises
-        ``HTTPException(404, detail=detail)`` verbatim when absent.
+        ``HTTPException(404, detail=detail)`` verbatim when absent. By
+        default "absent" matches each original call site's falsy check
+        (``missing_if_falsy=True``), so an empty/corrupt persisted record
+        (e.g. ``{}``) 404s rather than being treated as loaded; pass
+        ``missing_if_falsy=False`` for a call site whose original guard
+        was ``is None`` (allowing a falsy-but-present record through to
+        its own downstream error handling instead).
     """
     with _lock:
         value = store.get(key)
-    if value is None:
+    missing = value is None if not missing_if_falsy else not value
+    if missing:
         raise HTTPException(status_code=404, detail=detail)
     return value
 
@@ -5802,7 +5809,10 @@ def get_paper_trading_session(session_id: str) -> PaperTradingResponse:
         detail.
     """
     raw = _load_or_404(
-        _paper_trading_sessions, session_id, f"Paper trading session '{session_id}' not found."
+        _paper_trading_sessions,
+        session_id,
+        f"Paper trading session '{session_id}' not found.",
+        missing_if_falsy=False,
     )
 
     try:
