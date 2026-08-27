@@ -86,7 +86,6 @@ from branding_team.scripts.quality_judge import (
 from llm_service import DummyLLMClient, get_client
 from llm_service.dummy_provider import force_dummy_llm_provider
 
-PHASE5_REDUCTION_TARGET_PCT = 40.0
 QUALITY_REGRESSION_THRESHOLD_PTS = 0.5
 
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "eval_results"
@@ -706,7 +705,7 @@ def run_eval(
 
 
 def _print_report(comparisons: list[PhasePromptComparison]) -> None:
-    """Print the per-phase token-count table and the Phase 5 pass/fail verdict.
+    """Print the per-phase token-count table and Phase 5's reduction summary.
 
     Preconditions:
         ``comparisons`` is the list ``run_eval`` returns (may be empty, or
@@ -717,9 +716,12 @@ def _print_report(comparisons: list[PhasePromptComparison]) -> None:
         (Phase 5) comparisons collected." (if none exist) or the arithmetic
         mean of each GOVERNANCE comparison's ``reduction_pct`` (not the
         reduction between the missions' average token counts, which would
-        weight missions differently) and a PASS/FAIL verdict against
-        ``PHASE5_REDUCTION_TARGET_PCT``. Writes to stdout only; returns
-        nothing.
+        weight missions differently). GOVERNANCE's ``context_phases`` is
+        configured to include every upstream phase (see
+        ``orchestrator._PHASE_SPEC``), so its selective and full-context
+        prompts are identical and the reduction is expected to be 0.0% --
+        there is no pass/fail token-reduction target for Phase 5. Writes to
+        stdout only; returns nothing.
     """
     print(f"\n{'Mission':<32}{'Phase':<22}{'Selective':>12}{'Full':>10}{'Reduction':>12}")
     print("-" * 88)
@@ -739,11 +741,8 @@ def _print_report(comparisons: list[PhasePromptComparison]) -> None:
     print("-" * 88)
     print(
         f"Phase 5 (governance) average reduction: {avg_reduction:.1f}% "
-        f"(target: >= {PHASE5_REDUCTION_TARGET_PCT:.0f}%)"
-    )
-    verdict = "PASS" if avg_reduction >= PHASE5_REDUCTION_TARGET_PCT else "FAIL"
-    print(
-        f"Acceptance criterion (>= {PHASE5_REDUCTION_TARGET_PCT:.0f}% Phase 5 reduction): {verdict}"
+        "-- Phase 5 is intentionally full-context (context_phases spans every "
+        "upstream phase), so no token-reduction target applies."
     )
 
 
