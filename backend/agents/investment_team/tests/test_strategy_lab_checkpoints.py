@@ -358,6 +358,21 @@ def test_parse_checkpoint_rejects_stage_mismatched_payload() -> None:
         parse_checkpoint(raw)
 
 
+def test_parse_checkpoint_rejects_downgrade_direction_mismatch() -> None:
+    """The inverse direction of the above: a later-stage payload (carrying
+    stage-specific fields an earlier subclass doesn't declare) whose "stage"
+    key is corrupted to an *earlier* stage must also be rejected — not
+    silently accepted with the extra fields discarded. This is what
+    ``extra="forbid"`` guards that ``_enforce_pinned_stage`` alone can't:
+    that validator only ever sees a self-consistent ``stage`` field after
+    Pydantic has already decided whether to accept or reject the payload's
+    other fields."""
+    raw = _build_alignment_checkpoint().model_dump(mode="json")
+    raw["stage"] = "synthesis"
+    with pytest.raises(ValidationError):
+        parse_checkpoint(raw)
+
+
 # ---------------------------------------------------------------------------
 # Serialization round-trip
 # ---------------------------------------------------------------------------

@@ -163,9 +163,21 @@ class PipelineCheckpoint(BaseModel):
         was computed from are themselves the checkpoint's own payload); the
         invariant governs how a *consumer* compares a checkpoint's hash
         against independently-known current state.
+      - **A payload must match its dispatched subclass exactly, in both
+        directions.** ``extra="forbid"`` (alongside ``frozen=True``) means a
+        subclass rejects a payload carrying any field it doesn't declare —
+        not just a missing required field. Without this, ``parse_checkpoint``
+        dispatching a later-stage payload (e.g. an ``AlignmentCheckpoint``
+        whose ``"stage"`` was corrupted to ``"synthesis"``) to an
+        earlier-stage subclass would silently validate, discarding the
+        stage-specific fields the earlier subclass doesn't recognize
+        (``alignment_rounds_completed``) rather than raising — exactly the
+        inverse mismatch direction ``_enforce_pinned_stage`` alone doesn't
+        catch, since that validator only compares the (already-consistent)
+        ``stage`` field's value, not the full field set.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     _pinned_stage: ClassVar[PipelineStage | None] = None
 
