@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 from agents.blogging.blog_copy_editor_agent import CopyEditorInput
 from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
 from agents.blogging.blog_writer_agent import ReviseWriterInput, WriterInput
-from agents.blogging.shared.artifacts import read_artifact
+from agents.blogging.shared.artifacts import load_allowed_claims_for_brief
 from agents.blogging.shared.blog_job_store import (
     add_blog_pending_questions,
     is_waiting_for_blog_answers,
@@ -61,10 +61,12 @@ def run_draft_stage(
           copy-edit loop (the story-placeholder skip is logged, since unfilled
           placeholders visibly degrade the output).
         - An optional ``allowed_claims.json`` artifact may exist in ``ctx.work_dir``.
-          If present and a dict, its contents are passed to the draft writer and
-          subsequent revision calls (including ``revise_from_user_feedback``) as
-          ``allowed_claims``; a missing or non-dict artifact (or no ``work_dir`` at
-          all) is a no-op (matching the fact-check/validator gates' handling of the
+          If present, a dict, and its ``"topic"`` field equals ``ctx.brief.brief``
+          exactly, its contents are passed to the draft writer and subsequent
+          revision calls (including ``revise_from_user_feedback``) as
+          ``allowed_claims``; a missing or non-dict artifact, a topic mismatch
+          (a stale artifact from a reused ``work_dir``), or no ``work_dir`` at
+          all is a no-op (matching the fact-check/validator gates' handling of the
           same artifact).
     Postconditions:
         - On success sets ``ctx.draft_result`` (and the possibly-updated
@@ -111,13 +113,10 @@ def run_draft_stage(
 
     # Load allowed_claims.json (if a prior pipeline step has persisted one — see
     # ARTIFACT_PRODUCER in shared/artifacts.py) so the writer can tag factual claims
-    # with [CLAIM:id]; a missing/non-dict artifact is a no-op, matching the
-    # fact-check/validator gates' handling of the same artifact.
-    allowed_claims = (
-        read_artifact(work_dir, "allowed_claims.json", default=None) if work_dir else None
-    )
-    if not isinstance(allowed_claims, dict):
-        allowed_claims = None
+    # with [CLAIM:id]; a missing/non-dict artifact, or one whose "topic" doesn't
+    # match the current brief (a stale artifact from a reused work_dir), is a
+    # no-op, matching the fact-check/validator gates' handling of the same artifact.
+    allowed_claims = load_allowed_claims_for_brief(work_dir, brief.brief)
 
     # Draft + Copy Editor loop (load style and brand spec as raw text for draft/editor agents)
     writing_style_content, brand_spec_content = _load_required_guidelines("start drafting")

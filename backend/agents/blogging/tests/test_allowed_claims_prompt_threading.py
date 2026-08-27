@@ -48,7 +48,11 @@ def _minimal_plan():
 
 
 SAMPLE_ALLOWED_CLAIMS = {
-    "topic": "Test topic",
+    # Matches the brief used by the end-to-end pipeline tests below, whose
+    # loader now rejects an allowed_claims.json artifact unless its "topic"
+    # matches the current run's brief (guards against a stale artifact left
+    # in a reused work_dir by an earlier, unrelated brief).
+    "topic": "Topic about AI",
     "claims": [
         {"id": "c1", "text": "80% of teams ship weekly.", "citations": ["Source 1"]},
         {"id": "c2", "text": "The median deploy takes 4 minutes.", "citations": []},
@@ -468,6 +472,51 @@ def test_run_pipeline_no_allowed_claims_artifact_is_noop(monkeypatch, tmp_path: 
         assert draft_input.allowed_claims is None
 
 
+def test_run_pipeline_ignores_stale_allowed_claims_from_reused_work_dir(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A work_dir reused across runs may hold an allowed_claims.json artifact
+    left by an earlier, unrelated brief. It must not be applied to a new run
+    whose brief doesn't match the artifact's "topic"."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.shared.artifacts import write_artifact
+
+    from ._content_plan_test_utils import make_minimal_planning_phase_result
+
+    monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: make_minimal_planning_phase_result())
+    monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "guidelines text")
+
+    captured: list = []
+    monkeypatch.setattr(v2, "BlogWriterAgent", _capturing_stub_writer_class(captured))
+    monkeypatch.setattr(v2, "BlogCopyEditorAgent", make_stub_editor_class())
+
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+
+    work_dir = tmp_path / "wd"
+    work_dir.mkdir()
+    write_artifact(
+        work_dir,
+        "allowed_claims.json",
+        {
+            "topic": "An earlier, unrelated topic",
+            "claims": [{"id": "stale1", "text": "Stale claim."}],
+        },
+    )
+
+    brief = ResearchBriefInput(brief="Topic about AI", audience="devs", max_results=10)
+    _, _, status = v2.run_pipeline(
+        brief,
+        work_dir=work_dir,
+        run_gates=False,
+        draft_editor_iterations=1,
+        llm_client=object(),
+    )
+    assert status == "PASS"
+    assert captured
+    for _kind, draft_input in captured:
+        assert draft_input.allowed_claims is None
+
+
 # ---------------------------------------------------------------------------
 # gates_stage: the fact-check gate must evaluate the draft against the same
 # allowed-claims list the writer was given.
@@ -544,6 +593,7 @@ def test_gates_stage_threads_allowed_claims_into_fact_check(monkeypatch, tmp_pat
         run_gates=True,
         max_rewrite_iterations=1,
         draft_editor_iterations=1,
+        llm_client=object(),
     )
     assert status == "PASS"
     assert captured_kwargs.get("allowed_claims") == SAMPLE_ALLOWED_CLAIMS

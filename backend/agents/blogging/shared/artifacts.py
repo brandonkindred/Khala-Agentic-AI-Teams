@@ -145,6 +145,36 @@ def read_artifact(
     return raw
 
 
+def load_allowed_claims_for_brief(
+    work_dir: Optional[Union[str, Path]],
+    brief_text: str,
+) -> Optional[dict]:
+    """
+    Load allowed_claims.json from work_dir, but only if it belongs to the current brief.
+
+    A work_dir may be reused across runs (e.g. a stable CLI run_dir, or a caller
+    explicitly reusing work_dir for a new topic). Without this check, a stale
+    allowed_claims.json left by an earlier, unrelated brief would silently
+    constrain and validate the new draft's claims.
+
+    Preconditions:
+        brief_text is the current run's brief/topic string (may be "").
+    Postconditions:
+        Returns the parsed artifact dict only when work_dir is truthy, the
+        artifact exists, is a dict, and its "topic" field equals brief_text
+        exactly. Returns None otherwise (no work_dir, missing artifact,
+        non-dict content, or a topic mismatch indicating a stale artifact).
+    """
+    if not work_dir:
+        return None
+    allowed_claims = read_artifact(work_dir, "allowed_claims.json", default=None)
+    if not isinstance(allowed_claims, dict):
+        return None
+    if allowed_claims.get("topic") != brief_text:
+        return None
+    return allowed_claims
+
+
 def read_latest_draft(
     work_dir: Union[str, Path],
     preferred: str = "final.md",

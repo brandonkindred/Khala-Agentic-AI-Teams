@@ -6,7 +6,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agents.blogging.shared.artifacts import read_latest_draft
+from agents.blogging.shared.artifacts import (
+    load_allowed_claims_for_brief,
+    read_latest_draft,
+    write_artifact,
+)
 
 
 def test_read_latest_draft_prefers_final(tmp_path: Path) -> None:
@@ -50,3 +54,32 @@ def test_read_latest_draft_custom_preferred_and_fallback_names(tmp_path: Path) -
         fallback_names=("custom_fallback.md",),
     )
     assert result == "custom fallback content"
+
+
+def test_load_allowed_claims_for_brief_returns_dict_on_topic_match(tmp_path: Path) -> None:
+    write_artifact(tmp_path, "allowed_claims.json", {"topic": "AI", "claims": []})
+
+    assert load_allowed_claims_for_brief(tmp_path, "AI") == {"topic": "AI", "claims": []}
+
+
+def test_load_allowed_claims_for_brief_rejects_stale_topic(tmp_path: Path) -> None:
+    """A work_dir reused for a new, unrelated brief must not have its stale
+    allowed_claims.json silently applied to the new run."""
+    write_artifact(tmp_path, "allowed_claims.json", {"topic": "Old topic", "claims": []})
+
+    assert load_allowed_claims_for_brief(tmp_path, "New topic") is None
+
+
+def test_load_allowed_claims_for_brief_missing_artifact_is_none(tmp_path: Path) -> None:
+    assert load_allowed_claims_for_brief(tmp_path, "AI") is None
+
+
+def test_load_allowed_claims_for_brief_non_dict_artifact_is_none(tmp_path: Path) -> None:
+    (tmp_path / "allowed_claims.json").write_text("[1, 2, 3]")
+
+    assert load_allowed_claims_for_brief(tmp_path, "AI") is None
+
+
+def test_load_allowed_claims_for_brief_no_work_dir_is_none() -> None:
+    assert load_allowed_claims_for_brief(None, "AI") is None
+    assert load_allowed_claims_for_brief("", "AI") is None
