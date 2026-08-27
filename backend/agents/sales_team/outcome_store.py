@@ -27,9 +27,9 @@ from .models import DealOutcome, LearningInsights, StageOutcome
 logger = logging.getLogger(__name__)
 
 _LOCK = threading.Lock()
-_CACHE_ROOT = Path(os.getenv("AGENT_CACHE_DIR", ".agent_cache")) / "sales_team" / "outcomes"
+_CACHE_ROOT = Path(os.getenv("AGENT_CACHE", ".agent_cache")) / "sales_team" / "outcomes"
 _INSIGHTS_PATH = (
-    Path(os.getenv("AGENT_CACHE_DIR", ".agent_cache")) / "sales_team" / "insights" / "current.json"
+    Path(os.getenv("AGENT_CACHE", ".agent_cache")) / "sales_team" / "insights" / "current.json"
 )
 
 
