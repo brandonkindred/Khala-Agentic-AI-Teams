@@ -27,12 +27,13 @@ def diff_or_full(previous_code: str | None, current_code: str) -> str:
     if previous_code is None:
         return current_code
 
-    diff = "".join(
+    diff = "\n".join(
         difflib.unified_diff(
-            previous_code.splitlines(keepends=True),
-            current_code.splitlines(keepends=True),
+            previous_code.splitlines(),
+            current_code.splitlines(),
             fromfile="previous_round",
             tofile="current_round",
+            lineterm="",
         )
     )
 

@@ -55,3 +55,15 @@ def test_empty_previous_code_is_not_none_and_diffs():
     result = diff_or_full(previous, current)
 
     assert result == current or "x = 1" in result
+
+
+def test_no_trailing_newline_change_does_not_concatenate_lines():
+    previous = "\n".join(f"line_{i} = {i}" for i in range(50))
+    current = previous.replace("line_49 = 49", "line_49 = 999")
+
+    result = diff_or_full(previous, current)
+
+    assert "line_49 = 49\n" in result
+    assert "999" in result
+    assert "49999" not in result
+    assert "49+line_49" not in result
