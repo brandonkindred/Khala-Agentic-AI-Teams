@@ -501,7 +501,7 @@ def _now() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
-def _load_or_404(store: dict, key: str, detail: str):
+def _load_or_404(store: dict, key: str, detail: str) -> Any:
     """Look up ``key`` in ``store`` (under ``_lock``), raising 404 if absent.
 
     Preconditions:
