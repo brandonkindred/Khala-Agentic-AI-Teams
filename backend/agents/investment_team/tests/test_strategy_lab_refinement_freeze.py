@@ -363,6 +363,7 @@ class _LoosenOnceRefinementAgent:
         failure_details: str,
         metrics: Optional[BacktestResult] = None,
         prior_attempts: Optional[List[str]] = None,
+        previous_code: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], str]:
         return (
             {
@@ -391,6 +392,7 @@ class _StraySpecRefinementAgent:
         failure_details: str,
         metrics: Optional[BacktestResult] = None,
         prior_attempts: Optional[List[str]] = None,
+        previous_code: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], str]:
         self.call_count += 1
         return (

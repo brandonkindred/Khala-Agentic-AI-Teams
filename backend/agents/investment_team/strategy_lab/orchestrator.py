@@ -918,8 +918,15 @@ class StrategyLabOrchestrator(
         failure_details: str,
         metrics: Optional[BacktestResult],
         prior_attempts: List[str],
+        previous_code: Optional[str] = None,
     ) -> tuple[Dict[str, Any], str]:
-        """Call the refinement agent and return (updates_dict, new_code)."""
+        """Call the refinement agent and return (updates_dict, new_code).
+
+        ``previous_code``, when given, is the prior refinement round's full
+        code for this same synthesis attempt — forwarded to
+        :meth:`RefinementAgent.run` so it can send a diff instead of the
+        full file. Callers must scope it to one synthesis attempt.
+        """
         try:
             return self.refinement_agent.run(
                 spec=spec,
@@ -928,6 +935,7 @@ class StrategyLabOrchestrator(
                 failure_details=failure_details,
                 metrics=metrics,
                 prior_attempts=prior_attempts,
+                previous_code=previous_code,
             )
         except DesignBudgetExhausted:
             raise
@@ -950,6 +958,7 @@ class StrategyLabOrchestrator(
         stall_tracker: RefinementStallTracker,
         refine_label: Optional[str] = None,
         drift_collector: Optional[_DriftCollector] = None,
+        previous_code: Optional[str] = None,
     ) -> tuple[StrategySpec, str, bool, bool]:
         """Apply one refinement attempt or exhaust the round budget.
 
@@ -971,6 +980,11 @@ class StrategyLabOrchestrator(
         call only — used by the evaluation phase which passes
         ``"evaluation (backtest anomaly)"`` to the refinement LLM while
         emitting ``"evaluation"`` to the event stream.
+
+        ``previous_code``, when given, is the prior round's full code for
+        this synthesis attempt, forwarded to ``_refine`` so the refinement
+        prompt can send a diff instead of the full file; ``None`` on the
+        attempt's first refinement round.
         """
         if not isinstance(spec, StrategySpec):
             raise TypeError(f"spec must be a StrategySpec, got {type(spec).__name__}")
@@ -1036,6 +1050,7 @@ class StrategyLabOrchestrator(
                 failure_details,
                 metrics,
                 refinement_attempts,
+                previous_code=previous_code,
             )
         except DesignBudgetExhausted as exc:
             _annotate_budget_exhaustion(exc, spec, code=code)
