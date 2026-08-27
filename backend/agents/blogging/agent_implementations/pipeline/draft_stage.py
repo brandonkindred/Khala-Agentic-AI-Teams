@@ -61,16 +61,19 @@ def run_draft_stage(
           copy-edit loop (the story-placeholder skip is logged, since unfilled
           placeholders visibly degrade the output).
         - An optional ``allowed_claims.json`` artifact may exist in ``ctx.work_dir``.
-          It is an externally-supplied input — no ``run_pipeline()`` step writes it
-          today (``BlogResearchAgent`` can build one via ``extract_allowed_claims()``
-          but is currently a standalone module, not invoked by the pipeline). If
-          present, a dict, and its ``"topic"`` field equals ``ctx.brief.brief``
-          exactly, its contents are passed to the draft writer and subsequent
-          revision calls (including ``revise_from_user_feedback``) as
-          ``allowed_claims``; a missing or non-dict artifact, a topic mismatch
-          (a stale artifact from a reused ``work_dir``), or no ``work_dir`` at
-          all is a no-op (matching the fact-check/validator gates' handling of the
-          same artifact).
+          The planning stage now writes it (``run_planning`` /
+          ``_persist_content_plan_artifacts`` call ``extract_allowed_claims()``
+          with ``topic=ctx.brief.brief``), so in the normal pipeline path it is
+          always present with a matching topic by the time this stage runs; it
+          remains optional here (no-op when absent) for callers that invoke this
+          stage without having run planning first (e.g. tests, or a caller that
+          supplies its own artifact). If present, a dict, and its ``"topic"``
+          field equals ``ctx.brief.brief`` exactly, its contents are passed to
+          the draft writer and subsequent revision calls (including
+          ``revise_from_user_feedback``) as ``allowed_claims``; a missing or
+          non-dict artifact, a topic mismatch (a stale artifact from a reused
+          ``work_dir``), or no ``work_dir`` at all is a no-op (matching the
+          fact-check/validator gates' handling of the same artifact).
     Postconditions:
         - On success sets ``ctx.draft_result`` (and the possibly-updated
           ``ctx.elicited_stories_text``) and returns None.
@@ -114,12 +117,13 @@ def run_draft_stage(
     elicited_stories_text = ctx.elicited_stories_text
     _update = _make_update(job_updater)
 
-    # Load allowed_claims.json (an externally-supplied optional input, not currently
-    # written by any run_pipeline() step — see ARTIFACT_PRODUCER in shared/artifacts.py)
-    # so the writer can tag factual claims with [CLAIM:id]; a missing/non-dict
+    # Load allowed_claims.json (written by the planning stage via
+    # extract_allowed_claims() — see ARTIFACT_PRODUCER in shared/artifacts.py) so
+    # the writer can tag factual claims with [CLAIM:id]; a missing/non-dict
     # artifact, or one whose "topic" doesn't match the current brief (a stale
-    # artifact from a reused work_dir), is a
-    # no-op, matching the fact-check/validator gates' handling of the same artifact.
+    # artifact from a reused work_dir, or this stage running without planning
+    # having populated one), is a no-op, matching the fact-check/validator
+    # gates' handling of the same artifact.
     allowed_claims = load_allowed_claims_for_brief(work_dir, brief.brief)
 
     # Draft + Copy Editor loop (load style and brand spec as raw text for draft/editor agents)

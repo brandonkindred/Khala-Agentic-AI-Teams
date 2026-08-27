@@ -125,12 +125,11 @@ def test_load_allowed_claims_for_brief_treats_missing_claims_key_as_empty(tmp_pa
     assert load_allowed_claims_for_brief(tmp_path, "AI") == {"topic": "AI", "claims": []}
 
 
-def test_allowed_claims_json_producer_is_not_misattributed_to_pipeline() -> None:
-    """allowed_claims.json isn't written by any run_pipeline() step today --
-    BlogResearchAgent is a standalone module, not invoked by the v2 pipeline (see
-    system_design/Architecture.md). The registry must not claim otherwise, since
-    api/routers/artifacts.py surfaces producer_phase/producer_agent to callers."""
+def test_allowed_claims_json_producer_matches_planning_stage() -> None:
+    """allowed_claims.json is written by the planning stage
+    (run_planning/_persist_content_plan_artifacts call extract_allowed_claims());
+    the registry must attribute it there since api/routers/artifacts.py surfaces
+    producer_phase/producer_agent to callers."""
     entry = ARTIFACT_PRODUCER["allowed_claims.json"]
-    assert entry["producer_phase"] != "research"
-    assert entry["producer_agent"] != "BlogResearchAgent"
-    assert "external" in entry["producer_phase"].lower()
+    assert entry["producer_phase"] == "planning"
+    assert entry["producer_agent"] == "BlogPlanningAgent"
