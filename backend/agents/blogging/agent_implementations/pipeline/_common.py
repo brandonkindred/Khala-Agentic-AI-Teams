@@ -260,7 +260,10 @@ def _persist_content_plan_artifacts(
     Args:
         work_dir: Directory to persist artifacts to.
         plan: The (possibly revised) content plan to persist.
-        llm_client: Resolved LLM client used for claims extraction.
+        llm_client: Resolved LLM client used for claims extraction. May be a raw
+            ``LLMClient`` or a Strands ``LLMClientModel`` wrapper (what the
+            pipeline actually passes in production, e.g. via
+            ``get_strands_model``) — either is accepted.
         topic: Topic/brief text recorded on the persisted ``AllowedClaims``.
 
     Preconditions:
@@ -287,8 +290,13 @@ def _persist_content_plan_artifacts(
     write_artifact(work_dir, "content_brief.md", content_plan_to_content_brief_markdown(plan))
     logger.info("Persisted content_plan.json, content_plan.md, outline.md, content_brief.md")
 
+    # extract_allowed_claims calls complete_json() directly, which only the backing
+    # LLMClient exposes — a Strands LLMClientModel wrapper (what get_strands_model
+    # returns, and what the pipeline actually passes in production) does not, so it
+    # must be unwrapped first (same pattern as _apply_stage_model_override above).
+    claims_llm_client = llm_client.client if isinstance(llm_client, LLMClientModel) else llm_client
     allowed_claims = extract_allowed_claims(
-        llm_client, content_plan_markdown, references=[], topic=topic
+        claims_llm_client, content_plan_markdown, references=[], topic=topic
     )
     write_artifact(work_dir, "allowed_claims.json", allowed_claims.to_dict())
     logger.info("Persisted allowed_claims.json (%d claim(s))", len(allowed_claims.claims))

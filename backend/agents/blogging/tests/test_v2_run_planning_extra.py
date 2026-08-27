@@ -164,6 +164,65 @@ def test_run_planning_writes_allowed_claims_with_zero_claims(monkeypatch, tmp_pa
     assert written == {"topic": "b", "claims": []}
 
 
+def test_run_planning_unwraps_llm_client_model_for_claims_extraction(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """extract_allowed_claims must reach the backing client's complete_json, not the
+    Strands LLMClientModel wrapper the pipeline actually passes in production.
+
+    Regression test for the Codex finding on PR #7408: LLMClientModel (returned by
+    get_strands_model, what run_pipeline/Temporal activities pass as llm_client) has
+    no complete_json method, so passing it unwrapped silently produced empty claims
+    in every real run (extract_allowed_claims catches the AttributeError and falls
+    back to zero claims). This test does NOT mock extract_allowed_claims — it must
+    exercise the real function against a real LLMClientModel to catch this.
+    """
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
+
+    from llm_service import LLMClientModel
+
+    ppr = _make_planning_result(critic_report=None)
+
+    class _FakeBackingClient:
+        def complete_json(self, _prompt, **_kw):
+            return {
+                "claims": [
+                    {
+                        "id": "1",
+                        "text": "Claim from the backing client.",
+                        "citations": ["Source 1"],
+                        "risk_level": "low",
+                    }
+                ]
+            }
+
+    _patch_planning_collaborators(monkeypatch, v2, ppr)
+
+    work_dir = tmp_path / "wd"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    v2.run_planning(
+        ResearchBriefInput(brief="b", max_results=5),
+        work_dir=work_dir,
+        llm_client=LLMClientModel(_FakeBackingClient()),
+        length_policy=resolve_length_policy(content_profile=ContentProfile.standard_article),
+        series_context=None,
+        job_updater=None,
+    )
+
+    written = json.loads((work_dir / "allowed_claims.json").read_text())
+    assert written["claims"] == [
+        {
+            "id": "1",
+            "text": "Claim from the backing client.",
+            "citations": ["Source 1"],
+            "risk_level": "low",
+        }
+    ]
+
+
 def test_run_planning_without_work_dir_or_critic_report(monkeypatch) -> None:
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.blog_research_agent.models import ResearchBriefInput
