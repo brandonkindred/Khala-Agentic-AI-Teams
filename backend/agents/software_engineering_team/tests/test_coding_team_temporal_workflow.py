@@ -27,6 +27,7 @@ import contextlib
 
 import pytest
 
+from shared.temporal.testing import workflow_environment as _workflow_environment
 from software_engineering_team.api.coding_team_models import RunRequest
 from software_engineering_team.temporal.coding_team_workflow import CodingTeamWorkflow
 
@@ -965,31 +966,6 @@ def test_github_publish_exception_preserves_original_when_terminalize_fails(
 
 
 # --------------------------------------------------------------------------- WorkflowEnvironment
-
-
-@contextlib.asynccontextmanager
-async def _workflow_environment():
-    """Start a time-skipping ``WorkflowEnvironment`` with no worker attached.
-
-    Preconditions:
-        - Caller is an async test (or other async context) that will drive the
-          yielded ``env`` and any workers itself.
-    Postconditions:
-        - Yields a started ``WorkflowEnvironment``. Skips the test (rather than
-          failing) when the ephemeral Temporal test-server binary cannot be
-          downloaded — same egress caveat as
-          ``test_code_review_temporal.py``'s helper. The environment is shut
-          down on exit.
-    """
-    from temporalio.testing import WorkflowEnvironment
-
-    try:
-        test_env = await WorkflowEnvironment.start_time_skipping()
-    except RuntimeError as exc:
-        pytest.skip(f"Temporal ephemeral test server unavailable (no egress?): {exc}")
-
-    async with test_env as env:
-        yield env
 
 
 @contextlib.asynccontextmanager

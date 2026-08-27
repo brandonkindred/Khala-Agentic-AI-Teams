@@ -115,9 +115,11 @@ flowchart LR
 ## 4. Conversational chat flow
 
 Used when the caller has no structured brief and wants the assistant to
-extract a mission from free-form messages. Each turn parses the LLM's
-structured output, merges mission fields, and optionally reruns the
-orchestrator.
+extract a mission from free-form messages. `BrandingAssistantAgent.respond()`
+runs as **two independent Strands agent calls** per turn — a conversation
+stage that produces the free-form reply, and a silent extraction stage that
+returns a validated `MissionUpdate` — then merges the mission fields and
+optionally reruns the orchestrator.
 
 ```mermaid
 sequenceDiagram
@@ -126,7 +128,8 @@ sequenceDiagram
     participant API as /conversations/.../messages
     participant ConvStore as BrandingConversationStore
     participant Assistant as BrandingAssistantAgent
-    participant LLM as llm_service
+    participant ConvLLM as conversation agent<br/>(output_mode=text)
+    participant ExtLLM as extraction agent<br/>(structured_output=MissionUpdate)
     participant Orch as BrandingTeamOrchestrator
     participant BrandStore as BrandingStore
 
@@ -135,11 +138,13 @@ sequenceDiagram
     ConvStore-->>API: messages + mission + latest_output
     API->>ConvStore: append_message(user, content)
     API->>Assistant: respond(messages, mission, user_message)
-    Assistant->>LLM: complete(prompt, temperature=0.5,<br/>system_prompt=SYSTEM_PROMPT, think=true)
-    LLM-->>Assistant: raw completion
-    Assistant->>Assistant: _parse_mission_and_suggestions(raw)<br/>(assistant/agent.py:14-66)
-    Assistant->>Assistant: _merge_mission_update(current, update)<br/>(assistant/agent.py:69-123)
-    Assistant-->>API: reply, updated_mission, suggested_questions
+    Assistant->>ConvLLM: USER_TURN_TEMPLATE(brief, history, user_message)
+    ConvLLM-->>Assistant: raw prose reply
+    Assistant->>Assistant: _strip_accidental_json(raw_reply)<br/>(assistant/agent.py:_strip_accidental_json)
+    Assistant->>ExtLLM: EXTRACTION_USER_TEMPLATE(brief, history,<br/>user_message, assistant_reply)
+    ExtLLM-->>Assistant: validated MissionUpdate<br/>(.structured_output)
+    Assistant->>Assistant: _merge_mission_update(current, update)<br/>(assistant/agent.py:_merge_mission_update)
+    Assistant-->>API: reply, updated_mission,<br/>suggested_questions, degraded
     API->>ConvStore: update_mission(conversation_id, updated_mission)
     API->>ConvStore: append_message(assistant, reply)
     API->>API: _run_orchestrator_if_ready(updated_mission)<br/>(api/main.py:360-367)
@@ -156,10 +161,14 @@ sequenceDiagram
     API-->>User: ConversationStateResponse
 ```
 
-On LLM failure the assistant returns a canned reply and suggested
-questions without propagating the exception
-(`assistant/agent.py:188-195`), so chat remains responsive even when the
-LLM backend is down.
+The two stages fail independently. If the conversation agent call raises,
+`respond()` returns a canned reply and default suggested questions without
+propagating the exception, and the extraction stage is never called. If the
+extraction agent call raises, or its result doesn't carry a valid
+`MissionUpdate`, the conversation reply is unaffected — `respond()` returns
+`degraded=True` and leaves the mission unchanged instead of propagating the
+exception, so chat remains responsive even when extraction or the LLM
+backend is degraded.
 
 ## 5. Phase-gated approval workflow
 

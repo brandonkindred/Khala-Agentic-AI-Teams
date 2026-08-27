@@ -24,26 +24,18 @@ from typing import Any, Dict, List
 from unittest import mock
 
 from investment_team.strategy_lab.temporal import workflows as wf
-
-
-def _config_dict(**overrides: Any) -> Dict[str, Any]:
-    base = {"start_date": "2023-01-01", "end_date": "2023-12-31"}
-    base.update(overrides)
-    return base
-
-
-_WF_CONFIG = {
-    "design_review_rounds": 20,
-    "design_review_stall_rounds": 3,
-    # Exercise the true default so a regression that resets the mechanical
-    # repair flag (which hid two crash bugs in the earlier hand-ported port)
-    # would surface here rather than being masked.
-    "mechanical_repair_enabled": True,
-    "code_conformance_retries": 2,
-    "design_max_llm_calls": 120,
-    "regime_summary_enabled": False,
-    "max_design_reentries": 2,
-}
+from investment_team.tests.strategy_lab_temporal_fixtures import (
+    WF_CONFIG as _WF_CONFIG,
+)
+from investment_team.tests.strategy_lab_temporal_fixtures import (
+    config_dict as _config_dict,
+)
+from investment_team.tests.strategy_lab_temporal_fixtures import (
+    record_outcome as _record_outcome,
+)
+from investment_team.tests.strategy_lab_temporal_fixtures import (
+    reentry_outcome as _reentry_outcome,
+)
 
 
 def _patch_execute(handlers: Dict[str, Any], *, calls: List[str] | None = None):
@@ -66,36 +58,6 @@ def _patch_execute(handlers: Dict[str, Any], *, calls: List[str] | None = None):
         return handler
 
     return mock.patch("temporalio.workflow.execute_activity", _fake_exec)
-
-
-def _reentry_outcome(**overrides: Any) -> Dict[str, Any]:
-    base = {
-        "kind": "reentry",
-        "evidence": "always fails",
-        "last_spec": {"strategy_id": "strat-1"},
-        "last_code": "code",
-        "failure_phase": "evaluation",
-        "design_context": {"rounds": 1, "critiques": [], "stop_reason": "x", "loop_telemetry": {}},
-        "convergence_tracker_state": {"trial_count": 0},
-        "gate_results": [],
-        "budget_calls": 0,
-        "drift": {"spec_history": [], "code_history": [], "gate_timeline": []},
-    }
-    base.update(overrides)
-    return base
-
-
-def _record_outcome(**overrides: Any) -> Dict[str, Any]:
-    base = {
-        "kind": "record",
-        "record": {"lab_record_id": "rec-1"},
-        "convergence_tracker_state": {"trial_count": 1},
-        "gate_results": [],
-        "budget_calls": 3,
-        "drift": {"spec_history": [], "code_history": [], "gate_timeline": []},
-    }
-    base.update(overrides)
-    return base
 
 
 def _skipped_outcome(**overrides: Any) -> Dict[str, Any]:

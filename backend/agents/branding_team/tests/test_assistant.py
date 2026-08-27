@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from branding_team.assistant.agent import (
+    _DEFAULT_SUGGESTIONS,
     BrandingAssistantAgent,
     _merge_mission_update,
     _strip_accidental_json,
@@ -389,6 +390,78 @@ def test_branding_assistant_agent_default_extraction_agent_uses_build_agent() ->
     assert extraction_agent.name == "extraction"
     assert extraction_agent.system_prompt == EXTRACTION_SYSTEM_PROMPT
     assert extraction_agent.callback_handler is null_callback_handler
+
+
+def test_branding_assistant_agent_empty_extraction_result_is_noop_and_not_degraded() -> None:
+    """A *successful* extraction call that legitimately finds nothing new this
+    turn (an all-empty ``MissionUpdate``) must leave the mission unchanged,
+    report ``degraded=False`` (unlike the extraction-failure paths, which
+    also leave the mission unchanged but with ``degraded=True``), and fall
+    back to the default suggested questions."""
+    conversation_llm = MagicMock(return_value="Got it — tell me more about your audience.")
+    extraction_llm = MagicMock(return_value=_extraction_result())
+    agent = BrandingAssistantAgent(conversation_llm=conversation_llm, extraction_llm=extraction_llm)
+    mission = make_mission(
+        company_name="Acme", company_description="Software company.", target_audience="TBD"
+    )
+    reply, updated_mission, suggested_questions, degraded = agent.respond(
+        messages=[],
+        current_mission=mission,
+        user_message="just thinking out loud",
+    )
+    assert "Got it" in reply
+    assert updated_mission == mission
+    assert degraded is False
+    assert suggested_questions == list(_DEFAULT_SUGGESTIONS)
+    extraction_llm.assert_called_once()
+
+
+def test_branding_assistant_agent_defaults_suggested_questions_when_empty_list() -> None:
+    """Same as the ``None`` default case, but the extractor explicitly returns
+    an empty list rather than leaving the field unset — ``_coerce_suggestions``
+    must treat both the same way."""
+    conversation_llm = MagicMock(return_value="Got it — tell me more about your audience.")
+    extraction_llm = MagicMock(
+        return_value=_extraction_result(company_name="Acme", suggested_questions=[])
+    )
+    agent = BrandingAssistantAgent(conversation_llm=conversation_llm, extraction_llm=extraction_llm)
+    mission = make_mission(company_name="TBD")
+    _, updated_mission, suggested_questions, degraded = agent.respond(
+        messages=[],
+        current_mission=mission,
+        user_message="We're called Acme",
+    )
+    assert updated_mission.company_name == "Acme"
+    assert degraded is False
+    assert suggested_questions == list(_DEFAULT_SUGGESTIONS)
+
+
+def test_branding_assistant_agent_end_to_end_merges_color_palettes_and_selected_index() -> None:
+    """Full ``respond()`` path (not just ``_merge_mission_update`` directly):
+    a structured extraction result carrying color palettes and a selected
+    index must land on the returned mission."""
+    from branding_team.models import ColorPalette
+
+    conversation_llm = MagicMock(return_value="Here are a couple of directions to consider.")
+    extraction_llm = MagicMock(
+        return_value=_extraction_result(
+            color_palettes=[
+                ColorPalette(name="Warm", description="cozy", colors=["#a30"], sentiment="warm"),
+                ColorPalette(name="Cool", description="crisp", colors=["#03a"], sentiment="cool"),
+            ],
+            selected_palette_index=1,
+        )
+    )
+    agent = BrandingAssistantAgent(conversation_llm=conversation_llm, extraction_llm=extraction_llm)
+    mission = make_mission()
+    _, updated_mission, _, degraded = agent.respond(
+        messages=[],
+        current_mission=mission,
+        user_message="I like the cool one",
+    )
+    assert [p.name for p in updated_mission.color_palettes] == ["Warm", "Cool"]
+    assert updated_mission.selected_palette_index == 1
+    assert degraded is False
 
 
 def test_branding_assistant_agent_handles_conversation_llm_failure() -> None:

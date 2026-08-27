@@ -97,11 +97,13 @@ def invoke_outreach(body: dict[str, Any]) -> dict[str, Any]:
             case_studies=case_studies,
             company_context=req.company_context,
         )
-        per_prospect_results.append({
-            "prospect_id": prospect.id,
-            "prospect_company": prospect.company_name,
-            "variants": result.model_dump(mode="json")["variants"],
-        })
+        per_prospect_results.append(
+            {
+                "prospect_id": prospect.id,
+                "prospect_company": prospect.company_name,
+                "variants": result.model_dump(mode="json")["variants"],
+            }
+        )
     return {"results": per_prospect_results}
 
 
@@ -172,6 +174,7 @@ def invoke_closer(body: dict[str, Any]) -> dict[str, Any]:
         proposal_json=req.proposal.model_dump_json(),
         product_name=req.product_name,
         value_proposition=req.value_proposition,
+        dossier=req.dossier,
     )
     return result.model_dump(mode="json")
 
