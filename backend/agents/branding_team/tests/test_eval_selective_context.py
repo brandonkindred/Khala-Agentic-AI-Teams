@@ -88,19 +88,21 @@ def test_phase_spec_context_override_restores_on_error() -> None:
     assert _PHASE_SPEC[BrandPhase.GOVERNANCE].context_phases == original
 
 
-def test_run_variant_selective_excludes_channel_activation_context() -> None:
+def test_run_variant_selective_includes_all_upstream_context() -> None:
     """Integration check that _run_variant(full_context=False) genuinely goes
-    through the real, non-monkeypatched _PHASE_SPEC -- GOVERNANCE's task
-    string must never mention channel_activation or narrative_messaging,
-    the acceptance criterion #6965 exists to enforce.
+    through the real, non-monkeypatched _PHASE_SPEC -- GOVERNANCE's selective
+    ``context_phases`` is every upstream phase, so its task string must
+    mention channel_activation and narrative_messaging alongside
+    strategic_core and visual_identity, matching what the
+    ``brand_rules_codifier`` and ``asset_wiki_planner`` prompts assume.
     """
     orchestrator = BrandingTeamOrchestrator()
     with force_dummy_llm_provider():
         _outputs, task_strings = _run_variant(orchestrator, make_mission(), full_context=False)
 
     governance_task = task_strings[BrandPhase.GOVERNANCE]
-    assert BrandPhase.CHANNEL_ACTIVATION.value not in governance_task
-    assert BrandPhase.NARRATIVE_MESSAGING.value not in governance_task
+    assert BrandPhase.CHANNEL_ACTIVATION.value in governance_task
+    assert BrandPhase.NARRATIVE_MESSAGING.value in governance_task
     assert BrandPhase.STRATEGIC_CORE.value in governance_task
     assert BrandPhase.VISUAL_IDENTITY.value in governance_task
 
@@ -166,29 +168,29 @@ def test_run_variant_restores_phase_spec_after_full_context() -> None:
         assert spec.context_phases == originals[phase]
 
 
-def test_diverges_from_full_context_true_only_for_governance() -> None:
-    """Today only GOVERNANCE's selective context_phases differs from its full-context
-    prefix. STRATEGIC_CORE has no upstream phases at all, so it has no full-context
-    variant to diverge from and is excluded from this loop; every remaining phase's
-    selective and full task prompts are identical.
+def test_diverges_from_full_context_false_for_every_phase() -> None:
+    """No phase's selective context_phases differs from its full-context prefix
+    today: GOVERNANCE's selective context now spans every upstream phase, the
+    same set every other non-STRATEGIC_CORE phase already used. STRATEGIC_CORE
+    has no upstream phases at all, so it has no full-context variant to
+    diverge from and is excluded from this loop.
     """
     for phase in PHASE_ORDER:
         if phase == BrandPhase.STRATEGIC_CORE:
             continue
-        expected = phase == BrandPhase.GOVERNANCE
-        assert _diverges_from_full_context(phase) is expected
+        assert _diverges_from_full_context(phase) is False
 
 
-def test_first_diverging_phase_is_governance() -> None:
-    """GOVERNANCE is the only (and therefore first) diverging phase today."""
-    assert _first_diverging_phase() == BrandPhase.GOVERNANCE
+def test_first_diverging_phase_is_none() -> None:
+    """No phase diverges from its full-context prefix today."""
+    assert _first_diverging_phase() is None
 
 
-def test_run_variant_pair_shares_non_diverging_phase_outputs() -> None:
-    """Every phase before the first divergence (narrative_messaging, visual_identity,
-    channel_activation, strategic_core) must be the identical shared object between
-    the selective and full-context results -- not two independently regenerated
-    outputs -- so a live run can never manufacture a false delta on those phases.
+def test_run_variant_pair_shares_all_phase_outputs_when_none_diverge() -> None:
+    """No phase's context diverges from its full-context prefix today, so every
+    phase in PHASE_ORDER must be the identical shared object between the
+    selective and full-context results -- not independently regenerated -- so
+    a live run can never manufacture a false delta anywhere in the pipeline.
     """
     orchestrator = BrandingTeamOrchestrator()
     mission = make_mission()
@@ -197,14 +199,10 @@ def test_run_variant_pair_shares_non_diverging_phase_outputs() -> None:
             orchestrator, mission
         )
 
-    fork_phase = _first_diverging_phase()
-    fork_idx = PHASE_ORDER.index(fork_phase)
-    for phase in PHASE_ORDER[:fork_idx]:
+    assert _first_diverging_phase() is None
+    for phase in PHASE_ORDER:
         assert selective_outputs[phase] is full_outputs[phase]
         assert selective_tasks[phase] == full_tasks[phase]
-
-    # The diverging phase itself must still be judged independently per variant.
-    assert selective_outputs[fork_phase] is not full_outputs[fork_phase]
 
 
 def test_run_variant_pair_governance_task_strings_match_run_variant() -> None:
@@ -287,15 +285,18 @@ def test_run_eval_default_dummy_mode_has_no_quality_regressions(tmp_path) -> Non
 
 
 def test_run_eval_judges_shared_phase_output_only_once(tmp_path) -> None:
-    """CHANNEL_ACTIVATION's context doesn't diverge between variants, so its output
-    is the identical shared object in both -- run_eval must call the single-output
-    judge on it exactly once (never twice) and never route it through the paired
-    judge call at all.
+    """Neither judged phase's context diverges between variants today (GOVERNANCE's
+    context_phases now spans every upstream phase, matching CHANNEL_ACTIVATION's
+    prior no-divergence status), so both outputs are the identical shared object
+    in both variants -- run_eval must call the single-output judge on each of
+    them exactly once (never twice) and never route either through the paired
+    judge call.
     """
-    # CHANNEL_ACTIVATION is asserted directly (not derived from
+    # CHANNEL_ACTIVATION and GOVERNANCE are asserted directly (not derived from
     # _first_diverging_phase()) because this test's whole point is pinning
-    # down *which* judged phase is non-diverging today; if that ever changes,
-    # this assertion should fail loudly rather than silently track the change.
+    # down *which* judged phases are non-diverging today; if that ever
+    # changes, this assertion should fail loudly rather than silently track
+    # the change.
     with patch(
         "branding_team.scripts.eval_selective_context.score_phase_output",
         wraps=eval_ctx.score_phase_output,
@@ -303,24 +304,27 @@ def test_run_eval_judges_shared_phase_output_only_once(tmp_path) -> None:
         run_eval(missions=[make_mission()], output_dir=tmp_path)
 
     judged_phases = [call.kwargs["phase"] for call in mock_score.call_args_list]
-    assert judged_phases == [BrandPhase.CHANNEL_ACTIVATION]
+    assert judged_phases == [BrandPhase.CHANNEL_ACTIVATION, BrandPhase.GOVERNANCE]
 
 
 def test_run_eval_judges_diverging_phase_with_both_paired_orderings(tmp_path) -> None:
-    """GOVERNANCE's context does diverge between variants, so run_eval must score
-    both candidates through exactly two score_phase_output_pair calls -- one with
-    selective as OUTPUT A, one with full as OUTPUT A -- to average out any
-    positional bias, never a single call or two separate score_phase_output calls.
+    """When a judged phase's context does diverge from its full-context prefix,
+    run_eval must score both candidates through exactly two
+    score_phase_output_pair calls -- one with selective as OUTPUT A, one with
+    full as OUTPUT A -- to average out any positional bias, never a single
+    call or two separate score_phase_output calls.
+
+    No judged phase diverges under today's real _PHASE_SPEC (see
+    test_run_eval_judges_shared_phase_output_only_once), so this test forces a
+    synthetic divergence on GOVERNANCE via _phase_spec_context_override to
+    keep the paired-judging branch covered.
     """
-    # GOVERNANCE is asserted directly for the same reason as the shared-phase
-    # test above: it mirrors test_first_diverging_phase_is_governance(), which
-    # documents today's divergence point, so a mismatch here signals a real
-    # behavior change rather than a stale assumption.
-    with patch(
-        "branding_team.scripts.eval_selective_context.score_phase_output_pair",
-        wraps=eval_ctx.score_phase_output_pair,
-    ) as mock_pair:
-        run_eval(missions=[make_mission()], output_dir=tmp_path)
+    with _phase_spec_context_override(BrandPhase.GOVERNANCE, ()):
+        with patch(
+            "branding_team.scripts.eval_selective_context.score_phase_output_pair",
+            wraps=eval_ctx.score_phase_output_pair,
+        ) as mock_pair:
+            run_eval(missions=[make_mission()], output_dir=tmp_path)
 
     judged_phases = [call.kwargs["phase"] for call in mock_pair.call_args_list]
     assert judged_phases == [BrandPhase.GOVERNANCE, BrandPhase.GOVERNANCE]
@@ -336,6 +340,10 @@ def test_run_eval_averages_both_paired_orderings_to_cancel_positional_bias(tmp_p
     selective/full scores: averaging the forward and reverse orderings should
     cancel the bias and leave both candidates with the same averaged score,
     since a single ordering alone would report a manufactured one-point delta.
+
+    No judged phase diverges under today's real _PHASE_SPEC, so this test
+    forces the same synthetic GOVERNANCE divergence as the paired-orderings
+    test above to route GOVERNANCE through the patched paired judge call.
     """
     # Simulates a judge that always scores whichever candidate is OUTPUT A one
     # point higher than whichever is OUTPUT B, regardless of actual content.
@@ -350,11 +358,14 @@ def test_run_eval_averages_both_paired_orderings_to_cancel_positional_bias(tmp_p
         # Whichever candidate is passed as output_a gets the higher score.
         return PairedPhaseQualityScore(output_a=biased_high, output_b=biased_low)
 
-    with patch(
-        "branding_team.scripts.eval_selective_context.score_phase_output_pair",
-        side_effect=fake_paired,
-    ):
-        _comparisons, quality_comparisons = run_eval(missions=[make_mission()], output_dir=tmp_path)
+    with _phase_spec_context_override(BrandPhase.GOVERNANCE, ()):
+        with patch(
+            "branding_team.scripts.eval_selective_context.score_phase_output_pair",
+            side_effect=fake_paired,
+        ):
+            _comparisons, quality_comparisons = run_eval(
+                missions=[make_mission()], output_dir=tmp_path
+            )
 
     governance = next(c for c in quality_comparisons if c.phase == BrandPhase.GOVERNANCE)
     # Averaging (5+4)/2 = 4.5 for both sides -- the one-point positional bias
