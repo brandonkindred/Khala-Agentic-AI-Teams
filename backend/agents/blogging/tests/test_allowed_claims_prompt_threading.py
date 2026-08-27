@@ -67,6 +67,45 @@ SAMPLE_ALLOWED_CLAIMS = {
 
 
 # ---------------------------------------------------------------------------
+# _classify_allowed_claims — the policy discriminator run() switches on,
+# independent of _render_allowed_claims_section's rendered text.
+# ---------------------------------------------------------------------------
+
+
+def test_classify_allowed_claims_none() -> None:
+    from agents.blogging.blog_writer_agent.agent import (
+        _CLAIMS_POLICY_NONE,
+        _classify_allowed_claims,
+    )
+
+    assert _classify_allowed_claims(None) == _CLAIMS_POLICY_NONE
+    assert _classify_allowed_claims("not a dict") == _CLAIMS_POLICY_NONE
+
+
+def test_classify_allowed_claims_restrictive() -> None:
+    from agents.blogging.blog_writer_agent.agent import (
+        _CLAIMS_POLICY_RESTRICTIVE,
+        _classify_allowed_claims,
+    )
+
+    for allowed_claims in (
+        {"claims": []},
+        {"claims": "not a list"},
+        {"claims": [{"id": "", "text": "no id"}]},
+    ):
+        assert _classify_allowed_claims(allowed_claims) == _CLAIMS_POLICY_RESTRICTIVE
+
+
+def test_classify_allowed_claims_populated() -> None:
+    from agents.blogging.blog_writer_agent.agent import (
+        _CLAIMS_POLICY_POPULATED,
+        _classify_allowed_claims,
+    )
+
+    assert _classify_allowed_claims(SAMPLE_ALLOWED_CLAIMS) == _CLAIMS_POLICY_POPULATED
+
+
+# ---------------------------------------------------------------------------
 # _render_allowed_claims_section
 # ---------------------------------------------------------------------------
 

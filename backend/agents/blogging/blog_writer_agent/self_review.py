@@ -375,17 +375,19 @@ def fix_deterministic_violations(
           callback (e.g. ``BlogWriterAgent._call_text``).
         - ``allowed_claims_section`` is the caller's already-rendered allowed-claims
           prompt block (e.g. via ``agent._render_allowed_claims_section``), or ``""``
-          when no allowed-claims artifact was supplied. This function embeds it
-          verbatim (no added wrapper text) so the block's own self-contained
-          guidance — tag-and-preserve when claims are listed, no tags at all when
-          the artifact is present but empty — is never contradicted by a blanket
-          "preserve everything" instruction layered on top.
+          when no allowed-claims artifact was supplied. This function embeds its
+          text unmodified (surrounded only by blank-line spacing, no added wrapper
+          *text*) so the block's own self-contained guidance — tag-and-preserve
+          when claims are listed, no tags at all when the artifact is present but
+          empty — is never contradicted by a blanket "preserve everything"
+          instruction layered on top.
     Postconditions:
         - On success with extractable fixed draft, returns that stripped draft.
-        - When ``allowed_claims_section`` is non-empty, the fix prompt includes it
-          verbatim, instructing the model to follow the claims policy it describes
-          (this is a prompt instruction, not an enforced guarantee: the function
-          does not validate or otherwise check that the model's rewrite obeys it).
+        - When ``allowed_claims_section`` is non-empty, the fix prompt includes its
+          text unmodified (as its own paragraph, surrounded by blank-line spacing),
+          instructing the model to follow the claims policy it describes (this is
+          a prompt instruction, not an enforced guarantee: the function does not
+          validate or otherwise check that the model's rewrite obeys it).
         - On soft-fail (``LLMError`` excluding types re-raised below, or
           ``json.JSONDecodeError`` / ``TypeError`` / ``ValueError`` / ``AttributeError``),
           logs with traceback via ``logger.exception`` and returns the original ``draft``.
@@ -436,16 +438,17 @@ def llm_self_review(
           callback (e.g. ``BlogWriterAgent._call_text``).
         - ``allowed_claims_section`` is the caller's already-rendered allowed-claims
           prompt block (e.g. via ``agent._render_allowed_claims_section``), or ``""``
-          when no allowed-claims artifact was supplied. Embedded verbatim (no added
-          wrapper text) so its own self-contained guidance is never contradicted by
-          a blanket "preserve everything" instruction layered on top.
+          when no allowed-claims artifact was supplied. Its text is embedded
+          unmodified (surrounded only by blank-line spacing, no added wrapper
+          *text*) so its own self-contained guidance is never contradicted by a
+          blanket "preserve everything" instruction layered on top.
     Postconditions:
         - On success, returns the reviewed/fixed draft or the original when no issues.
         - When issues are found and ``allowed_claims_section`` is non-empty, the fix
-          prompt includes it verbatim, instructing the model to follow the claims
-          policy it describes (a prompt instruction, not an enforced guarantee:
-          the function does not validate or otherwise check that the model's
-          rewrite obeys it).
+          prompt includes its text unmodified (as its own paragraph, surrounded by
+          blank-line spacing), instructing the model to follow the claims policy it
+          describes (a prompt instruction, not an enforced guarantee: the function
+          does not validate or otherwise check that the model's rewrite obeys it).
         - Three ways the response can resolve to "issues": (1) it parses to a
           JSON list, used directly; (2) it parses to a genuine top-level JSON
           object (the model's real "no issues" response), which returns the

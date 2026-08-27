@@ -193,6 +193,39 @@ _NO_ALLOWED_CLAIMS_SECTION = (
     "anywhere, since no ID is available to use."
 )
 
+# Discriminator for how the writer must treat factual/statistical claims. Callers
+# that need to branch on the policy (e.g. run()'s numeric-figure requirement) should
+# use _classify_allowed_claims / this constant set rather than comparing rendered
+# prompt text against _NO_ALLOWED_CLAIMS_SECTION -- a future wording change to that
+# text would otherwise silently break a text-equality-based branch.
+_CLAIMS_POLICY_NONE = "none"  # no allowed-claims artifact was supplied at all
+_CLAIMS_POLICY_RESTRICTIVE = "restrictive"  # artifact supplied but yields no usable claim
+_CLAIMS_POLICY_POPULATED = "populated"  # at least one usable claim
+
+
+def _classify_allowed_claims(allowed_claims: Optional[dict]) -> str:
+    """Classify ``allowed_claims`` into a claims-policy discriminator, independent
+    of how ``_render_allowed_claims_section`` renders that policy as prompt text.
+
+    Preconditions:
+        - Same as ``_render_allowed_claims_section``: ``allowed_claims`` is ``None``
+          or a dict shaped like allowed_claims.json.
+    Postconditions:
+        - Returns ``_CLAIMS_POLICY_NONE`` when ``allowed_claims`` is ``None`` or not
+          a dict.
+        - Returns ``_CLAIMS_POLICY_RESTRICTIVE`` when ``allowed_claims`` is a dict
+          but yields no usable claim (``claims`` missing, empty, not a list, or
+          every entry malformed).
+        - Otherwise returns ``_CLAIMS_POLICY_POPULATED``.
+    """
+    if not isinstance(allowed_claims, dict):
+        return _CLAIMS_POLICY_NONE
+    claims = allowed_claims.get("claims")
+    if not isinstance(claims, list):
+        return _CLAIMS_POLICY_RESTRICTIVE
+    has_usable_claim = any(isinstance(c, dict) and c.get("id") and c.get("text") for c in claims)
+    return _CLAIMS_POLICY_POPULATED if has_usable_claim else _CLAIMS_POLICY_RESTRICTIVE
+
 
 def _render_allowed_claims_section(allowed_claims: Optional[dict]) -> str:
     """Render allowed_claims.json content as a prompt section, or "" when no artifact
@@ -203,33 +236,33 @@ def _render_allowed_claims_section(allowed_claims: Optional[dict]) -> str:
           (``{"topic": ..., "claims": [{"id": ..., "text": ...}, ...]}``); malformed
           claim entries are tolerated (skipped) rather than raising.
     Postconditions:
-        - Returns ``""`` only when ``allowed_claims`` is ``None`` or not a dict —
-          i.e. no allowed-claims artifact was supplied at all. The writer prompt's
-          own instructions cover this case (write normally, no ``[CLAIM:id]`` tags).
-        - When ``allowed_claims`` is a dict but yields no usable claim (``claims``
-          missing, empty, not a list, or every entry malformed), returns the
-          restrictive ``_NO_ALLOWED_CLAIMS_SECTION`` block instead of ``""`` —
-          a present-but-empty artifact (e.g. extraction ran and found nothing
+        - Returns ``""`` when ``_classify_allowed_claims`` yields
+          ``_CLAIMS_POLICY_NONE`` — i.e. no allowed-claims artifact was supplied at
+          all. The writer prompt's own instructions cover this case (write
+          normally, no ``[CLAIM:id]`` tags).
+        - Returns the restrictive ``_NO_ALLOWED_CLAIMS_SECTION`` block when
+          ``_classify_allowed_claims`` yields ``_CLAIMS_POLICY_RESTRICTIVE`` — a
+          present-but-empty artifact (e.g. extraction ran and found nothing
           supportable) must not be treated the same as "no artifact was checked",
           since the latter silently permits unsupported factual claims.
-        - Otherwise returns a ``---``-delimited prompt block listing every claim as
-          ``- [id] text``, instructing the model to tag claims with the given IDs,
-          to invent none, and (self-contained, so any rewrite/revision caller that
-          embeds this block verbatim gets consistent guidance without adding its
-          own wrapper text) to preserve existing ``[CLAIM:id]`` tags when revising.
+        - Otherwise (``_CLAIMS_POLICY_POPULATED``) returns a ``---``-delimited
+          prompt block listing every claim as ``- [id] text``, instructing the
+          model to tag claims with the given IDs, to invent none, and
+          (self-contained, so any rewrite/revision caller that embeds this block
+          verbatim gets consistent guidance without adding its own wrapper text)
+          to preserve existing ``[CLAIM:id]`` tags when revising.
     """
-    if not isinstance(allowed_claims, dict):
+    policy = _classify_allowed_claims(allowed_claims)
+    if policy == _CLAIMS_POLICY_NONE:
         return ""
-    claims = allowed_claims.get("claims")
-    if not isinstance(claims, list):
+    if policy == _CLAIMS_POLICY_RESTRICTIVE:
         return _NO_ALLOWED_CLAIMS_SECTION
+    claims = allowed_claims.get("claims")
     lines = [
         f"- [{c.get('id')}] {c.get('text')}"
         for c in claims
         if isinstance(c, dict) and c.get("id") and c.get("text")
     ]
-    if not lines:
-        return _NO_ALLOWED_CLAIMS_SECTION
     return (
         "---\n"
         "ALLOWED CLAIMS (tag every factual/statistical claim with [CLAIM:id] using "
@@ -746,8 +779,11 @@ class BlogWriterAgent(_BlogAgentBase):
         # The restrictive no-claims policy forbids every factual/statistical assertion,
         # so the numeric-figure requirement below must not apply when it's in effect —
         # otherwise the model gets two contradictory mandates for a quantitative topic
-        # and may invent an unsupported number to satisfy this one.
-        if claims_section == _NO_ALLOWED_CLAIMS_SECTION:
+        # and may invent an unsupported number to satisfy this one. Classified from
+        # draft_input.allowed_claims directly (not by comparing claims_section's
+        # rendered text) so a future wording change to _NO_ALLOWED_CLAIMS_SECTION
+        # can't silently break this branch.
+        if _classify_allowed_claims(draft_input.allowed_claims) == _CLAIMS_POLICY_RESTRICTIVE:
             numeric_requirement = (
                 "no specific numbers, dollar figures, percentages, or durations (the "
                 "ALLOWED CLAIMS section above forbids factual/statistical claims; do "
