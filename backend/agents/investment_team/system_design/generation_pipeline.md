@@ -337,9 +337,9 @@ the table.
 |---|---|---|
 | `strategy_validator.py`: `StrategySpecValidator` | design, synthesis <sup>a</sup> | Deterministic field-level validation of `StrategySpec` |
 | `spec_readiness.py`: `SpecReadinessGate` | design, synthesis <sup>f</sup> | The implementability gate that decides design-loop readiness (sizing coherence, timeframe validity, DSL completeness) |
-| `code_safety.py` (+ `code_safety_ast.py`): `CodeSafetyChecker` | synthesis, and verification (alignment-proposal re-check) | AST + regex safety scan of generated strategy Python |
+| `code_safety.py` (+ `code_safety_ast.py`): `CodeSafetyChecker` | synthesis, verification <sup>h</sup> | AST + regex safety scan of generated strategy Python |
 | `code_conformance/gate.py` (+ `ast_helpers.py`): `CodeConformanceGate` | synthesis | Deterministic spec→code conformance, incl. custom-code faithfulness checks |
-| `predicate_conformance.py` (+ `predicate_conformance_fixtures.py`, `conformance_bars.py`): `PredicateConformanceGate` | synthesis, re-checked at verification | Pre-execution predicate-conformance shadow check against synthetic bars |
+| `predicate_conformance.py` (+ `predicate_conformance_fixtures.py`, `conformance_bars.py`): `PredicateConformanceGate` | synthesis, verification <sup>i</sup> | Pre-execution predicate-conformance shadow check against synthetic bars |
 | `predicate_reachability.py`: `PredicateReachabilityProbe` | synthesis | Pre-backtest, data-driven check that spec predicates can actually fire |
 | `backtest_anomaly.py`: `BacktestAnomalyDetector` | synthesis, verification <sup>b</sup> | Threshold-based anomaly detection over backtest results |
 | `alignment_checks.py`: `DeterministicAlignmentChecker` | verification <sup>e</sup> | The seven per-rule trade-alignment checks described above |
@@ -378,10 +378,13 @@ so takes the `"synthesis"` default, emitting `zero_trade_repair_`-prefixed rows.
 failure fails the run closed before verification; `check_breadth` is a softer
 verification-phase check.
 
-<sup>g</sup> Not a gate in the stamping sense: `inject_universe_and_guard`
-is a pure AST source rewriter returning `str`. It emits no
-`QualityGateResult` and so carries no phase tag, even though it runs during
-synthesis.
+<sup>d</sup> `ConvergenceTracker` stamps no phase — `record()` files an
+outcome rather than emitting a `QualityGateResult`. It is called per-attempt
+inside `RecordAssemblyMixin`
+(`orchestrator_record_assembly.py`) — the same activity scope as
+everything else here, not a batch-level step. The directives it *derives* are
+what carry across cycles; batch-level merging is a separate step
+(`merge_wave_results_activity`).
 
 <sup>e</sup> `check()` runs its whole body inside
 `with self._using_phase("verification")`, so every finding it emits is stamped
@@ -391,13 +394,21 @@ even though the loop that drives it is the trade-alignment loop.
 <sup>f</sup> Stamped `"design"` in the design loop and `"synthesis"` on the
 round-0 re-check.
 
-<sup>d</sup> `ConvergenceTracker` stamps no phase — `record()` files an
-outcome rather than emitting a `QualityGateResult`. It is called per-attempt
-inside `RecordAssemblyMixin`
-(`orchestrator_record_assembly.py`) — the same activity scope as
-everything else here, not a batch-level step. The directives it *derives* are
-what carry across cycles; batch-level merging is a separate step
-(`merge_wave_results_activity`).
+<sup>g</sup> Not a gate in the stamping sense: `inject_universe_and_guard`
+is a pure AST source rewriter returning `str`. It emits no
+`QualityGateResult` and so carries no phase tag, even though it runs during
+synthesis.
+
+<sup>h</sup> The verification invocation re-validates the alignment
+proposal's code (`orchestrator_alignment.py`) before it re-executes — the
+phase tag is `"verification"` because alignment runs after the backtest that
+produced the proposal.
+
+<sup>i</sup> The verification invocation re-checks predicate conformance on
+code committed *after* synthesis by either a trade-alignment fix or zero-trade
+repair (`orchestrator.py`), so the persisted `ran_on_non_conforming_code` flag
+describes the code that actually produced the backtest — not the pre-commit
+synthesis-time check.
 
 `quality_gates/__init__.py` and its two subpackage markers
 (`code_conformance/__init__.py`, `realism/__init__.py`) are omitted above.

@@ -399,7 +399,8 @@ Most agents take an `LLMClient` from `backend/agents/llm_service/` and call
 `.complete_json(...)`. Strategy Lab's design/review/refinement agents and the
 `SignalIntelligenceExpert` are the exception — they build a Strands `Model`
 via `model_factory.get_strands_model` and are invoked as `Agent(prompt)`,
-which is why `LLM_PROVIDER=dummy` is not team-wide safe (see below). Platform-wide, provider/base-URL/model resolve from the
+which is why `LLM_PROVIDER=dummy` is not safe for this team's Strands agents
+(see below). Platform-wide, provider/base-URL/model resolve from the
 Postgres-backed ordered provider list (`/llm-config` UI → `llm_provider_configs`)
 — per the root `CLAUDE.md`, the sole source of LLM resolution, with
 `LLM_PROVIDER=dummy` as the only env override.
@@ -476,7 +477,7 @@ alignment loops, and the ~20-gate `quality_gates/` catalog — are documented in
 | `STRATEGY_LAB_MARKET_DATA_CACHE_TTL_SEC` | Snapshot cache TTL (default 120.0) |
 | `STRATEGY_LAB_MARKET_DATA_PROVIDER` | Provider key (only `free_tier` is implemented) |
 | `STRATEGY_LAB_SIGNAL_EXPERT_ENABLED` | Toggles the signal-intelligence step |
-| `LLM_PROVIDER` | Must be `ollama` or `bedrock` for Strategy Lab's Strands agents — `dummy` and any other value raise (see §10). Platform-wide, only `dummy` is load-bearing |
+| `LLM_PROVIDER` | For Strategy Lab's Strands agents: must be `ollama` or `bedrock`; `dummy` and any other value raise (see §10). Platform-wide, it is only load-bearing as an env override when set to `dummy` (all other provider/base-URL/model resolution comes from the provider list) |
 | `LLM_BASE_URL` / `LLM_MODEL` | Blank-provider-list-entry defaults (applied by `llm_service.factory`). `LLM_MODEL` additionally selects the live model on the `bedrock` branch (see §10) |
 | `POSTGRES_HOST` (+ friends) | Enables job-service persistence (required for non-trivial use) |
 
