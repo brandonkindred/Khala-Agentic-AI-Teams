@@ -384,6 +384,48 @@ def test_run_planning_research_reraises_transient_llm_errors(monkeypatch, err_cl
     assert exc.value is cause
 
 
+@pytest.mark.parametrize("err_cls_name", ["LLMRateLimitError", "LLMTemporaryError"])
+def test_run_planning_research_unwraps_strands_transient_errors(monkeypatch, err_cls_name) -> None:
+    """A transient LLM error that Strands wraps in EventLoopException (as a live
+    ResearchAgent._call_json() call would raise it) must still be recognized as
+    transient and re-raised unwrapped, not turned into a terminal ResearchError.
+
+    Unlike the planner's LLM calls (which go through run_json_gate/
+    call_json_with_retry and unwrap EventLoopException themselves),
+    ResearchAgent._call_json() calls Strands directly, so the unwrap has to happen
+    at this boundary instead.
+    """
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from strands.types.exceptions import EventLoopException
+
+    from llm_service import LLMRateLimitError, LLMTemporaryError
+
+    err_cls = LLMRateLimitError if err_cls_name == "LLMRateLimitError" else LLMTemporaryError
+    cause = err_cls("transient outage")
+    wrapped = EventLoopException(cause)
+
+    class _FailingResearchAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def run(self, _brief):
+            raise wrapped
+
+    monkeypatch.setattr(v2, "ResearchAgent", _FailingResearchAgent)
+
+    with pytest.raises(err_cls) as exc:
+        v2.run_planning(
+            ResearchBriefInput(brief="b", max_results=5),
+            work_dir=None,
+            llm_client=object(),
+            length_policy=None,
+            series_context=None,
+            job_updater=None,
+        )
+    assert exc.value is cause
+
+
 def test_run_planning_research_reraises_blogging_error(monkeypatch) -> None:
     """A BloggingError raised directly by research (e.g. a ResearchError from a
     sub-step) propagates unwrapped rather than being double-wrapped."""

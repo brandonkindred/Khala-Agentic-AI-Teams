@@ -29,21 +29,32 @@ _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "needs_human
 _BLOG_RESTARTABLE = RESTARTABLE_STATUSES | {"needs_human_review"}
 
 
-def _clear_research_cache(work_dir: Optional[str]) -> None:
-    """Delete a job's research checkpoint cache so a restart is genuinely from scratch.
+def _reset_research_state(work_dir: Optional[str]) -> None:
+    """Delete a job's research checkpoint cache and packet so a restart is genuinely
+    from scratch.
 
     A restart reuses the job's ``work_dir`` and (for an unchanged brief) the same
-    ``ResearchAgent`` cache key, so without this the "from scratch" restart would
-    silently resume the previous run's research checkpoints instead of re-running
-    research. A missing cache directory (nothing to clear) is a no-op; any other
-    failure to delete it propagates — reporting the restart as successful while an
-    old checkpoint actually survives would be worse than failing the restart outright.
+    ``ResearchAgent`` cache key, so without clearing the cache the "from scratch"
+    restart would silently resume the previous run's research checkpoints instead
+    of re-running research. Separately, the artifact list/read endpoints expose
+    ``research_packet.md`` purely based on its existence in ``work_dir``, so leaving
+    the old one in place would serve stale research while the new run is pending —
+    or permanently, if the new attempt fails before it gets a chance to overwrite it.
+
+    A missing cache directory or artifact file (nothing to clear) is a no-op for
+    that item; any other deletion failure propagates — reporting the restart as
+    successful while stale research state actually survives would be worse than
+    failing the restart outright.
     """
     if not work_dir:
         return
-    cache_dir = Path(work_dir) / ".research_cache"
+    work_path = Path(work_dir)
     try:
-        shutil.rmtree(cache_dir)
+        shutil.rmtree(work_path / ".research_cache")
+    except FileNotFoundError:
+        pass
+    try:
+        (work_path / "research_packet.md").unlink()
     except FileNotFoundError:
         pass
 
@@ -238,14 +249,14 @@ def restart_blog_job(job_id: str) -> StartPipelineResponse:
             status_code=400, detail="Original request payload not available for restart."
         )
 
-    # Clear the research cache before resetting the job record: if this fails, the
-    # job is left untouched (still in its prior terminal state) rather than reset to
+    # Reset research state before resetting the job record: if this fails, the job
+    # is left untouched (still in its prior terminal state) rather than reset to
     # "pending" with a restart that never actually happened.
     try:
-        _clear_research_cache(job.get("work_dir"))
+        _reset_research_state(job.get("work_dir"))
     except OSError as exc:
         raise HTTPException(
-            status_code=500, detail=f"Failed to clear research cache for restart: {exc}"
+            status_code=500, detail=f"Failed to reset research state for restart: {exc}"
         ) from exc
 
     from agents.blogging.shared.blog_job_store import reset_blog_job

@@ -140,15 +140,18 @@ def test_restart_job_happy(client: TestClient, monkeypatch) -> None:
 
 
 def test_restart_job_clears_research_cache(client: TestClient, monkeypatch, tmp_path: Path) -> None:
-    """Restart must wipe the job's research checkpoint cache, not just job-store
-    fields — otherwise a "from scratch" restart with an unchanged brief would
-    silently resume the previous run's ResearchAgent checkpoints."""
+    """Restart must wipe the job's research checkpoint cache and packet, not just
+    job-store fields — otherwise a "from scratch" restart with an unchanged brief
+    would silently resume the previous run's checkpoints, or keep serving the
+    previous run's research_packet.md artifact while the new one is pending."""
     from agents.blogging.shared import blog_job_store as bjs
 
     work_dir = tmp_path / "job-work-dir"
     cache_dir = work_dir / ".research_cache"
     cache_dir.mkdir(parents=True)
     (cache_dir / "stale-checkpoint.json").write_text("{}", encoding="utf-8")
+    packet_path = work_dir / "research_packet.md"
+    packet_path.write_text("# stale research", encoding="utf-8")
 
     job_id = _create_job()
     bjs.update_blog_job(
@@ -163,30 +166,33 @@ def test_restart_job_clears_research_cache(client: TestClient, monkeypatch, tmp_
     r = client.post(f"/job/{job_id}/restart")
     assert r.status_code == 200
     assert not cache_dir.exists()
+    assert not packet_path.exists()
 
 
-def test_clear_research_cache_helper(tmp_path: Path) -> None:
-    """Unit-level coverage of _clear_research_cache's edge cases: no work_dir,
-    and a work_dir with no research cache yet (nothing to clear either way)."""
-    from agents.blogging.api.routers.jobs import _clear_research_cache
+def test_reset_research_state_helper(tmp_path: Path) -> None:
+    """Unit-level coverage of _reset_research_state's edge cases: no work_dir, and a
+    work_dir with no research cache/packet yet (nothing to clear either way)."""
+    from agents.blogging.api.routers.jobs import _reset_research_state
 
     # No work_dir recorded on the job (e.g. never started) — no-op, doesn't raise.
-    _clear_research_cache(None)
-    _clear_research_cache("")
+    _reset_research_state(None)
+    _reset_research_state("")
 
-    # work_dir exists but no .research_cache under it yet (no research ran) —
-    # also a no-op, not an error.
+    # work_dir exists but no .research_cache/research_packet.md under it yet (no
+    # research ran) — also a no-op, not an error.
     work_dir = tmp_path / "job-work-dir"
     work_dir.mkdir()
-    _clear_research_cache(str(work_dir))
+    _reset_research_state(str(work_dir))
     assert not (work_dir / ".research_cache").exists()
+    assert not (work_dir / "research_packet.md").exists()
 
 
-def test_clear_research_cache_helper_propagates_genuine_errors(monkeypatch, tmp_path: Path) -> None:
+def test_reset_research_state_helper_propagates_genuine_errors(monkeypatch, tmp_path: Path) -> None:
     """A real deletion failure (not just "already gone") must propagate rather than
-    be swallowed — silently reporting a successful "from scratch" restart while a
-    stale checkpoint actually survives is worse than failing the restart outright."""
-    from agents.blogging.api.routers.jobs import _clear_research_cache
+    be swallowed — silently reporting a successful "from scratch" restart while
+    stale research state actually survives is worse than failing the restart
+    outright."""
+    from agents.blogging.api.routers.jobs import _reset_research_state
 
     def boom(*_a, **_kw):
         raise PermissionError("read-only filesystem")
@@ -197,15 +203,30 @@ def test_clear_research_cache_helper_propagates_genuine_errors(monkeypatch, tmp_
     (work_dir / ".research_cache").mkdir(parents=True)
 
     with pytest.raises(PermissionError):
-        _clear_research_cache(str(work_dir))
+        _reset_research_state(str(work_dir))
 
 
-def test_restart_job_500_when_cache_clear_fails(
+def test_reset_research_state_helper_removes_stale_packet(tmp_path: Path) -> None:
+    """research_packet.md is deleted too, not just the checkpoint cache dir — the
+    artifact-list/read endpoints expose it purely based on existence."""
+    from agents.blogging.api.routers.jobs import _reset_research_state
+
+    work_dir = tmp_path / "job-work-dir"
+    work_dir.mkdir()
+    packet_path = work_dir / "research_packet.md"
+    packet_path.write_text("# stale research", encoding="utf-8")
+
+    _reset_research_state(str(work_dir))
+
+    assert not packet_path.exists()
+
+
+def test_restart_job_500_when_research_reset_fails(
     client: TestClient, monkeypatch, tmp_path: Path
 ) -> None:
-    """A cache-clear failure aborts the restart with a 500 and leaves the job record
-    untouched, rather than resetting it to "pending" for a restart that never
-    actually happened."""
+    """A research-state-reset failure aborts the restart with a 500 and leaves the
+    job record untouched, rather than resetting it to "pending" for a restart that
+    never actually happened."""
     from agents.blogging.shared import blog_job_store as bjs
 
     work_dir = tmp_path / "job-work-dir"
@@ -226,7 +247,7 @@ def test_restart_job_500_when_cache_clear_fails(
     def boom(_work_dir):
         raise OSError("disk error")
 
-    monkeypatch.setattr(jobs_router, "_clear_research_cache", boom)
+    monkeypatch.setattr(jobs_router, "_reset_research_state", boom)
 
     r = client.post(f"/job/{job_id}/restart")
     assert r.status_code == 500
