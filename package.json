@@ -4,6 +4,9 @@
   "description": "Monorepo root - run npm commands from user-interface/",
   "scripts": {
     "install:ui": "cd user-interface && npm install",
-    "postinstall": "echo 'Tip: For UI deps, run: cd user-interface && nvm use && npm ci'"
+    "postinstall": "echo 'Tip: For UI deps, run: cd user-interface && nvm use && npm ci'",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
   }
 }
