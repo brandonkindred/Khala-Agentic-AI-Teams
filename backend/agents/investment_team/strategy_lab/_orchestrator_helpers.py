@@ -32,6 +32,14 @@ External callers (``zero_trade_repair.py``, the test suite,
 these names via ``investment_team.strategy_lab.orchestrator``.
 ``orchestrator.py`` re-exports them (see the "Re-exports" block near the
 end of that file) so existing import sites keep working.
+
+``run_cycle``'s directive-gathering and terminal-guard logic lives in the
+sibling ``cycle_control.py`` instead of here, specifically because it must
+also be reachable from the Temporal-mode ``StrategyLabCycleWorkflow.run``
+(via ``temporal/dto.py``'s adapters) — see that module's docstring for why
+this module's own top-level imports (``market_data_service``,
+``execution.metrics``, ``trading_service.modes.sandbox_compat``) make it
+unsafe to import, even deferred, from inside the temporalio workflow sandbox.
 """
 
 from __future__ import annotations
