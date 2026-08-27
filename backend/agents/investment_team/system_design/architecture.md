@@ -396,11 +396,12 @@ prompt-side data shape without destabilizing the backtester.
 ### 10. LLM access goes through the shared service
 
 Most agents take an `LLMClient` from `backend/agents/llm_service/` and call
-`.complete_json(...)`. Strategy Lab is the exception across the board:
-`DesignAgent`, `DesignReviewAgent`, `RefinementAgent`, `CodeSynthesisAgent`,
-`TradeAlignmentAgent`, `AnalysisAgent`, `ZeroTradeRepairAgent`, and
-`SignalIntelligenceExpert` all build a Strands `Model` via
-`model_factory.get_strands_model`. `CodeSynthesisAgent`, `TradeAlignmentAgent`,
+`.complete_json(...)`. Strategy Lab is the exception across the board, via
+two different paths. `DesignAgent`, `DesignReviewAgent`, `RefinementAgent`,
+`CodeSynthesisAgent`, `TradeAlignmentAgent`, `AnalysisAgent`, and
+`ZeroTradeRepairAgent` build a Strands `Model` via this team's own
+`model_factory.get_strands_model` (see below — this is the one that rejects
+`LLM_PROVIDER=dummy`). `CodeSynthesisAgent`, `TradeAlignmentAgent`,
 `AnalysisAgent`, and `ZeroTradeRepairAgent` are always invoked as
 `Agent(prompt)` (via the shared `run_single_shot_agent` runner).
 `DesignAgent`, `DesignReviewAgent`, and `RefinementAgent` are conditional: on
@@ -409,10 +410,13 @@ decoding available), `_structured_output.invoke_structured_with_schema` takes
 the model's `.client` and calls `complete`/`complete_json` directly, never
 constructing an `Agent`; they fall back to `Agent(prompt)` (via
 `run_json_with_parse_retry`) only when the active provider can't do that
-(`bedrock`). `PaperTradingAgent` is Strands-backed too, but through a
-separate `llm_service.strands_provider.get_strands_model`, not this team's
-`model_factory`. All of this is why `LLM_PROVIDER=dummy` is not safe for any of
-Strategy Lab's Strands agents (see below). Platform-wide, provider/base-URL/model resolve from the
+(`bedrock`). `SignalIntelligenceExpert` and `PaperTradingAgent` are
+Strands-backed too, but through the platform-wide
+`llm_service.get_strands_model` — the same centralized provider-list
+resolution (and `dummy` support) every `LLMClient`-based agent gets — not
+this team's `model_factory`. So `LLM_PROVIDER=dummy` is only unsafe for the
+seven `model_factory`-routed agents above; `SignalIntelligenceExpert` and
+`PaperTradingAgent` work fine with it. Platform-wide, provider/base-URL/model resolve from the
 Postgres-backed ordered provider list (`/llm-config` UI → `llm_provider_configs`)
 — per the root `CLAUDE.md`, the sole source of LLM resolution, with
 `LLM_PROVIDER=dummy` as the only env override.
@@ -489,7 +493,7 @@ alignment loops, and the ~20-gate `quality_gates/` catalog — are documented in
 | `STRATEGY_LAB_MARKET_DATA_CACHE_TTL_SEC` | Snapshot cache TTL (default 120.0) |
 | `STRATEGY_LAB_MARKET_DATA_PROVIDER` | Provider key (only `free_tier` is implemented) |
 | `STRATEGY_LAB_SIGNAL_EXPERT_ENABLED` | Toggles the signal-intelligence step |
-| `LLM_PROVIDER` | For Strategy Lab's Strands agents: must be `ollama` or `bedrock`; `dummy` and any other value raise (see §10). Platform-wide, it is only load-bearing as an env override when set to `dummy` (all other provider/base-URL/model resolution comes from the provider list) |
+| `LLM_PROVIDER` | For the seven `model_factory`-routed Strategy Lab agents (design/review/refinement/synthesis/alignment/analysis/zero-trade-repair): must be `ollama` or `bedrock`; `dummy` and any other value raise (see §10). `SignalIntelligenceExpert`/`PaperTradingAgent` route through the platform-wide resolver instead and support `dummy` like any other agent. Platform-wide, it is only load-bearing as an env override when set to `dummy` (all other provider/base-URL/model resolution comes from the provider list) |
 | `LLM_BASE_URL` / `LLM_MODEL` | Blank-provider-list-entry defaults (applied by `llm_service.factory`). `LLM_MODEL` additionally selects the live model on the `bedrock` branch (see §10) |
 | `POSTGRES_HOST` (+ friends) | Enables job-service persistence (required for non-trivial use) |
 
