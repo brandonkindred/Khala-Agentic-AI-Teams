@@ -150,8 +150,9 @@ sequenceDiagram
                 opt publishable winner AND paper_trading_enabled
                     Finalize->>PTA: run_session(strategy)
                     PTA-->>Finalize: PaperTradingSession
+                    Finalize->>Store: persist PaperTradingSession
                 end
-                Finalize->>Store: persist StrategyLabRecord
+                Finalize->>Store: persist StrategyLabRecord + StrategySpec +<br/>BacktestRecord (_persist_strategy_lab_record —<br/>three writes, one call)
                 BatchWF->>Bus: publish_run_event_activity (best-effort)
                 Bus-->>Client: SSE event
             end
