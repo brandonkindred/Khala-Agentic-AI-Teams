@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 
-from sales_team.models import ProspectDossier, PublicWorkItem
+from sales_team.models import DecisionMakerSignal, ProspectDossier, PublicWorkItem
 from sales_team.prompts._dossier_render import (
     _DOSSIER_LIST_TOP_K,
     _truncate,
@@ -121,6 +121,43 @@ def test_trigger_events_truncate_to_top_k() -> None:
     out = render_dossier_for_prompt(dossier)
     # Top-K rendered, rest dropped.
     rendered = [e for e in events if e in out]
+    assert len(rendered) == _DOSSIER_LIST_TOP_K
+
+
+def test_decision_maker_signals_render_strength_and_evidence() -> None:
+    dossier = ProspectDossier(
+        prospect_id="prs_dm",
+        full_name="Jane",
+        current_title="VP",
+        current_company="Acme",
+        decision_maker_signals=[
+            DecisionMakerSignal(
+                signal="reports_directly_to_ceo",
+                evidence_url="https://acme.example.com/leadership",
+                strength="strong",
+            ),
+            DecisionMakerSignal(signal="owns_budget_for_data_tooling"),
+        ],
+    )
+    out = render_dossier_for_prompt(dossier)
+    assert "### Decision Maker Signals" in out
+    assert "[strong] reports_directly_to_ceo (https://acme.example.com/leadership)" in out
+    # Default strength ("medium") renders, and a signal without evidence_url omits the URL suffix.
+    assert "[medium] owns_budget_for_data_tooling" in out
+    assert "owns_budget_for_data_tooling (" not in out
+
+
+def test_decision_maker_signals_truncate_to_top_k() -> None:
+    signals = [DecisionMakerSignal(signal=f"signal-{i}") for i in range(8)]
+    dossier = ProspectDossier(
+        prospect_id="prs_dm_trunc",
+        full_name="J",
+        current_title="V",
+        current_company="A",
+        decision_maker_signals=signals,
+    )
+    out = render_dossier_for_prompt(dossier)
+    rendered = [s.signal for s in signals if s.signal in out]
     assert len(rendered) == _DOSSIER_LIST_TOP_K
 
 

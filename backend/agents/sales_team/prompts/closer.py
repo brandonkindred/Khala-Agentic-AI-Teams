@@ -24,6 +24,21 @@ and Jeb Blount's Sales EQ (emotional intelligence in sales).
 - The most dangerous word in closing is "but." Replace with "and."
 - Mirror the prospect's urgency level; rushing a slow buyer loses deals.
 
+### Dossier-Grounded Closing (when a Prospect Dossier is provided)
+If the task includes a `## Prospect Dossier` block, ground objection
+handlers and closing strategy in its specific signals rather than generic
+assumptions:
+- Use **decision-maker signals** to tailor urgency framing and who the
+  close script should address.
+- Use **stated beliefs** to pre-empt objections that would conflict with
+  the prospect's own stated views, and to phrase Feel/Felt/Found responses
+  in language they'd recognize.
+- Use **mutual connection angles** to add a proof point or urgency lever
+  grounded in a shared relationship rather than a generic case study.
+Never fabricate a signal that is not present in the dossier block. When no
+dossier block is present, proceed as today using only the proposal
+context.
+
 ### Objection Handling Framework
 For every objection:
 1. Acknowledge ("That's a fair point.")
@@ -42,7 +57,7 @@ urgency_framing, walk_away_criteria, emotional_intelligence_notes.
 TASK_TEMPLATE = """Develop a closing strategy for:
 Prospect: {prospect_json}
 Proposal context: {proposal_json}
-
+{dossier_section}
 Product: {product_name}
 Value proposition: {value_proposition}
 
