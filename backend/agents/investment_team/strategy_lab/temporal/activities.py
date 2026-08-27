@@ -427,7 +427,7 @@ def resolve_workflow_config_activity() -> Dict[str, Any]:
         int, "mechanical_repair_enabled": bool, "code_conformance_retries":
         int, "design_max_llm_calls": int, "regime_summary_enabled": bool,
         "max_design_reentries": int, "llm_timeout_s": float, "llm_max_retries":
-        int}``.
+        int, "llm_backoff_cap_s": float}``.
         A workflow may never read these env vars itself (``os.*`` is
         restricted at workflow runtime by the temporalio sandbox) — it calls
         this activity once and threads the resolved values through
@@ -447,6 +447,11 @@ def resolve_workflow_config_activity() -> Dict[str, Any]:
         through) applies per call — reused here rather than re-derived so a
         legitimately-retrying (not stalled) call can't outlast a safety
         margin sized independently of the client's own retry budget.
+        ``llm_backoff_cap_s`` is the same client's per-retry exponential
+        backoff ceiling (``_exponential_retry_delay`` caps each wait at this
+        value, plus a small jitter this deadline doesn't additionally budget
+        for) — the batch workflow adds it once per retry so the sleep time
+        between attempts, not just the attempts' own durations, is covered.
     """
     from investment_team.strategy_lab.orchestrator import (
         MAX_DESIGN_REENTRIES,
@@ -462,7 +467,7 @@ def resolve_workflow_config_activity() -> Dict[str, Any]:
     from llm_service.clients.ollama import _parse_retry_config
     from llm_service.config import resolve_timeout
 
-    llm_max_retries, _backoff_base, _backoff_cap = _parse_retry_config()
+    llm_max_retries, _backoff_base, llm_backoff_cap_s = _parse_retry_config()
 
     return {
         "design_review_rounds": _design_review_rounds(),
@@ -474,6 +479,7 @@ def resolve_workflow_config_activity() -> Dict[str, Any]:
         "max_design_reentries": MAX_DESIGN_REENTRIES,
         "llm_timeout_s": resolve_timeout(),
         "llm_max_retries": llm_max_retries,
+        "llm_backoff_cap_s": llm_backoff_cap_s,
     }
 
 

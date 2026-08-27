@@ -615,13 +615,13 @@ def test_signal_brief_activity_timeout_scales_with_configured_llm_timeout():
     forcing Temporal to retry the whole activity and repeat paid LLM calls."""
     from datetime import timedelta
 
-    default_timeout = wf._signal_brief_activity_timeout(3600.0, None, 10)
-    doubled_timeout = wf._signal_brief_activity_timeout(7200.0, None, 10)
+    default_timeout = wf._signal_brief_activity_timeout(3600.0, None, 10, 0.0)
+    doubled_timeout = wf._signal_brief_activity_timeout(7200.0, None, 10, 0.0)
     assert doubled_timeout == default_timeout * 2
 
     # An excluded category shrinks the allowed count, so the deadline shrinks too.
     stocks_only = wf._signal_brief_activity_timeout(
-        3600.0, ["crypto", "forex", "futures", "commodities"], 10
+        3600.0, ["crypto", "forex", "futures", "commodities"], 10, 0.0
     )
     assert stocks_only == timedelta(seconds=1 * 3600.0 * 11)
     assert stocks_only < default_timeout
@@ -634,12 +634,32 @@ def test_signal_brief_activity_timeout_scales_with_configured_retry_ceiling():
     margin sized independently of the client's own retry budget."""
     from datetime import timedelta
 
-    default_retries = wf._signal_brief_activity_timeout(3600.0, None, 10)
-    more_retries = wf._signal_brief_activity_timeout(3600.0, None, 20)
+    default_retries = wf._signal_brief_activity_timeout(3600.0, None, 10, 0.0)
+    more_retries = wf._signal_brief_activity_timeout(3600.0, None, 20, 0.0)
     assert more_retries == timedelta(seconds=5 * 3600.0 * 21)
     assert more_retries > default_retries
 
-    zero_retries = wf._signal_brief_activity_timeout(3600.0, None, 0)
+    zero_retries = wf._signal_brief_activity_timeout(3600.0, None, 0, 0.0)
+    assert zero_retries == timedelta(seconds=5 * 3600.0 * 1)
+
+
+def test_signal_brief_activity_timeout_includes_retry_backoff_sleep_time():
+    """A start_to_close deadline sized only for attempts' own durations can
+    still expire mid-backoff during a valid retry sequence -- the client
+    sleeps up to llm_backoff_cap_s after each failed attempt, and that sleep
+    time is real wall-clock the activity spends without heartbeats protecting
+    against a start_to_close cutoff. The deadline must add
+    llm_max_retries * llm_backoff_cap_s per category on top of the
+    attempts-only total."""
+    from datetime import timedelta
+
+    no_backoff = wf._signal_brief_activity_timeout(3600.0, None, 10, 0.0)
+    with_backoff = wf._signal_brief_activity_timeout(3600.0, None, 10, 120.0)
+    assert with_backoff == no_backoff + timedelta(seconds=5 * 10 * 120.0)
+    assert with_backoff > no_backoff
+
+    # Zero retries means zero backoff sleeps, regardless of the configured cap.
+    zero_retries = wf._signal_brief_activity_timeout(3600.0, None, 0, 120.0)
     assert zero_retries == timedelta(seconds=5 * 3600.0 * 1)
 
 
@@ -650,7 +670,7 @@ def test_signal_brief_activity_timeout_never_degenerates_to_a_non_positive_deadl
     from datetime import timedelta
 
     result = wf._signal_brief_activity_timeout(
-        3600.0, ["stocks", "crypto", "forex", "futures", "commodities"], 10
+        3600.0, ["stocks", "crypto", "forex", "futures", "commodities"], 10, 0.0
     )
     assert result == timedelta(seconds=1 * 3600.0 * 11)
     assert result > timedelta(0)
@@ -664,7 +684,7 @@ def test_signal_brief_activity_timeout_deduplicates_the_exclude_list():
     dangerous direction for this helper to get wrong."""
     from datetime import timedelta
 
-    deduped = wf._signal_brief_activity_timeout(3600.0, ["stocks", "stocks", "crypto"], 10)
-    distinct = wf._signal_brief_activity_timeout(3600.0, ["stocks", "crypto"], 10)
+    deduped = wf._signal_brief_activity_timeout(3600.0, ["stocks", "stocks", "crypto"], 10, 0.0)
+    distinct = wf._signal_brief_activity_timeout(3600.0, ["stocks", "crypto"], 10, 0.0)
     assert deduped == distinct
     assert deduped == timedelta(seconds=3 * 3600.0 * 11)

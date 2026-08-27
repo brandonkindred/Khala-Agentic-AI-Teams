@@ -84,6 +84,10 @@ _DEFAULT_LLM_TIMEOUT_S_FALLBACK = 3600.0
 # Same wf_config.get(...) fallback rationale as _DEFAULT_LLM_TIMEOUT_S_FALLBACK
 # — only for a workflow history replayed from before "llm_max_retries" existed.
 _DEFAULT_LLM_MAX_RETRIES_FALLBACK = 10
+# Mirrors llm_service.clients.ollama._parse_retry_config's own default (120s).
+# Same wf_config.get(...) fallback rationale as _DEFAULT_LLM_TIMEOUT_S_FALLBACK
+# — only for a workflow history replayed from before "llm_backoff_cap_s" existed.
+_DEFAULT_LLM_BACKOFF_CAP_S_FALLBACK = 120.0
 
 # Mirrors ``strategy_lab.run_state.DEFAULT_FENCING_GENERATION`` -- duplicated
 # rather than imported for the same reason as ``_MAX_DESIGN_REENTRIES_FALLBACK``
@@ -126,14 +130,15 @@ _DESIGN_ATTEMPT_TIMEOUT = timedelta(hours=2)
 # against (heartbeats keep firing throughout a live retry sequence; only
 # start_to_close bounds how long Temporal lets the activity run in total).
 # start_to_close is therefore derived from the *actual resolved* per-call
-# timeout AND the *actual resolved* transient-retry ceiling (both threaded
-# through wf_config via resolve_workflow_config_activity, since a workflow
-# may never read env vars itself) times the allowed-category count, so it
-# scales with whatever the operator has configured instead of guessing a
-# constant. See _signal_brief_activity_timeout below. (Rate-limit and
-# semantic retry budgets -- smaller, edge-case-specific layers atop the
-# dominant transient-retry budget -- are not additionally accounted for; see
-# that function's docstring.)
+# timeout, the *actual resolved* transient-retry ceiling, AND the *actual
+# resolved* per-retry backoff cap (all threaded through wf_config via
+# resolve_workflow_config_activity, since a workflow may never read env vars
+# itself) times the allowed-category count, so it scales with whatever the
+# operator has configured instead of guessing a constant. See
+# _signal_brief_activity_timeout below. (Rate-limit and semantic retry
+# budgets -- smaller, edge-case-specific layers atop the dominant
+# transient-retry budget -- are not additionally accounted for; see that
+# function's docstring.)
 _SIGNAL_BRIEF_CATEGORY_COUNT = 5
 
 
@@ -141,6 +146,7 @@ def _signal_brief_activity_timeout(
     llm_timeout_s: float,
     exclude_asset_classes: Optional[List[str]],
     llm_max_retries: int,
+    llm_backoff_cap_s: float,
 ) -> timedelta:
     """Aggregate ``compute_signal_brief_activity`` start_to_close deadline.
 
@@ -153,43 +159,54 @@ def _signal_brief_activity_timeout(
         ceiling (``wf_config["llm_max_retries"]``, always >= 0 --
         ``ollama._parse_retry_config`` clamps a negative override to 0) for
         the Ollama client ``SignalIntelligenceExpert``'s calls actually go
-        through.
+        through. ``llm_backoff_cap_s`` is that same client's per-retry
+        exponential backoff ceiling (``wf_config["llm_backoff_cap_s"]``,
+        always >= 0).
     Postconditions:
-        Returns ``allowed_count * llm_timeout_s * (llm_max_retries + 1)``
-        seconds, where ``allowed_count`` is
-        ``_SIGNAL_BRIEF_CATEGORY_COUNT - len(set(exclude_asset_classes))``
-        clamped to at least 1 (an all-excluded/malformed list still yields a
-        positive deadline rather than a degenerate zero one), and
-        ``llm_max_retries + 1`` is one call's worst-case attempt count (the
-        initial attempt plus every transient retry, each potentially
-        consuming the full per-call timeout) -- the dominant contributor to
-        one category's real worst-case latency, reused directly from the
-        client's own retry ceiling rather than a hand-picked constant so a
-        legitimately-retrying (not stalled) call can't outlast this margin.
-        Deliberately does not additionally scale for the separate rate-limit
-        or semantic retry budgets (``ollama.py``'s ``max_total_attempts``
-        also sums those in) -- those are narrower, transient-error-adjacent
-        layers on top of the dominant transient-retry budget already covered
-        here, and folding every nested budget in would make this deadline
-        balloon far beyond a practical ceiling for a diminishing return.
-        Deduplicating ``exclude_asset_classes`` before counting matters
-        because an undersized ``allowed_count`` is the dangerous direction
-        here (it undersizes the very deadline this helper exists to size
-        correctly) — a duplicate-laden ``exclude_asset_classes`` (e.g. a
-        caller-side bug repeating an entry) must not inflate the excluded
-        count past the true number of distinct categories excluded. Pure and
-        deterministic — safe to call from workflow code. Does not validate
-        entries against the canonical class set (that would require
-        importing ``strategy_lab_context``, which this sandboxed module
-        avoids — see ``_MAX_DESIGN_REENTRIES_FALLBACK`` above);
-        ``exclude_asset_classes`` is always constructed from the validated
-        ``excluded_for_allowed`` path at dispatch time (``start_workflow.py``),
-        never from unvalidated user input.
+        Returns ``allowed_count * (llm_timeout_s * (llm_max_retries + 1) +
+        llm_max_retries * llm_backoff_cap_s)`` seconds, where
+        ``allowed_count`` is ``_SIGNAL_BRIEF_CATEGORY_COUNT -
+        len(set(exclude_asset_classes))`` clamped to at least 1 (an
+        all-excluded/malformed list still yields a positive deadline rather
+        than a degenerate zero one). ``llm_max_retries + 1`` is one call's
+        worst-case attempt count (the initial attempt plus every transient
+        retry, each potentially consuming the full per-call timeout) -- the
+        dominant contributor to one category's real worst-case latency,
+        reused directly from the client's own retry ceiling rather than a
+        hand-picked constant so a legitimately-retrying (not stalled) call
+        can't outlast this margin. ``llm_max_retries * llm_backoff_cap_s`` is
+        the worst-case *sleep* time between those attempts — the client
+        waits ``_exponential_retry_delay`` (base * 2^attempt, capped at
+        ``llm_backoff_cap_s``, plus a small jitter this deadline doesn't
+        additionally budget for) after each of up to ``llm_max_retries``
+        failures — without which the deadline would only cover attempts'
+        own durations and could still expire mid-backoff during a valid
+        retry sequence. Deliberately does not additionally scale for the
+        separate rate-limit or semantic retry budgets (``ollama.py``'s
+        ``max_total_attempts`` also sums those in) -- those are narrower,
+        transient-error-adjacent layers on top of the dominant transient-retry
+        budget already covered here, and folding every nested budget in
+        would make this deadline balloon far beyond a practical ceiling for
+        a diminishing return. Deduplicating ``exclude_asset_classes`` before
+        counting matters because an undersized ``allowed_count`` is the
+        dangerous direction here (it undersizes the very deadline this
+        helper exists to size correctly) — a duplicate-laden
+        ``exclude_asset_classes`` (e.g. a caller-side bug repeating an entry)
+        must not inflate the excluded count past the true number of distinct
+        categories excluded. Pure and deterministic — safe to call from
+        workflow code. Does not validate entries against the canonical class
+        set (that would require importing ``strategy_lab_context``, which
+        this sandboxed module avoids — see ``_MAX_DESIGN_REENTRIES_FALLBACK``
+        above); ``exclude_asset_classes`` is always constructed from the
+        validated ``excluded_for_allowed`` path at dispatch time
+        (``start_workflow.py``), never from unvalidated user input.
     """
     excluded = len(set(exclude_asset_classes)) if exclude_asset_classes else 0
     allowed_count = max(1, _SIGNAL_BRIEF_CATEGORY_COUNT - excluded)
-    attempts_per_call = max(0, llm_max_retries) + 1
-    return timedelta(seconds=allowed_count * llm_timeout_s * attempts_per_call)
+    retries = max(0, llm_max_retries)
+    attempts_per_call = retries + 1
+    per_call_seconds = llm_timeout_s * attempts_per_call + retries * max(0.0, llm_backoff_cap_s)
+    return timedelta(seconds=allowed_count * per_call_seconds)
 
 
 # Server-enforced liveness deadline for compute_signal_brief_activity's
@@ -746,6 +763,7 @@ class StrategyLabBatchWorkflow:
                     wf_config.get("llm_timeout_s", _DEFAULT_LLM_TIMEOUT_S_FALLBACK),
                     exclude_asset_classes,
                     wf_config.get("llm_max_retries", _DEFAULT_LLM_MAX_RETRIES_FALLBACK),
+                    wf_config.get("llm_backoff_cap_s", _DEFAULT_LLM_BACKOFF_CAP_S_FALLBACK),
                 ),
                 heartbeat_timeout=_SIGNAL_BRIEF_HEARTBEAT_TIMEOUT,
             )

@@ -151,6 +151,7 @@ def test_resolve_workflow_config_activity_resolves_every_expected_key(monkeypatc
     monkeypatch.delenv("STRATEGY_LAB_REGIME_SUMMARY_ENABLED", raising=False)
     monkeypatch.delenv("LLM_TIMEOUT", raising=False)
     monkeypatch.delenv("LLM_MAX_RETRIES", raising=False)
+    monkeypatch.delenv("LLM_BACKOFF_MAX", raising=False)
 
     result = act.resolve_workflow_config_activity()
     assert result == {
@@ -163,6 +164,7 @@ def test_resolve_workflow_config_activity_resolves_every_expected_key(monkeypatc
         "max_design_reentries": 2,
         "llm_timeout_s": 3600.0,
         "llm_max_retries": 10,
+        "llm_backoff_cap_s": 120.0,
     }
 
 
@@ -178,6 +180,13 @@ def test_resolve_workflow_config_activity_reflects_llm_max_retries_override(monk
 
     result = act.resolve_workflow_config_activity()
     assert result["llm_max_retries"] == 4
+
+
+def test_resolve_workflow_config_activity_reflects_llm_backoff_cap_override(monkeypatch):
+    monkeypatch.setenv("LLM_BACKOFF_MAX", "60")
+
+    result = act.resolve_workflow_config_activity()
+    assert result["llm_backoff_cap_s"] == 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -3035,6 +3044,54 @@ def test_compute_signal_brief_snapshot_scopes_market_context_per_category(monkey
     assert "DGS10" in seen_prompts["stocks"]
     assert "Crypto" in seen_prompts["crypto"]
     assert "FX" not in seen_prompts["crypto"]
+
+
+def test_compute_signal_brief_snapshot_provenance_reflects_the_scoped_degraded_flag(monkeypatch):
+    """brief_provenance's market_degraded must reflect the SCOPED context the
+    expert actually received (category_market_ctx), not the unscoped
+    aggregate market_ctx -- otherwise a forex-source failure would mark a
+    stocks brief's provenance degraded even though scoped_to("stocks")
+    already stripped that failure reason and the stocks context is not
+    actually degraded from what the model saw."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_strategy_lab_signal_expert_enabled", lambda: True)
+    monkeypatch.setattr(
+        api_main,
+        "_snapshot_prior_records",
+        lambda: [_signal_brief_prior_record("stocks")],
+    )
+
+    class _FakeProvider:
+        def fetch_context(self, request):
+            from investment_team.market_lab_data import MarketLabContext
+
+            # Unscoped context is degraded solely by a forex-source failure --
+            # scoped_to("stocks") should strip that reason and clear degraded.
+            return MarketLabContext(
+                fetched_at="2024-01-01T00:00:00Z",
+                degraded=True,
+                degraded_reason="frankfurter_failed",
+                sources_used=["frankfurter"],
+            )
+
+        def close(self):
+            pass
+
+    class _FakeExpert:
+        def produce_signal_brief(self, prior_records, market_ctx, *, asset_class=None):
+            from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
+
+            return SignalIntelligenceBriefV1(brief_version=1)
+
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _FakeProvider)
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
+
+    _briefs, storage = api_main._compute_signal_brief_snapshot(
+        "SPY", ["crypto", "forex", "futures", "commodities"]
+    )
+
+    assert storage["by_asset_class"]["stocks"]["brief_provenance"]["market_degraded"] is False
 
 
 def test_compute_signal_brief_snapshot_skips_categories_with_no_prior_records(monkeypatch):

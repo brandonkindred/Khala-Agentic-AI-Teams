@@ -2806,7 +2806,7 @@ def _compute_signal_brief_snapshot(
                 "prior_record_count": len(category_records),
                 "market_snapshot_hash": market_hash,
                 "market_fetched_at": market_ctx.fetched_at,
-                "market_degraded": market_ctx.degraded,
+                "market_degraded": category_market_ctx.degraded,
                 "duration_ms": int((datetime.now(tz=timezone.utc) - t0).total_seconds() * 1000),
             }
             by_class[asset_class] = entry
