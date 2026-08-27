@@ -2782,14 +2782,15 @@ def test_run_called_twice_with_changed_unallowlisted_mission_field_reinvokes_no_
     """Two ``run()`` calls sharing one cache: the first populates it for one
     mission, the second changes only ``wiki_path`` -- a field on no phase's
     real ``mission_fields`` allowlist (unlike ``company_name``, which
-    STRATEGIC_CORE's and NARRATIVE_MESSAGING's allowlists deliberately
-    include despite no prompt citing it, precisely so a rename invalidates
-    their cache entries, or ``existing_brand_material``, which STRATEGIC_CORE's
-    allowlist also includes since it reached ``discovery_auditor`` before this
-    mechanism existed -- see ``test_run_called_twice_with_changed_company_name_
-    reinvokes_strategic_core_and_narrative`` below. ``wiki_path`` is a path,
-    not prose content any agent's text prompt can act on, so it stays
-    excluded from every phase). This is the epic's whole point: an edit to a
+    STRATEGIC_CORE's, NARRATIVE_MESSAGING's, and CHANNEL_ACTIVATION's
+    allowlists deliberately include despite no prompt citing it, precisely so
+    a rename invalidates their cache entries, or ``existing_brand_material``,
+    which STRATEGIC_CORE's allowlist also includes since it reached
+    ``discovery_auditor`` before this mechanism existed -- see
+    ``test_run_called_twice_with_changed_company_name_reinvokes_every_phase_
+    that_allowlists_it`` below. ``wiki_path`` is a path, not prose content any
+    agent's text prompt can act on, so it stays excluded from every phase).
+    This is the epic's whole point: an edit to a
     field none of the 5 phases' agents reference (nor any cross-mission-
     identity or content-grounding concern touches) must not invalidate any
     phase's cache entry, unlike the old full-mission-hash behavior."""
@@ -2854,22 +2855,22 @@ def test_run_called_twice_with_changed_allowlisted_mission_field_reinvokes_only_
     assert second_call_phases == [BrandPhase.STRATEGIC_CORE]
 
 
-def test_run_called_twice_with_changed_company_name_reinvokes_strategic_core_and_narrative() -> (
+def test_run_called_twice_with_changed_company_name_reinvokes_every_phase_that_allowlists_it() -> (
     None
 ):
-    """``company_name`` is on both STRATEGIC_CORE's and NARRATIVE_MESSAGING's
-    real allowlists even though no agent prompt cites it by name -- it was
-    added to STRATEGIC_CORE so a renamed (or otherwise differently-named)
-    mission can't silently reuse another company's cached strategic output,
-    and separately to NARRATIVE_MESSAGING because ``StrategicCoreOutput`` has
-    no field that echoes the company name back, so Phase 2's own cache key
-    can't rely on STRATEGIC_CORE's allowlist alone (see the "Post-review
-    addendum" in ``system_design/mission_field_dependency_analysis.md``). A
-    change to it must invalidate both phases' cache entries directly -- not
-    just STRATEGIC_CORE's, and not merely as a knock-on effect of
-    STRATEGIC_CORE's output changing (the fixture's output is identical
-    regardless of input, so NARRATIVE_MESSAGING's own allowlist is the only
-    thing that can explain it missing here)."""
+    """``company_name`` is on STRATEGIC_CORE's, NARRATIVE_MESSAGING's, and
+    CHANNEL_ACTIVATION's real allowlists even though no agent prompt cites it
+    by name -- each was added independently because no upstream output model
+    (``StrategicCoreOutput``, ``NarrativeMessagingOutput``,
+    ``VisualIdentityOutput``) echoes the raw company name back, so a
+    downstream phase's own allowlist can't rely on an upstream phase's
+    allowlist or output to propagate it (see the "Post-review addendum" in
+    ``system_design/mission_field_dependency_analysis.md``). A change to it
+    must invalidate all three phases' cache entries directly -- not merely as
+    a knock-on effect of an upstream phase's output changing (the fixture's
+    output is identical regardless of input, so each phase's own allowlist is
+    the only thing that can explain it missing here). VISUAL_IDENTITY and
+    GOVERNANCE do not allowlist ``company_name`` and must not be reinvoked."""
     first_mission = make_mission(company_name="Northstar Labs")
     second_mission = make_mission(company_name="Different Co")
     cache = PhaseOutputCache()
@@ -2891,11 +2892,15 @@ def test_run_called_twice_with_changed_company_name_reinvokes_strategic_core_and
             phase_cache=cache,
         )
 
-    assert mock_run_single_phase.call_count == len(PHASE_ORDER) + 2
+    assert mock_run_single_phase.call_count == len(PHASE_ORDER) + 3
     second_call_phases = [
         call.args[1] for call in mock_run_single_phase.call_args_list[len(PHASE_ORDER) :]
     ]
-    assert second_call_phases == [BrandPhase.STRATEGIC_CORE, BrandPhase.NARRATIVE_MESSAGING]
+    assert second_call_phases == [
+        BrandPhase.STRATEGIC_CORE,
+        BrandPhase.NARRATIVE_MESSAGING,
+        BrandPhase.CHANNEL_ACTIVATION,
+    ]
 
 
 # ---------------------------------------------------------------------------

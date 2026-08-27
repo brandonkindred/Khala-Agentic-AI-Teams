@@ -383,7 +383,7 @@ these tables is treated as safe to ship, particularly for phases where an
 agent's only mission reference is the generic, unqualified phrase "the
 branding mission."
 
-### Post-review addendum: four allowlists widened beyond this document's tables
+### Post-review addendum: five allowlists widened beyond this document's tables
 
 Code review on the implementation PR flagged conclusions in this
 document's tables as carrying a real correctness risk this document's
@@ -447,8 +447,20 @@ widened accordingly rather than following the tables above verbatim:
   catch. Absent the empirical validation this document already
   recommends before narrowing further, the safer default is to keep
   grounding Phase 3 in the user's actual color/typography selections.
+- **CHANNEL_ACTIVATION now also includes `company_name`.** Same
+  generalization as NARRATIVE_MESSAGING above, applied one phase further
+  downstream: none of CHANNEL_ACTIVATION's upstream output models
+  (`StrategicCoreOutput`, `NarrativeMessagingOutput`,
+  `VisualIdentityOutput`) echo the raw company name back, so relying on
+  it "appearing incidentally in upstream prose" is not guaranteed. Without
+  `company_name` directly in this phase's own allowlist,
+  `brand_architecture_builder` — whose whole job is brand-architecture
+  rules, parent-brand relationships, and naming conventions — could
+  receive no actual company name on a cold run, and a rename could reuse
+  another company's cached architecture/brand-in-action output on a warm
+  run.
 
-Every other phase's allowlist (`CHANNEL_ACTIVATION`, `GOVERNANCE`) ships
-exactly as recommended above. This addendum documents the deviation for
-future readers of this document; it does not change any table or finding
+Every other phase's allowlist (`GOVERNANCE`) ships exactly as recommended
+above. This addendum documents the deviation for future readers of this
+document; it does not change any table or finding
 above, which remain the underlying evidence record.

@@ -383,7 +383,13 @@ class _PhaseSpec(NamedTuple):
             visual-preference input, and dropping them would silently stop
             grounding the moodboard/color/typography agents in a user's actual
             palette/style selections — a functional regression, not just a
-            cache-scope one).
+            cache-scope one). CHANNEL_ACTIVATION additionally includes
+            ``company_name`` too, for the same reason as NARRATIVE_MESSAGING:
+            none of its upstream output models (``StrategicCoreOutput``,
+            ``NarrativeMessagingOutput``, ``VisualIdentityOutput``) echo the
+            raw company name back, so ``brand_architecture_builder`` — whose
+            whole job is naming conventions and brand-architecture rules —
+            would otherwise have no company identity to build on.
     """
 
     builder_fn: Callable[[], Any]
@@ -456,7 +462,7 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
             BrandPhase.NARRATIVE_MESSAGING,
             BrandPhase.VISUAL_IDENTITY,
         ),
-        mission_fields=frozenset(),
+        mission_fields=frozenset({"company_name"}),
     ),
     BrandPhase.GOVERNANCE: _PhaseSpec(
         build_phase5_graph,
