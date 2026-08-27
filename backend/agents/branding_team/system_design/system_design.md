@@ -459,8 +459,10 @@ user-facing reply is never constrained or contaminated by structured-output
 formatting requirements — the conversation agent is free to write pure
 prose, and the extraction agent's schema can evolve independently.
 
-**Initialization** (`assistant/agent.py:306-345`) happens lazily and builds
-one `strands.Agent` per stage via `graphs/shared.py:build_agent()`:
+**The `BrandingAssistantAgent` constructor** (`assistant/agent.py:306-345`)
+builds one `strands.Agent` per stage via `graphs/shared.py:build_agent()`
+as soon as it runs (when a stage isn't injected via `conversation_llm=`/
+`extraction_llm=`/`llm=`):
 
 ```python
 def __init__(self, conversation_llm=None, extraction_llm=None, llm=None):
@@ -479,7 +481,7 @@ def __init__(self, conversation_llm=None, extraction_llm=None, llm=None):
         )
 ```
 
-The FastAPI app wraps construction in a second layer of laziness
+The FastAPI app wraps that construction in a layer of laziness of its own
 (`api/main.py`): `assistant_agent` starts as `None`, and
 `_get_assistant_agent()` only constructs `BrandingAssistantAgent()` (no
 args — both stages default-construct) on first conversation request. If
