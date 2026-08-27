@@ -107,6 +107,8 @@ graph LR
 > **Note 2:** The v2 pipeline currently skips external research. `PlanningInput.research_digest` defaults to `""` (see `shared/content_plan.py:197`), and the orchestrator does not invoke `BlogResearchAgent`. The research agent module remains available as a standalone component.
 >
 > **Note 3:** `run_pipeline()` writes a `PublishingPack` artifact but does **not** call the Publication Agent. Publication (approve/unapprove) and Medium stats collection are handled by separate API endpoints.
+>
+> **Note 4:** `allowed_claims.json` is documented (`blog_research_agent/allowed_claims.py`'s module docstring) as a Research Librarian output, but per Note 2 above the v2 pipeline runs no research stage. As an interim measure, planning itself calls `extract_allowed_claims()` against the content plan's own markdown with an empty reference list (see `_persist_content_plan_artifacts()` in `agent_implementations/pipeline/_common.py`, used by both `run_planning()` and `run_planning_stage()`'s outline re-plan loop), producing a citation-free `allowed_claims.json`. This call site should move to consume `BlogResearchAgent`'s output once that agent is wired back into the pipeline.
 
 ### Pipeline Phase Mapping
 
