@@ -453,7 +453,12 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
         merge_fn=functools.partial(
             _merge_named_fragments, node_merge=_PHASE5_NODE_MERGE, require_all=True
         ),
-        context_phases=(BrandPhase.STRATEGIC_CORE, BrandPhase.VISUAL_IDENTITY),
+        context_phases=(
+            BrandPhase.STRATEGIC_CORE,
+            BrandPhase.NARRATIVE_MESSAGING,
+            BrandPhase.VISUAL_IDENTITY,
+            BrandPhase.CHANNEL_ACTIVATION,
+        ),
         mission_fields=frozenset(),
     ),
 }
