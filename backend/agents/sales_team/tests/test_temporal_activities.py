@@ -431,6 +431,21 @@ def test_close_one_optional_proposal_none(orch_mock, fake_job_client):
     orch_mock.close_one.return_value = _dumpable({"prospect": {"id": "prs_1"}})
     acts.close_one_activity(_ctx_dict(), _PROSPECT.model_dump(mode="json"), None)
     assert orch_mock.close_one.call_args.args[1] is None
+    # dossier defaults to None when omitted
+    assert orch_mock.close_one.call_args.args[3] is None
+
+
+def test_close_one_reconstructs_dossier(orch_mock, fake_job_client):
+    fake_job_client.create_job("job-1", status="running")
+    orch_mock.close_one.return_value = _dumpable({"prospect": {"id": "prs_1"}})
+    acts.close_one_activity(
+        _ctx_dict(),
+        _PROSPECT.model_dump(mode="json"),
+        None,
+        _dossier_dict(),
+    )
+    call = orch_mock.close_one.call_args
+    assert isinstance(call.args[3], ProspectDossier)
 
 
 # ---------------------------------------------------------------------------

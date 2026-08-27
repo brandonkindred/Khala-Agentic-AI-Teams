@@ -1767,16 +1767,43 @@ def test_run_negotiation_passes_resolved_dossier_per_prospect(stub_orch, sample_
         update=orch_mod._noop_update,
     )
 
+    roi = ROIModel(
+        annual_cost_usd=25000.0,
+        estimated_annual_benefit_usd=70000.0,
+        payback_months=6.0,
+        roi_percentage=180.0,
+    )
+    prop_p1 = SalesProposal(
+        prospect=p1,
+        executive_summary="alice-proposal-summary",
+        situation_analysis="...",
+        proposed_solution="...",
+        roi_model=roi,
+    )
+    prop_p2 = SalesProposal(
+        prospect=p2,
+        executive_summary="bob-proposal-summary",
+        situation_analysis="...",
+        proposed_solution="...",
+        roi_model=roi,
+    )
+
     dossier_received: dict = {}
+    proposal_received: dict = {}
 
     def _capture_dossier(prospect_json, prop_json, *a, **kw):
         pid = json.loads(prospect_json)["id"]
         dossier_received[pid] = kw.get("dossier")
+        proposal_received[pid] = prop_json
         return _closer_body()
 
     stub_orch.closer.develop_strategy.side_effect = _capture_dossier
 
-    strategies = stub_orch._run_negotiation(ctx, [p1, p2], [], dossier_map)
+    strategies = stub_orch._run_negotiation(ctx, [p1, p2], [prop_p1, prop_p2], dossier_map)
     assert len(strategies) == 2
+    # Each prospect must have received its own proposal alongside its dossier —
+    # dossier forwarding must not disturb the existing proposal-lookup wiring.
+    assert "alice-proposal-summary" in proposal_received[p1.id]
+    assert "bob-proposal-summary" in proposal_received[p2.id]
     assert dossier_received[p1.id] is dossier_p1
     assert dossier_received[p2.id] is None

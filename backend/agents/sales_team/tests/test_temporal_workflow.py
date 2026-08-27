@@ -170,9 +170,10 @@ def test_per_prospect_argument_pairing(monkeypatch):
     for _ctx, prospect, dossier, qual in rec.args_for(acts.proposal_one_activity):
         assert dossier == {"d": prospect["id"]}
         assert qual["prospect"]["id"] == prospect["id"]
-    # close: [ctx, prospect, proposal] — proposal's prospect matches
-    for _ctx, prospect, proposal in rec.args_for(acts.close_one_activity):
+    # close: [ctx, prospect, proposal, dossier] — both keyed to the prospect
+    for _ctx, prospect, proposal, dossier in rec.args_for(acts.close_one_activity):
         assert proposal["prospect"]["id"] == prospect["id"]
+        assert dossier == {"d": prospect["id"]}
 
 
 def test_retry_policies_per_activity(monkeypatch):
@@ -387,6 +388,26 @@ def test_discovery_stage_reloads_dossiers_when_first_load_empty(monkeypatch):
     assert dossier == {"d": "p1"}
     # proposal reuses the same (already-populated) map — no second reload
     ((_ctx, prospect, dossier, _qual),) = rec.args_for(acts.proposal_one_activity)
+    assert dossier == {"d": "p1"}
+    # negotiation reuses the same (already-populated) map — no third reload
+    ((_ctx, prospect, _proposal, dossier),) = rec.args_for(acts.close_one_activity)
+    assert dossier == {"d": "p1"}
+
+
+def test_negotiation_stage_reloads_dossiers_when_first_load_empty(monkeypatch):
+    """Thread-path parity: an empty dossier map reaching the negotiation
+    boundary (e.g. discovery/proposal were both skipped by entry_stage, or a
+    transient store outage persisted through both) is retried there too, so
+    closing strategies still get dossier grounding."""
+    rec = _Recorder(
+        prospects=[_prospect("p1")],
+        dossier_map={},
+        dossier_maps=[{}, {}, {}, {"p1": {"d": "p1"}}],  # empty until the negotiation reload
+    )
+    _run(monkeypatch, rec)
+    # initial + discovery + proposal + negotiation reloads, all but the last empty
+    assert rec.count(acts.load_dossiers_activity) == 4
+    ((_ctx, _p, _proposal, dossier),) = rec.args_for(acts.close_one_activity)
     assert dossier == {"d": "p1"}
 
 

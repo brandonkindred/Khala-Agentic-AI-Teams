@@ -319,10 +319,16 @@ class SalesWorkflow:
             and qualified_prospects
             and await _entry_gate("negotiation")
         ):
+            if not dossier_map:
+                # Thread-path parity: re-attempt the dossier load at the
+                # negotiation boundary so a transient store outage at the
+                # first load doesn't strip grounding from every closing
+                # strategy in the run.
+                dossier_map = await _load_dossiers(qualified_prospects)
             result["closing_strategies"] = await _fan(
                 _act.close_one_activity,
                 qualified_prospects,
-                lambda p: [ctx, p, prop_by_id.get(p["id"])],
+                lambda p: [ctx, p, prop_by_id.get(p["id"]), dossier_map.get(p["id"])],
             )
             await _exit_gate("negotiation")
 
