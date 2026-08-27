@@ -642,18 +642,22 @@ def proposal_one_activity(
 
 @activity.defn(name="sales_close_one")
 def close_one_activity(
-    ctx: dict[str, Any], prospect: dict[str, Any], proposal: Optional[dict[str, Any]]
+    ctx: dict[str, Any],
+    prospect: dict[str, Any],
+    proposal: Optional[dict[str, Any]],
+    dossier: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """Develop one prospect's closing strategy (``proposal`` may be ``None``).
+    """Develop one prospect's closing strategy (``proposal``/``dossier`` may be ``None``).
 
     Postconditions: see :func:`_stage_one`.
     """
-    from sales_team.models import SalesProposal
+    from sales_team.models import ProspectDossier, SalesProposal
 
     proposal_obj = SalesProposal.model_validate(proposal) if proposal is not None else None
+    dossier_obj = ProspectDossier.model_validate(dossier) if dossier is not None else None
     return _stage_one(
         ctx,
         prospect,
         "sales_close_one",
-        lambda orch, p, rc: orch.close_one(p, proposal_obj, rc),
+        lambda orch, p, rc: orch.close_one(p, proposal_obj, rc, dossier_obj),
     )
