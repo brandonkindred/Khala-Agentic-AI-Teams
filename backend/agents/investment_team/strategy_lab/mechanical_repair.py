@@ -16,6 +16,21 @@ mechanical repairs, exposed via :func:`repair_spec`:
 * **Position-cap bound** (readiness Rule 8): clamp
   ``risk_limits.max_position_pct`` down to
   :data:`spec_readiness.MAX_POSITION_PCT_CEILING`.
+* **Asset-category pin, symbol half** (readiness Rule 11): when the caller
+  passes ``pinned_asset_class`` and the spec *already declares* that class,
+  drop any ``target_symbols`` entry that unambiguously belongs to a different
+  class — but only when at least one symbol survives the drop. Stripping
+  *every* symbol is left unrepaired (Rule 11's critical stays live): an
+  empty result would fall back to the pinned class's full default universe,
+  silently laundering a hypothesis whose entire named universe contradicts
+  its own declared class into a readiness-clean backtest over unrelated
+  tickers. The class half of Rule 11 — a spec declaring the *wrong*
+  category — is deliberately **not** repaired here either: rewriting
+  ``asset_class`` in place would relabel a crypto strategy as a stocks one
+  while leaving crypto logic intact, which is precisely the cross-category
+  contamination the pin exists to prevent. Both violations stay a readiness
+  critical so the design loop's own ``revise`` round rebuilds the strategy
+  for the pinned category.
 
 The custom-code decision is a separate, *readiness-gated* concern handled by
 :func:`select_code_path`: it trial-compiles a spec and, on :class:`CompilerError`,
@@ -33,11 +48,13 @@ parsed from gate-message text — so the rule and its repair cannot drift apart.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
 from ..models import BacktestConfig, StrategySpec
-from ..strategy_lab_context import normalize_asset_class_strict
+from ..strategy_lab_context import normalize_asset_class, normalize_asset_class_strict
+from ..symbols import COINGECKO_IDS, find_offcategory_symbols
 from .quality_gates.spec_readiness import (
     _FULL_TIMEFRAME_ASSET_CLASSES,
     MAX_POSITION_PCT_CEILING,
@@ -75,10 +92,77 @@ class RepairOutcome:
     actions: List[RepairAction] = field(default_factory=list)
 
 
+# Common English names for the futures/commodity roots in symbols.py's
+# FUTURES_SYMBOLS_BARE / COMMODITY_SYMBOLS (a small, closed universe — 7-9
+# contracts each — unlike stocks, whose thousands of possible company names
+# make an equivalent table impractical to build or keep complete; a stocks
+# thesis naming its off-category holding only by common name, never by
+# ticker, remains an acknowledged gap). Values are the plain-English terms a
+# hypothesis would plausibly use; multi-word phrases are matched as a single
+# whole-word-bounded unit (e.g. "crude oil" won't match a thesis that only
+# says "oil price rally" — a deliberate, conservative choice over guessing at
+# every partial phrasing).
+_NON_CRYPTO_COMMON_NAMES: dict[str, tuple[str, ...]] = {
+    "ES": ("s&p 500", "s&p", "spx"),
+    "NQ": ("nasdaq", "nasdaq 100"),
+    "CL": ("crude oil", "crude", "wti"),
+    "GC": ("gold",),
+    "SI": ("silver",),
+    "ZB": ("treasury bond", "treasury bonds"),
+    "NG": ("natural gas",),
+    "SLV": ("silver",),
+    "DBA": ("agriculture",),
+    "UNG": ("natural gas",),
+}
+
+
+def _symbol_named_in_thesis(symbol: str, *thesis_text: str) -> bool:
+    """True if ``symbol`` (or its bare root, e.g. ``"DOGE"`` for
+    ``"DOGE-USDT"``) — or a known common English name for that root (e.g.
+    ``"Bitcoin"`` for ``"BTC"``, ``"S&P 500"`` for ``"ES"``) — is mentioned by
+    name in ``thesis_text``.
+
+    Preconditions:
+      - ``symbol`` is a ticker string; ``thesis_text`` are free-text spec
+        fields (``hypothesis``, ``signal_definition``) that may be empty.
+    Postconditions:
+      - Returns whether the symbol's root (suffix stripped), a known crypto
+        common name derived from :data:`symbols.COINGECKO_IDS`, or a known
+        futures/commodity common name from :data:`_NON_CRYPTO_COMMON_NAMES`
+        for that root, appears as a whole word/phrase, case-insensitively, in
+        the joined text. A thesis naming an off-category asset by its plain
+        name rather than its ticker (e.g. "Bitcoin momentum" targeting
+        ``BTC-USD``, or "S&P 500 futures momentum" targeting ``ES=F``) would
+        otherwise go undetected and the symbol would be silently stripped as
+        an unrelated stray ticker. Still purely a lexical check — no semantic
+        understanding of whether the thesis actually depends on the symbol,
+        and stocks common names (e.g. "Apple" for ``AAPL``) aren't covered
+        since no equivalent bounded name table exists for that asset class.
+    """
+    root = re.split(r"[-=]", symbol, maxsplit=1)[0]
+    if not root:
+        return False
+    root_upper = root.upper()
+    candidates = {root}
+    common_name = COINGECKO_IDS.get(root_upper)
+    if common_name:
+        # A CoinGecko id can carry a disambiguating suffix (e.g.
+        # "avalanche-2") or be a hyphenated compound (e.g. "matic-network");
+        # only the leading alpha segment is a plausible English name a
+        # hypothesis would actually use.
+        alpha_name = re.match(r"[a-zA-Z]+", common_name)
+        if alpha_name:
+            candidates.add(alpha_name.group(0))
+    candidates.update(_NON_CRYPTO_COMMON_NAMES.get(root_upper, ()))
+    text = " ".join(thesis_text)
+    return any(re.search(r"\b" + re.escape(c) + r"\b", text, re.IGNORECASE) for c in candidates)
+
+
 def repair_spec(
     spec: StrategySpec,
     *,
     config: Optional[BacktestConfig] = None,
+    pinned_asset_class: Optional[str] = None,
 ) -> RepairOutcome:
     """Apply the in-scope deterministic *mechanical* repairs to ``spec``.
 
@@ -94,6 +178,9 @@ def repair_spec(
       - ``spec`` is a constructed :class:`StrategySpec`.
       - ``config`` is a :class:`BacktestConfig` or ``None`` (accepted for a
         uniform call site; the current repairs do not consult it).
+      - ``pinned_asset_class`` is a canonical asset-class label naming the
+        single category the caller's design attempt is restricted to, or
+        ``None`` when no pin applies.
 
     Postconditions:
       - Returns a :class:`RepairOutcome`. When no repair applies, the input
@@ -105,6 +192,9 @@ def repair_spec(
         ``actions == []`` (idempotent) — barring external state changes.
       - The returned spec is never mutated in place; edits are made on a deep
         copy.
+      - ``spec.asset_class`` is never rewritten, with or without a pin — see
+        the module docstring for why the class half of Rule 11 is left to the
+        readiness-critique path.
     """
     assert isinstance(spec, StrategySpec), "spec must be a StrategySpec"
     assert config is None or isinstance(config, BacktestConfig), (
@@ -154,6 +244,61 @@ def repair_spec(
         updates["risk_limits"] = spec.risk_limits.model_copy(
             update={"max_position_pct": MAX_POSITION_PCT_CEILING}
         )
+
+    # --- Rule 11 (symbol half): stray off-category tickers under a pin.
+    # Only applies once the spec already declares the pinned class — a spec
+    # declaring the wrong class is a readiness critical the design loop's
+    # revise round owns, and stripping symbols from it would destroy the very
+    # evidence the reviser needs to rebuild the strategy.
+    if (
+        pinned_asset_class is not None
+        and normalize_asset_class(spec.asset_class) == pinned_asset_class
+    ):
+        # ``find_offcategory_symbols`` (shared with readiness Rule 11's own
+        # symbol check, so the two can never disagree) excludes cross-asset
+        # ETFs (GLD, QQQ, ...) that legitimately trade in more than one
+        # category; only an unambiguous mismatch is stripped.
+        offcategory = find_offcategory_symbols(spec.target_symbols, pinned_asset_class)
+        # A removed symbol the hypothesis/signal_definition names explicitly
+        # (e.g. a "DOGE momentum" thesis targeting ["AAPL", "DOGE-USDT"]) is
+        # not a stray ticker to drop — stripping it would leave the pinned
+        # class's spec still carrying, and about to backtest, an off-category
+        # thesis under a now readiness-clean symbol list. Treat any such
+        # symbol as if it were the whole universe: force a rebuild instead of
+        # a silent partial strip.
+        thesis_bound = {
+            sym
+            for sym in offcategory
+            if _symbol_named_in_thesis(sym, spec.hypothesis, spec.signal_definition)
+        }
+        kept = [sym for sym in spec.target_symbols if sym not in offcategory or sym in thesis_bound]
+        # Only repair a MINORITY mismatch — at least one symbol must survive.
+        # Stripping every symbol is not "a stray ticker"; it means the whole
+        # explicit universe contradicts the declared class, which is the same
+        # mislabeling signal ``build_spec_from_dict``'s symbol-inference guards
+        # against on the omitted-``asset_class`` path. An empty result falls
+        # back to the pinned class's FULL default universe — silently
+        # laundering an (e.g.) crypto-themed hypothesis into a backtest over
+        # unrelated stock tickers, recorded as a valid, readiness-clean
+        # strategy. Leaving ``target_symbols`` untouched here instead keeps
+        # readiness Rule 11's symbol critical alive, so the round routes
+        # through a real critique and a full rebuild rather than a silent
+        # mechanical erasure.
+        if kept and len(kept) != len(spec.target_symbols):
+            actions.append(
+                RepairAction(
+                    rule="asset_category_pin_symbols",
+                    field="target_symbols",
+                    before=list(spec.target_symbols),
+                    after=kept,
+                    reason=(
+                        f"target_symbols contained tickers outside the pinned asset "
+                        f"category '{pinned_asset_class}'; dropped them so the backtest "
+                        f"universe matches the declared class."
+                    ),
+                )
+            )
+            updates["target_symbols"] = kept
 
     if not actions:
         return RepairOutcome(spec=spec, actions=[])

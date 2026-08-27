@@ -165,9 +165,12 @@ def test_compute_regime_summary_multiple_benchmarks_default() -> None:
         return bars
 
     summary = compute_regime_summary(fetch, computed_at=_COMPUTED_AT)
-    # Default map covers stocks (SPY) + crypto (BTC-USD).
-    assert {e.benchmark_symbol for e in summary.entries} == {"SPY", "BTC-USD"}
-    assert set(calls) == {"SPY", "BTC-USD"}
+    # Default map covers all five prompt classes: stocks (SPY), crypto
+    # (BTC-USD), forex (EURUSD=X), futures (ES=F), commodities (GLD) — every
+    # class a design attempt can be pinned to gets a regime read.
+    expected = {"SPY", "BTC-USD", "EURUSD=X", "ES=F", "GLD"}
+    assert {e.benchmark_symbol for e in summary.entries} == expected
+    assert set(calls) == expected
     assert not summary.degraded
 
 

@@ -149,6 +149,9 @@ def test_resolve_workflow_config_activity_resolves_every_expected_key(monkeypatc
     monkeypatch.delenv("STRATEGY_LAB_CODE_CONFORMANCE_RETRIES", raising=False)
     monkeypatch.delenv("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", raising=False)
     monkeypatch.delenv("STRATEGY_LAB_REGIME_SUMMARY_ENABLED", raising=False)
+    monkeypatch.delenv("LLM_TIMEOUT", raising=False)
+    monkeypatch.delenv("LLM_MAX_RETRIES", raising=False)
+    monkeypatch.delenv("LLM_BACKOFF_MAX", raising=False)
 
     result = act.resolve_workflow_config_activity()
     assert result == {
@@ -159,7 +162,31 @@ def test_resolve_workflow_config_activity_resolves_every_expected_key(monkeypatc
         "design_max_llm_calls": 120,
         "regime_summary_enabled": True,
         "max_design_reentries": 2,
+        "llm_timeout_s": 3600.0,
+        "llm_max_retries": 10,
+        "llm_backoff_cap_s": 120.0,
     }
+
+
+def test_resolve_workflow_config_activity_reflects_llm_timeout_override(monkeypatch):
+    monkeypatch.setenv("LLM_TIMEOUT", "5400")
+
+    result = act.resolve_workflow_config_activity()
+    assert result["llm_timeout_s"] == 5400.0
+
+
+def test_resolve_workflow_config_activity_reflects_llm_max_retries_override(monkeypatch):
+    monkeypatch.setenv("LLM_MAX_RETRIES", "4")
+
+    result = act.resolve_workflow_config_activity()
+    assert result["llm_max_retries"] == 4
+
+
+def test_resolve_workflow_config_activity_reflects_llm_backoff_cap_override(monkeypatch):
+    monkeypatch.setenv("LLM_BACKOFF_MAX", "60")
+
+    result = act.resolve_workflow_config_activity()
+    assert result["llm_backoff_cap_s"] == 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -2238,38 +2265,62 @@ def test_run_design_attempt_activity_checkpoint_delete_failure_is_swallowed(monk
 # ---------------------------------------------------------------------------
 
 
-def test_compute_signal_brief_activity_serializes_brief_and_storage(monkeypatch):
-    """compute_signal_brief_activity returns the signal brief as a serialized
-    dict and passes the storage metadata through unchanged."""
+def test_compute_signal_brief_activity_serializes_per_category_briefs(monkeypatch):
+    """compute_signal_brief_activity serializes one brief per asset category
+    and passes the storage metadata through unchanged."""
     from investment_team.api import main as api_main
 
     class _FakeBrief:
+        def __init__(self, asset_class: str) -> None:
+            self._asset_class = asset_class
+
         def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
-            return {"brief_version": "v1"}
+            return {"brief_version": "v1", "asset_class": self._asset_class}
 
-    monkeypatch.setattr(
-        api_main,
-        "_compute_signal_brief_snapshot",
-        lambda benchmark_symbol: (_FakeBrief(), {"stored": True, "sym": benchmark_symbol}),
+    seen: Dict[str, Any] = {}
+
+    def _snapshot(benchmark_symbol, exclude_asset_classes=None):
+        seen["benchmark"] = benchmark_symbol
+        seen["exclude"] = exclude_asset_classes
+        return ({"stocks": _FakeBrief("stocks")}, {"stored": True})
+
+    monkeypatch.setattr(api_main, "_compute_signal_brief_snapshot", _snapshot)
+    out = act.compute_signal_brief_activity(
+        {"benchmark_symbol": "SPY", "exclude_asset_classes": ["crypto"]}
     )
-    out = act.compute_signal_brief_activity("SPY")
-    assert out["signal_brief"] == {"brief_version": "v1"}
-    assert out["signal_brief_storage"] == {"stored": True, "sym": "SPY"}
+    assert out["signal_briefs"] == {"stocks": {"brief_version": "v1", "asset_class": "stocks"}}
+    assert out["signal_brief_storage"] == {"stored": True}
+    # The user's category restriction must reach the brief producer, so an
+    # excluded category never gets a brief the design loop could read.
+    assert seen == {"benchmark": "SPY", "exclude": ["crypto"]}
 
 
-def test_compute_signal_brief_activity_handles_none_brief(monkeypatch):
-    """compute_signal_brief_activity correctly surfaces a None brief without
-    failing and still returns the storage metadata."""
+def test_compute_signal_brief_activity_handles_no_briefs(monkeypatch):
+    """An empty brief map surfaces without failing, storage still returned."""
     from investment_team.api import main as api_main
 
     monkeypatch.setattr(
         api_main,
         "_compute_signal_brief_snapshot",
-        lambda benchmark_symbol: (None, {"skipped": True}),
+        lambda benchmark_symbol, exclude_asset_classes=None: ({}, {"skipped": True}),
+    )
+    out = act.compute_signal_brief_activity({"benchmark_symbol": "SPY"})
+    assert out["signal_briefs"] == {}
+    assert out["signal_brief_storage"] == {"skipped": True}
+
+
+def test_compute_signal_brief_activity_accepts_a_legacy_bare_symbol(monkeypatch):
+    """A workflow-history replay predating the params dict passes a bare
+    benchmark string; it must still resolve rather than raise."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main,
+        "_compute_signal_brief_snapshot",
+        lambda benchmark_symbol, exclude_asset_classes=None: ({}, {"sym": benchmark_symbol}),
     )
     out = act.compute_signal_brief_activity("SPY")
-    assert out["signal_brief"] is None
-    assert out["signal_brief_storage"] == {"skipped": True}
+    assert out["signal_brief_storage"] == {"sym": "SPY"}
 
 
 def test_is_run_cancelled_activity_delegates(monkeypatch):
@@ -2938,9 +2989,151 @@ def test_compute_signal_brief_snapshot_disabled_returns_skip(monkeypatch):
     from investment_team.api import main as api_main
 
     monkeypatch.setattr(api_main, "_strategy_lab_signal_expert_enabled", lambda: False)
-    brief, storage = api_main._compute_signal_brief_snapshot("SPY")
-    assert brief is None
+    briefs, storage = api_main._compute_signal_brief_snapshot("SPY")
+    assert briefs == {}
     assert storage == {"skipped": True, "skipped_reason": "signal_expert_disabled"}
+
+
+def test_compute_signal_brief_snapshot_scopes_market_context_per_category(monkeypatch):
+    """A stocks brief must never see the shared snapshot's FX rates or crypto
+    headline -- rendering them would contradict the brief's own "covers
+    stocks and nothing else" scope instruction and hand the model
+    cross-category evidence it was told not to use. A category's own
+    single-class field (crypto's headline) still reaches its own brief."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_strategy_lab_signal_expert_enabled", lambda: True)
+    monkeypatch.setattr(
+        api_main,
+        "_snapshot_prior_records",
+        lambda: [_signal_brief_prior_record("stocks"), _signal_brief_prior_record("crypto")],
+    )
+
+    class _FakeProvider:
+        def fetch_context(self, request):
+            from investment_team.market_lab_data import MarketLabContext
+
+            return MarketLabContext(
+                fetched_at="2024-01-01T00:00:00Z",
+                degraded=False,
+                sources_used=["x"],
+                fx_rates={"EUR": 1.08},
+                crypto_snapshot="BTC=65000",
+                macro_snippets=["DGS10=4.2%"],
+            )
+
+        def close(self):
+            pass
+
+    seen_prompts: Dict[str, str] = {}
+
+    class _FakeExpert:
+        def produce_signal_brief(self, prior_records, market_ctx, *, asset_class=None):
+            from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
+
+            seen_prompts[asset_class] = market_ctx.as_prompt_text()
+            return SignalIntelligenceBriefV1(brief_version=1)
+
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _FakeProvider)
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
+
+    api_main._compute_signal_brief_snapshot("SPY", ["forex", "futures", "commodities"])
+
+    assert "FX" not in seen_prompts["stocks"]
+    assert "Crypto" not in seen_prompts["stocks"]
+    assert "DGS10" in seen_prompts["stocks"]
+    assert "Crypto" in seen_prompts["crypto"]
+    assert "FX" not in seen_prompts["crypto"]
+
+
+def test_compute_signal_brief_snapshot_provenance_reflects_the_scoped_degraded_flag(monkeypatch):
+    """brief_provenance's market_degraded must reflect the SCOPED context the
+    expert actually received (category_market_ctx), not the unscoped
+    aggregate market_ctx -- otherwise a forex-source failure would mark a
+    stocks brief's provenance degraded even though scoped_to("stocks")
+    already stripped that failure reason and the stocks context is not
+    actually degraded from what the model saw."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_strategy_lab_signal_expert_enabled", lambda: True)
+    monkeypatch.setattr(
+        api_main,
+        "_snapshot_prior_records",
+        lambda: [_signal_brief_prior_record("stocks")],
+    )
+
+    class _FakeProvider:
+        def fetch_context(self, request):
+            from investment_team.market_lab_data import MarketLabContext
+
+            # Unscoped context is degraded solely by a forex-source failure --
+            # scoped_to("stocks") should strip that reason and clear degraded.
+            return MarketLabContext(
+                fetched_at="2024-01-01T00:00:00Z",
+                degraded=True,
+                degraded_reason="frankfurter_failed",
+                sources_used=["frankfurter"],
+            )
+
+        def close(self):
+            pass
+
+    class _FakeExpert:
+        def produce_signal_brief(self, prior_records, market_ctx, *, asset_class=None):
+            from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
+
+            return SignalIntelligenceBriefV1(brief_version=1)
+
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _FakeProvider)
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
+
+    _briefs, storage = api_main._compute_signal_brief_snapshot(
+        "SPY", ["crypto", "forex", "futures", "commodities"]
+    )
+
+    assert storage["by_asset_class"]["stocks"]["brief_provenance"]["market_degraded"] is False
+
+
+def test_compute_signal_brief_snapshot_skips_categories_with_no_prior_records(monkeypatch):
+    """A category with zero prior records has nothing for the expert to
+    analyze -- calling it anyway would be a paid LLM round-trip for generic
+    market commentary, up to len(allowed) times on a run's first batch. Must
+    skip the expert call entirely and record a ``no_prior_records`` marker."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_strategy_lab_signal_expert_enabled", lambda: True)
+    monkeypatch.setattr(api_main, "_snapshot_prior_records", lambda: [])
+
+    class _FakeProvider:
+        def fetch_context(self, request):
+            from investment_team.market_lab_data import MarketLabContext
+
+            return MarketLabContext(
+                fetched_at="2024-01-01T00:00:00Z", degraded=False, sources_used=["x"]
+            )
+
+        def close(self):
+            pass
+
+    calls = {"n": 0}
+
+    class _FakeExpert:
+        def produce_signal_brief(self, prior_records, market_ctx, *, asset_class=None):
+            calls["n"] += 1
+            raise AssertionError("must not be called for an empty-evidence category")
+
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _FakeProvider)
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
+
+    briefs, storage = api_main._compute_signal_brief_snapshot("SPY", None)
+
+    assert briefs == {}
+    assert calls["n"] == 0
+    from investment_team.strategy_lab_context import PROMPT_ASSET_CLASSES
+
+    assert set(storage["by_asset_class"].keys()) == set(PROMPT_ASSET_CLASSES)
+    for entry in storage["by_asset_class"].values():
+        assert entry == {"skipped": True, "skipped_reason": "no_prior_records"}
 
 
 def test_compute_signal_brief_snapshot_fails_open_on_provider_init_failure(monkeypatch):
@@ -2955,18 +3148,19 @@ def test_compute_signal_brief_snapshot_fails_open_on_provider_init_failure(monke
 
     monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _boom_provider)
 
-    brief, storage = api_main._compute_signal_brief_snapshot("SPY")
+    briefs, storage = api_main._compute_signal_brief_snapshot("SPY")
 
-    assert brief is None
+    assert briefs == {}
     assert storage["skipped"] is True
     assert storage["skipped_reason"] == "provider_init_failed"
     assert "provider config invalid" in storage["error"]
 
 
 def test_compute_signal_brief_snapshot_fails_open_on_expert_init_failure(monkeypatch):
-    """Fail-open must cover SignalIntelligenceExpert() construction, which sits
-    inside the outer try but was previously outside the inner try/except that
-    only guarded produce_signal_brief's body."""
+    """Fail-open must cover SignalIntelligenceExpert() construction. Construction
+    now happens per category (a fresh expert per category, not one reused
+    across the loop -- see the isolation test below), so a construction
+    failure is a per-category skip, not a whole-function abort."""
     from investment_team.api import main as api_main
 
     closed = []
@@ -2985,16 +3179,20 @@ def test_compute_signal_brief_snapshot_fails_open_on_expert_init_failure(monkeyp
     def _boom_expert():
         raise RuntimeError("expert init failed")
 
-    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(
+        api_main, "_snapshot_prior_records", lambda *, reverse=False: [_signal_brief_prior_record("stocks")]
+    )
     monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _FakeProvider)
     monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _boom_expert)
 
-    brief, storage = api_main._compute_signal_brief_snapshot("SPY")
+    briefs, storage = api_main._compute_signal_brief_snapshot("SPY", ["crypto", "forex", "futures", "commodities"])
 
-    assert brief is None
-    assert storage["skipped"] is True
-    assert storage["skipped_reason"] == "expert_failed"
-    assert "expert init failed" in storage["error"]
+    assert briefs == {}
+    assert storage["by_asset_class"]["stocks"] == {
+        "skipped": True,
+        "skipped_reason": "expert_failed",
+        "error": "expert init failed",
+    }
     # provider.close() still runs even though expert init failed.
     assert closed == [True]
 
@@ -3018,16 +3216,18 @@ def test_compute_signal_brief_snapshot_survives_provider_close_failure(monkeypat
     def _boom_expert():
         raise RuntimeError("expert failed too")
 
-    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(
+        api_main, "_snapshot_prior_records", lambda *, reverse=False: [_signal_brief_prior_record("stocks")]
+    )
     monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _FakeProvider)
     monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _boom_expert)
 
     # Must not raise despite close() also failing.
-    brief, storage = api_main._compute_signal_brief_snapshot("SPY")
+    briefs, storage = api_main._compute_signal_brief_snapshot("SPY", ["crypto", "forex", "futures", "commodities"])
 
-    assert brief is None
-    assert storage["skipped"] is True
-    assert storage["skipped_reason"] == "expert_failed"
+    assert briefs == {}
+    assert storage["by_asset_class"]["stocks"]["skipped"] is True
+    assert storage["by_asset_class"]["stocks"]["skipped_reason"] == "expert_failed"
 
 
 def test_compute_signal_brief_snapshot_success_survives_provider_close_failure(monkeypatch):
@@ -3052,20 +3252,284 @@ def test_compute_signal_brief_snapshot_success_survives_provider_close_failure(m
             return {"brief_version": "v1"}
 
     class _FakeExpert:
-        def produce_signal_brief(self, prior_records, market_ctx):
+        def produce_signal_brief(self, prior_records, market_ctx, *, asset_class=None):
             return _FakeBrief()
 
-    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    # One prior record per allowed category -- a signal brief has nothing to
+    # analyze (and is skipped entirely) for a category with zero records, so
+    # this seeds the evidence the expert-call path under test actually needs.
+    monkeypatch.setattr(
+        api_main,
+        "_snapshot_prior_records",
+        lambda *, reverse=False: [
+            _signal_brief_prior_record("stocks"),
+            _signal_brief_prior_record("futures"),
+            _signal_brief_prior_record("commodities"),
+        ],
+    )
     monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _FakeProvider)
     monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
 
-    # Must not raise despite close() failing, and must return the brief the
-    # try block already produced -- not a fail-open fallback tuple.
-    brief, storage = api_main._compute_signal_brief_snapshot("SPY")
+    # Must not raise despite close() failing, and must return the briefs the
+    # try block already produced -- not a fail-open fallback tuple. Only the
+    # allowed categories get one, so the restriction is visible in the result.
+    briefs, storage = api_main._compute_signal_brief_snapshot("SPY", ["crypto", "forex"])
 
-    assert isinstance(brief, _FakeBrief)
+    assert sorted(briefs) == ["commodities", "futures", "stocks"]
+    assert all(isinstance(b, _FakeBrief) for b in briefs.values())
     assert storage.get("skipped") is not True
-    assert storage["brief_version"] == "v1"
+    assert storage["by_asset_class"]["stocks"]["brief_version"] == "v1"
+
+
+def _signal_brief_prior_record(asset_class: str):
+    """A minimal, non-winning StrategyLabRecord for ``asset_class``, seeding
+    prior-result data for ``_compute_signal_brief_snapshot`` tests. Carries a
+    single backtest with placeholder metrics -- callers assert on category
+    scoping, not on the numbers themselves."""
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    strat = StrategySpec(
+        strategy_id=f"strat-{asset_class}",
+        authored_by="x",
+        asset_class=asset_class,
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    result = BacktestResult(
+        total_return_pct=1.0,
+        annualized_return_pct=1.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=40.0,
+        profit_factor=1.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id=f"bt-{asset_class}",
+        strategy_id=strat.strategy_id,
+        strategy=strat,
+        config=BacktestConfig(start_date="2024-01-01", end_date="2024-02-01"),
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=result,
+        trades=[],
+    )
+    return StrategyLabRecord(
+        lab_record_id=f"lab-{asset_class}",
+        strategy=strat,
+        backtest=bt,
+        is_winning=False,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
+    )
+
+
+def _signal_brief_fake_provider():
+    """A fake FreeTierMarketDataProvider class for signal-brief tests: yields
+    a clean, non-degraded MarketLabContext and has a no-op close()."""
+    from investment_team.market_lab_data import MarketLabContext
+
+    class _FakeProvider:
+        def fetch_context(self, request):
+            return MarketLabContext(
+                fetched_at="2024-01-01T00:00:00Z", degraded=False, sources_used=["x"]
+            )
+
+        def close(self):
+            pass
+
+    return _FakeProvider
+
+
+def test_compute_signal_brief_snapshot_isolates_one_categorys_expert_failure(monkeypatch):
+    """produce_signal_brief raising for one category must not cost sibling
+    categories their brief -- this is the PR's own stated purpose for the
+    per-category try/except, previously unexercised by any test (every
+    existing fail-open test only covers construction-time failures, which
+    abort the whole function before this per-category loop even starts)."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main,
+        "_snapshot_prior_records",
+        lambda *, reverse=False: [
+            _signal_brief_prior_record("stocks"),
+            _signal_brief_prior_record("crypto"),
+        ],
+    )
+
+    class _FakeBrief:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"brief_version": "v1"}
+
+    class _FakeExpert:
+        def produce_signal_brief(self, prior_records, market_ctx, *, asset_class=None):
+            if asset_class == "stocks":
+                raise RuntimeError("LLM call failed for stocks")
+            return _FakeBrief()
+
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _signal_brief_fake_provider())
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
+
+    briefs, storage = api_main._compute_signal_brief_snapshot("SPY", ["forex", "futures", "commodities"])
+
+    # The failing category is absent from briefs and carries a skip marker...
+    assert "stocks" not in briefs
+    assert storage["by_asset_class"]["stocks"] == {
+        "skipped": True,
+        "skipped_reason": "expert_failed",
+        "error": "LLM call failed for stocks",
+    }
+    # ...while the sibling category's brief is entirely unaffected.
+    assert "crypto" in briefs
+    assert storage["by_asset_class"]["crypto"]["brief_version"] == "v1"
+
+
+def test_compute_signal_brief_snapshot_constructs_a_fresh_expert_per_category(monkeypatch):
+    """A single SignalIntelligenceExpert wraps a Strands Agent, which retains
+    conversation history across calls -- reusing one instance across
+    categories would let a stocks brief's prompt/response leak into crypto's
+    call as prior conversation turns, silently reintroducing cross-category
+    contamination despite the per-category record/market scoping. Must
+    construct a distinct instance for every category."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main,
+        "_snapshot_prior_records",
+        lambda *, reverse=False: [
+            _signal_brief_prior_record("stocks"),
+            _signal_brief_prior_record("crypto"),
+            _signal_brief_prior_record("forex"),
+        ],
+    )
+
+    constructed: List[Any] = []
+
+    class _FakeBrief:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"brief_version": "v1"}
+
+    class _FakeExpert:
+        def __init__(self):
+            constructed.append(self)
+
+        def produce_signal_brief(self, prior_records, market_ctx, *, asset_class=None):
+            return _FakeBrief()
+
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _signal_brief_fake_provider())
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
+
+    briefs, _storage = api_main._compute_signal_brief_snapshot("SPY", ["futures", "commodities"])
+
+    assert sorted(briefs) == ["crypto", "forex", "stocks"]
+    # One fresh instance per category -- never fewer (reused), never shared.
+    assert len(constructed) == 3
+    assert len({id(e) for e in constructed}) == 3
+
+
+def test_compute_signal_brief_snapshot_isolates_a_scoped_to_failure(monkeypatch):
+    """A failure computing the per-category market-snapshot hash (scoped_to /
+    as_prompt_text, evaluated before produce_signal_brief) must be caught by
+    the same per-category fail-open guard, not escape the function entirely
+    and fail the whole batch's Temporal activity over one category."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main, "_snapshot_prior_records", lambda *, reverse=False: [_signal_brief_prior_record("stocks")]
+    )
+
+    class _FakeExpert:
+        def produce_signal_brief(self, prior_records, market_ctx, *, asset_class=None):
+            raise AssertionError("must not be reached -- scoped_to already failed")
+
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _signal_brief_fake_provider())
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
+
+    from investment_team.market_lab_data import MarketLabContext
+
+    def _boom_scoped_to(self, asset_class):
+        raise ValueError("scoped_to boom")
+
+    monkeypatch.setattr(MarketLabContext, "scoped_to", _boom_scoped_to)
+
+    briefs, storage = api_main._compute_signal_brief_snapshot("SPY", ["crypto", "forex", "futures", "commodities"])
+
+    assert briefs == {}
+    assert storage["by_asset_class"]["stocks"] == {
+        "skipped": True,
+        "skipped_reason": "expert_failed",
+        "error": "scoped_to boom",
+    }
+
+
+def test_compute_signal_brief_snapshot_propagates_an_assertion_error(monkeypatch):
+    """An AssertionError from the per-category expert call is a precondition
+    violation in this function's own construction of its call -- per this
+    codebase's Design by Contract rule, that must propagate rather than be
+    silently folded into a routine "expert_failed" skip marker alongside
+    genuine external/transient failures."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main, "_snapshot_prior_records", lambda *, reverse=False: [_signal_brief_prior_record("stocks")]
+    )
+
+    class _FakeExpert:
+        def produce_signal_brief(self, prior_records, market_ctx, *, asset_class=None):
+            raise AssertionError("asset_class must be a canonical PROMPT_ASSET_CLASSES member")
+
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _signal_brief_fake_provider())
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
+
+    with pytest.raises(AssertionError, match="canonical PROMPT_ASSET_CLASSES member"):
+        api_main._compute_signal_brief_snapshot("SPY", ["crypto", "forex", "futures", "commodities"])
+
+
+def test_compute_signal_brief_snapshot_excludes_an_alias_spelling(monkeypatch):
+    """exclude_asset_classes must exclude an alias spelling (e.g. "equity")
+    the same way it excludes the canonical label -- this only works because
+    the allowed-set computation goes through the shared
+    strategy_lab_context.allowed_asset_classes helper (with its
+    normalize_asset_class_strict alias handling), not a hand-rolled
+    ``set(exclude_asset_classes or ())`` that skips normalization entirely."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main,
+        "_snapshot_prior_records",
+        lambda *, reverse=False: [_signal_brief_prior_record("crypto")],
+    )
+
+    class _FakeBrief:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"brief_version": "v1"}
+
+    class _FakeExpert:
+        def produce_signal_brief(self, prior_records, market_ctx, *, asset_class=None):
+            assert asset_class != "stocks", "an aliased exclusion must still exclude stocks"
+            return _FakeBrief()
+
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _signal_brief_fake_provider())
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
+
+    briefs, _storage = api_main._compute_signal_brief_snapshot(
+        "SPY", ["equity", "forex", "futures", "commodities"]
+    )
+
+    assert "stocks" not in briefs
 
 
 def test_is_strategy_lab_run_externally_stopped_reads_job_status(monkeypatch):
@@ -3155,6 +3619,17 @@ def test_compute_signal_brief_activity_maps_unexpected_error(monkeypatch):
     monkeypatch.setattr(api_main, "_compute_signal_brief_snapshot", _boom)
     with pytest.raises(ApplicationError):
         act.compute_signal_brief_activity("SPY")
+
+
+def test_compute_signal_brief_activity_maps_malformed_dict_params():
+    """A dict `params` missing the required `benchmark_symbol` key must raise
+    ApplicationError (non-retryable), not a raw KeyError -- extracting the
+    fields now runs inside the same try/except as the snapshot delegate
+    call, so a malformed payload fails fast instead of being retried by
+    Temporal as if it were a transient failure."""
+    with pytest.raises(ApplicationError) as exc_info:
+        act.compute_signal_brief_activity({"exclude_asset_classes": ["forex"]})
+    assert exc_info.value.non_retryable is True
 
 
 def test_finalize_cycle_record_activity_maps_malformed_record_parse_error():

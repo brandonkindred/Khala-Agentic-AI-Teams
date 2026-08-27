@@ -179,6 +179,112 @@ def test_market_lab_context_prompt_text_not_truncated() -> None:
     assert t.count("macro line ") == 60
 
 
+def _scoping_ctx() -> MarketLabContext:
+    """A MarketLabContext with the main category-specific data fields
+    (fx_rates, crypto_snapshot) populated, so scoping tests have something
+    real to strip. Class-agnostic fields (macro_snippets, social_sentiment)
+    are also included to verify they survive scoping."""
+    return MarketLabContext(
+        fetched_at="2024-01-01T00:00:00Z",
+        degraded=False,
+        sources_used=["x"],
+        fx_rates={"EUR": 1.08, "GBP": 1.27},
+        macro_snippets=["DGS10=4.2%"],
+        crypto_snapshot="BTC=65000",
+        social_sentiment="neutral",
+    )
+
+
+def test_scoped_to_stocks_clears_fx_and_crypto_but_keeps_shared_macro() -> None:
+    """A category-pinned signal brief's own scope block says "covers stocks
+    and nothing else" -- rendering explicit FX rates and a crypto headline
+    into that same prompt directly contradicts it and gives the model
+    cross-category evidence it was told not to use. Genuinely class-agnostic
+    macro fields (yield, sentiment) still reach every category."""
+    scoped = _scoping_ctx().scoped_to("stocks")
+    assert not scoped.fx_rates
+    assert scoped.crypto_snapshot is None
+    text = scoped.as_prompt_text()
+    assert "FX" not in text
+    assert "Crypto" not in text
+    assert "DGS10" in text
+    assert "neutral" in text
+
+
+def test_scoped_to_forex_keeps_fx_drops_crypto() -> None:
+    """Scoping to forex retains FX rates and removes the crypto snapshot."""
+    scoped = _scoping_ctx().scoped_to("forex")
+    assert scoped.fx_rates
+    assert scoped.crypto_snapshot is None
+    text = scoped.as_prompt_text()
+    assert "FX" in text
+    assert "Crypto" not in text
+
+
+def test_scoped_to_crypto_keeps_crypto_drops_fx() -> None:
+    """Scoping to crypto retains the crypto snapshot and removes FX rates."""
+    scoped = _scoping_ctx().scoped_to("crypto")
+    assert not scoped.fx_rates
+    assert scoped.crypto_snapshot is not None
+    text = scoped.as_prompt_text()
+    assert "Crypto" in text
+    assert "FX" not in text
+
+
+def test_scoped_to_strips_category_specific_sources_and_degraded_reason() -> None:
+    """sources_used/degraded_reason name the same category-specific providers
+    as fx_rates/crypto_snapshot ("frankfurter" for forex, "yahoo_crypto" for
+    crypto) and would otherwise leak which categories' data was fetched even
+    after the data fields themselves are cleared."""
+    ctx = MarketLabContext(
+        fetched_at="2024-01-01T00:00:00Z",
+        degraded=True,
+        degraded_reason="frankfurter_failed, fred_failed, yahoo_crypto_failed",
+        sources_used=["fred_dgs10", "yahoo_crypto"],
+        fx_rates={},
+        macro_snippets=["DGS10=4.2%"],
+        crypto_snapshot="BTC=65000",
+    )
+    # Scoped to stocks: both forex- and crypto-specific ids drop; the
+    # class-agnostic fred_failed/fred_dgs10 survive.
+    stocks_scoped = ctx.scoped_to("stocks")
+    assert stocks_scoped.sources_used == ["fred_dgs10"]
+    assert stocks_scoped.degraded_reason == "fred_failed"
+    assert stocks_scoped.degraded is True
+
+    # Scoped to forex: crypto-specific ids drop, frankfurter's survive.
+    forex_scoped = ctx.scoped_to("forex")
+    assert "yahoo_crypto" not in forex_scoped.sources_used
+    assert forex_scoped.degraded_reason == "frankfurter_failed, fred_failed"
+
+    # When every remaining reason is dropped, degraded flips back to False.
+    healthy = ctx.model_copy(update={"degraded_reason": "yahoo_crypto_failed"})
+    healthy_scoped = healthy.scoped_to("stocks")
+    assert healthy_scoped.degraded_reason is None
+    assert healthy_scoped.degraded is False
+
+
+def test_scoped_to_does_not_mutate_the_original_context() -> None:
+    ctx = _scoping_ctx()
+    ctx.scoped_to("stocks")
+    text = ctx.as_prompt_text()
+    assert "FX" in text
+    assert "Crypto" in text
+
+
+def test_scoped_to_none_returns_the_same_instance() -> None:
+    """Scoping to None returns the original context instance unchanged."""
+    ctx = _scoping_ctx()
+    assert ctx.scoped_to(None) is ctx
+
+
+def test_scoped_to_returns_the_same_instance_when_nothing_to_strip() -> None:
+    """Scoping a context with no category-specific fields set returns the
+    same instance -- there's nothing for scoped_to to strip."""
+    ctx = MarketLabContext(fetched_at="x", macro_snippets=["DGS10=4.2%"])
+    assert ctx.scoped_to("stocks") is ctx
+
+
 def test_strategy_lab_data_request_defaults() -> None:
     r = StrategyLabDataRequest()
     assert r.benchmark_symbol == "SPY"

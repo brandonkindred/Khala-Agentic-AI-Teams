@@ -52,7 +52,17 @@ from ..models import (
     StrategySpec,
 )
 from ..signal_intelligence_models import SignalIntelligenceBriefV1
-from ..strategy_lab_context import normalize_asset_class, normalize_asset_class_strict
+from ..strategy_lab_context import (
+    PROMPT_ASSET_CLASSES,
+    allowed_asset_classes,
+    excluded_for_allowed,
+    filter_records_by_asset_class,
+    normalize_asset_class,
+    normalize_asset_class_strict,
+    select_asset_category,
+    select_signal_brief,
+)
+from ..symbols import classify_symbol
 from ._orchestrator_helpers import (
     _DesignAttemptState,
     _DesignPersistContext,
@@ -69,9 +79,10 @@ from .alignment_findings import AlignmentFinding
 from .backtest_cache import BacktestCache
 from .budget_config import StrategyLabBudgetConfig
 from .exceptions import OrchestratorContractError, SpecImplementabilityError
-from .market_regime import RegimeSummary
+from .market_regime import RegimeSummary, filter_regime_summary
 from .mechanical_repair import RepairAction, demote_code_path, repair_spec, select_code_path
 from .phases import Phase
+from .quality_gates.convergence_tracker import is_asset_class_steering_directive
 from .quality_gates.models import QualityGateResult
 from .spec_dsl import DEFAULT_SIZING_PAYLOAD
 
@@ -139,7 +150,47 @@ def _coerce_expectancy_forecast(raw: Any) -> Optional[ExpectancyForecast]:
     return None
 
 
-def build_spec_from_dict(strategy_dict: Dict[str, Any], *, strategy_id: str) -> "StrategySpec":
+def _infer_asset_class_from_symbols(
+    target_symbols: List[str], *, allowed_classes: Optional[frozenset[str]] = None
+) -> Optional[str]:
+    """Infer a single asset class from explicit ``target_symbols``, if unambiguous.
+
+    Preconditions:
+        ``target_symbols`` is a list of ticker strings (possibly empty).
+        ``allowed_classes``, when given, is the run's user-level allowed
+        category set (see ``strategy_lab_context.allowed_asset_classes``) —
+        NOT the narrower per-attempt pin, which excludes every class but the
+        one attempt's random pick and would defeat inference for its own
+        sake.
+
+    Postconditions:
+        Returns the one canonical class every *classifiable* symbol agrees on
+        (``classify_symbol`` returns ``None`` for cross-asset ETFs like
+        ``GLD``/``QQQ`` — those are ignored, not treated as a vote). Returns
+        ``None`` when there are no classifiable symbols, when they name more
+        than one class, or — when ``allowed_classes`` is given — when the
+        one class they agree on is not in it: a class the user globally
+        excluded must never be inferred and persisted (even on a failed
+        record), only a class outside *this attempt's* pin but still within
+        the user's selection is fair game, since Rule 11 will correctly
+        route that back into a rebuild for the pinned category.
+    """
+    classified = {c for c in (classify_symbol(s) for s in target_symbols) if c is not None}
+    if len(classified) != 1:
+        return None
+    inferred = next(iter(classified))
+    if allowed_classes is not None and inferred not in allowed_classes:
+        return None
+    return inferred
+
+
+def build_spec_from_dict(
+    strategy_dict: Dict[str, Any],
+    *,
+    strategy_id: str,
+    default_asset_class: str = "stocks",
+    exclude_asset_classes: Optional[List[str]] = None,
+) -> "StrategySpec":
     """Construct a ``StrategySpec`` from a design-agent JSON payload.
 
     Pre: ``strategy_dict`` is the JSON dict returned by
@@ -155,8 +206,31 @@ def build_spec_from_dict(strategy_dict: Dict[str, Any], *, strategy_id: str) -> 
     commodity/metal/energy, cryptocurrency/cryptocurrencies) are
     canonicalized before construction so a clean mapping never trips the
     strict ``StrategySpec`` validator. A missing or blank ``asset_class``
-    likewise resolves to the default ``stocks`` rather than being treated as
-    unsupported, so it never triggers a spurious redesign.
+    resolves to ``default_asset_class`` rather than being treated as
+    unsupported, so it never triggers a spurious redesign — UNLESS explicit
+    ``target_symbols`` unambiguously name a different class (see
+    :func:`_infer_asset_class_from_symbols`), in which case the inferred
+    class is used instead. An omitted field with no such symbols expressed
+    no choice at all; an omitted field alongside symbols that only make
+    sense for one class (e.g. ``AAPL``, ``MSFT`` with no ``asset_class``)
+    expressed a choice through the symbols, and honoring the pin over that
+    signal would silently launder a differently-themed hypothesis into the
+    pinned category once the mismatched symbols are mechanically stripped by
+    ``repair_spec`` — exactly the mislabeling this function exists to refuse.
+    The inference itself is constrained to ``exclude_asset_classes``'s
+    complement (the user's actual selection, not the narrower per-attempt
+    pin) — a class the user globally excluded is never inferred, so a
+    failed/unconverged record can never persist labeled with a category the
+    run was never allowed to touch.
+
+    ``default_asset_class`` is the category the caller's design attempt is
+    pinned to. Filling an *omitted* field from the pin (when the symbols
+    don't override it) is not a relabel: the payload expressed no choice,
+    and the pin is the only correct value it could have had. A payload that
+    names a *different* class — explicitly, or implicitly via its symbols —
+    is left exactly as authored — readiness Rule 11 then rejects it so the
+    strategy gets rebuilt for the pinned category rather than silently
+    reassigned to it.
 
     A *genuinely unsupported* class the strict normalizer rejects (e.g.
     ``bonds``) is NOT silently coerced to ``stocks`` — doing so would run
@@ -177,16 +251,37 @@ def build_spec_from_dict(strategy_dict: Dict[str, Any], *, strategy_id: str) -> 
         SpecImplementabilityError: the payload names an unsupported
             ``asset_class`` that no alias maps to a tradeable class.
     """
-    raw_asset_class = strategy_dict.get("asset_class", "stocks")
+    if default_asset_class not in PROMPT_ASSET_CLASSES:
+        raise OrchestratorContractError(
+            f"default_asset_class must be a canonical PROMPT_ASSET_CLASSES member, got {default_asset_class!r}"
+        )
+    # ``or`` alone would let a whitespace-only value through as an authored
+    # choice; a blank field expresses no choice on its own. But explicit
+    # target_symbols that unambiguously name a different class than the pin
+    # ARE a choice — inferring it here (rather than defaulting to the pin)
+    # means Rule 11 sees the true mismatch and forces a real redesign,
+    # instead of the mismatch being silently mechanically repaired away by
+    # stripping the "wrong" symbols down to an empty, pin-labeled spec.
+    raw_asset_class = str(strategy_dict.get("asset_class") or "").strip()
+    if not raw_asset_class:
+        allowed_classes = allowed_asset_classes(exclude_asset_classes)
+        inferred = _infer_asset_class_from_symbols(
+            strategy_dict.get("target_symbols") or [], allowed_classes=allowed_classes
+        )
+        raw_asset_class = inferred or default_asset_class
+    # ``normalize_asset_class`` is total — it never raises, always returning a
+    # string (defaulting an unrecognized value to ``"stocks"``) — so computing
+    # it here first is safe regardless of what the strict check below decides.
     asset_class = normalize_asset_class(raw_asset_class)
-    # A missing/blank asset_class is the documented default (``stocks``), which
+    # A missing/blank asset_class is the documented default, which
     # ``normalize_asset_class`` already produced above — it is not an unsupported
     # class, so it must not trip the strict validator and force a redesign. Only a
     # genuinely-named-but-unknown class (e.g. ``bonds``) routes to redesign. The
-    # strict check runs on the RAW value so an unknown class is caught before
-    # ``normalize_asset_class`` flattens it to ``stocks``; checking the coerced
-    # value would let ``bonds`` pass as ``stocks`` and be backtested under the
-    # wrong universe/gates.
+    # strict check below compares against ``raw_asset_class`` (not the coerced
+    # ``asset_class`` computed above) so an unknown class is still caught even
+    # though ``normalize_asset_class`` already flattened it to ``"stocks"`` —
+    # checking the coerced value instead would let ``bonds`` pass as ``stocks``
+    # and be backtested under the wrong universe/gates.
     unsupported_class = False
     if str(raw_asset_class or "").strip():
         try:
@@ -565,7 +660,7 @@ class DesignMixin:
         self,
         *,
         prior_records: List[StrategyLabRecord],
-        signal_brief: Optional[SignalIntelligenceBriefV1],
+        signal_briefs: Optional[Dict[str, SignalIntelligenceBriefV1]],
         directives: List[str],
         exclude_asset_classes: Optional[List[str]],
         config: BacktestConfig,
@@ -580,7 +675,14 @@ class DesignMixin:
         Pre: ``self.design_agent`` and ``self.design_review_agent`` are
         constructed; ``all_gate_results`` is the orchestrator's running
         gate list (the loop appends readiness findings via
-        ``self.record_gates``).
+        ``self.record_gates``). ``signal_briefs`` is either ``None`` or a
+        map from canonical asset-class label to the
+        :class:`SignalIntelligenceBriefV1` computed over that category's
+        prior records only; a category with no prior records is absent from
+        the map rather than mapped to an empty brief. The loop selects only
+        its own pinned category's entry via ``select_signal_brief`` — a
+        missing entry yields ``None`` for that attempt, never another
+        category's brief.
         Post: returns a :class:`_DesignLoopOutcome`. When ``ready=True``
         the caller may advance to code synthesis; when ``ready=False``
         the caller MUST short-circuit the cycle. The outcome is a value
@@ -625,15 +727,78 @@ class DesignMixin:
         stop_reason = "budget_exhausted"
         loop_telemetry: Dict[str, Any] = {}
 
+        # ── Asset-category pin ───────────────────────────────────────────
+        # Every design attempt commits to exactly ONE asset category, chosen
+        # at random from the categories the user selected at run start
+        # (``exclude_asset_classes`` is the complement of that selection
+        # within ``PROMPT_ASSET_CLASSES``; an unrestricted run means every
+        # category is allowed, not that no pin applies).
+        #
+        # The pin is unconditional because asset categories are not
+        # interchangeable: forex microstructure, crypto's 24/7 sessions, and
+        # equity market hours make a "learning" drawn from one category
+        # actively misleading in another. An attempt that reasoned over a
+        # blended cross-category history would produce conclusions that hold
+        # for no category in particular, whether or not the user narrowed the
+        # menu. So every attempt gets one category and sees only that
+        # category's evidence.
+        #
+        # Three things follow from the pin, all of them hard restrictions
+        # rather than prompt-level requests:
+        #   * ``prior_records`` is filtered to the pinned category, so the
+        #     "Prior Strategy Results" analysis cannot reference another one.
+        #   * ``exclude_asset_classes`` handed to the designer forbids every
+        #     other class, rather than leaving it free among the allowed set.
+        #   * The readiness gate enforces the pin (Rule 11), so a spec that
+        #     drifts off-category can never be marked ready and therefore can
+        #     never reach code synthesis or be persisted as a strategy.
+        #
+        # The convergence tracker's diversity directive separately tells the
+        # designer to avoid whichever asset class is over-represented in
+        # recent history. Bias the pin away from that same set so the two
+        # steering mechanisms don't contradict each other — see the
+        # ``directives`` filtering right after selection.
+        diversity_avoid_classes = self.convergence_tracker.get_diversity_avoid_classes()
+        selected_category: str = select_asset_category(
+            exclude_asset_classes, avoid=diversity_avoid_classes
+        )
+        category_prior_records = filter_records_by_asset_class(prior_records, selected_category)
+        pinned_exclude_asset_classes = excluded_for_allowed([selected_category])
+        # Scope the two cross-category analysis surfaces the designer is also
+        # handed. Both are computed once per batch/cycle over every asset
+        # class; without this the designer reads a signal brief whose
+        # "evidence from priors" and diversity hint span categories it is
+        # forbidden to use, and a regime block quoting four irrelevant markets.
+        category_signal_brief = select_signal_brief(signal_briefs, selected_category)
+        category_regime_summary = filter_regime_summary(regime_summary, selected_category)
+
+        # A pinned attempt cannot satisfy ANY "change asset class" directive —
+        # ``pinned_exclude_asset_classes`` already forbids every class but the
+        # pinned one — so drop them all rather than hand the designer a
+        # self-contradictory prompt ("use something other than X" alongside
+        # "MANDATORY EXCLUSION: only X is allowed"). This covers the stall
+        # directive as well as the diversity one; the predicate lives with the
+        # text it matches (see ``convergence_tracker``) so a reword cannot
+        # silently stop it matching.
+        attempt_directives = [d for d in directives if not is_asset_class_steering_directive(d)]
+
         try:
             strategy_dict, rationale = self.design_agent.run(
-                prior_records=prior_records,
-                signal_brief=signal_brief,
-                convergence_directives=directives or None,
-                exclude_asset_classes=exclude_asset_classes,
-                regime_summary=regime_summary,
+                prior_records=category_prior_records,
+                signal_brief=category_signal_brief,
+                convergence_directives=attempt_directives or None,
+                exclude_asset_classes=pinned_exclude_asset_classes,
+                regime_summary=category_regime_summary,
             )
-            spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
+            spec = self._build_spec_from_dict(
+                strategy_dict,
+                strategy_id=strategy_id,
+                default_asset_class=selected_category,
+                exclude_asset_classes=exclude_asset_classes,
+            )
+            # No post-hoc correction here: a spec that came back off-category
+            # is caught by readiness Rule 11 on the very first round below and
+            # answered by that round's own ``revise`` call.
 
             # ═══ Phase 1 → 2 transition: DESIGN → DESIGN_REVIEW ═══════════
             # The initial DesignAgent invocation has produced a spec draft;
@@ -659,6 +824,8 @@ class DesignMixin:
                 ledger=ledger,
                 emit=emit,
                 drift_collector=drift_collector,
+                selected_category=selected_category,
+                exclude_asset_classes=exclude_asset_classes,
             )
         except DesignBudgetExhausted as exc:
             # Per-cycle LLM-call budget hit mid-design. Surface whatever
@@ -677,7 +844,22 @@ class DesignMixin:
             # ``spec`` is None only if the very first ``run()`` tripped — fall
             # back to a defaults spec so the audit record is still well-formed.
             if spec is None:
-                spec = self._build_spec_from_dict({}, strategy_id=strategy_id)
+                spec = self._build_spec_from_dict(
+                    {},
+                    strategy_id=strategy_id,
+                    default_asset_class=selected_category,
+                    exclude_asset_classes=exclude_asset_classes,
+                )
+            # The spec is left exactly as the designer produced it, even when
+            # it is off-pin. This exit is a *failure* record
+            # (``status="failed: budget_exhausted"``) that never reaches
+            # synthesis, so relabelling its ``asset_class`` to the pinned
+            # category would only file crypto logic under stocks in the
+            # record store — where the next attempt's category-scoped
+            # prior-record filter would then read it as stocks evidence.
+            # ``asset_category`` in the telemetry below records what this
+            # attempt was pinned to; ``spec.asset_class`` stays honest about
+            # what was actually produced.
             emit(
                 "designing",
                 {
@@ -696,6 +878,7 @@ class DesignMixin:
                 "budget_exhausted",
                 getattr(exc, "mechanical_repair_count", 0),
             )
+            budget_telemetry["asset_category"] = selected_category
             # Mirror the normal-exit path: emit the per-cycle ``design_loop``
             # summary so live ``on_phase`` consumers see the stop reason and
             # ledger totals on budget-exhausted cycles too, not just per-round
@@ -735,6 +918,8 @@ class DesignMixin:
         ledger: CritiqueLedger,
         emit: PhaseCallback,
         drift_collector: Optional[_DriftCollector],
+        selected_category: str,
+        exclude_asset_classes: Optional[List[str]] = None,
     ) -> Tuple[StrategySpec, str, bool, str, Dict[str, Any]]:
         """Run the bounded readiness → review → revise rounds.
 
@@ -744,6 +929,16 @@ class DesignMixin:
         :class:`CritiqueLedger` the caller owns, so the budget-exhaustion
         handler in :meth:`_run_design_loop` can still read the counters
         accumulated for the rounds completed before a charge failed.
+        ``selected_category`` is the single asset class this design attempt
+        is pinned to (from :func:`select_asset_category`), passed to the
+        readiness gate as ``pinned_asset_class`` so Rule 11 rejects a spec
+        whose ``asset_class`` — or whose ``target_symbols`` — drift off that
+        category. ``exclude_asset_classes`` is the *user's* excluded classes
+        (the complement of their run-start ``allowed_asset_classes``
+        selection, not the narrower per-attempt pin), threaded through to
+        every spec-building call so an omitted ``asset_class`` inferred from
+        symbols (see ``_infer_asset_class_from_symbols``) can never land on a
+        category the user excluded from the run entirely.
         Post: returns ``(spec, rationale, ready, stop_reason, loop_telemetry)``
         — the final candidate spec, its latest rationale, whether the
         reviewer marked it ready on the most recent round, the reason the
@@ -781,13 +976,13 @@ class DesignMixin:
                     last_readiness_signature=last_readiness_signature,
                     readiness_results=readiness_results,
                     all_gate_results=all_gate_results,
+                    pinned_asset_class=selected_category,
                 )
             )
 
             # Step 2 — deterministic mechanical pre-flight (repair criticals,
             # then trial-compile a readiness-clean spec to pick the code path)
             # before every review round.
-            repair_count_before_round = mechanical_repair_count
             if repair_enabled:
                 (
                     spec,
@@ -798,6 +993,7 @@ class DesignMixin:
                 ) = self._run_mechanical_repair_stages(
                     spec=spec,
                     config=config,
+                    pinned_asset_class=selected_category,
                     readiness_results=readiness_results,
                     last_readiness_signature=last_readiness_signature,
                     deterministic_ready=deterministic_ready,
@@ -867,13 +1063,17 @@ class DesignMixin:
                 stop_reason = "round_cap"
                 break
 
-            # Step 5 — revise the spec from this round's critique. Skip the
-            # designer's internal self-review LLM call when this round's
-            # readiness gate passed AND no mechanical repair fired this round
-            # — the spec is already known structurally clean, so the
-            # self-review audit would be redundant work.
-            repair_fired_this_round = mechanical_repair_count > repair_count_before_round
-            skip_self_review = deterministic_ready and not repair_fired_this_round
+            # Step 5 — revise the spec from this round's critique. The
+            # designer's internal self-review always runs on this call's
+            # output: ``deterministic_ready`` describes the *incoming* spec
+            # (the one the reviewer just found insufficient), not the spec
+            # ``revise`` is about to produce, so it cannot predict whether
+            # the rewrite responding to ``critique`` is clean. Self-review's
+            # whole purpose — catching a prose/predicate or risk-math
+            # contradiction the designer slips in while addressing
+            # critique — applies precisely to this freshly generated spec,
+            # so skipping it here would disable the audit exactly when a
+            # substantive rewrite makes it most likely to be needed.
             spec, rationale = self._revise_with_regression_notice(
                 spec=spec,
                 rationale=rationale,
@@ -883,12 +1083,15 @@ class DesignMixin:
                 strategy_id=strategy_id,
                 mechanical_repair_count=mechanical_repair_count,
                 drift_collector=drift_collector,
-                skip_self_review=skip_self_review,
+                skip_self_review=False,
+                default_asset_class=selected_category,
+                exclude_asset_classes=exclude_asset_classes,
             )
 
         loop_telemetry = _design_loop_telemetry_summary(
             ledger, len(critique_history), stop_reason, mechanical_repair_count
         )
+        loop_telemetry["asset_category"] = selected_category
         emit("telemetry", {"scope": "design_loop", **loop_telemetry})
         return spec, rationale, ready, stop_reason, loop_telemetry
 
@@ -900,22 +1103,37 @@ class DesignMixin:
         last_readiness_signature: Optional[tuple],
         readiness_results: List[QualityGateResult],
         all_gate_results: List[QualityGateResult],
+        pinned_asset_class: Optional[str] = None,
     ) -> Tuple[List[QualityGateResult], Optional[tuple], bool]:
         """Run the deterministic readiness gate, memoized on the spec signature.
 
         Pre: ``readiness_results`` / ``last_readiness_signature`` carry the
-        previous round's verdict and the spec signature that produced it.
+        previous round's verdict and the spec signature that produced it;
+        ``pinned_asset_class`` is the category this design attempt is pinned
+        to (readiness Rule 11) — every design attempt is unconditionally
+        pinned in production, so the single production call site always
+        supplies one; ``None`` is accepted for a direct/test invocation with
+        no pin.
         Post: returns ``(readiness_results, last_readiness_signature,
         deterministic_ready)``. Re-validates (and records the gates onto
         ``all_gate_results`` in place) only when the spec's readiness-relevant
         signature changed since ``last_readiness_signature`` — the gate would
         otherwise return the same verdict. ``deterministic_ready`` is ``True``
-        iff no readiness critical is present.
+        iff no readiness critical is present, so a spec violating the pin is
+        never reported ready.
+
+        The memoization stays sound under a pin because ``asset_class`` and
+        ``target_symbols`` — the only two fields Rule 11 reads — are both part
+        of ``_spec_readiness_signature``, and the pin itself is fixed for the
+        whole attempt.
         """
         signature = _spec_readiness_signature(spec)
         if signature != last_readiness_signature:
             readiness_results = self.spec_readiness_gate.validate(
-                spec, phase="design", backtest_config=config
+                spec,
+                phase="design",
+                backtest_config=config,
+                pinned_asset_class=pinned_asset_class,
             )
             self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
             last_readiness_signature = signature
@@ -932,6 +1150,7 @@ class DesignMixin:
         deterministic_ready: bool,
         mechanical_repair_count: int,
         review_round: int,
+        pinned_asset_class: Optional[str] = None,
         all_gate_results: List[QualityGateResult],
         drift_collector: Optional[_DriftCollector],
         emit: PhaseCallback,
@@ -939,8 +1158,12 @@ class DesignMixin:
         """Run the deterministic mechanical pre-flight in two ordered stages.
 
         Stage 1 repairs mechanical readiness criticals (timeframe data
-        availability, position-cap bound) so they never cost an LLM ``revise``
-        round, then re-validates. Stage 2 — only once the spec is readiness-
+        availability, position-cap bound, and — under a pin — stray
+        off-category ``target_symbols``) so they never cost an LLM ``revise``
+        round, then re-validates. The *class* half of the category pin is
+        deliberately not repairable here: a spec declaring the wrong category
+        needs its logic rebuilt, not its label rewritten, so it stays a
+        readiness critical for this round's ``revise`` call to answer. Stage 2 — only once the spec is readiness-
         clean — trial-compiles it and flips ``requires_custom_code`` on
         ``CompilerError`` so a readiness-clean spec that is still outside the
         deterministic-compiler envelope (e.g. a ``volatility_target`` spec
@@ -964,7 +1187,7 @@ class DesignMixin:
         pre_repair_spec: Optional[StrategySpec] = None
 
         # Stage 1 — mechanical repairs (repair_spec never trial-compiles).
-        outcome = repair_spec(spec, config=config)
+        outcome = repair_spec(spec, config=config, pinned_asset_class=pinned_asset_class)
         if outcome.actions:
             pre_repair_spec = spec.model_copy(deep=True)
             spec = outcome.spec
@@ -974,7 +1197,10 @@ class DesignMixin:
             repaired_signature = _spec_readiness_signature(spec)
             if repaired_signature != last_readiness_signature:
                 readiness_results = self.spec_readiness_gate.validate(
-                    spec, phase="design", backtest_config=config
+                    spec,
+                    phase="design",
+                    backtest_config=config,
+                    pinned_asset_class=pinned_asset_class,
                 )
                 self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
                 last_readiness_signature = repaired_signature
@@ -1001,7 +1227,10 @@ class DesignMixin:
                 repaired_signature = _spec_readiness_signature(spec)
                 if repaired_signature != last_readiness_signature:
                     readiness_results = self.spec_readiness_gate.validate(
-                        spec, phase="design", backtest_config=config
+                        spec,
+                        phase="design",
+                        backtest_config=config,
+                        pinned_asset_class=pinned_asset_class,
                     )
                     self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
                     last_readiness_signature = repaired_signature
@@ -1147,6 +1376,8 @@ class DesignMixin:
         mechanical_repair_count: int,
         drift_collector: Optional[_DriftCollector],
         skip_self_review: bool = False,
+        default_asset_class: str,
+        exclude_asset_classes: Optional[List[str]],
     ) -> Tuple[StrategySpec, str]:
         """Revise the spec from the round's critique, flagging regressions.
 
@@ -1162,6 +1393,16 @@ class DesignMixin:
         computes it as "this round's readiness gate passed AND no mechanical
         repair fired this round", so a structurally clean revision skips the
         designer's internal self-review LLM call.
+
+        Both ``default_asset_class`` and ``exclude_asset_classes`` are
+        required (no default) — this is the single-category pin's own revise
+        step, so the caller must supply the attempt's actual pinned category
+        and its run-level exclusions rather than risk a silent fallback to a
+        hardcoded class. Forwarded verbatim to :meth:`_build_spec_from_dict`:
+        ``default_asset_class`` is the pinned category an omitted/blank
+        ``asset_class`` in the designer's revised payload resolves to;
+        ``exclude_asset_classes`` constrains symbol-based class inference so
+        an inferred class can never land on one the user excluded.
         Raises: ``DesignBudgetExhausted`` with the latest spec / rationale /
         repair count attached — revise has not yet produced a new spec, so the
         latest fully-realised spec is the current (post mechanical-repair) one.
@@ -1184,7 +1425,12 @@ class DesignMixin:
                 mechanical_repair_count=mechanical_repair_count,
             )
             raise
-        spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
+        spec = self._build_spec_from_dict(
+            strategy_dict,
+            strategy_id=strategy_id,
+            default_asset_class=default_asset_class,
+            exclude_asset_classes=exclude_asset_classes,
+        )
         if drift_collector is not None:
             drift_collector.record_spec_change(
                 phase="design_review",
@@ -1196,7 +1442,12 @@ class DesignMixin:
         return spec, rationale
 
     def _build_spec_from_dict(
-        self, strategy_dict: Dict[str, Any], *, strategy_id: str
+        self,
+        strategy_dict: Dict[str, Any],
+        *,
+        strategy_id: str,
+        default_asset_class: str = "stocks",
+        exclude_asset_classes: Optional[List[str]] = None,
     ) -> StrategySpec:
         """Thin instance wrapper over :func:`build_spec_from_dict`.
 
@@ -1204,14 +1455,19 @@ class DesignMixin:
         form; the construction logic lives in the module-level function so it
         can be unit-tested without instantiating the orchestrator.
         """
-        return build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
+        return build_spec_from_dict(
+            strategy_dict,
+            strategy_id=strategy_id,
+            default_asset_class=default_asset_class,
+            exclude_asset_classes=exclude_asset_classes,
+        )
 
     def _run_design_attempt(
         self,
         *,
         prior_records: List[StrategyLabRecord],
         config: BacktestConfig,
-        signal_brief: Optional[SignalIntelligenceBriefV1],
+        signal_briefs: Optional[Dict[str, SignalIntelligenceBriefV1]],
         emit: PhaseCallback,
         exclude_asset_classes: Optional[List[str]],
         directives: List[str],
@@ -1264,6 +1520,15 @@ class DesignMixin:
         Preconditions:
             ``resume_spec is None`` if and only if ``resume_design_context
             is None``.
+            ``signal_briefs`` is a required argument that may be ``None`` or
+            a map of allowed asset class -> per-category signal-intelligence
+            brief (see
+            :func:`_compute_signal_brief_snapshot`). The attempt's
+            ``_run_design_loop`` selects its own pinned category's entry via
+            ``select_signal_brief``; a missing entry yields ``None`` for that
+            category (the design prompt omits its signal section) rather
+            than substituting another category's brief. An excluded category
+            must never appear in the map.
         """
         if (resume_spec is None) != (resume_design_context is None):
             raise ValueError(
@@ -1309,7 +1574,7 @@ class DesignMixin:
         else:
             design_phase = self._orchestrate_design_and_review(
                 prior_records=prior_records,
-                signal_brief=signal_brief,
+                signal_briefs=signal_briefs,
                 directives=directives,
                 exclude_asset_classes=exclude_asset_classes,
                 config=config,
@@ -1847,7 +2112,7 @@ class DesignMixin:
         self,
         *,
         prior_records: List[StrategyLabRecord],
-        signal_brief: Optional[SignalIntelligenceBriefV1],
+        signal_briefs: Optional[Dict[str, SignalIntelligenceBriefV1]],
         directives: List[str],
         exclude_asset_classes: Optional[List[str]],
         config: BacktestConfig,
@@ -1861,6 +2126,11 @@ class DesignMixin:
         """Run the bounded design + review loop and gate entry to synthesis.
 
         Pre: ``all_gate_results`` is the running gate list for this attempt.
+        ``signal_briefs`` is either ``None`` or a map from canonical
+        asset-class label to the per-category ``SignalIntelligenceBriefV1``
+        (see ``_run_design_loop``'s docstring for the map's contract) —
+        forwarded verbatim to ``_run_design_loop``, which selects the
+        attempt's own pinned category's entry.
         Post: returns a ``_DesignPhaseResult``. When the loop did not reach
         readiness (round-cap / stall / LLM-budget), ``record`` carries the
         short-circuit ``StrategyLabRecord`` and the caller returns it. On
@@ -1870,7 +2140,7 @@ class DesignMixin:
         """
         design_outcome = self._run_design_loop(
             prior_records=prior_records,
-            signal_brief=signal_brief,
+            signal_briefs=signal_briefs,
             directives=directives,
             exclude_asset_classes=exclude_asset_classes,
             config=config,

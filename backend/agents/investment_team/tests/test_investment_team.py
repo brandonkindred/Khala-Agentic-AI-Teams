@@ -1269,6 +1269,16 @@ def test_classify_symbol_unambiguous_cases() -> None:
     assert classify_symbol("BTC-USD") == "crypto"
     assert classify_symbol("AUDCHF=X") == "forex"
     assert classify_symbol("RTY=F") == "futures"
+    # Non-Yahoo crypto quote-currency suffixes canonical_symbol already
+    # recognizes (and deliberately leaves unstripped) — classify_symbol must
+    # not treat them as unclassified just because they aren't Yahoo-suffixed.
+    assert classify_symbol("DOGE-USDT") == "crypto"
+    assert classify_symbol("SOL-USDC") == "crypto"
+    # Bare currency pair outside FOREX_SYMBOLS/FOREX_SYMBOLS_BARE — recognized
+    # by the currency-code heuristic so it isn't silently allowed through an
+    # asset-category pin check as "unclassified".
+    assert classify_symbol("USDNOK") == "forex"
+    assert classify_symbol("usdnok") == "forex"
 
 
 def test_classify_symbol_returns_none_for_ambiguous_or_unknown() -> None:
@@ -1282,6 +1292,44 @@ def test_classify_symbol_returns_none_for_ambiguous_or_unknown() -> None:
     assert classify_symbol("TLT") is None
     # Unknown ticker — don't guess
     assert classify_symbol("NEWCO") is None
+    # Six letters but not two recognized currency codes — still don't guess.
+    assert classify_symbol("NETFLX") is None
+    # Same code repeated isn't a pair.
+    assert classify_symbol("USDUSD") is None
+
+
+def test_classify_symbol_honors_the_other_symbols_exemption_in_crypto_suffixed_form() -> None:
+    """A cross-asset ETF reaching classify_symbol with a raw crypto-quote
+    suffix (e.g. "GLD-USD" instead of the bare "GLD") must still hit the
+    OTHER_SYMBOLS exemption -- the -USD/-USDT/-USDC suffix heuristic below it
+    would otherwise misclassify it as crypto, contradicting the documented
+    "cross-asset ETFs are never classified" guarantee."""
+    from investment_team.symbols import classify_symbol
+
+    assert classify_symbol("GLD-USD") is None
+    assert classify_symbol("QQQ-USDT") is None
+    assert classify_symbol("TLT-USDC") is None
+    # A genuine crypto ticker with the same suffixes is still classified.
+    assert classify_symbol("BTC-USD") == "crypto"
+    assert classify_symbol("DOGE-USDT") == "crypto"
+
+
+def test_find_offcategory_symbols_flags_only_unambiguous_mismatches() -> None:
+    """Shared by readiness Rule 11 and mechanical_repair -- must exclude
+    ambiguous/cross-asset ETFs and unrecognized tickers the same way
+    classify_symbol itself does, keeping only a genuine mismatch."""
+    from investment_team.symbols import find_offcategory_symbols
+
+    assert find_offcategory_symbols(["AAPL", "BTC", "MSFT"], "stocks") == {"BTC"}
+    # Cross-asset ETFs (classify_symbol -> None) are never flagged.
+    assert find_offcategory_symbols(["AAPL", "GLD", "QQQ"], "stocks") == set()
+    # An unrecognized ticker is never flagged either -- unclassified is not
+    # the same as off-category.
+    assert find_offcategory_symbols(["AAPL", "NEWCO"], "stocks") == set()
+    # A same-category symbol is never flagged.
+    assert find_offcategory_symbols(["AAPL", "MSFT"], "stocks") == set()
+    # Empty input -> empty output.
+    assert find_offcategory_symbols([], "stocks") == set()
 
 
 def test_resolve_strategy_symbols_warns_on_asset_class_mismatch(caplog) -> None:
@@ -1894,7 +1942,7 @@ class _FakeOrchestrator:
         *,
         prior_records=None,
         config=None,
-        signal_brief=None,
+        signal_briefs=None,
         on_phase=None,
         exclude_asset_classes=None,
     ):

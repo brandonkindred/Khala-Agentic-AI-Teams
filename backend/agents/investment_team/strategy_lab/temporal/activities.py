@@ -426,7 +426,8 @@ def resolve_workflow_config_activity() -> Dict[str, Any]:
         Returns ``{"design_review_rounds": int, "design_review_stall_rounds":
         int, "mechanical_repair_enabled": bool, "code_conformance_retries":
         int, "design_max_llm_calls": int, "regime_summary_enabled": bool,
-        "max_design_reentries": int}``.
+        "max_design_reentries": int, "llm_timeout_s": float, "llm_max_retries":
+        int, "llm_backoff_cap_s": float}``.
         A workflow may never read these env vars itself (``os.*`` is
         restricted at workflow runtime by the temporalio sandbox) — it calls
         this activity once and threads the resolved values through
@@ -434,6 +435,23 @@ def resolve_workflow_config_activity() -> Dict[str, Any]:
         ``max_design_reentries`` is a plain module constant (not env-derived);
         it is surfaced here so the workflow need never import
         ``orchestrator`` (and its heavy transitive graph) into the sandbox.
+        ``llm_timeout_s`` is the per-call LLM timeout
+        (``llm_service.config.resolve_timeout``, operator-overridable via
+        ``LLM_TIMEOUT`` with no fixed upper bound) — the batch workflow uses
+        it to size ``compute_signal_brief_activity``'s ``start_to_close``
+        deadline relative to the true configured per-call ceiling, rather
+        than a fixed constant that a large override could exceed.
+        ``llm_max_retries`` is the *same* transient-retry ceiling the Ollama
+        client (``llm_service.clients.ollama._parse_retry_config``, the
+        underlying client ``SignalIntelligenceExpert``'s calls actually go
+        through) applies per call — reused here rather than re-derived so a
+        legitimately-retrying (not stalled) call can't outlast a safety
+        margin sized independently of the client's own retry budget.
+        ``llm_backoff_cap_s`` is the same client's per-retry exponential
+        backoff ceiling (``_exponential_retry_delay`` caps each wait at this
+        value, plus a small jitter this deadline doesn't additionally budget
+        for) — the batch workflow adds it once per retry so the sleep time
+        between attempts, not just the attempts' own durations, is covered.
     """
     from investment_team.strategy_lab.orchestrator import (
         MAX_DESIGN_REENTRIES,
@@ -446,6 +464,10 @@ def resolve_workflow_config_activity() -> Dict[str, Any]:
     from investment_team.strategy_lab.quality_gates.predicate_conformance import (
         _code_conformance_retries,
     )
+    from llm_service.clients.ollama import _parse_retry_config
+    from llm_service.config import resolve_timeout
+
+    llm_max_retries, _backoff_base, llm_backoff_cap_s = _parse_retry_config()
 
     return {
         "design_review_rounds": _design_review_rounds(),
@@ -455,6 +477,9 @@ def resolve_workflow_config_activity() -> Dict[str, Any]:
         "design_max_llm_calls": _design_max_llm_calls(),
         "regime_summary_enabled": _env_flag("STRATEGY_LAB_REGIME_SUMMARY_ENABLED"),
         "max_design_reentries": MAX_DESIGN_REENTRIES,
+        "llm_timeout_s": resolve_timeout(),
+        "llm_max_retries": llm_max_retries,
+        "llm_backoff_cap_s": llm_backoff_cap_s,
     }
 
 
@@ -970,7 +995,8 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         ``params`` carries the JSON-shaped attempt inputs:
           - ``prior_records``: list of ``StrategyLabRecord`` JSON dumps.
           - ``config``: ``BacktestConfig`` JSON dump.
-          - ``signal_brief``: ``SignalIntelligenceBriefV1`` JSON dump or ``None``.
+          - ``signal_briefs``: map of asset class → ``SignalIntelligenceBriefV1``
+            JSON dump (one per allowed category), or absent.
           - ``exclude_asset_classes``: list of str or ``None``.
           - ``directives``: list of convergence-directive strings.
           - ``design_attempt``: int re-entry index (0-based).
@@ -1107,9 +1133,17 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         )
     else:
         _batch_cache_cm = contextlib.nullcontext()
-    signal_brief = (
-        SignalIntelligenceBriefV1(**params["signal_brief"]) if params.get("signal_brief") else None
-    )
+    # One brief per asset category, keyed by canonical class name. A cycle
+    # input from a workflow-history replay predating the per-category briefs
+    # carries the old single-brief ``signal_brief`` key; there is no category
+    # to file it under, and filing it under the wrong one would feed a pinned
+    # attempt another category's evidence — so a legacy payload yields no
+    # briefs and the design prompt simply omits its signal section.
+    signal_briefs = {
+        asset_class: SignalIntelligenceBriefV1(**dump)
+        for asset_class, dump in (params.get("signal_briefs") or {}).items()
+        if dump
+    }
     regime_summary = (
         RegimeSummary(**params["regime_summary"]) if params.get("regime_summary") else None
     )
@@ -1430,7 +1464,7 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             record = orch._run_design_attempt(
                 prior_records=prior_records,
                 config=config,
-                signal_brief=signal_brief,
+                signal_briefs=signal_briefs,
                 emit=_design_attempt_progress_checkpoint,
                 exclude_asset_classes=params.get("exclude_asset_classes"),
                 directives=list(params.get("directives") or []),
@@ -1517,30 +1551,72 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+_SIGNAL_BRIEF_HEARTBEAT_INTERVAL_S = 20.0
+"""How often the background heartbeat beats during signal-brief synthesis.
+
+``_compute_signal_brief_snapshot`` makes up to ``len(PROMPT_ASSET_CLASSES)``
+LLM calls serially, one per allowed category with a prior record, each
+individually bounded by the configured LLM timeout (default 60 minutes) —
+their aggregate duration isn't itself bounded by a fixed ceiling. Rather than
+guess a ``start_to_close_timeout`` large enough for every combination of
+per-call latencies, this activity heartbeats like ``run_design_attempt_activity``
+does: the workflow's ``heartbeat_timeout`` (``workflows.py``'s
+``_SIGNAL_BRIEF_HEARTBEAT_TIMEOUT``) catches genuine staleness quickly, while
+``start_to_close_timeout`` only needs to bound the true worst case generously.
+"""
+
+
 @activity.defn(name="strategy_lab_compute_signal_brief")
-def compute_signal_brief_activity(benchmark_symbol: str) -> Dict[str, Any]:
-    """Build the per-batch signal brief over all currently-persisted prior records.
+def compute_signal_brief_activity(params: Any) -> Dict[str, Any]:
+    """Build one per-batch signal brief per allowed asset category.
 
     Preconditions:
-        ``benchmark_symbol`` is the run's benchmark ticker.
+        ``params`` carries ``benchmark_symbol`` (the run's benchmark ticker)
+        and optionally ``exclude_asset_classes`` (the complement of the user's
+        ``allowed_asset_classes`` selection). A bare string is also accepted
+        for a workflow-history replay predating the params dict — typed
+        ``Any`` rather than ``Dict[str, Any]`` deliberately: Temporal's
+        payload converter uses the parameter's type hint to decode the
+        argument, and a ``Dict``-typed hint risks rejecting a bare-string
+        payload from an in-flight run recorded by a pre-deploy worker before
+        this function body's ``isinstance`` branch ever runs.
     Postconditions:
-        Returns ``{"signal_brief": <SignalIntelligenceBriefV1 JSON dump or None>,
-        "signal_brief_storage": <dict or None>}`` — the JSON-shaped pair the batch
-        workflow threads into each cycle's ``signal_brief`` input and into
-        ``finalize_cycle_record_activity``. Delegates to
+        Returns ``{"signal_briefs": {<asset_class>: <SignalIntelligenceBriefV1
+        JSON dump>, ...}, "signal_brief_storage": <dict>}`` — the JSON-shaped
+        pair the batch workflow threads into each cycle's ``signal_briefs``
+        input and into ``finalize_cycle_record_activity``. Only *allowed*
+        categories are computed, so a restricted run never pays for — or
+        produces — a brief for a category the user excluded. Delegates to
         ``investment_team.strategy_lab.orchestrator_api._compute_signal_brief_snapshot``
         (façade over ``api.main``; fail-open — never raises; returns a
         skipped/degraded marker instead), so this activity likewise only raises
-        ``ApplicationError`` on a genuinely unexpected exception.
+        ``ApplicationError`` on a genuinely unexpected exception. Heartbeats every
+        ``_SIGNAL_BRIEF_HEARTBEAT_INTERVAL_S`` seconds for the duration of the
+        delegate call — see that constant's docstring.
     """
     from investment_team.strategy_lab.orchestrator_api import _compute_signal_brief_snapshot
 
     try:
-        brief, storage = _compute_signal_brief_snapshot(benchmark_symbol)
+        if isinstance(params, str):
+            benchmark_symbol, exclude_asset_classes = params, None
+        else:
+            benchmark_symbol = params["benchmark_symbol"]
+            exclude_asset_classes = params.get("exclude_asset_classes")
+        with BackgroundHeartbeat(
+            activity.heartbeat,
+            _SIGNAL_BRIEF_HEARTBEAT_INTERVAL_S,
+            copy_context=True,
+            name="strategy-lab-signal-brief-hb",
+        ):
+            briefs, storage = _compute_signal_brief_snapshot(
+                benchmark_symbol, exclude_asset_classes
+            )
     except Exception as exc:  # noqa: BLE001
         raise _map_exception_to_application_error(exc) from exc
     return {
-        "signal_brief": brief.model_dump(mode="json") if brief is not None else None,
+        "signal_briefs": {
+            asset_class: brief.model_dump(mode="json") for asset_class, brief in briefs.items()
+        },
         "signal_brief_storage": storage,
     }
 

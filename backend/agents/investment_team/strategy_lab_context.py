@@ -6,10 +6,17 @@ Used by strategy ideation and signal intelligence to avoid circular imports.
 
 from __future__ import annotations
 
-from typing import Iterable, List, Optional
+import logging
+import random
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
 from .models import StrategyLabRecord
 from .strategy_lab.spec_dsl import AllOf, AnyOf, Predicate, iter_leaf_predicates
+
+if TYPE_CHECKING:  # pragma: no cover - typing-only, avoids a circular import
+    from .signal_intelligence_models import SignalIntelligenceBriefV1
+
+logger = logging.getLogger(__name__)
 
 _CANONICAL_ASSET_CLASSES: tuple[str, ...] = (
     "stocks",
@@ -221,6 +228,192 @@ def excluded_for_allowed(allowed: Optional[Iterable[str]]) -> List[str]:
         return []
     allowed_set = set(allowed)
     return [c for c in PROMPT_ASSET_CLASSES if c not in allowed_set]
+
+
+def _canonical_subset(raw: Optional[List[str]]) -> set[str]:
+    """Normalize a class-name list to the canonical labels it actually names.
+
+    Shared by :func:`allowed_asset_classes` (for ``exclude_asset_classes``)
+    and :func:`select_asset_category` (for its ``avoid`` bias), so an alias
+    (``equity`` / ``fx``) is honored rather than silently matching nothing
+    against :data:`PROMPT_ASSET_CLASSES`.
+
+    Preconditions:
+      - ``raw`` is ``None`` or a list of scalar values.
+    Postconditions:
+      - Returns the set of canonical labels named by ``raw``; entries that
+        resolve to no known class are dropped.
+    """
+    out: set[str] = set()
+    for item in raw or ():
+        try:
+            out.add(normalize_asset_class_strict(item))
+        except ValueError:
+            continue
+    return out
+
+
+def select_signal_brief(
+    briefs: Optional[Dict[str, "SignalIntelligenceBriefV1"]],
+    asset_class: str,
+) -> Optional["SignalIntelligenceBriefV1"]:
+    """Pick the signal brief synthesized for ``asset_class``.
+
+    The per-batch signal expert produces one brief per allowed category, each
+    built from that category's records alone. A design attempt pinned to a
+    category takes its own brief and no other — a brief is injected verbatim
+    into the design prompt, so handing over another category's would reintroduce
+    exactly the cross-category evidence the pin exists to keep out.
+
+    Preconditions:
+        * ``briefs`` maps canonical asset-class labels to briefs, or is
+          ``None`` / empty when no brief could be produced.
+        * ``asset_class`` is the canonical label this attempt is pinned to.
+
+    Postconditions:
+        * Returns the brief for ``asset_class``, or ``None`` when there is
+          none. ``None`` is a supported outcome the design agent handles by
+          omitting the signal section — never a substitute brief from a
+          different category.
+    """
+    if not briefs:
+        return None
+    return briefs.get(asset_class)
+
+
+def allowed_asset_classes(exclude_asset_classes: Optional[List[str]]) -> frozenset[str]:
+    """Recover the run's user-level allowed-category set from its exclusions.
+
+    The complement of ``exclude_asset_classes`` within
+    :data:`PROMPT_ASSET_CLASSES` — the exact inverse of
+    :func:`excluded_for_allowed`, so this reconstructs the user's original
+    ``allowed_asset_classes`` selection without needing it threaded through
+    separately. Entries are normalized through
+    :func:`normalize_asset_class_strict`, so an alias (``equity`` / ``fx``)
+    excludes the canonical class it names rather than silently matching
+    nothing and leaving that class selectable.
+
+    Single source of truth for this computation, shared by
+    :func:`select_asset_category` (which further narrows the result to make
+    one random pick) and any other caller that needs the same run-level
+    complement directly — e.g. constraining symbol-based class inference to
+    categories the user actually selected, rather than the narrower
+    per-attempt pin.
+
+    Preconditions:
+      - ``exclude_asset_classes`` is ``None``/empty (unrestricted run — every
+        category allowed) or a list of canonical class labels or known
+        aliases naming the categories the user did NOT select. Entries that
+        resolve to no known class are ignored.
+
+    Postconditions:
+      - Returns the complement within :data:`PROMPT_ASSET_CLASSES`. Never
+        empty: an exclusion covering every class degrades to the full menu
+        rather than returning nothing, matching :func:`asset_class_mix_hint`'s
+        defensive handling of the same internal-caller misuse — the API
+        boundary is what actually enforces a non-empty
+        ``allowed_asset_classes`` selection.
+    """
+    excluded_set = _canonical_subset(exclude_asset_classes)
+    allowed = frozenset(c for c in PROMPT_ASSET_CLASSES if c not in excluded_set)
+    if not allowed:
+        logger.warning(
+            "allowed_asset_classes: exclude_asset_classes=%s covers every category; "
+            "falling back to the full menu instead of failing the cycle.",
+            sorted(excluded_set),
+        )
+        return frozenset(PROMPT_ASSET_CLASSES)
+    return allowed
+
+
+def select_asset_category(
+    exclude_asset_classes: Optional[List[str]],
+    *,
+    avoid: Optional[List[str]] = None,
+    rng: Optional[random.Random] = None,
+) -> str:
+    """Randomly pick exactly one asset category for a design attempt.
+
+    Each design attempt must commit to a single asset category rather than
+    leaving the designer free to mix strategies across every category the
+    user allowed. The allowed set is :func:`allowed_asset_classes`.
+
+    ``avoid`` (optional) names classes to steer away from when possible —
+    typically the convergence tracker's over-represented set
+    (``ConvergenceTracker.get_diversity_avoid_classes``), so a pin doesn't
+    land on the very class its own diversity directive tells the designer to
+    stop using. The bias is soft: when ``allowed - avoid`` is non-empty, the
+    choice is made from that narrowed set; otherwise (every allowed class is
+    also in ``avoid``, e.g. a single-category restriction) it falls back to
+    the full ``allowed`` set — the pin always wins over the bias.
+
+    Both list parameters are typed ``List[str]`` (not ``Iterable[str]``)
+    deliberately, matching :func:`asset_class_mix_hint`: ``str`` is itself
+    iterable, so an ``Iterable[str]`` annotation would silently accept a bare
+    string and iterate its characters — excluding nothing and inverting the
+    caller's intent.
+
+    Preconditions:
+      - ``exclude_asset_classes`` / ``avoid`` are ``None`` or lists of
+        canonical class labels or known aliases. Entries that resolve to no
+        known class are ignored.
+      - ``rng`` is ``None`` (uses the global :mod:`random` module) or a
+        ``random.Random`` instance to make the selection deterministic, e.g.
+        for a seeded test.
+
+    Postconditions:
+      - Returns one class from :data:`PROMPT_ASSET_CLASSES`, never one named
+        (directly or by alias) in ``exclude_asset_classes`` — unless the
+        exclusion covers every class, in which case it degrades to the full
+        menu rather than raising, matching :func:`asset_class_mix_hint`'s
+        defensive handling of the same internal-caller misuse.
+    """
+    allowed_set = allowed_asset_classes(exclude_asset_classes)
+    allowed = [c for c in PROMPT_ASSET_CLASSES if c in allowed_set]
+    chooser = rng or random
+    avoid_set = _canonical_subset(avoid)
+    if avoid_set:
+        preferred = [c for c in allowed if c not in avoid_set]
+        if preferred:
+            return chooser.choice(preferred)
+    return chooser.choice(allowed)
+
+
+def filter_records_by_asset_class(
+    records: List[StrategyLabRecord], asset_class: str
+) -> List[StrategyLabRecord]:
+    """Restrict prior records to genuine, executed evidence for one asset category.
+
+    Used to scope the design agent's "prior strategy results" context, and
+    the per-category signal brief, to the category selected for the current
+    attempt (see :func:`select_asset_category`), so neither ever reasons
+    over hypotheses, rationale, or performance data from unrelated asset
+    categories.
+
+    Non-executed short-circuits (see :data:`_NON_EXECUTED_BACKTEST_STATUSES`)
+    are excluded outright rather than trusted by their persisted
+    ``strategy.asset_class``: a pre-backtest exit for a genuinely unsupported
+    class (e.g. ``bonds``) coerces that field to a schema-valid placeholder
+    (``stocks``) so the record can be persisted at all, while the hypothesis
+    it carries is not actually stocks evidence. Matching on the coerced label
+    would launder that placeholder into a later stocks attempt's prior-results
+    context or signal brief as if it were real stocks history — the exact
+    cross-category contamination category-scoping exists to prevent.
+
+    Preconditions:
+      - ``records`` is a list of ``StrategyLabRecord``; ``asset_class`` is a
+        canonical label (typically the output of :func:`select_asset_category`).
+
+    Postconditions:
+      - Returns the subset of ``records`` that are executed
+        (:func:`_is_executed_record`) and whose (normalized) strategy asset
+        class equals ``asset_class``, preserving input order.
+    """
+    return [
+        r
+        for r in records
+        if _is_executed_record(r) and normalize_asset_class(r.strategy.asset_class) == asset_class
+    ]
 
 
 def format_prior_results(records: List[StrategyLabRecord], *, max_records: int = 50) -> str:

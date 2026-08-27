@@ -75,6 +75,19 @@ from investment_team.strategy_lab.temporal.dto import (
 # temporalio sandbox's restricted re-import of this workflow module. This
 # fallback is used only if the config activity somehow omits the value.
 _MAX_DESIGN_REENTRIES_FALLBACK = 2
+# Mirrors llm_service.config.resolve_timeout's own default (3600s / 60min).
+# Used only as a wf_config.get(...) fallback for a workflow history replayed
+# from before resolve_workflow_config_activity started returning
+# "llm_timeout_s" — a fresh dispatch always gets the actually-resolved value.
+_DEFAULT_LLM_TIMEOUT_S_FALLBACK = 3600.0
+# Mirrors llm_service.clients.ollama._parse_retry_config's own default (10).
+# Same wf_config.get(...) fallback rationale as _DEFAULT_LLM_TIMEOUT_S_FALLBACK
+# — only for a workflow history replayed from before "llm_max_retries" existed.
+_DEFAULT_LLM_MAX_RETRIES_FALLBACK = 10
+# Mirrors llm_service.clients.ollama._parse_retry_config's own default (120s).
+# Same wf_config.get(...) fallback rationale as _DEFAULT_LLM_TIMEOUT_S_FALLBACK
+# — only for a workflow history replayed from before "llm_backoff_cap_s" existed.
+_DEFAULT_LLM_BACKOFF_CAP_S_FALLBACK = 120.0
 
 # Mirrors ``strategy_lab.run_state.DEFAULT_FENCING_GENERATION`` -- duplicated
 # rather than imported for the same reason as ``_MAX_DESIGN_REENTRIES_FALLBACK``
@@ -100,6 +113,107 @@ _ACTIVITY_TIMEOUT = timedelta(minutes=10)
 # ``STRATEGY_LAB_DESIGN_MAX_LLM_CALLS`` model round-trips plus backtests), so it
 # needs a far wider ceiling than a single LLM/gate/persist activity.
 _DESIGN_ATTEMPT_TIMEOUT = timedelta(hours=2)
+# compute_signal_brief_activity runs one LLM call per allowed asset category
+# with a prior record, serially (up to _SIGNAL_BRIEF_CATEGORY_COUNT -- see
+# PROMPT_ASSET_CLASSES), each individually bounded by the configured LLM
+# timeout (llm_service.config.resolve_timeout, operator-overridable via
+# LLM_TIMEOUT with no fixed upper bound) AND retried by the underlying Ollama
+# client up to its own configured transient-retry ceiling
+# (llm_service.clients.ollama._parse_retry_config, operator-overridable via
+# LLM_MAX_RETRIES, default 10) before that call gives up. Their aggregate
+# duration therefore has no fixed ceiling either -- a start_to_close_timeout
+# sized as a bare constant, or even scaled only by the per-call timeout,
+# could still be blown by an operator raising LLM_TIMEOUT or LLM_MAX_RETRIES,
+# retrying the whole activity (repeating already-completed paid calls) before
+# failing again -- including during a run of LEGITIMATE, still-succeeding
+# transient retries, which the per-activity heartbeat does not protect
+# against (heartbeats keep firing throughout a live retry sequence; only
+# start_to_close bounds how long Temporal lets the activity run in total).
+# start_to_close is therefore derived from the *actual resolved* per-call
+# timeout, the *actual resolved* transient-retry ceiling, AND the *actual
+# resolved* per-retry backoff cap (all threaded through wf_config via
+# resolve_workflow_config_activity, since a workflow may never read env vars
+# itself) times the allowed-category count, so it scales with whatever the
+# operator has configured instead of guessing a constant. See
+# _signal_brief_activity_timeout below. (Rate-limit and semantic retry
+# budgets -- smaller, edge-case-specific layers atop the dominant
+# transient-retry budget -- are not additionally accounted for; see that
+# function's docstring.)
+_SIGNAL_BRIEF_CATEGORY_COUNT = 5
+
+
+def _signal_brief_activity_timeout(
+    llm_timeout_s: float,
+    exclude_asset_classes: Optional[List[str]],
+    llm_max_retries: int,
+    llm_backoff_cap_s: float,
+) -> timedelta:
+    """Aggregate ``compute_signal_brief_activity`` start_to_close deadline.
+
+    Preconditions:
+        ``llm_timeout_s`` is the resolved per-call LLM timeout in seconds
+        (``wf_config["llm_timeout_s"]``, always > 0 --
+        ``llm_service.config.resolve_timeout`` never returns a non-positive
+        value). ``exclude_asset_classes`` is the run's excluded-category list
+        or ``None``. ``llm_max_retries`` is the resolved transient-retry
+        ceiling (``wf_config["llm_max_retries"]``, always >= 0 --
+        ``ollama._parse_retry_config`` clamps a negative override to 0) for
+        the Ollama client ``SignalIntelligenceExpert``'s calls actually go
+        through. ``llm_backoff_cap_s`` is that same client's per-retry
+        exponential backoff ceiling (``wf_config["llm_backoff_cap_s"]``,
+        always >= 0).
+    Postconditions:
+        Returns ``allowed_count * (llm_timeout_s * (llm_max_retries + 1) +
+        llm_max_retries * llm_backoff_cap_s)`` seconds, where
+        ``allowed_count`` is ``_SIGNAL_BRIEF_CATEGORY_COUNT -
+        len(set(exclude_asset_classes))`` clamped to at least 1 (an
+        all-excluded/malformed list still yields a positive deadline rather
+        than a degenerate zero one). ``llm_max_retries + 1`` is one call's
+        worst-case attempt count (the initial attempt plus every transient
+        retry, each potentially consuming the full per-call timeout) -- the
+        dominant contributor to one category's real worst-case latency,
+        reused directly from the client's own retry ceiling rather than a
+        hand-picked constant so a legitimately-retrying (not stalled) call
+        can't outlast this margin. ``llm_max_retries * llm_backoff_cap_s`` is
+        the worst-case *sleep* time between those attempts — the client
+        waits ``_exponential_retry_delay`` (base * 2^attempt, capped at
+        ``llm_backoff_cap_s``, plus a small jitter this deadline doesn't
+        additionally budget for) after each of up to ``llm_max_retries``
+        failures — without which the deadline would only cover attempts'
+        own durations and could still expire mid-backoff during a valid
+        retry sequence. Deliberately does not additionally scale for the
+        separate rate-limit or semantic retry budgets (``ollama.py``'s
+        ``max_total_attempts`` also sums those in) -- those are narrower,
+        transient-error-adjacent layers on top of the dominant transient-retry
+        budget already covered here, and folding every nested budget in
+        would make this deadline balloon far beyond a practical ceiling for
+        a diminishing return. Deduplicating ``exclude_asset_classes`` before
+        counting matters because an undersized ``allowed_count`` is the
+        dangerous direction here (it undersizes the very deadline this
+        helper exists to size correctly) — a duplicate-laden
+        ``exclude_asset_classes`` (e.g. a caller-side bug repeating an entry)
+        must not inflate the excluded count past the true number of distinct
+        categories excluded. Pure and deterministic — safe to call from
+        workflow code. Does not validate entries against the canonical class
+        set (that would require importing ``strategy_lab_context``, which
+        this sandboxed module avoids — see ``_MAX_DESIGN_REENTRIES_FALLBACK``
+        above); ``exclude_asset_classes`` is always constructed from the
+        validated ``excluded_for_allowed`` path at dispatch time
+        (``start_workflow.py``), never from unvalidated user input.
+    """
+    excluded = len(set(exclude_asset_classes)) if exclude_asset_classes else 0
+    allowed_count = max(1, _SIGNAL_BRIEF_CATEGORY_COUNT - excluded)
+    retries = max(0, llm_max_retries)
+    attempts_per_call = retries + 1
+    per_call_seconds = llm_timeout_s * attempts_per_call + retries * max(0.0, llm_backoff_cap_s)
+    return timedelta(seconds=allowed_count * per_call_seconds)
+
+
+# Server-enforced liveness deadline for compute_signal_brief_activity's
+# heartbeat. Sized generously relative to _SIGNAL_BRIEF_HEARTBEAT_INTERVAL_S
+# (activities.py) so a missed heartbeat window is a real liveness problem,
+# not a slow-but-healthy single LLM call.
+_SIGNAL_BRIEF_HEARTBEAT_TIMEOUT = timedelta(seconds=90)
 # Server-enforced liveness deadline for the design-attempt activity's
 # heartbeat (activities.py wraps the attempt in a fixed-interval
 # BackgroundHeartbeat, decoupled from ``emit`` checkpoint cadence -- see
@@ -146,7 +260,8 @@ async def _exec(
         activity expects, or ``None`` for a no-argument activity.
         ``heartbeat_timeout`` is ``None`` (the default -- no heartbeat
         deadline, matching every non-heartbeating activity) unless ``fn``
-        heartbeats itself (currently only ``run_design_attempt_activity``).
+        heartbeats itself (currently ``run_design_attempt_activity`` and
+        ``compute_signal_brief_activity``).
     Postconditions:
         Returns the activity's result, retried per ``_ACTIVITY_RETRY``.
     """
@@ -177,7 +292,9 @@ class StrategyLabCycleWorkflow:
     Preconditions:
         ``cycle_input`` (the sole ``run()`` argument) is a JSON-shaped dict:
         ``prior_records`` (list of ``StrategyLabRecord`` dumps), ``config``
-        (``BacktestConfig`` dump), ``signal_brief`` (dump or ``None``),
+        (``BacktestConfig`` dump), ``signal_briefs`` (asset-class → dump map,
+        optional — ``.get(...)``-guarded, so an absent key yields ``None`` and
+        every design attempt in the cycle sees no category-specific brief),
         ``exclude_asset_classes`` (list or ``None``),
         ``convergence_tracker_state`` (``dto`` wire dict — the batch-level
         tracker), and optionally ``workflow_config`` (a
@@ -221,7 +338,7 @@ class StrategyLabCycleWorkflow:
     async def run(self, cycle_input: Dict[str, Any]) -> Dict[str, Any]:
         prior_records = cycle_input["prior_records"]
         config_dict = cycle_input["config"]
-        signal_brief = cycle_input.get("signal_brief")
+        signal_briefs = cycle_input.get("signal_briefs")
         exclude_asset_classes = cycle_input.get("exclude_asset_classes")
         tracker_state = cycle_input.get("convergence_tracker_state") or {}
         run_id = cycle_input.get("run_id")
@@ -283,7 +400,7 @@ class StrategyLabCycleWorkflow:
                     "cycle_index": cycle_index,
                     "prior_records": prior_records,
                     "config": config_dict,
-                    "signal_brief": signal_brief,
+                    "signal_briefs": signal_briefs,
                     "exclude_asset_classes": exclude_asset_classes,
                     "directives": directives,
                     "design_attempt": design_attempt,
@@ -635,10 +752,22 @@ class StrategyLabBatchWorkflow:
             # ── Per-batch signal-brief refresh (batch N sees batches 1..N-1) ──
             brief = await _exec(
                 act.compute_signal_brief_activity,
-                params=benchmark_symbol,
-                timeout=_ACTIVITY_TIMEOUT,
+                params={
+                    "benchmark_symbol": benchmark_symbol,
+                    # Only the user's selected categories get a brief — an
+                    # excluded category's brief would be cost paid for
+                    # evidence no design attempt is allowed to use.
+                    "exclude_asset_classes": exclude_asset_classes,
+                },
+                timeout=_signal_brief_activity_timeout(
+                    wf_config.get("llm_timeout_s", _DEFAULT_LLM_TIMEOUT_S_FALLBACK),
+                    exclude_asset_classes,
+                    wf_config.get("llm_max_retries", _DEFAULT_LLM_MAX_RETRIES_FALLBACK),
+                    wf_config.get("llm_backoff_cap_s", _DEFAULT_LLM_BACKOFF_CAP_S_FALLBACK),
+                ),
+                heartbeat_timeout=_SIGNAL_BRIEF_HEARTBEAT_TIMEOUT,
             )
-            signal_brief = brief.get("signal_brief")
+            signal_briefs = brief.get("signal_briefs")
             signal_brief_storage = brief.get("signal_brief_storage")
 
             batch_start_cycle = batch_idx * batch_size
@@ -663,7 +792,7 @@ class StrategyLabBatchWorkflow:
                         "cycle_index": cycle_index,
                         "prior_records": prior_records,
                         "config": config_dict,
-                        "signal_brief": signal_brief,
+                        "signal_briefs": signal_briefs,
                         "exclude_asset_classes": exclude_asset_classes,
                         "convergence_tracker_state": _snapshot_tracker_wire(primary_tracker_state),
                         "workflow_config": wf_config,
