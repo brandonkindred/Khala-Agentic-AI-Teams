@@ -1298,6 +1298,22 @@ def test_classify_symbol_returns_none_for_ambiguous_or_unknown() -> None:
     assert classify_symbol("USDUSD") is None
 
 
+def test_classify_symbol_honors_the_other_symbols_exemption_in_crypto_suffixed_form() -> None:
+    """A cross-asset ETF reaching classify_symbol with a raw crypto-quote
+    suffix (e.g. "GLD-USD" instead of the bare "GLD") must still hit the
+    OTHER_SYMBOLS exemption -- the -USD/-USDT/-USDC suffix heuristic below it
+    would otherwise misclassify it as crypto, contradicting the documented
+    "cross-asset ETFs are never classified" guarantee."""
+    from investment_team.symbols import classify_symbol
+
+    assert classify_symbol("GLD-USD") is None
+    assert classify_symbol("QQQ-USDT") is None
+    assert classify_symbol("TLT-USDC") is None
+    # A genuine crypto ticker with the same suffixes is still classified.
+    assert classify_symbol("BTC-USD") == "crypto"
+    assert classify_symbol("DOGE-USDT") == "crypto"
+
+
 def test_find_offcategory_symbols_flags_only_unambiguous_mismatches() -> None:
     """Shared by readiness Rule 11 and mechanical_repair -- must exclude
     ambiguous/cross-asset ETFs and unrecognized tickers the same way

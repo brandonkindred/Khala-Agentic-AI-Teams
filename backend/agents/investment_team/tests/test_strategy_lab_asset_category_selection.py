@@ -19,9 +19,12 @@ from __future__ import annotations
 import random
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import pytest
+
+if TYPE_CHECKING:
+    from investment_team.strategy_lab.market_regime import RegimeEntry, RegimeSummary
 
 from investment_team.models import (
     BacktestConfig,
@@ -1012,7 +1015,7 @@ def test_select_signal_brief_handles_empty_and_none() -> None:
     assert select_signal_brief({}, "stocks") is None
 
 
-def _regime_entry(asset_class: str) -> Any:
+def _regime_entry(asset_class: str) -> RegimeEntry:
     from investment_team.strategy_lab.market_regime import RegimeEntry
 
     return RegimeEntry(
@@ -1030,7 +1033,7 @@ def _regime_entry(asset_class: str) -> Any:
     )
 
 
-def _regime_summary(*asset_classes: str) -> Any:
+def _regime_summary(*asset_classes: str) -> RegimeSummary:
     from investment_team.strategy_lab.market_regime import RegimeSummary
 
     return RegimeSummary(

@@ -225,6 +225,14 @@ def classify_symbol(symbol: str) -> Optional[str]:
 
     if sym in OTHER_SYMBOLS:
         return None
+    # A cross-asset ETF can also reach here in its crypto-quote-suffixed form
+    # (e.g. "GLD-USD") if a caller passes a raw, non-canonical ticker instead
+    # of the bare alias -- strip the same three quote suffixes the crypto
+    # heuristic below matches on and re-check OTHER_SYMBOLS before falling
+    # through to that heuristic, so the ETF exemption holds for both forms.
+    for _suffix in ("-USD", "-USDT", "-USDC"):
+        if sym.endswith(_suffix) and sym[: -len(_suffix)] in OTHER_SYMBOLS:
+            return None
 
     matched: list[str] = []
     if sym in STOCK_SYMBOLS:

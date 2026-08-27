@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 # designer's prior-results context to a single category.
 ASSET_CLASS_ONLY_STEERING_PHRASE = "You MUST choose a DIFFERENT asset class"
 
+# Share of a recent window one asset class must exceed to count as
+# "over-represented" for diversity steering (see _over_represented_classes).
+OVER_REPRESENTATION_THRESHOLD = 0.4
+
 
 def is_asset_class_steering_directive(directive: str) -> bool:
     """True when ``directive`` contains the asset-class-only steering phrase.
@@ -186,13 +190,13 @@ class ConvergenceTracker:
         Postconditions:
           - Returns an empty set when fewer than 3 entries have been recorded
             across the *full* history (not just ``recent``), or when no class
-            exceeds the 40% share of ``recent``.
+            exceeds ``OVER_REPRESENTATION_THRESHOLD``'s share of ``recent``.
         """
         if len(self._asset_class_history) < 3:
             return set()
         counts = Counter(recent)
         total = len(recent)
-        return {ac for ac, c in counts.items() if c / total > 0.4}
+        return {ac for ac, c in counts.items() if c / total > OVER_REPRESENTATION_THRESHOLD}
 
     def get_diversity_avoid_classes(self, tail: int = 10) -> Set[str]:
         """Return the asset classes ``get_diversity_directive`` would tell the

@@ -86,9 +86,13 @@ class MarketLabContext(BaseModel):
             unless ``asset_class == "forex"`` and ``crypto_snapshot`` cleared
             unless ``asset_class == "crypto"``; ``sources_used`` and
             ``degraded_reason`` have the corresponding category-specific
-            entries removed the same way (``degraded`` is recomputed from
-            what remains). Returns ``self`` verbatim (no copy) when
-            ``asset_class`` is ``None``, or when nothing needed clearing.
+            entries removed the same way. ``degraded`` is recomputed from
+            what remains only when a ``degraded_reason`` was present to
+            recompute it from — a ``degraded=True``/``degraded_reason=None``
+            context (degraded for a reason this method doesn't track) is left
+            unchanged rather than guessed at. Returns ``self`` verbatim (no
+            copy) when ``asset_class`` is ``None``, or when nothing needed
+            clearing.
         """
         if asset_class is None:
             return self
