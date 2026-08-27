@@ -1,6 +1,7 @@
 """Tests for the checkpoint/resume-state model family in
 ``strategy_lab.checkpoints``: construction, immutability, serialization
-round-trip, hash wiring, precondition validation, and stage ordering.
+round-trip, hash wiring, precondition validation, pinned-stage enforcement,
+and stage ordering.
 
 This is pure data-model coverage — nothing here exercises capture points or
 consumption, since neither exists yet (see the module docstring in
@@ -149,11 +150,14 @@ def test_synthesis_checkpoint_construction() -> None:
         **_identity(),
         spec_hash=phases.hash_spec(spec),
         code_hash=phases.hash_code(code),
+        spec=spec,
+        rationale="because",
         code=code,
         code_history=[_code_revision()],
     )
     assert cp.stage == PipelineStage.SYNTHESIS
     assert cp.code == code
+    assert cp.spec == spec
 
 
 def test_refinement_checkpoint_construction() -> None:
@@ -163,12 +167,15 @@ def test_refinement_checkpoint_construction() -> None:
         **_identity(),
         spec_hash=phases.hash_spec(spec),
         code_hash=phases.hash_code(code),
+        spec=spec,
+        rationale="because",
         code=code,
         code_history=[_code_revision()],
         refinement_rounds_completed=1,
     )
     assert cp.stage == PipelineStage.REFINEMENT
     assert cp.refinement_rounds_completed == 1
+    assert cp.spec == spec
 
 
 def test_alignment_checkpoint_construction() -> None:
@@ -178,6 +185,8 @@ def test_alignment_checkpoint_construction() -> None:
         **_identity(),
         spec_hash=phases.hash_spec(spec),
         code_hash=phases.hash_code(code),
+        spec=spec,
+        rationale="because",
         code=code,
         alignment_rounds_completed=3,
         gate_timeline=[_gate_event()],
@@ -185,53 +194,103 @@ def test_alignment_checkpoint_construction() -> None:
     assert cp.stage == PipelineStage.ALIGNMENT
     assert cp.alignment_rounds_completed == 3
     assert len(cp.gate_timeline) == 1
+    assert cp.spec == spec
 
 
 # ---------------------------------------------------------------------------
-# Shared per-subclass builders (reused by both the immutability and the
-# serialization round-trip parametrizations below, one entry per stage).
+# Shared per-subclass builders (reused by the immutability, serialization
+# round-trip, and pinned-stage parametrizations below, one entry per stage).
+# Each builder captures a single ``spec``/``code`` value and reuses it for
+# both the hash and the payload, rather than constructing a fresh one for
+# each — so a hash/payload mismatch is impossible even if these helpers ever
+# gain non-deterministic fields.
 # ---------------------------------------------------------------------------
 
-_STAGE_CHECKPOINT_BUILDERS = [
-    lambda: DesignCheckpoint(
+
+def _build_design_checkpoint(**overrides: Any) -> DesignCheckpoint:
+    spec = _spec()
+    kwargs = dict(
         **_identity(),
-        spec_hash=phases.hash_spec(_spec()),
+        spec_hash=phases.hash_spec(spec),
         code_hash=_EMPTY_CODE_HASH,
-        spec=_spec(),
+        spec=spec,
         rationale="because",
-    ),
-    lambda: ReviewCheckpoint(
+    )
+    kwargs.update(overrides)
+    return DesignCheckpoint(**kwargs)
+
+
+def _build_review_checkpoint(**overrides: Any) -> ReviewCheckpoint:
+    spec = _spec()
+    kwargs = dict(
         **_identity(),
-        spec_hash=phases.hash_spec(_spec()),
+        spec_hash=phases.hash_spec(spec),
         code_hash=_EMPTY_CODE_HASH,
-        spec=_spec(),
+        spec=spec,
         rationale="because",
         spec_history=[_spec_revision()],
         review_rounds_completed=1,
-    ),
-    lambda: SynthesisCheckpoint(
+    )
+    kwargs.update(overrides)
+    return ReviewCheckpoint(**kwargs)
+
+
+def _build_synthesis_checkpoint(**overrides: Any) -> SynthesisCheckpoint:
+    spec = _spec()
+    code = "code"
+    kwargs = dict(
         **_identity(),
-        spec_hash=phases.hash_spec(_spec()),
-        code_hash=phases.hash_code("code"),
-        code="code",
+        spec_hash=phases.hash_spec(spec),
+        code_hash=phases.hash_code(code),
+        spec=spec,
+        rationale="because",
+        code=code,
         code_history=[_code_revision()],
-    ),
-    lambda: RefinementCheckpoint(
+    )
+    kwargs.update(overrides)
+    return SynthesisCheckpoint(**kwargs)
+
+
+def _build_refinement_checkpoint(**overrides: Any) -> RefinementCheckpoint:
+    spec = _spec()
+    code = "code"
+    kwargs = dict(
         **_identity(),
-        spec_hash=phases.hash_spec(_spec()),
-        code_hash=phases.hash_code("code"),
-        code="code",
+        spec_hash=phases.hash_spec(spec),
+        code_hash=phases.hash_code(code),
+        spec=spec,
+        rationale="because",
+        code=code,
         code_history=[_code_revision()],
         refinement_rounds_completed=1,
-    ),
-    lambda: AlignmentCheckpoint(
+    )
+    kwargs.update(overrides)
+    return RefinementCheckpoint(**kwargs)
+
+
+def _build_alignment_checkpoint(**overrides: Any) -> AlignmentCheckpoint:
+    spec = _spec()
+    code = "code"
+    kwargs = dict(
         **_identity(),
-        spec_hash=phases.hash_spec(_spec()),
-        code_hash=phases.hash_code("code"),
-        code="code",
+        spec_hash=phases.hash_spec(spec),
+        code_hash=phases.hash_code(code),
+        spec=spec,
+        rationale="because",
+        code=code,
         alignment_rounds_completed=1,
         gate_timeline=[_gate_event()],
-    ),
+    )
+    kwargs.update(overrides)
+    return AlignmentCheckpoint(**kwargs)
+
+
+_STAGE_CHECKPOINT_BUILDERS = [
+    _build_design_checkpoint,
+    _build_review_checkpoint,
+    _build_synthesis_checkpoint,
+    _build_refinement_checkpoint,
+    _build_alignment_checkpoint,
 ]
 _STAGE_CHECKPOINT_IDS = ["design", "review", "synthesis", "refinement", "alignment"]
 
@@ -243,12 +302,43 @@ _STAGE_CHECKPOINT_IDS = ["design", "review", "synthesis", "refinement", "alignme
 
 @pytest.mark.parametrize("build", _STAGE_CHECKPOINT_BUILDERS, ids=_STAGE_CHECKPOINT_IDS)
 def test_checkpoint_is_frozen(build) -> None:
-    """Every stage subclass is frozen, not just ``DesignCheckpoint``: attempting
-    to set any field — including one common to all subclasses (``stage``) —
-    raises on every one of them."""
+    """Every stage subclass is frozen: assigning the common ``stage`` field
+    raises a ``ValidationError`` on each subclass (Pydantic's ``frozen=True``
+    rejects rebinding any field, ``stage`` is just the one exercised here)."""
     cp = build()
     with pytest.raises(ValidationError):
         cp.stage = cp.stage
+
+
+# ---------------------------------------------------------------------------
+# Pinned-stage enforcement
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "build,mismatched_stage",
+    [
+        (_build_design_checkpoint, PipelineStage.REVIEW),
+        (_build_review_checkpoint, PipelineStage.DESIGN),
+        (_build_synthesis_checkpoint, PipelineStage.ALIGNMENT),
+        (_build_refinement_checkpoint, PipelineStage.SYNTHESIS),
+        (_build_alignment_checkpoint, PipelineStage.REFINEMENT),
+    ],
+    ids=_STAGE_CHECKPOINT_IDS,
+)
+def test_mismatched_stage_rejected(build, mismatched_stage) -> None:
+    with pytest.raises(ValidationError):
+        build(stage=mismatched_stage)
+
+
+def test_parse_checkpoint_rejects_stage_mismatched_payload() -> None:
+    """A payload dispatched to ``SynthesisCheckpoint`` by its ``"stage"`` key
+    but carrying a mismatched ``stage`` value inside itself is impossible to
+    construct — the outer dispatch key and the inner field must agree."""
+    raw = _build_synthesis_checkpoint().model_dump(mode="json")
+    raw["stage"] = "alignment"
+    with pytest.raises(ValidationError):
+        parse_checkpoint(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -266,13 +356,7 @@ def test_checkpoint_serialization_round_trip(build) -> None:
 
 
 def test_parse_checkpoint_dispatches_by_stage_field() -> None:
-    raw = {
-        **_identity(),
-        "stage": "synthesis",
-        "spec_hash": phases.hash_spec(_spec()),
-        "code_hash": phases.hash_code("x"),
-        "code": "x",
-    }
+    raw = _build_synthesis_checkpoint().model_dump(mode="json")
     restored = parse_checkpoint(raw)
     assert isinstance(restored, SynthesisCheckpoint)
 
@@ -283,40 +367,19 @@ def test_parse_checkpoint_dispatches_by_stage_field() -> None:
 
 
 def test_spec_hash_matches_phases_hash_spec() -> None:
-    spec = _spec()
-    cp = DesignCheckpoint(
-        **_identity(),
-        spec_hash=phases.hash_spec(spec),
-        code_hash=_EMPTY_CODE_HASH,
-        spec=spec,
-        rationale="because",
-    )
+    cp = _build_design_checkpoint()
     assert cp.spec_hash == phases.hash_spec(cp.spec)
 
 
 def test_code_hash_matches_phases_hash_code() -> None:
-    code = "def run(): return 42"
-    spec = _spec()
-    cp = SynthesisCheckpoint(
-        **_identity(),
-        spec_hash=phases.hash_spec(spec),
-        code_hash=phases.hash_code(code),
-        code=code,
-    )
+    cp = _build_synthesis_checkpoint()
     assert cp.code_hash == phases.hash_code(cp.code)
 
 
 def test_code_hash_before_synthesis_is_empty_string_digest() -> None:
     """A design-stage checkpoint (no code yet) carries the empty-string
     SHA-256, matching ``phases.PhaseTransition``'s pre-synthesis convention."""
-    spec = _spec()
-    cp = DesignCheckpoint(
-        **_identity(),
-        spec_hash=phases.hash_spec(spec),
-        code_hash=phases.hash_code(None),
-        spec=spec,
-        rationale="because",
-    )
+    cp = _build_design_checkpoint(code_hash=phases.hash_code(None))
     assert cp.code_hash == _EMPTY_CODE_HASH
 
 
@@ -326,105 +389,50 @@ def test_code_hash_before_synthesis_is_empty_string_digest() -> None:
 
 
 def test_non_positive_generation_rejected() -> None:
-    spec = _spec()
     with pytest.raises(ValidationError):
-        DesignCheckpoint(
-            **_identity(generation=0),
-            spec_hash=phases.hash_spec(spec),
-            code_hash=_EMPTY_CODE_HASH,
-            spec=spec,
-            rationale="because",
-        )
+        _build_design_checkpoint(**_identity(generation=0))
 
 
 def test_negative_design_attempt_rejected() -> None:
-    spec = _spec()
     with pytest.raises(ValidationError):
-        DesignCheckpoint(
-            **_identity(design_attempt=-1),
-            spec_hash=phases.hash_spec(spec),
-            code_hash=_EMPTY_CODE_HASH,
-            spec=spec,
-            rationale="because",
-        )
+        _build_design_checkpoint(**_identity(design_attempt=-1))
 
 
 def test_empty_cycle_scope_rejected() -> None:
-    spec = _spec()
     with pytest.raises(ValidationError):
-        DesignCheckpoint(
-            **_identity(cycle_scope=""),
-            spec_hash=phases.hash_spec(spec),
-            code_hash=_EMPTY_CODE_HASH,
-            spec=spec,
-            rationale="because",
-        )
+        _build_design_checkpoint(**_identity(cycle_scope=""))
 
 
 def test_malformed_spec_hash_rejected() -> None:
-    spec = _spec()
     with pytest.raises(ValidationError):
-        DesignCheckpoint(
-            **_identity(),
-            spec_hash="too-short",
-            code_hash=_EMPTY_CODE_HASH,
-            spec=spec,
-            rationale="because",
-        )
+        _build_design_checkpoint(spec_hash="too-short")
 
 
 def test_malformed_code_hash_rejected() -> None:
-    spec = _spec()
     with pytest.raises(ValidationError):
-        DesignCheckpoint(
-            **_identity(),
-            spec_hash=phases.hash_spec(spec),
-            code_hash="too-short",
-            spec=spec,
-            rationale="because",
-        )
+        _build_design_checkpoint(code_hash="too-short")
 
 
 @pytest.mark.parametrize(
-    "build_kwargs",
+    "build,field_name",
     [
-        lambda spec, rounds: dict(
-            cls=ReviewCheckpoint,
-            spec_hash=phases.hash_spec(spec),
-            code_hash=_EMPTY_CODE_HASH,
-            spec=spec,
-            rationale="because",
-            review_rounds_completed=rounds,
-        ),
-        lambda spec, rounds: dict(
-            cls=RefinementCheckpoint,
-            spec_hash=phases.hash_spec(spec),
-            code_hash=phases.hash_code("code"),
-            code="code",
-            refinement_rounds_completed=rounds,
-        ),
-        lambda spec, rounds: dict(
-            cls=AlignmentCheckpoint,
-            spec_hash=phases.hash_spec(spec),
-            code_hash=phases.hash_code("code"),
-            code="code",
-            alignment_rounds_completed=rounds,
-        ),
+        (_build_review_checkpoint, "review_rounds_completed"),
+        (_build_refinement_checkpoint, "refinement_rounds_completed"),
+        (_build_alignment_checkpoint, "alignment_rounds_completed"),
     ],
     ids=["review", "refinement", "alignment"],
 )
-def test_negative_rounds_completed_rejected(build_kwargs) -> None:
-    spec = _spec()
-    kwargs = build_kwargs(spec, -1)
-    checkpoint_cls = kwargs.pop("cls")
+def test_negative_rounds_completed_rejected(build, field_name) -> None:
     with pytest.raises(ValidationError):
-        checkpoint_cls(**_identity(), **kwargs)
+        build(**{field_name: -1})
 
 
 def test_pipeline_checkpoint_base_class_still_constructible_directly() -> None:
     """The base class isn't meant to be used directly, but nothing prevents
     it mechanically (Pydantic has no abstract-model enforcement) — document
-    that via a direct construction, matching its own docstring's caveat."""
+    that via a direct construction, matching its own docstring's caveat. Its
+    unset ``_pinned_stage`` (``None``) also means the pinned-stage validator
+    is a no-op here, unlike every concrete subclass."""
     spec = _spec()
     cp = PipelineCheckpoint(
         **_identity(),

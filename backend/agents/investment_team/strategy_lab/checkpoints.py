@@ -41,9 +41,9 @@ cleanly through both thread-mode (in-process Python objects) and Temporal-mode
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..models import CodeRevision, GateEvent, SpecRevision, StrategySpec
 
@@ -102,8 +102,21 @@ class PipelineCheckpoint(BaseModel):
         ``SpecRevision``/``CodeRevision``/``GateEvent``.
 
     Postconditions:
-      - Instances are immutable (``frozen=True``) snapshots: a checkpoint
-        never changes after construction.
+      - Instances are immutable (``frozen=True``) snapshots: a checkpoint's
+        own fields can never be rebound after construction, and its list-typed
+        history/timeline fields are ``tuple``s (not ``list``s) so they can't
+        be appended to in place either. This is a shallow guarantee, the same
+        one every other frozen model in this codebase (``DesignAttemptCheckpoint``,
+        ``phases.PhaseTransition``) provides: a caller that reaches into a
+        nested, non-frozen field — ``design_context`` (a plain ``dict``) or
+        the nested ``StrategySpec``/``SpecRevision``/``CodeRevision``/
+        ``GateEvent`` payload objects, none of which are themselves frozen —
+        can still mutate their contents in place. Deep-freezing those would
+        mean changing models shared across the rest of the codebase, out of
+        scope for this additive module; callers that need the stronger
+        guarantee should treat a checkpoint's nested payload as read-only by
+        convention, as the codebase already does for `DesignAttemptCheckpoint`'s
+        identically-shaped ``design_context: Dict[str, Any]`` field.
 
     Invariants:
       - **Never cross-attempt.** A checkpoint captured while running
@@ -132,6 +145,8 @@ class PipelineCheckpoint(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    _pinned_stage: ClassVar[PipelineStage | None] = None
+
     run_id: str
     cycle_scope: str = Field(..., min_length=1)
     design_attempt: int = Field(..., ge=0)
@@ -141,13 +156,32 @@ class PipelineCheckpoint(BaseModel):
     code_hash: str = Field(..., min_length=64, max_length=64)
     captured_at: str
 
+    @model_validator(mode="after")
+    def _enforce_pinned_stage(self) -> "PipelineCheckpoint":
+        """Reject a ``stage`` value other than the subclass's pinned one.
+
+        A subclass's ``stage`` field default only supplies a value when the
+        field is omitted — Pydantic does not otherwise restrict what's
+        accepted. Without this validator, ``DesignCheckpoint(stage="review",
+        ...)`` or ``DesignCheckpoint.model_validate({"stage": "review", ...})``
+        would construct successfully despite the class's own documented
+        "``stage`` is always ``PipelineStage.DESIGN``" postcondition.
+        """
+        expected = self._pinned_stage
+        if expected is not None and self.stage != expected:
+            raise ValueError(f"{type(self).__name__} requires stage={expected.value!r}, got {self.stage.value!r}")
+        return self
+
 
 class DesignCheckpoint(PipelineCheckpoint):
     """Checkpoint at the design-stage boundary: a candidate spec, not yet reviewed.
 
     Postconditions:
-      - ``stage`` is always ``PipelineStage.DESIGN``.
+      - ``stage`` is always ``PipelineStage.DESIGN`` — enforced by
+        ``PipelineCheckpoint._enforce_pinned_stage``.
     """
+
+    _pinned_stage: ClassVar[PipelineStage] = PipelineStage.DESIGN
 
     stage: PipelineStage = PipelineStage.DESIGN
     spec: StrategySpec
@@ -159,59 +193,101 @@ class ReviewCheckpoint(PipelineCheckpoint):
     """Checkpoint at the review-stage boundary: a spec that has converged through review.
 
     Postconditions:
-      - ``stage`` is always ``PipelineStage.REVIEW``.
+      - ``stage`` is always ``PipelineStage.REVIEW`` — enforced by
+        ``PipelineCheckpoint._enforce_pinned_stage``.
       - ``spec_history`` records every design-phase spec revision leading to
         this converged spec, oldest first.
     """
+
+    _pinned_stage: ClassVar[PipelineStage] = PipelineStage.REVIEW
 
     stage: PipelineStage = PipelineStage.REVIEW
     spec: StrategySpec
     rationale: str
     design_context: dict[str, Any] = Field(default_factory=dict)
-    spec_history: list[SpecRevision] = Field(default_factory=list)
+    spec_history: tuple[SpecRevision, ...] = Field(default_factory=tuple)
     review_rounds_completed: int = Field(..., ge=0)
 
 
 class SynthesisCheckpoint(PipelineCheckpoint):
     """Checkpoint at the synthesis-stage boundary: strategy code has been generated.
 
+    ``spec``/``rationale``/``design_context`` are carried forward unchanged from
+    the review boundary: the spec is frozen post-review (ADR-012's own
+    documented invariant — see ``phases.PhaseTransition``), so this checkpoint
+    is self-sufficient to resume every stage from synthesis onward without
+    reaching back to an earlier checkpoint for the design-time artefacts later
+    stages (refinement, alignment) also need.
+
     Postconditions:
-      - ``stage`` is always ``PipelineStage.SYNTHESIS``.
+      - ``stage`` is always ``PipelineStage.SYNTHESIS`` — enforced by
+        ``PipelineCheckpoint._enforce_pinned_stage``.
       - ``code_history`` records every code revision produced so far, oldest first.
     """
 
+    _pinned_stage: ClassVar[PipelineStage] = PipelineStage.SYNTHESIS
+
     stage: PipelineStage = PipelineStage.SYNTHESIS
+    spec: StrategySpec
+    rationale: str
+    design_context: dict[str, Any] = Field(default_factory=dict)
     code: str
-    code_history: list[CodeRevision] = Field(default_factory=list)
+    code_history: tuple[CodeRevision, ...] = Field(default_factory=tuple)
 
 
 class RefinementCheckpoint(PipelineCheckpoint):
     """Checkpoint at the refinement-stage boundary: code has converged through refinement.
 
+    Carries ``spec``/``rationale``/``design_context`` forward from the design
+    boundary for the same reason ``SynthesisCheckpoint`` does — see that
+    class's docstring.
+
     Postconditions:
-      - ``stage`` is always ``PipelineStage.REFINEMENT``.
+      - ``stage`` is always ``PipelineStage.REFINEMENT`` — enforced by
+        ``PipelineCheckpoint._enforce_pinned_stage``.
       - ``code_history`` records every code revision produced so far, oldest first.
     """
 
+    _pinned_stage: ClassVar[PipelineStage] = PipelineStage.REFINEMENT
+
     stage: PipelineStage = PipelineStage.REFINEMENT
+    spec: StrategySpec
+    rationale: str
+    design_context: dict[str, Any] = Field(default_factory=dict)
     code: str
-    code_history: list[CodeRevision] = Field(default_factory=list)
+    code_history: tuple[CodeRevision, ...] = Field(default_factory=tuple)
     refinement_rounds_completed: int = Field(..., ge=0)
 
 
 class AlignmentCheckpoint(PipelineCheckpoint):
     """Checkpoint at the alignment-stage boundary: trade-alignment audit has converged.
 
+    Carries ``spec``/``rationale``/``design_context`` forward from the design
+    boundary for the same reason ``SynthesisCheckpoint`` does — see that
+    class's docstring. Trade-alignment-specific resume inputs (executed
+    trades, backtest metrics, market data, execution status) are deliberately
+    not modeled here: this issue is pure data-model design with no capture
+    points yet, and the precise shape of those inputs is a capture-time
+    decision better made by the sibling issue that actually wires
+    ``_run_trade_alignment_loop`` to a checkpoint, the same way ADR-012 left
+    its own storage-key shape to its implementation sub-issue.
+
     Postconditions:
-      - ``stage`` is always ``PipelineStage.ALIGNMENT``.
+      - ``stage`` is always ``PipelineStage.ALIGNMENT`` — enforced by
+        ``PipelineCheckpoint._enforce_pinned_stage``.
       - ``gate_timeline`` records every quality-gate evaluation during alignment
         so far, oldest first.
     """
 
+    _pinned_stage: ClassVar[PipelineStage] = PipelineStage.ALIGNMENT
+
     stage: PipelineStage = PipelineStage.ALIGNMENT
+    spec: StrategySpec
+    rationale: str
+    design_context: dict[str, Any] = Field(default_factory=dict)
     code: str
     alignment_rounds_completed: int = Field(..., ge=0)
-    gate_timeline: list[GateEvent] = Field(default_factory=list)
+    gate_timeline: tuple[GateEvent, ...] = Field(default_factory=tuple)
 
 
 AnyPipelineCheckpoint = (
@@ -240,6 +316,10 @@ def parse_checkpoint(raw: dict[str, Any]) -> AnyPipelineCheckpoint:
     Raises:
       - ``KeyError`` if ``raw`` has no ``"stage"`` key.
       - ``ValueError`` if ``raw["stage"]`` is not a valid ``PipelineStage`` member.
+      - ``pydantic.ValidationError`` if the payload fails validation for the
+        selected subclass (missing required fields, malformed hashes, a
+        ``stage`` value that doesn't match the dispatched subclass, etc.) —
+        the common failure mode for invalid persisted checkpoint data.
     """
     stage = PipelineStage(raw["stage"])
     checkpoint_cls = _CHECKPOINT_CLASSES_BY_STAGE[stage]
