@@ -85,8 +85,14 @@ def test_ghost_plan_to_text_renders_sections() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _patch_agent(monkeypatch, responses: List[Any]) -> Dict[str, int]:
-    """Stub the strands Agent class inside ghost_writer_agent.agent.
+def _patch_agent(monkeypatch, responses: List[Any], target_module: Any = None) -> Dict[str, int]:
+    """Stub the strands Agent class used by ghost_writer_agent.agent.
+
+    ``target_module`` defaults to ``ghost_writer_agent.agent`` (used by
+    ``_generate_follow_up``/``_compile_narrative``, which construct ``Agent``
+    directly) — pass ``agents.blogging.shared.json_retry`` for call sites that
+    go through ``run_json_gate`` (``_evaluate_sufficiency``/``_find_gaps_via_llm``),
+    since that helper constructs its ``Agent`` in its own module.
 
     Returns the shared call-count state dict (key ``"i"``) so callers can assert
     exactly how many of the configured ``responses`` were consumed. Calling the
@@ -95,7 +101,8 @@ def _patch_agent(monkeypatch, responses: List[Any]) -> Dict[str, int]:
     agent more times than a test expects fails loudly instead of masking the
     extra call behind a reused response.
     """
-    import agents.blogging.ghost_writer_agent.agent as gw_agent
+    if target_module is None:
+        import agents.blogging.ghost_writer_agent.agent as target_module
 
     state = {"i": 0}
 
@@ -114,13 +121,14 @@ def _patch_agent(monkeypatch, responses: List[Any]) -> Dict[str, int]:
                 raise r
             return r
 
-    monkeypatch.setattr(gw_agent, "Agent", _StubAgent)
+    monkeypatch.setattr(target_module, "Agent", _StubAgent)
     return state
 
 
 def test_ghost_evaluate_sufficiency_success(monkeypatch) -> None:
     """A single valid JSON response is parsed and returned as-is."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.shared import json_retry
 
     from llm_service import DummyLLMClient
 
@@ -136,6 +144,7 @@ def test_ghost_evaluate_sufficiency_success(monkeypatch) -> None:
                 }
             )
         ],
+        target_module=json_retry,
     )
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     out = agent._evaluate_sufficiency(_gap(), [{"role": "agent", "content": "Got a story?"}])
@@ -146,6 +155,7 @@ def test_ghost_evaluate_sufficiency_success(monkeypatch) -> None:
 def test_ghost_evaluate_sufficiency_parse_retry_succeeds(monkeypatch) -> None:
     """An unparseable first response is retried once; the second, valid response is used."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.shared import json_retry
 
     from llm_service import DummyLLMClient
 
@@ -157,6 +167,7 @@ def test_ghost_evaluate_sufficiency_parse_retry_succeeds(monkeypatch) -> None:
                 {"sufficient": True, "no_experience": False, "story_context": None, "missing": None}
             ),
         ],
+        target_module=json_retry,
     )
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     out = agent._evaluate_sufficiency(_gap(), [])
@@ -167,10 +178,11 @@ def test_ghost_evaluate_sufficiency_parse_retry_succeeds(monkeypatch) -> None:
 def test_ghost_evaluate_sufficiency_falls_back_default(monkeypatch) -> None:
     """Two unparseable responses exhaust the retry budget; the default sufficiency dict is returned."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.shared import json_retry
 
     from llm_service import DummyLLMClient
 
-    state = _patch_agent(monkeypatch, ["not-json-1", "not-json-2"])
+    state = _patch_agent(monkeypatch, ["not-json-1", "not-json-2"], target_module=json_retry)
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     out = agent._evaluate_sufficiency(_gap(), [])
     assert out == {
@@ -184,8 +196,8 @@ def test_ghost_evaluate_sufficiency_falls_back_default(monkeypatch) -> None:
 
 def test_ghost_evaluate_sufficiency_exception_then_default(monkeypatch) -> None:
     """A non-transient exception from the agent falls back to the default sufficiency dict."""
-    import agents.blogging.ghost_writer_agent.agent as gw_agent
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.shared import json_retry
 
     from llm_service import DummyLLMClient
 
@@ -196,7 +208,7 @@ def test_ghost_evaluate_sufficiency_exception_then_default(monkeypatch) -> None:
         def __call__(self, prompt):
             raise RuntimeError("LLM exploded")
 
-    monkeypatch.setattr(gw_agent, "Agent", _Boom)
+    monkeypatch.setattr(json_retry, "Agent", _Boom)
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     out = agent._evaluate_sufficiency(_gap(), [])
     assert out == {
@@ -210,8 +222,8 @@ def test_ghost_evaluate_sufficiency_exception_then_default(monkeypatch) -> None:
 def test_ghost_evaluate_sufficiency_rate_limit_falls_back_default(monkeypatch) -> None:
     """LLMRateLimitError from the evaluator is caught and the default not-sufficient dict is
     returned, matching the behavior for other transient failures."""
-    import agents.blogging.ghost_writer_agent.agent as gw_agent
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.shared import json_retry
 
     from llm_service import DummyLLMClient, LLMRateLimitError
 
@@ -222,7 +234,7 @@ def test_ghost_evaluate_sufficiency_rate_limit_falls_back_default(monkeypatch) -
         def __call__(self, prompt):
             raise LLMRateLimitError("rate limited")
 
-    monkeypatch.setattr(gw_agent, "Agent", _Boom)
+    monkeypatch.setattr(json_retry, "Agent", _Boom)
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     out = agent._evaluate_sufficiency(_gap(), [])
     assert out == {
@@ -347,6 +359,7 @@ def test_ghost_compile_narrative_handles_errors(monkeypatch) -> None:
 def test_ghost_find_gaps_via_llm_success(monkeypatch) -> None:
     """A valid JSON array of gap objects is parsed; a blank seed_question gets a generated fallback."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.shared import json_retry
 
     from llm_service import DummyLLMClient
 
@@ -370,6 +383,7 @@ def test_ghost_find_gaps_via_llm_success(monkeypatch) -> None:
                 ]
             )
         ],
+        target_module=json_retry,
     )
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     out = agent._find_gaps_via_llm(plan)
@@ -382,10 +396,11 @@ def test_ghost_find_gaps_via_llm_success(monkeypatch) -> None:
 def test_ghost_find_gaps_via_llm_no_array_returns_empty(monkeypatch) -> None:
     """A response with no JSON array parses to a non-list value, so an empty gap list is returned."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.shared import json_retry
 
     from llm_service import DummyLLMClient
 
-    _patch_agent(monkeypatch, ["no brackets here"])
+    _patch_agent(monkeypatch, ["no brackets here"], target_module=json_retry)
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     out = agent._find_gaps_via_llm(_content_plan())
     assert out == []
@@ -394,10 +409,11 @@ def test_ghost_find_gaps_via_llm_no_array_returns_empty(monkeypatch) -> None:
 def test_ghost_find_gaps_via_llm_parse_error_retry_then_fail(monkeypatch) -> None:
     """Two unparseable array responses exhaust the retry budget; an empty gap list is returned."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.shared import json_retry
 
     from llm_service import DummyLLMClient
 
-    state = _patch_agent(monkeypatch, ["[not-json", "[also-not-json"])
+    state = _patch_agent(monkeypatch, ["[not-json", "[also-not-json"], target_module=json_retry)
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     assert agent._find_gaps_via_llm(_content_plan()) == []
     assert state["i"] == 2
@@ -405,8 +421,8 @@ def test_ghost_find_gaps_via_llm_parse_error_retry_then_fail(monkeypatch) -> Non
 
 def test_ghost_find_gaps_via_llm_exception_falls_back_empty(monkeypatch) -> None:
     """Generic invoke errors fall back immediately (shared helper, no local retry)."""
-    import agents.blogging.ghost_writer_agent.agent as gw_agent
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.shared import json_retry
 
     from llm_service import DummyLLMClient
 
@@ -431,7 +447,7 @@ def test_ghost_find_gaps_via_llm_exception_falls_back_empty(monkeypatch) -> None
                 ]
             )
 
-    monkeypatch.setattr(gw_agent, "Agent", _Stub)
+    monkeypatch.setattr(json_retry, "Agent", _Stub)
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     # Old loop would recover on attempt 2; helper falls back on first unexpected error.
     assert agent._find_gaps_via_llm(_content_plan()) == []
@@ -440,6 +456,7 @@ def test_ghost_find_gaps_via_llm_exception_falls_back_empty(monkeypatch) -> None
 def test_ghost_find_gaps_via_llm_skips_non_dict_items(monkeypatch) -> None:
     """Array items that are not dicts are silently dropped; valid dicts are kept."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.shared import json_retry
 
     from llm_service import DummyLLMClient
 
@@ -457,6 +474,7 @@ def test_ghost_find_gaps_via_llm_skips_non_dict_items(monkeypatch) -> None:
                 ]
             )
         ],
+        target_module=json_retry,
     )
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     out = agent._find_gaps_via_llm(_content_plan())
@@ -469,6 +487,7 @@ def test_ghost_find_gaps_via_llm_coerces_null_and_non_string_fields(monkeypatch)
     stringified section_context; null section_title is normalized to an empty string,
     and non-null non-string fields (section_context) are coerced to strings."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.shared import json_retry
 
     from llm_service import DummyLLMClient
 
@@ -485,6 +504,7 @@ def test_ghost_find_gaps_via_llm_coerces_null_and_non_string_fields(monkeypatch)
                 ]
             )
         ],
+        target_module=json_retry,
     )
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     out = agent._find_gaps_via_llm(_content_plan())
@@ -496,8 +516,8 @@ def test_ghost_find_gaps_via_llm_coerces_null_and_non_string_fields(monkeypatch)
 
 def test_ghost_find_gaps_via_llm_rate_limit_falls_back_empty(monkeypatch) -> None:
     """Soft call sites map transient LLM errors to [] (planning_stage would otherwise swallow)."""
-    import agents.blogging.ghost_writer_agent.agent as gw_agent
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.shared import json_retry
 
     from llm_service import DummyLLMClient, LLMRateLimitError
 
@@ -508,7 +528,7 @@ def test_ghost_find_gaps_via_llm_rate_limit_falls_back_empty(monkeypatch) -> Non
         def __call__(self, prompt):
             raise LLMRateLimitError("rate limited")
 
-    monkeypatch.setattr(gw_agent, "Agent", _Boom)
+    monkeypatch.setattr(json_retry, "Agent", _Boom)
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     assert agent._find_gaps_via_llm(_content_plan()) == []
 
