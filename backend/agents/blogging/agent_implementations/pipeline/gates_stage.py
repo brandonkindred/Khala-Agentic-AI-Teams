@@ -94,17 +94,20 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
     _update = _make_update(job_updater)
 
     status: PipelineStatus = "PASS"
+    allowed_claims = None
     if work_dir is not None:
         write_artifact(work_dir, "final.md", draft_result.draft)
         logger.info("Persisted final.md")
 
-    # Load allowed_claims.json (if present, and belonging to the current brief) so
-    # the fact-check gate evaluates the draft against the same list the writer was
-    # given, and so a gate-driven rewrite can keep [CLAIM:id] tags valid; a
-    # missing/non-dict artifact, or a topic mismatch (a stale artifact from a
-    # reused work_dir), is a no-op (matches validators' handling of the same
-    # artifact).
-    allowed_claims = load_allowed_claims_for_brief(work_dir, brief.brief)
+        # Load allowed_claims.json (if present, and belonging to the current
+        # brief) so the fact-check gate evaluates the draft against the same
+        # list the writer was given, and so a gate-driven rewrite can keep
+        # [CLAIM:id] tags valid; a missing/non-dict artifact, or a topic
+        # mismatch (a stale artifact from a reused work_dir), is a no-op
+        # (matches validators' handling of the same artifact). Guarded by the
+        # same work_dir check as the write above: there's nothing on disk to
+        # read when there's no work_dir.
+        allowed_claims = load_allowed_claims_for_brief(work_dir, brief.brief)
 
     # Gates require a work_dir: they persist validator/fact-check/compliance
     # artifacts and drive the closed-loop rewrite off them. When gates are

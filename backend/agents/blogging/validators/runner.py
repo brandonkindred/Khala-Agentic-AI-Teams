@@ -22,11 +22,20 @@ from .models import CheckResult, ValidatorReport
 
 logger = logging.getLogger(__name__)
 
-# Distinguishes "caller did not pass allowed_claims" (fall back to reading
-# work_dir/allowed_claims.json directly) from "caller passed None explicitly"
-# (no claims for this run, e.g. a topic-mismatched stale artifact — do not
-# independently re-read and possibly disagree with that decision).
-_UNSET = object()
+
+class _UnsetType:
+    """Sentinel type for ``run_validators_from_work_dir``'s ``allowed_claims``
+    parameter, distinguishing "caller did not pass allowed_claims" (fall back to
+    reading work_dir/allowed_claims.json directly) from "caller passed None
+    explicitly" (no claims for this run, e.g. a topic-mismatched stale artifact —
+    do not independently re-read and possibly disagree with that decision).
+    A plain ``object()`` sentinel would type-check against ``Optional[Dict]``
+    as a default value; this dedicated type makes the three-state contract
+    (unset / None / dict) explicit and honest to a type checker.
+    """
+
+
+_UNSET = _UnsetType()
 
 
 def check_claims_policy(
@@ -110,7 +119,7 @@ def run_validators_from_work_dir(
     *,
     draft_artifact: str = "final.md",
     brand_spec_path: Optional[Union[str, Path]] = None,
-    allowed_claims: Optional[Dict[str, Any]] = _UNSET,
+    allowed_claims: Union[Dict[str, Any], None, _UnsetType] = _UNSET,
 ) -> ValidatorReport:
     """
     Run validators using artifacts from work_dir.

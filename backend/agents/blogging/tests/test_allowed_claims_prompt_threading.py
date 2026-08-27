@@ -1,7 +1,7 @@
 """Tests for threading allowed_claims.json into the writer's prompt context.
 
 Covers ``_render_allowed_claims_section`` directly, its wiring into
-``BlogWriterAgent.run()`` (initial draft) and ``_build_revise_all_items_prompt``
+``BlogWriterAgent.run()`` (initial draft) and ``build_revise_all_items_prompt``
 (revision, used by both the copy-edit loop and the gates rewrite loop), and the
 end-to-end pipeline path that loads ``allowed_claims.json`` from ``work_dir``.
 """
@@ -14,6 +14,9 @@ from .conftest import make_stub_editor_class, make_writer_agent
 
 
 def _writer_input(**overrides):
+    """Build a minimal valid ``WriterInput`` for tests, with a small hard-coded
+    content plan. Pass any ``WriterInput`` field (e.g. ``allowed_claims=...``) as
+    a keyword override to test that field's effect on the writer's prompt."""
     from agents.blogging.blog_writer_agent.models import WriterInput
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
@@ -35,6 +38,9 @@ def _writer_input(**overrides):
 
 
 def _minimal_plan():
+    """Return a minimal ``ContentPlan`` for tests that build a ``revise_input``
+    or call the revision prompt builders directly (as opposed to ``_writer_input``,
+    which wraps its own plan in a full ``WriterInput``)."""
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
     from ._content_plan_test_utils import make_content_plan
@@ -303,11 +309,17 @@ def test_writer_run_keeps_numeric_requirement_when_no_artifact(monkeypatch) -> N
 
 
 # ---------------------------------------------------------------------------
-# _build_revise_all_items_prompt — revision (copy-edit loop / gates rewrite)
+# revision.build_revise_all_items_prompt — revision (copy-edit loop / gates rewrite)
 # ---------------------------------------------------------------------------
 
 
 def test_build_revise_all_items_prompt_includes_allowed_claims() -> None:
+    """``build_revise_all_items_prompt`` is a free function that takes its
+    style/brand/model inputs explicitly rather than a ``BlogWriterAgent``
+    instance (see revision.py), so this reaches into ``make_writer_agent()``'s
+    private ``_style_prompt``/``_brand_section_for_prompt()``/``_model`` purely
+    to obtain realistic values to pass in -- it is not asserting on agent
+    internals, just supplying them as plain arguments."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent import revision
     from agents.blogging.blog_writer_agent.agent import _render_allowed_claims_section
@@ -423,6 +435,12 @@ def test_revise_from_user_feedback_omits_allowed_claims_when_absent(monkeypatch)
 
 
 def _capturing_stub_writer_class(captured_inputs: list) -> type:
+    """Return a ``BlogWriterAgent``-shaped stub class that appends every
+    ``("run" | "revise", input)`` pair it receives to ``captured_inputs``, so
+    end-to-end ``run_pipeline`` tests can assert that ``allowed_claims`` reached
+    the ``WriterInput``/``ReviseWriterInput`` the pipeline actually built, without
+    depending on a real LLM call. The other agent methods are no-op stubs
+    sufficient to satisfy `run_pipeline`'s interactive-loop/no-gates code paths."""
     from agents.blogging.blog_writer_agent.models import WriterOutput
 
     class _CapturingStubWriter:
