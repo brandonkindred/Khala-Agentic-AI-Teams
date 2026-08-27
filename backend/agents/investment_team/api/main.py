@@ -526,6 +526,32 @@ def _load_or_404(store: dict, key: str, detail: str, *, missing_if_falsy: bool =
     return value
 
 
+def _validate_advisory_result(
+    result: Any, field_types: dict[str, type], *, log_message: str, log_args: tuple = ()
+) -> dict[str, Any]:
+    """Validate an advisory workflow result has the expected dict shape.
+
+    Preconditions:
+        ``field_types`` maps each required top-level key to its expected type.
+    Postconditions:
+        Returns ``result`` unchanged if it is a dict and, for every entry in
+        ``field_types``, ``result.get(key)`` is an instance of the paired
+        type. Otherwise logs ``log_message % log_args`` and raises
+        ``HTTPException(502)`` with the standard "unexpected response
+        structure" detail — never lets a malformed result reach a caller's
+        ``.model_validate(...)``.
+    """
+    if not isinstance(result, dict) or any(
+        not isinstance(result.get(key), expected) for key, expected in field_types.items()
+    ):
+        logger.error(log_message, *log_args)
+        raise HTTPException(
+            status_code=502,
+            detail="Advisory execution returned unexpected response structure",
+        )
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Strategy Lab run tracking models
 # ---------------------------------------------------------------------------
@@ -1165,12 +1191,12 @@ def create_proposal(request: CreateProposalRequest) -> CreateProposalResponse:
         {"proposal_id": proposal_id, "request": request.model_dump(mode="json")},
         key=proposal_id,
     )
-    if not isinstance(result, dict) or not isinstance(result.get("proposal"), dict):
-        logger.error("Invalid advisory response for proposal %s: %r", proposal_id, result)
-        raise HTTPException(
-            status_code=502,
-            detail="Advisory execution returned unexpected response structure",
-        )
+    _validate_advisory_result(
+        result,
+        {"proposal": dict},
+        log_message="Invalid advisory response for proposal %s: %r",
+        log_args=(proposal_id, result),
+    )
     return CreateProposalResponse(
         proposal_id=proposal_id, proposal=PortfolioProposal.model_validate(result["proposal"])
     )
@@ -1221,18 +1247,12 @@ def validate_proposal(
         {"proposal_id": proposal_id, "user_id": request.user_id},
         key=proposal_id,
     )
-    if (
-        not isinstance(result, dict)
-        or not isinstance(result.get("valid"), bool)
-        or not isinstance(result.get("violations"), list)
-    ):
-        logger.error(
-            "Invalid advisory response for proposal %s validation: %r", proposal_id, result
-        )
-        raise HTTPException(
-            status_code=502,
-            detail="Advisory execution returned unexpected response structure",
-        )
+    _validate_advisory_result(
+        result,
+        {"valid": bool, "violations": list},
+        log_message="Invalid advisory response for proposal %s validation: %r",
+        log_args=(proposal_id, result),
+    )
     return ValidateProposalResponse(
         proposal_id=proposal_id,
         valid=result["valid"],
@@ -1318,21 +1338,12 @@ def validate_strategy(
         {"strategy_id": strategy_id, "request": request.model_dump(mode="json")},
         key=strategy_id,
     )
-    required_keys = ("validation", "passed", "failures")
-    if (
-        not isinstance(result, dict)
-        or any(key not in result for key in required_keys)
-        or not isinstance(result["validation"], dict)
-        or not isinstance(result["passed"], bool)
-        or not isinstance(result["failures"], list)
-    ):
-        logger.error(
-            "Invalid advisory response for strategy %s validation: %r", strategy_id, result
-        )
-        raise HTTPException(
-            status_code=502,
-            detail="Advisory execution returned unexpected response structure",
-        )
+    _validate_advisory_result(
+        result,
+        {"validation": dict, "passed": bool, "failures": list},
+        log_message="Invalid advisory response for strategy %s validation: %r",
+        log_args=(strategy_id, result),
+    )
     return ValidateStrategyResponse(
         strategy_id=strategy_id,
         validation=ValidationReport.model_validate(result["validation"]),
@@ -1896,12 +1907,12 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
         },
         key=request.user_id,
     )
-    if not isinstance(result, dict) or not isinstance(result.get("memo"), dict):
-        logger.error("Invalid advisory response for memo (user %s): %r", request.user_id, result)
-        raise HTTPException(
-            status_code=502,
-            detail="Advisory execution returned unexpected response structure",
-        )
+    _validate_advisory_result(
+        result,
+        {"memo": dict},
+        log_message="Invalid advisory response for memo (user %s): %r",
+        log_args=(request.user_id, result),
+    )
     try:
         memo = InvestmentCommitteeMemo.model_validate(result["memo"])
     except ValidationError as exc:
