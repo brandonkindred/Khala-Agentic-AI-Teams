@@ -2780,18 +2780,21 @@ def test_run_called_twice_with_identical_mission_only_invokes_run_single_phase_o
 
 def test_run_called_twice_with_changed_unallowlisted_mission_field_reinvokes_no_phase() -> None:
     """Two ``run()`` calls sharing one cache: the first populates it for one
-    mission, the second changes only ``existing_brand_material`` -- a field
-    on no phase's real ``mission_fields`` allowlist (unlike ``company_name``,
-    which STRATEGIC_CORE's and NARRATIVE_MESSAGING's allowlists deliberately
+    mission, the second changes only ``wiki_path`` -- a field on no phase's
+    real ``mission_fields`` allowlist (unlike ``company_name``, which
+    STRATEGIC_CORE's and NARRATIVE_MESSAGING's allowlists deliberately
     include despite no prompt citing it, precisely so a rename invalidates
-    their cache entries -- see
-    ``test_run_called_twice_with_changed_company_name_reinvokes_strategic_core_and_narrative``
-    below). This is the epic's whole point: an edit to a field none of the 5
-    phases' agents reference (nor any cross-mission-identity concern touches)
-    must not invalidate any phase's cache entry, unlike the old
-    full-mission-hash behavior."""
-    first_mission = make_mission(existing_brand_material=["old logo pack"])
-    second_mission = make_mission(existing_brand_material=["new logo pack"])
+    their cache entries, or ``existing_brand_material``, which STRATEGIC_CORE's
+    allowlist also includes since it reached ``discovery_auditor`` before this
+    mechanism existed -- see ``test_run_called_twice_with_changed_company_name_
+    reinvokes_strategic_core_and_narrative`` below. ``wiki_path`` is a path,
+    not prose content any agent's text prompt can act on, so it stays
+    excluded from every phase). This is the epic's whole point: an edit to a
+    field none of the 5 phases' agents reference (nor any cross-mission-
+    identity or content-grounding concern touches) must not invalidate any
+    phase's cache entry, unlike the old full-mission-hash behavior."""
+    first_mission = make_mission(wiki_path="wiki/old-brand-page")
+    second_mission = make_mission(wiki_path="wiki/new-brand-page")
     cache = PhaseOutputCache()
     orchestrator = BrandingTeamOrchestrator()
 

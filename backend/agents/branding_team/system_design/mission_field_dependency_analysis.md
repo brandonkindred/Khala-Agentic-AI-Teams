@@ -383,7 +383,7 @@ these tables is treated as safe to ship, particularly for phases where an
 agent's only mission reference is the generic, unqualified phrase "the
 branding mission."
 
-### Post-review addendum: three allowlists widened beyond this document's tables
+### Post-review addendum: four allowlists widened beyond this document's tables
 
 Code review on the implementation PR flagged conclusions in this
 document's tables as carrying a real correctness risk this document's
@@ -400,6 +400,22 @@ widened accordingly rather than following the tables above verbatim:
   not a prompt-grounding question, and the prompt-citation method this
   document uses cannot rule it out either way — only widening the
   allowlist can.
+- **STRATEGIC_CORE now also includes `existing_brand_material`.** Finding
+  3 correctly found it "never referenced, anywhere, even ambiguously," but
+  that finding is about prompt-text citation, not about whether the field
+  ever reached an agent — before this document's mechanism existed,
+  `_phase_task` injected the entire mission into every phase's task string
+  regardless of citation, so `existing_brand_material` already reached
+  every Phase 1 agent as raw context, including `discovery_auditor`, whose
+  entire job is auditing *current* brand perception, market position, and
+  SWOT — the closest match anywhere in the pipeline for content field
+  literally named "existing brand material." Shipping the recommended
+  exclusion would have been the first time this field stopped reaching
+  that agent at all, the same category of functional regression the
+  VISUAL_IDENTITY entry below already establishes precedent for. `wiki_path`
+  (Finding 3's other never-referenced field) is not included anywhere: it
+  is a path, not prose content an agent's text prompt can act on, so unlike
+  `existing_brand_material` there is no plausible grounding story for it.
 - **NARRATIVE_MESSAGING now also includes `company_name`.** A first pass
   reasoned that STRATEGIC_CORE's `company_name` inclusion above was
   sufficient, since Phase 2 sees STRATEGIC_CORE's output as upstream

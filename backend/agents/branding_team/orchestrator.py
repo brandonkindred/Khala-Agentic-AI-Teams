@@ -366,18 +366,24 @@ class _PhaseSpec(NamedTuple):
             additionally includes ``company_name`` (never explicitly cited in
             prompt text, but excluding it lets two differently-named missions
             that are otherwise identical share a cache entry and reuse each
-            other's company-specific output), NARRATIVE_MESSAGING additionally
-            includes ``company_name`` too (``StrategicCoreOutput``, Phase 2's
-            only upstream context, has no field that echoes the raw company
-            name back, so without this a rename can both go unnoticed by
-            Phase 2's cache key and leave its narrative/tagline agents with no
-            company identity in their prompt at all), and VISUAL_IDENTITY
-            additionally includes its six visual-identity-only fields (no
-            Phase 3 prompt cites them by name, but they are the mission's only
-            user-supplied visual-preference input, and dropping them would
-            silently stop grounding the moodboard/color/typography agents in a
-            user's actual palette/style selections — a functional regression,
-            not just a cache-scope one).
+            other's company-specific output) and ``existing_brand_material``
+            (never cited by any prompt either, but before this mechanism
+            existed every phase's task string carried the full mission
+            regardless of citation, so it already reached ``discovery_auditor``
+            — whose whole job is auditing *current* brand perception — as raw
+            context; dropping it would be the first time it stops reaching
+            that agent at all). NARRATIVE_MESSAGING additionally includes
+            ``company_name`` too (``StrategicCoreOutput``, Phase 2's only
+            upstream context, has no field that echoes the raw company name
+            back, so without this a rename can both go unnoticed by Phase 2's
+            cache key and leave its narrative/tagline agents with no company
+            identity in their prompt at all). VISUAL_IDENTITY additionally
+            includes its six visual-identity-only fields (no Phase 3 prompt
+            cites them by name, but they are the mission's only user-supplied
+            visual-preference input, and dropping them would silently stop
+            grounding the moodboard/color/typography agents in a user's actual
+            palette/style selections — a functional regression, not just a
+            cache-scope one).
     """
 
     builder_fn: Callable[[], Any]
@@ -405,6 +411,7 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
                 "target_audience",
                 "values",
                 "differentiators",
+                "existing_brand_material",
             }
         ),
     ),
