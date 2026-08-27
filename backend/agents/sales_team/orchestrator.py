@@ -1174,7 +1174,11 @@ class SalesPodOrchestrator:
         return proposals
 
     def close_one(
-        self, p: Prospect, proposal: Optional[SalesProposal], ctx: _RunContext
+        self,
+        p: Prospect,
+        proposal: Optional[SalesProposal],
+        ctx: _RunContext,
+        dossier: Optional[ProspectDossier] = None,
     ) -> ClosingStrategy:
         """Develop one prospect's closing strategy. Raises on failure.
 
@@ -1184,9 +1188,16 @@ class SalesPodOrchestrator:
             - ``proposal`` is the matching ``SalesProposal`` for ``p`` or
               ``None`` (an empty ``"{}"`` is passed to the agent in that case,
               preserving the prior behaviour).
+            - ``dossier`` is the matching ``ProspectDossier`` for ``p`` or
+              ``None`` when no dossier is saved; defaults to ``None`` so
+              existing callers (e.g. the ``sales_close_one`` activity) keep
+              working unmodified.
 
         Postconditions:
             - Returns a ``ClosingStrategy`` whose ``prospect`` is ``p``.
+            - ``dossier`` is forwarded to ``CloserAgent.develop_strategy`` as-is;
+              ``None`` produces the same strategy as before dossier support
+              existed.
         """
         prop_json = proposal.model_dump_json(indent=2) if proposal else "{}"
         body = self.closer.develop_strategy(
@@ -1195,6 +1206,7 @@ class SalesPodOrchestrator:
             ctx.product,
             ctx.vp,
             ctx.insights_ctx,
+            dossier=dossier,
         )
         return ClosingStrategy(prospect=p, **body.model_dump())
 
@@ -1203,6 +1215,7 @@ class SalesPodOrchestrator:
         ctx: _RunContext,
         qualified_prospects: List[Prospect],
         proposals: List[SalesProposal],
+        dossier_map: dict[str, ProspectDossier],
     ) -> List[ClosingStrategy]:
         """Run the negotiation/closing stage for all qualified prospects in parallel.
 
@@ -1212,6 +1225,11 @@ class SalesPodOrchestrator:
             - ``proposals`` is a list of ``SalesProposal`` objects; entries without
               an ``id`` on their embedded prospect are silently excluded from the
               lookup dict.
+            - ``dossier_map`` is ``{prospect_id: ProspectDossier}`` for prospects
+              with a saved dossier, typically the map already resolved by
+              ``_run_outreach``; if empty (e.g. the outreach stage was
+              skipped), it is re-resolved here via
+              ``load_dossiers_for_prospects``.
 
         Postconditions:
             - Returns a list whose length is ≤ ``len(qualified_prospects)``; any
@@ -1221,14 +1239,21 @@ class SalesPodOrchestrator:
             - If a prospect has no matching ``SalesProposal`` in ``proposals``,
               an empty JSON object (``"{}"``) is passed to ``closer.develop_strategy``,
               which is expected to handle this gracefully.
+            - A prospect with no entry in the resolved ``dossier_map`` still
+              produces a closing strategy (``dossier`` degrades to ``None``);
+              this is not a new failure mode and never skips the stage.
         """
         ctx.update("negotiation", STAGE_PROGRESS["negotiation"][0])
         logger.info("Sales pod [%s]: closing strategy stage", ctx.job_id)
         proposal_by_prospect_id = index_by_prospect_id(proposals, lambda prop: prop.prospect)
+        if not dossier_map:
+            dossier_map = self.load_dossiers_for_prospects(qualified_prospects)
 
         def _one(p: Prospect) -> Optional[ClosingStrategy]:
             try:
-                return self.close_one(p, proposal_by_prospect_id.get(p.id), ctx)
+                return self.close_one(
+                    p, proposal_by_prospect_id.get(p.id), ctx, dossier_map.get(p.id)
+                )
             except Exception:
                 logger.exception("sales.close.failed prospect_id=%s", p.id)
                 return None
@@ -1319,6 +1344,7 @@ class SalesPodOrchestrator:
                 ctx,
                 qualified_prospects,
                 result.proposals,
+                dossier_map,
             )
 
         # Coaching + outcomes

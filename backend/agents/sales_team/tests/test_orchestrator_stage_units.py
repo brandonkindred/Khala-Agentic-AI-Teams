@@ -178,6 +178,26 @@ def test_close_one_wraps_body(orch, ctx):
     strat = orch.close_one(_PROSPECT, None, ctx)
     assert isinstance(strat, ClosingStrategy)
     assert orch.closer.develop_strategy.call_args.args[1] == "{}"  # no proposal => "{}"
+    # dossier defaults to None => forwarded as None, no new failure mode
+    assert orch.closer.develop_strategy.call_args.kwargs["dossier"] is None
+
+
+def test_close_one_passes_dossier_through(orch, ctx):
+    orch.closer.develop_strategy.return_value = ClosingStrategyBody(
+        recommended_close_technique=CloseType.ASSUMPTIVE
+    )
+    dossier = ProspectDossier(
+        dossier_id="d1",
+        prospect_id="prs_1",
+        full_name="J",
+        current_title="VP",
+        current_company="Acme",
+        executive_summary="s",
+        confidence=0.9,
+    )
+    strat = orch.close_one(_PROSPECT, None, ctx, dossier)
+    assert isinstance(strat, ClosingStrategy)
+    assert orch.closer.develop_strategy.call_args.kwargs["dossier"] is dossier
 
 
 def test_close_one_raises_on_agent_error(orch, ctx):

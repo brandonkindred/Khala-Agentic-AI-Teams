@@ -1653,7 +1653,7 @@ def test_discovery_and_negotiation_match_by_id_not_company_name(stub_orch, sampl
 
     stub_orch.closer.develop_strategy.side_effect = _capture_negotiation
 
-    strategies = stub_orch._run_negotiation(ctx, [p1, p2], [prop_p1, prop_p2])
+    strategies = stub_orch._run_negotiation(ctx, [p1, p2], [prop_p1, prop_p2], {})
     assert len(strategies) == 2
     assert {strategy.prospect.id for strategy in strategies} == {p1.id, p2.id}
 
@@ -1719,5 +1719,64 @@ def test_run_discovery_passes_resolved_dossier_per_prospect(stub_orch, sample_ic
 
     plans = stub_orch._run_discovery(ctx, [p1, p2], [], dossier_map)
     assert len(plans) == 2
+    assert dossier_received[p1.id] is dossier_p1
+    assert dossier_received[p2.id] is None
+
+
+# ---------------------------------------------------------------------------
+# _run_negotiation: resolved dossier_map wiring
+# ---------------------------------------------------------------------------
+
+
+def test_run_negotiation_passes_resolved_dossier_per_prospect(stub_orch, sample_icp) -> None:
+    """_run_negotiation forwards each prospect's dossier from an already-resolved map.
+
+    Mirrors the discovery-stage dossier pattern: a prospect with a saved dossier
+    gets it forwarded to close_one/closer.develop_strategy; a prospect without one
+    still produces a closing strategy with dossier=None (no new failure mode).
+    """
+    p1 = Prospect(id="prs_dossier_1", company_name="AcmeCo", contact_name="Alice")
+    p2 = Prospect(id="prs_dossier_2", company_name="OtherCo", contact_name="Bob")
+
+    dossier_p1 = ProspectDossier(
+        dossier_id="dsr_1",
+        prospect_id=p1.id,
+        full_name="Alice",
+        current_title="VP",
+        current_company="AcmeCo",
+        executive_summary="Runs sales at AcmeCo.",
+        confidence=0.9,
+    )
+    dossier_map = {p1.id: dossier_p1}  # p2 intentionally absent
+
+    ctx = orch_mod._RunContext(
+        request=SalesPipelineRequest(
+            product_name="P",
+            value_proposition="A valid long value proposition",
+            icp=sample_icp,
+        ),
+        job_id="j-id-dossier-negotiation",
+        icp_json=sample_icp.model_dump_json(indent=2),
+        product="P",
+        vp="A valid long value proposition",
+        company_context="",
+        cases="",
+        entry=PipelineStage.PROSPECTING,
+        insights_ctx="",
+        config=SalesPipelineConfig(),
+        update=orch_mod._noop_update,
+    )
+
+    dossier_received: dict = {}
+
+    def _capture_dossier(prospect_json, prop_json, *a, **kw):
+        pid = json.loads(prospect_json)["id"]
+        dossier_received[pid] = kw.get("dossier")
+        return _closer_body()
+
+    stub_orch.closer.develop_strategy.side_effect = _capture_dossier
+
+    strategies = stub_orch._run_negotiation(ctx, [p1, p2], [], dossier_map)
+    assert len(strategies) == 2
     assert dossier_received[p1.id] is dossier_p1
     assert dossier_received[p2.id] is None
