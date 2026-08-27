@@ -1,23 +1,35 @@
-"""Checkpoint/resume-state model family for cross-attempt Strategy Lab re-entry.
+"""Checkpoint/resume-state model family for same-attempt Strategy Lab crash recovery.
 
 Defines one immutable checkpoint variant per pipeline stage boundary —
 ``DESIGN``, ``REVIEW``, ``SYNTHESIS``, ``REFINEMENT``, ``ALIGNMENT`` — capturing
-what has converged at that boundary so a later attempt can resume from it
-instead of re-deriving upstream work from scratch. This is pure data-model
-design: no orchestrator wiring, no capture points, no consumption. Capturing
-instances of these models at actual pipeline stage boundaries, and consuming
-them to skip stages on re-entry, are separate, later pieces of work.
+what has converged at that boundary so a crash mid-attempt can resume from the
+latest converged boundary instead of re-deriving upstream work from scratch
+*within that same design attempt*. This is pure data-model design: no
+orchestrator wiring, no capture points, no consumption. Capturing instances of
+these models at actual pipeline stage boundaries, and consuming them to skip
+stages on resume, are separate, later pieces of work.
 
-This family is **additive alongside**, and must not be confused with,
-``DesignAttemptCheckpoint`` (``..models``, documented by
+This family generalizes, and is additive alongside, ``DesignAttemptCheckpoint``
+(``..models``, documented by
 ``system_design/adr/ADR-012-strategy-lab-design-attempt-checkpoint-contract.md``).
-``DesignAttemptCheckpoint`` checkpoints exactly one boundary (combined
-design+review output, handed to code synthesis) to let Temporal resume the
-*same* design attempt after a worker crash mid-attempt. This module's family
-checkpoints all five stage boundaries, for resuming a *new* attempt
-(``SpecImplementabilityError`` re-entry) from a *prior* attempt's partial
-convergence — a different resume scenario, with its own scoping rules below.
-Nothing here changes ``DesignAttemptCheckpoint`` or its ADR.
+``DesignAttemptCheckpoint`` checkpoints exactly one same-attempt boundary
+(combined design+review output, handed to code synthesis) to let Temporal
+resume the *same* design attempt after a worker crash mid-attempt. This
+module's family checkpoints all five stage boundaries of that same
+same-attempt scenario, so a crash during synthesis, refinement, or alignment
+can also resume without redoing the stages already converged in the current
+attempt. Nothing here changes ``DesignAttemptCheckpoint`` or its ADR.
+
+**Same-attempt only — this is not a cross-attempt re-entry mechanism.** A
+checkpoint captured for ``design_attempt=N`` is never read while running
+``design_attempt=N+1``. When ``SpecImplementabilityError`` triggers a design
+re-entry, the new attempt starts fresh with none of this family's
+checkpoints consulted, exactly as ``RETRY_STATE_ISOLATION.md`` requires for
+every other kind of attempt-local state: a failed attempt's mutations must
+never leak into the next attempt's reasoning. Letting a *new* attempt resume
+from a *prior* attempt's partial convergence would require an explicit
+amendment to that isolation contract (to define which stages, if any, survive
+the failure that caused re-entry) and is out of scope for this family.
 
 Serialization relies entirely on Pydantic's built-in ``model_dump(mode="json")``
 / ``model_validate`` — the same mechanism already proven for
@@ -93,9 +105,12 @@ class PipelineCheckpoint(BaseModel):
     Invariants:
       - **Never cross-attempt.** A checkpoint captured while running
         ``design_attempt=N`` is never read or considered while running
-        ``design_attempt=N+1`` — a design re-entry starts a fresh attempt
-        with its own fresh state, exactly as ``RETRY_STATE_ISOLATION.md``
-        already requires for other attempt-local state.
+        ``design_attempt=N+1`` — a design re-entry (``SpecImplementabilityError``)
+        starts a fresh attempt with its own fresh state, exactly as
+        ``RETRY_STATE_ISOLATION.md`` already requires for other attempt-local
+        state. This family's resume scenario is strictly same-attempt crash
+        recovery (see the module docstring); it is never a mechanism for a
+        new attempt to reuse a prior attempt's partial convergence.
       - **Never survives a generation bump.** A checkpoint minted under an
         older fencing generation is stale the instant a restart mints a new
         one (``restart_strategy_lab_run``'s full-reset semantics) — the same
@@ -219,6 +234,9 @@ def parse_checkpoint(raw: Dict[str, Any]) -> AnyPipelineCheckpoint:
     Postconditions:
       - Returns an instance of the ``PipelineCheckpoint`` subclass matching
         ``raw["stage"]``, constructed via that subclass's own validation.
+    Raises:
+      - ``KeyError`` if ``raw`` has no ``"stage"`` key.
+      - ``ValueError`` if ``raw["stage"]`` is not a valid ``PipelineStage`` member.
     """
     stage = PipelineStage(raw["stage"])
     checkpoint_cls = _CHECKPOINT_CLASSES_BY_STAGE[stage]
