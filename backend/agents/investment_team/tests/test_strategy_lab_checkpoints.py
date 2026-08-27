@@ -349,9 +349,9 @@ def test_mismatched_stage_rejected(build: Callable[..., PipelineCheckpoint], mis
 
 
 def test_parse_checkpoint_rejects_stage_mismatched_payload() -> None:
-    """A payload dispatched to ``SynthesisCheckpoint`` by its ``"stage"`` key
-    but carrying a mismatched ``stage`` value inside itself is impossible to
-    construct — the outer dispatch key and the inner field must agree."""
+    """A payload whose ``"stage"`` key dispatches to ``AlignmentCheckpoint`` but
+    whose remaining fields belong to ``SynthesisCheckpoint`` is rejected: the
+    dispatcher and the subclass schema must agree on the complete shape."""
     raw = _build_synthesis_checkpoint().model_dump(mode="json")
     raw["stage"] = "alignment"
     with pytest.raises(ValidationError):
@@ -364,7 +364,7 @@ def test_parse_checkpoint_rejects_stage_mismatched_payload() -> None:
 
 
 @pytest.mark.parametrize("build", _STAGE_CHECKPOINT_BUILDERS, ids=_STAGE_CHECKPOINT_IDS)
-def test_checkpoint_serialization_round_trip(build) -> None:
+def test_checkpoint_serialization_round_trip(build: Callable[..., PipelineCheckpoint]) -> None:
     original = build()
     raw = original.model_dump(mode="json")
     restored = parse_checkpoint(raw)
