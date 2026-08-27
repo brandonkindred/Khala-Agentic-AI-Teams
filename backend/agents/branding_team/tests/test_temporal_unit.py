@@ -851,12 +851,13 @@ def test_phase_task_filters_prior_outputs_by_context_phases(monkeypatch) -> None
     assert "VISUAL_MARKER" not in task
 
 
-def test_governance_phase_task_excludes_channel_activation_context() -> None:
+def test_governance_phase_task_includes_all_upstream_context() -> None:
     """Integration-level check of the real (non-monkeypatched) ``_PHASE_SPEC``
-    values set by #6965: GOVERNANCE's ``context_phases`` is
-    ``(STRATEGIC_CORE, VISUAL_IDENTITY)``, so its task string must include
-    strategic-core and visual-identity context but never channel-activation
-    content -- the acceptance criterion #6965 exists to enforce."""
+    values: GOVERNANCE's ``context_phases`` is configured to include every
+    upstream phase, so its task string must include strategic-core, narrative,
+    visual-identity, and channel-activation alike -- matching what the
+    ``brand_rules_codifier`` and ``asset_wiki_planner`` prompts assume they
+    have."""
     mission = make_mission()
     prior_outputs = {
         BrandPhase.STRATEGIC_CORE.value: {"marker": "STRATEGIC_MARKER"},
@@ -871,10 +872,10 @@ def test_governance_phase_task_excludes_channel_activation_context() -> None:
 
     assert "STRATEGIC_MARKER" in task
     assert "VISUAL_MARKER" in task
-    assert "NARRATIVE_MARKER" not in task
-    assert BrandPhase.CHANNEL_ACTIVATION.value not in task
-    assert "channel_guidelines" not in task
-    assert "CHANNEL_ACTIVATION_MARKER" not in task
+    assert "NARRATIVE_MARKER" in task
+    assert BrandPhase.CHANNEL_ACTIVATION.value in task
+    assert "channel_guidelines" in task
+    assert "CHANNEL_ACTIVATION_MARKER" in task
 
 
 def test_phase_task_explicit_empty_context_phases_excludes_all_prior_context(
