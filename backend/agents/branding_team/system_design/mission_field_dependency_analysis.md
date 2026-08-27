@@ -383,7 +383,7 @@ these tables is treated as safe to ship, particularly for phases where an
 agent's only mission reference is the generic, unqualified phrase "the
 branding mission."
 
-### Post-review addendum: eight allowlists widened beyond this document's tables
+### Post-review addendum: nine allowlists widened beyond this document's tables
 
 Code review on the implementation PR flagged conclusions in this
 document's tables as carrying a real correctness risk this document's
@@ -479,6 +479,13 @@ widened accordingly rather than following the tables above verbatim:
   receive no actual company name on a cold run, and a rename could reuse
   another company's cached architecture/brand-in-action output on a warm
   run.
+- **CHANNEL_ACTIVATION now also includes `existing_brand_material`.** Same
+  generalization as the `existing_brand_material` entries for the other
+  three phases: none of CHANNEL_ACTIVATION's three upstream output models
+  preserve the original material list, so the channel-guide specialists
+  and `brand_in_action_illustrator` cannot inspect existing executions
+  (landing-page copy, campaign assets, prior channel guidelines) that
+  already exist, on either a cold or a warm run.
 - **GOVERNANCE now also includes `existing_brand_material`.** Same
   generalization as the other three phases' `existing_brand_material`
   entries above, applied to the phase where it is arguably most directly

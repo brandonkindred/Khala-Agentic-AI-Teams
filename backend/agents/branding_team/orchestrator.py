@@ -400,8 +400,13 @@ class _PhaseSpec(NamedTuple):
             ``NarrativeMessagingOutput``, ``VisualIdentityOutput``) echo the
             raw company name back, so ``brand_architecture_builder`` — whose
             whole job is naming conventions and brand-architecture rules —
-            would otherwise have no company identity to build on.
-            GOVERNANCE additionally includes ``existing_brand_material`` too
+            would otherwise have no company identity to build on, and
+            ``existing_brand_material`` too — none of its three upstream
+            output models preserve the original material list, so its
+            channel specialists and ``brand_in_action_illustrator`` cannot
+            inspect supplied executions (landing-page copy, campaign
+            assets) that already exist. GOVERNANCE additionally includes
+            ``existing_brand_material`` too
             — none of its four upstream output models preserve the original
             material list, so ``asset_wiki_planner``, whose whole job is
             asset-management guidance and the brand wiki backlog, would
@@ -479,7 +484,7 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
             BrandPhase.NARRATIVE_MESSAGING,
             BrandPhase.VISUAL_IDENTITY,
         ),
-        mission_fields=frozenset({"company_name"}),
+        mission_fields=frozenset({"company_name", "existing_brand_material"}),
     ),
     BrandPhase.GOVERNANCE: _PhaseSpec(
         build_phase5_graph,
