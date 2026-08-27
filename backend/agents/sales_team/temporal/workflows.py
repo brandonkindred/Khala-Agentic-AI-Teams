@@ -84,6 +84,16 @@ _PROSPECTING_TIMEOUT = timedelta(minutes=45)
 _PER_PROSPECT_TIMEOUT = timedelta(minutes=60)
 _HEARTBEAT_TIMEOUT = timedelta(seconds=_act.HEARTBEAT_TIMEOUT_S)
 
+# Guards the negotiation-boundary dossier reload + 4-arg close_one_activity
+# call added alongside dossier-aware closing strategies. A history recorded
+# before this change scheduled sales_close_one with only 3 args and no reload
+# at this boundary; workflow.patched(...) returns False on replay of that
+# history so it re-schedules the original 3-arg call, while a brand-new
+# execution (or a replay of history recorded after this change) gets True and
+# runs the new reload + 4-arg path. See the code_review_agent/temporal
+# workflows for the established pattern of granular, mid-function patches.
+_NEGOTIATION_DOSSIER_PATCH = "sales-negotiation-dossier"
+
 
 @workflow.defn(name="SalesWorkflow")
 class SalesWorkflow:
@@ -133,7 +143,11 @@ class SalesWorkflow:
 
         Preconditions: same as :meth:`run` (its sole caller).
         Postconditions: returns ``{"job_id": job_id}``; raises on the first
-            fatal activity error (handled by :meth:`run`'s catch-all).
+            fatal activity error (handled by :meth:`run`'s catch-all). Stage 7
+            (negotiation) has a ``workflow.patched(_NEGOTIATION_DOSSIER_PATCH)``
+            drain-out branch: a history recorded before dossier-aware closing
+            existed replays the original 3-arg ``sales_close_one`` call with
+            no dossier reload at that boundary.
         """
         entry = request.get("entry_stage", PipelineStage.PROSPECTING.value)
 
@@ -319,17 +333,30 @@ class SalesWorkflow:
             and qualified_prospects
             and await _entry_gate("negotiation")
         ):
-            if not dossier_map:
-                # Thread-path parity: re-attempt the dossier load at the
-                # negotiation boundary so a transient store outage at the
-                # first load doesn't strip grounding from every closing
-                # strategy in the run.
-                dossier_map = await _load_dossiers(qualified_prospects)
-            result["closing_strategies"] = await _fan(
-                _act.close_one_activity,
-                qualified_prospects,
-                lambda p: [ctx, p, prop_by_id.get(p["id"]), dossier_map.get(p["id"])],
-            )
+            if workflow.patched(_NEGOTIATION_DOSSIER_PATCH):
+                if not dossier_map:
+                    # Thread-path parity: re-attempt the dossier load at the
+                    # negotiation boundary so a transient store outage at the
+                    # first load doesn't strip grounding from every closing
+                    # strategy in the run.
+                    dossier_map = await _load_dossiers(qualified_prospects)
+                result["closing_strategies"] = await _fan(
+                    _act.close_one_activity,
+                    qualified_prospects,
+                    lambda p: [ctx, p, prop_by_id.get(p["id"]), dossier_map.get(p["id"])],
+                )
+            else:
+                # Drain-out branch: a history recorded before dossier-aware
+                # closing existed scheduled sales_close_one with the original
+                # 3-arg signature and no reload at this boundary; replaying it
+                # must reproduce that exact command sequence. Delete this
+                # branch (and keep only the patched-True body) once no such
+                # history can still be in flight.
+                result["closing_strategies"] = await _fan(
+                    _act.close_one_activity,
+                    qualified_prospects,
+                    lambda p: [ctx, p, prop_by_id.get(p["id"])],
+                )
             await _exit_gate("negotiation")
 
         # Coaching — best-effort in BOTH layers: the activity itself returns

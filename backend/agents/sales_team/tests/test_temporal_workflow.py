@@ -108,8 +108,12 @@ class _Recorder:
         return [r for (f, _a, r) in self.calls if f is fn]
 
 
-def _run(monkeypatch, rec, request=None):
+def _run(monkeypatch, rec, request=None, *, patched: bool = True):
     monkeypatch.setattr(wf.workflow, "execute_activity", rec.execute_activity)
+    # workflow.patched needs a real workflow event loop; stub it to select the
+    # patched (new) or unpatched (legacy drain-out) branch under test. Default
+    # True so all pre-existing tests keep exercising today's new behavior.
+    monkeypatch.setattr(wf.workflow, "patched", lambda *a, **k: patched)
     return asyncio.run(wf.SalesWorkflow().run("job-wf", request or _REQUEST))
 
 
@@ -307,6 +311,7 @@ def test_coaching_failure_is_absorbed(monkeypatch):
         return await orig(fn, *args, **kwargs)
 
     monkeypatch.setattr(wf.workflow, "execute_activity", _wrapped)
+    monkeypatch.setattr(wf.workflow, "patched", lambda *a, **k: True)
     out = asyncio.run(wf.SalesWorkflow().run("job-wf", _REQUEST))
     assert out == {"job_id": "job-wf"}
     assert rec.count(acts.finalize_sales_pipeline_activity) == 1
@@ -409,6 +414,25 @@ def test_negotiation_stage_reloads_dossiers_when_first_load_empty(monkeypatch):
     assert rec.count(acts.load_dossiers_activity) == 4
     ((_ctx, _p, _proposal, dossier),) = rec.args_for(acts.close_one_activity)
     assert dossier == {"d": "p1"}
+
+
+def test_negotiation_stage_replays_legacy_three_arg_close_when_unpatched(monkeypatch):
+    """Temporal replay determinism: a history recorded before dossier-aware
+    closing existed scheduled sales_close_one with the original 3-arg
+    signature and no reload at the negotiation boundary. Replaying it
+    (workflow.patched -> False) must reproduce that exact command sequence —
+    even when dossier_map is empty there — or the workflow can't progress
+    past a worker restart/deploy."""
+    rec = _Recorder(
+        prospects=[_prospect("p1")],
+        dossier_map={},
+        dossier_maps=[{}, {}, {}],  # empty at every boundary; unpatched never reloads again
+    )
+    _run(monkeypatch, rec, patched=False)
+    # no reload at the negotiation boundary on the unpatched path
+    assert rec.count(acts.load_dossiers_activity) == 3
+    ((args),) = rec.args_for(acts.close_one_activity)
+    assert len(args) == 3  # [ctx, prospect, proposal] — no dossier arg
 
 
 def test_failed_fanout_item_is_dropped(monkeypatch):
