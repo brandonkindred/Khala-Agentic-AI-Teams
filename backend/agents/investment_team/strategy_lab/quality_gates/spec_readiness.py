@@ -1397,11 +1397,11 @@ class SpecReadinessGate(GateResultsMixin):
         return out
 
     # ------------------------------------------------------------------
-    # Rule 11: Asset-category pin — when the design attempt is pinned to one
-    # category (the user selected a subset of asset classes at run start, and
-    # the design loop picked one of them for this attempt), the spec must
-    # declare that category and must not name symbols belonging to a
-    # different one.
+    # Rule 11: Asset-category pin — every design attempt is pinned to exactly
+    # one category (drawn from the user's selection at run start, or from the
+    # full default menu when no narrowing was requested), unconditionally.
+    # The spec must declare that category and must not name symbols belonging
+    # to a different one.
     #
     # This lives in the readiness gate rather than in a bespoke post-hoc
     # correction so the fix rides the design loop's own machinery: a critical

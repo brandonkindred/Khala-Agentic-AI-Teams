@@ -357,6 +357,9 @@ def select_asset_category(
       - ``exclude_asset_classes`` / ``avoid`` are ``None`` or lists of
         canonical class labels or known aliases. Entries that resolve to no
         known class are ignored.
+      - ``rng`` is ``None`` (uses the global :mod:`random` module) or a
+        ``random.Random`` instance to make the selection deterministic, e.g.
+        for a seeded test.
 
     Postconditions:
       - Returns one class from :data:`PROMPT_ASSET_CLASSES`, never one named
