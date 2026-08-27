@@ -3,6 +3,17 @@ Allowed claims schema and utilities for the blogging pipeline.
 
 Research Librarian produces allowed_claims.json; Draft Writer uses only these
 claims and tags them as [CLAIM:id] in the draft.
+
+Interim v2 note: the v2 pipeline does not currently run a research stage
+(``BlogResearchAgent`` is not wired in — see ``system_design/Architecture.md``'s
+"skips external research" note). Until it is, planning
+(``agent_implementations/pipeline/_common.py``'s ``_persist_content_plan_artifacts``,
+used by both ``run_planning`` and ``run_planning_stage``'s outline re-plan loop)
+is the interim producer: it calls ``extract_allowed_claims`` directly against the
+content plan's own markdown with an empty reference list, yielding a citation-free
+``allowed_claims.json`` rather than one grounded in real sources. When
+``BlogResearchAgent`` is reintroduced, that call site should be updated to consume
+its compiled document/references instead.
 """
 
 from __future__ import annotations
