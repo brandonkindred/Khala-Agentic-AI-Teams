@@ -11,6 +11,7 @@ from ...models import BacktestResult, StrategySpec
 from ..budget_config import StrategyLabBudgetConfig
 from . import _structured_output as so
 from ._agent_runner import run_json_with_parse_retry
+from ._diff_format import diff_or_full
 from ._llm_budget import charge_active_budget
 from ._parse_helpers import build_json_correction_prompt
 from ._prompt_context import render_prior_attempts, spec_prompt_fields
@@ -48,6 +49,39 @@ _CORRECTION_KEYS_HINT = (
 _ALLOWED_OUTPUT_KEYS = frozenset({"changes_made"})
 _PASSTHROUGH_FOR_ORCHESTRATOR = frozenset({"risk_limits"})
 
+# Wired into the "## Current Code" prompt section: round 1 (no previous
+# round) always renders the full file, byte-identical to the original
+# hardcoded template, so every existing single-round test is unaffected.
+# Rounds after the first render a compact unified diff against the previous
+# round's code when ``diff_or_full`` finds one smaller than the full text;
+# otherwise (near-total rewrite) it still falls back to the full file. This
+# preamble is what lets the model tell the two shapes apart without a
+# wrapper key in the JSON response schema.
+_DIFF_CODE_SECTION_PREAMBLE = (
+    "This is a unified diff against the previous round's code, not the "
+    "full file. Reconstruct the current file from context, then respond "
+    "with the complete fixed file."
+)
+
+
+def _render_code_section(code: str, diffed: str, *, is_diff: bool) -> str:
+    """Render the "## Current Code" section body: full code, or an explained diff.
+
+    Preconditions: ``code`` is the current round's full strategy code;
+    ``diffed`` is ``diff_or_full(previous_code, code)``'s result; ``is_diff``
+    is ``True`` iff ``diffed`` is an actual diff (i.e. ``diffed != code``).
+
+    Postconditions: when ``is_diff`` is ``False``, returns a fenced Python
+    code block wrapping ``code`` verbatim — byte-identical to the original
+    hardcoded template. When ``is_diff`` is ``True``, returns ``diffed``
+    fenced as a ``diff`` block, preceded by an explanatory line so the model
+    does not mistake it for the full file.
+    """
+    if not is_diff:
+        return f"```python\n{code}\n```"
+    return f"{_DIFF_CODE_SECTION_PREAMBLE}\n\n```diff\n{diffed}\n```"
+
+
 _REFINEMENT_USER_TEMPLATE = """\
 Fix the following trading strategy code that failed {failure_phase}.
 
@@ -60,9 +94,7 @@ Sizing rules: {sizing_rules}
 Risk limits: {risk_limits}
 
 ## Current Code
-```python
-{strategy_code}
-```
+{code_section}
 
 ## Failure Details
 {failure_details}
@@ -99,7 +131,19 @@ tightening a risk limit):
 
 
 class RefinementAgent:
-    """Refine strategy code based on quality gate or execution failures."""
+    """Refine strategy code based on quality gate or execution failures.
+
+    Invariants:
+      * ``_previous_round_code`` tracks the ``code`` argument of the most
+        recent ``run()`` call, so consecutive calls on one instance diff
+        round-over-round. This is only meaningful across the
+        sequential refinement rounds of a *single* strategy's run — callers
+        must not share one instance across unrelated strategies or call
+        ``run()`` out of round order. ``StrategyLabOrchestrator`` satisfies
+        this: it constructs one throwaway orchestrator (and therefore one
+        ``RefinementAgent``) per strategy run, and calls ``run()``
+        sequentially as refinement rounds progress.
+    """
 
     def __init__(self) -> None:
         # Audit trail of every refinement round where the LLM emitted
@@ -107,6 +151,9 @@ class RefinementAgent:
         # diagnose prompt drift. Each entry: {"failure_phase": str,
         # "keys": list[str]}.
         self.spec_mutation_history: List[Dict[str, Any]] = []
+        # Round-over-round diff state — see class Invariants.
+        # ``None`` until the first ``run()`` call completes its prompt build.
+        self._previous_round_code: Optional[str] = None
 
     def run(
         self,
@@ -126,6 +173,17 @@ class RefinementAgent:
         optional ``"risk_limits"`` passthrough (the orchestrator applies
         tighten-only semantics). Any other top-level keys in the LLM
         response are logged and discarded.
+
+        The "## Current Code" prompt section sends ``code`` in full on the
+        first call on this instance (no previous round to diff against).
+        On later calls, it sends a compact unified diff against the ``code``
+        argument of this instance's last *successful* ``run()`` call —
+        whichever of the diff or the full code renders shorter — falling
+        back to the full ``code`` otherwise. State only advances past a
+        successful call, so a failed call never corrupts the next round's
+        diff base. Either way, this method's inputs/outputs are unchanged —
+        the LLM is still asked for, and this method still returns, the
+        complete fixed code.
 
         Raises:
             :class:`~._llm_budget.DesignBudgetExhausted`: If the active per-cycle design
@@ -153,10 +211,25 @@ class RefinementAgent:
 
         prior_text = render_prior_attempts(prior_attempts)
 
+        diffed = diff_or_full(self._previous_round_code, code)
+        # Render both candidate sections and keep whichever is actually
+        # shorter, rather than trusting diff_or_full's raw-length decision
+        # alone: for small files, the diff-section preamble and ```diff```
+        # fence can push a "smaller than the raw code" diff past the size
+        # of just sending the full file once rendered. When there's no
+        # previous round (or a near-total rewrite), diff_section degenerates
+        # to the full code wrapped in a diff fence plus the preamble, which
+        # is always longer than full_section — so full_section always wins
+        # there, keeping round 1 byte-identical to the pre-diff-wiring
+        # rendering.
+        diff_section = _render_code_section(code, diffed, is_diff=True)
+        full_section = _render_code_section(code, diffed, is_diff=False)
+        code_section = diff_section if len(diff_section) < len(full_section) else full_section
+
         user_prompt = _REFINEMENT_USER_TEMPLATE.format(
             failure_phase=failure_phase,
             **spec_prompt_fields(spec),
-            strategy_code=code,
+            code_section=code_section,
             failure_details=failure_details,
             metrics_section=metrics_section,
             n_prior_attempts=len(prior_attempts) if prior_attempts else 0,
@@ -165,6 +238,14 @@ class RefinementAgent:
         )
 
         parsed = self._invoke_and_parse(system_prompt, user_prompt, failure_phase)
+        # Advance the round-over-round diff state only after a successful
+        # invocation: if the call above raises and the caller retries with
+        # unchanged code (see orchestrator._refine's fallback), the next
+        # round must still diff against the last *successful* round's code,
+        # not against `code` itself — diffing code against itself produces
+        # a no-op diff that would strip the actual code content from that
+        # retry's prompt.
+        self._previous_round_code = code
 
         updated_code = parsed.pop("strategy_code", code)
 
