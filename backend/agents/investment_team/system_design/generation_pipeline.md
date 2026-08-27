@@ -231,12 +231,17 @@ not repeated here.
 ## Refinement loop (still CODE_SYNTHESIS)
 
 Owned by `SynthesisMixin` (`_run_synthesis_loop` in
-`orchestrator_synthesis.py`). Round 0 runs `SpecReadinessGate` at `phase="synthesis"`,
-`CodeSafetyChecker`, `CodeConformanceGate`, and `PredicateConformanceGate`
-against the just-synthesized code; a `PredicateReachabilityProbe` checks
-whether the spec's predicates can actually fire against real market data
-before a full backtest is even attempted. On a gate failure or a runtime
-exception from executing the code in the sandbox, `RefinementAgent`
+`orchestrator_synthesis.py`). Round 0 runs the blocking validation gates —
+`SpecReadinessGate` at `phase="synthesis"`, `CodeSafetyChecker`,
+`CodeConformanceGate`, and `PredicateConformanceGate` — against the
+just-synthesized code. A `PredicateReachabilityProbe` also checks whether
+the spec's predicates can actually fire against real market data before a
+full backtest is even attempted, but it only records its findings onto the
+gate-results ledger; per its own docstring, "findings never short-circuit
+the round" — even a critical compiled-path finding proceeds straight to
+execution and does not by itself trigger `RefinementAgent`. On a failure
+from one of the blocking validation gates, or a runtime exception from
+executing the code in the sandbox, `RefinementAgent`
 (`../strategy_lab/agents/refinement.py`) receives the concrete failure
 (syntax error, gate finding, or anomaly) and rewrites the code — the spec
 itself does not change here except for the tighten-only `risk_limits`
@@ -264,13 +269,16 @@ has produced a real trade ledger. Each round:
    seven per-rule checks, and which of them can actually drive the
    `aligned`/`misaligned` verdict, are enumerated in
    [`strategy_lab_pipeline.md`](./strategy_lab_pipeline.md) — the canonical
-   list, not repeated here. What matters for the loop: the checker is
-   deterministic and makes **no LLM call**, so a clean audit costs nothing.
-   A near-miss on the entry-signal check (within
+   list, not repeated here. What matters for the loop: the checker itself is
+   deterministic and makes no LLM call, so an audit with no near-miss costs
+   nothing. A near-miss on the entry-signal check (within
    `STRATEGY_LAB_ALIGNMENT_NEAR_MISS_PCT`, resolved by `_near_miss_pct()` in
    `../strategy_lab/quality_gates/alignment_checks.py`) routes to
    `TradeAlignmentAgent.adjudicate_near_miss` — a single-shot yes/no call,
-   not a full re-audit.
+   not a full re-audit — and `_run_alignment_audit` always supplies that
+   adjudicator, so a near-miss can cost an LLM call even when the final
+   verdict comes back `aligned` (an adjudicated-legitimate near-miss is
+   recorded as an `info`-severity finding, which doesn't flip the verdict).
 2. If misaligned, `TradeAlignmentAgent.propose_code_fix` receives the
    structured findings (never raw trade-ledger prose) and returns a rewritten
    strategy file. The proposal is re-checked by `CodeSafetyChecker` at

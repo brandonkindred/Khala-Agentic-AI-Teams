@@ -305,12 +305,14 @@ class StrategyLabBudgetConfig:
             enforced by ``__post_init__`` regardless of construction path.
         Postconditions:
             Returns a positive ``int``. Purely informational — this method
-            does not enforce any cap itself; ``design_max_llm_calls`` remains
-            the actually-enforced per-cycle ceiling. This return value models
-            the design phase only — it does not include refinement,
-            trade-alignment, or zero-trade-repair calls, all of which also
-            charge against the same cap, so it understates the true
-            worst-case call count against ``design_max_llm_calls``.
+            does not enforce any cap itself; ``design_max_llm_calls`` is the
+            cap each ``LLMCallBudget`` instance enforces — not a hard
+            ceiling on a cycle's total charged calls across Temporal
+            activity retries (see ``LLMCallBudget``'s docstring). This
+            return value models the design phase only — it does not include
+            refinement, trade-alignment, or zero-trade-repair calls, all of
+            which also charge against the same cap, so it understates the
+            true worst-case call count against ``design_max_llm_calls``.
         """
         revise_calls = (self.design_parse_retries + 1) * (1 + self.design_self_revision_rounds) + 2
         per_round_calls = revise_calls + 1
