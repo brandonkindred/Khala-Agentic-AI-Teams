@@ -643,9 +643,10 @@ class BlogWriterAgent(_BlogAgentBase):
     def _self_review(self, draft: str, allowed_claims_section: str = "") -> str:
         """Run deterministic check then LLM self-review. Returns cleaned draft.
 
-        Orchestrates the three delegating methods above (rather than delegating
-        directly to ``self_review.self_review``) so that each sub-step still runs
-        through this agent's own bound methods.
+        Orchestrates the delegating methods above (``_fix_deterministic_violations``
+        and ``_llm_self_review``, rather than delegating directly to
+        ``self_review.self_review``) so that each sub-step still runs through this
+        agent's own bound methods.
 
         ``allowed_claims_section`` is an already-rendered allowed-claims prompt
         block (e.g. via ``_render_allowed_claims_section``), or ``""``; forwarded
