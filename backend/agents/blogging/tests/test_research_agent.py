@@ -427,6 +427,85 @@ def test_research_agent_run_checkpoints_siblings_when_notes_raises(monkeypatch, 
     assert checkpoint.similar_topics == ["fresh topic"]
 
 
+@pytest.mark.parametrize("wrap_in_event_loop_exception", [False, True])
+def test_research_agent_similar_topics_cancellation_propagates(
+    monkeypatch, tmp_path, wrap_in_event_loop_exception
+) -> None:
+    """A Temporal cancellation raised inside _get_similar_topics's Strands call must
+    propagate out of run() rather than being swallowed by its broad
+    "optional step, fail open" except block and turned into an empty result.
+
+    Regression test for the Codex finding: run() returning normally on a
+    cancellation would let run_planning() continue into planning instead of the
+    job being recorded as cancelled. Covers both a bare CancelledError and one
+    Strands wraps in EventLoopException (as a live Agent() call raises it)."""
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from strands.types.exceptions import EventLoopException
+    from temporalio.exceptions import CancelledError
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="cancel during similar topics", max_results=3)
+    cache.save_checkpoint(brief, "normalized", normalized={"topic": "cached"})
+    cache.save_checkpoint(brief, "queries", queries=[{"query_text": "q", "intent": "overview"}])
+    cache.save_checkpoint(brief, "candidates", candidates=[])
+    cache.save_checkpoint(brief, "documents", documents=[])
+    cache.save_checkpoint(brief, "scored_docs", scored_docs=[])
+    cache.save_checkpoint(brief, "references", references=[])
+
+    a = _make_agent(monkeypatch, [])
+    a.cache = cache
+
+    monkeypatch.setattr(ResearchAgent, "_synthesize_overview", lambda self, b, refs: "notes")
+    monkeypatch.setattr(ResearchAgent, "_fetch_academic_papers", lambda self, b: [])
+
+    cause = CancelledError("job cancelled")
+    to_raise = EventLoopException(cause) if wrap_in_event_loop_exception else cause
+
+    def _boom(self, b, refs):
+        raise to_raise
+
+    monkeypatch.setattr(ResearchAgent, "_get_similar_topics", _boom)
+
+    expected_exc = EventLoopException if wrap_in_event_loop_exception else CancelledError
+    with pytest.raises(expected_exc):
+        a.run(brief)
+
+
+def test_research_agent_academic_papers_cancellation_propagates(monkeypatch, tmp_path) -> None:
+    """A Temporal cancellation during the arXiv search must propagate rather than
+    being swallowed by _fetch_academic_papers's broad "best effort" except block."""
+    from agents.blogging.blog_research_agent import agent as ra_mod
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from temporalio.exceptions import CancelledError
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="cancel during arxiv", max_results=3)
+    cache.save_checkpoint(brief, "normalized", normalized={"topic": "cached"})
+    cache.save_checkpoint(brief, "queries", queries=[{"query_text": "q", "intent": "overview"}])
+    cache.save_checkpoint(brief, "candidates", candidates=[])
+    cache.save_checkpoint(brief, "documents", documents=[])
+    cache.save_checkpoint(brief, "scored_docs", scored_docs=[])
+    cache.save_checkpoint(brief, "references", references=[])
+
+    a = _make_agent(monkeypatch, [])
+    a.cache = cache
+
+    monkeypatch.setattr(ResearchAgent, "_synthesize_overview", lambda self, b, refs: "notes")
+    monkeypatch.setattr(ResearchAgent, "_get_similar_topics", lambda self, b, refs: [])
+
+    def boom(*args, **kwargs):
+        raise CancelledError("job cancelled")
+
+    monkeypatch.setattr(ra_mod, "search_arxiv", boom)
+
+    with pytest.raises(CancelledError):
+        a.run(brief)
+
+
 def test_research_agent_synthesize_overview_no_references() -> None:
     from agents.blogging.blog_research_agent.agent import ResearchAgent
     from agents.blogging.blog_research_agent.models import ResearchBriefInput
@@ -450,6 +529,30 @@ def _doc(n: int):
         language="en",
         metadata={},
     )
+
+
+def test_summarize_one_document_cancellation_propagates(monkeypatch) -> None:
+    """A Temporal cancellation during per-document summarization must propagate
+    rather than being swallowed by the excerpt-fallback except block."""
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from strands.types.exceptions import EventLoopException
+    from temporalio.exceptions import CancelledError
+
+    from llm_service import DummyLLMClient
+
+    a = ResearchAgent(llm_client=DummyLLMClient())
+    cause = CancelledError("job cancelled")
+    monkeypatch.setattr(
+        ResearchAgent,
+        "_call_json",
+        lambda self, prompt: (_ for _ in ()).throw(EventLoopException(cause)),
+    )
+
+    with pytest.raises(EventLoopException):
+        a._summarize_one_document(
+            (_doc(0), 1.0, 1.0, 1.0, "blog"), ResearchBriefInput(brief="x", max_results=5)
+        )
 
 
 def test_score_documents_propagates_attribution_into_workers(monkeypatch) -> None:

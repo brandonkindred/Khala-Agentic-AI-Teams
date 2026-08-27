@@ -7,10 +7,12 @@ from typing import Any, Callable, List, Optional, Tuple
 
 from pydantic import HttpUrl
 from strands import Agent
+from strands.types.exceptions import EventLoopException
 
 logger = logging.getLogger(__name__)
 
 from agents.blogging.shared.agent_base import _BlogAgentBase  # noqa: E402
+from temporalio.exceptions import CancelledError  # noqa: E402
 
 from llm_service import LLMJsonParseError, compact_text, extract_json_from_response  # noqa: E402
 from shared.concurrency import parallel_map  # noqa: E402
@@ -41,6 +43,29 @@ from .tools.web_search import OllamaWebSearch  # noqa: E402
 # summarization fan-outs. Named here (rather than inline at each call site) so
 # the two stages stay in lockstep and the cap can be tuned in one place.
 _DOC_PARALLEL_WORKERS = 8
+
+
+def _is_cancellation(exc: BaseException) -> bool:
+    """True when exc is a Temporal cancellation, possibly wrapped in the
+    EventLoopException a live Strands Agent() call raises it as.
+
+    Guards the optional-step fallbacks (academic papers, similar topics) below:
+    their broad ``except Exception`` must not silently degrade a genuine
+    cancellation to an empty result, since that would let ``run()`` return
+    normally instead of the cancellation propagating to callers like
+    ``run_planning()`` that need to see it.
+
+    Preconditions:
+        - ``exc`` is the exception caught at an optional-step boundary.
+    Postconditions:
+        - Returns True iff ``exc`` is a ``CancelledError``, or an
+          ``EventLoopException`` whose ``original_exception`` is one.
+    """
+    if isinstance(exc, CancelledError):
+        return True
+    if isinstance(exc, EventLoopException):
+        return isinstance(exc.original_exception, CancelledError)
+    return False
 
 
 class ResearchAgent(_BlogAgentBase):
@@ -615,6 +640,8 @@ class ResearchAgent(_BlogAgentBase):
             summary = data.get("summary") or ""
             key_points = data.get("key_points") or []
         except Exception as e:  # pragma: no cover - excerpt-fallback path triggers only when the LLM raises mid-summarization; covered by integration tests with a flaky model.
+            if _is_cancellation(e):
+                raise
             logger.warning(
                 "Summarization LLM failed for %s (%s); using excerpt fallback so research can continue.",
                 doc.url,
@@ -743,7 +770,9 @@ class ResearchAgent(_BlogAgentBase):
         Search arXiv for papers relevant to the brief. Returns list of AcademicPaper.
 
         Preconditions: brief_input valid.
-        Postconditions: Returns list of AcademicPaper (title, url, overview_or_summary); may be empty on failure.
+        Postconditions: Returns list of AcademicPaper (title, url, overview_or_summary);
+            may be empty on failure. A Temporal cancellation propagates instead of
+            being swallowed as a failure.
         """
         try:
             papers = search_arxiv(
@@ -753,6 +782,8 @@ class ResearchAgent(_BlogAgentBase):
             )
             return papers
         except Exception as e:
+            if _is_cancellation(e):
+                raise
             logger.warning("arXiv search failed, skipping academic sources: %s", e)
             return []
 
@@ -765,7 +796,9 @@ class ResearchAgent(_BlogAgentBase):
         Use LLM to suggest similar topics with similarity scores; return topics with score > 70%.
 
         Preconditions: brief_input and references valid.
-        Postconditions: Returns list of topic strings (similarity_score >= 0.7).
+        Postconditions: Returns list of topic strings (similarity_score >= 0.7). A
+            Temporal cancellation propagates (including one Strands wraps in
+            EventLoopException) instead of being swallowed as a failure.
         """
         if not references:
             return []
@@ -796,6 +829,8 @@ class ResearchAgent(_BlogAgentBase):
                             pass
             return topics[:15]
         except Exception as e:
+            if _is_cancellation(e):
+                raise
             logger.warning("Similar topics step failed: %s", e)
             return []
 
