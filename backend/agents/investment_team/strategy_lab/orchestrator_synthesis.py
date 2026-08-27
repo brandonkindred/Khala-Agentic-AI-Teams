@@ -385,12 +385,6 @@ class SynthesisMixin:
         # unbound name if MAX_CODE_REFINEMENT_ROUNDS is ever 0 (loop body
         # never executes).
         round_num = -1
-        # The previous round's (post-injection) code, for diffing this
-        # round's refinement prompt against instead of resending the full
-        # file. Scoped to this one loop invocation (never carried over from
-        # an unrelated synthesis attempt) and ``None`` until a round
-        # actually completes a refinement pass.
-        previous_code: Optional[str] = None
 
         for round_num in range(_orchestrator_module.MAX_CODE_REFINEMENT_ROUNDS):
             round_gate_results: List[QualityGateResult] = []
@@ -399,10 +393,6 @@ class SynthesisMixin:
             code = self._run_synthesis_universe_injection(
                 spec=spec, code=code, drift_collector=drift_collector
             )
-            # This round's code, after deterministic injection but before
-            # any LLM refinement — becomes ``previous_code`` for the NEXT
-            # round if this round ends up refining.
-            round_start_code = code
 
             # ── 2a: VALIDATE (code safety + spec readiness on round 0) ───
             round_gate_results, predicate_conformance_attempts = (
@@ -447,13 +437,11 @@ class SynthesisMixin:
                     emit=emit,
                     stall_tracker=stall_tracker,
                     drift_collector=drift_collector,
-                    previous_code=previous_code,
                 )
                 if exhausted:
                     max_rounds_exhausted = True
                     refinement_stalled = stalled
                     break
-                previous_code = round_start_code
                 continue
 
             emit(
@@ -519,13 +507,11 @@ class SynthesisMixin:
                     emit=emit,
                     stall_tracker=stall_tracker,
                     drift_collector=drift_collector,
-                    previous_code=previous_code,
                 )
                 if exhausted:
                     max_rounds_exhausted = True
                     refinement_stalled = stalled
                     break
-                previous_code = round_start_code
                 continue
 
             # ── 2d: COLLECT TRADES + target-symbol coverage on trades ─
@@ -561,7 +547,6 @@ class SynthesisMixin:
                 emit=emit,
                 stall_tracker=stall_tracker,
                 drift_collector=drift_collector,
-                previous_code=previous_code,
             )
             spec, code = evaluation.spec, evaluation.code
             trades, metrics = evaluation.trades, evaluation.metrics
@@ -573,7 +558,6 @@ class SynthesisMixin:
                 refinement_stalled = evaluation.stalled
                 break
             if evaluation.action == "continue":
-                previous_code = round_start_code
                 continue
 
             # All gates passed — code is clean and backtest is sound
@@ -909,7 +893,6 @@ class SynthesisMixin:
         emit: PhaseCallback,
         stall_tracker: RefinementStallTracker,
         drift_collector: Optional[_DriftCollector],
-        previous_code: Optional[str] = None,
     ) -> _SynthesisEvaluateResult:
         """Compute metrics, run the anomaly gates, and route any recovery.
 
@@ -978,7 +961,6 @@ class SynthesisMixin:
                 emit=emit,
                 stall_tracker=stall_tracker,
                 drift_collector=drift_collector,
-                previous_code=previous_code,
             )
             spec, code = recovery.spec, recovery.code
             trades, metrics = recovery.trades, recovery.metrics
@@ -1032,7 +1014,6 @@ class SynthesisMixin:
         emit: PhaseCallback,
         stall_tracker: RefinementStallTracker,
         drift_collector: Optional[_DriftCollector] = None,
-        previous_code: Optional[str] = None,
     ) -> _AnomalyRecoveryOutcome:
         """Recover from critical backtest anomalies in the evaluation phase.
 
@@ -1207,7 +1188,6 @@ class SynthesisMixin:
             emit=emit,
             stall_tracker=stall_tracker,
             drift_collector=drift_collector,
-            previous_code=previous_code,
         )
         return _AnomalyRecoveryOutcome(
             spec=new_spec,

@@ -11,7 +11,6 @@ from ...models import BacktestResult, StrategySpec
 from ..budget_config import StrategyLabBudgetConfig
 from . import _structured_output as so
 from ._agent_runner import run_json_with_parse_retry
-from ._diff_format import diff_or_full
 from ._llm_budget import charge_active_budget
 from ._parse_helpers import build_json_correction_prompt
 from ._prompt_context import render_prior_attempts, spec_prompt_fields
@@ -60,7 +59,7 @@ Exit rules: {exit_rules}
 Sizing rules: {sizing_rules}
 Risk limits: {risk_limits}
 
-## Current Code{code_diff_note}
+## Current Code
 ```python
 {strategy_code}
 ```
@@ -80,10 +79,6 @@ Risk limits: {risk_limits}
    not refinement. The rules above are rendered text views of structured
    DSL objects; do NOT emit them back in your response.
 3. Ensure your fix doesn't re-introduce any previously fixed issues.
-4. The code above may be shown as a unified diff against the previous
-   round instead of the full file. Regardless, `strategy_code` in your
-   response must always be the complete fixed file, never a diff or
-   partial patch.
 
 ## Response format — JSON only
 Respond with a SINGLE valid JSON object and nothing else: no markdown
@@ -121,23 +116,8 @@ class RefinementAgent:
         failure_details: str,
         metrics: Optional[BacktestResult] = None,
         prior_attempts: Optional[List[str]] = None,
-        previous_code: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], str]:
         """Refine the strategy code.
-
-        Preconditions: ``previous_code`` is either ``None`` (no prior
-        refinement round exists for this synthesis attempt — e.g. round 1,
-        or a fresh attempt after a re-design) or the full code string this
-        attempt's *previous* round operated on. Callers must scope
-        ``previous_code`` to one synthesis loop / strategy attempt and never
-        carry it over from an unrelated attempt.
-
-        Postconditions: the rendered prompt's ``## Current Code`` block is a
-        unified diff against ``previous_code`` when one is given and that
-        diff is strictly smaller than ``code`` itself (see
-        :func:`~._diff_format.diff_or_full`); otherwise it is ``code`` in
-        full. This affects prompt content only — ``updated_code`` (the
-        returned fixed code) is unaffected.
 
         Returns:
             (updated_fields_dict, updated_code)
@@ -172,18 +152,11 @@ class RefinementAgent:
             )
 
         prior_text = render_prior_attempts(prior_attempts)
-        strategy_code = diff_or_full(previous_code, code)
-        code_diff_note = (
-            " (unified diff against the previous round — see Instructions)"
-            if strategy_code != code
-            else ""
-        )
 
         user_prompt = _REFINEMENT_USER_TEMPLATE.format(
             failure_phase=failure_phase,
             **spec_prompt_fields(spec),
-            strategy_code=strategy_code,
-            code_diff_note=code_diff_note,
+            strategy_code=code,
             failure_details=failure_details,
             metrics_section=metrics_section,
             n_prior_attempts=len(prior_attempts) if prior_attempts else 0,
