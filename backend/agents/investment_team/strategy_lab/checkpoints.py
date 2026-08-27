@@ -100,6 +100,19 @@ class PipelineCheckpoint(BaseModel):
       - ``captured_at`` is an ISO-8601 / RFC-3339 UTC timestamp string,
         matching the ``timestamp: str`` convention already used by
         ``SpecRevision``/``CodeRevision``/``GateEvent``.
+      - ``budget_calls`` is the cumulative LLM-call count as of the boundary
+        (``LLMCallBudget.calls_made``), and ``gate_results`` is the
+        cumulative quality-gate result list as of the boundary — both
+        carried at every stage, not just design/synthesis, generalizing the
+        same two fields ``DesignAttemptCheckpoint`` already persists for
+        exactly the reason ADR-012 documents: resuming must seed the budget
+        from *this* boundary's count, never from the pre-attempt count,
+        or it silently reopens already-spent headroom (a false negative on
+        the LLM-call ceiling, not a double charge, but the same practical
+        failure mode). ``gate_results`` is typed as ``tuple[dict[str, Any],
+        ...]`` rather than a typed gate-result model for the same
+        circular-import reason ``DesignAttemptCheckpoint.gate_results``
+        documents in ``models.py``.
 
     Postconditions:
       - Instances are immutable (``frozen=True``) snapshots: a checkpoint's
@@ -155,6 +168,8 @@ class PipelineCheckpoint(BaseModel):
     spec_hash: str = Field(..., min_length=64, max_length=64)
     code_hash: str = Field(..., min_length=64, max_length=64)
     captured_at: str
+    budget_calls: int = Field(..., ge=0)
+    gate_results: tuple[dict[str, Any], ...] = Field(default_factory=tuple)
 
     @model_validator(mode="after")
     def _enforce_pinned_stage(self) -> "PipelineCheckpoint":

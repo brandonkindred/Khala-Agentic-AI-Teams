@@ -52,6 +52,8 @@ def _identity(**overrides: Any) -> Dict[str, Any]:
         "design_attempt": 0,
         "generation": 1,
         "captured_at": "2026-08-27T00:00:00Z",
+        "budget_calls": 5,
+        "gate_results": [{"gate_name": "risk_limits", "passed": True}],
     }
     base.update(overrides)
     return base
@@ -401,6 +403,11 @@ def test_negative_design_attempt_rejected() -> None:
 def test_empty_cycle_scope_rejected() -> None:
     with pytest.raises(ValidationError):
         _build_design_checkpoint(**_identity(cycle_scope=""))
+
+
+def test_negative_budget_calls_rejected() -> None:
+    with pytest.raises(ValidationError):
+        _build_design_checkpoint(**_identity(budget_calls=-1))
 
 
 def test_malformed_spec_hash_rejected() -> None:
