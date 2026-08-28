@@ -47,6 +47,45 @@ def diff_or_full(previous_code: str | None, current_code: str) -> str:
     return current_code
 
 
+def _leaf_lines(kind: str, path: str, value: Any) -> list[str]:
+    """Render ``kind`` (``"added"`` or ``"removed"``) lines for ``value`` at ``path``.
+
+    Preconditions: ``kind`` is ``"added"`` or ``"removed"``; ``path`` is the
+    dotted key-path of ``value``.
+
+    Postconditions: returns one line per leaf value reachable from ``value``
+    — recursing into nested dicts so every leaf's own value is included in
+    the output — rather than a single line naming only the top-level key.
+    A non-dict ``value`` yields exactly one line carrying its value. Never
+    mutates ``value``.
+    """
+    if isinstance(value, dict):
+        if not value:
+            return [f"{kind}: {path}: {{}}"]
+        lines: list[str] = []
+        for sub_key in sorted(value):
+            lines.extend(_leaf_lines(kind, f"{path}.{sub_key}", value[sub_key]))
+        return lines
+
+    return [f"{kind}: {path}: {value!r}"]
+
+
+def _values_differ(prev_value: Any, curr_value: Any) -> bool:
+    """Report whether two JSON leaf values differ, honoring JSON type distinctions.
+
+    Preconditions: ``prev_value`` and ``curr_value`` are JSON-serializable
+    scalars (not both dicts — dicts are recursed into by the caller before
+    reaching this check).
+
+    Postconditions: returns ``True`` whenever the values would serialize to
+    different JSON representations. Plain ``!=`` treats ``True == 1`` and
+    ``1 == 1.0``, which would silently hide a JSON type change (e.g. a bool
+    field becoming an int); this additionally treats differing Python types
+    as a difference even when ``==`` would call the values equal.
+    """
+    return type(prev_value) is not type(curr_value) or prev_value != curr_value
+
+
 def _walk_dict_diff(previous: dict[str, Any], current: dict[str, Any], path: str) -> list[str]:
     """Recursively collect ``added``/``removed``/``changed`` lines for two dicts.
 
@@ -55,9 +94,12 @@ def _walk_dict_diff(previous: dict[str, Any], current: dict[str, Any], path: str
     the top level).
 
     Postconditions: returns a list of human-readable lines, one per leaf-level
-    difference, each prefixed with ``added:``, ``removed:``, or ``changed:``
-    and the dotted path to the differing key. A nested dict present under the
-    same key on both sides is recursed into rather than reported as a single
+    difference, each prefixed with ``added:``, ``removed:``, or ``changed:``,
+    the dotted path to the differing key, and (for ``added``/``removed``, via
+    :func:`_leaf_lines`, and for ``changed``) the differing value(s) — so the
+    result carries enough information to reconstruct the changed leaves
+    without needing the full JSON. A nested dict present under the same key
+    on both sides is recursed into rather than reported as a single
     ``changed`` line, so only genuine leaf differences are listed. Returns an
     empty list when ``previous == current``. Never mutates either input.
     """
@@ -68,17 +110,17 @@ def _walk_dict_diff(previous: dict[str, Any], current: dict[str, Any], path: str
         key_path = f"{path}.{key}" if path else key
 
         if key not in previous:
-            lines.append(f"added: {key_path}")
+            lines.extend(_leaf_lines("added", key_path, current[key]))
             continue
         if key not in current:
-            lines.append(f"removed: {key_path}")
+            lines.extend(_leaf_lines("removed", key_path, previous[key]))
             continue
 
         prev_value = previous[key]
         curr_value = current[key]
         if isinstance(prev_value, dict) and isinstance(curr_value, dict):
             lines.extend(_walk_dict_diff(prev_value, curr_value, key_path))
-        elif prev_value != curr_value:
+        elif _values_differ(prev_value, curr_value):
             lines.append(f"changed: {key_path}: {prev_value!r} -> {curr_value!r}")
 
     return lines

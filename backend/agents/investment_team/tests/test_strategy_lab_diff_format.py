@@ -114,6 +114,64 @@ def test_spec_added_and_removed_keys_are_reported():
     assert "added: exit_rules" in result
 
 
+def test_spec_added_key_includes_its_value():
+    previous_spec = {"entry_rules": {"threshold": 0.5}}
+    current_spec = {"entry_rules": {"threshold": 0.5}, "exit_rules": {"trailing_stop": 0.05}}
+
+    result = diff_spec_or_full(previous_spec, current_spec)
+
+    assert "added: exit_rules.trailing_stop: 0.05" in result
+
+
+def test_spec_removed_key_includes_its_value():
+    previous_spec = {"entry_rules": {"threshold": 0.5}, "legacy_field": "old_value"}
+    current_spec = {"entry_rules": {"threshold": 0.5}}
+
+    result = diff_spec_or_full(previous_spec, current_spec)
+
+    assert "removed: legacy_field: 'old_value'" in result
+
+
+def test_spec_added_nested_dict_reports_every_leaf_value():
+    previous_spec = {"entry_rules": {"threshold": 0.5}}
+    current_spec = {
+        "entry_rules": {"threshold": 0.5},
+        "exit_rules": {"trailing_stop": 0.05, "hard_stop": {"pct": 0.1}},
+    }
+
+    result = diff_spec_or_full(previous_spec, current_spec)
+
+    assert "added: exit_rules.trailing_stop: 0.05" in result
+    assert "added: exit_rules.hard_stop.pct: 0.1" in result
+
+
+def test_spec_added_empty_dict_reports_a_single_line():
+    previous_spec = {"entry_rules": {"threshold": 0.5}}
+    current_spec = {"entry_rules": {"threshold": 0.5}, "exit_rules": {}}
+
+    result = diff_spec_or_full(previous_spec, current_spec)
+
+    assert "added: exit_rules: {}" in result
+
+
+def test_spec_bool_vs_int_type_change_is_reported_as_changed():
+    previous_spec = {"entry_rules": {"active": True}}
+    current_spec = {"entry_rules": {"active": 1}}
+
+    result = diff_spec_or_full(previous_spec, current_spec)
+
+    assert "changed: entry_rules.active" in result
+
+
+def test_spec_int_vs_float_type_change_is_reported_as_changed():
+    previous_spec = {"entry_rules": {"threshold": 1}}
+    current_spec = {"entry_rules": {"threshold": 1.0}}
+
+    result = diff_spec_or_full(previous_spec, current_spec)
+
+    assert "changed: entry_rules.threshold" in result
+
+
 def test_spec_near_total_rewrite_falls_back_to_full_json():
     previous_spec = {f"field_{i}": f"old_value_{i}" for i in range(30)}
     current_spec = {f"field_{i}": f"totally_different_value_{i}_xyz" for i in range(30)}
