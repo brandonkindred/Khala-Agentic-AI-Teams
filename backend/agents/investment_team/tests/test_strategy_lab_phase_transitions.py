@@ -35,6 +35,7 @@ import pytest
 from investment_team.models import BacktestConfig
 from investment_team.strategy_lab import orchestrator as orchestrator_module
 from investment_team.strategy_lab.agents.design_review import SpecCritique
+from investment_team.strategy_lab.checkpoints import PipelineStage
 from investment_team.strategy_lab.exceptions import SpecImplementabilityError
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.phases import (
@@ -225,6 +226,24 @@ def test_run_cycle_emits_exactly_four_phase_transitions(
         assert len(t["spec_hash"]) == 64
         assert len(t["code_hash"]) == 64
         assert t["attempt"] == 0
+
+
+def test_unconverged_refinement_does_not_capture_later_stage_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A no-market-data exit crosses observability phase transitions but does
+    not falsely claim that refinement or alignment converged."""
+
+    orch = StrategyLabOrchestrator()
+    _stub_pipeline_for_happy_path(monkeypatch, orch)
+
+    _drive_cycle_capturing_transitions(orch)
+
+    assert [checkpoint.stage for checkpoint in orch.pipeline_checkpoints] == [
+        PipelineStage.DESIGN,
+        PipelineStage.REVIEW,
+        PipelineStage.SYNTHESIS,
+    ]
 
 
 def test_spec_hash_stable_after_design_review_exit(
