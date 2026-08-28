@@ -133,7 +133,12 @@ sequenceDiagram
                 end
                 Attempt->>Attempt: execute strategy_code in the<br/>sandboxed TradingService — trade ledger<br/>is engine output, not an LLM response
                 opt execution error, anomaly, or zero-trade result
-                    Attempt->>LLM: RefinementAgent, or<br/>ZeroTradeRepairAgent for a zero-trade<br/>result — either may trigger a re-execution
+                    alt zero-trade classified ENTRY_WITH_NO_EXIT
+                        Note over Attempt: raises SpecImplementabilityError — no LLM<br/>call — exits are engine-owned, only a spec<br/>rewrite can fix it
+                        Attempt-->>CycleWF: propagates out of the activity,<br/>consumed by the design-re-entry loop above
+                    else other execution error, anomaly, or zero-trade category
+                        Attempt->>LLM: RefinementAgent, or<br/>ZeroTradeRepairAgent for a zero-trade<br/>result — either may trigger a re-execution
+                    end
                 end
                 Attempt->>Attempt: DeterministicAlignmentChecker audits the<br/>trade ledger — a clean pass synthesizes the<br/>report locally, no LLM call
                 opt near-miss adjudication or a misaligned fix
