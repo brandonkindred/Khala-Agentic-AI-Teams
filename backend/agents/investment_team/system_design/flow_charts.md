@@ -140,11 +140,15 @@ sequenceDiagram
                         Attempt->>LLM: RefinementAgent, or<br/>ZeroTradeRepairAgent for a zero-trade<br/>result — either may trigger a re-execution
                     end
                 end
-                Attempt->>Attempt: DeterministicAlignmentChecker audits the<br/>trade ledger — a clean pass synthesizes the<br/>report locally, no LLM call
-                opt near-miss adjudication or a misaligned fix
-                    Attempt->>LLM: TradeAlignmentAgent<br/>(adjudicate_near_miss, or<br/>propose_code_fix — may re-execute<br/>a committed fix)
+                alt execution succeeded with a non-empty trade ledger
+                    Attempt->>Attempt: DeterministicAlignmentChecker audits the<br/>trade ledger — a clean pass synthesizes the<br/>report locally, no LLM call
+                    opt near-miss adjudication or a misaligned fix
+                        Attempt->>LLM: TradeAlignmentAgent<br/>(adjudicate_near_miss, or<br/>propose_code_fix — may re-execute<br/>a committed fix)
+                    end
+                    Attempt->>LLM: AnalysisAgent (after the deterministic<br/>verification gates)
+                else execution failed, or refinement exhausted with no trades
+                    Note over Attempt: alignment and AnalysisAgent are both<br/>skipped — neither runs without a<br/>successful execution and a trade ledger
                 end
-                Attempt->>LLM: AnalysisAgent (after the deterministic<br/>verification gates)
                 Attempt-->>CycleWF: record | reentry | skipped
             end
 

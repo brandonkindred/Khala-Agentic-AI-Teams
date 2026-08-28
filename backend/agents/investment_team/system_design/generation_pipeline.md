@@ -257,7 +257,12 @@ enters a position) is routed to
 ahead of the generic refinement path, since "why did this never fire" needs
 different diagnosis than a runtime exception — the `coverage_probe/`
 subsystem (static + runtime AST instrumentation) supplies the evidence for
-that diagnosis.
+that diagnosis. One category is the exception: a zero-*closed*-trade result
+diagnosed as `ENTRY_WITH_NO_EXIT` (entries filled but engine-owned exits
+never fired) skips the repair agent entirely — `_handle_critical_anomalies`
+raises `SpecImplementabilityError` directly, since exits are engine-owned
+and not covered by the repair whitelist, routing the cycle back to design
+instead.
 
 ## Trade-alignment loop (start of BACKTEST_AND_VERIFICATION)
 
