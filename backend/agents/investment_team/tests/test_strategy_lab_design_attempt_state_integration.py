@@ -260,3 +260,54 @@ def test_converged_cycle_captures_all_five_pipeline_stage_boundaries(
     assert design.spec.hypothesis == captured_hypothesis
     assert design.spec_hash == hash_spec(design.spec)
     assert design.spec_hash != hash_spec(record.strategy)
+
+
+@pytest.mark.parametrize(
+    ("stage", "mutated_artifact"),
+    [
+        pytest.param(PipelineStage.DESIGN, "spec", id="design-spec"),
+        pytest.param(PipelineStage.REVIEW, "spec", id="review-spec"),
+        pytest.param(PipelineStage.SYNTHESIS, "code", id="synthesis-code"),
+        pytest.param(PipelineStage.REFINEMENT, "code", id="refinement-code"),
+        pytest.param(PipelineStage.ALIGNMENT, "code", id="alignment-code"),
+    ],
+)
+def test_each_boundary_checkpoint_hashes_detect_upstream_state_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    stage: PipelineStage,
+    mutated_artifact: str,
+) -> None:
+    """A real capture from each boundary detects later spec/code drift.
+
+    The mutation happens to a detached representation of the current upstream
+    state after capture.  This models a stray upstream write without altering
+    the immutable snapshot itself and proves the captured #7291 hashes expose
+    the mismatch.  Production selection/rejection belongs to #7281/#7282 and
+    is deliberately not simulated by a test-only consumer here.
+    """
+
+    orch = orchestrator(StubMarketDataService())
+    wire_run_cycle_stubs(orch, monkeypatch, alignment_aligned=True)
+    orch.run_cycle(
+        prior_records=[],
+        config=_config(walk_forward_enabled=False),
+    )
+
+    checkpoints_by_stage = {
+        checkpoint.stage: checkpoint for checkpoint in orch.pipeline_checkpoints
+    }
+    checkpoint = checkpoints_by_stage[stage]
+    current_spec = checkpoint.spec.model_copy(deep=True)
+    current_code = getattr(checkpoint, "code", "")
+
+    assert checkpoint.spec_hash == hash_spec(current_spec)
+    assert checkpoint.code_hash == hash_code(current_code)
+
+    if mutated_artifact == "spec":
+        current_spec.hypothesis = f"{current_spec.hypothesis} (stray upstream mutation)"
+        assert checkpoint.spec_hash != hash_spec(current_spec)
+        assert checkpoint.code_hash == hash_code(current_code)
+    else:
+        current_code += "\n# stray upstream mutation"
+        assert checkpoint.spec_hash == hash_spec(current_spec)
+        assert checkpoint.code_hash != hash_code(current_code)
