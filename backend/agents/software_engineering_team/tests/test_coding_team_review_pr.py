@@ -142,6 +142,37 @@ class TestGetPullRequest:
         with pytest.raises(GitHubAPIError):
             client.get_pull_request("o", "r", 7)
 
+    def test_head_repo_full_name_missing_repo_is_empty(self) -> None:
+        """No head.repo at all (the default fixture shape) parses as ''."""
+        client = _client_with(lambda _req: httpx.Response(200, json=_pr_payload(7)))
+        pr = client.get_pull_request("o", "r", 7)
+        assert pr.head_repo_full_name == ""
+
+    def test_head_repo_full_name_same_repo(self) -> None:
+        """An ordinary (non-fork) PR's head.repo is the PR's own repository."""
+        payload = _pr_payload(
+            7, head={"ref": "feature", "sha": "abc123", "repo": {"full_name": "o/r"}}
+        )
+        client = _client_with(lambda _req: httpx.Response(200, json=payload))
+        pr = client.get_pull_request("o", "r", 7)
+        assert pr.head_repo_full_name == "o/r"
+
+    def test_head_repo_full_name_fork(self) -> None:
+        """A fork-opened PR's head.repo is the contributor's fork, not the base repo."""
+        payload = _pr_payload(
+            7, head={"ref": "feature", "sha": "abc123", "repo": {"full_name": "contributor/r"}}
+        )
+        client = _client_with(lambda _req: httpx.Response(200, json=payload))
+        pr = client.get_pull_request("o", "r", 7)
+        assert pr.head_repo_full_name == "contributor/r"
+
+    def test_head_repo_full_name_deleted_fork_is_empty(self) -> None:
+        """GitHub reports head.repo as null when the fork was deleted after the PR opened."""
+        payload = _pr_payload(7, head={"ref": "feature", "sha": "abc123", "repo": None})
+        client = _client_with(lambda _req: httpx.Response(200, json=payload))
+        pr = client.get_pull_request("o", "r", 7)
+        assert pr.head_repo_full_name == ""
+
 
 # ---------------------------------------------------------------------------
 # Client: get_pull_request_files

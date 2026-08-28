@@ -30,6 +30,15 @@ _PER_ISSUE_PREFIX = "issue-"
 PER_ISSUE_DIR_TEMPLATE = _PER_ISSUE_PREFIX + "{issue_number}"
 _PER_ISSUE_DIR_RE = re.compile(re.escape(_PER_ISSUE_PREFIX) + r"\d+")
 
+# Per-PR checkout directory name, for the address-comments flow (unified_api's
+# ``_resolve_repo_path`` with ``pr_number`` set). A distinct ``pr-`` prefix (rather
+# than reusing ``issue-``) is required, not stylistic: GitHub issues and pull
+# requests share one numbering sequence per repository, so ``issue-42`` and PR #42
+# would otherwise collide on the same checkout directory.
+_PER_PR_PREFIX = "pr-"
+PER_PR_DIR_TEMPLATE = _PER_PR_PREFIX + "{pr_number}"
+_PER_PR_DIR_RE = re.compile(re.escape(_PER_PR_PREFIX) + r"\d+")
+
 
 def is_per_issue_dir(name: str) -> bool:
     """True iff ``name`` is an auto-derived per-issue checkout directory name.
@@ -40,6 +49,17 @@ def is_per_issue_dir(name: str) -> bool:
         - Returns True iff ``name`` exactly matches ``issue-<digits>``. Pure.
     """
     return _PER_ISSUE_DIR_RE.fullmatch(name) is not None
+
+
+def is_per_pr_dir(name: str) -> bool:
+    """True iff ``name`` is an auto-derived per-PR checkout directory name.
+
+    Preconditions:
+        - ``name`` is a path's final component (``Path.name``), not a full path.
+    Postconditions:
+        - Returns True iff ``name`` exactly matches ``pr-<digits>``. Pure.
+    """
+    return _PER_PR_DIR_RE.fullmatch(name) is not None
 
 
 def clone_lock_path(repo_path: str | Path) -> Path:

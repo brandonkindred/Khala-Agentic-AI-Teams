@@ -11,6 +11,7 @@ Covers:
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any, Callable, Optional
 
 import httpx
@@ -244,6 +245,7 @@ class _FakeClient:
             state="open",
             updated_at="",
             labels=("bug",),
+            head_repo_full_name="o/r",
         )
 
     def __enter__(self) -> "_FakeClient":
@@ -397,6 +399,32 @@ class TestUnresolvedComments:
 
 
 # ---------------------------------------------------------------------------
+# _pr_head_remote
+# ---------------------------------------------------------------------------
+
+
+class TestPrHeadRemote:
+    def test_same_repo_pr_resolves_to_origin(self, address_env) -> None:
+        ac, fake = address_env["ac"], address_env["fake"]
+        assert ac._pr_head_remote("o", "r", fake.pr) == "origin"
+
+    def test_same_repo_pr_is_case_insensitive(self, address_env) -> None:
+        ac, fake = address_env["ac"], address_env["fake"]
+        fake.pr = replace(fake.pr, head_repo_full_name="O/R")
+        assert ac._pr_head_remote("o", "r", fake.pr) == "origin"
+
+    def test_fork_pr_resolves_to_fork_clone_url(self, address_env) -> None:
+        ac, fake = address_env["ac"], address_env["fake"]
+        fake.pr = replace(fake.pr, head_repo_full_name="contributor/r")
+        assert ac._pr_head_remote("o", "r", fake.pr) == "https://github.com/contributor/r.git"
+
+    def test_deleted_fork_resolves_to_none(self, address_env) -> None:
+        ac, fake = address_env["ac"], address_env["fake"]
+        fake.pr = replace(fake.pr, head_repo_full_name="")
+        assert ac._pr_head_remote("o", "r", fake.pr) is None
+
+
+# ---------------------------------------------------------------------------
 # _handle_comment
 # ---------------------------------------------------------------------------
 
@@ -410,7 +438,7 @@ class TestHandleComment:
         thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
 
         outcome = ac._handle_comment(
-            fake, "parent", req, _comment(2), thread, "feature", "main", fake.pr.html_url, "tok"
+            fake, "parent", req, _comment(2), thread, "feature", "main", fake.pr.html_url, "origin", "tok"
         )
 
         assert outcome.outcome == "resolved"
@@ -421,13 +449,56 @@ class TestHandleComment:
         assert fake.replies and fake.replies[0][0] == 2
         assert fake.resolved == ["T2"]
 
+    def test_real_issue_on_fork_pr_pushes_to_fork_remote(self, address_env, monkeypatch) -> None:
+        """A fork-opened PR's implementation workflow is dispatched with the fork's
+        clone URL as the remote, not "origin" (the base repo)."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            "feature",
+            "main",
+            fake.pr.html_url,
+            "https://github.com/contributor/r.git",
+            "tok",
+        )
+
+        assert outcome.outcome == "resolved"
+        github = address_env["executions"][0]["kwargs"]["github"]
+        assert github["remote"] == "https://github.com/contributor/r.git"
+
+    def test_real_issue_with_unresolvable_remote_fails_without_dispatch(
+        self, address_env, monkeypatch
+    ) -> None:
+        """A deleted fork (no resolvable remote) fails the comment before dispatching
+        any implementation workflow — never guesses "origin" for a fork PR."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+
+        outcome = ac._handle_comment(
+            fake, "parent", req, _comment(2), thread, "feature", "main", fake.pr.html_url, None, "tok"
+        )
+
+        assert outcome.outcome == "failed"
+        assert "fork appears to have been deleted" in outcome.detail
+        assert address_env["executions"] == []
+        assert fake.replies == []
+        assert fake.resolved == []
+
     def test_false_positive_replies_and_resolves(self, address_env, monkeypatch) -> None:
         ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
         _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=True)
         thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
 
         outcome = ac._handle_comment(
-            fake, "parent", req, _comment(2), thread, "feature", "main", fake.pr.html_url, "tok"
+            fake, "parent", req, _comment(2), thread, "feature", "main", fake.pr.html_url, "origin", "tok"
         )
 
         assert outcome.outcome == "false_positive"
@@ -449,7 +520,7 @@ class TestHandleComment:
         thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
 
         outcome = ac._handle_comment(
-            fake, "parent", req, _comment(2), thread, "feature", "main", fake.pr.html_url, "tok"
+            fake, "parent", req, _comment(2), thread, "feature", "main", fake.pr.html_url, "origin", "tok"
         )
 
         assert outcome.outcome == "failed"
@@ -465,7 +536,7 @@ class TestHandleComment:
         thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
 
         outcome = ac._handle_comment(
-            fake, "parent", req, _comment(2), thread, "feature", "main", fake.pr.html_url, "tok"
+            fake, "parent", req, _comment(2), thread, "feature", "main", fake.pr.html_url, "origin", "tok"
         )
 
         # Must NOT falsely report a handled false positive when the thread stays open.
@@ -476,7 +547,7 @@ class TestHandleComment:
         _stub_triage(monkeypatch, ac, raises_issue=False, is_false_positive=False)
 
         outcome = ac._handle_comment(
-            fake, "parent", req, _comment(2), None, "feature", "main", fake.pr.html_url, "tok"
+            fake, "parent", req, _comment(2), None, "feature", "main", fake.pr.html_url, "origin", "tok"
         )
 
         assert outcome.outcome == "not_an_issue"

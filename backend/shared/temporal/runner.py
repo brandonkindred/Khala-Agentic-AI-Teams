@@ -160,6 +160,7 @@ def execute_workflow_sync(
     task_queue: str,
     client_ready_timeout_s: float | None = None,
     execute_timeout_s: float = EXECUTE_WORKFLOW_TIMEOUT_S,
+    reattach_on_timeout: bool = False,
 ) -> Any:
     """Start a Temporal workflow and block for its RESULT, from synchronous code.
 
@@ -177,9 +178,26 @@ def execute_workflow_sync(
           :func:`run_team_job` does, so a duplicate *live* id would raise
           ``WorkflowAlreadyStartedError``.
         - ``args`` are Temporal-serializable (the same codec the workflow uses).
+        - ``reattach_on_timeout=True`` is only appropriate for a caller that can
+          afford to keep blocking well past ``execute_timeout_s`` (e.g. a
+          dedicated background thread, not a request handler with its own
+          upstream deadline) — see Postconditions.
 
     Postconditions:
         - Returns the workflow's return value once it completes successfully.
+        - ``reattach_on_timeout=False`` (default): a client-side wait timeout
+          raises ``concurrent.futures.TimeoutError`` exactly as before — the
+          workflow itself keeps running server-side (Temporal is durable), but
+          this call stops waiting on it.
+        - ``reattach_on_timeout=True``: a client-side wait timeout does NOT
+          raise. Instead this reattaches to the same still-running workflow (by
+          its known ``workflow_id``, via ``get_workflow_handle`` — no new
+          workflow is started, so this can never duplicate work) and keeps
+          waiting in further ``execute_timeout_s``-sized windows, logging once
+          per window, until the workflow reaches its own terminal state. This
+          exists for callers where "the client gave up waiting" must never be
+          conflated with "the workflow failed" (e.g. a long-running
+          implementation or a HITL pause that outlives one wait window).
 
     Invariants:
         - Runs the coroutine on the worker's shared event loop via
@@ -189,7 +207,7 @@ def execute_workflow_sync(
         - ``RuntimeError`` if the worker's client never becomes available within
           ``client_ready_timeout_s`` (defaulting to ``CLIENT_READY_TIMEOUT_S``).
         - ``concurrent.futures.TimeoutError`` if the workflow does not finish within
-          ``execute_timeout_s``.
+          ``execute_timeout_s`` and ``reattach_on_timeout`` is False.
         - ``temporalio.client.WorkflowFailureError`` if the workflow itself fails;
           callers that need to translate the failure inspect its ``ApplicationError``
           cause.
@@ -200,7 +218,52 @@ def execute_workflow_sync(
     coro = client.execute_workflow(
         workflow_run, args=list(args), id=workflow_id, task_queue=task_queue
     )
-    return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=execute_timeout_s)
+    try:
+        return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=execute_timeout_s)
+    except futures.TimeoutError:
+        if not reattach_on_timeout:
+            raise
+        logger.warning(
+            "execute_workflow_sync: client-side wait for workflow id=%s timed out after "
+            "%ss; the workflow keeps running server-side — reattaching instead of "
+            "treating this as a failure",
+            workflow_id,
+            execute_timeout_s,
+        )
+        return _reattach_and_wait_sync(client, loop, workflow_id, execute_timeout_s)
+
+
+def _reattach_and_wait_sync(client: Any, loop: Any, workflow_id: str, poll_timeout_s: float) -> Any:
+    """Repeatedly reattach to an already-running workflow until it terminates.
+
+    Used only by :func:`execute_workflow_sync` when ``reattach_on_timeout=True``
+    and the initial wait window elapsed. ``get_workflow_handle`` looks up the
+    existing run by id — it starts nothing — so each reattach is idempotent and
+    can never duplicate the workflow's work.
+
+    Preconditions:
+        - ``workflow_id`` names a workflow that was already started (by the
+          caller, before the timed-out wait) on ``client``'s namespace.
+
+    Postconditions:
+        - Returns the workflow's result once it reaches a terminal state.
+        - Blocks in further ``poll_timeout_s``-sized windows for as long as the
+          workflow keeps running, logging once per window — this function only
+          returns (or raises the workflow's own failure) once Temporal reports
+          a terminal state; it never itself times out.
+    """
+    while True:
+        handle = client.get_workflow_handle(workflow_id)
+        try:
+            return asyncio.run_coroutine_threadsafe(handle.result(), loop).result(timeout=poll_timeout_s)
+        except futures.TimeoutError:
+            logger.warning(
+                "execute_workflow_sync: still waiting on workflow id=%s after another "
+                "%ss; reattaching again",
+                workflow_id,
+                poll_timeout_s,
+            )
+            continue
 
 
 async def execute_workflow_async(

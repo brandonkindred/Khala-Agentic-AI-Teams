@@ -309,6 +309,106 @@ def test_execute_requires_non_empty_ids():
         runner.execute_workflow_sync(object(), workflow_id="wid", task_queue="")
 
 
+# ---------------------------------------------------------------------------
+# execute_workflow_sync — reattach_on_timeout
+# ---------------------------------------------------------------------------
+
+
+class _FakeSlowExecClient:
+    """A client whose ``execute_workflow`` never resolves within the test's timeout."""
+
+    async def execute_workflow(self, workflow_run, *, args, id, task_queue):
+        await asyncio.sleep(10)
+
+
+class _FakeReattachHandle:
+    """A workflow handle whose ``result()`` "completes" after N reattach calls,
+    simulating a workflow that outlives several client-side wait windows before
+    reaching its own terminal state."""
+
+    def __init__(self, captured: dict, *, result_after_calls: int, result: object) -> None:
+        self._captured = captured
+        self._result_after_calls = result_after_calls
+        self._result = result
+
+    async def result(self):
+        calls = self._captured.setdefault("reattach_calls", 0) + 1
+        self._captured["reattach_calls"] = calls
+        if calls < self._result_after_calls:
+            await asyncio.sleep(10)  # still "running" — outlives this window
+        return self._result
+
+
+class _FakeReattachClient(_FakeSlowExecClient):
+    """``execute_workflow`` always hangs (as if the client-side wait always
+    expires); ``get_workflow_handle`` returns the same still-running handle each
+    time, matching Temporal's real semantics — reattaching never starts a new
+    workflow."""
+
+    def __init__(self, captured: dict, handle: "_FakeReattachHandle") -> None:
+        self._captured = captured
+        self._handle = handle
+
+    def get_workflow_handle(self, workflow_id):
+        self._captured["reattach_workflow_id"] = workflow_id
+        return self._handle
+
+
+def test_execute_workflow_sync_without_reattach_raises_timeout(running_loop):
+    """Default behavior (reattach_on_timeout=False, unchanged) still raises on a
+    client-side timeout rather than waiting indefinitely."""
+    client_mod.set_temporal_client(_FakeSlowExecClient())
+    client_mod.set_temporal_loop(running_loop)
+
+    with pytest.raises(TimeoutError):
+        runner.execute_workflow_sync(
+            object(), workflow_id="wid", task_queue="q", execute_timeout_s=0.05
+        )
+
+
+def test_execute_workflow_sync_reattach_returns_result_after_timeout(running_loop):
+    """reattach_on_timeout=True: a client-side timeout reattaches to the same
+    workflow id (via get_workflow_handle, never starting a new run) and returns
+    its eventual result instead of raising."""
+    captured: dict = {}
+    sentinel = {"ok": True}
+    handle = _FakeReattachHandle(captured, result_after_calls=1, result=sentinel)
+    client_mod.set_temporal_client(_FakeReattachClient(captured, handle))
+    client_mod.set_temporal_loop(running_loop)
+
+    out = runner.execute_workflow_sync(
+        object(),
+        workflow_id="wid",
+        task_queue="q",
+        execute_timeout_s=0.05,
+        reattach_on_timeout=True,
+    )
+
+    assert out is sentinel
+    assert captured["reattach_workflow_id"] == "wid"
+
+
+def test_execute_workflow_sync_reattach_polls_multiple_windows(running_loop):
+    """A workflow that outlives several reattach windows is still waited on —
+    reattach_on_timeout never gives up early."""
+    captured: dict = {}
+    sentinel = {"ok": True}
+    handle = _FakeReattachHandle(captured, result_after_calls=3, result=sentinel)
+    client_mod.set_temporal_client(_FakeReattachClient(captured, handle))
+    client_mod.set_temporal_loop(running_loop)
+
+    out = runner.execute_workflow_sync(
+        object(),
+        workflow_id="wid",
+        task_queue="q",
+        execute_timeout_s=0.03,
+        reattach_on_timeout=True,
+    )
+
+    assert out is sentinel
+    assert captured["reattach_calls"] == 3
+
+
 def test_bridges_are_exported():
     import shared.temporal
 

@@ -341,6 +341,44 @@ def _plan_resolution(comment: ReviewComment, cited_code: str) -> Optional[IssueR
 # ---------------------------------------------------------------------------
 
 
+def _pr_head_remote(owner: str, repo: str, pr: Any) -> Optional[str]:
+    """Resolve the git remote to fetch/push the PR's head branch through.
+
+    ``PullRequestDetail.head`` is only the branch's short ref, which is
+    ambiguous for a fork-opened PR: the branch lives in the fork's repository,
+    not ``owner/repo``, so fetching/pushing it against the literal string
+    ``"origin"`` (the base repo's remote) either fails outright or silently
+    touches an unrelated same-named branch in the base repo.
+
+    Preconditions:
+        - ``owner``/``repo`` are the PR's own (base) repository.
+        - ``pr`` carries a ``head_repo_full_name`` attribute (see
+          :class:`PullRequestDetail`).
+    Postconditions:
+        - Returns ``"origin"`` when the head branch lives in ``owner/repo``
+          itself (the ordinary, same-repo case) — the checkout's existing
+          origin remote is already correct.
+        - Returns an HTTPS clone URL for the head repository when it differs
+          from ``owner/repo`` (a fork-opened PR). A URL is valid anywhere git
+          accepts a remote name, so the existing token-based auth (injected
+          via env, not the URL) applies to it exactly as it does to "origin";
+          whether the token can actually push there is GitHub's decision at
+          push time (a fork typically must opt in via "Allow edits from
+          maintainers"), so a permission failure surfaces as an ordinary push
+          error rather than being pre-empted here.
+        - Returns ``None`` when the head repository is unknown (GitHub reports
+          no ``head.repo`` at all — the fork was deleted after the PR was
+          opened). There is no remote to resolve in that case; the caller must
+          fail closed rather than guess one.
+    """
+    head_repo_full_name = (pr.head_repo_full_name or "").strip()
+    if not head_repo_full_name:
+        return None
+    if head_repo_full_name.casefold() == f"{owner}/{repo}".casefold():
+        return "origin"
+    return f"https://github.com/{head_repo_full_name}.git"
+
+
 def _dispatch_implementation(
     parent_job_id: str,
     request: AddressCommentsRequest,
@@ -349,6 +387,7 @@ def _dispatch_implementation(
     pr_head: str,
     pr_base: str,
     pr_url: str,
+    pr_remote: Optional[str],
     token: str,
 ) -> str:
     """Run one unique child workflow and return its child job id on success.
@@ -358,7 +397,21 @@ def _dispatch_implementation(
     resulting commit to the existing head branch, and returns only after that
     publication is terminal. Any non-success result raises so the caller leaves
     the review thread open.
+
+    Preconditions:
+        - ``pr_remote`` is the remote to fetch/push the head branch through
+          (see :func:`_pr_head_remote`) — ``"origin"`` for a same-repo PR, a
+          fork clone URL for a fork PR, or ``None`` when it could not be
+          resolved (the fork was deleted). ``None`` raises immediately rather
+          than defaulting to "origin", which would silently target the wrong
+          repository.
     """
+    if pr_remote is None:
+        raise RuntimeError(
+            f"cannot determine the head repository for {request.owner}/{request.repo}"
+            f"#{request.pr_number}'s branch {pr_head!r} (its fork appears to have been "
+            "deleted); the fix cannot be published"
+        )
     requirements = "\n".join(f"- {r}" for r in plan.requirements) or "- (none stated)"
     description = (
         f"Address the following pull-request review comment on {request.owner}/{request.repo}"
@@ -417,6 +470,7 @@ def _dispatch_implementation(
             "publish_mode": "existing_pr",
             "base": pr_base,
             "integration_branch": pr_head,
+            "remote": pr_remote,
         },
     )
     if result.get("status") != JobStatus.COMPLETED.value:
@@ -513,6 +567,7 @@ def _handle_comment(
     pr_head: str,
     pr_base: str,
     pr_url: str,
+    pr_remote: Optional[str],
     token: str,
 ) -> CommentOutcome:
     """Run the full triage → implement → publish → reply → resolve flow.
@@ -568,6 +623,7 @@ def _handle_comment(
             pr_head,
             pr_base,
             pr_url,
+            pr_remote,
             token,
         )
         reply = (
@@ -658,6 +714,7 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
 
         with _main.GitHubClient(token=token) as client:
             pr = client.get_pull_request(owner, repo, pr_number)
+            pr_remote = _pr_head_remote(owner, repo, pr)
             unresolved, thread_by_comment = _unresolved_comments(client, owner, repo, pr_number)
 
             outcomes: List[CommentOutcome] = []
@@ -671,6 +728,7 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                     pr.head,
                     pr.base,
                     pr.html_url,
+                    pr_remote,
                     token,
                 )
                 outcomes.append(outcome)

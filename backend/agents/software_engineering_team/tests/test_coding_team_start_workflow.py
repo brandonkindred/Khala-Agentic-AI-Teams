@@ -111,3 +111,7 @@ def test_execute_coding_team_workflow_waits_for_terminal_result(monkeypatch):
     assert captured["task_queue"] == TASK_QUEUE
     assert captured["args"][0]["github"] == github
     assert captured["execute_timeout_s"] == sw._COMMENT_WORKFLOW_TIMEOUT_S
+    # A client-side timeout must never be mistaken for workflow failure: this
+    # caller reattaches to the same still-running workflow rather than giving
+    # up after one wait window (see runner.execute_workflow_sync's docstring).
+    assert captured["reattach_on_timeout"] is True

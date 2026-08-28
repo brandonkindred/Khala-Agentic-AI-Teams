@@ -913,6 +913,82 @@ def test_resolve_repo_path_override_not_applied_to_other_repo(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# _resolve_repo_path: per-PR checkout isolation (address-comments flow)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_repo_path_namespaces_per_pr_under_agent_cache(monkeypatch):
+    """AGENT_CACHE-derived path is namespaced per PR under github_workspaces, using a
+    distinct pr- prefix so it can never collide with an issue-N checkout."""
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    path = _resolve_repo_path(dict(_GH_CFG), "acme", "widget", pr_number=42)
+    assert path == "/cache/github_workspaces/acme/widget/pr-42"
+
+
+def test_resolve_repo_path_distinct_prs_map_to_distinct_paths(monkeypatch):
+    """Two distinct PR numbers resolve to two distinct checkout paths."""
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    cfg = dict(_GH_CFG)
+    assert _resolve_repo_path(cfg, "acme", "widget", pr_number=1) != _resolve_repo_path(
+        cfg, "acme", "widget", pr_number=2
+    )
+
+
+def test_resolve_repo_path_pr_and_issue_never_collide(monkeypatch):
+    """An issue and a PR that share the same number (GitHub's shared numbering
+    sequence) resolve to distinct checkout paths."""
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    cfg = dict(_GH_CFG)
+    assert _resolve_repo_path(cfg, "acme", "widget", issue_number=42) != _resolve_repo_path(
+        cfg, "acme", "widget", pr_number=42
+    )
+
+
+def test_resolve_repo_path_uses_se_workspace_dir_with_pr(monkeypatch):
+    """SE_WORKSPACE_DIR (highest priority) yields <root>/<owner>_<repo>/pr-N."""
+    monkeypatch.setenv("SE_WORKSPACE_DIR", "/work")
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.delenv("AGENT_CACHE", raising=False)
+    path = _resolve_repo_path(dict(_GH_CFG), "acme", "widget", pr_number=9)
+    assert path == "/work/acme_widget/pr-9"
+
+
+def test_resolve_repo_path_operator_override_returned_verbatim_for_pr():
+    """An operator-pinned repo_path is returned verbatim, never per-PR-namespaced."""
+    cfg = {"enabled": True, "owner": "acme", "repo": "widget", "repo_path": "/srv/checkout"}
+    assert _resolve_repo_path(cfg, "acme", "widget", pr_number=42) == "/srv/checkout"
+
+
+@pytest.mark.parametrize("bad", [0, -1, -42])
+def test_resolve_repo_path_rejects_nonpositive_pr_number(monkeypatch, bad):
+    """A non-positive PR number (which would build a degenerate pr-0/pr--1 segment)
+    is rejected with HTTP 400."""
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    with pytest.raises(HTTPException) as exc:
+        _resolve_repo_path(dict(_GH_CFG), "acme", "widget", pr_number=bad)
+    assert exc.value.status_code == 400
+
+
+def test_resolve_repo_path_rejects_both_issue_and_pr_number(monkeypatch):
+    """issue_number and pr_number are mutually exclusive; passing both is HTTP 400
+    rather than silently preferring one."""
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    with pytest.raises(HTTPException) as exc:
+        _resolve_repo_path(dict(_GH_CFG), "acme", "widget", issue_number=1, pr_number=1)
+    assert exc.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
 # POST /github/events: webhook receiver for the "@khala review" PR-comment trigger
 # ---------------------------------------------------------------------------
 

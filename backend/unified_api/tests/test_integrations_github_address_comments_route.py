@@ -90,10 +90,11 @@ def test_503_when_service_url_unset(mock_cfg, mock_cred, monkeypatch):
     assert client.post(_URL, json={}).status_code == 503
 
 
-@patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
+@patch(f"{_M}._ensure_repo_clone", return_value=None)
+@patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget/pr-7")
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
-def test_success_proxies_with_token_and_path(mock_cfg, mock_cred, mock_path, monkeypatch):
+def test_success_proxies_with_token_and_path(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103/")
     fake = _FakeAsyncClient(result=_FakeResp(200, _OK))
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
@@ -107,33 +108,49 @@ def test_success_proxies_with_token_and_path(mock_cfg, mock_cred, mock_path, mon
     assert url == "http://coding:8103/pulls/7/address-comments"
     assert sent["pr_number"] == 7
     assert sent["github_token"] == "ghp"
-    assert sent["repo_path"] == "/tmp/acme_widget"
+    assert sent["repo_path"] == "/tmp/acme_widget/pr-7"
+    # The checkout is materialized (cloned/fetched) before the job is forwarded.
+    mock_clone.assert_called_once_with("/tmp/acme_widget/pr-7", "acme", "widget", "ghp", platform_owned=True)
 
 
+@patch(f"{_M}._ensure_repo_clone", return_value="git clone failed: boom")
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/x")
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
-def test_504_on_timeout(mock_cfg, mock_cred, mock_path, monkeypatch):
+def test_502_when_clone_fails(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    resp = client.post(_URL, json={})
+    assert resp.status_code == 502
+    assert resp.json()["detail"] == "git clone failed: boom"
+
+
+@patch(f"{_M}._ensure_repo_clone", return_value=None)
+@patch(f"{_M}._resolve_repo_path", return_value="/tmp/x")
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_504_on_timeout(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(exc=httpx.ReadTimeout("slow"))
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
         assert client.post(_URL, json={}).status_code == 504
 
 
+@patch(f"{_M}._ensure_repo_clone", return_value=None)
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/x")
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
-def test_502_on_unreachable(mock_cfg, mock_cred, mock_path, monkeypatch):
+def test_502_on_unreachable(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(exc=httpx.ConnectError("refused"))
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
         assert client.post(_URL, json={}).status_code == 502
 
 
+@patch(f"{_M}._ensure_repo_clone", return_value=None)
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/x")
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
-def test_propagates_upstream_error(mock_cfg, mock_cred, mock_path, monkeypatch):
+def test_propagates_upstream_error(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(result=_FakeResp(502, {"detail": "github api error"}))
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
@@ -142,10 +159,11 @@ def test_propagates_upstream_error(mock_cfg, mock_cred, mock_path, monkeypatch):
     assert resp.json()["detail"] == "Failed to start addressing the PR comments."
 
 
+@patch(f"{_M}._ensure_repo_clone", return_value=None)
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/x")
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
-def test_502_on_malformed_success_body(mock_cfg, mock_cred, mock_path, monkeypatch):
+def test_502_on_malformed_success_body(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(result=_FakeResp(200, {"unexpected": "shape"}))
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):

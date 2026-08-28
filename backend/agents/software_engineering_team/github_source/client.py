@@ -147,6 +147,14 @@ class PullRequestDetail:
 
     The head SHA is the ``commit_id`` an inline review must be anchored to so its
     comments resolve against the exact commit that was reviewed.
+
+    ``head_repo_full_name`` is the ``owner/repo`` of the repository the head
+    branch lives in — the same repo (equal to the PR's own ``owner/repo``) for
+    an ordinary branch, a different ``owner/repo`` for a fork-opened PR, and
+    ``""`` when GitHub reports no head repository at all (the fork was deleted
+    after the PR was opened). A caller that needs to fetch/push the head branch
+    must resolve the correct remote from this field — ``head`` alone is only
+    the branch's short ref and is ambiguous for a fork PR.
     """
 
     number: int
@@ -161,6 +169,7 @@ class PullRequestDetail:
     state: str
     updated_at: str
     labels: tuple[str, ...]
+    head_repo_full_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -339,6 +348,11 @@ def _pr_from_payload(payload: dict[str, Any]) -> PullRequest:
 def _pr_detail_from_payload(payload: dict[str, Any]) -> PullRequestDetail:
     head = payload.get("head") or {}
     base = payload.get("base") or {}
+    # ``head.repo`` is null when the fork the PR was opened from has since been
+    # deleted; treat that the same as "unknown" (empty string) rather than let a
+    # dict-typed .get default mask the distinction from an ordinary same-repo PR.
+    head_repo = head.get("repo")
+    head_repo_full_name = (head_repo or {}).get("full_name") or "" if isinstance(head_repo, dict) else ""
     return PullRequestDetail(
         number=int(payload["number"]),
         html_url=payload.get("html_url") or "",
@@ -356,6 +370,7 @@ def _pr_detail_from_payload(payload: dict[str, Any]) -> PullRequestDetail:
             for label in (payload.get("labels") or [])
             if isinstance(label, dict) and label.get("name")
         ),
+        head_repo_full_name=head_repo_full_name,
     )
 
 

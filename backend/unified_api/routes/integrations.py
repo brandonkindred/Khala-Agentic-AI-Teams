@@ -37,6 +37,7 @@ from shared.concurrency import flock_lock
 from shared.postgres import bounded_probe
 from software_engineering_team.clone_workspace import (
     PER_ISSUE_DIR_TEMPLATE,
+    PER_PR_DIR_TEMPLATE,
     agent_cache_dir,
     clone_lock_path,
 )
@@ -2398,7 +2399,9 @@ def _repo_path_override(cfg: dict[str, Any], owner: str, repo: str) -> str:
     return ""
 
 
-def _resolve_repo_path(cfg: dict[str, Any], owner: str, repo: str, issue_number: int | None = None) -> str:
+def _resolve_repo_path(
+    cfg: dict[str, Any], owner: str, repo: str, issue_number: int | None = None, pr_number: int | None = None
+) -> str:
     """Resolve the local checkout path for the coding team.
 
     Priority: config override (default repo only) > SE_WORKSPACE_DIR env >
@@ -2412,15 +2415,21 @@ def _resolve_repo_path(cfg: dict[str, Any], owner: str, repo: str, issue_number:
     When ``issue_number`` is given and the path is auto-derived (no operator
     override), the checkout is namespaced per-issue with an ``issue-{N}`` segment
     so multiple coding-team jobs can run on different issues of the same
-    repository in true filesystem isolation, concurrently. An operator override
-    is returned verbatim — the operator manages that checkout themselves, so it
-    is neither per-issue-namespaced nor auto-cleaned.
+    repository in true filesystem isolation, concurrently. ``pr_number`` is the
+    equivalent namespacing for the address-comments flow, using a distinct
+    ``pr-{N}`` segment — a separate prefix is required, not stylistic, because
+    GitHub issues and pull requests share one numbering sequence per repository,
+    so ``issue-42`` and PR #42 would otherwise collide on the same checkout. An
+    operator override is returned verbatim — the operator manages that checkout
+    themselves, so it is neither namespaced nor auto-cleaned.
 
     Preconditions:
         - ``owner`` and ``repo`` are the non-empty target repository (the run
           routes resolve this via ``_resolve_github_target`` before calling).
-        - ``issue_number`` is a positive issue number or ``None`` (the PR-review
-          path passes ``None`` and gets the repo-level path; it never clones).
+        - ``issue_number`` is a positive issue number or ``None``; ``pr_number``
+          is a positive PR number or ``None``. At most one of the two is set (the
+          PR-review path passes neither and gets the repo-level path; it never
+          clones).
     Postconditions:
         - Returns the override verbatim when set and applicable to this target
           (see :func:`_repo_path_override`). The override is trusted operator
@@ -2429,21 +2438,25 @@ def _resolve_repo_path(cfg: dict[str, Any], owner: str, repo: str, issue_number:
           config source ever accepts untrusted input it must be sanitized by the
           caller.
         - Otherwise returns an absolute derived path; with ``issue_number`` set
-          the path ends in ``issue-{issue_number}`` and two distinct issue
-          numbers map to two distinct paths.
+          the path ends in ``issue-{issue_number}``, with ``pr_number`` set it
+          ends in ``pr-{pr_number}``, and two distinct numbers (of the same kind)
+          map to two distinct paths.
         - Raises ``HTTPException(400)`` when ``owner``/``repo`` are missing or
-          carry a path separator, ``..`` segment, or null byte, or when
-          ``issue_number`` is non-positive — defense-in-depth so this path
-          builder can't be coerced into escaping the workspace root or building
-          a degenerate ``issue-0`` segment even if a caller skipped validation.
+          carry a path separator, ``..`` segment, or null byte, when
+          ``issue_number`` or ``pr_number`` is non-positive, or when both are
+          set — defense-in-depth so this path builder can't be coerced into
+          escaping the workspace root, building a degenerate ``issue-0``/``pr-0``
+          segment, or building an ambiguous path, even if a caller skipped
+          validation.
 
     Note:
         The auto-derived layout differs by source: a workspace-root env var gives
-        ``{root}/{owner}_{repo}[/issue-N]`` while the ``AGENT_CACHE`` fallback
-        gives ``{cache}/github_workspaces/{owner}/{repo}[/issue-N]``. This is
-        intentional (``AGENT_CACHE`` is a shared multi-team cache namespaced under
-        ``github_workspaces``; a dedicated workspace root is not), and
-        ``ephemeral_workspace_roots`` mirrors both shapes for the cleanup guard.
+        ``{root}/{owner}_{repo}[/issue-N|/pr-N]`` while the ``AGENT_CACHE``
+        fallback gives ``{cache}/github_workspaces/{owner}/{repo}[/issue-N|/pr-N]``.
+        This is intentional (``AGENT_CACHE`` is a shared multi-team cache
+        namespaced under ``github_workspaces``; a dedicated workspace root is
+        not), and ``ephemeral_workspace_roots`` mirrors both shapes for the
+        cleanup guard.
     """
     override = _repo_path_override(cfg, owner, repo)
     if override:
@@ -2469,13 +2482,23 @@ def _resolve_repo_path(cfg: dict[str, Any], owner: str, repo: str, issue_number:
             raise HTTPException(status_code=400, detail=f"invalid GitHub {label}: {value!r}")
         _validate_repo_component(label, value)
 
-    # Enforce the documented precondition: a non-positive issue_number would yield
-    # a degenerate ``issue-0`` / ``issue--1`` segment (and never names a real
-    # GitHub issue), so reject it here rather than build a bad path.
+    if issue_number is not None and pr_number is not None:
+        raise HTTPException(status_code=400, detail="issue_number and pr_number are mutually exclusive")
+
+    # Enforce the documented precondition: a non-positive issue_number/pr_number
+    # would yield a degenerate ``issue-0``/``pr-0`` segment (and never names a
+    # real GitHub issue or PR), so reject it here rather than build a bad path.
     if issue_number is not None and issue_number < 1:
         raise HTTPException(status_code=400, detail=f"issue_number must be positive: {issue_number!r}")
+    if pr_number is not None and pr_number < 1:
+        raise HTTPException(status_code=400, detail=f"pr_number must be positive: {pr_number!r}")
 
-    issue_segment = PER_ISSUE_DIR_TEMPLATE.format(issue_number=issue_number) if issue_number is not None else None
+    if issue_number is not None:
+        namespace_segment = PER_ISSUE_DIR_TEMPLATE.format(issue_number=issue_number)
+    elif pr_number is not None:
+        namespace_segment = PER_PR_DIR_TEMPLATE.format(pr_number=pr_number)
+    else:
+        namespace_segment = None
 
     # Auto-derived paths are resolved to absolute so they are stable regardless
     # of the process working directory at clone vs. cleanup time, and so the
@@ -2484,13 +2507,13 @@ def _resolve_repo_path(cfg: dict[str, Any], owner: str, repo: str, issue_number:
         val = os.environ.get(env_var, "").strip()
         if val:
             base = Path(val) / f"{owner}_{repo}"
-            target = base / issue_segment if issue_segment else base
+            target = base / namespace_segment if namespace_segment else base
             return str(target.resolve())
 
     # Shared AGENT_CACHE resolver (single source of truth) so the derived path
     # and the cleanup safety root in ephemeral_workspace_roots never diverge.
     base = Path(agent_cache_dir()) / "github_workspaces" / owner / repo
-    target = base / issue_segment if issue_segment else base
+    target = base / namespace_segment if namespace_segment else base
     return str(target.resolve())
 
 
@@ -2965,16 +2988,37 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
     Postconditions:
         - On success returns the started job's id, PR url, unresolved-comment count, and
           initial status. Every failure path raises ``HTTPException`` with an explanatory
-          detail; no ``httpx`` error escapes unhandled.
+          detail; no ``httpx`` or ``subprocess`` error escapes unhandled.
+        - The checkout is namespaced per-PR (``pr-{pr_number}``, unless the operator
+          pins an explicit ``repo_path`` override) and cloned/fetched here before the
+          job is forwarded, mirroring ``run_github_issue``: unlike a plain PR review
+          (API-only), this flow implements and pushes fixes, so it needs a real local
+          checkout, and per-PR namespacing keeps concurrent address-comments jobs on
+          different PRs of the same repo from racing on the same working tree.
     """
     cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, None, body.owner, body.repo)
 
     coding_team_url = _require_coding_team_url()
 
+    repo_path = _resolve_repo_path(cfg, owner, repo, pr_number=pr_number)
+    # An operator-pinned repo_path override is not per-PR-namespaced and is never
+    # auto-cleaned/lock-guarded by this service — mirrors run_github_issue's
+    # cleanup_checkout_on_success computation.
+    platform_owned = not _repo_path_override(cfg, owner, repo)
+
+    loop = asyncio.get_running_loop()
+    clone_err = await loop.run_in_executor(
+        None,
+        functools.partial(_ensure_repo_clone, repo_path, owner, repo, token, platform_owned=platform_owned),
+    )
+    if clone_err:
+        logger.warning("github address-comments: repository preparation failed: %s", clone_err)
+        raise HTTPException(status_code=502, detail=clone_err)
+
     payload: dict[str, Any] = {
         "owner": owner,
         "repo": repo,
-        "repo_path": _resolve_repo_path(cfg, owner, repo),
+        "repo_path": repo_path,
         "pr_number": pr_number,
         "github_token": token,
     }

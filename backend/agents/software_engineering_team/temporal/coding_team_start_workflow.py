@@ -85,6 +85,14 @@ def execute_coding_team_workflow(
         - Blocks until ``CodingTeamWorkflow`` reaches a terminal result and returns
           that result. A pause remains durable in Temporal and is resumed through
           the normal answer-signal path.
+        - Blocking past ``_COMMENT_WORKFLOW_TIMEOUT_S`` (the client-side wait
+          window) does NOT surface as failure: this caller reattaches to the
+          same still-running workflow (``reattach_on_timeout=True``) and keeps
+          waiting rather than reporting a terminal failure while the durable
+          workflow may later succeed and push code with nobody watching. The
+          caller is a per-comment background-thread worker (see
+          ``address_comments._dispatch_implementation``), which can afford to
+          keep blocking — there is no request deadline to respect here.
     """
     assert job_id, "execute_coding_team_workflow requires a non-empty job_id"
     assert repo_path, "execute_coding_team_workflow requires a non-empty repo_path"
@@ -101,6 +109,7 @@ def execute_coding_team_workflow(
         workflow_id=f"{WORKFLOW_ID_PREFIX}{job_id}",
         task_queue=TASK_QUEUE,
         execute_timeout_s=_COMMENT_WORKFLOW_TIMEOUT_S,
+        reattach_on_timeout=True,
     )
     if not isinstance(result, dict):
         raise RuntimeError("CodingTeamWorkflow returned a non-object result")
