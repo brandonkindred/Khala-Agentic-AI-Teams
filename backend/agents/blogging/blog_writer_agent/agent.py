@@ -22,6 +22,7 @@ from agents.blogging.shared.content_planning_loop import (
 )
 from agents.blogging.shared.content_profile import LengthPolicy
 from agents.blogging.shared.json_retry import run_json_gate
+from agents.blogging.shared.prompt_budget import resolve_model_context_tokens
 from pydantic import ValidationError
 from strands import Agent
 from strands.types.exceptions import EventLoopException
@@ -562,6 +563,7 @@ class BlogWriterAgent(_BlogAgentBase):
             generate_system=GENERATE_PLAN_SYSTEM,
             refine_system=REFINE_PLAN_SYSTEM,
             complete_plan_json_fn=self._complete_plan_json,
+            planner_context_tokens=resolve_model_context_tokens(self._model),
         )
 
     # ------------------------------------------------------------------

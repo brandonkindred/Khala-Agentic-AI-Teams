@@ -20,6 +20,7 @@ from agents.blogging.shared.planning_config import (
     planning_max_iterations,
     planning_max_parse_retries,
 )
+from agents.blogging.shared.prompt_budget import resolve_model_context_tokens
 from strands import Agent
 
 from llm_service import extract_json_from_response
@@ -142,6 +143,7 @@ class BlogPlanningAgent(_BlogAgentBase):
             generate_system=GENERATE_PLAN_SYSTEM,
             refine_system=REFINE_PLAN_SYSTEM,
             complete_plan_json_fn=self._complete_plan_json,
+            planner_context_tokens=resolve_model_context_tokens(self._model),
         )
 
 
