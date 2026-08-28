@@ -164,8 +164,15 @@ _RESPONSE_RESERVE_TOKENS = 8000
 
 
 def _get_model_chunk_chars(llm: "LLMClient") -> int:
-    """Max chars of source text that fit in one compaction call."""
-    ctx = llm.get_max_context_tokens() if hasattr(llm, "get_max_context_tokens") else 16384
+    """Max source chars safe for one call across every possible LLM consumer."""
+    min_context = getattr(llm, "get_min_context_tokens", None)
+    if callable(min_context):
+        # A failover client can switch providers after a 429 within this call, so
+        # size the chunk for its smallest candidate rather than only the preferred
+        # provider exposed through get_max_context_tokens().
+        ctx = min_context()
+    else:
+        ctx = llm.get_max_context_tokens() if hasattr(llm, "get_max_context_tokens") else 16384
     available = ctx - _PROMPT_OVERHEAD_TOKENS - _RESPONSE_RESERVE_TOKENS
     return max(4000, int(available * _CHUNK_CHARS_PER_TOKEN))
 

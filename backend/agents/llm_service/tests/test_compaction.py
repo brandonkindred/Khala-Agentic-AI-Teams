@@ -12,6 +12,7 @@ from llm_service.compaction import (  # noqa: PLC2701 - internals are under test
     _compaction_cache_key,
     _compaction_cache_namespace,
     _compaction_cache_size,
+    _get_model_chunk_chars,
     _model_fingerprint,
     clear_compaction_cache,
     compact_text,
@@ -395,6 +396,19 @@ def test_supports_compaction_false_for_none() -> None:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def test_chunk_size_uses_smallest_failover_context() -> None:
+    class _FailoverLikeClient:
+        def get_max_context_tokens(self):
+            return 100_000
+
+        def get_min_context_tokens(self):
+            return 16_000
+
+    # 16k context minus the 12k prompt/response reserve reaches the 4k floor.
+    # Using only the preferred provider would incorrectly allow an 88k chunk.
+    assert _get_model_chunk_chars(_FailoverLikeClient()) == 4_000
 
 
 def test_cache_size_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
