@@ -408,6 +408,7 @@ def parse_checkpoint(raw: dict[str, Any]) -> AnyPipelineCheckpoint:
 def find_latest_checkpoint_for_attempt(
     checkpoints: Iterable[AnyPipelineCheckpoint],
     *,
+    run_id: str,
     cycle_scope: str,
     design_attempt: int,
     generation: int,
@@ -415,16 +416,19 @@ def find_latest_checkpoint_for_attempt(
     """Return the most-converged valid checkpoint captured for one attempt.
 
     Preconditions:
-      - ``cycle_scope``/``design_attempt``/``generation`` identify exactly the
-        attempt to look up, using the same identity/versioning fields every
-        checkpoint carries (see ``PipelineCheckpoint``'s own docstring).
+      - ``run_id``/``cycle_scope``/``design_attempt``/``generation`` identify
+        exactly the attempt to look up, using the same identity/versioning
+        fields every checkpoint carries (see ``PipelineCheckpoint``'s own
+        docstring: an attempt's identity is ``(run_id, cycle_scope,
+        design_attempt)``, disambiguated further by ``generation``).
 
     Postconditions:
-      - Checkpoints in ``checkpoints`` whose ``cycle_scope``, ``design_attempt``,
-        or ``generation`` don't match the given values are excluded -- this is
-        what makes a stale-generation or wrong-attempt checkpoint invalid for
-        this lookup, per ``PipelineCheckpoint``'s "never survives a generation
-        bump" invariant.
+      - Checkpoints in ``checkpoints`` whose ``run_id``, ``cycle_scope``,
+        ``design_attempt``, or ``generation`` don't match the given values
+        are excluded -- this is what makes a checkpoint from a different run
+        or attempt, or a stale-generation checkpoint, invalid for this
+        lookup, per ``PipelineCheckpoint``'s identity fields and its "never
+        survives a generation bump" invariant.
       - Among the remaining matches, returns the one whose ``stage`` is
         furthest along ``PIPELINE_STAGES`` -- the most-converged valid
         checkpoint for the attempt, since a checkpoint at stage ``S`` implies
@@ -434,7 +438,8 @@ def find_latest_checkpoint_for_attempt(
     matches = [
         cp
         for cp in checkpoints
-        if cp.cycle_scope == cycle_scope
+        if cp.run_id == run_id
+        and cp.cycle_scope == cycle_scope
         and cp.design_attempt == design_attempt
         and cp.generation == generation
     ]

@@ -661,6 +661,7 @@ class StrategyLabOrchestrator(
                     # from the top, exactly as before.
                     resume_checkpoint = find_latest_checkpoint_for_attempt(
                         self.pipeline_checkpoints,
+                        run_id=checkpoint_scope,
                         cycle_scope=checkpoint_scope,
                         design_attempt=design_attempt,
                         generation=1,

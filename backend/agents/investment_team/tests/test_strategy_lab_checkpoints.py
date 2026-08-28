@@ -521,6 +521,7 @@ def test_find_latest_checkpoint_for_attempt_returns_most_converged_match() -> No
     review_cp = _build_review_checkpoint()
     found = find_latest_checkpoint_for_attempt(
         [design_cp, review_cp],
+        run_id="run-1",
         cycle_scope="cycle-scope-1",
         design_attempt=0,
         generation=1,
@@ -532,6 +533,7 @@ def test_find_latest_checkpoint_for_attempt_returns_none_when_no_match() -> None
     assert (
         find_latest_checkpoint_for_attempt(
             [],
+            run_id="run-1",
             cycle_scope="cycle-scope-1",
             design_attempt=0,
             generation=1,
@@ -543,22 +545,24 @@ def test_find_latest_checkpoint_for_attempt_returns_none_when_no_match() -> None
 @pytest.mark.parametrize(
     "mismatch_kwargs",
     [
+        {"run_id": "some-other-run"},
         {"cycle_scope": "some-other-cycle-scope"},
         {"design_attempt": 99},
         {"generation": 2},
     ],
-    ids=["cycle_scope", "design_attempt", "generation"],
+    ids=["run_id", "cycle_scope", "design_attempt", "generation"],
 )
 def test_find_latest_checkpoint_for_attempt_excludes_invalid_checkpoints(
     mismatch_kwargs: Dict[str, Any],
 ) -> None:
     """A checkpoint that fails its validity invariants for this lookup (wrong
-    cycle_scope, wrong design_attempt, or a stale generation) is excluded --
+    run_id, cycle_scope, design_attempt, or a stale generation) is excluded --
     the lookup falls back to 'no usable checkpoint' rather than reusing it."""
     cp = _build_alignment_checkpoint()
     found = find_latest_checkpoint_for_attempt(
         [cp],
         **{
+            "run_id": "run-1",
             "cycle_scope": "cycle-scope-1",
             "design_attempt": 0,
             "generation": 1,
