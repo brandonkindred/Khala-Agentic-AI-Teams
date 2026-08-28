@@ -32,6 +32,7 @@ from agents.blogging.shared.content_plan import (
     ContentPlan,
     PlanningInput,
     PlanningPhaseResult,
+    build_research_digest,
     content_plan_to_content_brief_markdown,
     content_plan_to_markdown_doc,
     content_plan_to_outline_markdown,
@@ -362,6 +363,8 @@ def run_planning(
           its compiled document as ``research_packet.md`` under ``work_dir`` (before
           the planning artifacts below); reports a "research" phase progress message
           via ``job_updater`` before and after the research call.
+        - Passes a bounded digest of the compiled research document into planning;
+          a research run with no references supplies an empty digest.
         - Returns a ``PlanningPhaseResult`` (content plan with title candidates,
           sections, requirements analysis, and planning telemetry).
         - When ``work_dir`` is given, ``allowed_claims.json`` is always written
@@ -467,10 +470,22 @@ def run_planning(
         status_text="Generating content plan...",
     )
 
+    # The research agent emits a human-readable fallback document even when no
+    # references were found.  That artifact remains useful for diagnostics, but it
+    # is not evidence for the planner, so keep the planning digest empty in that
+    # case.  Supplying the resolved client lets build_research_digest compact
+    # documents that exceed its prompt budget instead of passing them through.
+    digest_llm = llm_client.client if isinstance(llm_client, LLMClientModel) else llm_client
+    research_digest = build_research_digest(
+        research_output.compiled_document if research_output.references else "",
+        llm=digest_llm,
+    )
+
     planning_input = PlanningInput(
         brief=brief.brief,
         audience=brief.audience,
         tone_or_purpose=brief.tone_or_purpose,
+        research_digest=research_digest,
         length_policy_context=build_planning_length_context(length_policy),
         series_context_block=series_context_block(series_context),
     )
@@ -1214,7 +1229,10 @@ def _run_title_selection(
             replacement = None
             try:
                 data = llm_client.complete_json(
-                    feedback_prompt, temperature=0.7, objective="regenerate blog titles", think=False
+                    feedback_prompt,
+                    temperature=0.7,
+                    objective="regenerate blog titles",
+                    think=False,
                 )
                 new_titles = data.get("titles", []) if data else []
                 if new_titles and isinstance(new_titles, list):
