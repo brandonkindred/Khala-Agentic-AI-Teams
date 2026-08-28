@@ -94,9 +94,9 @@ sequenceDiagram
     API->>Pipeline: run_blog_full_pipeline_job()
     Pipeline->>RA: run(ResearchBriefInput)
     RA-->>Pipeline: ResearchAgentOutput<br/>(compiled_document, references, notes)
-    Note over Pipeline: run_planning() writes<br/>research_packet.md to work_dir
+    Note over Pipeline: run_planning() writes research_packet.md<br/>and builds a bounded research digest
     Pipeline->>WA: plan_content(PlanningInput)
-    Note over WA: research_digest still defaults to "";<br/>research output not yet routed into PlanningInput
+    Note over WA: Planning and plan critic receive<br/>PlanningInput.research_digest
 
     loop Refine until acceptable (max 5 iterations)
         WA->>WA: Generate / refine ContentPlan
