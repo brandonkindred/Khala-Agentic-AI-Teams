@@ -897,8 +897,32 @@ def _prepare_issue_branch(
 
 
 def _fast_forward(repo_path: str, branch: str, source_ref: str) -> Tuple[bool, Optional[str]]:
+    """Force-move ``branch`` to point at ``source_ref`` in ``repo_path``.
+
+    Implemented with ``git branch -f``, which git REFUSES when ``branch`` is
+    the attached HEAD of any working tree of the repo. ``_prepare_issue_branch``
+    leaves the per-issue checkout with ``branch`` (the integration branch)
+    checked out via ``checkout -B``, so a naive ``git branch -f`` here fails
+    with "cannot force update the branch '<branch>' used by worktree at ...".
+
+    To avoid that, when ``branch`` is the checkout's current HEAD we first
+    detach HEAD onto its own commit (``git checkout --detach``), leaving the
+    branch attached nowhere, then force-update it. The final state is identical
+    to what the subsequent push expects (``branch`` points at ``source_ref``);
+    the working tree is only ever left detached, never on a different branch.
+    """
     if not _is_safe_ref(branch) or not _is_safe_ref(source_ref):
         return False, f"unsafe ref: {branch!r} <- {source_ref!r}"
+
+    # If the checkout currently has `branch` attached as HEAD, git will refuse
+    # to force-update it. Detach HEAD first so the branch is no longer "used by
+    # a worktree", making the force-update legal.
+    rc_head, head = _main._git(repo_path, "rev-parse", "--abbrev-ref", "HEAD")
+    if rc_head == 0 and head.strip() == branch:
+        rc_detach, detach_msg = _main._git(repo_path, "checkout", "--detach")
+        if rc_detach != 0:
+            return False, f"could not detach HEAD before updating {branch!r}: {detach_msg}"
+
     rc, msg = _main._git(repo_path, "branch", "-f", "--", branch, source_ref)
     return (rc == 0), (None if rc == 0 else msg)
 

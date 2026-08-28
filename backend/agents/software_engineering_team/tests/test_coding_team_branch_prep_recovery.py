@@ -1088,3 +1088,67 @@ class TestStaleRefDeletionFailure:
         # The surviving ref was reported, not silently used as a candidate.
         r = _run(clone, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/khala/issue-7")
         assert r.returncode == 0
+
+
+class TestFastForwardWithCheckedOutBranch:
+    """`_fast_forward` force-moves the integration branch (`git branch -f`).
+
+    Branch prep leaves the per-issue checkout with the integration branch
+    checked out (`checkout -B khala/issue-N`), so a naive `git branch -f` on it
+    is rejected by git with "cannot force update the branch '<branch>' used by
+    worktree at ...". `_fast_forward` must detach HEAD first so the update is
+    legal, reproducing the field failure and its fix.
+    """
+
+    def _setup_repo_with_integration_checked_out(self, api, clone: str) -> str:
+        """Return the integration branch name, left checked out and behind development."""
+        integration_branch = "khala/issue-6867"
+        # `development` gets a commit the integration branch does not have, so a
+        # real force-update (not a no-op) is required to move it forward.
+        _must(clone, "checkout", "-q", "-b", "development")
+        _commit_file(clone, "dev.py", "x = 1\n", "development work")
+        # Integration branch seeded from an earlier point, then left CHECKED OUT
+        # exactly as `_prepare_issue_branch`'s `checkout -B integration_branch` does.
+        _must(clone, "checkout", "-q", "-b", integration_branch, "main")
+        assert _must(clone, "rev-parse", "--abbrev-ref", "HEAD") == integration_branch
+        return integration_branch
+
+    def test_fast_forward_succeeds_when_branch_is_checked_out(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        integration_branch = self._setup_repo_with_integration_checked_out(api, clone)
+
+        dev_tip = _must(clone, "rev-parse", "development")
+
+        ok, err = api._fast_forward(clone, integration_branch, "development")
+
+        assert ok is True, err
+        # The branch ref actually moved to development's tip.
+        assert _must(clone, "rev-parse", integration_branch) == dev_tip
+        # HEAD was detached (no longer attached to the integration branch), so the
+        # force-update was legal; the branch is not held by the working tree anymore.
+        assert _must(clone, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"
+
+    def test_fast_forward_succeeds_when_branch_not_checked_out(self, api, repo_pair) -> None:
+        """When the integration branch is NOT the checkout's HEAD, the update
+        still works (and HEAD is left untouched)."""
+        _, clone = repo_pair
+        integration_branch = "khala/issue-6867"
+        _must(clone, "checkout", "-q", "-b", "development")
+        _commit_file(clone, "dev.py", "x = 1\n", "development work")
+        # Create the integration branch but leave HEAD on development.
+        _must(clone, "branch", integration_branch, "main")
+        assert _must(clone, "rev-parse", "--abbrev-ref", "HEAD") == "development"
+
+        dev_tip = _must(clone, "rev-parse", "development")
+        ok, err = api._fast_forward(clone, integration_branch, "development")
+
+        assert ok is True, err
+        assert _must(clone, "rev-parse", integration_branch) == dev_tip
+        # HEAD was not on the integration branch, so it is left untouched.
+        assert _must(clone, "rev-parse", "--abbrev-ref", "HEAD") == "development"
+
+    def test_fast_forward_rejects_unsafe_refs(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        ok, err = api._fast_forward(clone, "--evil", "development")
+        assert ok is False
+        assert "unsafe" in (err or "")
