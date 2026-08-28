@@ -309,7 +309,7 @@ def test_run_planning_keeps_academic_only_research_digest(monkeypatch) -> None:
 
 
 def test_run_planning_caps_research_digest(monkeypatch) -> None:
-    """Oversized research is compacted before it reaches the planning prompt."""
+    """Oversized research is capped for the smaller planner/critic context."""
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.blog_research_agent.models import (
         ResearchAgentOutput,
@@ -322,7 +322,7 @@ def test_run_planning_caps_research_digest(monkeypatch) -> None:
 
     ppr = _make_planning_result()
     oversized_document = "x" * 200_001
-    compacted_digest = "y" * 7_000
+    compacted_digest = "y" * 3_000
     planning_digests: list[str] = []
     compaction_calls: list[tuple] = []
 
@@ -331,6 +331,15 @@ def test_run_planning_caps_research_digest(monkeypatch) -> None:
             return 12_000
 
     planning_client = _PlanningClient()
+
+    class _CriticClient:
+        def get_max_context_tokens(self):
+            return 8_000
+
+    class _FakeCritic:
+        _model = _CriticClient()
+
+    plan_critic = _FakeCritic()
 
     class _FakePlanAgent:
         def __init__(self, **kw):
@@ -362,7 +371,7 @@ def test_run_planning_caps_research_digest(monkeypatch) -> None:
     monkeypatch.setattr(v2, "ResearchAgent", _FakeResearchAgent)
     monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "brand")
     monkeypatch.setattr(v2, "load_style_file", lambda _p: "style")
-    monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: None)
+    monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: plan_critic)
     monkeypatch.setattr(llm_service, "compact_text", _compact)
 
     v2.run_planning(
@@ -374,10 +383,25 @@ def test_run_planning_caps_research_digest(monkeypatch) -> None:
         job_updater=None,
     )
 
-    # The 12k-token planning model reserves 6k tokens for the rest of the prompt
-    # and output. Even an over-budget compaction response is hard-capped.
-    assert planning_digests == [compacted_digest[:6_000]]
-    assert compaction_calls == [(oversized_document, 6_000, planning_client, "research digest")]
+    # The 8k-token critic is smaller than the 12k planner, leaving 2k characters
+    # after the shared 6k reserve. An oversized compaction response is hard-capped.
+    assert planning_digests == [compacted_digest[:2_000]]
+    assert compaction_calls == [(oversized_document, 2_000, planning_client, "research digest")]
+
+
+def test_research_digest_budget_uses_smallest_failover_context() -> None:
+    from agents.blogging.agent_implementations.pipeline._common import (
+        _research_digest_max_chars_for_consumers,
+    )
+
+    class _FailoverLikeClient:
+        def get_max_context_tokens(self):
+            return 32_000
+
+        def get_min_context_tokens(self):
+            return 7_500
+
+    assert _research_digest_max_chars_for_consumers(_FailoverLikeClient()) == 1_500
 
 
 def test_run_planning_writes_allowed_claims_with_extracted_claims(

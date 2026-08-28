@@ -50,7 +50,7 @@ from agents.blogging.shared.run_pipeline_job import _is_external_cancellation
 from strands.types.exceptions import EventLoopException
 from temporalio.exceptions import CancelledError
 
-from llm_service import LLMClientModel, with_model_override
+from llm_service import LLMClientModel, unwrap_client, with_model_override
 from llm_service.interface import LLMClient, LLMRateLimitError, LLMTemporaryError
 
 from .constants import (
@@ -67,26 +67,37 @@ _DEFAULT_PLANNING_CONTEXT_TOKENS = 16_384
 _PLANNING_NON_RESEARCH_RESERVE_TOKENS = 6_000
 
 
-def _planning_research_digest_max_chars(llm: Any) -> int:
-    """Return a conservative digest budget for the selected planning model.
+def _research_digest_max_chars_for_consumers(*consumers: Any) -> int:
+    """Return a digest budget safe for every planner/critic model and failover.
 
     Research text is budgeted at one character per token, matching the research
     agent's safety rule for poorly tokenizing web content.  The remaining context
     is reserved for the planning instructions, brief, prior plan/feedback, and
     model output.
     """
-    try:
-        context_tokens = int(llm.get_max_context_tokens())
-    except (AttributeError, TypeError, ValueError):
-        context_tokens = _DEFAULT_PLANNING_CONTEXT_TOKENS
-    except Exception:
-        logger.warning(
-            "Could not resolve planning context size; using %d-token fallback",
-            _DEFAULT_PLANNING_CONTEXT_TOKENS,
-            exc_info=True,
-        )
-        context_tokens = _DEFAULT_PLANNING_CONTEXT_TOKENS
-    return max(1, context_tokens - _PLANNING_NON_RESEARCH_RESERVE_TOKENS)
+    context_limits: list[int] = []
+    for consumer in consumers:
+        sizing_client = consumer.client if isinstance(consumer, LLMClientModel) else consumer
+        sizing_client = unwrap_client(sizing_client)
+        try:
+            min_context = getattr(sizing_client, "get_min_context_tokens", None)
+            context_tokens = int(
+                min_context() if callable(min_context) else sizing_client.get_max_context_tokens()
+            )
+        except (AttributeError, TypeError, ValueError):
+            context_tokens = _DEFAULT_PLANNING_CONTEXT_TOKENS
+        except Exception:
+            # A consumer whose context cannot be established must not receive a
+            # large digest. Keep one character after the fixed reserve so planning
+            # can still proceed without risking a context overflow.
+            logger.warning(
+                "Could not resolve an LLM consumer context size; using minimal digest budget",
+                exc_info=True,
+            )
+            context_tokens = _PLANNING_NON_RESEARCH_RESERVE_TOKENS + 1
+        context_limits.append(context_tokens)
+    smallest_context = min(context_limits, default=_DEFAULT_PLANNING_CONTEXT_TOKENS)
+    return max(1, smallest_context - _PLANNING_NON_RESEARCH_RESERVE_TOKENS)
 
 
 def _unwrap_llm_cause(exc: BaseException) -> BaseException:
@@ -500,6 +511,11 @@ def run_planning(
     )
 
     planning_client = planning_llm_client(llm_client)
+    plan_critic = _build_plan_critic_agent(llm_client)
+    digest_consumers = [planning_client]
+    critic_client = getattr(plan_critic, "_model", None)
+    if critic_client is not None:
+        digest_consumers.append(critic_client)
 
     # The research agent emits a human-readable fallback document even when no web
     # references or academic papers were found.  That artifact remains useful for
@@ -510,7 +526,7 @@ def run_planning(
     digest_llm = (
         planning_client.client if isinstance(planning_client, LLMClientModel) else planning_client
     )
-    digest_max_chars = _planning_research_digest_max_chars(planning_client)
+    digest_max_chars = _research_digest_max_chars_for_consumers(*digest_consumers)
     research_digest = build_research_digest(
         research_output.compiled_document
         if research_output.references or research_output.academic_papers
@@ -544,8 +560,6 @@ def run_planning(
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("Could not load writing guidelines for plan critic: %s", e)
         writing_guidelines_for_critic = ""
-
-    plan_critic = _build_plan_critic_agent(llm_client)
 
     # Planning convergence cap: honour the critic's max iterations when the
     # critic is enabled, since the critic can reject plans the planner would
