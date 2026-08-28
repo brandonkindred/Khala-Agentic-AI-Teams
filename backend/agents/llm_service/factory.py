@@ -534,7 +534,9 @@ class FailoverLLMClient:
 
     ``.model``, ``get_max_context_tokens`` and the Strands surface delegate through
     ``__getattr__`` to the active provider client, so the wrapper duck-types as its
-    current provider. Registered as a virtual ``LLMClient``.
+    current provider. ``get_min_context_tokens`` inspects every current failover
+    candidate for callers that must size a prompt safely before provider selection.
+    Registered as a virtual ``LLMClient``.
 
     Invariants:
         - Holds no provider client itself — clients are pulled from the shared
@@ -614,6 +616,22 @@ class FailoverLLMClient:
 
     def chat(self, *args: Any, **kwargs: Any) -> Any:
         return self._dispatch("chat", *args, **kwargs)
+
+    def get_min_context_tokens(self) -> int:
+        """Return the smallest context window among current failover candidates.
+
+        Each generation call may advance past the active provider after a 429, so
+        prompt-sizing callers cannot safely rely on the active provider's window.
+        The same model override that generation will apply is used while inspecting
+        each candidate.
+        """
+        candidates = self._load_candidates()
+        if not candidates:
+            raise LLMNotConfiguredError(_NO_PROVIDER_MSG)
+        return min(
+            int(self._build(entry, None, self._model_override).get_max_context_tokens())
+            for entry in candidates
+        )
 
     def __getattr__(self, name: str) -> Any:
         # Only reached for attributes not defined on the wrapper itself: delegate to

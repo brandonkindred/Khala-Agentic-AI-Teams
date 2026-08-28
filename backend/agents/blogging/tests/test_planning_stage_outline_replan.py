@@ -146,8 +146,8 @@ def test_replan_failure_swallows_unexpected_error_and_keeps_current_plan(monkeyp
     assert ctx.status == "PASS"
 
 
-def test_replan_refreshes_allowed_claims_json(monkeypatch, tmp_path) -> None:
-    """A re-plan round must regenerate allowed_claims.json, not leave it stale.
+def test_replan_refreshes_claims_and_preserves_research_digest(monkeypatch, tmp_path) -> None:
+    """A re-plan must refresh claims and retain the initial research grounding.
 
     Regression test for the review finding on PR #7408: run_planning's initial
     persist and run_planning_stage's outline re-plan loop must stay in sync via
@@ -178,24 +178,36 @@ def test_replan_refreshes_allowed_claims_json(monkeypatch, tmp_path) -> None:
     ppr_refined = make_planning_phase_result(
         refined_plan, planning_iterations_used=1, planning_wall_ms_total=10.0
     )
+    planning_digests: list[str] = []
 
     class _FakeAgent:
         def __init__(self, **_kw):
             pass
 
         def plan_content(self, planning_input, **_kw):
+            planning_digests.append(planning_input.research_digest)
             if "Author feedback" in planning_input.brief:
                 return ppr_refined
             return ppr_initial
 
-    from agents.blogging.blog_research_agent.models import ResearchAgentOutput
+    from agents.blogging.blog_research_agent.models import ResearchAgentOutput, ResearchReference
+
+    compiled_research = "# Blog Post Research\n\n## Sources\n\nEvidence."
 
     class _StubResearchAgent:
         def __init__(self, **_kw):
             pass
 
         def run(self, _brief):
-            return ResearchAgentOutput(query_plan=[], references=[], compiled_document="stub research")
+            return ResearchAgentOutput(
+                query_plan=[],
+                references=[
+                    ResearchReference(
+                        url="https://example.com", title="Example", summary="Evidence"
+                    )
+                ],
+                compiled_document=compiled_research,
+            )
 
     monkeypatch.setattr(v2, "BlogWriterAgent", _FakeAgent)
     monkeypatch.setattr(v2, "ResearchAgent", _StubResearchAgent)
@@ -261,6 +273,7 @@ def test_replan_refreshes_allowed_claims_json(monkeypatch, tmp_path) -> None:
 
     assert result is None
     assert ctx.plan.title_candidates[0].title == "Refined Title"
+    assert planning_digests == [compiled_research, compiled_research]
 
     written = json.loads((tmp_path / "allowed_claims.json").read_text())
     assert written["claims"] == [

@@ -342,19 +342,19 @@ def test_content_plan_build_research_digest(monkeypatch) -> None:
     # Empty
     assert build_research_digest("", max_chars=100) == ""
 
-    # Over budget without llm — returns as-is
+    # Over budget without llm — hard-capped
     big = "x" * 1000
-    assert build_research_digest(big, max_chars=50) == big
+    assert build_research_digest(big, max_chars=50) == "x" * 50
 
     # Over budget with llm
     import llm_service as ls
 
     def fake_compact(text, max_chars, llm, label):
-        return text[:max_chars]
+        return text[:max_chars] + "overshoot"
 
     monkeypatch.setattr(ls, "compact_text", fake_compact)
     out = build_research_digest("x" * 1000, max_chars=50, llm=object())
-    assert len(out) == 50
+    assert out == "x" * 50
 
 
 # ---------------------------------------------------------------------------

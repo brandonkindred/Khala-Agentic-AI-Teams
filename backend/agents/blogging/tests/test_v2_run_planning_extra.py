@@ -128,11 +128,16 @@ def test_run_planning_runs_research_and_writes_packet(monkeypatch, tmp_path: Pat
         compiled_document=compiled_doc,
     )
 
+    planning_prompts: list[str] = []
+
     class _FakePlanAgent:
         def __init__(self, **_kw):
             pass
 
-        def plan_content(self, *_a, **_kw):
+        def plan_content(self, planning_input, **_kw):
+            from agents.blogging.shared.content_planning_loop import build_generate_plan_prompt
+
+            planning_prompts.append(build_generate_plan_prompt(planning_input))
             return ppr
 
     research_calls: list = []
@@ -172,6 +177,7 @@ def test_run_planning_runs_research_and_writes_packet(monkeypatch, tmp_path: Pat
     assert research_calls[0][0] == "init"
     assert research_calls[1] == ("run", brief)
     assert (work_dir / "research_packet.md").read_text(encoding="utf-8") == compiled_doc
+    assert compiled_doc.strip() in planning_prompts[0]
     research_updates = [u for u in updates if u.get("phase") == "research"]
     assert len(research_updates) == 2
     assert research_updates[0]["status_text"] == "Researching topic..."
@@ -201,11 +207,14 @@ def test_run_planning_research_zero_references_writes_fallback_packet(
     ppr = _make_planning_result()
     compiled_doc = "# Blog Post Research\n\n## Sources\n\n(No web sources found.)\n"
 
+    planning_digests: list[str] = []
+
     class _FakePlanAgent:
         def __init__(self, **_kw):
             pass
 
-        def plan_content(self, *_a, **_kw):
+        def plan_content(self, planning_input, **_kw):
+            planning_digests.append(planning_input.research_digest)
             return ppr
 
     class _FakeResearchAgent:
@@ -236,8 +245,163 @@ def test_run_planning_research_zero_references_writes_fallback_packet(
 
     assert result is ppr
     assert (work_dir / "research_packet.md").read_text(encoding="utf-8") == compiled_doc
+    assert planning_digests == [""]
     research_updates = [u for u in updates if u.get("phase") == "research"]
     assert "0 reference" in research_updates[1]["status_text"]
+
+
+def test_run_planning_keeps_academic_only_research_digest(monkeypatch) -> None:
+    """Academic papers remain valid evidence when web references are empty."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.models import (
+        AcademicPaper,
+        ResearchAgentOutput,
+        ResearchBriefInput,
+    )
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
+
+    ppr = _make_planning_result()
+    compiled_doc = "# Academic Sources\n\nA useful paper."
+    planning_digests: list[str] = []
+
+    class _FakePlanAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def plan_content(self, planning_input, **_kw):
+            planning_digests.append(planning_input.research_digest)
+            return ppr
+
+    class _FakeResearchAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def run(self, _brief):
+            return ResearchAgentOutput(
+                query_plan=[],
+                references=[],
+                academic_papers=[
+                    AcademicPaper(
+                        title="Useful Paper",
+                        url="https://arxiv.org/abs/1234.5678",
+                        overview_or_summary="Useful findings.",
+                    )
+                ],
+                compiled_document=compiled_doc,
+            )
+
+    monkeypatch.setattr(v2, "BlogWriterAgent", _FakePlanAgent)
+    monkeypatch.setattr(v2, "ResearchAgent", _FakeResearchAgent)
+    monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "brand")
+    monkeypatch.setattr(v2, "load_style_file", lambda _p: "style")
+    monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: None)
+
+    v2.run_planning(
+        ResearchBriefInput(brief="b", max_results=5),
+        work_dir=None,
+        llm_client=object(),
+        length_policy=resolve_length_policy(content_profile=ContentProfile.standard_article),
+        series_context=None,
+        job_updater=None,
+    )
+
+    assert planning_digests == [compiled_doc]
+
+
+def test_run_planning_preserves_planners_larger_research_budget(monkeypatch) -> None:
+    """The shared digest uses the planner budget, not a smaller critic budget."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.models import (
+        ResearchAgentOutput,
+        ResearchBriefInput,
+        ResearchReference,
+    )
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
+
+    import llm_service
+
+    ppr = _make_planning_result()
+    oversized_document = "x" * 200_001
+    compacted_digest = "y" * 7_000
+    planning_digests: list[str] = []
+    compaction_calls: list[tuple] = []
+
+    class _PlanningClient:
+        def get_max_context_tokens(self):
+            return 12_000
+
+    planning_client = _PlanningClient()
+
+    class _CriticClient:
+        def get_max_context_tokens(self):
+            return 8_000
+
+    class _FakeCritic:
+        _model = _CriticClient()
+
+    plan_critic = _FakeCritic()
+
+    class _FakePlanAgent:
+        def __init__(self, **kw):
+            assert kw["llm_client"] is planning_client
+
+        def plan_content(self, planning_input, **_kw):
+            planning_digests.append(planning_input.research_digest)
+            return ppr
+
+    class _FakeResearchAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def run(self, _brief):
+            return ResearchAgentOutput(
+                query_plan=[],
+                references=[
+                    ResearchReference(url="https://example.com", title="Example", summary="Summary")
+                ],
+                compiled_document=oversized_document,
+            )
+
+    def _compact(text, max_chars, llm, label):
+        compaction_calls.append((text, max_chars, llm, label))
+        return compacted_digest
+
+    monkeypatch.setattr(v2, "planning_model_override", lambda: None)
+    monkeypatch.setattr(v2, "BlogWriterAgent", _FakePlanAgent)
+    monkeypatch.setattr(v2, "ResearchAgent", _FakeResearchAgent)
+    monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "brand")
+    monkeypatch.setattr(v2, "load_style_file", lambda _p: "style")
+    monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: plan_critic)
+    monkeypatch.setattr(llm_service, "compact_text", _compact)
+
+    v2.run_planning(
+        ResearchBriefInput(brief="b", max_results=5),
+        work_dir=None,
+        llm_client=planning_client,
+        length_policy=resolve_length_policy(content_profile=ContentProfile.standard_article),
+        series_context=None,
+        job_updater=None,
+    )
+
+    # The 12k planner retains its 6k-character initial budget. The 8k critic no
+    # longer permanently discards evidence before per-prompt fitting occurs.
+    assert planning_digests == [compacted_digest[:6_000]]
+    assert compaction_calls == [(oversized_document, 6_000, planning_client, "research digest")]
+
+
+def test_research_digest_budget_uses_smallest_failover_context() -> None:
+    from agents.blogging.agent_implementations.pipeline._common import (
+        _research_digest_max_chars_for_consumers,
+    )
+
+    class _FailoverLikeClient:
+        def get_max_context_tokens(self):
+            return 32_000
+
+        def get_min_context_tokens(self):
+            return 7_500
+
+    assert _research_digest_max_chars_for_consumers(_FailoverLikeClient()) == 1_500
 
 
 def test_run_planning_writes_allowed_claims_with_extracted_claims(

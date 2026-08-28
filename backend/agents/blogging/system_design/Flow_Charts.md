@@ -16,7 +16,7 @@ flowchart TD
     LoadBrandSpec --> StartPipeline[Start pipeline<br/>Status: RUNNING]
 
     StartPipeline --> Research["Research Agent<br/>Persist research_packet.md<br/>(research phase sub-progress, no BlogPhase slice)"]
-    Research --> Planning["BlogWriterAgent.plan_content()<br/>ContentPlan + refine loop<br/>(research_digest defaults to empty)<br/>(BlogPhase.PLANNING, 0-15%)"]
+    Research --> Planning["BlogWriterAgent.plan_content()<br/>ContentPlan + refine loop<br/>(bounded research_digest)<br/>(BlogPhase.PLANNING, 0-15%)"]
 
     Planning --> PlanOK{Plan<br/>acceptable?}
     PlanOK -->|No| PlanFail([FAILED<br/>PlanningError])
@@ -67,7 +67,7 @@ flowchart TD
 
 **Implementation notes:**
 
-- `run_planning()` (`pipeline/_common.py`) calls `ResearchAgent.run()` ahead of planning and persists its compiled document as `research_packet.md`, reporting progress on a "research" phase (not a `BlogPhase` slice). The output is not yet fed into planning, though: `run_pipeline()` still builds `PlanningInput` with `research_digest=""` (the default in `shared/content_plan.py:197`) — routing the compiled document into `research_digest` is tracked as a separate follow-up.
+- `run_planning()` (`pipeline/_common.py`) calls `ResearchAgent.run()` ahead of planning, persists its compiled document as `research_packet.md`, and passes a digest hard-capped to the smallest context budget across the planner, optional plan critic, and current failover candidates into `PlanningInput.research_digest`. A run with no web references or academic papers keeps the diagnostic packet but supplies an empty digest; outline revisions reuse the initial digest. Progress is reported on a "research" phase (not a `BlogPhase` slice).
 - Planning is done inline by `BlogWriterAgent.plan_content()` (`blog_writer_agent/agent.py:294`), not by a separate `BlogPlanningAgent` class.
 - Validators, fact-check, and compliance all run inside a single loop bounded by `max_rewrite_iterations`. Title selection is only reached after an iteration where every gate returned `PASS`.
 

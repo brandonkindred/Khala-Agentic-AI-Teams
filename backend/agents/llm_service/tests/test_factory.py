@@ -111,6 +111,37 @@ def test_get_client_none_is_unwrapped_failover(seed_ollama):
     assert c.model == "default-model"
 
 
+def test_failover_reports_smallest_candidate_context() -> None:
+    """Prompt sizing must account for every provider a generation may use."""
+    entries = [object(), object()]
+    contexts = {entries[0]: 32_000, entries[1]: 8_000}
+    builds: list[tuple] = []
+
+    class _Client:
+        def __init__(self, context_tokens):
+            self.context_tokens = context_tokens
+
+        def get_max_context_tokens(self):
+            return self.context_tokens
+
+    def _build(entry, retry_override, model_override):
+        builds.append((entry, retry_override, model_override))
+        return _Client(contexts[entry])
+
+    client = FailoverLLMClient(
+        lambda: entries,
+        _build,
+        lambda _entry, _error: None,
+        model_override="planning-model",
+    )
+
+    assert client.get_min_context_tokens() == 8_000
+    assert builds == [
+        (entries[0], None, "planning-model"),
+        (entries[1], None, "planning-model"),
+    ]
+
+
 def test_get_client_per_agent_model_default(seed_ollama, monkeypatch):
     """A blank entry model resolves per-agent via the shared resolver defaults."""
     seed_ollama(model="")  # blank → resolver default applies

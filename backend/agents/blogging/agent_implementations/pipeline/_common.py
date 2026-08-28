@@ -32,6 +32,7 @@ from agents.blogging.shared.content_plan import (
     ContentPlan,
     PlanningInput,
     PlanningPhaseResult,
+    build_research_digest,
     content_plan_to_content_brief_markdown,
     content_plan_to_markdown_doc,
     content_plan_to_outline_markdown,
@@ -49,7 +50,7 @@ from agents.blogging.shared.run_pipeline_job import _is_external_cancellation
 from strands.types.exceptions import EventLoopException
 from temporalio.exceptions import CancelledError
 
-from llm_service import LLMClientModel, with_model_override
+from llm_service import LLMClientModel, unwrap_client, with_model_override
 from llm_service.interface import LLMClient, LLMRateLimitError, LLMTemporaryError
 
 from .constants import (
@@ -61,6 +62,42 @@ from .constants import (
 from .context import JobUpdater
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_PLANNING_CONTEXT_TOKENS = 16_384
+_PLANNING_NON_RESEARCH_RESERVE_TOKENS = 6_000
+
+
+def _research_digest_max_chars_for_consumers(*consumers: Any) -> int:
+    """Return a digest budget safe for every planner/critic model and failover.
+
+    Research text is budgeted at one character per token, matching the research
+    agent's safety rule for poorly tokenizing web content.  The remaining context
+    is reserved for the planning instructions, brief, prior plan/feedback, and
+    model output.
+    """
+    context_limits: list[int] = []
+    for consumer in consumers:
+        sizing_client = consumer.client if isinstance(consumer, LLMClientModel) else consumer
+        sizing_client = unwrap_client(sizing_client)
+        try:
+            min_context = getattr(sizing_client, "get_min_context_tokens", None)
+            context_tokens = int(
+                min_context() if callable(min_context) else sizing_client.get_max_context_tokens()
+            )
+        except (AttributeError, TypeError, ValueError):
+            context_tokens = _DEFAULT_PLANNING_CONTEXT_TOKENS
+        except Exception:
+            # A consumer whose context cannot be established must not receive a
+            # large digest. Keep one character after the fixed reserve so planning
+            # can still proceed without risking a context overflow.
+            logger.warning(
+                "Could not resolve an LLM consumer context size; using minimal digest budget",
+                exc_info=True,
+            )
+            context_tokens = _PLANNING_NON_RESEARCH_RESERVE_TOKENS + 1
+        context_limits.append(context_tokens)
+    smallest_context = min(context_limits, default=_DEFAULT_PLANNING_CONTEXT_TOKENS)
+    return max(1, smallest_context - _PLANNING_NON_RESEARCH_RESERVE_TOKENS)
 
 
 def _unwrap_llm_cause(exc: BaseException) -> BaseException:
@@ -341,6 +378,7 @@ def run_planning(
     length_policy: LengthPolicy,
     series_context: Optional[SeriesContext],
     job_updater: Optional[JobUpdater],
+    on_research_digest: Optional[Callable[[str], None]] = None,
 ) -> PlanningPhaseResult:
     """
     Planning step for the full pipeline: build the content plan for ``brief``.
@@ -353,6 +391,8 @@ def run_planning(
         length_policy: Resolved length/format policy for the plan.
         series_context: Optional series-instalment scope.
         job_updater: Optional UI progress callback.
+        on_research_digest: Optional internal callback that receives the bounded
+            digest so callers performing later re-planning can reuse it.
 
     Preconditions:
         - ``brief`` is a valid ``ResearchBriefInput``.
@@ -362,6 +402,9 @@ def run_planning(
           its compiled document as ``research_packet.md`` under ``work_dir`` (before
           the planning artifacts below); reports a "research" phase progress message
           via ``job_updater`` before and after the research call.
+        - Passes a bounded digest of the compiled research document into planning;
+          a research run with no web references or academic papers supplies an
+          empty digest.
         - Returns a ``PlanningPhaseResult`` (content plan with title candidates,
           sections, requirements analysis, and planning telemetry).
         - When ``work_dir`` is given, ``allowed_claims.json`` is always written
@@ -467,10 +510,37 @@ def run_planning(
         status_text="Generating content plan...",
     )
 
+    planning_client = planning_llm_client(llm_client)
+    plan_critic = _build_plan_critic_agent(llm_client)
+
+    # The research agent emits a human-readable fallback document even when no web
+    # references or academic papers were found.  That artifact remains useful for
+    # diagnostics, but it is not evidence for the planner, so keep the planning
+    # digest empty in that case.  Supplying the resolved client lets
+    # build_research_digest compact documents that exceed its prompt budget instead
+    # of passing them through.
+    digest_llm = (
+        planning_client.client if isinstance(planning_client, LLMClientModel) else planning_client
+    )
+    # Preserve all evidence the planner can accept. The planning loop and critic
+    # independently fit this shared digest to each of their concrete prompts, so
+    # constraining it here to a smaller critic would discard planner-usable evidence.
+    digest_max_chars = _research_digest_max_chars_for_consumers(planning_client)
+    research_digest = build_research_digest(
+        research_output.compiled_document
+        if research_output.references or research_output.academic_papers
+        else "",
+        max_chars=digest_max_chars,
+        llm=digest_llm,
+    )
+    if on_research_digest is not None:
+        on_research_digest(research_digest)
+
     planning_input = PlanningInput(
         brief=brief.brief,
         audience=brief.audience,
         tone_or_purpose=brief.tone_or_purpose,
+        research_digest=research_digest,
         length_policy_context=build_planning_length_context(length_policy),
         series_context_block=series_context_block(series_context),
     )
@@ -490,8 +560,6 @@ def run_planning(
         logger.warning("Could not load writing guidelines for plan critic: %s", e)
         writing_guidelines_for_critic = ""
 
-    plan_critic = _build_plan_critic_agent(llm_client)
-
     # Planning convergence cap: honour the critic's max iterations when the
     # critic is enabled, since the critic can reject plans the planner would
     # otherwise accept. Fall back to the planner's own iteration cap otherwise.
@@ -499,7 +567,7 @@ def run_planning(
 
     try:
         planning_draft_agent = BlogWriterAgent(
-            llm_client=planning_llm_client(llm_client),
+            llm_client=planning_client,
             writing_style_guide_content=writing_guidelines_for_critic,
             brand_spec_content=brand_spec_for_critic,
         )
@@ -1214,7 +1282,10 @@ def _run_title_selection(
             replacement = None
             try:
                 data = llm_client.complete_json(
-                    feedback_prompt, temperature=0.7, objective="regenerate blog titles", think=False
+                    feedback_prompt,
+                    temperature=0.7,
+                    objective="regenerate blog titles",
+                    think=False,
                 )
                 new_titles = data.get("titles", []) if data else []
                 if new_titles and isinstance(new_titles, list):
