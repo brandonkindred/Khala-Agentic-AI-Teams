@@ -192,7 +192,10 @@ def test_stage_research_state_helper_propagates_genuine_errors(monkeypatch, tmp_
     be swallowed — silently reporting a successful "from scratch" restart while
     stale research state actually survives is worse than failing the restart
     outright."""
-    from agents.blogging.api.routers.jobs import _stage_research_state
+    from agents.blogging.api.routers.jobs import (
+        _RESEARCH_STATE_BACKUP_DIRNAME,
+        _stage_research_state,
+    )
 
     def boom(*_a, **_kw):
         raise PermissionError("read-only filesystem")
@@ -204,6 +207,45 @@ def test_stage_research_state_helper_propagates_genuine_errors(monkeypatch, tmp_
 
     with pytest.raises(PermissionError):
         _stage_research_state(str(work_dir))
+
+    assert not (work_dir / _RESEARCH_STATE_BACKUP_DIRNAME).exists()
+
+
+def test_stage_research_state_rolls_back_partial_move_on_failure(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """If moving .research_cache succeeds but moving research_packet.md then fails
+    (e.g. an I/O error), the already-moved cache dir must be rolled back to its
+    original location and no orphaned backup directory left behind — otherwise a
+    *later* restart's stale-backup cleanup (`if backup_dir.exists(): rmtree`)
+    would delete the still-unmoved original state along with it."""
+    from agents.blogging.api.routers.jobs import (
+        _RESEARCH_STATE_BACKUP_DIRNAME,
+        _stage_research_state,
+    )
+
+    real_move = shutil.move
+
+    def flaky_move(src, dst):
+        if str(src).endswith("research_packet.md"):
+            raise OSError("disk full")
+        return real_move(src, dst)
+
+    monkeypatch.setattr(shutil, "move", flaky_move)
+
+    work_dir = tmp_path / "job-work-dir"
+    cache_dir = work_dir / ".research_cache"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "checkpoint.json").write_text("{}", encoding="utf-8")
+    packet_path = work_dir / "research_packet.md"
+    packet_path.write_text("# research", encoding="utf-8")
+
+    with pytest.raises(OSError, match="disk full"):
+        _stage_research_state(str(work_dir))
+
+    assert (cache_dir / "checkpoint.json").read_text(encoding="utf-8") == "{}"
+    assert packet_path.read_text(encoding="utf-8") == "# research"
+    assert not (work_dir / _RESEARCH_STATE_BACKUP_DIRNAME).exists()
 
 
 def test_stage_and_discard_research_state_moves_stale_packet_aside(tmp_path: Path) -> None:

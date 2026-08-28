@@ -61,7 +61,13 @@ def _stage_research_state(work_dir: Optional[str]) -> Optional[Path]:
         under ``work_dir`` and returns that directory's path. Any OSError other
         than "already gone" propagates — reporting the restart as successful
         while stale research state actually survives would be worse than
-        failing the restart outright.
+        failing the restart outright. If one item moves but a later one raises
+        (e.g. an I/O error moving ``research_packet.md`` after
+        ``.research_cache`` already moved), the already-moved item is rolled
+        back via ``_restore_research_state`` before the error propagates, so a
+        partial failure here never strands a backup directory that a *later*
+        restart's ``backup_dir.exists()`` check would delete outright, taking
+        the still-unmoved original state with it.
     """
     if not work_dir:
         return None
@@ -74,10 +80,14 @@ def _stage_research_state(work_dir: Optional[str]) -> Optional[Path]:
     if backup_dir.exists():
         shutil.rmtree(backup_dir)
     backup_dir.mkdir(parents=True)
-    if cache_dir.exists():
-        shutil.move(str(cache_dir), str(backup_dir / ".research_cache"))
-    if packet_path.exists():
-        shutil.move(str(packet_path), str(backup_dir / "research_packet.md"))
+    try:
+        if cache_dir.exists():
+            shutil.move(str(cache_dir), str(backup_dir / ".research_cache"))
+        if packet_path.exists():
+            shutil.move(str(packet_path), str(backup_dir / "research_packet.md"))
+    except OSError:
+        _restore_research_state(work_dir, backup_dir)
+        raise
     return backup_dir
 
 
