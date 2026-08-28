@@ -17,9 +17,9 @@ from typing import Any, List
 
 import pytest
 
-from investment_team.models import BacktestResult, StrategyLabRecord
+from investment_team.models import BacktestResult, StrategyLabRecord, StrategySpec
 from investment_team.strategy_lab._orchestrator_helpers import _DesignAttemptState
-from investment_team.strategy_lab.checkpoints import PipelineStage
+from investment_team.strategy_lab.checkpoints import AnyPipelineCheckpoint, PipelineStage
 from investment_team.strategy_lab.phases import (
     PHASE_TRANSITION_EVENT_NAME,
     Phase,
@@ -35,6 +35,27 @@ from ._walk_forward_test_helpers import (
 from ._walk_forward_test_helpers import config as _config
 
 pytestmark = pytest.mark.strategy_lab_integration
+
+
+def _select_reusable_checkpoint(
+    checkpoint: AnyPipelineCheckpoint,
+    *,
+    current_spec: StrategySpec,
+    current_code: str,
+) -> AnyPipelineCheckpoint | None:
+    """Apply the #7291 current-artifact invariant used by future consumers.
+
+    Resume consumption itself belongs to #7281/#7282.  These capture tests
+    still need to prove that every boundary snapshot contains enough version
+    information for those consumers to reject a stale checkpoint, so this
+    test oracle returns the checkpoint only while both artifact hashes match.
+    """
+
+    if checkpoint.spec_hash != hash_spec(current_spec):
+        return None
+    if checkpoint.code_hash != hash_code(current_code):
+        return None
+    return checkpoint
 
 
 def test_design_attempt_state_threads_end_to_end_on_converged_cycle(
@@ -260,3 +281,65 @@ def test_converged_cycle_captures_all_five_pipeline_stage_boundaries(
     assert design.spec.hypothesis == captured_hypothesis
     assert design.spec_hash == hash_spec(design.spec)
     assert design.spec_hash != hash_spec(record.strategy)
+
+
+@pytest.mark.parametrize(
+    ("stage", "mutated_artifact"),
+    [
+        (PipelineStage.DESIGN, "spec"),
+        (PipelineStage.REVIEW, "spec"),
+        (PipelineStage.SYNTHESIS, "code"),
+        (PipelineStage.REFINEMENT, "code"),
+        (PipelineStage.ALIGNMENT, "code"),
+    ],
+    ids=[stage.value for stage in PipelineStage],
+)
+def test_each_boundary_checkpoint_is_ignored_after_upstream_state_drifts(
+    monkeypatch: pytest.MonkeyPatch,
+    stage: PipelineStage,
+    mutated_artifact: str,
+) -> None:
+    """A real capture from each boundary becomes unusable after spec/code drift.
+
+    The mutation happens to a detached representation of the current upstream
+    state after capture.  This models a stray upstream write without altering
+    the immutable snapshot itself, then applies the model's #7291 reuse
+    invariant and verifies that the stale checkpoint is ignored.
+    """
+
+    orch = orchestrator(StubMarketDataService())
+    wire_run_cycle_stubs(orch, monkeypatch, alignment_aligned=True)
+    orch.run_cycle(
+        prior_records=[],
+        config=_config(walk_forward_enabled=False),
+    )
+
+    checkpoints_by_stage = {
+        checkpoint.stage: checkpoint for checkpoint in orch.pipeline_checkpoints
+    }
+    checkpoint = checkpoints_by_stage[stage]
+    current_spec = checkpoint.spec.model_copy(deep=True)
+    current_code = getattr(checkpoint, "code", "")
+
+    assert (
+        _select_reusable_checkpoint(
+            checkpoint,
+            current_spec=current_spec,
+            current_code=current_code,
+        )
+        is checkpoint
+    )
+
+    if mutated_artifact == "spec":
+        current_spec.hypothesis = f"{current_spec.hypothesis} (stray upstream mutation)"
+    else:
+        current_code += "\n# stray upstream mutation"
+
+    assert (
+        _select_reusable_checkpoint(
+            checkpoint,
+            current_spec=current_spec,
+            current_code=current_code,
+        )
+        is None
+    )
