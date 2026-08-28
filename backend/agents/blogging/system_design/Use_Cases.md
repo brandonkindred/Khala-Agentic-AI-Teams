@@ -77,6 +77,7 @@ sequenceDiagram
     participant API as Blogging API
     participant JS as Job Store
     participant Pipeline as Pipeline Orchestrator
+    participant RA as Research Agent
     participant WA as Writer Agent
     participant GW as Ghost Writer
     participant CE as Copy Editor
@@ -91,8 +92,11 @@ sequenceDiagram
 
     Note over Pipeline: Phase 1: PLANNING (0-15%)
     API->>Pipeline: run_blog_full_pipeline_job()
+    Pipeline->>RA: run(ResearchBriefInput)
+    RA-->>Pipeline: ResearchAgentOutput<br/>(compiled_document, references, notes)
+    Note over Pipeline: run_planning() writes<br/>research_packet.md to work_dir
     Pipeline->>WA: plan_content(PlanningInput)
-    Note over WA: research_digest defaults to "";<br/>no ResearchAgent call in v2
+    Note over WA: research_digest still defaults to "";<br/>research output not yet routed into PlanningInput
 
     loop Refine until acceptable (max 5 iterations)
         WA->>WA: Generate / refine ContentPlan

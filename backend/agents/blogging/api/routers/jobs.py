@@ -3,7 +3,10 @@ approve/unapprove, and listing."""
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import logging
+import shutil
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from agents.blogging.api.dependencies import get_job
 from agents.blogging.api.models import (
@@ -18,13 +21,142 @@ from agents.blogging.api.models import (
 )
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from pydantic import ValidationError
 
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "needs_human_review"})
 _BLOG_RESTARTABLE = RESTARTABLE_STATUSES | {"needs_human_review"}
+
+_RESEARCH_STATE_BACKUP_DIRNAME = ".research_reset_backup"
+
+
+def _stage_research_state(work_dir: Optional[str]) -> Optional[Path]:
+    """Move a job's research checkpoint cache and packet aside so a restart is
+    genuinely from scratch, without deleting them outright.
+
+    A restart reuses the job's ``work_dir`` and (for an unchanged brief) the same
+    ``ResearchAgent`` cache key, so without moving the cache aside the "from
+    scratch" restart would silently resume the previous run's research
+    checkpoints instead of re-running research. Separately, the artifact
+    list/read endpoints expose ``research_packet.md`` purely based on its
+    existence in ``work_dir``, so leaving the old one in place would serve stale
+    research while the new run is pending.
+
+    Staged (moved, not deleted) rather than removed outright: if a later restart
+    step fails (job-store reset, Temporal/thread-mode dispatch), the caller can
+    restore this backup via ``_restore_research_state`` instead of the old run's
+    research state being lost irrecoverably for a restart that never actually
+    happened. ``_discard_research_state_backup`` deletes it once dispatch has
+    actually succeeded.
+
+    Preconditions: none.
+    Postconditions: Returns None when ``work_dir`` is falsy or neither
+        ``.research_cache`` nor ``research_packet.md`` exists (nothing to stage).
+        Otherwise moves whichever of them exist into a fresh backup directory
+        under ``work_dir`` and returns that directory's path. Any OSError other
+        than "already gone" propagates — reporting the restart as successful
+        while stale research state actually survives would be worse than
+        failing the restart outright. If one item moves but a later one raises
+        (e.g. an I/O error moving ``research_packet.md`` after
+        ``.research_cache`` already moved), the already-moved item is rolled
+        back via ``_restore_research_state`` before the error propagates, so a
+        partial failure here never strands a backup directory that a *later*
+        restart's ``backup_dir.exists()`` check would delete outright, taking
+        the still-unmoved original state with it.
+    """
+    if not work_dir:
+        return None
+    work_path = Path(work_dir)
+    cache_dir = work_path / ".research_cache"
+    packet_path = work_path / "research_packet.md"
+    if not cache_dir.exists() and not packet_path.exists():
+        return None
+    backup_dir = work_path / _RESEARCH_STATE_BACKUP_DIRNAME
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir)
+    backup_dir.mkdir(parents=True)
+    try:
+        if cache_dir.exists():
+            shutil.move(str(cache_dir), str(backup_dir / ".research_cache"))
+        if packet_path.exists():
+            shutil.move(str(packet_path), str(backup_dir / "research_packet.md"))
+    except OSError:
+        _restore_research_state(work_dir, backup_dir)
+        raise
+    return backup_dir
+
+
+def _restore_research_state(work_dir: Optional[str], backup_dir: Optional[Path]) -> None:
+    """Undo ``_stage_research_state`` after a downstream restart failure, moving
+    the staged research cache/packet back to their original location.
+
+    Best-effort: called only from an already-failing path (the caller re-raises
+    the original error regardless), so a further failure here is logged rather
+    than raised — surfacing a second, unrelated exception in place of the real
+    cause would be worse than a research artifact staying staged.
+
+    Preconditions: none.
+    Postconditions: When ``backup_dir`` and ``work_dir`` are both set, moves the
+        backup's contents back under ``work_dir`` and removes the backup
+        directory; any OSError during that is logged, not raised.
+    """
+    if not backup_dir or not work_dir:
+        return
+    work_path = Path(work_dir)
+    try:
+        for item in backup_dir.iterdir():
+            dest = work_path / item.name
+            if dest.exists():
+                if dest.is_dir():
+                    shutil.rmtree(dest)
+                else:
+                    dest.unlink()
+            shutil.move(str(item), str(dest))
+        backup_dir.rmdir()
+    except OSError as exc:
+        logger.error("Failed to restore research state backup at %s: %s", backup_dir, exc)
+
+
+def _restore_job_record(update_blog_job: Any, job_id: str, original_job: Dict[str, Any]) -> None:
+    """Undo ``reset_blog_job``'s field changes after a downstream restart failure
+    (Temporal/thread-mode dispatch raising), restoring the job record to its
+    pre-restart snapshot rather than leaving it reset to "pending" with cleared
+    status/timestamps/results for a restart that never actually launched a
+    replacement run.
+
+    Preconditions:
+        - ``update_blog_job`` is the job-store update callable (``_main.update_blog_job``).
+        - ``original_job`` is the job dict captured before ``reset_blog_job`` ran.
+    Postconditions:
+        - Merges every field of ``original_job`` (except ``job_id``, which is
+          passed positionally) back onto the job record. Idempotent: safe to call
+          even when ``reset_blog_job`` itself never actually applied (restoring
+          already-original values is a no-op).
+    """
+    update_blog_job(job_id, **{k: v for k, v in original_job.items() if k != "job_id"})
+
+
+def _discard_research_state_backup(backup_dir: Optional[Path]) -> None:
+    """Permanently delete a research-state backup once the restart it staged for
+    has been dispatched successfully.
+
+    Preconditions: none.
+    Postconditions: Removes ``backup_dir`` if set; an OSError during removal is
+        logged, not raised — the restart itself already succeeded, so a leftover
+        backup directory is a minor cleanup miss, not a reason to fail a request
+        that has already succeeded.
+    """
+    if not backup_dir:
+        return
+    try:
+        shutil.rmtree(backup_dir)
+    except OSError as exc:
+        logger.warning("Failed to clean up research state backup at %s: %s", backup_dir, exc)
 
 
 @router.get(
@@ -217,28 +349,59 @@ def restart_blog_job(job_id: str) -> StartPipelineResponse:
             status_code=400, detail="Original request payload not available for restart."
         )
 
+    # Validate the stored payload before any destructive reset: if request
+    # constraints tightened since the job was created, this raises and the job's
+    # research artifacts / record are left untouched rather than being wiped for a
+    # restart that then aborts without ever launching a replacement run.
+    try:
+        request = FullPipelineRequest(**payload)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Stored request payload is no longer valid: {exc}"
+        ) from exc
+
+    # Stage (not delete) research state before resetting the job record: if this
+    # fails, the job is left untouched (still in its prior terminal state) rather
+    # than reset to "pending" with a restart that never actually happened. Staging
+    # rather than deleting outright, and snapshotting the pre-reset job record
+    # below, means a failure further down (job-store reset, Temporal/thread-mode
+    # dispatch) can restore both instead of either being lost for a restart that
+    # never actually launched a replacement run.
+    work_dir = job.get("work_dir")
+    try:
+        backup_dir = _stage_research_state(work_dir)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to reset research state for restart: {exc}"
+        ) from exc
+
     from agents.blogging.shared.blog_job_store import reset_blog_job
 
-    reset_blog_job(job_id)
-
-    request = FullPipelineRequest(**payload)
-
     try:
-        from agents.blogging.temporal.start_workflow import start_full_pipeline_workflow
+        reset_blog_job(job_id)
 
-        from shared.temporal.client import is_temporal_enabled
+        try:
+            from agents.blogging.temporal.start_workflow import start_full_pipeline_workflow
 
-        if is_temporal_enabled():
-            request_dict = request.model_dump(mode="json")
-            audience_str = _format_audience(request.audience)
-            request_dict["audience"] = audience_str or request_dict.get("audience")
-            start_full_pipeline_workflow(job_id, request_dict)
-            return StartPipelineResponse(job_id=job_id, message="Job restarted (Temporal)")
-    except ImportError:
-        pass
+            from shared.temporal.client import is_temporal_enabled
 
-    _main._submit_async_job(_main._run_pipeline_with_tracking, job_id, request)
-    return StartPipelineResponse(job_id=job_id, message="Job restarted from scratch")
+            if is_temporal_enabled():
+                request_dict = request.model_dump(mode="json")
+                audience_str = _format_audience(request.audience)
+                request_dict["audience"] = audience_str or request_dict.get("audience")
+                start_full_pipeline_workflow(job_id, request_dict)
+                _discard_research_state_backup(backup_dir)
+                return StartPipelineResponse(job_id=job_id, message="Job restarted (Temporal)")
+        except ImportError:
+            pass
+
+        _main._submit_async_job(_main._run_pipeline_with_tracking, job_id, request)
+        _discard_research_state_backup(backup_dir)
+        return StartPipelineResponse(job_id=job_id, message="Job restarted from scratch")
+    except Exception:
+        _restore_research_state(work_dir, backup_dir)
+        _restore_job_record(_main.update_blog_job, job_id, job)
+        raise
 
 
 @router.post(

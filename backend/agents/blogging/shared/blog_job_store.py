@@ -191,6 +191,7 @@ def reset_blog_job(
         title_choices=[],
         outline=None,
         draft_preview=None,
+        research_sources_count=0,
         selected_title=None,
         waiting_for_title_selection=False,
         waiting_for_story_input=False,

@@ -7,10 +7,12 @@ from typing import Any, Callable, List, Optional, Tuple
 
 from pydantic import HttpUrl
 from strands import Agent
+from strands.types.exceptions import EventLoopException
 
 logger = logging.getLogger(__name__)
 
 from agents.blogging.shared.agent_base import _BlogAgentBase  # noqa: E402
+from temporalio.exceptions import CancelledError  # noqa: E402
 
 from llm_service import LLMJsonParseError, compact_text, extract_json_from_response  # noqa: E402
 from shared.concurrency import parallel_map  # noqa: E402
@@ -41,6 +43,29 @@ from .tools.web_search import OllamaWebSearch  # noqa: E402
 # summarization fan-outs. Named here (rather than inline at each call site) so
 # the two stages stay in lockstep and the cap can be tuned in one place.
 _DOC_PARALLEL_WORKERS = 8
+
+
+def _is_cancellation(exc: BaseException) -> bool:
+    """True when exc is a Temporal cancellation, possibly wrapped in the
+    EventLoopException a live Strands Agent() call raises it as.
+
+    Guards the optional-step fallbacks (academic papers, similar topics) below:
+    their broad ``except Exception`` must not silently degrade a genuine
+    cancellation to an empty result, since that would let ``run()`` return
+    normally instead of the cancellation propagating to callers like
+    ``run_planning()`` that need to see it.
+
+    Preconditions:
+        - ``exc`` is the exception caught at an optional-step boundary.
+    Postconditions:
+        - Returns True iff ``exc`` is a ``CancelledError``, or an
+          ``EventLoopException`` whose ``original_exception`` is one.
+    """
+    if isinstance(exc, CancelledError):
+        return True
+    if isinstance(exc, EventLoopException):
+        return isinstance(exc.original_exception, CancelledError)
+    return False
 
 
 class ResearchAgent(_BlogAgentBase):
@@ -160,8 +185,12 @@ class ResearchAgent(_BlogAgentBase):
                     self.cache.save_checkpoint(brief_input, "queries", queries=queries)
 
             # Step 3: Run searches
+            # candidates is checked for "is not None" rather than truthiness: a
+            # zero-candidate search is a legitimately completed checkpoint, not a
+            # missing one, and re-running it on resume would repeat the web searches
+            # for no reason.
             if (
-                cached_state and cached_state.candidates
+                cached_state and cached_state.candidates is not None
             ):  # pragma: no cover - resume-from-checkpoint branch; see Step 1.
                 logger.info("Using cached candidates (%s)", len(cached_state.candidates))
                 candidates = [CandidateResult(**c) for c in cached_state.candidates]
@@ -174,11 +203,16 @@ class ResearchAgent(_BlogAgentBase):
                         f"Running web search {i + 1}/{n}...", 0.15 + 0.20 * (i + 1) / max(1, n)
                     ),
                 )
+                if self.cache:
+                    self.cache.save_checkpoint(brief_input, "candidates", candidates=candidates)
             _report("Fetching and reading web pages...", 0.38)
 
             # Step 4: Fetch documents
+            # documents is checked for "is not None" (see Step 3's candidates comment):
+            # every fetch can legitimately fail/be rejected, and that's still a
+            # completed checkpoint, not a missing one.
             if (
-                cached_state and cached_state.documents
+                cached_state and cached_state.documents is not None
             ):  # pragma: no cover - resume-from-checkpoint branch; see Step 1.
                 logger.info("Using cached documents (%s)", len(cached_state.documents))
                 documents = [SourceDocument(**d) for d in cached_state.documents]
@@ -189,8 +223,9 @@ class ResearchAgent(_BlogAgentBase):
 
             # Step 5: Score documents
             _report("Scoring documents for relevance...", 0.50)
+            # scored_docs: "is not None" for the same reason as documents above.
             if (
-                cached_state and cached_state.scored_docs
+                cached_state and cached_state.scored_docs is not None
             ):  # pragma: no cover - resume-from-checkpoint branch including the legacy 3-tuple shape; see Step 1.
                 logger.info("Using cached scored documents (%s)", len(cached_state.scored_docs))
                 scored_docs = []
@@ -217,8 +252,9 @@ class ResearchAgent(_BlogAgentBase):
 
             # Step 6: Summarize documents
             _report("Summarizing references...", 0.65)
+            # references: "is not None" for the same reason as documents above.
             if (
-                cached_state and cached_state.references
+                cached_state and cached_state.references is not None
             ):  # pragma: no cover - resume-from-checkpoint branch; see Step 1.
                 logger.info("Using cached references (%s)", len(cached_state.references))
                 references = [ResearchReference(**r) for r in cached_state.references]
@@ -230,20 +266,50 @@ class ResearchAgent(_BlogAgentBase):
             # Steps 7-9: synthesize overview (LLM), fetch academic papers (arXiv
             # HTTP), and find similar topics (LLM) are mutually independent — none
             # consumes another's output — so run them concurrently instead of as
-            # three sequential round-trips. The notes step keeps its
-            # resume-from-checkpoint short-circuit and checkpoint save.
+            # three sequential round-trips. Each keeps its own resume-from-checkpoint
+            # short-circuit, but — unlike the strictly-sequential steps above — the
+            # checkpoint *save* is deliberately deferred until after all three
+            # `.result()`s come back and done here one at a time: AgentCache.
+            # save_checkpoint() is an unlocked read-modify-write over one shared JSON
+            # file, so three concurrent savers would race and can clobber each
+            # other's (or the earlier steps') already-persisted state.
             _report("Synthesizing overview, searching arXiv, finding similar topics...", 0.78)
 
+            # notes_computed (not "notes is not None"): _synthesize_overview can
+            # legitimately complete with notes=None (no references, or an unusable
+            # LLM response), which is indistinguishable from "never checkpointed"
+            # by value alone — see AgentCacheState.notes_computed.
+            notes_is_cached = bool(
+                cached_state and cached_state.notes_computed
+            )  # pragma: no cover - resume-from-checkpoint branch; see Step 1.
+            academic_papers_is_cached = bool(
+                cached_state and cached_state.academic_papers is not None
+            )  # pragma: no cover - resume-from-checkpoint branch; see Step 1.
+            similar_topics_is_cached = bool(
+                cached_state and cached_state.similar_topics is not None
+            )  # pragma: no cover - resume-from-checkpoint branch; see Step 1.
+
             def _resolve_notes() -> Any:
-                if (
-                    cached_state and cached_state.notes is not None
-                ):  # pragma: no cover - resume-from-checkpoint branch; see Step 1.
+                if notes_is_cached:
                     logger.info("Using cached notes")
                     return cached_state.notes
-                resolved = self._synthesize_overview(brief_input, references)
-                if self.cache:
-                    self.cache.save_checkpoint(brief_input, "notes", notes=resolved)
-                return resolved
+                return self._synthesize_overview(brief_input, references)
+
+            def _resolve_academic_papers() -> List[AcademicPaper]:
+                if academic_papers_is_cached:
+                    logger.info(
+                        "Using cached academic papers (%s)", len(cached_state.academic_papers)
+                    )
+                    return [AcademicPaper(**p) for p in cached_state.academic_papers]
+                return self._fetch_academic_papers(brief_input)
+
+            def _resolve_similar_topics() -> List[str]:
+                if similar_topics_is_cached:
+                    logger.info(
+                        "Using cached similar topics (%s)", len(cached_state.similar_topics)
+                    )
+                    return cached_state.similar_topics
+                return self._get_similar_topics(brief_input, references)
 
             # Run each step inside a copy of this thread's context so the LLM
             # attribution / request-id contextvars propagate to the workers — a
@@ -251,17 +317,54 @@ class ResearchAgent(_BlogAgentBase):
             with ThreadPoolExecutor(max_workers=3) as executor:
                 notes_future = executor.submit(contextvars.copy_context().run, _resolve_notes)
                 academic_future = executor.submit(
-                    contextvars.copy_context().run, self._fetch_academic_papers, brief_input
+                    contextvars.copy_context().run, _resolve_academic_papers
                 )
                 similar_future = executor.submit(
-                    contextvars.copy_context().run,
-                    self._get_similar_topics,
-                    brief_input,
-                    references,
+                    contextvars.copy_context().run, _resolve_similar_topics
                 )
-                notes = notes_future.result()
-                academic_papers = academic_future.result()
-                similar_topics = similar_future.result()
+
+                # Collect every future's outcome independently (not `a = f.result();
+                # b = g.result()` in sequence) so one step's exception can't skip
+                # retrieving — and therefore checkpointing — its siblings' already
+                # -completed results. `with ThreadPoolExecutor` waits for all three to
+                # finish regardless on exit, so the arXiv/LLM calls run to completion
+                # either way; losing their output here would just make a Temporal
+                # retry repeat that same completed work for nothing.
+                results: dict[str, Any] = {}
+                errors: dict[str, Exception] = {}
+                for name, future in (
+                    ("notes", notes_future),
+                    ("academic_papers", academic_future),
+                    ("similar_topics", similar_future),
+                ):
+                    try:
+                        results[name] = future.result()
+                    except Exception as e:
+                        errors[name] = e
+
+            if self.cache:
+                if "notes" in results and not notes_is_cached:
+                    self.cache.save_checkpoint(brief_input, "notes", notes=results["notes"])
+                if "academic_papers" in results and not academic_papers_is_cached:
+                    self.cache.save_checkpoint(
+                        brief_input, "academic_papers", academic_papers=results["academic_papers"]
+                    )
+                if "similar_topics" in results and not similar_topics_is_cached:
+                    self.cache.save_checkpoint(
+                        brief_input, "similar_topics", similar_topics=results["similar_topics"]
+                    )
+
+            if errors:
+                # Preserve the original priority (notes, then academic_papers, then
+                # similar_topics) so which exception surfaces doesn't change now that
+                # all three are collected instead of failing fast on the first.
+                for name in ("notes", "academic_papers", "similar_topics"):
+                    if name in errors:
+                        raise errors[name]
+
+            notes = results["notes"]
+            academic_papers = results["academic_papers"]
+            similar_topics = results["similar_topics"]
 
             # Step 10: Compile document (Blog Post Research format)
             _report("Compiling research document...", 0.95)
@@ -541,6 +644,8 @@ class ResearchAgent(_BlogAgentBase):
             summary = data.get("summary") or ""
             key_points = data.get("key_points") or []
         except Exception as e:  # pragma: no cover - excerpt-fallback path triggers only when the LLM raises mid-summarization; covered by integration tests with a flaky model.
+            if _is_cancellation(e):
+                raise
             logger.warning(
                 "Summarization LLM failed for %s (%s); using excerpt fallback so research can continue.",
                 doc.url,
@@ -669,7 +774,9 @@ class ResearchAgent(_BlogAgentBase):
         Search arXiv for papers relevant to the brief. Returns list of AcademicPaper.
 
         Preconditions: brief_input valid.
-        Postconditions: Returns list of AcademicPaper (title, url, overview_or_summary); may be empty on failure.
+        Postconditions: Returns list of AcademicPaper (title, url, overview_or_summary);
+            may be empty on failure. A Temporal cancellation propagates instead of
+            being swallowed as a failure.
         """
         try:
             papers = search_arxiv(
@@ -679,6 +786,8 @@ class ResearchAgent(_BlogAgentBase):
             )
             return papers
         except Exception as e:
+            if _is_cancellation(e):
+                raise
             logger.warning("arXiv search failed, skipping academic sources: %s", e)
             return []
 
@@ -691,7 +800,9 @@ class ResearchAgent(_BlogAgentBase):
         Use LLM to suggest similar topics with similarity scores; return topics with score > 70%.
 
         Preconditions: brief_input and references valid.
-        Postconditions: Returns list of topic strings (similarity_score >= 0.7).
+        Postconditions: Returns list of topic strings (similarity_score >= 0.7). A
+            Temporal cancellation propagates (including one Strands wraps in
+            EventLoopException) instead of being swallowed as a failure.
         """
         if not references:
             return []
@@ -722,6 +833,8 @@ class ResearchAgent(_BlogAgentBase):
                             pass
             return topics[:15]
         except Exception as e:
+            if _is_cancellation(e):
+                raise
             logger.warning("Similar topics step failed: %s", e)
             return []
 

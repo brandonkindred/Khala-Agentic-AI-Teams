@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from agents.blogging.ghost_writer_agent.models import StoryGap
 
 from agents.blogging.blog_plan_critic_agent import BlogPlanCriticAgent
+from agents.blogging.blog_research_agent.agent_cache import AgentCache
 from agents.blogging.blog_research_agent.models import ResearchBriefInput
 from agents.blogging.shared.artifacts import write_artifact
 from agents.blogging.shared.content_plan import (
@@ -41,10 +42,11 @@ from agents.blogging.shared.content_profile import (
     build_planning_length_context,
     series_context_block,
 )
-from agents.blogging.shared.errors import BloggingError, DraftError, PlanningError
+from agents.blogging.shared.errors import BloggingError, DraftError, PlanningError, ResearchError
 from agents.blogging.shared.models import BlogPhase, get_phase_progress
 from agents.blogging.shared.planning_config import plan_critic_max_iterations
 from agents.blogging.shared.run_pipeline_job import _is_external_cancellation
+from strands.types.exceptions import EventLoopException
 from temporalio.exceptions import CancelledError
 
 from llm_service import LLMClientModel, with_model_override
@@ -59,6 +61,26 @@ from .constants import (
 from .context import JobUpdater
 
 logger = logging.getLogger(__name__)
+
+
+def _unwrap_llm_cause(exc: BaseException) -> BaseException:
+    """Return the underlying model error when strands wraps it in EventLoopException.
+
+    Same helper as ``blog_writer_agent``'s (repeated locally rather than shared, per
+    that module's convention — see its own copy's docstring).
+
+    Preconditions:
+        - ``exc`` is the exception caught at an LLM call boundary.
+    Postconditions:
+        - If ``exc`` is an ``EventLoopException`` with a non-None ``original_exception``,
+          returns that original exception.
+        - Otherwise returns ``exc`` unchanged.
+    """
+    if isinstance(exc, EventLoopException):
+        original = getattr(exc, "original_exception", None)
+        if isinstance(original, BaseException):
+            return original
+    return exc
 
 
 def _wait_for_hitl(
@@ -253,10 +275,10 @@ def _persist_content_plan_artifacts(
     instead of writing the artifacts separately, so ``allowed_claims.json``
     can never drift out of sync with the plan text it was derived from.
 
-    The v2 pipeline does not yet run a research stage (``BlogResearchAgent``
-    is not wired in), so there is no compiled research document/reference
-    list available here; ``extract_allowed_claims`` is called against the
-    plan's own markdown with an empty reference list.
+    ``run_planning`` runs a research stage (``ResearchAgent``) ahead of this
+    helper, but its compiled document/reference list are not yet threaded
+    through here (a separate follow-up); ``extract_allowed_claims`` is called
+    against the plan's own markdown with an empty reference list.
 
     Args:
         work_dir: Directory to persist artifacts to.
@@ -336,6 +358,10 @@ def run_planning(
         - ``brief`` is a valid ``ResearchBriefInput``.
         - ``llm_client`` and ``length_policy`` are resolved (non-None).
     Postconditions:
+        - Runs ``ResearchAgent.run(brief)`` and, when ``work_dir`` is set, persists
+          its compiled document as ``research_packet.md`` under ``work_dir`` (before
+          the planning artifacts below); reports a "research" phase progress message
+          via ``job_updater`` before and after the research call.
         - Returns a ``PlanningPhaseResult`` (content plan with title candidates,
           sections, requirements analysis, and planning telemetry).
         - When ``work_dir`` is given, ``allowed_claims.json`` is always written
@@ -344,17 +370,21 @@ def run_planning(
           claims yields a valid ``allowed_claims.json`` with an empty ``claims``
           list rather than omitting the artifact.
     Raises:
+        ResearchError: If research fails for a non-transient reason (phase="research",
+            so Temporal/thread-mode failure tracking attributes the failure correctly
+            instead of defaulting to "planning").
         PlanningError: If content planning fails for a non-transient reason.
-        BloggingError: Blogging-domain errors from the planner or plan critic
-            propagate unwrapped (not re-wrapped as ``PlanningError``).
+        BloggingError: Blogging-domain errors from the research agent, planner, or
+            plan critic propagate unwrapped (not re-wrapped).
         LLMRateLimitError / LLMTemporaryError: transient LLM-transport failures
-            (including from the plan critic) propagate unwrapped so Temporal's
-            activity funnel can retry the stage instead of treating them as a
-            terminal PlanningError.
+            (including from research and the plan critic) propagate unwrapped so
+            Temporal's activity funnel can retry the stage instead of treating them
+            as a terminal error.
     """
     # Deferred import: see module docstring.
     from agents.blogging.agent_implementations.blog_writing_process_v2 import (
         BlogWriterAgent,
+        ResearchAgent,
         load_brand_spec_prompt,
         load_style_file,
     )
@@ -365,6 +395,71 @@ def run_planning(
     # Same progress-callback as the stage functions use; _make_update is the single
     # source of the swallow-but-reraise-CancelledError update logic.
     _update = _make_update(job_updater)
+
+    def _report_research(status_text: str, **extra: Any) -> None:
+        # Reported on its own "research" phase (not a BlogPhase member, same
+        # convention as the "story_elicitation"/"title_selection" raw job_updater
+        # calls elsewhere in this module) since it doesn't have its own slice of the
+        # overall progress bar. Guarded the same way _make_update guards phase
+        # updates, so a failing job_updater can't abort research/planning.
+        if not job_updater:
+            return
+        try:
+            job_updater(phase="research", progress=0, status_text=status_text, **extra)
+        except CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("Failed to update job status: %s", e)
+
+    # Research: run before planning so a compiled research document is available
+    # as an artifact. Checkpointed under work_dir (when set) so a Temporal retry of
+    # this activity after a transient planning failure resumes research from its
+    # last completed step instead of repeating every search/fetch/summarization call.
+    # Cache setup and the artifact write are wrapped alongside the agent call (not
+    # around/after it) so a failure anywhere in this block — cache dir creation, the
+    # agent run, or the artifact write — is attributed to phase="research" too,
+    # instead of surfacing unattributed or misattributed to planning.
+    _report_research("Researching topic...")
+
+    try:
+        research_cache = (
+            AgentCache(cache_dir=Path(work_dir) / ".research_cache")
+            if work_dir is not None
+            else None
+        )
+        research_agent = ResearchAgent(llm_client=llm_client, cache=research_cache)
+        research_output = research_agent.run(brief)
+        if work_dir is not None:
+            write_artifact(work_dir, "research_packet.md", research_output.compiled_document or "")
+            logger.info(
+                "Persisted research_packet.md (%d reference(s))",
+                len(research_output.references),
+            )
+    except (BloggingError, LLMRateLimitError, LLMTemporaryError):
+        raise
+    except Exception as e:
+        cause = _unwrap_llm_cause(e)
+        if isinstance(cause, (BloggingError, LLMRateLimitError, LLMTemporaryError)):
+            # ResearchAgent's live Strands call (unlike the planner's, which goes
+            # through run_json_gate/call_json_with_retry) doesn't unwrap
+            # EventLoopException itself, so a transient LLM error can still reach
+            # here wrapped. Re-raise the unwrapped cause so Temporal recognizes it
+            # as transient instead of failing the job on a terminal ResearchError.
+            raise cause
+        if _is_external_cancellation(cause):
+            # Mirrors the unwrap above: a Temporal cancellation raised inside the
+            # Strands event loop reaches here as EventLoopException(CancelledError),
+            # so _is_external_cancellation must see the unwrapped cause (its
+            # __cause__/__context__ walk can't reach into original_exception) — and
+            # must re-raise that cause, not the EventLoopException wrapper, so the
+            # job is recorded as cancelled rather than as a research failure.
+            raise cause
+        raise ResearchError(f"Research failed: {e}", cause=e) from e
+
+    _report_research(
+        f"Research complete ({len(research_output.references)} reference(s))",
+        research_sources_count=len(research_output.references),
+    )
 
     _update(
         BlogPhase.PLANNING,

@@ -178,6 +178,15 @@ describe('BloggingDashboardComponent (extra coverage)', () => {
     expect(component.isPhaseComplete('finalize')).toBe(false);
   });
 
+  it('pipelinePhases includes research ahead of planning, so the stepper can show it active/failed', () => {
+    fixture.detectChanges();
+    expect(component.pipelinePhases[0].key).toBe('research');
+    expect(component.pipelinePhases[1].key).toBe('planning');
+
+    component.selectedJobStatus = makeStatus({ phase: 'planning', status: 'running' });
+    expect(component.isPhaseComplete('research')).toBe(true);
+  });
+
   // -----------------------------------------------------------------------
   // selectJob / streaming / polling
   // -----------------------------------------------------------------------
