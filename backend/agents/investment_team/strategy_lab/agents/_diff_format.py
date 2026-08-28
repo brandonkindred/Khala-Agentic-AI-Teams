@@ -56,8 +56,9 @@ def _leaf_lines(kind: str, path: str, value: Any) -> list[str]:
     Postconditions: returns one line per leaf value reachable from ``value``
     — recursing into nested dicts so every leaf's own value is included in
     the output — rather than a single line naming only the top-level key.
-    A non-dict ``value`` yields exactly one line carrying its value. Never
-    mutates ``value``.
+    A non-dict ``value`` yields exactly one line carrying its value. An empty
+    dict yields exactly one line of the form ``"{kind}: {path}: {}"`` (it has
+    no leaf values to enumerate). Never mutates ``value``.
     """
     if isinstance(value, dict):
         if not value:
@@ -74,8 +75,8 @@ def _values_differ(prev_value: Any, curr_value: Any) -> bool:
     """Report whether two JSON leaf values differ, honoring JSON type distinctions.
 
     Preconditions: ``prev_value`` and ``curr_value`` are JSON-serializable
-    scalars (not both dicts — dicts are recursed into by the caller before
-    reaching this check).
+    non-dict values (not both dicts — dicts are recursed into by the caller
+    before reaching this check). Lists/arrays are compared as leaf values.
 
     Postconditions: returns ``True`` whenever the values would serialize to
     different JSON representations. Plain ``!=`` treats ``True == 1`` and
