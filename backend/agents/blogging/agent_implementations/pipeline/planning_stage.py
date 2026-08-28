@@ -91,6 +91,11 @@ def run_planning_stage(
     job_id = ctx.job_id
     job_updater = ctx.job_updater
     _update = _make_update(job_updater)
+    research_digest = ""
+
+    def _capture_research_digest(digest: str) -> None:
+        nonlocal research_digest
+        research_digest = digest
 
     planning_phase_result = _run_planning(
         brief,
@@ -99,6 +104,7 @@ def run_planning_stage(
         length_policy=length_policy,
         series_context=series_context,
         job_updater=job_updater,
+        on_research_digest=_capture_research_digest,
     )
     plan = planning_phase_result.content_plan
 
@@ -321,6 +327,7 @@ def run_planning_stage(
                     brief=refine_brief,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
+                    research_digest=research_digest,
                     length_policy_context=build_planning_length_context(length_policy),
                     series_context_block=series_context_block(series_context),
                 )

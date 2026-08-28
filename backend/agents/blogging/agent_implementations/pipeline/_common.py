@@ -342,6 +342,7 @@ def run_planning(
     length_policy: LengthPolicy,
     series_context: Optional[SeriesContext],
     job_updater: Optional[JobUpdater],
+    on_research_digest: Optional[Callable[[str], None]] = None,
 ) -> PlanningPhaseResult:
     """
     Planning step for the full pipeline: build the content plan for ``brief``.
@@ -354,6 +355,8 @@ def run_planning(
         length_policy: Resolved length/format policy for the plan.
         series_context: Optional series-instalment scope.
         job_updater: Optional UI progress callback.
+        on_research_digest: Optional internal callback that receives the bounded
+            digest so callers performing later re-planning can reuse it.
 
     Preconditions:
         - ``brief`` is a valid ``ResearchBriefInput``.
@@ -364,7 +367,8 @@ def run_planning(
           the planning artifacts below); reports a "research" phase progress message
           via ``job_updater`` before and after the research call.
         - Passes a bounded digest of the compiled research document into planning;
-          a research run with no references supplies an empty digest.
+          a research run with no web references or academic papers supplies an
+          empty digest.
         - Returns a ``PlanningPhaseResult`` (content plan with title candidates,
           sections, requirements analysis, and planning telemetry).
         - When ``work_dir`` is given, ``allowed_claims.json`` is always written
@@ -470,16 +474,21 @@ def run_planning(
         status_text="Generating content plan...",
     )
 
-    # The research agent emits a human-readable fallback document even when no
-    # references were found.  That artifact remains useful for diagnostics, but it
-    # is not evidence for the planner, so keep the planning digest empty in that
-    # case.  Supplying the resolved client lets build_research_digest compact
-    # documents that exceed its prompt budget instead of passing them through.
+    # The research agent emits a human-readable fallback document even when no web
+    # references or academic papers were found.  That artifact remains useful for
+    # diagnostics, but it is not evidence for the planner, so keep the planning
+    # digest empty in that case.  Supplying the resolved client lets
+    # build_research_digest compact documents that exceed its prompt budget instead
+    # of passing them through.
     digest_llm = llm_client.client if isinstance(llm_client, LLMClientModel) else llm_client
     research_digest = build_research_digest(
-        research_output.compiled_document if research_output.references else "",
+        research_output.compiled_document
+        if research_output.references or research_output.academic_papers
+        else "",
         llm=digest_llm,
     )
+    if on_research_digest is not None:
+        on_research_digest(research_digest)
 
     planning_input = PlanningInput(
         brief=brief.brief,

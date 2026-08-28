@@ -250,6 +250,64 @@ def test_run_planning_research_zero_references_writes_fallback_packet(
     assert "0 reference" in research_updates[1]["status_text"]
 
 
+def test_run_planning_keeps_academic_only_research_digest(monkeypatch) -> None:
+    """Academic papers remain valid evidence when web references are empty."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.models import (
+        AcademicPaper,
+        ResearchAgentOutput,
+        ResearchBriefInput,
+    )
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
+
+    ppr = _make_planning_result()
+    compiled_doc = "# Academic Sources\n\nA useful paper."
+    planning_digests: list[str] = []
+
+    class _FakePlanAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def plan_content(self, planning_input, **_kw):
+            planning_digests.append(planning_input.research_digest)
+            return ppr
+
+    class _FakeResearchAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def run(self, _brief):
+            return ResearchAgentOutput(
+                query_plan=[],
+                references=[],
+                academic_papers=[
+                    AcademicPaper(
+                        title="Useful Paper",
+                        url="https://arxiv.org/abs/1234.5678",
+                        overview_or_summary="Useful findings.",
+                    )
+                ],
+                compiled_document=compiled_doc,
+            )
+
+    monkeypatch.setattr(v2, "BlogWriterAgent", _FakePlanAgent)
+    monkeypatch.setattr(v2, "ResearchAgent", _FakeResearchAgent)
+    monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "brand")
+    monkeypatch.setattr(v2, "load_style_file", lambda _p: "style")
+    monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: None)
+
+    v2.run_planning(
+        ResearchBriefInput(brief="b", max_results=5),
+        work_dir=None,
+        llm_client=object(),
+        length_policy=resolve_length_policy(content_profile=ContentProfile.standard_article),
+        series_context=None,
+        job_updater=None,
+    )
+
+    assert planning_digests == [compiled_doc]
+
+
 def test_run_planning_caps_research_digest(monkeypatch) -> None:
     """Oversized research is compacted before it reaches the planning prompt."""
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
