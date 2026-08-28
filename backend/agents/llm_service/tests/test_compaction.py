@@ -411,12 +411,36 @@ def test_chunk_size_uses_smallest_failover_context() -> None:
     assert _get_model_chunk_chars(_FailoverLikeClient()) == 4_000
 
 
+@pytest.mark.parametrize(
+    ("context_tokens", "expected_chunk_chars"),
+    [
+        (12_288, 0),
+        (15_999, 0),
+        (16_000, 4_000),
+    ],
+)
+def test_chunk_size_requires_practical_minimum(
+    context_tokens: int, expected_chunk_chars: int
+) -> None:
+    client = _CountingClient(ctx=context_tokens)
+    assert _get_model_chunk_chars(client) == expected_chunk_chars
+
+
 def test_compaction_skips_llm_when_context_cannot_fit_reserves() -> None:
     client = _CountingClient(result="must not be used", ctx=2_048)
     original = "x" * 10_000
 
     assert _get_model_chunk_chars(client) == 0
     assert compact_text(original, 100, client, "small-context research") == original
+    assert client.calls == 0
+
+
+def test_compaction_skips_llm_when_safe_chunk_is_impractically_small() -> None:
+    client = _CountingClient(result="must not be used", ctx=12_288)
+    original = "x" * 200_000
+
+    assert _get_model_chunk_chars(client) == 0
+    assert compact_text(original, 10_000, client, "near-reserve research") == original
     assert client.calls == 0
 
 
