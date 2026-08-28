@@ -322,13 +322,19 @@ def test_run_planning_caps_research_digest(monkeypatch) -> None:
 
     ppr = _make_planning_result()
     oversized_document = "x" * 200_001
-    compacted_digest = "bounded digest"
+    compacted_digest = "y" * 7_000
     planning_digests: list[str] = []
     compaction_calls: list[tuple] = []
 
+    class _PlanningClient:
+        def get_max_context_tokens(self):
+            return 12_000
+
+    planning_client = _PlanningClient()
+
     class _FakePlanAgent:
-        def __init__(self, **_kw):
-            pass
+        def __init__(self, **kw):
+            assert kw["llm_client"] is planning_client
 
         def plan_content(self, planning_input, **_kw):
             planning_digests.append(planning_input.research_digest)
@@ -351,7 +357,7 @@ def test_run_planning_caps_research_digest(monkeypatch) -> None:
         compaction_calls.append((text, max_chars, llm, label))
         return compacted_digest
 
-    llm_client = object()
+    monkeypatch.setattr(v2, "planning_model_override", lambda: None)
     monkeypatch.setattr(v2, "BlogWriterAgent", _FakePlanAgent)
     monkeypatch.setattr(v2, "ResearchAgent", _FakeResearchAgent)
     monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "brand")
@@ -362,14 +368,16 @@ def test_run_planning_caps_research_digest(monkeypatch) -> None:
     v2.run_planning(
         ResearchBriefInput(brief="b", max_results=5),
         work_dir=None,
-        llm_client=llm_client,
+        llm_client=planning_client,
         length_policy=resolve_length_policy(content_profile=ContentProfile.standard_article),
         series_context=None,
         job_updater=None,
     )
 
-    assert planning_digests == [compacted_digest]
-    assert compaction_calls == [(oversized_document, 200_000, llm_client, "research digest")]
+    # The 12k-token planning model reserves 6k tokens for the rest of the prompt
+    # and output. Even an over-budget compaction response is hard-capped.
+    assert planning_digests == [compacted_digest[:6_000]]
+    assert compaction_calls == [(oversized_document, 6_000, planning_client, "research digest")]
 
 
 def test_run_planning_writes_allowed_claims_with_extracted_claims(

@@ -67,7 +67,7 @@ flowchart TD
 
 **Implementation notes:**
 
-- `run_planning()` (`pipeline/_common.py`) calls `ResearchAgent.run()` ahead of planning, persists its compiled document as `research_packet.md`, and passes a bounded digest into `PlanningInput.research_digest`. A run with no web references or academic papers keeps the diagnostic packet but supplies an empty digest; outline revisions reuse the initial digest. Progress is reported on a "research" phase (not a `BlogPhase` slice).
+- `run_planning()` (`pipeline/_common.py`) calls `ResearchAgent.run()` ahead of planning, persists its compiled document as `research_packet.md`, and passes a digest hard-capped to the selected planning model's context budget into `PlanningInput.research_digest`. A run with no web references or academic papers keeps the diagnostic packet but supplies an empty digest; outline revisions reuse the initial digest. Progress is reported on a "research" phase (not a `BlogPhase` slice).
 - Planning is done inline by `BlogWriterAgent.plan_content()` (`blog_writer_agent/agent.py:294`), not by a separate `BlogPlanningAgent` class.
 - Validators, fact-check, and compliance all run inside a single loop bounded by `max_rewrite_iterations`. Title selection is only reached after an iteration where every gate returned `PASS`.
 

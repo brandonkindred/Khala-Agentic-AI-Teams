@@ -105,7 +105,7 @@ graph LR
 
 > **Note 1:** Planning is performed by `BlogWriterAgent.plan_content()` (see `blog_writer_agent/agent.py:294`), which implements the refine-until-done loop. The `BlogPlanningAgent` class in `blog_planning_agent/agent.py` is an alternative implementation that is not currently wired into `run_pipeline()`.
 >
-> **Note 2:** `run_planning()` (`pipeline/_common.py`) invokes `ResearchAgent.run()` ahead of content planning, persists its compiled document as the `research_packet.md` artifact when `work_dir` is set, and passes a bounded digest into `PlanningInput.research_digest`. A run with no web references or academic papers supplies an empty digest while retaining the packet for diagnostics. Outline revisions reuse the same digest.
+> **Note 2:** `run_planning()` (`pipeline/_common.py`) invokes `ResearchAgent.run()` ahead of content planning, persists its compiled document as the `research_packet.md` artifact when `work_dir` is set, and passes a digest capped to the selected planning model's context budget into `PlanningInput.research_digest`. A run with no web references or academic papers supplies an empty digest while retaining the packet for diagnostics. Outline revisions reuse the same digest.
 >
 > **Note 3:** `run_pipeline()` writes a `PublishingPack` artifact but does **not** call the Publication Agent. Publication (approve/unapprove) and Medium stats collection are handled by separate API endpoints.
 >

@@ -63,6 +63,31 @@ from .context import JobUpdater
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_PLANNING_CONTEXT_TOKENS = 16_384
+_PLANNING_NON_RESEARCH_RESERVE_TOKENS = 6_000
+
+
+def _planning_research_digest_max_chars(llm: Any) -> int:
+    """Return a conservative digest budget for the selected planning model.
+
+    Research text is budgeted at one character per token, matching the research
+    agent's safety rule for poorly tokenizing web content.  The remaining context
+    is reserved for the planning instructions, brief, prior plan/feedback, and
+    model output.
+    """
+    try:
+        context_tokens = int(llm.get_max_context_tokens())
+    except (AttributeError, TypeError, ValueError):
+        context_tokens = _DEFAULT_PLANNING_CONTEXT_TOKENS
+    except Exception:
+        logger.warning(
+            "Could not resolve planning context size; using %d-token fallback",
+            _DEFAULT_PLANNING_CONTEXT_TOKENS,
+            exc_info=True,
+        )
+        context_tokens = _DEFAULT_PLANNING_CONTEXT_TOKENS
+    return max(1, context_tokens - _PLANNING_NON_RESEARCH_RESERVE_TOKENS)
+
 
 def _unwrap_llm_cause(exc: BaseException) -> BaseException:
     """Return the underlying model error when strands wraps it in EventLoopException.
@@ -474,17 +499,23 @@ def run_planning(
         status_text="Generating content plan...",
     )
 
+    planning_client = planning_llm_client(llm_client)
+
     # The research agent emits a human-readable fallback document even when no web
     # references or academic papers were found.  That artifact remains useful for
     # diagnostics, but it is not evidence for the planner, so keep the planning
     # digest empty in that case.  Supplying the resolved client lets
     # build_research_digest compact documents that exceed its prompt budget instead
     # of passing them through.
-    digest_llm = llm_client.client if isinstance(llm_client, LLMClientModel) else llm_client
+    digest_llm = (
+        planning_client.client if isinstance(planning_client, LLMClientModel) else planning_client
+    )
+    digest_max_chars = _planning_research_digest_max_chars(planning_client)
     research_digest = build_research_digest(
         research_output.compiled_document
         if research_output.references or research_output.academic_papers
         else "",
+        max_chars=digest_max_chars,
         llm=digest_llm,
     )
     if on_research_digest is not None:
@@ -523,7 +554,7 @@ def run_planning(
 
     try:
         planning_draft_agent = BlogWriterAgent(
-            llm_client=planning_llm_client(llm_client),
+            llm_client=planning_client,
             writing_style_guide_content=writing_guidelines_for_critic,
             brand_spec_content=brand_spec_for_critic,
         )
