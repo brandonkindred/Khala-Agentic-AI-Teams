@@ -21,6 +21,7 @@ from .client import (
     Repo,
     ReviewComment,
     ReviewThread,
+    ReviewThreadsUnavailableError,
     SubIssue,
     scrub_token_from_text,
 )
@@ -116,6 +117,7 @@ __all__ = [
     "Repo",
     "ReviewComment",
     "ReviewThread",
+    "ReviewThreadsUnavailableError",
     "ScoreBreakdown",
     "SubIssue",
     "annotate_duplicate_proposals",

@@ -33,6 +33,7 @@ from software_engineering_team.code_review_agent import transcript
 from software_engineering_team.github_source import (
     GitHubAPIError,
     Issue,
+    ReviewThreadsUnavailableError,
     build_enhanced_issue_from_proposal,
     compute_complexity_score,
     duplicate_check_max_open_issues,
@@ -264,12 +265,13 @@ def post_review_pr(request: ReviewPrRequest) -> ReviewPrResponse:
 def post_address_comments(
     pr_number: int, request: AddressCommentsRequest
 ) -> AddressCommentsResponse:
-    """Address & respond to every unresolved review comment on an open pull request.
+    """Address & respond to every unresolved review comment on an OPEN pull request.
 
     Gathers the PR's unresolved review comments and, in a background job, hands each
-    to the software-engineering team: triage (false positive vs. real issue), and for
-    a real issue plan the best-scoring solution, implement it on the PR branch, reply
-    to the comment, and resolve it — finally moving the PR to "waiting for review".
+    to the software-engineering team: triage (false positive vs. real issue), then
+    plan, implement, review, and push each real fix to the existing PR branch before
+    replying and resolving its thread. When every comment is handled without failure
+    the PR is moved to "waiting for review".
 
     Reuses the PR-review admission lock so a single PR cannot have overlapping
     comment-addressing jobs (and cannot run alongside a plain review, since both are
@@ -279,28 +281,53 @@ def post_address_comments(
         - A GitHub token is configured (request body or ``GITHUB_TOKEN``).
         - ``pr_number`` names an existing pull request in ``owner/repo``; the path
           ``pr_number`` is authoritative (the body's is coerced to match it).
+        - The PR is OPEN (enforced below — a closed/merged PR is rejected with 400).
     Postconditions:
-        - Creates a job, starts the address-comments hook in the background, and
-          returns the job id, PR URL, and the count of unresolved comments the job
-          will work through. Poll ``GET /status/{job_id}`` for progress.
+        - Creates a job, records the review start, and starts the address-comments
+          hook — all while holding the admission lock, so a persisted job can never be
+          left without a running worker (which would otherwise block future requests
+          for the PR). Returns the job id, PR URL, and the count of unresolved comments
+          the job will work through. Poll ``GET /status/{job_id}`` for progress.
+        - A 400 is returned when the PR is not open; a 409 when a job is already
+          running for the PR; a 502 for a GitHub API error, including when the PR's
+          review-thread state cannot be reliably retrieved (the flow fails closed
+          rather than acting on unknown state).
     """
     # The path is authoritative; keep the body consistent so downstream code (which
     # reads request.pr_number) and the job's github_context agree with the URL.
     request = request.model_copy(update={"pr_number": pr_number})
     token = resolve_github_token(request)
 
-    # Validate the PR exists and gather the unresolved-comment count BEFORE taking the
-    # admission lock (the GitHub round-trips are the slow part; keep the critical section
-    # to fast job-service writes only).
+    # Validate the PR exists, is open, and gather the unresolved-comment count BEFORE
+    # taking the admission lock (the GitHub round-trips are the slow part).
     with _main.GitHubClient(token=token) as client:
         try:
             pr = client.get_pull_request(request.owner, request.repo, pr_number)
-            unresolved, _threads = _address._unresolved_comments(
+            if pr.state != "open":
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"PR {request.owner}/{request.repo}#{pr_number} is {pr.state}; "
+                        "only open PRs can be addressed."
+                    ),
+                )
+            unresolved, _threads = _address.unresolved_comments(
                 client, request.owner, request.repo, pr_number
             )
+        except ReviewThreadsUnavailableError as e:
+            # Fail closed: without reliable resolved/unresolved state the flow would
+            # re-triage resolved discussions and post duplicate replies.
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not determine review-thread state: {e}",
+            ) from e
         except GitHubAPIError as e:
             raise HTTPException(status_code=502, detail=f"github api error: {e}") from e
 
+    # Hold the admission lock across the WHOLE start sequence (create + record + launch)
+    # so a persisted job always has a running worker: if record_review_start or the
+    # thread launch raised after we released the lock, an orphaned "running" job would
+    # block every future address-comments request for this PR.
     with _main._pr_review_admission(request.owner, request.repo, pr_number):
         running = _main._running_review_for_pr(request.owner, request.repo, pr_number)
         if running:
@@ -313,20 +340,50 @@ def post_address_comments(
 
         job_id = str(uuid.uuid4())
         _main.create_job(job_id=job_id, repo_path=request.repo_path)
-        _main.update_job(
-            job_id,
-            github_context={
+        job_fields: dict[str, Any] = {
+            "github_context": {
                 "owner": request.owner,
                 "repo": request.repo,
                 "pr_number": pr_number,
                 "pr_url": pr.html_url,
             },
-        )
+        }
+        # Temporal GitHub activities run outside this request and resolve their
+        # credential from the durable job record. Persist ciphertext only, matching
+        # /run-from-github; never put the plaintext PAT in a workflow payload.
+        encrypted = _main.encrypt_token(token)
+        if encrypted:
+            job_fields["github_token_encrypted"] = encrypted
+        _main.update_job(job_id, **job_fields)
+        try:
+            created_at = _main.record_review_start(
+                job_id, request.owner, request.repo, pr_number, pr.html_url, _main._review_author()
+            )
+            _address.start_address_comments_thread(job_id, request, token)
+        except Exception as e:
+            # Creation is not transactional across the job service, review store,
+            # and Python thread launcher. Terminalize whatever was persisted so a
+            # half-started job cannot block the PR admission guard indefinitely.
+            error = f"Could not start address-comments worker: {scrub_token_from_text(str(e))}"
+            try:
+                _main.update_job(
+                    job_id,
+                    status="failed",
+                    phase="completed",
+                    status_text="Failed to start address-comments worker",
+                    error=error,
+                )
+                _main.update_review(
+                    job_id,
+                    status="failed",
+                    status_text="Failed to start address-comments worker",
+                    error=error,
+                    completed=True,
+                )
+            except Exception:
+                logger.exception("Could not terminalize address-comments job %s", job_id)
+            raise HTTPException(status_code=500, detail=error) from e
 
-    created_at = _main.record_review_start(
-        job_id, request.owner, request.repo, pr_number, pr.html_url, _main._review_author()
-    )
-    _address._start_address_comments_thread(job_id, request, token)
     return AddressCommentsResponse(
         job_id=job_id,
         pr_number=pr_number,

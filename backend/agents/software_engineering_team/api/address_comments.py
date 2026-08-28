@@ -7,18 +7,10 @@ through the required steps:
   1. Read the comment to understand the issue it raises.
   2. Use the codebase to decide whether the comment is a FALSE POSITIVE or a REAL
      issue.
-  3. For a real issue:
-     1. Identify the requirements the fix must satisfy to be considered resolved.
-     2. Identify the top-3 candidate solutions, each scored on how well it meets
-        the requirements plus computational performance, memory usage, and
-        expected code complexity.
-     3. Plan the best-scoring solution.
-     4. Implement the plan (dispatch the SE implementation pipeline).
-     5. Go through the existing review processes.
-     6. Commit and push the changes to the PR branch.
-     7. Reply to the comment.
-     8. Resolve the comment.
-  4. Once every comment is handled, move the PR to "waiting for review".
+  3. For a real issue, plan the best of three scored solutions, run a distinct
+     durable implementation workflow, wait for it to finish successfully, push
+     the result to the existing PR branch, then reply and resolve the thread.
+  4. For a false positive, reply with the evidence and resolve the thread.
 
 Runs in a background thread (mirroring ``pr_review._run_pr_review``) so the HTTP
 route returns immediately and the UI polls ``GET /status/{job_id}``. Every
@@ -30,9 +22,11 @@ Contract summary (see per-function docstrings for detail):
     the PR's repository; ``request`` carries the target ``owner``/``repo``/
     ``pr_number``.
   - Postconditions: the job ends ``completed`` (even when there was nothing to
-    do) or ``failed`` (only on an error that prevented the flow from running);
-    per-comment failures degrade to a recorded outcome rather than failing the
-    whole job. The background hook NEVER raises.
+    do) or ``failed`` (on an error that prevented the flow from running, including
+    review-thread state being unavailable — the flow fails closed rather than
+    treating unknown state as unresolved). Per-comment failures degrade to a
+    recorded outcome rather than failing the whole job. The background hook NEVER
+    raises.
 """
 
 from __future__ import annotations
@@ -48,6 +42,7 @@ from software_engineering_team.api.coding_team_models import AddressCommentsRequ
 from software_engineering_team.github_source import (
     ReviewComment,
     ReviewThread,
+    ReviewThreadsUnavailableError,
     scrub_token_from_text,
 )
 from software_engineering_team.models import CodingTeamPlanInput, JobStatus
@@ -169,8 +164,8 @@ class CommentOutcome(BaseModel):
     line: Optional[int] = None
     html_url: str = ""
     outcome: str = Field(
-        description="One of: 'resolved' (real issue fixed & thread resolved), 'false_positive', "
-        "'not_an_issue', 'failed'."
+        description="One of: 'resolved' (real issue fixed, pushed, replied to, and thread "
+        "resolved), 'false_positive', 'not_an_issue', or 'failed'."
     )
     detail: str = ""
 
@@ -190,14 +185,23 @@ def _unresolved_comments(
     Postconditions:
         - Returns ``(comments, thread_by_comment_id)`` where ``comments`` are the
           review comments whose thread GitHub reports as UNRESOLVED and which Khala
-          did not itself author (marker check), in GitHub's response order, and
-          ``thread_by_comment_id`` maps every such comment's id to its owning
-          :class:`ReviewThread` (so the caller can resolve the thread later). A
-          comment with no discoverable thread is treated as unresolved and included
-          with no thread entry (it can still be replied to; only resolution needs
-          the thread id).
+          did not itself author (marker check), in GitHub's response order.
+        - ``thread_by_comment_id`` maps EVERY comment id appearing in ANY thread
+          GitHub returned (resolved threads included) to its owning
+          :class:`ReviewThread`. Callers only look up ids drawn from ``comments``,
+          so the extra resolved entries are harmless; the map is deliberately not
+          narrowed to the unresolved subset. If a REST review comment has no
+          discoverable thread, thread state is incomplete and the function fails
+          closed rather than guessing that the comment is unresolved.
+        - Fails closed: :meth:`GitHubClient.list_review_threads` raises
+          :class:`ReviewThreadsUnavailableError` when thread state is unknown or
+          incomplete, and this function lets that propagate rather than treating
+          unknown state as "all unresolved" (which would re-triage resolved
+          discussions and post duplicate replies).
     """
     all_comments = client.list_review_comments(owner, repo, pr_number)
+    # Raises ReviewThreadsUnavailableError on unknown/incomplete state — propagated
+    # so the caller aborts instead of misclassifying resolved comments as unresolved.
     threads = client.list_review_threads(owner, repo, pr_number)
 
     thread_by_comment: Dict[int, ReviewThread] = {}
@@ -210,9 +214,16 @@ def _unresolved_comments(
 
     unresolved: List[ReviewComment] = []
     for comment in all_comments:
-        if comment.id in resolved_ids:
-            continue
         if _KHALA_COMMENT_MARKER in (comment.body or ""):
+            continue
+        if comment.id not in thread_by_comment:
+            raise ReviewThreadsUnavailableError(
+                owner,
+                repo,
+                pr_number,
+                f"review comment {comment.id} has no discoverable thread",
+            )
+        if comment.id in resolved_ids:
             continue
         unresolved.append(comment)
     return unresolved, thread_by_comment
@@ -326,43 +337,38 @@ def _plan_resolution(comment: ReviewComment, cited_code: str) -> Optional[IssueR
 
 
 # ---------------------------------------------------------------------------
-# Implement (dispatch the SE pipeline) + push
+# Implement, publish to the existing PR, and wait for success
 # ---------------------------------------------------------------------------
 
 
 def _dispatch_implementation(
-    job_id: str,
+    parent_job_id: str,
     request: AddressCommentsRequest,
     comment: ReviewComment,
     plan: IssueResolutionPlan,
     pr_head: str,
-) -> None:
-    """Hand the chosen plan to the SE implementation pipeline for the PR branch.
+    pr_base: str,
+    pr_url: str,
+    token: str,
+) -> str:
+    """Run one unique child workflow and return its child job id on success.
 
-    Builds a :class:`CodingTeamPlanInput` describing the fix and starts the coding
-    team's implementation workflow against the PR's head branch, so steps 4-6 of
-    the flow (implement → existing review processes → commit & push to the PR) run
-    inside the established pipeline rather than being re-implemented here.
-
-    Postconditions:
-        - Dispatches ``_main.start_coding_team_workflow`` with a plan input whose
-          ``requirements_description`` captures the comment, the resolution
-          requirements, and the chosen plan, and whose ``project_overview`` carries
-          the PR/comment context (owner, repo, pr_number, head branch, comment id).
-          Raises whatever the dispatch raises (the caller treats a dispatch failure
-          as a per-comment failure, not a job failure).
+    The child workflow uses PR-specific publication: it prepares from the PR's
+    base/head, runs the normal implementation and review pipeline, pushes the
+    resulting commit to the existing head branch, and returns only after that
+    publication is terminal. Any non-success result raises so the caller leaves
+    the review thread open.
     """
     requirements = "\n".join(f"- {r}" for r in plan.requirements) or "- (none stated)"
     description = (
         f"Address the following pull-request review comment on {request.owner}/{request.repo}"
         f"#{request.pr_number} (file {comment.path}, "
         f"line {comment.line if comment.line is not None else 'file-level'}):\n\n"
-        f"{comment.body}\n\n"
-        f"Resolution requirements:\n{requirements}\n\n"
+        f"{comment.body}\n\nResolution requirements:\n{requirements}\n\n"
         f"Implementation plan:\n{plan.chosen_plan}"
     )
     plan_input = CodingTeamPlanInput(
-        requirements_title=f"Address review comment on PR #{request.pr_number}",
+        requirements_title=f"Address review comment {comment.id} on PR #{request.pr_number}",
         requirements_description=description,
         repo_path=request.repo_path,
         project_overview={
@@ -376,20 +382,47 @@ def _dispatch_implementation(
             }
         },
     )
-    _main.start_coding_team_workflow(
-        job_id,
+    child_job_id = f"{parent_job_id}:comment:{comment.id}"
+    _main.create_job(
+        job_id=child_job_id,
+        repo_path=request.repo_path,
+        plan_input=plan_input.model_dump(),
+    )
+    child_fields: Dict[str, Any] = {
+        "parent_job_id": parent_job_id,
+        "github_context": {
+            "owner": request.owner,
+            "repo": request.repo,
+            "pr_number": request.pr_number,
+            "pr_url": pr_url,
+            "review_comment_id": comment.id,
+        },
+    }
+    encrypted = _main.encrypt_token(token)
+    if encrypted:
+        child_fields["github_token_encrypted"] = encrypted
+    _main.update_job(child_job_id, **child_fields)
+
+    result = _main.execute_coding_team_workflow(
+        child_job_id,
         request.repo_path,
         plan_input.model_dump(),
         github={
             "owner": request.owner,
             "repo": request.repo,
+            # Failure notices use the generic issue/PR-number field.
+            "issue_number": request.pr_number,
             "pr_number": request.pr_number,
-            # Work on the PR's own branch so the fix commits & pushes back to the PR
-            # (steps 4.6) rather than opening a new branch.
-            "base": pr_head,
+            "pr_url": pr_url,
+            "publish_mode": "existing_pr",
+            "base": pr_base,
             "integration_branch": pr_head,
         },
     )
+    if result.get("status") != JobStatus.COMPLETED.value:
+        status = result.get("status") or result.get("outcome") or "unknown"
+        raise RuntimeError(f"implementation workflow did not complete successfully: {status}")
+    return child_job_id
 
 
 # ---------------------------------------------------------------------------
@@ -404,13 +437,12 @@ def _reply_and_resolve(
     thread: Optional[ReviewThread],
     reply_body: str,
 ) -> bool:
-    """Reply to a review comment and resolve its thread (best-effort each).
+    """Reply to a review comment and resolve its thread.
 
     Postconditions:
         - Posts a threaded reply under ``comment`` and, when ``thread`` is known,
           resolves it. Returns True when BOTH the reply and (if attempted) the
-          resolve succeeded; False otherwise. Never raises — a failure here is
-          recorded as a per-comment outcome, not a job failure.
+          resolution succeeded; False otherwise. Never raises.
     """
     replied = False
     try:
@@ -479,13 +511,18 @@ def _handle_comment(
     comment: ReviewComment,
     thread: Optional[ReviewThread],
     pr_head: str,
+    pr_base: str,
+    pr_url: str,
+    token: str,
 ) -> CommentOutcome:
-    """Run the full triage → plan → implement → reply → resolve flow for one comment.
+    """Run the full triage → implement → publish → reply → resolve flow.
 
     Postconditions:
-        - Returns the :class:`CommentOutcome` recording what happened. Never raises:
-          any error becomes an ``outcome="failed"`` record so one bad comment cannot
-          sink the job.
+        - Returns the :class:`CommentOutcome` recording what happened:
+          ``not_an_issue`` (skipped), ``false_positive`` (replied and thread
+          resolved only when both succeed), or ``resolved`` (implementation
+          workflow completed, the fix was pushed to the PR, then the reply and
+          resolution succeeded). Never raises; one comment's failure is recorded.
     """
     base = CommentOutcome(
         comment_id=comment.id,
@@ -505,14 +542,16 @@ def _handle_comment(
 
         if triage.is_false_positive:
             # Real-looking comment, but the codebase shows the concern does not hold.
-            # Reply explaining why and resolve the thread — no code change needed.
+            # Reply explaining why and resolve the thread — no code change is owed.
+            # Only report success when BOTH the reply and the resolve land, so a
+            # silently-open thread is never advertised as a handled false positive.
             reply = (
                 "After reviewing the referenced code, this appears to be a false positive: "
                 f"{triage.issue_summary}"
             )
-            _reply_and_resolve(client, request, comment, thread, reply)
-            base.outcome = "false_positive"
-            base.detail = triage.issue_summary
+            ok = _reply_and_resolve(client, request, comment, thread, reply)
+            base.outcome = "false_positive" if ok else "failed"
+            base.detail = triage.issue_summary if ok else "Reply/resolve step failed."
             return base
 
         # Real issue: requirements → top-3 scored solutions → plan the best one.
@@ -521,12 +560,20 @@ def _handle_comment(
             base.detail = "Could not produce a resolution plan."
             return base
 
-        # Implement the plan (dispatch the SE pipeline: implement → existing review
-        # processes → commit & push to the PR branch).
-        _dispatch_implementation(job_id, request, comment, plan, pr_head)
-
-        # Reply to and resolve the comment.
-        reply = f"Addressed by the software-engineering team. {plan.chosen_plan}"
+        child_job_id = _dispatch_implementation(
+            job_id,
+            request,
+            comment,
+            plan,
+            pr_head,
+            pr_base,
+            pr_url,
+            token,
+        )
+        reply = (
+            f"Addressed by the software-engineering team in job `{child_job_id}`. "
+            f"{plan.chosen_plan}"
+        )
         ok = _reply_and_resolve(client, request, comment, thread, reply)
         base.outcome = "resolved" if ok else "failed"
         base.detail = plan.chosen_plan if ok else "Reply/resolve step failed."
@@ -559,6 +606,29 @@ def _start_address_comments_thread(
         daemon=True,
     )
     t.start()
+
+
+# ---------------------------------------------------------------------------
+# Public API for route consumption
+# ---------------------------------------------------------------------------
+# The route module (``api/routes/reviews.py``) is a separate module, so it must
+# not reach into this module's underscore-prefixed internals. These thin public
+# aliases are the stable surface the route depends on; the underscore functions
+# remain the package-internal implementation (and the monkeypatch surface tests
+# use). Keeping the alias lets the internals be refactored without touching the
+# route.
+
+
+def unresolved_comments(
+    client: Any, owner: str, repo: str, pr_number: int
+) -> tuple[List[ReviewComment], Dict[int, ReviewThread]]:
+    """Public entry point for :func:`_unresolved_comments` (see its contract)."""
+    return _unresolved_comments(client, owner, repo, pr_number)
+
+
+def start_address_comments_thread(job_id: str, request: AddressCommentsRequest, token: str) -> None:
+    """Public entry point for :func:`_start_address_comments_thread` (see its contract)."""
+    _start_address_comments_thread(job_id, request, token)
 
 
 def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: str) -> None:
@@ -599,11 +669,17 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                     comment,
                     thread_by_comment.get(comment.id),
                     pr.head,
+                    pr.base,
+                    pr.html_url,
+                    token,
                 )
                 outcomes.append(outcome)
 
-            # Every unresolved comment handled → the PR is ready for another look.
-            _mark_waiting_for_review(client, owner, repo, pr_number)
+            # Move the PR to "waiting for review" only when every comment was handled
+            # without failure — a failed comment means work is still owed, so the PR
+            # is not yet ready for another look.
+            if outcomes and all(o.outcome != "failed" for o in outcomes):
+                _mark_waiting_for_review(client, owner, repo, pr_number)
 
         summary = _build_summary(outcomes)
         _main.update_job(
@@ -652,10 +728,13 @@ def _build_summary(outcomes: List[CommentOutcome]) -> Dict[str, Any]:
     counts: Dict[str, int] = {}
     for o in outcomes:
         counts[o.outcome] = counts.get(o.outcome, 0) + 1
-    resolved = counts.get("resolved", 0)
     total = len(outcomes)
+    # "Handled" = everything the job acted on without failing.
+    handled = counts.get("resolved", 0) + counts.get("false_positive", 0) + counts.get(
+        "not_an_issue", 0
+    )
     status_text = (
-        f"Addressed {resolved}/{total} unresolved comment(s)"
+        f"Handled {handled}/{total} unresolved comment(s)"
         if total
         else "No unresolved comments to address"
     )

@@ -12,11 +12,13 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from shared.temporal import start_workflow_sync
+from shared.temporal import execute_workflow_sync, start_workflow_sync
 from software_engineering_team.temporal.coding_team_constants import TASK_QUEUE, WORKFLOW_ID_PREFIX
 from software_engineering_team.temporal.coding_team_workflow import CodingTeamWorkflow
 
 logger = logging.getLogger(__name__)
+
+_COMMENT_WORKFLOW_TIMEOUT_S = 4 * 60 * 60
 
 
 def start_coding_team_workflow(
@@ -61,3 +63,45 @@ def start_coding_team_workflow(
         task_queue=TASK_QUEUE,
     )
     logger.info("Started CodingTeamWorkflow id=%s", workflow_id)
+
+
+def execute_coding_team_workflow(
+    job_id: str,
+    repo_path: str,
+    plan_input: Optional[Dict[str, Any]],
+    github: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Run one coding-team workflow and wait for its terminal result.
+
+    This is the completion-aware counterpart to :func:`start_coding_team_workflow`.
+    It is used by review-comment remediation because a thread must not be replied
+    to or resolved merely because Temporal accepted a workflow start.
+
+    Preconditions:
+        - ``job_id`` is unique per review comment and names an existing child job.
+        - ``github`` contains no plaintext token; activities resolve credentials
+          from the child job's encrypted token or ``GITHUB_TOKEN``.
+    Postconditions:
+        - Blocks until ``CodingTeamWorkflow`` reaches a terminal result and returns
+          that result. A pause remains durable in Temporal and is resumed through
+          the normal answer-signal path.
+    """
+    assert job_id, "execute_coding_team_workflow requires a non-empty job_id"
+    assert repo_path, "execute_coding_team_workflow requires a non-empty repo_path"
+    assert "token" not in github, "github workflow payload must not include a token"
+    payload: Dict[str, Any] = {
+        "job_id": job_id,
+        "repo_path": repo_path,
+        "plan_input": plan_input,
+        "github": github,
+    }
+    result = execute_workflow_sync(
+        CodingTeamWorkflow.run,
+        payload,
+        workflow_id=f"{WORKFLOW_ID_PREFIX}{job_id}",
+        task_queue=TASK_QUEUE,
+        execute_timeout_s=_COMMENT_WORKFLOW_TIMEOUT_S,
+    )
+    if not isinstance(result, dict):
+        raise RuntimeError("CodingTeamWorkflow returned a non-object result")
+    return result

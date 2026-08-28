@@ -569,3 +569,45 @@ def test_publish_activity_registered_under_expected_temporal_name() -> None:
     silently break that dispatch without this test catching it."""
     definition = _activity().__temporal_activity_definition
     assert definition.name == "coding_team_github_publish"
+
+
+def test_pr_publish_activity_pushes_existing_head_and_completes_child(
+    monkeypatch: pytest.MonkeyPatch, api: Any
+) -> None:
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_pr_publish_activity,
+    )
+
+    store, _ = _install(monkeypatch, api, "job-1")
+    fast_forwards: list[tuple[str, str, str]] = []
+    pushes: list[tuple[str, str, str, str]] = []
+    monkeypatch.setattr(
+        api,
+        "_fast_forward",
+        lambda path, branch, source: fast_forwards.append((path, branch, source)) or (True, None),
+    )
+    monkeypatch.setattr(
+        api,
+        "_push_branch",
+        lambda path, remote, branch, token: pushes.append((path, remote, branch, token))
+        or (True, None),
+    )
+
+    out = github_pr_publish_activity(
+        {
+            "job_id": "job-1",
+            "owner": "acme",
+            "repo": "widgets",
+            "repo_path": "/repo",
+            "pr_number": 7,
+            "pr_url": "https://example/pull/7",
+            "integration_branch": "feature/pr-7",
+            "remote": "origin",
+        }
+    )
+
+    assert fast_forwards == [("/repo", "feature/pr-7", api.DEVELOPMENT_BRANCH)]
+    assert pushes == [("/repo", "origin", "feature/pr-7", "tok-123")]
+    assert store.cleared_markers == [("/repo", 7)]
+    assert out["status"] == "completed"
+    assert out["github_pr_url"] == "https://example/pull/7"

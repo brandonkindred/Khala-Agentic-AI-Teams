@@ -553,6 +553,10 @@ def run_planning(
     planning_max_iter = plan_critic_max_iterations() if plan_critic is not None else 5
 
     try:
+        # BlogWriterAgent intentionally accepts the Strands LLMClientModel wrapper:
+        # it uses that model for structured helpers and derives a text-mode clone
+        # for draft generation. build_research_digest above needs the raw client's
+        # chat API, which is why only that call unwraps ``.client``.
         planning_draft_agent = BlogWriterAgent(
             llm_client=planning_client,
             writing_style_guide_content=writing_guidelines_for_critic,

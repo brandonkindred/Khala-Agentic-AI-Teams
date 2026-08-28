@@ -61,7 +61,9 @@ def run_planning_stage(
           ``allowed_claims.json`` together (via the same
           ``_persist_content_plan_artifacts`` helper ``run_planning`` uses),
           so ``allowed_claims.json`` never goes stale relative to the plan the
-          user is currently reviewing.
+          user is currently reviewing. Each re-plan also preserves the original
+          ``research_digest`` in the refined ``PlanningInput`` so outline feedback
+          cannot discard the research context.
     Raises:
         PlanningError: when content planning fails (e.g. max parse retries).
         BloggingError: any other blogging-domain failure from the planning agent

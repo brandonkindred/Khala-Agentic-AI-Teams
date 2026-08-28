@@ -45,6 +45,7 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
         nodes {
           isResolved
           comments(first: 100) {
+            pageInfo { hasNextPage }
             nodes { databaseId }
           }
         }
@@ -209,6 +210,31 @@ class ReviewThread:
     id: str
     is_resolved: bool
     comment_ids: tuple[int, ...]
+
+
+class ReviewThreadsUnavailableError(GitHubAPIError):
+    """Raised when a PR's review-thread state could not be fully retrieved.
+
+    Review-thread resolution state is GraphQL-only. When that query fails
+    (transport/HTTP error, GraphQL-level error, missing GraphQL permission, or an
+    unexpected payload shape on any page), a caller that decides "unresolved vs
+    resolved" must NOT treat the unknown state as "everything is unresolved":
+    doing so would re-triage already-resolved discussions and post duplicate
+    replies. :meth:`GitHubClient.list_review_threads` therefore fails closed by
+    raising this instead of returning a partial/empty list. Carried as a
+    ``GitHubAPIError`` subclass so existing ``except GitHubAPIError`` handlers
+    still catch it.
+    """
+
+    def __init__(self, owner: str, repo: str, number: int, detail: str) -> None:
+        """Record the PR whose thread state was unavailable and why.
+
+        Postconditions:
+            - Initializes the ``GitHubAPIError`` base with status ``0`` (no single
+              HTTP status applies — the failure may be transport-level or a GraphQL
+              body error) and a message identifying the PR and the underlying detail.
+        """
+        super().__init__(0, f"review-thread state unavailable for {owner}/{repo}#{number}: {detail}")
 
 
 @dataclass(frozen=True)
@@ -958,12 +984,19 @@ class GitHubClient(_GitHubHttpMixin):
         Postconditions:
             - Returns one :class:`ReviewThread` per thread, in GitHub's response
               order, each carrying its node ``id``, ``is_resolved``, and the
-              ordered tuple of its comments' numeric ids.
-            - Never raises: any GraphQL transport/HTTP error, non-2xx status,
-              GraphQL-level error, or unexpected shape is logged and degrades to
-              an empty list — the "address unresolved comments" flow then simply
-              has nothing to act on rather than failing (mirrors the read
-              query's degradation contract).
+              ordered tuple of its comments' numeric ids — the COMPLETE set of
+              threads.
+            - Fails closed: any GraphQL transport/HTTP error, non-2xx status,
+              GraphQL-level error, unexpected payload shape, or exceeding
+              :data:`MAX_REVIEW_THREADS_TRAVERSED` (i.e. any case where the returned
+              list would be partial or the state unknown) raises
+              :class:`ReviewThreadsUnavailableError` instead of returning a
+              partial/empty list. A caller that classifies "unresolved vs resolved"
+              must not treat unknown state as unresolved, so this never silently
+              degrades. (This differs deliberately from
+              :meth:`get_resolved_review_thread_comment_ids`, which degrades to an
+              empty set because a review only loses de-duplication, not correctness,
+              when resolution state is missing.)
         """
         threads: list[ReviewThread] = []
         after: Optional[str] = None
@@ -985,50 +1018,94 @@ class GitHubClient(_GitHubHttpMixin):
                 )
                 payload = response.json()
                 if payload.get("errors"):
-                    logger.warning(
-                        "list_review_threads: GraphQL errors for %s/%s#%s: %s",
-                        owner,
-                        repo,
-                        number,
-                        payload["errors"],
+                    raise ReviewThreadsUnavailableError(
+                        owner, repo, number, f"GraphQL errors: {payload['errors']}"
                     )
-                    return threads
                 pr_data = ((payload.get("data") or {}).get("repository") or {}).get(
                     "pullRequest"
-                ) or {}
-                nodes = (pr_data.get("reviewThreads") or {}).get("nodes") or []
+                )
+                if not isinstance(pr_data, dict):
+                    raise ReviewThreadsUnavailableError(
+                        owner, repo, number, "missing pullRequest payload"
+                    )
+                review_threads = pr_data.get("reviewThreads")
+                if not isinstance(review_threads, dict) or not isinstance(
+                    review_threads.get("nodes"), list
+                ):
+                    raise ReviewThreadsUnavailableError(
+                        owner, repo, number, "invalid reviewThreads payload"
+                    )
+                nodes = review_threads["nodes"]
                 for node in nodes:
                     seen += 1
                     if seen > MAX_REVIEW_THREADS_TRAVERSED:
-                        logger.warning(
-                            "list_review_threads hit MAX_REVIEW_THREADS_TRAVERSED=%d; stopping",
-                            MAX_REVIEW_THREADS_TRAVERSED,
+                        # Exceeding the cap means the listing is incomplete; fail
+                        # closed rather than returning a partial view that a caller
+                        # would mistake for the full set.
+                        raise ReviewThreadsUnavailableError(
+                            owner,
+                            repo,
+                            number,
+                            f"exceeded MAX_REVIEW_THREADS_TRAVERSED={MAX_REVIEW_THREADS_TRAVERSED}",
                         )
-                        return threads
+                    if not isinstance(node, dict):
+                        raise ReviewThreadsUnavailableError(
+                            owner, repo, number, "invalid review-thread node"
+                        )
                     thread_id = node.get("id")
-                    if not isinstance(thread_id, str):
-                        continue
-                    comment_ids = tuple(
-                        c["databaseId"]
-                        for c in (node.get("comments") or {}).get("nodes") or []
-                        if isinstance(c.get("databaseId"), int)
-                    )
+                    if not isinstance(thread_id, str) or not thread_id:
+                        raise ReviewThreadsUnavailableError(
+                            owner, repo, number, "review-thread node missing id"
+                        )
+                    if not isinstance(node.get("isResolved"), bool):
+                        raise ReviewThreadsUnavailableError(
+                            owner, repo, number, "review-thread node missing isResolved"
+                        )
+                    comments = node.get("comments")
+                    if not isinstance(comments, dict) or not isinstance(
+                        comments.get("nodes"), list
+                    ):
+                        raise ReviewThreadsUnavailableError(
+                            owner, repo, number, "invalid review-thread comments payload"
+                        )
+                    if (comments.get("pageInfo") or {}).get("hasNextPage"):
+                        raise ReviewThreadsUnavailableError(
+                            owner, repo, number, "review thread has more than 100 comments"
+                        )
+                    comment_ids_list: list[int] = []
+                    for comment in comments["nodes"]:
+                        if not isinstance(comment, dict) or not isinstance(
+                            comment.get("databaseId"), int
+                        ):
+                            raise ReviewThreadsUnavailableError(
+                                owner, repo, number, "review comment missing databaseId"
+                            )
+                        comment_ids_list.append(comment["databaseId"])
                     threads.append(
                         ReviewThread(
                             id=thread_id,
-                            is_resolved=bool(node.get("isResolved")),
-                            comment_ids=comment_ids,
+                            is_resolved=node["isResolved"],
+                            comment_ids=tuple(comment_ids_list),
                         )
                     )
-                page_info = (pr_data.get("reviewThreads") or {}).get("pageInfo") or {}
+                page_info = review_threads.get("pageInfo")
+                if not isinstance(page_info, dict):
+                    raise ReviewThreadsUnavailableError(
+                        owner, repo, number, "invalid reviewThreads pageInfo"
+                    )
                 if not page_info.get("hasNextPage"):
                     return threads
                 after = page_info.get("endCursor")
                 if not after:
-                    return threads
-        except Exception as e:  # noqa: BLE001 - degrade to what was gathered; never fail the flow
+                    raise ReviewThreadsUnavailableError(
+                        owner, repo, number, "reviewThreads page missing endCursor"
+                    )
+        except ReviewThreadsUnavailableError:
+            # Already the fail-closed signal — propagate as-is.
+            raise
+        except Exception as e:  # noqa: BLE001 - any other failure is also "state unknown"
             logger.warning("list_review_threads failed for %s/%s#%s: %s", owner, repo, number, e)
-            return threads
+            raise ReviewThreadsUnavailableError(owner, repo, number, str(e)) from e
 
     def reply_to_review_comment(
         self, *, owner: str, repo: str, number: int, comment_id: int, body: str
@@ -1329,6 +1406,7 @@ __all__ = [
     "Repo",
     "ReviewComment",
     "ReviewThread",
+    "ReviewThreadsUnavailableError",
     "SubIssue",
     "scrub_token_from_text",
 ]

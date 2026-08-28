@@ -12,6 +12,7 @@ from temporalio.common import RetryPolicy
 from software_engineering_team.temporal.coding_team_github_activities import (
     github_branch_prep_activity,
     github_failure_notice_activity,
+    github_pr_publish_activity,
     github_publish_activity,
 )
 
@@ -436,9 +437,10 @@ class CodingTeamWorkflow:
               ``run_pipeline_activity``'s contract).
             - When supplied, ``request["github"]`` is a dict carrying the
               GitHub branch/PR coordinates needed by the GitHub activities:
-              ``owner``, ``repo``, ``issue_number``, ``issue_title``,
-              ``base``, and ``integration_branch``. ``remote`` defaults to
-              ``"origin"`` when blank or absent.
+              ``owner``, ``repo``, ``base``, and ``integration_branch``, plus
+              either ``issue_number``/``issue_title`` for issue-driven publishing
+              or ``publish_mode="existing_pr"``/``pr_number`` for review-comment
+              remediation. ``remote`` defaults to ``"origin"`` when absent.
             - Any GitHub token or credential stays outside workflow activity
               arguments. This workflow passes only repository coordinates and
               issue metadata to GitHub activities; a ``"token"`` key must
@@ -599,22 +601,40 @@ class CodingTeamWorkflow:
             if status in ("failed", "cancelled", "waiting_for_user"):
                 return result
             try:
+                publish_activity = (
+                    github_pr_publish_activity
+                    if github.get("publish_mode") == "existing_pr"
+                    else github_publish_activity
+                )
+                publish_request = {
+                    "job_id": request["job_id"],
+                    "owner": github["owner"],
+                    "repo": github["repo"],
+                    "repo_path": request["repo_path"],
+                    "base": github["base"],
+                    "integration_branch": github["integration_branch"],
+                    "remote": github.get("remote") or "origin",
+                    "cleanup_checkout_on_success": bool(
+                        github.get("cleanup_checkout_on_success")
+                    ),
+                }
+                if github.get("publish_mode") == "existing_pr":
+                    publish_request.update(
+                        {
+                            "pr_number": github["pr_number"],
+                            "pr_url": github.get("pr_url"),
+                        }
+                    )
+                else:
+                    publish_request.update(
+                        {
+                            "issue_number": github["issue_number"],
+                            "issue_title": github["issue_title"],
+                        }
+                    )
                 return await workflow.execute_activity(
-                    github_publish_activity,
-                    {
-                        "job_id": request["job_id"],
-                        "owner": github["owner"],
-                        "repo": github["repo"],
-                        "repo_path": request["repo_path"],
-                        "issue_number": github["issue_number"],
-                        "issue_title": github["issue_title"],
-                        "base": github["base"],
-                        "integration_branch": github["integration_branch"],
-                        "remote": github.get("remote") or "origin",
-                        "cleanup_checkout_on_success": bool(
-                            github.get("cleanup_checkout_on_success")
-                        ),
-                    },
+                    publish_activity,
+                    publish_request,
                     start_to_close_timeout=github_timeout,
                     retry_policy=_GITHUB_ACTIVITY_RETRY,
                 )
@@ -637,6 +657,7 @@ ACTIVITIES = [
     run_pipeline_activity,
     github_branch_prep_activity,
     github_publish_activity,
+    github_pr_publish_activity,
     github_failure_notice_activity,
     mark_coding_team_job_failed_activity,
     # Not scheduled by CodingTeamWorkflow itself (see the module-level Postconditions

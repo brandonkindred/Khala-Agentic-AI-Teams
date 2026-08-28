@@ -42,6 +42,7 @@ def test_activities_export_includes_mark_job_cancelled() -> None:
     from software_engineering_team.temporal.coding_team_github_activities import (
         github_branch_prep_activity,
         github_failure_notice_activity,
+        github_pr_publish_activity,
         github_publish_activity,
     )
     from software_engineering_team.temporal.coding_team_workflow import (
@@ -55,6 +56,7 @@ def test_activities_export_includes_mark_job_cancelled() -> None:
         run_pipeline_activity,
         github_branch_prep_activity,
         github_publish_activity,
+        github_pr_publish_activity,
         github_failure_notice_activity,
         mark_coding_team_job_failed_activity,
         mark_coding_team_job_cancelled_activity,
@@ -448,6 +450,42 @@ def test_github_run_calls_prep_then_pipeline_then_publish(monkeypatch: pytest.Mo
     assert snapshots[2]["issue_title"] == "Fix the widget"
     assert "token" not in snapshots[2]
     assert result["github_pr_url"] == "https://example/pull/1"
+
+
+def test_pr_comment_run_uses_existing_pr_publisher(monkeypatch: pytest.MonkeyPatch) -> None:
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_pr_publish_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+
+    github = {
+        **_GITHUB,
+        "publish_mode": "existing_pr",
+        "pr_number": 7,
+        "pr_url": "https://example/pull/7",
+        "integration_branch": "feature/pr-7",
+    }
+    calls, snapshots = _patch_execute(
+        monkeypatch,
+        [
+            {"ok": True, "error": None, "notes": []},
+            {"job_id": "job-1", "status": "completed"},
+            {"job_id": "job-1", "status": "completed", "github_pr_url": github["pr_url"]},
+        ],
+    )
+
+    result = asyncio.run(CodingTeamWorkflow().run(_github_request(github=github)))
+
+    assert [c[0] for c in calls] == [
+        github_branch_prep_activity,
+        run_pipeline_activity,
+        github_pr_publish_activity,
+    ]
+    assert snapshots[2]["pr_number"] == 7
+    assert snapshots[2]["integration_branch"] == "feature/pr-7"
+    assert "issue_title" not in snapshots[2]
+    assert result["status"] == "completed"
 
 
 def test_github_prep_failure_calls_failure_notice_skips_pipeline(

@@ -85,3 +85,29 @@ def test_start_coding_team_workflow_omits_github_when_none(monkeypatch):
     sw.start_coding_team_workflow("job-7", "/repo", {"objective": "x"}, github=None)
     (payload,) = captured["args"]
     assert "github" not in payload
+
+
+def test_execute_coding_team_workflow_waits_for_terminal_result(monkeypatch):
+    captured: dict = {}
+
+    def _fake_execute(workflow_run, *args, **kwargs):
+        captured.update({"workflow_run": workflow_run, "args": args, **kwargs})
+        return {"status": "completed", "github_pr_url": "https://example/pr/7"}
+
+    monkeypatch.setattr(sw, "execute_workflow_sync", _fake_execute)
+    github = {
+        "owner": "acme",
+        "repo": "widgets",
+        "pr_number": 7,
+        "publish_mode": "existing_pr",
+        "base": "main",
+        "integration_branch": "feature",
+    }
+
+    result = sw.execute_coding_team_workflow("parent:comment:2", "/repo", {"x": 1}, github)
+
+    assert result["status"] == "completed"
+    assert captured["workflow_id"] == "coding_team-parent:comment:2"
+    assert captured["task_queue"] == TASK_QUEUE
+    assert captured["args"][0]["github"] == github
+    assert captured["execute_timeout_s"] == sw._COMMENT_WORKFLOW_TIMEOUT_S

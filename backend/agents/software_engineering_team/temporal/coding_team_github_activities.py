@@ -244,6 +244,57 @@ def github_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
     return _main.get_job(job_id) or {"job_id": job_id, "status": "unknown"}
 
 
+_PR_PUBLISH_REQUIRED_FIELDS = (
+    "job_id",
+    "owner",
+    "repo",
+    "repo_path",
+    "pr_number",
+    "integration_branch",
+)
+
+
+@activity.defn(name="coding_team_github_pr_publish")
+def github_pr_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
+    """Push a successful remediation run back to an existing PR branch.
+
+    Unlike :func:`github_publish_activity`, this does not create or update a PR
+    from issue metadata. It fast-forwards the existing PR head from the coding
+    team's development branch and pushes that same head branch.
+    """
+    token = _require_activity_github_token(request)
+    missing = [f for f in _PR_PUBLISH_REQUIRED_FIELDS if not request.get(f)]
+    if missing:
+        raise ValueError(f"github_pr_publish_activity missing required fields: {missing!r}")
+
+    from software_engineering_team.api import coding_team_main as _main
+
+    job_id = request["job_id"]
+    repo_path = request["repo_path"]
+    branch = request["integration_branch"]
+    remote = request.get("remote") or "origin"
+
+    ff_ok, ff_err = _main._fast_forward(repo_path, branch, _main.DEVELOPMENT_BRANCH)
+    if not ff_ok:
+        raise RuntimeError(f"fast-forward failed: {ff_err}")
+    push_ok, push_err = _main._push_branch(repo_path, remote, branch, token)
+    if not push_ok:
+        raise RuntimeError(f"git push failed: {push_err}")
+
+    # The branch is now durable on the existing PR. Clear the prep marker and
+    # make the child job terminal before the parent resolves the review thread.
+    _main._clear_active_issue_if_matches(repo_path, request["pr_number"])
+    _main.update_job(
+        job_id,
+        status="completed",
+        phase="completed",
+        status_text=f"Published fix to PR #{request['pr_number']}",
+        github_pr_url=request.get("pr_url"),
+        integration_branch=branch,
+    )
+    return _main.get_job(job_id) or {"job_id": job_id, "status": "completed"}
+
+
 _FAILURE_NOTICE_REQUIRED_FIELDS = ("job_id", "owner", "repo", "number", "message", "kind")
 _FAILURE_NOTICE_KINDS = ("failure", "outage")
 

@@ -10,7 +10,12 @@ import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { NotificationService } from '../../core/notification.service';
 import { CodingTeamPageComponent } from './coding-team-page.component';
-import type { GitHubConfigResponse, GitHubIssueItem, GitHubRepoItem } from '../../models/integrations.model';
+import type {
+  GitHubConfigResponse,
+  GitHubIssueItem,
+  GitHubPullRequestItem,
+  GitHubRepoItem,
+} from '../../models/integrations.model';
 
 function makeIssues(count: number): GitHubIssueItem[] {
   return Array.from({ length: count }, (_, i) => ({
@@ -73,7 +78,7 @@ function ghRun(overrides: Partial<CodingTeamJobListItem> = {}): CodingTeamJobLis
 }
 
 /** One open pull request for the PR-tab tests. */
-function ghPull(number: number, overrides: Record<string, unknown> = {}) {
+function ghPull(number: number, overrides: Partial<GitHubPullRequestItem> = {}): GitHubPullRequestItem {
   return {
     number,
     title: `PR ${number}`,
@@ -1993,10 +1998,10 @@ describe('CodingTeamPageComponent', () => {
       );
       await setup();
       await openPullsForRepo();
-      component.addressPrComments(ghPull(7) as never);
+      component.addressPrComments(ghPull(7));
       expect(integrationsSpy.addressPrComments).toHaveBeenCalledWith(7, { owner: 'acme', repo: 'widgets' });
       expect(notificationsSpy.saved).toHaveBeenCalled();
-      expect(component.isAddressingPr(ghPull(7) as never)).toBe(false);
+      expect(component.isAddressingPr(ghPull(7))).toBe(false);
     });
 
     it('addressPrComments guards against a double-submit while in flight', async () => {
@@ -2005,10 +2010,10 @@ describe('CodingTeamPageComponent', () => {
       integrationsSpy.addressPrComments.mockReturnValue(new Subject());
       await setup();
       await openPullsForRepo();
-      component.addressPrComments(ghPull(7) as never);
-      component.addressPrComments(ghPull(7) as never);
+      component.addressPrComments(ghPull(7));
+      component.addressPrComments(ghPull(7));
       expect(integrationsSpy.addressPrComments).toHaveBeenCalledTimes(1);
-      expect(component.isAddressingPr(ghPull(7) as never)).toBe(true);
+      expect(component.isAddressingPr(ghPull(7))).toBe(true);
     });
 
     it('addressPrComments surfaces an error and clears the guard', async () => {
@@ -2016,9 +2021,9 @@ describe('CodingTeamPageComponent', () => {
       integrationsSpy.addressPrComments.mockReturnValue(throwError(() => ({ error: { detail: 'nope' } })));
       await setup();
       await openPullsForRepo();
-      component.addressPrComments(ghPull(7) as never);
+      component.addressPrComments(ghPull(7));
       expect(component.pullError).toBe('nope');
-      expect(component.isAddressingPr(ghPull(7) as never)).toBe(false);
+      expect(component.isAddressingPr(ghPull(7))).toBe(false);
     });
   });
 });

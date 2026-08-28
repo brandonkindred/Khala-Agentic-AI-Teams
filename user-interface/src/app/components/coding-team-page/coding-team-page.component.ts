@@ -83,6 +83,11 @@ function issueRunKey(owner: string | undefined, repo: string | undefined, issueN
   return `${(owner ?? '').toLowerCase()}/${(repo ?? '').toLowerCase()}#${issueNumber}`;
 }
 
+/** Stable identity for an in-flight PR-comment remediation request. */
+function prAddressKey(owner: string, repo: string, prNumber: number): string {
+  return `${owner.toLowerCase()}/${repo.toLowerCase()}#${prNumber}`;
+}
+
 /**
  * Precomputed view-model for one issue row, so the GitHub list template binds plain properties
  * instead of calling helper methods per change-detection cycle. Rebuilt whenever the visible page or
@@ -1382,7 +1387,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   isAddressingPr(pr: GitHubPullRequestItem): boolean {
     const repo = this.selectedRepo;
     if (!repo) return false;
-    return this.addressingPrs.has(issueRunKey(repo.owner, repo.name, pr.number));
+    return this.addressingPrs.has(prAddressKey(repo.owner, repo.name, pr.number));
   }
 
   /**
@@ -1397,7 +1402,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   addressPrComments(pr: GitHubPullRequestItem): void {
     const repo = this.selectedRepo;
     if (!repo) return;
-    const key = issueRunKey(repo.owner, repo.name, pr.number);
+    const key = prAddressKey(repo.owner, repo.name, pr.number);
     if (this.addressingPrs.has(key)) return;
     this.addressingPrs.add(key);
     this.pullError = null;
