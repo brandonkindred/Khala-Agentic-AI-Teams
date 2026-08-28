@@ -774,3 +774,124 @@
     padding-right: var(--kh-space-3);
   }
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// Pull Requests tab — open PRs with an "address unresolved comments" action.
+// ───────────────────────────────────────────────────────────────────────────
+.pulls-panel {
+  // Card base (surface, border, radius, padding) comes from the shared `.kh-card` class.
+  &__header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+
+    h2 {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin: 0;
+      flex: 1;
+      font-size: var(--kh-text-lg);
+      font-weight: 600;
+    }
+  }
+
+  &__repo-prompt {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.75rem;
+    padding: var(--kh-space-8) var(--kh-space-4);
+    text-align: center;
+    color: var(--kh-text-secondary);
+  }
+
+  &__loading {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: var(--kh-space-4);
+    color: var(--kh-text-secondary);
+  }
+
+  &__empty {
+    padding: var(--kh-space-8) var(--kh-space-4);
+  }
+}
+
+.pulls-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.pull-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--kh-border);
+  border-radius: var(--kh-radius-md);
+  background: var(--kh-surface-2, transparent);
+
+  &__main {
+    min-width: 0;
+    flex: 1;
+  }
+
+  &__title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  &__number {
+    color: var(--kh-text-tertiary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  &__name {
+    font-weight: 600;
+  }
+
+  &__chip {
+    font-size: var(--kh-text-xs);
+    padding: 0.1rem 0.4rem;
+    border-radius: var(--kh-radius-sm);
+    background: var(--kh-surface-3, rgba(0, 0, 0, 0.06));
+    color: var(--kh-text-secondary);
+
+    &--draft {
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+  }
+
+  &__link {
+    display: inline-flex;
+    align-items: center;
+    color: var(--kh-text-tertiary);
+
+    mat-icon {
+      font-size: 1.05rem;
+      width: 1.05rem;
+      height: 1.05rem;
+    }
+  }
+
+  &__meta {
+    margin: 0.25rem 0 0;
+    font-size: var(--kh-text-sm);
+    color: var(--kh-text-secondary);
+  }
+
+  &__actions {
+    flex-shrink: 0;
+  }
+}

@@ -10,8 +10,11 @@ from typing import Any, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from software_engineering_team.api import address_comments as _address
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.coding_team_models import (
+    AddressCommentsRequest,
+    AddressCommentsResponse,
     CreateEnhancedIssuesRequest,
     CreateEnhancedIssuesResponse,
     CreateReviewIssuesRequest,
@@ -254,6 +257,82 @@ def post_review_pr(request: ReviewPrRequest) -> ReviewPrResponse:
     _main._start_pr_review_thread(job_id, request, token)
     return ReviewPrResponse(
         job_id=job_id, pr_number=request.pr_number, pr_url=pr.html_url, created_at=created_at
+    )
+
+
+@router.post("/pulls/{pr_number}/address-comments", response_model=AddressCommentsResponse)
+def post_address_comments(
+    pr_number: int, request: AddressCommentsRequest
+) -> AddressCommentsResponse:
+    """Address & respond to every unresolved review comment on an open pull request.
+
+    Gathers the PR's unresolved review comments and, in a background job, hands each
+    to the software-engineering team: triage (false positive vs. real issue), and for
+    a real issue plan the best-scoring solution, implement it on the PR branch, reply
+    to the comment, and resolve it — finally moving the PR to "waiting for review".
+
+    Reuses the PR-review admission lock so a single PR cannot have overlapping
+    comment-addressing jobs (and cannot run alongside a plain review, since both are
+    keyed on ``owner/repo#pr``).
+
+    Preconditions:
+        - A GitHub token is configured (request body or ``GITHUB_TOKEN``).
+        - ``pr_number`` names an existing pull request in ``owner/repo``; the path
+          ``pr_number`` is authoritative (the body's is coerced to match it).
+    Postconditions:
+        - Creates a job, starts the address-comments hook in the background, and
+          returns the job id, PR URL, and the count of unresolved comments the job
+          will work through. Poll ``GET /status/{job_id}`` for progress.
+    """
+    # The path is authoritative; keep the body consistent so downstream code (which
+    # reads request.pr_number) and the job's github_context agree with the URL.
+    request = request.model_copy(update={"pr_number": pr_number})
+    token = resolve_github_token(request)
+
+    # Validate the PR exists and gather the unresolved-comment count BEFORE taking the
+    # admission lock (the GitHub round-trips are the slow part; keep the critical section
+    # to fast job-service writes only).
+    with _main.GitHubClient(token=token) as client:
+        try:
+            pr = client.get_pull_request(request.owner, request.repo, pr_number)
+            unresolved, _threads = _address._unresolved_comments(
+                client, request.owner, request.repo, pr_number
+            )
+        except GitHubAPIError as e:
+            raise HTTPException(status_code=502, detail=f"github api error: {e}") from e
+
+    with _main._pr_review_admission(request.owner, request.repo, pr_number):
+        running = _main._running_review_for_pr(request.owner, request.repo, pr_number)
+        if running:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"job {running} already running for {request.owner}/{request.repo}#{pr_number}"
+                ),
+            )
+
+        job_id = str(uuid.uuid4())
+        _main.create_job(job_id=job_id, repo_path=request.repo_path)
+        _main.update_job(
+            job_id,
+            github_context={
+                "owner": request.owner,
+                "repo": request.repo,
+                "pr_number": pr_number,
+                "pr_url": pr.html_url,
+            },
+        )
+
+    created_at = _main.record_review_start(
+        job_id, request.owner, request.repo, pr_number, pr.html_url, _main._review_author()
+    )
+    _address._start_address_comments_thread(job_id, request, token)
+    return AddressCommentsResponse(
+        job_id=job_id,
+        pr_number=pr_number,
+        pr_url=pr.html_url,
+        unresolved_comment_count=len(unresolved),
+        created_at=created_at,
     )
 
 

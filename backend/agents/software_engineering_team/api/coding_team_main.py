@@ -31,6 +31,7 @@ import shutil  # noqa: F401  (patched via main.shutil.rmtree in tests)
 import subprocess  # noqa: F401  (patched via main.subprocess.run in tests)
 import threading  # noqa: F401  (patched via main.threading.Thread/Timer in tests)
 
+from llm_service import generate_structured  # noqa: F401
 from shared.app import create_team_app
 from shared.git.git_utils import (  # noqa: F401
     DEVELOPMENT_BRANCH,
@@ -195,6 +196,9 @@ from software_engineering_team.review_history_store import (  # noqa: F401
     list_reviews,
     record_review_start,
     update_review,
+)
+from software_engineering_team.temporal.coding_team_start_workflow import (  # noqa: F401
+    start_coding_team_workflow,
 )
 from software_engineering_team.token_crypto import (  # noqa: F401
     decrypt_token,

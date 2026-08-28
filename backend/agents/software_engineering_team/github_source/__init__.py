@@ -20,6 +20,7 @@ from .client import (
     PullRequestFile,
     Repo,
     ReviewComment,
+    ReviewThread,
     SubIssue,
     scrub_token_from_text,
 )
@@ -114,6 +115,7 @@ __all__ = [
     "ReadyCheckResult",
     "Repo",
     "ReviewComment",
+    "ReviewThread",
     "ScoreBreakdown",
     "SubIssue",
     "annotate_duplicate_proposals",

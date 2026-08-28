@@ -26,7 +26,14 @@ import {
   PendingQuestionsComponent,
   type AnswersSubmittedStatus,
 } from '../pending-questions/pending-questions.component';
-import type { GitHubIssueItem, GitHubRepoItem, OutOfScopeProposalItem, RunGitHubIssueResponse } from '../../models/integrations.model';
+import type {
+  AddressPrCommentsResponse,
+  GitHubIssueItem,
+  GitHubPullRequestItem,
+  GitHubRepoItem,
+  OutOfScopeProposalItem,
+  RunGitHubIssueResponse,
+} from '../../models/integrations.model';
 import type { CodingTeamJobListItem, CodingTeamJobStatus } from '../../models/coding-team.model';
 import type { TeamAssistantFieldSpec } from '../../models/team-assistant.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
@@ -138,17 +145,21 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   private readonly notifications = inject(NotificationService);
 
   /** Which single view is visible. The page opens on the job Runs panel. */
-  private _activeView: 'chat' | 'github' | 'jobs' | 'issues' = 'jobs';
+  private _activeView: 'chat' | 'github' | 'pulls' | 'jobs' | 'issues' = 'jobs';
 
-  get activeView(): 'chat' | 'github' | 'jobs' | 'issues' {
+  get activeView(): 'chat' | 'github' | 'pulls' | 'jobs' | 'issues' {
     return this._activeView;
   }
 
-  set activeView(view: 'chat' | 'github' | 'jobs' | 'issues') {
+  set activeView(view: 'chat' | 'github' | 'pulls' | 'jobs' | 'issues') {
     this._activeView = view;
     // Auto-load out-of-scope issues when switching to the Issues tab with a repo selected.
     if (view === 'issues' && this.selectedRepo && this.oosProposals.length === 0 && !this.oosLoading) {
       this.loadOutOfScopeIssues();
+    }
+    // Auto-load open PRs when switching to the Pull Requests tab with a repo selected.
+    if (view === 'pulls' && this.selectedRepo && this.pulls.length === 0 && !this.loadingPulls) {
+      this.loadPulls();
     }
   }
 
@@ -232,6 +243,20 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this._selectedIssue = issue;
     this.selectedIssueOpenDepsText = issue ? this.openDepRefs(issue) : '';
   }
+
+  // Pull Requests tab — open PRs for the expanded repo, each with an "address
+  // unresolved comments" action.
+  /** Open pull requests for the expanded repo (GET /github/pulls). */
+  pulls: GitHubPullRequestItem[] = [];
+  loadingPulls = false;
+  pullsLoaded = false;
+  pullError: string | null = null;
+  /** PRs whose "address comments" job is currently being started, keyed by `owner/repo#number`
+   * (see {@link issueRunKey}) so a double-click can't submit the same PR twice and identical PR
+   * numbers across repos never collide. */
+  private readonly addressingPrs = new Set<string>();
+  // "Latest wins" guard so a slow PR load superseded by a newer one (repo switch) is discarded.
+  private readonly pullsLoad = new LatestOnly();
 
   // Runs panel — the persistent, non-dismissable status panel.
   /** Every coding-team run for this repo (running + recent terminal), newest snapshot from /jobs. */
@@ -555,6 +580,13 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     // configured default applied, and the toggle is a transient override for that repo only
     // (so turning it off for one repo doesn't silently unfilter every other repo).
     this.labelFilterActive = true;
+    // PR-tab state is repo-scoped too: clear it so switching repos re-fetches the new repo's
+    // open PRs (the Pull Requests tab auto-loads when `pulls` is empty). The in-flight guard
+    // set is not cleared — a job already being started for the previous repo's PR must still
+    // clear its own key when its request settles.
+    this.pulls = [];
+    this.pullsLoaded = false;
+    this.pullError = null;
   }
 
   /** Repos matching `repoSearch` (case-insensitive substring of `full_name`); all repos when empty. */
@@ -1303,6 +1335,90 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         error: (err) => {
           this.oosError = extractErrorDetail(err, 'Failed to load out-of-scope issues.');
           this.oosLoading = false;
+        },
+      });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pull Requests (Pull Requests tab)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Load the open pull requests for the currently expanded repo.
+   *
+   * Preconditions: `selectedRepo` is set (a repo was expanded in the GitHub tab).
+   * Postconditions: on success `pulls` holds every open PR for the repo and `pullsLoaded`
+   * is true; on error `pullError` is set. A slow load superseded by a repo switch is
+   * discarded (latest-wins), and the loading flag is always cleared by the current handler.
+   */
+  loadPulls(): void {
+    const repo = this.selectedRepo;
+    if (!repo) return;
+    const token = this.pullsLoad.next();
+    this.loadingPulls = true;
+    this.pullError = null;
+    this.integrationsApi
+      .getGitHubPullRequests({ owner: repo.owner, repo: repo.name })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (pulls) => {
+          if (!this.pullsLoad.isCurrent(token)) return;
+          this.loadingPulls = false;
+          // Guard against a repo switch mid-flight (pullError/pulls belong to the expanded repo).
+          if (this.selectedRepo?.full_name !== repo.full_name) return;
+          this.pulls = pulls;
+          this.pullsLoaded = true;
+        },
+        error: (err) => {
+          if (!this.pullsLoad.isCurrent(token)) return;
+          this.loadingPulls = false;
+          if (this.selectedRepo?.full_name !== repo.full_name) return;
+          this.pullError = extractErrorDetail(err, 'Failed to load pull requests.');
+        },
+      });
+  }
+
+  /** True while the "address comments" job for `pr` in the expanded repo is being started. */
+  isAddressingPr(pr: GitHubPullRequestItem): boolean {
+    const repo = this.selectedRepo;
+    if (!repo) return false;
+    return this.addressingPrs.has(issueRunKey(repo.owner, repo.name, pr.number));
+  }
+
+  /**
+   * Start the flow that addresses & responds to every unresolved review comment on `pr`.
+   *
+   * Preconditions: none enforced — a no-op when no repo is expanded or a job for this PR is
+   * already starting (`isAddressingPr`), so a double-click can't submit the same PR twice.
+   * Postconditions: on success a toast reports the started job and its unresolved-comment count,
+   * and the Runs list is refreshed so the job appears there; on error `pullError` is surfaced
+   * (only while still on the PR's repo). The per-PR in-flight flag is cleared across the call.
+   */
+  addressPrComments(pr: GitHubPullRequestItem): void {
+    const repo = this.selectedRepo;
+    if (!repo) return;
+    const key = issueRunKey(repo.owner, repo.name, pr.number);
+    if (this.addressingPrs.has(key)) return;
+    this.addressingPrs.add(key);
+    this.pullError = null;
+    this.integrationsApi
+      .addressPrComments(pr.number, { owner: repo.owner, repo: repo.name })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (resp: AddressPrCommentsResponse) => {
+          this.addressingPrs.delete(key);
+          this.notifications.saved(
+            `Addressing ${resp.unresolved_comment_count} unresolved comment(s) on PR #${resp.pr_number} — run ${resp.job_id}.`,
+          );
+          // The new job shows in the Runs list; nudge its poll so it appears promptly.
+          this.refreshTrigger$.next();
+        },
+        error: (err: unknown) => {
+          this.addressingPrs.delete(key);
+          // Only surface the failure while still on the repo the PR belongs to (see confirmAndRun).
+          if (this.selectedRepo?.full_name === repo.full_name) {
+            this.pullError = extractErrorDetail(err, 'Failed to start addressing comments.');
+          }
         },
       });
   }

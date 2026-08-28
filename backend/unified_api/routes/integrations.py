@@ -1495,6 +1495,32 @@ class RunPrReviewResponse(BaseModel):
     created_at: str | None = None
 
 
+class AddressPrCommentsRequest(BaseModel):
+    """Request body for ``POST /github/pulls/{pr_number}/address-comments``.
+
+    Kicks off the flow that addresses & responds to every unresolved review comment
+    on the PR. Target repository: blank ``owner``/``repo`` falls back to the legacy
+    configured default; the PAT's own authorization decides reachability.
+    """
+
+    base_branch: str | None = None
+    owner: str = ""
+    repo: str = ""
+
+
+class AddressPrCommentsResponse(BaseModel):
+    """Response for ``POST /github/pulls/{pr_number}/address-comments``: identifies
+    the started job and reports how many unresolved comments it will work through."""
+
+    job_id: str
+    pr_number: int
+    pr_url: str
+    unresolved_comment_count: int = 0
+    status: str = "pending"
+    message: str = "Addressing unresolved comments. Poll GET /api/coding-team/status/{job_id} for progress."
+    created_at: str | None = None
+
+
 class CodeReviewRunItem(BaseModel):
     """One persisted code-review run for a PR (GET /github/reviews)."""
 
@@ -2921,6 +2947,63 @@ async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
         whole contract to that function.
     """
     return await _start_pr_review(body.pr_number, body.base_branch, owner=body.owner, repo=body.repo)
+
+
+@router.post("/github/pulls/{pr_number}/address-comments", response_model=AddressPrCommentsResponse)
+async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequest) -> AddressPrCommentsResponse:
+    """Start the flow that addresses & responds to a PR's unresolved review comments.
+
+    Resolves the GitHub target (PAT + owner/repo), then forwards to the coding-team
+    service's ``POST /pulls/{pr_number}/address-comments`` — the same proxy shape as
+    ``POST /github/review-pr``. The token is injected server-side (never sent by the
+    browser).
+
+    Preconditions:
+        - GitHub integration is enabled with a stored PAT; the target repository is the
+          body's ``owner``/``repo`` (or the configured default), reachable by the PAT.
+        - ``CODING_TEAM_SERVICE_URL`` points at a reachable coding-team service.
+    Postconditions:
+        - On success returns the started job's id, PR url, unresolved-comment count, and
+          initial status. Every failure path raises ``HTTPException`` with an explanatory
+          detail; no ``httpx`` error escapes unhandled.
+    """
+    cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, None, body.owner, body.repo)
+
+    coding_team_url = _require_coding_team_url()
+
+    payload: dict[str, Any] = {
+        "owner": owner,
+        "repo": repo,
+        "repo_path": _resolve_repo_path(cfg, owner, repo),
+        "pr_number": pr_number,
+        "github_token": token,
+    }
+    if body.base_branch:
+        payload["base_branch"] = body.base_branch
+
+    data = await _forward_to_coding_team(
+        coding_team_url,
+        f"pulls/{pr_number}/address-comments",
+        json_body=payload,
+        log_prefix="github address-comments",
+        timeout_detail="Coding team service timed out while starting the comment-addressing job.",
+        generic_failure_detail="Failed to start addressing the PR comments.",
+    )
+    try:
+        return AddressPrCommentsResponse(
+            job_id=data["job_id"],
+            pr_number=data["pr_number"],
+            pr_url=data["pr_url"],
+            unresolved_comment_count=data.get("unresolved_comment_count", 0),
+            status=data.get("status", "pending"),
+            message=data.get("message", ""),
+            created_at=data.get("created_at"),
+        )
+    except (KeyError, TypeError) as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Coding team service returned an unexpected response: {e}",
+        ) from e
 
 
 @router.get("/github/reviews", response_model=list[CodeReviewRunItem])

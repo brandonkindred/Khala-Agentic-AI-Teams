@@ -74,6 +74,8 @@ describe('CodingTeamPageComponent a11y', () => {
     getGitHubRepos: ReturnType<typeof vi.fn>;
     getGitHubIssues: ReturnType<typeof vi.fn>;
     runGitHubIssue: ReturnType<typeof vi.fn>;
+    getGitHubPullRequests: ReturnType<typeof vi.fn>;
+    addressPrComments: ReturnType<typeof vi.fn>;
   };
   let notificationsSpy: { saved: ReturnType<typeof vi.fn> };
 
@@ -109,6 +111,23 @@ describe('CodingTeamPageComponent a11y', () => {
       getGitHubRepos: vi.fn().mockReturnValue(of([REPO])),
       getGitHubIssues: vi.fn().mockReturnValue(of(makeIssues(3))),
       runGitHubIssue: vi.fn(),
+      getGitHubPullRequests: vi.fn().mockReturnValue(
+        of([
+          {
+            number: 7,
+            title: 'PR 7',
+            body_preview: 'body',
+            author: 'octocat',
+            html_url: 'https://github.com/acme/widgets/pull/7',
+            head: 'feature-7',
+            base: 'main',
+            draft: false,
+            labels: [],
+            updated_at: '2026-06-09T10:00:00Z',
+          },
+        ]),
+      ),
+      addressPrComments: vi.fn(),
     };
     notificationsSpy = { saved: vi.fn() };
   });
@@ -120,7 +139,7 @@ describe('CodingTeamPageComponent a11y', () => {
   });
 
   /** Switch the visible view (the page opens on 'jobs') and re-render. */
-  function showView(view: 'chat' | 'github' | 'jobs'): void {
+  function showView(view: 'chat' | 'github' | 'pulls' | 'jobs'): void {
     component.activeView = view;
     fixture.detectChanges();
   }
@@ -169,6 +188,16 @@ describe('CodingTeamPageComponent a11y', () => {
     expandFirstRepo();
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelectorAll('.github-issue-row').length).toBe(3);
+    await expectNoAxeViolations(el);
+  }, 15000);
+
+  it('has no axe violations on the Pull Requests view with a repo expanded and PRs loaded', async () => {
+    await setup();
+    showView('github');
+    expandFirstRepo();
+    showView('pulls');
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelectorAll('.pull-row').length).toBe(1);
     await expectNoAxeViolations(el);
   }, 15000);
 

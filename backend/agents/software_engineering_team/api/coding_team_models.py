@@ -247,6 +247,44 @@ class ReviewPrResponse(BaseModel):
     created_at: Optional[datetime] = None
 
 
+class AddressCommentsRequest(BaseModel):
+    """Request body for POST /pulls/{pr_number}/address-comments.
+
+    Kicks off the "address & respond to every unresolved review comment on this
+    PR" flow: gather the PR's unresolved review comments, hand each to the
+    software-engineering team to triage (false positive vs. real issue), and for
+    real issues plan + implement a fix, push it, reply to and resolve the comment,
+    then move the PR to "waiting for review".
+    """
+
+    owner: str = Field(..., description="GitHub repository owner (user or org)")
+    repo: str = Field(..., description="GitHub repository name")
+    repo_path: str = Field(
+        default="",
+        description="Local checkout path, accepted for parity with /review-pr.",
+    )
+    pr_number: int = Field(..., description="Pull request number whose comments to address")
+    github_token: Optional[str] = Field(
+        default=None, description="Overrides GITHUB_TOKEN env var for this request."
+    )
+
+
+class AddressCommentsResponse(BaseModel):
+    """Response for ``POST /pulls/{pr_number}/address-comments``: the started job's
+    id, PR number/url, initial status, and the count of unresolved comments the job
+    will work through."""
+
+    job_id: str
+    pr_number: int
+    pr_url: str
+    unresolved_comment_count: int = Field(
+        description="Number of unresolved review comments the job will address."
+    )
+    status: str = "pending"
+    message: str = "Addressing unresolved comments. Poll GET /status/{job_id} for progress."
+    created_at: Optional[datetime] = None
+
+
 class ReviewRunItem(BaseModel):
     """One persisted code-review run for a pull request (GET /reviews)."""
 

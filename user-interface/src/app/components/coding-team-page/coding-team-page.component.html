@@ -31,6 +31,10 @@
     <mat-icon>bug_report</mat-icon>
     <span class="toggle-label">GitHub</span>
   </mat-button-toggle>
+  <mat-button-toggle value="pulls" matTooltip="Open pull requests — address unresolved review comments">
+    <mat-icon>merge_type</mat-icon>
+    <span class="toggle-label">Pull Requests</span>
+  </mat-button-toggle>
   <mat-button-toggle value="jobs" matTooltip="Track run progress">
     <mat-icon>engineering</mat-icon>
     <span class="toggle-label">Jobs</span>
@@ -350,6 +354,117 @@
             }
           </div>
           }
+        }
+      }
+    </section>
+  }
+}
+
+<!-- ────────────────────────────────────────────────────────────────── -->
+<!-- PULL REQUESTS view — open PRs; address unresolved review comments  -->
+<!-- ────────────────────────────────────────────────────────────────── -->
+@if (activeView === 'pulls') {
+  @if (!githubConfigured && !isLoadingConfig) {
+    <div class="github-section github-section--unconfigured">
+      <mat-icon>info</mat-icon>
+      <span>
+        GitHub integration is not configured.
+        <a routerLink="/integrations">Set up GitHub</a> to browse pull requests.
+      </span>
+    </div>
+  } @else {
+    <section class="pulls-panel kh-card">
+      <div class="pulls-panel__header">
+        <h2>
+          <mat-icon aria-hidden="true">merge_type</mat-icon>
+          Open Pull Requests
+        </h2>
+        @if (selectedRepo) {
+          <button
+            mat-flat-button
+            color="primary"
+            (click)="loadPulls()"
+            [disabled]="loadingPulls"
+          >
+            <mat-icon aria-hidden="true">refresh</mat-icon>
+            @if (loadingPulls) { Loading… } @else if (pullsLoaded) { Refresh } @else { Load pull requests }
+          </button>
+        }
+      </div>
+
+      @if (!selectedRepo) {
+        <div class="pulls-panel__repo-prompt">
+          <mat-icon aria-hidden="true">touch_app</mat-icon>
+          <p>Select a repository to view its open pull requests.</p>
+          <button mat-flat-button color="primary" (click)="activeView = 'github'">
+            <mat-icon aria-hidden="true">bug_report</mat-icon>
+            Go to GitHub tab
+          </button>
+        </div>
+      } @else {
+        @if (pullError) {
+          <app-inline-banner variant="error" [message]="pullError" />
+        }
+
+        @if (loadingPulls && !pullsLoaded) {
+          <div class="pulls-panel__loading">
+            <mat-spinner diameter="24"></mat-spinner>
+            <span>Loading pull requests…</span>
+          </div>
+        } @else if (pullsLoaded && pulls.length === 0) {
+          <div class="kh-empty-state pulls-panel__empty">
+            <mat-icon class="kh-empty-icon" aria-hidden="true">check_circle</mat-icon>
+            <span class="kh-empty-title">No open pull requests</span>
+            <span class="kh-empty-message">This repository has no open pull requests right now.</span>
+          </div>
+        } @else if (pulls.length > 0) {
+          <ul class="pulls-list">
+            @for (pr of pulls; track pr.number) {
+              <li class="pull-row">
+                <div class="pull-row__main">
+                  <div class="pull-row__title">
+                    <span class="pull-row__number">#{{ pr.number }}</span>
+                    <span class="pull-row__name">{{ pr.title }}</span>
+                    @if (pr.draft) {
+                      <span class="pull-row__chip pull-row__chip--draft">draft</span>
+                    }
+                    <a
+                      class="pull-row__link"
+                      [href]="pr.html_url"
+                      target="_blank"
+                      rel="noopener"
+                      [attr.aria-label]="'Open pull request #' + pr.number + ' on GitHub'"
+                    >
+                      <mat-icon aria-hidden="true">open_in_new</mat-icon>
+                    </a>
+                  </div>
+                  <p class="pull-row__meta">
+                    <code>{{ pr.head }}</code> → <code>{{ pr.base }}</code>
+                    @if (pr.author) { · by {{ pr.author }} }
+                  </p>
+                </div>
+                <div class="pull-row__actions">
+                  <button
+                    mat-flat-button
+                    color="primary"
+                    (click)="addressPrComments(pr)"
+                    [disabled]="isAddressingPr(pr)"
+                    [matTooltip]="'Have the coding team address & respond to all unresolved comments on PR #' + pr.number"
+                  >
+                    @if (isAddressingPr(pr)) {
+                      <mat-spinner diameter="18" aria-hidden="true"></mat-spinner>
+                      Starting…
+                    } @else {
+                      <ng-container>
+                        <mat-icon aria-hidden="true">play_arrow</mat-icon>
+                        Address comments
+                      </ng-container>
+                    }
+                  </button>
+                </div>
+              </li>
+            }
+          </ul>
         }
       }
     </section>

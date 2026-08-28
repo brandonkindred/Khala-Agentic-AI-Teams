@@ -54,6 +54,43 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
 }
 """
 
+# GraphQL query for the FULL review-thread listing (resolution state + the thread's
+# node id + each comment's databaseId). The read-only
+# ``get_resolved_review_thread_comment_ids`` only needs comment ids of resolved
+# threads; addressing unresolved comments needs the thread node ``id`` too so the
+# thread can be resolved via the ``resolveReviewThread`` mutation, and the per-thread
+# comment ids so a REST reply can be posted to the right comment. Kept separate from
+# ``_REVIEW_THREADS_QUERY`` so that query's minimal shape (and its tests) are unchanged.
+_REVIEW_THREADS_FULL_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          isResolved
+          comments(first: 100) {
+            nodes { databaseId }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+# GraphQL mutation that resolves a review thread (the "Resolve conversation"
+# button). The only write-side GraphQL in this client; posted through the same
+# ``_request``/``_check`` machinery as the read query.
+_RESOLVE_REVIEW_THREAD_MUTATION = """
+mutation($threadId: ID!) {
+  resolveReviewThread(input: {threadId: $threadId}) {
+    thread { id isResolved }
+  }
+}
+"""
+
 # Appended (as an HTML comment — invisible in GitHub's rendered view) to every issue/PR
 # conversation comment Khala posts, so the "@khala review" webhook can recognize and skip
 # Khala's own output. Comments are posted with the operator's PAT, so author identity
@@ -156,6 +193,22 @@ class ReviewComment:
     line: Optional[int]
     body: str
     html_url: str
+
+
+@dataclass(frozen=True)
+class ReviewThread:
+    """One review conversation thread on a pull request.
+
+    ``id`` is GitHub's GraphQL node id for the thread — the handle the
+    ``resolveReviewThread`` mutation takes. ``comment_ids`` are the numeric
+    ``databaseId``s (same values as :attr:`ReviewComment.id`) of every comment
+    in the thread, oldest first, so a reply can target the thread's root
+    comment. ``is_resolved`` mirrors GitHub's "Resolve conversation" state.
+    """
+
+    id: str
+    is_resolved: bool
+    comment_ids: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -889,6 +942,167 @@ class GitHubClient(_GitHubHttpMixin):
             )
             return resolved
 
+    def list_review_threads(self, owner: str, repo: str, number: int) -> list["ReviewThread"]:
+        """Return every review thread on a pull request (GraphQL).
+
+        Unlike :meth:`get_resolved_review_thread_comment_ids` (which returns only
+        the comment ids of *resolved* threads), this returns the full set of
+        threads with their GraphQL node ``id`` and per-thread comment
+        ``databaseId``s, so a caller can (a) tell resolved from unresolved and
+        (b) reply to / resolve a specific thread. Posted through the same
+        ``_request``/``_check`` machinery as the read query, paginated over
+        ``reviewThreads`` and bounded by :data:`MAX_REVIEW_THREADS_TRAVERSED`.
+
+        Preconditions:
+            - ``number`` names an existing pull request.
+        Postconditions:
+            - Returns one :class:`ReviewThread` per thread, in GitHub's response
+              order, each carrying its node ``id``, ``is_resolved``, and the
+              ordered tuple of its comments' numeric ids.
+            - Never raises: any GraphQL transport/HTTP error, non-2xx status,
+              GraphQL-level error, or unexpected shape is logged and degrades to
+              an empty list — the "address unresolved comments" flow then simply
+              has nothing to act on rather than failing (mirrors the read
+              query's degradation contract).
+        """
+        threads: list[ReviewThread] = []
+        after: Optional[str] = None
+        seen = 0
+        try:
+            while True:
+                variables: dict[str, Any] = {
+                    "owner": owner,
+                    "repo": repo,
+                    "number": number,
+                    "after": after,
+                }
+                response = self._check(
+                    self._request(
+                        "POST",
+                        "/graphql",
+                        json={"query": _REVIEW_THREADS_FULL_QUERY, "variables": variables},
+                    )
+                )
+                payload = response.json()
+                if payload.get("errors"):
+                    logger.warning(
+                        "list_review_threads: GraphQL errors for %s/%s#%s: %s",
+                        owner,
+                        repo,
+                        number,
+                        payload["errors"],
+                    )
+                    return threads
+                pr_data = ((payload.get("data") or {}).get("repository") or {}).get(
+                    "pullRequest"
+                ) or {}
+                nodes = (pr_data.get("reviewThreads") or {}).get("nodes") or []
+                for node in nodes:
+                    seen += 1
+                    if seen > MAX_REVIEW_THREADS_TRAVERSED:
+                        logger.warning(
+                            "list_review_threads hit MAX_REVIEW_THREADS_TRAVERSED=%d; stopping",
+                            MAX_REVIEW_THREADS_TRAVERSED,
+                        )
+                        return threads
+                    thread_id = node.get("id")
+                    if not isinstance(thread_id, str):
+                        continue
+                    comment_ids = tuple(
+                        c["databaseId"]
+                        for c in (node.get("comments") or {}).get("nodes") or []
+                        if isinstance(c.get("databaseId"), int)
+                    )
+                    threads.append(
+                        ReviewThread(
+                            id=thread_id,
+                            is_resolved=bool(node.get("isResolved")),
+                            comment_ids=comment_ids,
+                        )
+                    )
+                page_info = (pr_data.get("reviewThreads") or {}).get("pageInfo") or {}
+                if not page_info.get("hasNextPage"):
+                    return threads
+                after = page_info.get("endCursor")
+                if not after:
+                    return threads
+        except Exception as e:  # noqa: BLE001 - degrade to what was gathered; never fail the flow
+            logger.warning("list_review_threads failed for %s/%s#%s: %s", owner, repo, number, e)
+            return threads
+
+    def reply_to_review_comment(
+        self, *, owner: str, repo: str, number: int, comment_id: int, body: str
+    ) -> dict[str, Any]:
+        """Post a threaded reply under an existing review comment.
+
+        Uses ``POST /repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies``,
+        the REST endpoint dedicated to replying inside an existing review thread
+        (so the reply lands in the same conversation as the comment being
+        addressed, not as a new top-level review comment).
+
+        Preconditions:
+            - ``comment_id`` is the numeric id of a review comment on this PR (a
+              :attr:`ReviewComment.id`, ideally the thread's root comment).
+            - ``body`` is a non-empty string (already token-scrubbed by the
+              caller, matching the other ``create_*`` methods here).
+        Postconditions:
+            - Returns the created reply payload (carries ``id`` and ``html_url``).
+              Raises ``ValueError`` for an empty ``body`` (rather than sending a
+              request GitHub would reject with an opaque 422) and
+              ``GitHubAPIError`` on any non-2xx response.
+        """
+        if not body:
+            raise ValueError("reply_to_review_comment requires a non-empty 'body'")
+        r = self._check(
+            self._request(
+                "POST",
+                f"/repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies",
+                json={"body": body},
+            )
+        )
+        return r.json()
+
+    def resolve_review_thread(self, thread_id: str) -> bool:
+        """Mark a review thread resolved (GitHub's "Resolve conversation", GraphQL).
+
+        Preconditions:
+            - ``thread_id`` is a review thread's GraphQL node id (a
+              :attr:`ReviewThread.id`).
+        Postconditions:
+            - Returns True when GitHub reports the thread resolved after the
+              mutation. Returns False (never raises) on any GraphQL transport/HTTP
+              error, GraphQL-level error, or unexpected response shape — resolving
+              is the last, best-effort step of addressing a comment, so a failure
+              to flip the switch must not fail the whole flow (the reply and code
+              change already landed).
+        """
+        try:
+            response = self._check(
+                self._request(
+                    "POST",
+                    "/graphql",
+                    json={
+                        "query": _RESOLVE_REVIEW_THREAD_MUTATION,
+                        "variables": {"threadId": thread_id},
+                    },
+                )
+            )
+            payload = response.json()
+            if payload.get("errors"):
+                logger.warning(
+                    "resolve_review_thread: GraphQL errors for thread %s: %s",
+                    thread_id,
+                    payload["errors"],
+                )
+                return False
+            thread = ((payload.get("data") or {}).get("resolveReviewThread") or {}).get(
+                "thread"
+            ) or {}
+            return bool(thread.get("isResolved"))
+        except Exception as e:  # noqa: BLE001 - best-effort resolve; degrade to False
+            logger.warning("resolve_review_thread failed for thread %s: %s", thread_id, e)
+            return False
+
     def get_file_contents(self, owner: str, repo: str, path: str, ref: str) -> Optional[str]:
         """Return the decoded text of a repository file at ``ref``, or ``None``.
 
@@ -1114,6 +1328,7 @@ __all__ = [
     "PullRequestFile",
     "Repo",
     "ReviewComment",
+    "ReviewThread",
     "SubIssue",
     "scrub_token_from_text",
 ]
