@@ -134,8 +134,8 @@ sequenceDiagram
                 Attempt->>Attempt: execute strategy_code in the<br/>sandboxed TradingService — trade ledger<br/>is engine output, not an LLM response
                 opt execution error, anomaly, or zero-trade result
                     alt zero-trade classified ENTRY_WITH_NO_EXIT
-                        Note over Attempt: raises SpecImplementabilityError — no LLM<br/>call — exits are engine-owned, only a spec<br/>rewrite can fix it
-                        Attempt-->>CycleWF: propagates out of the activity,<br/>consumed by the design-re-entry loop above
+                        Note over Attempt: raises SpecImplementabilityError internally — no<br/>LLM call — exits are engine-owned, only a spec<br/>rewrite can fix it
+                        Attempt-->>CycleWF: caught inside the activity, returns<br/>&#123;kind: "reentry", ...&#125; — not an exception<br/>across the activity boundary — consumed by<br/>the design-re-entry loop above
                     else other execution error, anomaly, or zero-trade category
                         Attempt->>LLM: RefinementAgent, or<br/>ZeroTradeRepairAgent for a zero-trade<br/>result — either may trigger a re-execution
                     end
