@@ -9,49 +9,51 @@ For the container-level view of how this team fits into Khala, see
 ## Component diagram — API router
 
 How each endpoint reaches an agent or orchestrator call and which persistence
-bucket it reads/writes. Every line number below is from
-[`api/main.py`](../api/main.py).
+bucket it reads/writes. Every route below is declared in
+[`api/main.py`](../api/main.py); grep the route path to find its handler. Line
+numbers are deliberately omitted here — that file changes several times a day,
+and the route path is a stable identifier that never goes stale.
 
 ```mermaid
 flowchart LR
   subgraph advisor_api[Advisor Endpoints]
-    E1["POST /advisor/sessions<br/>L1981"]
-    E2["POST /advisor/sessions/{id}/messages<br/>L1997"]
-    E3["GET /advisor/sessions/{id}<br/>L2022"]
-    E4["POST /advisor/sessions/{id}/complete<br/>L2033"]
-    E5["POST /profiles<br/>L395"]
-    E6["GET /profiles/{user_id}<br/>L474"]
-    E7["POST /proposals/create<br/>L484"]
-    E8["GET /proposals/{id}<br/>L524"]
-    E9["POST /proposals/{id}/validate<br/>L534"]
-    E10["POST /memos<br/>L783"]
+    E1["POST /advisor/sessions"]
+    E2["POST /advisor/sessions/{id}/messages"]
+    E3["GET /advisor/sessions/{id}"]
+    E4["POST /advisor/sessions/{id}/complete"]
+    E5["POST /profiles"]
+    E6["GET /profiles/{user_id}"]
+    E7["POST /proposals/create"]
+    E8["GET /proposals/{id}"]
+    E9["POST /proposals/{id}/validate"]
+    E10["POST /memos"]
   end
 
   subgraph shared_api[Shared Endpoints]
-    S1["POST /strategies<br/>L557"]
-    S2["POST /strategies/{id}/validate<br/>L581"]
-    S3["POST /backtests<br/>L654"]
-    S4["GET /backtests<br/>L704"]
-    S5["POST /promotions/decide<br/>L719"]
-    S6["GET /workflow/status<br/>L756"]
-    S7["GET /workflow/queues<br/>L767"]
-    S8["GET /health<br/>L389"]
+    S1["POST /strategies"]
+    S2["POST /strategies/{id}/validate"]
+    S3["POST /backtests"]
+    S4["GET /backtests"]
+    S5["POST /promotions/decide"]
+    S6["GET /workflow/status"]
+    S7["GET /workflow/queues"]
+    S8["GET /health"]
   end
 
   subgraph lab_api[Strategy Lab Endpoints]
-    L1["POST /strategy-lab/run<br/>L1251"]
-    L2["GET /strategy-lab/results<br/>L1294"]
-    L3["GET /strategy-lab/jobs<br/>L1340"]
-    L4["POST /strategy-lab/runs/{id}/resume<br/>L1402"]
-    L5["POST /strategy-lab/runs/{id}/restart<br/>L1467"]
-    L6["GET /strategy-lab/runs<br/>L1526"]
-    L7["GET /strategy-lab/runs/{id}/status<br/>L1534"]
-    L8["GET /strategy-lab/runs/{id}/stream<br/>L1550"]
-    L9["DELETE /strategy-lab/records/{id}<br/>L1692"]
-    L10["DELETE /strategy-lab/storage<br/>L1732"]
-    L11["POST /strategy-lab/paper-trade<br/>L1792"]
-    L12["GET /strategy-lab/paper-trade/results<br/>L1901"]
-    L13["GET /strategy-lab/paper-trade/{id}<br/>L1929"]
+    L1["POST /strategy-lab/run"]
+    L2["GET /strategy-lab/results"]
+    L3["GET /strategy-lab/jobs"]
+    L4["POST /strategy-lab/runs/{id}/resume"]
+    L5["POST /strategy-lab/runs/{id}/restart"]
+    L6["GET /strategy-lab/runs"]
+    L7["GET /strategy-lab/runs/{id}/status"]
+    L8["GET /strategy-lab/runs/{id}/stream"]
+    L9["DELETE /strategy-lab/records/{id}"]
+    L10["DELETE /strategy-lab/storage"]
+    L11["POST /strategy-lab/paper-trade"]
+    L12["GET /strategy-lab/paper-trade/results"]
+    L13["GET /strategy-lab/paper-trade/{id}"]
   end
 
   subgraph handlers[Agents & Orchestrator]
@@ -60,12 +62,13 @@ flowchart LR
     VA[ValidationAgent]
     PGate[PromotionGateAgent]
     IC[InvestmentCommitteeAgent]
-    SIE[SignalIntelligenceExpert]
-    SIA[StrategyIdeationAgent]
-    BTA[BacktestingAgent]
-    PTA[PaperTradingAgent]
+    SIE[SignalIntelligenceExpert<br/>once per batch, not per<br/>batch-workflow invocation —<br/>see architecture.md §7]
+    CycleWF[StrategyLabCycleWorkflow<br/>per-cycle child workflow]
+    SLO["StrategyLabOrchestrator<br/>4-phase pipeline — see architecture.md §11<br/>and generation_pipeline.md"]
+    Finalize[finalize_cycle_record_activity<br/>paper-trade + persist]
+    PTA[PaperTradingAgent<br/>run_session — post-cycle via Finalize,<br/>or standalone via PaperTradingWorkflow]
     ORCH[InvestmentTeamOrchestrator]
-    Worker[_strategy_lab_worker]
+    BatchWF[StrategyLabBatchWorkflow<br/>Temporal-only]
     EventBus[job_event_bus]
   end
 
@@ -78,6 +81,10 @@ flowchart LR
     B6[(investment_backtests)]
     B7[(investment_strategy_lab_records)]
     B8[(investment_paper_trading_sessions)]
+  end
+
+  subgraph run_store[Run-State Store — direct JobServiceClient, bypasses _PersistentDict]
+    B9[(investment_strategy_lab_runs)]
   end
 
   E1 --> FA --> B1
@@ -93,7 +100,7 @@ flowchart LR
 
   S1 --> B4
   S2 --> VA --> B5
-  S3 --> BTA --> B6
+  S3 --> RDB[_run_real_data_backtest<br/>fetches OHLCV, executes<br/>strategy_code via trading_service] --> B6
   S4 --> B6
   S5 --> ORCH --> PGate
   PGate -.reads.-> B2
@@ -102,22 +109,29 @@ flowchart LR
   S6 --> ORCH
   S7 --> ORCH
 
-  L1 --> Worker
-  Worker --> SIE
-  Worker --> SIA
-  Worker --> BTA
-  Worker --> B7
-  Worker --> EventBus
+  L1 --> BatchWF
+  BatchWF --> SIE
+  BatchWF --> CycleWF
+  CycleWF --> SLO
+  BatchWF -->|"after awaiting the wave's<br/>child workflows"| Finalize
+  Finalize --> PTA
+  Finalize -.->|"publishable + paper<br/>trade succeeds"| B8
+  Finalize --> B4
+  Finalize --> B6
+  Finalize --> B7
+  BatchWF -->|"progress writes<br/>(persist_run_state_activity)"| B9
+  BatchWF --> EventBus
   L2 --> B7
-  L3 --> B7
-  L4 --> Worker
-  L5 --> Worker
-  L6 --> Worker
-  L7 --> Worker
+  L3 -->|"reconciles, then merges<br/>_active_runs + job rows"| B9
+  L4 --> BatchWF
+  L5 --> BatchWF
+  L6 -->|"_active_runs first,<br/>job-service rows merged in"| B9
+  L7 -->|"reconcile, then _active_runs;<br/>job service only as fallback"| B9
+  L8 -->|"reconciles for the<br/>connect-time snapshot"| B9
   L8 --> EventBus
   L9 --> B7
   L10 --> B7
-  L11 --> PTA --> B8
+  L11 -->|"PaperTradingWorkflow →<br/>run_paper_trading_activity"| PTA --> B8
   L12 --> B8
   L13 --> B8
 ```
@@ -137,25 +151,25 @@ priority)`:
 | `execution` | Accepted strategies awaiting execution routing | Ad hoc |
 | `escalation` | Rejected / revised strategies needing human review | **Automatic**: any `PromotionDecision` with outcome `reject` or `revise` is enqueued here with `priority="high"` ([`orchestrator.py`](../orchestrator.py):113-117) |
 
-`GET /workflow/queues` ([`api/main.py`](../api/main.py):767) exposes the
-current contents of every queue; `GET /workflow/status` ([`api/main.py`](../api/main.py):756)
+`GET /workflow/queues` exposes the
+current contents of every queue; `GET /workflow/status`
 returns the current `WorkflowMode` and the audit log.
 
 ## Orchestrator — promotion gates
 
 `PromotionGateAgent.decide` ([`agents.py`](../agents.py):131-302) runs the
-six gates in strict order. Short-circuit semantics: any `reject` terminates
-the checklist; missing validation forces `revise`; failure to unlock a live
-precondition falls back to `paper`.
+five gates plus a final promotion step, in strict order. Short-circuit
+semantics: any `reject` terminates the checklist; missing validation forces
+`revise`; failure to unlock a live precondition falls back to `paper`.
 
-| # | Gate | Fails when | Outcome on failure |
+| # | Step | Condition | Result |
 |---|---|---|---|
 | 1 | Separation of duties | `proposer_agent_id == approver.agent_id` | `reject` |
 | 2 | Risk veto | `risk_veto == True` | `reject` |
 | 3 | Validation completeness & pass criteria | Any required check missing or failed | `revise` |
 | 4 | IPS live-trading permission | `ips.live_trading_enabled == False` | fall back to `paper` |
 | 5 | Human live approval | `ips.human_approval_required_for_live and not human_live_approval` | fall back to `paper` |
-| 6 | Promote to live | All gates pass | `live` |
+| 6 | Promote to live | All five gates above passed | `live` (recorded as `human_approval = pass`; there is no separate `PromotionGate` member for this step) |
 
 Every gate records a `GateCheckResult(gate, result, details)` in
 `PromotionDecision.gate_results` and the decision carries an `AuditContext`
@@ -163,7 +177,7 @@ for traceability.
 
 ## Domain model — class diagram
 
-Core Pydantic models from [`models.py`](../models.py) (477 lines). Only the
+Core Pydantic models from [`models.py`](../models.py). Only the
 most important fields are shown; enums are in the lower block.
 
 ```mermaid
@@ -202,14 +216,23 @@ classDiagram
     }
     class StrategySpec {
       +strategy_id: str
+      +authored_by: str
       +asset_class: str
       +hypothesis: str
       +signal_definition: str
-      +entry_rules: str
-      +exit_rules: str
-      +sizing_rules: str
-      +risk_limits: dict
+      +timeframe: "1m|5m|15m|1h|1d"
+      +entry_rules: List~EntryRule~
+      +exit_rules: List~ExitRule~
+      +sizing: SizingRule
+      +target_symbols: List~str~
+      +risk_limits: RiskLimits
       +speculative: bool
+      +strategy_code?: str
+      +requires_redesign: bool
+      +requires_custom_code: bool
+      +unparsed_rules: List~str~
+      +expectancy_forecast?: ExpectancyForecast
+      +audit: AuditContext
     }
     class ValidationReport {
       +strategy_id: str
@@ -217,13 +240,14 @@ classDiagram
       +summary: str
     }
     class BacktestConfig {
-      +start_date: date
-      +end_date: date
+      +start_date: str
+      +end_date: str
       +initial_capital: float
-      +benchmark: str
-      +rebalance: str
-      +costs_bps: float
+      +benchmark_symbol: str
+      +rebalance_frequency: str
+      +transaction_cost_bps: float
       +slippage_bps: float
+      +risk_free_rate?: float
     }
     class BacktestResult {
       +total_return_pct: float
@@ -248,8 +272,59 @@ classDiagram
       +strategy: StrategySpec
       +backtest: BacktestRecord
       +is_winning: bool
-      +narrative: str
-      +signal_brief: dict
+      +is_publishable: bool
+      +publishability_skip_reason?: str
+      +strategy_rationale: str
+      +analysis_narrative: str
+      +design_rounds: int
+      +refinement_rounds: int
+      +spec_implementability_phase_backs: int
+      +critiques: List~dict~
+      +quality_gate_results: List~dict~
+      +signal_intelligence_brief?: dict
+      +spec_history: List~SpecRevision~
+      +code_history: List~CodeRevision~
+      +gate_timeline: List~GateEvent~
+      +rule_implementation_map: List~RuleImplementationMap~
+      +loop_telemetry: dict
+      +paper_trading_session_id?: str
+      +paper_trading_status?: "skipped|completed|failed"
+      +paper_trading_skipped_reason?: str
+      +paper_trading_verdict?: PaperTradingVerdict
+      +ran_on_non_conforming_code: bool
+    }
+    class SpecRevision {
+      +phase: str
+      +agent: str
+      +timestamp: str
+      +before_hash: str
+      +after_hash: str
+      +diff: str
+      +reason: str
+      +gate_failures: List~str~
+    }
+    class CodeRevision {
+      +phase: str
+      +agent: str
+      +timestamp: str
+      +before_hash: str
+      +after_hash: str
+      +diff: str
+      +reason: str
+      +gate_failures: List~str~
+    }
+    class GateEvent {
+      +phase: str
+      +gate_name: str
+      +passed: bool
+      +severity: "info|warning|critical"
+      +details: str
+      +timestamp: str
+    }
+    class RuleImplementationMap {
+      +rule_id: str
+      +code_line_refs: "List[List[int]]"
+      +traded_count: int
     }
     class PromotionDecision {
       +strategy_id: str
@@ -283,13 +358,17 @@ classDiagram
     }
     class PaperTradingSession {
       +session_id: str
-      +strategy_id: str
+      +lab_record_id: str
+      +strategy: StrategySpec
       +status: PaperTradingStatus
-      +verdict: PaperTradingVerdict
-      +start_date: date
-      +end_date: date
-      +result: BacktestResult
-      +comparison: PaperTradingComparison
+      +verdict?: PaperTradingVerdict
+      +initial_capital: float
+      +current_capital: float
+      +trades: List~TradeRecord~
+      +data_period_start: str
+      +data_period_end: str
+      +result?: BacktestResult
+      +comparison?: PaperTradingComparison
     }
     class PaperTradingComparison {
       +backtest_sharpe: float
@@ -298,9 +377,11 @@ classDiagram
       +analysis: str
     }
     class AuditContext {
-      +snapshot_id: str
+      +data_snapshot_id: str
       +assumptions: List~str~
-      +agent_version: str
+      +calc_artifacts: List~str~
+      +gate_trace: List~str~
+      +agent_versions: Dict~str, str~
     }
 
     InvestmentProfile --> IPS : wraps
@@ -323,29 +404,58 @@ classDiagram
     CollectedProfileData ..> InvestmentProfile : builds
     StrategySpec --> PaperTradingSession : simulated in
     PaperTradingSession --> PaperTradingComparison
+    StrategyLabRecord o-- SpecRevision : spec_history
+    StrategyLabRecord o-- CodeRevision : code_history
+    StrategyLabRecord o-- GateEvent : gate_timeline
+    StrategyLabRecord o-- RuleImplementationMap : rule_implementation_map
 ```
+
+`BacktestResult` carries substantially more than the core metrics shown above
+in the current model — walk-forward/deflated-Sharpe fields
+(`deflated_sharpe`, `sharpe_ci_low/high`, `is_sharpe`, `oos_sharpe`,
+`is_oos_degradation_pct`, `oos_trade_count`, `n_trials_when_accepted`,
+`acceptance_reason`, `regime_results`, `fold_results`), a `coverage_report`
+(zero/low-trade diagnostics from `coverage_probe/`), and
+`execution_diagnostics`. These aren't drawn above to keep the diagram
+readable; the full field list is on `class BacktestResult` in
+[`models.py`](../models.py), and their role in
+the verification/publication decision is documented in
+[`generation_pipeline.md`](./generation_pipeline.md).
 
 ### Enums
 
 | Enum | Values | Defined |
 |---|---|---|
-| `RiskTolerance` | `conservative`, `moderate_conservative`, `moderate`, `moderate_aggressive`, `aggressive` | [`models.py`](../models.py):11 |
-| `WorkflowMode` | `monitor_only`, `paper`, `live` | [`models.py`](../models.py):55 |
-| `PromotionStage` | `reject`, `revise`, `paper`, `live` | [`models.py`](../models.py):42 |
-| `PromotionGate` | `separation_of_duties`, `risk_veto`, `validation`, `ips_live`, `human_approval`, `live_promote` | [`models.py`](../models.py):62 |
-| `GateResult` | `pass`, `fail`, `warn` | [`models.py`](../models.py):70 |
-| `AdvisorTopic` | `greeting`, `risk`, `horizon`, `income`, `net_worth`, `savings`, `tax`, `liquidity`, `goals`, `preferences`, `constraints`, `review` | [`models.py`](../models.py):24 |
-| `AdvisorSessionStatus` | `active`, `completed`, `abandoned` | [`models.py`](../models.py):18 |
-| `PaperTradingStatus` | `running`, `completed`, `failed` | [`models.py`](../models.py):367 |
-| `PaperTradingVerdict` | `ready_for_live`, `not_performant`, `requires_review` | [`models.py`](../models.py):373 |
+| `RiskTolerance` | `low`, `medium`, `high`, `very_high` | [`models.py`](../models.py) |
+| `WorkflowMode` | `advisory`, `paper`, `live`, `monitor_only` | [`models.py`](../models.py) |
+| `PromotionStage` | `reject`, `revise`, `paper`, `live` | [`models.py`](../models.py) |
+| `PromotionGate` | `separation_of_duties`, `risk_veto`, `validation`, `ips_permission`, `human_approval` — five members; the sixth checklist step ("promote to live") records `human_approval = pass` rather than a gate of its own | [`models.py`](../models.py) |
+| `GateResult` | `pass`, `fail`, `warn` | [`models.py`](../models.py) |
+| `AdvisorTopic` | `greeting`, `risk_tolerance`, `time_horizon`, `income`, `net_worth`, `savings`, `tax`, `liquidity`, `goals`, `preferences`, `constraints`, `trading_preferences`, `review` (13) | [`models.py`](../models.py) |
+| `AdvisorSessionStatus` | `active`, `completed`, `abandoned` | [`models.py`](../models.py) |
+| `PaperTradingStatus` | `running`, `completed`, `failed` (legacy), plus live-mode `opening`, `warming_up`, `live` | [`models.py`](../models.py) |
+| `PaperTradingVerdict` | `ready_for_live`, `not_performant` | [`models.py`](../models.py) |
+
+`PaperTradingStatus` (above) and `StrategyLabRecord.paper_trading_status`
+(in the class diagram) are **not** the same vocabulary despite the name and
+two overlapping values — `PaperTradingStatus` is the runtime state of an
+active `PaperTradingSession` (the legacy `running`/`completed`/`failed`
+trio, plus `opening`/`warming_up`/`live` once live-streaming paper trading
+starts), while
+`StrategyLabRecord.paper_trading_status` is a plain `Optional[str]`
+recording the *persisted cycle outcome* (`skipped`/`completed`/`failed`,
+`None` for legacy rows) — a cycle that never started paper trading has no
+`PaperTradingSession` and therefore no `running` state to report. They are
+deliberately separate fields, not one enum reused inconsistently.
 
 ## Persistence strategy (recap)
 
 Instead of owning a `shared.postgres` schema, the team pushes every artifact
-through the `_PersistentDict` wrapper ([`api/main.py`](../api/main.py):85-132).
+through the `_PersistentDict` wrapper (`api/main.py` — search for `class
+_PersistentDict`).
 Reads and writes look like a normal Python dict but the backing store is the
 Khala job service (`JobServiceClient`), which persists to the `khala_jobs`
 Postgres database. The bucket names double as the job-service `team` field so
 operators can clean up with SQL filters like
-`WHERE team = 'investment_strategy_lab_records'` — see
-[`../README.md`](../README.md):77-86.
+`WHERE team = 'investment_strategy_lab_records'` — see "Clearing strategy lab
+data in Postgres directly" in [`../README.md`](../README.md).

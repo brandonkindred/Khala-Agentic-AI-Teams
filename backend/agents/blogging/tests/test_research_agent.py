@@ -208,6 +208,343 @@ def test_research_agent_run_with_cache_resume(monkeypatch, tmp_path) -> None:
     assert out.references == []
 
 
+def test_research_agent_run_checkpoints_candidates_after_fresh_search(
+    monkeypatch, tmp_path
+) -> None:
+    """A fresh (non-cached) search run must checkpoint its candidates, same as every
+    other step, so a resumed run after this point doesn't repeat the web searches.
+
+    Regression test: previously only steps 1, 2, 4, 5, 6, 7 saved a checkpoint —
+    step 3 (search) computed ``candidates`` but never persisted them, so an
+    AgentCache-backed retry after this point still re-ran every web search.
+    """
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="fresh search brief", max_results=3)
+
+    a = _make_agent(
+        monkeypatch,
+        [
+            {"topic": "AI"},
+            {"queries": [{"query_text": "q", "intent": "overview"}]},
+        ],
+    )
+    a.cache = cache
+    mock_search = MagicMock()
+    mock_search.search.return_value = []
+    a.web_search = mock_search
+    # Stub arXiv rather than letting the real query run: a live search can return
+    # non-empty results depending on network access/query text, which would make
+    # the academic_papers assertion below environment-dependent.
+    monkeypatch.setattr(ResearchAgent, "_fetch_academic_papers", lambda self, b: [])
+
+    a.run(brief)
+
+    checkpoint = cache.load_checkpoint(brief)
+    assert checkpoint is not None
+    # None (unset) vs [] (checkpointed-but-empty) is the whole point of the regression:
+    # before the fix this step's checkpoint was never written at all.
+    assert checkpoint.candidates == []
+    # academic_papers/similar_topics are also checkpointed now (steps 8-9), saved
+    # sequentially after notes once the parallel section's .result()s come back.
+    assert checkpoint.academic_papers == []
+    assert checkpoint.similar_topics == []
+    assert checkpoint.last_completed_step == "similar_topics"
+
+
+def test_research_agent_run_resumes_from_empty_candidates_checkpoint(monkeypatch, tmp_path) -> None:
+    """A checkpoint with candidates=[] (a completed search that found nothing) must
+    be treated as resumable, not re-run: `[]` and "no checkpoint" are different states.
+
+    Regression test: the resume check originally used truthiness (`cached_state and
+    cached_state.candidates`), so an empty-but-completed candidates checkpoint looked
+    identical to a missing one and the web searches ran again anyway.
+    """
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="empty candidates brief", max_results=3)
+    cache.save_checkpoint(brief, "normalized", normalized={"topic": "cached"})
+    cache.save_checkpoint(brief, "queries", queries=[{"query_text": "q", "intent": "overview"}])
+    cache.save_checkpoint(brief, "candidates", candidates=[])
+
+    a = _make_agent(monkeypatch, [])
+    a.cache = cache
+    mock_search = MagicMock()
+    mock_search.search.return_value = []
+    a.web_search = mock_search
+    # Stub arXiv so this test doesn't depend on live network access.
+    monkeypatch.setattr(ResearchAgent, "_fetch_academic_papers", lambda self, b: [])
+
+    a.run(brief)
+
+    mock_search.search.assert_not_called()
+
+
+def test_research_agent_run_resumes_from_empty_documents_checkpoint(monkeypatch, tmp_path) -> None:
+    """A checkpoint with documents=[] (every candidate fetch failed or was
+    rejected) must be treated as resumable, not re-fetched: `[]` and "no
+    checkpoint" are different states, same as the candidates fix above.
+    """
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="empty documents brief", max_results=3)
+    cache.save_checkpoint(brief, "normalized", normalized={"topic": "cached"})
+    cache.save_checkpoint(brief, "queries", queries=[{"query_text": "q", "intent": "overview"}])
+    cache.save_checkpoint(
+        brief,
+        "candidates",
+        candidates=[{"title": "Page", "url": "https://example.com/1", "rank": 1}],
+    )
+    cache.save_checkpoint(brief, "documents", documents=[])
+
+    a = _make_agent(monkeypatch, [])
+    a.cache = cache
+    mock_fetcher = MagicMock()
+    a.web_fetcher = mock_fetcher
+    monkeypatch.setattr(ResearchAgent, "_fetch_academic_papers", lambda self, b: [])
+
+    a.run(brief)
+
+    mock_fetcher.fetch.assert_not_called()
+
+
+def test_research_agent_run_resumes_academic_papers_and_similar_topics(
+    monkeypatch, tmp_path
+) -> None:
+    """Cached academic_papers/similar_topics checkpoints must be reused, not
+    recomputed, so a resumed run doesn't redo the arXiv HTTP call or the LLM
+    similar-topics call."""
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="resume tail steps", max_results=3)
+    cache.save_checkpoint(brief, "normalized", normalized={"topic": "cached"})
+    cache.save_checkpoint(brief, "queries", queries=[{"query_text": "q", "intent": "overview"}])
+    cache.save_checkpoint(brief, "candidates", candidates=[])
+    cache.save_checkpoint(brief, "documents", documents=[])
+    cache.save_checkpoint(brief, "scored_docs", scored_docs=[])
+    cache.save_checkpoint(brief, "references", references=[])
+    cache.save_checkpoint(brief, "notes", notes="cached notes")
+    cache.save_checkpoint(
+        brief,
+        "academic_papers",
+        academic_papers=[
+            {
+                "title": "Cached Paper",
+                "url": "https://arxiv.org/abs/1234",
+                "overview_or_summary": "cached abstract",
+            }
+        ],
+    )
+    cache.save_checkpoint(brief, "similar_topics", similar_topics=["cached topic"])
+
+    a = _make_agent(monkeypatch, [])
+    a.cache = cache
+
+    fetch_spy = MagicMock(side_effect=AssertionError("should not re-fetch academic papers"))
+    similar_spy = MagicMock(side_effect=AssertionError("should not recompute similar topics"))
+    monkeypatch.setattr(ResearchAgent, "_fetch_academic_papers", fetch_spy)
+    monkeypatch.setattr(ResearchAgent, "_get_similar_topics", similar_spy)
+
+    out = a.run(brief)
+
+    fetch_spy.assert_not_called()
+    similar_spy.assert_not_called()
+    assert out.notes == "cached notes"
+    assert [p.title for p in out.academic_papers] == ["Cached Paper"]
+    assert out.similar_topics == ["cached topic"]
+
+
+def test_research_agent_run_resumes_null_notes_checkpoint(monkeypatch, tmp_path) -> None:
+    """A notes checkpoint saved as None (a legitimate _synthesize_overview outcome
+    — no references, or an unusable LLM response) must still count as "already
+    computed" on resume, not be mistaken for "never checkpointed" and recomputed.
+
+    Regression test: cached_state.notes is None either way notes was never
+    checkpointed or it legitimately completed with a null result, so the resume
+    check must use a separate notes_computed marker rather than `notes is not
+    None`, matching the "is not None" fix already applied to the list-typed
+    steps (which don't have this ambiguity, since `[]` is distinguishable from
+    unset)."""
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="resume null notes", max_results=3)
+    cache.save_checkpoint(brief, "normalized", normalized={"topic": "cached"})
+    cache.save_checkpoint(brief, "queries", queries=[{"query_text": "q", "intent": "overview"}])
+    cache.save_checkpoint(brief, "candidates", candidates=[])
+    cache.save_checkpoint(brief, "documents", documents=[])
+    cache.save_checkpoint(brief, "scored_docs", scored_docs=[])
+    cache.save_checkpoint(brief, "references", references=[])
+    cache.save_checkpoint(brief, "notes", notes=None)
+    cache.save_checkpoint(brief, "academic_papers", academic_papers=[])
+    cache.save_checkpoint(brief, "similar_topics", similar_topics=[])
+
+    a = _make_agent(monkeypatch, [])
+    a.cache = cache
+
+    overview_spy = MagicMock(side_effect=AssertionError("should not recompute overview"))
+    monkeypatch.setattr(ResearchAgent, "_synthesize_overview", overview_spy)
+
+    out = a.run(brief)
+
+    overview_spy.assert_not_called()
+    assert out.notes is None
+
+
+def test_research_agent_run_checkpoints_siblings_when_notes_raises(monkeypatch, tmp_path) -> None:
+    """When notes synthesis raises, the concurrently-computed academic_papers and
+    similar_topics results must still be checkpointed rather than discarded.
+
+    Regression test: collecting the three futures' results in sequence
+    (`notes_future.result(); academic_future.result(); ...`) meant an exception
+    from notes_future.result() skipped retrieving (and therefore saving) the other
+    two futures' already-completed results, even though the ThreadPoolExecutor
+    context manager waits for them to finish regardless. A Temporal retry would
+    then repeat the arXiv/LLM calls for work that had, in fact, already succeeded.
+    """
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import AcademicPaper, ResearchBriefInput
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="notes raises brief", max_results=3)
+    cache.save_checkpoint(brief, "normalized", normalized={"topic": "cached"})
+    cache.save_checkpoint(brief, "queries", queries=[{"query_text": "q", "intent": "overview"}])
+    cache.save_checkpoint(brief, "candidates", candidates=[])
+    cache.save_checkpoint(brief, "documents", documents=[])
+    cache.save_checkpoint(brief, "scored_docs", scored_docs=[])
+    cache.save_checkpoint(brief, "references", references=[])
+
+    a = _make_agent(monkeypatch, [])
+    a.cache = cache
+
+    monkeypatch.setattr(
+        ResearchAgent,
+        "_synthesize_overview",
+        lambda self, b, refs: (_ for _ in ()).throw(RuntimeError("LLM transport error")),
+    )
+    monkeypatch.setattr(
+        ResearchAgent,
+        "_fetch_academic_papers",
+        lambda self, b: [
+            AcademicPaper(
+                title="Fresh Paper",
+                url="https://arxiv.org/abs/9999",
+                overview_or_summary="fresh abstract",
+            )
+        ],
+    )
+    monkeypatch.setattr(ResearchAgent, "_get_similar_topics", lambda self, b, refs: ["fresh topic"])
+
+    with pytest.raises(RuntimeError, match="LLM transport error"):
+        a.run(brief)
+
+    checkpoint = cache.load_checkpoint(brief)
+    assert checkpoint is not None
+    assert checkpoint.notes is None
+    assert checkpoint.academic_papers == [
+        {
+            "title": "Fresh Paper",
+            "url": "https://arxiv.org/abs/9999",
+            "overview_or_summary": "fresh abstract",
+        }
+    ]
+    assert checkpoint.similar_topics == ["fresh topic"]
+
+
+@pytest.mark.parametrize("wrap_in_event_loop_exception", [False, True])
+def test_research_agent_similar_topics_cancellation_propagates(
+    monkeypatch, tmp_path, wrap_in_event_loop_exception
+) -> None:
+    """A Temporal cancellation raised inside _get_similar_topics's Strands call must
+    propagate out of run() rather than being swallowed by its broad
+    "optional step, fail open" except block and turned into an empty result.
+
+    Regression test for the Codex finding: run() returning normally on a
+    cancellation would let run_planning() continue into planning instead of the
+    job being recorded as cancelled. Covers both a bare CancelledError and one
+    Strands wraps in EventLoopException (as a live Agent() call raises it)."""
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from strands.types.exceptions import EventLoopException
+    from temporalio.exceptions import CancelledError
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="cancel during similar topics", max_results=3)
+    cache.save_checkpoint(brief, "normalized", normalized={"topic": "cached"})
+    cache.save_checkpoint(brief, "queries", queries=[{"query_text": "q", "intent": "overview"}])
+    cache.save_checkpoint(brief, "candidates", candidates=[])
+    cache.save_checkpoint(brief, "documents", documents=[])
+    cache.save_checkpoint(brief, "scored_docs", scored_docs=[])
+    cache.save_checkpoint(brief, "references", references=[])
+
+    a = _make_agent(monkeypatch, [])
+    a.cache = cache
+
+    monkeypatch.setattr(ResearchAgent, "_synthesize_overview", lambda self, b, refs: "notes")
+    monkeypatch.setattr(ResearchAgent, "_fetch_academic_papers", lambda self, b: [])
+
+    cause = CancelledError("job cancelled")
+    to_raise = EventLoopException(cause) if wrap_in_event_loop_exception else cause
+
+    def _boom(self, b, refs):
+        raise to_raise
+
+    monkeypatch.setattr(ResearchAgent, "_get_similar_topics", _boom)
+
+    expected_exc = EventLoopException if wrap_in_event_loop_exception else CancelledError
+    with pytest.raises(expected_exc):
+        a.run(brief)
+
+
+def test_research_agent_academic_papers_cancellation_propagates(monkeypatch, tmp_path) -> None:
+    """A Temporal cancellation during the arXiv search must propagate rather than
+    being swallowed by _fetch_academic_papers's broad "best effort" except block."""
+    from agents.blogging.blog_research_agent import agent as ra_mod
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from temporalio.exceptions import CancelledError
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="cancel during arxiv", max_results=3)
+    cache.save_checkpoint(brief, "normalized", normalized={"topic": "cached"})
+    cache.save_checkpoint(brief, "queries", queries=[{"query_text": "q", "intent": "overview"}])
+    cache.save_checkpoint(brief, "candidates", candidates=[])
+    cache.save_checkpoint(brief, "documents", documents=[])
+    cache.save_checkpoint(brief, "scored_docs", scored_docs=[])
+    cache.save_checkpoint(brief, "references", references=[])
+
+    a = _make_agent(monkeypatch, [])
+    a.cache = cache
+
+    monkeypatch.setattr(ResearchAgent, "_synthesize_overview", lambda self, b, refs: "notes")
+    monkeypatch.setattr(ResearchAgent, "_get_similar_topics", lambda self, b, refs: [])
+
+    def boom(*args, **kwargs):
+        raise CancelledError("job cancelled")
+
+    monkeypatch.setattr(ra_mod, "search_arxiv", boom)
+
+    with pytest.raises(CancelledError):
+        a.run(brief)
+
+
 def test_research_agent_synthesize_overview_no_references() -> None:
     from agents.blogging.blog_research_agent.agent import ResearchAgent
     from agents.blogging.blog_research_agent.models import ResearchBriefInput
@@ -231,6 +568,30 @@ def _doc(n: int):
         language="en",
         metadata={},
     )
+
+
+def test_summarize_one_document_cancellation_propagates(monkeypatch) -> None:
+    """A Temporal cancellation during per-document summarization must propagate
+    rather than being swallowed by the excerpt-fallback except block."""
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from strands.types.exceptions import EventLoopException
+    from temporalio.exceptions import CancelledError
+
+    from llm_service import DummyLLMClient
+
+    a = ResearchAgent(llm_client=DummyLLMClient())
+    cause = CancelledError("job cancelled")
+    monkeypatch.setattr(
+        ResearchAgent,
+        "_call_json",
+        lambda self, prompt: (_ for _ in ()).throw(EventLoopException(cause)),
+    )
+
+    with pytest.raises(EventLoopException):
+        a._summarize_one_document(
+            (_doc(0), 1.0, 1.0, 1.0, "blog"), ResearchBriefInput(brief="x", max_results=5)
+        )
 
 
 def test_score_documents_propagates_attribution_into_workers(monkeypatch) -> None:

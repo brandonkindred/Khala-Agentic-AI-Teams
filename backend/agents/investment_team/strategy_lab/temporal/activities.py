@@ -1111,6 +1111,9 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         StrategyLabOrchestrator,
         _design_max_llm_calls,
     )
+    from investment_team.strategy_lab.orchestrator_record_assembly import (
+        PipelineCheckpointCapture,
+    )
     from investment_team.strategy_lab.quality_gates.models import QualityGateResult
     from investment_team.strategy_lab.temporal.dto import (
         convergence_tracker_from_wire,
@@ -1180,6 +1183,15 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     design_attempt_index = params.get("design_attempt", 0)
     cycle_scope = _infer_cycle_scope_from_activity_context()
     checkpoint_enabled = run_id is not None and cycle_scope is not None
+    pipeline_checkpoint_capture = (
+        PipelineCheckpointCapture(
+            run_id=run_id,
+            cycle_scope=cycle_scope,
+            generation=generation,
+        )
+        if checkpoint_enabled
+        else None
+    )
     # Absent for a params dict from a workflow-history replay predating this
     # field (see StrategyLabCycleWorkflow.run's own docstring) -- the
     # cancellation-checkpoint closure below treats a missing cycle_index the
@@ -1370,6 +1382,14 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             "gate_timeline": [r.model_dump(mode="json") for r in collector.gate_timeline],
         }
 
+    def _pipeline_checkpoints_to_wire() -> List[Dict[str, Any]]:
+        if pipeline_checkpoint_capture is None:
+            return []
+        return [
+            checkpoint.model_dump(mode="json")
+            for checkpoint in pipeline_checkpoint_capture.checkpoints
+        ]
+
     def _skipped_outcome() -> Dict[str, Any]:
         _delete_checkpoint()
         return {
@@ -1380,6 +1400,7 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             "gate_results": [g.model_dump(mode="json") for g in cumulative_gate_results],
             "budget_calls": budget.calls_made,
             "drift": _drift_to_wire(drift_collector),
+            "pipeline_checkpoints": _pipeline_checkpoints_to_wire(),
         }
 
     # ``cumulative_gate_results`` is ``all_gate_results`` in
@@ -1477,6 +1498,7 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 resume_rationale=resume_rationale,
                 resume_design_context=resume_design_context,
                 checkpoint_hook=_write_checkpoint,
+                checkpoint_capture=pipeline_checkpoint_capture,
             )
     except _DesignAttemptCancelled:
         # BaseException, so it already bypassed every ``except Exception``
@@ -1499,6 +1521,7 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             "gate_results": [g.model_dump(mode="json") for g in cumulative_gate_results],
             "budget_calls": budget.calls_made,
             "drift": _drift_to_wire(drift_collector),
+            "pipeline_checkpoints": _pipeline_checkpoints_to_wire(),
         }
     except HTTPException as exc:
         # Defense-in-depth: no current code path in the design-attempt
@@ -1541,6 +1564,7 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         "gate_results": [g.model_dump(mode="json") for g in cumulative_gate_results],
         "budget_calls": budget.calls_made,
         "drift": _drift_to_wire(drift_collector),
+        "pipeline_checkpoints": _pipeline_checkpoints_to_wire(),
     }
 
 

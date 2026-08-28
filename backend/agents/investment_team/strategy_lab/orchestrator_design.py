@@ -78,9 +78,17 @@ from .agents.design_review import CritiqueIssue, CritiqueLedger, LedgerDelta, Sp
 from .alignment_findings import AlignmentFinding
 from .backtest_cache import BacktestCache
 from .budget_config import StrategyLabBudgetConfig
+from .checkpoints import (
+    AlignmentCheckpoint,
+    DesignCheckpoint,
+    RefinementCheckpoint,
+    ReviewCheckpoint,
+    SynthesisCheckpoint,
+)
 from .exceptions import OrchestratorContractError, SpecImplementabilityError
 from .market_regime import RegimeSummary, filter_regime_summary
 from .mechanical_repair import RepairAction, demote_code_path, repair_spec, select_code_path
+from .orchestrator_record_assembly import PipelineCheckpointCapture
 from .phases import Phase
 from .quality_gates.convergence_tracker import is_asset_class_steering_directive
 from .quality_gates.models import QualityGateResult
@@ -669,6 +677,7 @@ class DesignMixin:
         design_attempt: int = 0,
         drift_collector: Optional[_DriftCollector] = None,
         regime_summary: Optional[RegimeSummary] = None,
+        checkpoint_capture: Optional[PipelineCheckpointCapture] = None,
     ) -> _DesignLoopOutcome:
         """Drive the bounded design ↔ design-review loop.
 
@@ -811,6 +820,17 @@ class DesignMixin:
                 spec=spec,
                 code="",
                 attempt=design_attempt,
+            )
+            self._capture_pipeline_checkpoint(
+                DesignCheckpoint,
+                capture=checkpoint_capture,
+                design_attempt=design_attempt,
+                spec=spec,
+                code="",
+                rationale=rationale,
+                design_context=_DesignPersistContext(),
+                all_gate_results=all_gate_results,
+                drift_collector=drift_collector or _DriftCollector(),
             )
 
             spec, rationale, ready, stop_reason, loop_telemetry = self._run_design_review_rounds(
@@ -1480,6 +1500,7 @@ class DesignMixin:
         resume_rationale: Optional[str] = None,
         resume_design_context: Optional[_DesignPersistContext] = None,
         checkpoint_hook: Optional[PhaseCallback] = None,
+        checkpoint_capture: Optional[PipelineCheckpointCapture] = None,
     ) -> StrategyLabRecord:
         """One design + refinement attempt. May raise
         ``SpecImplementabilityError`` to signal a need to re-enter the
@@ -1584,6 +1605,7 @@ class DesignMixin:
                 phase_back_count=phase_back_count,
                 drift_collector=drift_collector,
                 regime_summary=regime_summary,
+                checkpoint_capture=checkpoint_capture,
             )
             if design_phase.record is not None:
                 return design_phase.record
@@ -1595,6 +1617,19 @@ class DesignMixin:
                     "design_synthesis_boundary",
                     {"spec": spec, "rationale": rationale, "design_context": design_context},
                 )
+
+        self._capture_pipeline_checkpoint(
+            ReviewCheckpoint,
+            capture=checkpoint_capture,
+            design_attempt=design_attempt,
+            spec=spec,
+            code="",
+            rationale=rationale,
+            design_context=design_context,
+            all_gate_results=all_gate_results,
+            drift_collector=drift_collector,
+            review_rounds_completed=design_context.rounds,
+        )
 
         # ── Phase 1b: CODE SYNTHESIS ──────────────────────────────────
         code_synthesis = self._synthesize_initial_code(
@@ -1614,6 +1649,17 @@ class DesignMixin:
         original_spec = code_synthesis.original_spec
         original_code = code_synthesis.original_code
         config = code_synthesis.config
+        self._capture_pipeline_checkpoint(
+            SynthesisCheckpoint,
+            capture=checkpoint_capture,
+            design_attempt=design_attempt,
+            spec=spec,
+            code=code,
+            rationale=rationale,
+            design_context=design_context,
+            all_gate_results=all_gate_results,
+            drift_collector=drift_collector,
+        )
 
         # ── Phases 1b–2.5: PRE-SYNTHESIS GATE → REFINEMENT → ALIGNMENT ─
         # Budget-exhaustion during this phase (refinement, alignment-fix, or
@@ -1637,6 +1683,7 @@ class DesignMixin:
             phase_back_count=phase_back_count,
             drift_collector=drift_collector,
             design_context=design_context,
+            checkpoint_capture=checkpoint_capture,
         )
         if refine_align.record is not None:
             return refine_align.record
@@ -1732,6 +1779,7 @@ class DesignMixin:
         phase_back_count: int,
         drift_collector: _DriftCollector,
         design_context: _DesignPersistContext,
+        checkpoint_capture: Optional[PipelineCheckpointCapture] = None,
     ) -> _RefinementAlignmentResult:
         """Run pre-synthesis gating, the refinement loop, and trade alignment.
 
@@ -1828,6 +1876,19 @@ class DesignMixin:
             metrics = synthesis.metrics
             market_data = synthesis.market_data
             execution_succeeded = synthesis.execution_succeeded
+            if execution_succeeded:
+                self._capture_pipeline_checkpoint(
+                    RefinementCheckpoint,
+                    capture=checkpoint_capture,
+                    design_attempt=design_attempt,
+                    spec=spec,
+                    code=code,
+                    rationale=rationale,
+                    design_context=design_context,
+                    all_gate_results=all_gate_results,
+                    drift_collector=drift_collector,
+                    refinement_rounds_completed=len(refinement_attempts),
+                )
 
             # ═══ Phase 3 → 4 transition: CODE_SYNTHESIS → ═════════════
             # ═══                         BACKTEST_AND_VERIFICATION ════
@@ -1862,6 +1923,19 @@ class DesignMixin:
                 ran_on_non_conforming_code=synthesis.ran_on_non_conforming_code,
                 drift_collector=drift_collector,
             )
+            if alignment_outcome.trades_aligned:
+                self._capture_pipeline_checkpoint(
+                    AlignmentCheckpoint,
+                    capture=checkpoint_capture,
+                    design_attempt=design_attempt,
+                    spec=alignment_outcome.spec,
+                    code=alignment_outcome.code,
+                    rationale=rationale,
+                    design_context=design_context,
+                    all_gate_results=all_gate_results,
+                    drift_collector=drift_collector,
+                    alignment_rounds_completed=alignment_outcome.alignment_rounds,
+                )
             if alignment_outcome.rejection_reason:
                 logger.info(
                     "Alignment loop for %s ended with rejection_reason=%s",
@@ -1947,8 +2021,10 @@ class DesignMixin:
 
         Pre: the refinement + alignment loops have settled the run state;
         ``state`` carries the settled ``spec``/``code``/``trades``/``metrics``
-        for this design attempt (``state.code`` is unused here — verification
-        and analysis never touch the strategy source).
+        for this design attempt. Verification and analysis never *inspect*
+        the strategy source, but ``state.code`` is still load-bearing: it is
+        hashed into the terminal ``PhaseTransition`` below, and is the value
+        that carries any alignment-committed rewrite.
         Post: returns ``(metrics, is_winning, is_publishable,
         publishability_skip_reason, narrative)``. Increments the
         convergence trial counter (one per refinement round, plus the first),
@@ -2013,11 +2089,10 @@ class DesignMixin:
         )
 
         # ═══ Phase 4 → exit: BACKTEST_AND_VERIFICATION → ∅ ════════════
-        # Terminal transition out of the last named phase. ``to_phase``
-        # is ``None``; ``spec_hash``/``code_hash`` must match the values
-        # emitted on the previous two boundaries within this design
-        # attempt — the integration test in
-        # ``test_strategy_lab_phase_transitions.py`` asserts this.
+        # Terminal transition out of the last named phase (``to_phase`` is
+        # ``None``), hashed from the post-alignment state — so neither hash
+        # is guaranteed to match every earlier boundary. ``PhaseTransition``'s
+        # Invariants in ``phases.py`` own the carve-out list.
         _emit_phase_transition(
             emit,
             from_phase=Phase.BACKTEST_AND_VERIFICATION,
@@ -2122,6 +2197,7 @@ class DesignMixin:
         phase_back_count: int,
         drift_collector: _DriftCollector,
         regime_summary: Optional[RegimeSummary] = None,
+        checkpoint_capture: Optional[PipelineCheckpointCapture] = None,
     ) -> _DesignPhaseResult:
         """Run the bounded design + review loop and gate entry to synthesis.
 
@@ -2149,6 +2225,7 @@ class DesignMixin:
             design_attempt=design_attempt,
             drift_collector=drift_collector,
             regime_summary=regime_summary,
+            checkpoint_capture=checkpoint_capture,
         )
         spec = design_outcome.spec
         rationale = design_outcome.rationale

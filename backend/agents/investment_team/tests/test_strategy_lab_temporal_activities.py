@@ -996,6 +996,58 @@ def test_run_design_attempt_activity_returns_record_outcome(monkeypatch):
     assert captured["directives"] == ["seed directive"]
     assert "convergence_tracker_state" in out
     assert "drift" in out
+    assert out["pipeline_checkpoints"] == []
+
+
+def test_run_design_attempt_activity_serializes_shared_pipeline_capture(monkeypatch):
+    """Temporal supplies its real run/cycle/generation identity to the same
+    shared capture helper and returns the inert checkpoint payload unchanged."""
+
+    from investment_team.models import StrategySpec
+    from investment_team.strategy_lab._orchestrator_helpers import (
+        _DesignPersistContext,
+        _DriftCollector,
+    )
+    from investment_team.strategy_lab.checkpoints import DesignCheckpoint
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    spec = StrategySpec.parse_persisted(_spec_dict())
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    def _fake_attempt(self, **kwargs):
+        self._capture_pipeline_checkpoint(
+            DesignCheckpoint,
+            capture=kwargs["checkpoint_capture"],
+            design_attempt=kwargs["design_attempt"],
+            spec=spec,
+            code="",
+            rationale="because",
+            design_context=_DesignPersistContext(),
+            all_gate_results=kwargs["cumulative_gate_results"],
+            drift_collector=_DriftCollector(),
+        )
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    monkeypatch.setattr(act, "_infer_cycle_scope_from_activity_context", lambda: "run-1-c0")
+    monkeypatch.setattr(
+        act, "load_design_attempt_checkpoint", lambda run_id, cycle_scope, design_attempt: None
+    )
+
+    out = act.run_design_attempt_activity(
+        _run_design_attempt_params(run_id="run-1", generation=3, design_attempt=2)
+    )
+
+    assert len(out["pipeline_checkpoints"]) == 1
+    checkpoint = out["pipeline_checkpoints"][0]
+    assert checkpoint["stage"] == "design"
+    assert checkpoint["run_id"] == "run-1"
+    assert checkpoint["cycle_scope"] == "run-1-c0"
+    assert checkpoint["generation"] == 3
+    assert checkpoint["design_attempt"] == 2
 
 
 _BATCH_CACHE_ENV_VAR = "STRATEGY_LAB_BATCH_INDICATOR_CACHE_ENABLED"

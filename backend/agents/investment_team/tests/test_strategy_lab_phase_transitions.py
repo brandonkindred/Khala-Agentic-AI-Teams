@@ -7,7 +7,13 @@ These tests drive a real ``StrategyLabOrchestrator`` through
 * On the happy path, exactly four transitions fire in the order
   ``DESIGN → DESIGN_REVIEW → CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION → ∅``.
 * The ``spec_hash`` is stable across every transition emitted after
-  the design phase exits — i.e. no downstream phase mutates the spec.
+  the design phase exits, **for these happy-path fixtures**. This is not
+  a universal invariant: ``PhaseTransition`` documents three carve-outs
+  (zero-trade repair committing ``risk_limits``, a tighten-only
+  refinement merge, and a ``requires_custom_code`` flip on compiler
+  fallback) that none of these stubs exercise. A fixture exercising one
+  of them would legitimately produce a different hash — extend rather
+  than "fix" the stability assertion if you add such a case.
 * The ``code_hash`` recorded at the synthesis exit boundary matches the
   SHA-256 of the synthesised code string.
 * Critical ``SpecReadinessGate`` failure blocks the ``DESIGN_REVIEW →
@@ -29,6 +35,7 @@ import pytest
 from investment_team.models import BacktestConfig
 from investment_team.strategy_lab import orchestrator as orchestrator_module
 from investment_team.strategy_lab.agents.design_review import SpecCritique
+from investment_team.strategy_lab.checkpoints import PipelineStage
 from investment_team.strategy_lab.exceptions import SpecImplementabilityError
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.phases import (
@@ -221,12 +228,32 @@ def test_run_cycle_emits_exactly_four_phase_transitions(
         assert t["attempt"] == 0
 
 
+def test_unconverged_refinement_does_not_capture_later_stage_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A no-market-data exit crosses observability phase transitions but does
+    not falsely claim that refinement or alignment converged."""
+
+    orch = StrategyLabOrchestrator()
+    _stub_pipeline_for_happy_path(monkeypatch, orch)
+
+    _drive_cycle_capturing_transitions(orch)
+
+    assert [checkpoint.stage for checkpoint in orch.pipeline_checkpoints] == [
+        PipelineStage.DESIGN,
+        PipelineStage.REVIEW,
+        PipelineStage.SYNTHESIS,
+    ]
+
+
 def test_spec_hash_stable_after_design_review_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The spec is frozen post-design; ``spec_hash`` on every transition
-    from the ``DESIGN_REVIEW → CODE_SYNTHESIS`` boundary onward must be
-    equal — any drift indicates a downstream phase mutated the spec."""
+    """On this happy-path fixture the spec is not mutated post-design, so
+    ``spec_hash`` from the ``DESIGN_REVIEW → CODE_SYNTHESIS`` boundary
+    onward must be equal. Fixture behaviour, not a universal invariant —
+    the module docstring covers the carve-out caveat.
+    """
     orch = StrategyLabOrchestrator()
     _stub_pipeline_for_happy_path(monkeypatch, orch)
 

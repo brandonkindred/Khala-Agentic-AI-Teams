@@ -1,6 +1,11 @@
-"""Per-cycle LLM-call budget for the Strategy Lab design phase.
+"""LLM-call budget for Strategy Lab's design attempts.
 
-The design phase can fan a single ``run_cycle`` into a large number of
+The cap is not design-phase-only, despite the env var's name — see
+:class:`LLMCallBudget` for the authoritative scope statement, including which
+agents charge, which are exempt, and how the count behaves across Temporal
+activity retries. Do not restate that scope elsewhere in this module.
+
+A single ``run_cycle`` can fan into a large number of
 LLM round-trips: each design re-entry runs a bounded design ↔ review loop,
 and within each round the designer may parse-retry, self-review, and
 self-revise. Left uncapped, a non-converging spec drifting on a borderline
@@ -8,22 +13,24 @@ design burns a multiplicative number of calls before the deterministic
 ``design_not_ready`` short-circuit ever fires, which both wastes cloud
 spend and can exhaust rate-limited quotas mid-cycle.
 
-:class:`LLMCallBudget` is a plain counter threaded from ``run_cycle`` down
-to every design-phase ``agent(prompt)`` call site. Each site charges the
+:class:`LLMCallBudget` is a plain counter threaded down to every
+budget-charged ``agent(prompt)`` call site. Each site charges the
 budget *before* invoking the model; when the cap is reached the next charge
-raises :class:`DesignBudgetExhausted`, which the design loop translates into
-a structured ``status="failed: budget_exhausted"`` short-circuit.
+raises :class:`DesignBudgetExhausted`, which is translated into a structured
+``status="failed: budget_exhausted"`` short-circuit (see that exception's
+docstring for which handler catches which trip).
 
 This module imports nothing from ``strategy_lab`` (stdlib only) so it can be
 imported by the orchestrator and both design agents without creating an
 import cycle.
 
 Charging is accessed through a single chokepoint — :func:`charge_active_budget`,
-backed by a context variable the orchestrator binds via :func:`use_budget`
-for the duration of the design phase. Agents call ``charge_active_budget()``
-right before every model invocation; they no longer thread a ``budget``
-argument through their signatures, so a new design-phase LLM call site only
-has to make that one call to be covered by the cap.
+backed by a context variable bound via :func:`use_budget` (by ``run_cycle``
+around the whole cycle in thread mode, and by ``run_design_attempt_activity``
+around one attempt in Temporal mode). Agents call ``charge_active_budget()``
+right before every charged model invocation; they no longer thread a
+``budget`` argument through their signatures, so a new charged LLM call site
+only has to make that one call to be covered by the cap.
 """
 
 from __future__ import annotations
@@ -34,11 +41,19 @@ from typing import Iterator, Optional
 
 
 class DesignBudgetExhausted(Exception):
-    """Raised by :meth:`LLMCallBudget.charge` when the per-cycle budget is hit.
+    """Raised by :meth:`LLMCallBudget.charge` when the budget is hit.
 
-    Caught in ``_run_design_loop`` and translated to
+    Caught in ``_run_design_loop`` for design-phase trips, and in
+    ``orchestrator_design`` for trips from the later phases and translated to
     ``status="failed: budget_exhausted"``. Carries the configured ``limit``
     and the ``calls_made`` so far for diagnostics and the abort reason.
+
+    :func:`_annotate_budget_exhaustion` may additionally stamp the latest
+    in-loop state onto an instance before it is re-raised: ``latest_spec``
+    (set whenever the annotator runs), and — only when the calling loop
+    supplies them — ``latest_code``, ``latest_rationale``, and
+    ``mechanical_repair_count``. These are not declared in ``__init__`` and
+    are absent on an instance the annotator never touched.
 
     Preconditions:
       ``limit >= 1`` and ``calls_made >= 0`` (the raiser is
@@ -68,7 +83,7 @@ def _annotate_budget_exhaustion(
     """Stamp the latest in-loop state onto a budget trip before re-raising.
 
     The design / refinement / alignment / synthesis loops each catch a
-    :class:`DesignBudgetExhausted` at the point the per-cycle LLM-call budget
+    :class:`DesignBudgetExhausted` at the point the LLM-call budget
     trips and attach the freshest spec — and, depending on the call site, the
     code, rationale, and mechanical-repair count they were working on — before
     re-raising, so the outer ``_run_design_loop`` budget handler can build the
@@ -101,12 +116,27 @@ def _annotate_budget_exhaustion(
 
 
 class LLMCallBudget:
-    """Counter for design-phase LLM calls within a single ``run_cycle``.
+    """Counter for budget-charged LLM calls across a whole design attempt.
 
-    Created once in ``run_cycle`` and threaded through ``_run_design_attempt``
-    → ``_run_design_loop`` → the design/review agents, so the cap is a true
-    ceiling on the whole cycle (spanning every ``MAX_DESIGN_REENTRIES``
-    re-entry), not a per-attempt allowance.
+    Despite the ``DESIGN`` in ``STRATEGY_LAB_DESIGN_MAX_LLM_CALLS``, the scope
+    is **not** the design phase alone: ``use_budget`` wraps the entire
+    ``_run_design_attempt``, so refinement (``RefinementAgent``),
+    trade-alignment (``TradeAlignmentAgent``) and zero-trade repair
+    (``ZeroTradeRepairAgent``) all charge against it too. Only
+    ``CodeSynthesisAgent`` and ``AnalysisAgent`` are genuinely uncharged.
+
+    In thread mode the budget is created once in ``run_cycle`` and spans every
+    ``MAX_DESIGN_REENTRIES`` re-entry. In Temporal mode — the supported mode —
+    a fresh instance is built inside each design-attempt activity and seeded
+    from the previous attempt's count, preserving the ceiling across
+    re-entries. Across a Temporal *activity retry* the preservation is
+    partial: with a valid design-phase checkpoint the retry reseeds from the
+    checkpoint's boundary-time count (``activities.py``), so design-phase
+    charges are never regained — but charges made after that boundary
+    (refinement / alignment / repair) are not recorded anywhere the retry can
+    see and are re-issued, and a no-checkpoint retry reseeds from the
+    attempt-start count. Overshoot is bounded by the activity's
+    ``maximum_attempts``.
 
     Invariants:
       * ``0 <= calls_made <= limit`` at all times.
@@ -146,10 +176,11 @@ class LLMCallBudget:
         self.calls_made += 1
 
 
-# The budget in force for the current design phase. Bound by ``use_budget``
-# in ``run_cycle`` and read by ``charge_active_budget`` at each LLM call site.
-# Default ``None`` means "no cap" — agents invoked outside a design cycle
-# (e.g. unit tests calling an agent directly) are unaffected.
+# The budget in force for the current design attempt. Bound by ``use_budget``
+# around the whole ``_run_design_attempt`` and read by ``charge_active_budget``
+# at each LLM call site. Default ``None`` means "no cap" — agents invoked
+# outside a design attempt (e.g. unit tests calling an agent directly) are
+# unaffected.
 _active_budget: contextvars.ContextVar[Optional[LLMCallBudget]] = contextvars.ContextVar(
     "strategy_lab_design_budget", default=None
 )
@@ -157,10 +188,13 @@ _active_budget: contextvars.ContextVar[Optional[LLMCallBudget]] = contextvars.Co
 
 @contextmanager
 def use_budget(budget: Optional[LLMCallBudget]) -> Iterator[None]:
-    """Bind ``budget`` as the active design-phase budget for the duration.
+    """Bind ``budget`` as the active budget for the duration.
 
     Preconditions:
-      Called once per cycle around the whole design phase (all re-entries).
+      Wraps the full charged region — the whole cycle in thread mode
+      (``run_cycle``), one design attempt in Temporal mode
+      (``run_design_attempt_activity``); in both cases more than the design
+      phase alone, so refinement, alignment and repair calls charge too.
     Postconditions:
       Within the ``with`` block ``charge_active_budget`` charges ``budget``;
       the prior binding is restored on exit even if the block raises.
@@ -183,8 +217,10 @@ def active_budget() -> Optional[LLMCallBudget]:
 def charge_active_budget() -> None:
     """Charge the active budget for one imminent LLM call, if one is bound.
 
-    Single chokepoint for design-phase charging: every model invocation
-    calls this immediately before the call. A no-op when no budget is bound.
+    Single chokepoint for budget charging: every *charged* model invocation
+    calls this immediately before the call (uncharged sites —
+    ``CodeSynthesisAgent`` / ``AnalysisAgent`` — never do). A no-op when no
+    budget is bound.
 
     Postconditions:
       When a budget is bound, behaves exactly like :meth:`LLMCallBudget.charge`

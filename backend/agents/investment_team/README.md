@@ -24,14 +24,16 @@ flowchart LR
   end
   subgraph lab [Strategy Lab track]
     MD[Free-tier market snapshot]
-    SIG[SignalIntelligenceExpert]
-    SI[StrategyIdeationAgent]
     SL[POST /strategy-lab/run]
+    SIG[SignalIntelligenceExpert<br/>once per batch — one workflow<br/>invocation can span several batches;<br/>a mid-batch resume can also re-run it;<br/>see architecture.md §7]
+    GP[Generation pipeline<br/>Design ↔ Review → Synthesis →<br/>Alignment → Verification]
+    LabRec[(StrategyLabRecord<br/>+ paper trading)]
     ST[POST /strategies]
     BT[POST /backtests]
+    SL --> SIG
     MD --> SIG
-    SIG --> SI
-    SI --> SL
+    SIG --> GP
+    GP --> LabRec
     ST --> BT
   end
   IPS --> PG[PolicyGuardianAgent]
@@ -50,10 +52,21 @@ flowchart LR
 | **PromotionGateAgent** | Yes (IPS) | Live/paper gates from IPS |
 | **ValidationAgent** | No | Only `ValidationReport` checklist |
 | **InvestmentCommitteeAgent** | Yes (user id) | Memo `prepared_for_user_id` |
-| **SignalIntelligenceExpert** | No | Prior lab results + `MarketLabContext` (free-tier APIs); brief persisted on `StrategyLabRecord` |
-| **StrategyIdeationAgent** | No | Prior lab results + optional precomputed signal brief (Policy B: one brief per batch) |
+| **SignalIntelligenceExpert** | No | Runs once per **batch** (not per cycle) over prior lab results + `MarketLabContext` (free-tier APIs); brief normally shared by every cycle within that batch and persisted on each `StrategyLabRecord` — see `system_design/architecture.md` §7 for the full invocation-count nuance (multi-batch runs and mid-batch resumes) |
 | **InvestmentTeamOrchestrator** | Mixed | Promotion needs IPS; web tool coordinator has no profile |
 | **InvestmentWebInterfaceCoordinator** | No investment profile | Provider login/config only |
+
+The Strategy Lab generation pipeline itself — `DesignAgent`,
+`DesignReviewAgent`, `CodeSynthesisAgent`, `RefinementAgent`,
+`TradeAlignmentAgent`, `AnalysisAgent`, `ZeroTradeRepairAgent`, and
+`PaperTradingAgent` (post-cycle) — is documented in full in
+[`system_design/generation_pipeline.md`](./system_design/generation_pipeline.md)
+rather than duplicated in this table; none of them require a user profile.
+
+`strategy_ideation_agent.py`'s `StrategyIdeationAgent` is **vestigial** — it
+still ships, with its own test suite, but has no production caller: the
+generation pipeline above superseded it. That is why it appears in no diagram
+in `system_design/`.
 
 ### HTTP endpoints — profile requirement
 
@@ -185,7 +198,8 @@ Engineer-facing architecture details live under [`system_design/`](./system_desi
 - [`use_cases.md`](./system_design/use_cases.md) — use-case diagram grouped by actor and track.
 - [`flow_charts.md`](./system_design/flow_charts.md) — sequence/state diagrams for advisor, Strategy Lab batch, promotion gate, orchestrator mode.
 - [`market_data_flow.md`](./system_design/market_data_flow.md) — data providers, how data is retrieved and streamed into the engine, provider-selection precedence, and fill-price-from-bar logic for backtest + paper trade.
-- [`strategy_lab_pipeline.md`](./system_design/strategy_lab_pipeline.md) — per-cycle pipeline (`ideating → fetching_data → analyzing → paper_trading? → complete`), phase events, winner gate, skip paths.
+- [`strategy_lab_pipeline.md`](./system_design/strategy_lab_pipeline.md) — the per-cycle pipeline as a narrative of stages (ideate → fetch data → backtest → align → analyze → optionally paper-trade), the winner gate, and the skip paths. Note these stage names are the doc's own descriptive labels, not wire values — its "Phase events" section owns the actual emitted-name inventory and the `_PROGRESS_PHASE_MAP` collapse a subscriber sees.
+- [`generation_pipeline.md`](./system_design/generation_pipeline.md) — what happens inside "ideating" and "backtest": the 4-phase contract, design ↔ review loop, code synthesis, refinement/alignment loops, the full quality-gates catalog, and the Temporal activity mapping.
 - [`paper_trading_integration.md`](./system_design/paper_trading_integration.md) — paper trading as an integrated cycle step: winner gate, config, failure contract, linkage to `StrategyLabRecord`.
 - [`trade_record_schema.md`](./system_design/trade_record_schema.md) — every `TradeRecord` field, including bid vs fill prices and order-type fields used for post-hoc execution analysis.
 

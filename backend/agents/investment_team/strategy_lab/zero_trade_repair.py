@@ -54,6 +54,13 @@ PhaseCallback = Callable[[str, Dict[str, Any]], None]
 
 # Issue #530 — zero-trade repair may only mutate ``risk_limits`` via the
 # whitelist; the repair agent must fix the **code**, not weaken the **spec**.
+# ``risk_limits`` is the one sanctioned spec adjustment, and unlike
+# refinement's tighten-only merge a *loosening* is accepted here on purpose:
+# over-tight limits are a diagnosed cause of zero-trade outcomes, and the
+# repair prompt authorises a limits update only for that diagnosis (that
+# condition is enforced in the prompt, not in this code). The committed value
+# is still bounded — ``_revalidate_spec`` re-runs the spec validator's range
+# checks and the proposal must survive a fresh backtest plus anomaly gates.
 # Off-list keys are dropped with a ``logger.warning`` and a
 # ``zero_trade_repair_dropped_spec_keys`` quality gate so the drift is
 # visible in the persisted ``quality_gate_results``.

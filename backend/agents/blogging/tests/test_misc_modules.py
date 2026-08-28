@@ -888,6 +888,7 @@ def test_agent_cache_save_load_clear(tmp_path: Path) -> None:
     assert final.scored_docs[0][1] == 0.9
     assert final.scored_docs[1][1] == 0.5  # legacy mapped
     assert final.notes == "some notes"
+    assert final.notes_computed is True
 
     # Brief mismatch returns None
     different = ResearchBriefInput(brief="Topic about DBs", audience="devs", max_results=10)
@@ -898,6 +899,27 @@ def test_agent_cache_save_load_clear(tmp_path: Path) -> None:
     assert cache.load_checkpoint(brief) is None
     # Clearing again is a no-op
     cache.clear_checkpoint(brief)
+
+
+def test_agent_cache_notes_computed_distinguishes_null_from_unset(tmp_path: Path) -> None:
+    """notes=None is a legitimate completed result (no references, or an unusable
+    LLM response), distinct from a checkpoint where the notes step never ran —
+    notes_computed carries that distinction since `notes is not None` can't."""
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="Topic", max_results=10)
+
+    cache.save_checkpoint(brief, "normalized", normalized={"topic": "Topic"})
+    state = cache.load_checkpoint(brief)
+    assert state.notes is None
+    assert state.notes_computed is False
+
+    cache.save_checkpoint(brief, "notes", notes=None)
+    state = cache.load_checkpoint(brief)
+    assert state.notes is None
+    assert state.notes_computed is True
 
 
 def test_agent_cache_load_corrupt_file(tmp_path: Path) -> None:
@@ -1152,12 +1174,45 @@ def test_web_search_http_error(monkeypatch) -> None:
         s.search(SearchQuery(query_text="hi", intent="discover"), max_results=3)
 
 
+def test_web_search_connection_error_exhausted_retries_raises_llm_temporary_error(
+    monkeypatch,
+) -> None:
+    """A connection outage that outlasts the local retry budget is just as transient
+    as a 5xx response, so it's classified as LLMTemporaryError (not WebSearchError)
+    too — for the same Temporal-retry reason as the 429/5xx classification above."""
+    import httpx
+    from agents.blogging.blog_research_agent.models import SearchQuery
+    from agents.blogging.blog_research_agent.tools import web_search
+
+    from llm_service.interface import LLMTemporaryError
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def post(self, *a, **kw):
+            raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(web_search.httpx, "Client", _Client)
+    monkeypatch.setattr(web_search.time, "sleep", lambda *_a, **_kw: None)
+    s = web_search.OllamaWebSearch(api_key="test-key-placeholder")
+    with pytest.raises(LLMTemporaryError):
+        s.search(SearchQuery(query_text="hi", intent="discover"), max_results=3)
+
+
 def test_web_search_non_200_status(monkeypatch) -> None:
+    """A non-retryable status (e.g. 404) still raises the plain WebSearchError."""
     from agents.blogging.blog_research_agent.models import SearchQuery
     from agents.blogging.blog_research_agent.tools import web_search
 
     class _Response:
-        status_code = 500
+        status_code = 404
         text = "boom"
 
         def json(self):
@@ -1180,6 +1235,98 @@ def test_web_search_non_200_status(monkeypatch) -> None:
     s = web_search.OllamaWebSearch(api_key="test-key-placeholder")
     with pytest.raises(web_search.WebSearchError):
         s.search(SearchQuery(query_text="hi", intent="discover"), max_results=3)
+
+
+@pytest.mark.parametrize(
+    "status_code,expected_exc_name",
+    [(429, "LLMRateLimitError"), (500, "LLMTemporaryError"), (503, "LLMTemporaryError")],
+)
+def test_web_search_transient_status_raises_llm_error(
+    monkeypatch, status_code, expected_exc_name
+) -> None:
+    """429/5xx responses are retried locally, and once that budget is exhausted are
+    classified as transient LLM errors (not WebSearchError) so a caller funneling
+    research through Temporal's retry policy retries the activity instead of
+    permanently failing the job on a recoverable outage."""
+    from agents.blogging.blog_research_agent.models import SearchQuery
+    from agents.blogging.blog_research_agent.tools import web_search
+
+    from llm_service.interface import LLMRateLimitError, LLMTemporaryError
+
+    expected_exc = (
+        LLMRateLimitError if expected_exc_name == "LLMRateLimitError" else LLMTemporaryError
+    )
+
+    class _Response:
+        text = "boom"
+
+        def json(self):
+            return {}
+
+    _Response.status_code = status_code
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def post(self, *a, **kw):
+            return _Response()
+
+    monkeypatch.setattr(web_search.httpx, "Client", _Client)
+    monkeypatch.setattr(web_search.time, "sleep", lambda *_a, **_kw: None)
+    s = web_search.OllamaWebSearch(api_key="test-key-placeholder")
+    with pytest.raises(expected_exc) as exc:
+        s.search(SearchQuery(query_text="hi", intent="discover"), max_results=3)
+    assert exc.value.status_code == status_code
+
+
+def test_web_search_transient_status_recovers_within_retry_budget(monkeypatch) -> None:
+    """A 429 that clears on a later attempt returns results normally — the retry
+    resolves it locally, no exception ever reaches the caller."""
+    from agents.blogging.blog_research_agent.models import SearchQuery
+    from agents.blogging.blog_research_agent.tools import web_search
+
+    class _RateLimitedResponse:
+        status_code = 429
+        text = "slow down"
+
+        def json(self):
+            return {}
+
+    class _OkResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"results": [{"title": "A", "url": "https://example.com/a", "content": "x"}]}
+
+    responses = iter([_RateLimitedResponse(), _OkResponse()])
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def post(self, *a, **kw):
+            return next(responses)
+
+    monkeypatch.setattr(web_search.httpx, "Client", _Client)
+    monkeypatch.setattr(web_search.time, "sleep", lambda *_a, **_kw: None)
+    s = web_search.OllamaWebSearch(api_key="test-key-placeholder")
+    out = s.search(SearchQuery(query_text="hi", intent="discover"), max_results=3)
+    assert len(out) == 1
+    assert str(out[0].url) == "https://example.com/a"
 
 
 def test_web_search_happy_path(monkeypatch) -> None:

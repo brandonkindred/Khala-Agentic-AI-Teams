@@ -1030,7 +1030,7 @@ class TradeRecord(BaseModel):
     hold_days: int
     outcome: str  # "win" or "loss"
     cumulative_pnl: float  # running total net P&L
-    # Execution detail (populated by TradeSimulationEngine; optional for
+    # Execution detail (populated by trading_service's FillSimulator; optional for
     # backward compatibility with records persisted before these fields existed)
     entry_bid_price: Optional[float] = None
     entry_fill_price: Optional[float] = None
