@@ -5,8 +5,8 @@
   "scripts": {
     "install:ui": "cd user-interface && npm install",
     "postinstall": "echo 'Tip: For UI deps, run: cd user-interface && nvm use && npm ci'",
-    "lint": "eslint .",
-    "test": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "lint": "npm --prefix user-interface run lint",
+    "test": "npm --prefix user-interface run test",
+    "test:coverage": "npm --prefix user-interface run test:coverage"
   }
 }
