@@ -8,6 +8,8 @@ from typing import List
 import httpx
 from pydantic import HttpUrl
 
+from llm_service.interface import LLMRateLimitError, LLMTemporaryError
+
 from ..models import CandidateResult, SearchQuery
 
 logger = logging.getLogger(__name__)
@@ -68,7 +70,13 @@ class OllamaWebSearch:
         Returns
         -------
         List of CandidateResult, length at most max_results.
-        Raises WebSearchError on API or network failure.
+        429/5xx responses and connection errors are retried locally (same backoff
+        budget, WEB_SEARCH_MAX_RETRIES attempts) before raising, so a short-lived
+        outage usually resolves within this call. Raises LLMRateLimitError once a
+        429 outlasts that budget, LLMTemporaryError once a 5xx or connection error
+        does (both transient — for callers that additionally funnel this through a
+        Temporal retry policy), or WebSearchError on any other API/network failure
+        (missing API key, other non-200 status, a non-retryable httpx error).
         """
         assert max_results >= 1, "max_results must be at least 1"
         limit = min(max_results, OLLAMA_WEB_SEARCH_MAX_RESULTS)
@@ -88,7 +96,6 @@ class OllamaWebSearch:
             try:
                 with httpx.Client(timeout=self.timeout) as client:
                     resp = client.post(url, json=payload, headers=headers)
-                break
             except (httpx.ConnectError, httpx.ReadTimeout) as exc:
                 if attempt < WEB_SEARCH_MAX_RETRIES:
                     wait = WEB_SEARCH_BACKOFF_BASE**attempt
@@ -100,19 +107,59 @@ class OllamaWebSearch:
                         wait,
                     )
                     time.sleep(wait)
-                else:
-                    raise WebSearchError(
-                        f"HTTP error during Ollama web search after {WEB_SEARCH_MAX_RETRIES + 1} attempts: {exc}"
-                    ) from exc
+                    continue
+                # A connection outage that outlasts the local retry budget is just
+                # as transient as a 5xx response (the two are indistinguishable to
+                # the caller), so it gets the same LLMTemporaryError classification
+                # rather than a terminal WebSearchError/ResearchError.
+                raise LLMTemporaryError(
+                    f"Ollama web search connection error after {WEB_SEARCH_MAX_RETRIES + 1} attempts: {exc}"
+                ) from exc
             except httpx.HTTPError as exc:
                 raise WebSearchError(f"HTTP error during Ollama web search: {exc}") from exc
 
-        if resp is None:
-            raise WebSearchError("Ollama web search failed: no response after retries")
-        if resp.status_code != 200:
+            if resp.status_code == 200:
+                break
+            if resp.status_code == 429 or 500 <= resp.status_code < 600:
+                # Retry transient upstream failures locally first — same backoff loop
+                # as the connection-error path above — so a short-lived rate limit or
+                # server blip resolves within this single search() call instead of
+                # relying on a Temporal activity retry (which thread-mode callers
+                # don't get at all: neither _run_pipeline_with_tracking nor the
+                # synchronous pipeline route retries a raised LLMRateLimitError/
+                # LLMTemporaryError, so exhausting this budget is genuinely terminal
+                # for them, not just deferred to an outer retry layer).
+                if attempt < WEB_SEARCH_MAX_RETRIES:
+                    wait = WEB_SEARCH_BACKOFF_BASE**attempt
+                    logger.warning(
+                        "Web search transient status %d (attempt %d/%d). Retrying in %.1fs",
+                        resp.status_code,
+                        attempt + 1,
+                        WEB_SEARCH_MAX_RETRIES + 1,
+                        wait,
+                    )
+                    time.sleep(wait)
+                    continue
+                # Exhausted local retries: classified the same way the Ollama LLM
+                # client classifies its own 429/5xx responses, so Temporal-mode
+                # callers that funnel research through the activity retry policy
+                # still get a further outer retry.
+                if resp.status_code == 429:
+                    raise LLMRateLimitError(
+                        f"Ollama web search rate limited (429) after "
+                        f"{WEB_SEARCH_MAX_RETRIES + 1} attempts: {resp.text}",
+                        status_code=429,
+                    )
+                raise LLMTemporaryError(
+                    f"Ollama web search server error {resp.status_code} after "
+                    f"{WEB_SEARCH_MAX_RETRIES + 1} attempts: {resp.text}",
+                    status_code=resp.status_code,
+                )
             raise WebSearchError(
                 f"Ollama web search failed with status {resp.status_code}: {resp.text}"
             )
+
+        assert resp is not None and resp.status_code == 200
 
         data = resp.json()
         raw_results = data.get("results", []) or []

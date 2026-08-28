@@ -29,6 +29,7 @@ from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
 from agents.blogging.blog_fact_check_agent import BlogFactCheckAgent
 from agents.blogging.blog_plan_critic_agent import BlogPlanCriticAgent
 from agents.blogging.blog_publication_agent.models import PublishingPack
+from agents.blogging.blog_research_agent.agent import ResearchAgent
 from agents.blogging.blog_research_agent.allowed_claims import extract_allowed_claims
 from agents.blogging.blog_research_agent.models import ResearchBriefInput
 from agents.blogging.blog_writer_agent import BlogWriterAgent, ReviseWriterInput, WriterInput
@@ -152,6 +153,7 @@ __all__ = [
     "PlanningInput",
     "PlanningPhaseResult",
     "PublishingPack",
+    "ResearchAgent",
     "ResearchBriefInput",
     "ReviseWriterInput",
     "SeriesContext",

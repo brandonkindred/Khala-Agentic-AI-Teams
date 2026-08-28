@@ -52,7 +52,7 @@ graph TD
 
 ## 2. Component Architecture
 
-The pipeline orchestrator (`run_pipeline()` in `agent_implementations/blog_writing_process_v2.py`) coordinates agents across three functional groups that run inline: Content Production, Quality Gates, and Finalization. Four additional agent modules — Research Agent, Planning Agent (class), Publication Agent, and Medium Stats Agent — live in the team but are **not** invoked by `run_pipeline()` in the current v2 path: they are either standalone modules or are driven directly by the API layer.
+The pipeline orchestrator (`run_pipeline()` in `agent_implementations/blog_writing_process_v2.py`) coordinates agents across three functional groups that run inline: Content Production, Quality Gates, and Finalization. Planning (`run_planning()`, `pipeline/_common.py`) also invokes the Research Agent inline, ahead of content planning, to produce a `research_packet.md` artifact — see Note 2. Three additional agent modules — Planning Agent (class), Publication Agent, and Medium Stats Agent — live in the team but are **not** invoked by `run_pipeline()` in the current v2 path: they are either standalone modules or are driven directly by the API layer.
 
 ```mermaid
 graph LR
@@ -61,6 +61,7 @@ graph LR
     end
 
     subgraph InlinePlanning["Planning (inline)"]
+        RA["Research Agent<br/><i>blog_research_agent/</i><br/>(research_packet.md artifact only)"]
         WAPlan["BlogWriterAgent.plan_content()<br/><i>blog_writer_agent/agent.py</i>"]
     end
 
@@ -77,12 +78,12 @@ graph LR
     end
 
     subgraph Standalone["Standalone / API-Level"]
-        RA["Research Agent<br/><i>blog_research_agent/</i><br/>(not called by v2 pipeline)"]
         PAStand["Planning Agent class<br/><i>blog_planning_agent/</i><br/>(alternative, not wired)"]
         PUA["Publication Agent<br/><i>blog_publication_agent/</i>"]
         MSA["Medium Stats Agent<br/><i>blog_medium_stats_agent/</i>"]
     end
 
+    RP --> RA
     RP --> WAPlan
     RP --> WA
     RP --> GWA
@@ -104,11 +105,11 @@ graph LR
 
 > **Note 1:** Planning is performed by `BlogWriterAgent.plan_content()` (see `blog_writer_agent/agent.py:294`), which implements the refine-until-done loop. The `BlogPlanningAgent` class in `blog_planning_agent/agent.py` is an alternative implementation that is not currently wired into `run_pipeline()`.
 >
-> **Note 2:** The v2 pipeline currently skips external research. `PlanningInput.research_digest` defaults to `""` (see `shared/content_plan.py:197`), and the orchestrator does not invoke `BlogResearchAgent`. The research agent module remains available as a standalone component.
+> **Note 2:** `run_planning()` (`pipeline/_common.py`) invokes `ResearchAgent.run()` ahead of content planning and persists its compiled document as the `research_packet.md` artifact when `work_dir` is set. The research output is not yet fed into planning, though: `PlanningInput.research_digest` still defaults to `""` (see `shared/content_plan.py:197`) — routing the compiled document into `research_digest` is tracked as a separate follow-up.
 >
 > **Note 3:** `run_pipeline()` writes a `PublishingPack` artifact but does **not** call the Publication Agent. Publication (approve/unapprove) and Medium stats collection are handled by separate API endpoints.
 >
-> **Note 4:** `allowed_claims.json` is documented (`blog_research_agent/allowed_claims.py`'s module docstring) as a Research Librarian output, but per Note 2 above the v2 pipeline runs no research stage. As an interim measure, planning itself calls `extract_allowed_claims()` against the content plan's own markdown with an empty reference list (see `_persist_content_plan_artifacts()` in `agent_implementations/pipeline/_common.py`, used by both `run_planning()` and `run_planning_stage()`'s outline re-plan loop), producing a citation-free `allowed_claims.json`. This call site should move to consume `BlogResearchAgent`'s output once that agent is wired back into the pipeline.
+> **Note 4:** `allowed_claims.json` is documented (`blog_research_agent/allowed_claims.py`'s module docstring) as a Research Librarian output, but its extraction isn't yet wired to the research call described in Note 2. As an interim measure, planning itself calls `extract_allowed_claims()` against the content plan's own markdown with an empty reference list (see `_persist_content_plan_artifacts()` in `agent_implementations/pipeline/_common.py`, used by both `run_planning()` and `run_planning_stage()`'s outline re-plan loop), producing a citation-free `allowed_claims.json`. This call site should move to consume `ResearchAgent`'s output as a separate follow-up.
 
 ### Pipeline Phase Mapping
 
@@ -247,7 +248,7 @@ Agents marked **[pipeline]** are orchestrated by `run_pipeline()`. Agents marked
 | **Validators** | `validators/` | [pipeline] | Deterministic no-LLM checks (banned phrases, reading level, paragraph length, required sections, claims policy) | Draft text → `ValidatorReport` |
 | **Fact Check Agent** | `blog_fact_check_agent/` | [pipeline] | LLM-based claim verification and risk flagging with required-disclaimer detection | Draft + allowed claims → `FactCheckReport` |
 | **Compliance Agent** | `blog_compliance_agent/` | [pipeline] | LLM-based brand/style enforcement with veto power — FAIL triggers the closed-loop rewrite | Draft + brand spec + validator report → `ComplianceReport` |
-| **Research Agent** | `blog_research_agent/` | [standalone] | Ollama web_search + arXiv + ranking + synthesis. Not called by v2 pipeline; `PlanningInput.research_digest` defaults to `""` | `ResearchBriefInput` → `ResearchAgentOutput` |
+| **Research Agent** | `blog_research_agent/` | [pipeline] | Ollama web_search + arXiv + ranking + synthesis. Called from `run_planning()` for the `research_packet.md` artifact; output not yet fed into `PlanningInput.research_digest` (still defaults to `""`) | `ResearchBriefInput` → `ResearchAgentOutput` |
 | **Planning Agent (class)** | `blog_planning_agent/` | [standalone] | Alternative planning implementation with its own refine loop. Not wired into v2; planning uses `BlogWriterAgent.plan_content()` instead | `PlanningInput` → `PlanningPhaseResult` |
 | **Publication Agent** | `blog_publication_agent/` | [standalone] | Draft submission and platform formatting (Medium, dev.to, Substack). `run_pipeline()` writes the `publishing_pack.json` artifact directly and does not call this agent | `SubmitDraftInput` → `ApprovalResult` |
 | **Medium Stats Agent** | `blog_medium_stats_agent/` | [standalone] | Playwright automation against `medium.com/me/stats`, reusing the shared Google browser login when configured | `MediumStatsRunConfig` → `MediumStatsReport` |

@@ -188,7 +188,17 @@ def test_replan_refreshes_allowed_claims_json(monkeypatch, tmp_path) -> None:
                 return ppr_refined
             return ppr_initial
 
+    from agents.blogging.blog_research_agent.models import ResearchAgentOutput
+
+    class _StubResearchAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def run(self, _brief):
+            return ResearchAgentOutput(query_plan=[], references=[], compiled_document="stub research")
+
     monkeypatch.setattr(v2, "BlogWriterAgent", _FakeAgent)
+    monkeypatch.setattr(v2, "ResearchAgent", _StubResearchAgent)
     monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "")
     monkeypatch.setattr(v2, "load_style_file", lambda _p: "")
     monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: None)

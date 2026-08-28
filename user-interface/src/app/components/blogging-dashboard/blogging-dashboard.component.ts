@@ -42,6 +42,7 @@ const POLL_STATUS_MS = 60000;
 
 /** Pipeline phases in execution order for the phase stepper. */
 const PIPELINE_PHASES = [
+  { key: 'research', label: 'Research' },
   { key: 'planning', label: 'Planning' },
   { key: 'story_elicitation', label: 'Stories' },
   { key: 'draft_initial', label: 'Draft' },
