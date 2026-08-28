@@ -258,6 +258,42 @@ def test_run_content_planning_loop_refines_then_converges() -> None:
     assert result.planning_iterations_used == 2
 
 
+def test_run_content_planning_loop_refits_digest_for_each_concrete_prompt() -> None:
+    digest = "D" * 1_000
+    planning_input = PlanningInput(
+        brief="b",
+        length_policy_context="c",
+        research_digest=digest,
+    )
+    empty_input = planning_input.model_copy(update={"research_digest": ""})
+    retry_suffix = "\n\nRespond with a single JSON object only, no markdown fences."
+    context_tokens = (
+        4_000
+        + len("GEN")
+        + len(build_generate_plan_prompt(empty_input))
+        + len(retry_suffix)
+        + len(digest)
+    )
+    prompts: list[str] = []
+    plans = iter([_bad_plan_dict(), _good_plan_dict()])
+
+    def complete_fn(prompt, *, system, on_llm_request, max_parse_retries):
+        prompts.append(prompt)
+        return next(plans), 0
+
+    result = run_content_planning_loop(
+        **_loop_kwargs(
+            planning_input=planning_input,
+            planner_context_tokens=context_tokens,
+            complete_plan_json_fn=complete_fn,
+        )
+    )
+
+    assert result.planning_iterations_used == 2
+    assert digest in prompts[0]
+    assert digest not in prompts[1]
+
+
 def test_run_content_planning_loop_raises_after_max_iterations() -> None:
     bad = _bad_plan_dict()
 

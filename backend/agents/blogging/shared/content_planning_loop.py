@@ -37,6 +37,7 @@ from .content_plan import (
 )
 from .content_profile import LengthPolicy
 from .errors import PlanningError
+from .prompt_budget import fit_optional_text_to_prompt
 
 if TYPE_CHECKING:
     from agents.blogging.blog_plan_critic_agent import BlogPlanCriticAgent, PlanCriticReport
@@ -201,6 +202,7 @@ def run_content_planning_loop(
     generate_system: str,
     refine_system: str,
     complete_plan_json_fn: CompletePlanJsonFn,
+    planner_context_tokens: Optional[int] = None,
 ) -> PlanningPhaseResult:
     """Generate and refine a ContentPlan until the planner (and optional critic) agree.
 
@@ -208,6 +210,9 @@ def run_content_planning_loop(
     terminates only when the planner's self-eval is done AND the critic
     approves. Refine feedback comes from the critic's structured violations
     instead of a generic string. When absent, legacy planner-self-eval only.
+    When ``planner_context_tokens`` is supplied, the research digest is fitted
+    independently to every concrete generate/refine prompt after charging that
+    iteration's brief, prior plan, feedback, instructions, and response reserve.
     """
     t0 = time.monotonic()
     total_parse_retries = 0
@@ -225,8 +230,13 @@ def run_content_planning_loop(
 
     for iteration in range(1, max_iterations + 1):
         if iteration == 1:
-            prompt = build_generate_plan_prompt(planning_input)
             system = generate_system
+
+            def build_prompt(digest: str) -> str:
+                return build_generate_plan_prompt(
+                    planning_input.model_copy(update={"research_digest": digest})
+                )
+
         else:
             assert last_plan is not None
             if last_critic_report is not None:
@@ -239,8 +249,30 @@ def run_content_planning_loop(
                     f"scope_feasible={last_plan.requirements_analysis.scope_feasible}. "
                     "Fix gaps, scope, and research alignment."
                 )
-            prompt = build_refine_plan_prompt(planning_input, last_plan, feedback)
             system = refine_system
+
+            def build_prompt(digest: str) -> str:
+                return build_refine_plan_prompt(
+                    planning_input.model_copy(update={"research_digest": digest}),
+                    last_plan,
+                    feedback,
+                )
+
+        iteration_research_digest = planning_input.research_digest
+        if planner_context_tokens is None:
+            prompt = build_prompt(iteration_research_digest)
+        else:
+            # Account for this exact iteration's brief, previous-plan JSON, and
+            # feedback before admitting research. Reserve the longest JSON-only
+            # retry instruction appended by ``complete_plan_json`` as well.
+            retry_suffix = "\n\nRespond with a single JSON object only, no markdown fences."
+            prompt, iteration_research_digest = fit_optional_text_to_prompt(
+                iteration_research_digest,
+                build_prompt=build_prompt,
+                system_prompt=system,
+                context_tokens=planner_context_tokens,
+                extra_prompt_reserve_chars=len(retry_suffix),
+            )
 
         data, pr = complete_plan_json_fn(
             prompt,
@@ -280,7 +312,7 @@ def run_content_planning_loop(
                 plan=last_plan,
                 brand_spec_prompt=brand_spec_prompt,
                 writing_guidelines=writing_guidelines,
-                research_digest=planning_input.research_digest,
+                research_digest=iteration_research_digest,
                 on_llm_request=on_llm_request,
                 work_dir=work_dir,
                 artifact_name=f"plan_critic_report_v{iteration}.json",

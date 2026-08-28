@@ -27,6 +27,10 @@ from agents.blogging.shared.agent_base import _BlogAgentBase
 from agents.blogging.shared.artifacts import write_artifact
 from agents.blogging.shared.content_plan import ContentPlan
 from agents.blogging.shared.json_retry import run_json_gate
+from agents.blogging.shared.prompt_budget import (
+    fit_optional_text_to_prompt,
+    resolve_model_context_tokens,
+)
 
 from .models import PlanCriticReport, PlanViolation
 from .prompts import PLAN_CRITIC_SYSTEM, PLAN_CRITIC_USER_TEMPLATE
@@ -101,21 +105,30 @@ class BlogPlanCriticAgent(_BlogAgentBase):
             - When ``work_dir`` is set and ``write_artifact`` is available, the report is
               persisted as ``artifact_name`` (default ``plan_critic_report.json``).
         """
-        user_prompt = PLAN_CRITIC_USER_TEMPLATE.format(
-            brand_spec_prompt=(brand_spec_prompt or "").strip(),
-            writing_guidelines=(writing_guidelines or "").strip(),
-            research_digest=(research_digest or "").strip() or "(no research digest supplied)",
-            plan_json=json.dumps(plan.model_dump(mode="json"), indent=2),
-        )
-
-        if on_llm_request:
-            on_llm_request("Plan critic: evaluating plan against brand spec + rubric...")
-
         soft_json_instruction = "\n\nRespond with valid JSON only, no markdown fences."
         strict_json_suffix = (
             "\n\nRespond with a single JSON object only (no markdown, no code fences). "
             'Keys: "status", "approved", "violations", "notes", "rubric_version".'
         )
+
+        def build_user_prompt(digest: str) -> str:
+            return PLAN_CRITIC_USER_TEMPLATE.format(
+                brand_spec_prompt=(brand_spec_prompt or "").strip(),
+                writing_guidelines=(writing_guidelines or "").strip(),
+                research_digest=digest.strip() or "(no research digest supplied)",
+                plan_json=json.dumps(plan.model_dump(mode="json"), indent=2),
+            ) + soft_json_instruction
+
+        user_prompt, _ = fit_optional_text_to_prompt(
+            research_digest,
+            build_prompt=build_user_prompt,
+            system_prompt=PLAN_CRITIC_SYSTEM,
+            context_tokens=resolve_model_context_tokens(self._model),
+            extra_prompt_reserve_chars=len(strict_json_suffix),
+        )
+
+        if on_llm_request:
+            on_llm_request("Plan critic: evaluating plan against brand spec + rubric...")
 
         def _fallback_dict(exc: Exception) -> dict[str, Any]:
             return _fallback_report(str(exc)).model_dump(mode="json")
@@ -123,7 +136,7 @@ class BlogPlanCriticAgent(_BlogAgentBase):
         data = run_json_gate(
             self._model,
             PLAN_CRITIC_SYSTEM,
-            user_prompt + soft_json_instruction,
+            user_prompt,
             max_attempts=2,
             strict_json_suffix=strict_json_suffix,
             fresh_agent_per_attempt=True,
