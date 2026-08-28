@@ -161,13 +161,34 @@ _CHUNK_CHARS_PER_TOKEN = 1.0
 # Reserve tokens for the compaction prompt template + response.
 _PROMPT_OVERHEAD_TOKENS = 4000
 _RESPONSE_RESERVE_TOKENS = 8000
+# Below this size, chunking large inputs creates too many sequential LLM calls
+# to be operationally useful. A 4k source chunk keeps the worst-case request
+# count in the same range as the existing 16k-context behavior.
+_MIN_COMPACTION_CHUNK_CHARS = 4000
 
 
 def _get_model_chunk_chars(llm: "LLMClient") -> int:
-    """Max chars of source text that fit in one compaction call."""
-    ctx = llm.get_max_context_tokens() if hasattr(llm, "get_max_context_tokens") else 16384
+    """Max practical source chars safe across every possible LLM consumer.
+
+    Returns zero when the context can fit the fixed prompt/response reserves but
+    leaves less than ``_MIN_COMPACTION_CHUNK_CHARS`` for source text. Tiny chunks
+    would turn a large document into hundreds or thousands of sequential calls;
+    callers treat zero as a signal to skip LLM compaction.
+    """
+    min_context = getattr(llm, "get_min_context_tokens", None)
+    if callable(min_context):
+        # A failover client can switch providers after a 429 within this call, so
+        # size the chunk for its smallest candidate rather than only the preferred
+        # provider exposed through get_max_context_tokens().
+        ctx = min_context()
+    else:
+        ctx = llm.get_max_context_tokens() if hasattr(llm, "get_max_context_tokens") else 16384
     available = ctx - _PROMPT_OVERHEAD_TOKENS - _RESPONSE_RESERVE_TOKENS
-    return max(4000, int(available * _CHUNK_CHARS_PER_TOKEN))
+    chunk_chars = max(0, int(available * _CHUNK_CHARS_PER_TOKEN))
+    # Do not turn a near-reserve context into an impractically large sequence of
+    # tiny requests. This is a cutoff, not a size floor: callers must skip rather
+    # than send more source text than the model can safely accept.
+    return chunk_chars if chunk_chars >= _MIN_COMPACTION_CHUNK_CHARS else 0
 
 
 def _split_into_chunks(text: str, chunk_chars: int) -> List[str]:
@@ -415,6 +436,13 @@ def _compact_uncached(
 
     try:
         chunk_chars = _get_model_chunk_chars(llm)
+        if chunk_chars <= 0:
+            logger.warning(
+                "Skipping compaction for %s: model context cannot fit a practical source chunk "
+                "after prompt/response reserves",
+                content_description,
+            )
+            return text, False
 
         # If the text fits in one compaction call, do it directly.
         if len(text) <= chunk_chars:

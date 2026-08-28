@@ -26,6 +26,7 @@ from agents.blogging.shared.content_planning_loop import (
 )
 from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
 from agents.blogging.shared.errors import PlanningError
+from agents.blogging.shared.prompt_budget import fit_optional_text_to_prompt
 
 from ._content_plan_test_utils import make_content_plan, make_requirements_analysis
 
@@ -166,6 +167,22 @@ def test_build_refine_plan_prompt_includes_previous_plan_and_feedback() -> None:
     assert "PREVIOUS PLAN" in out
 
 
+def test_optional_prompt_text_uses_utf8_bytes_for_unicode_budget() -> None:
+    text = "😀😀"
+    base = "prompt:"
+    context_tokens = 4_000 + len(base.encode("utf-8")) + 4
+
+    prompt, fitted = fit_optional_text_to_prompt(
+        text,
+        build_prompt=lambda optional: base + optional,
+        system_prompt="",
+        context_tokens=context_tokens,
+    )
+
+    assert fitted == "😀"
+    assert prompt == "prompt:😀"
+
+
 def test_complete_plan_json_first_attempt_success() -> None:
     data, retries = complete_plan_json(
         "p",
@@ -256,6 +273,42 @@ def test_run_content_planning_loop_refines_then_converges() -> None:
 
     result = run_content_planning_loop(**_loop_kwargs(complete_plan_json_fn=complete_fn))
     assert result.planning_iterations_used == 2
+
+
+def test_run_content_planning_loop_refits_digest_for_each_concrete_prompt() -> None:
+    digest = "D" * 1_000
+    planning_input = PlanningInput(
+        brief="b",
+        length_policy_context="c",
+        research_digest=digest,
+    )
+    empty_input = planning_input.model_copy(update={"research_digest": ""})
+    retry_suffix = "\n\nRespond with a single JSON object only, no markdown fences."
+    context_tokens = (
+        4_000
+        + len("GEN")
+        + len(build_generate_plan_prompt(empty_input))
+        + len(retry_suffix)
+        + len(digest)
+    )
+    prompts: list[str] = []
+    plans = iter([_bad_plan_dict(), _good_plan_dict()])
+
+    def complete_fn(prompt, *, system, on_llm_request, max_parse_retries):
+        prompts.append(prompt)
+        return next(plans), 0
+
+    result = run_content_planning_loop(
+        **_loop_kwargs(
+            planning_input=planning_input,
+            planner_context_tokens=context_tokens,
+            complete_plan_json_fn=complete_fn,
+        )
+    )
+
+    assert result.planning_iterations_used == 2
+    assert digest in prompts[0]
+    assert digest not in prompts[1]
 
 
 def test_run_content_planning_loop_raises_after_max_iterations() -> None:

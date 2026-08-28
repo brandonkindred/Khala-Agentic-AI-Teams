@@ -327,12 +327,15 @@ def content_plan_to_content_brief_markdown(plan: ContentPlan) -> str:
 def build_research_digest(
     research_document: str, *, max_chars: int = 200_000, llm: Any = None
 ) -> str:
-    """Bounded digest for planning prompts (compact with LLM when over budget)."""
+    """Return a digest no longer than ``max_chars``, compacting when possible."""
     doc = (research_document or "").strip()
     if not doc or len(doc) <= max_chars:
         return doc
     if llm is not None:
         from llm_service import compact_text
 
-        return compact_text(doc, max_chars, llm, "research digest")
-    return doc
+        doc = compact_text(doc, max_chars, llm, "research digest")
+    # compact_text deliberately returns the original input when its LLM call fails
+    # and a model may also overshoot its requested response size.  Planning must
+    # fail closed on prompt size, so enforce the caller's budget unconditionally.
+    return doc[:max_chars]
