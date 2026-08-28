@@ -2021,8 +2021,10 @@ class DesignMixin:
 
         Pre: the refinement + alignment loops have settled the run state;
         ``state`` carries the settled ``spec``/``code``/``trades``/``metrics``
-        for this design attempt (``state.code`` is unused here — verification
-        and analysis never touch the strategy source).
+        for this design attempt. Verification and analysis never *inspect*
+        the strategy source, but ``state.code`` is still load-bearing: it is
+        hashed into the terminal ``PhaseTransition`` below, and is the value
+        that carries any alignment-committed rewrite.
         Post: returns ``(metrics, is_winning, is_publishable,
         publishability_skip_reason, narrative)``. Increments the
         convergence trial counter (one per refinement round, plus the first),
@@ -2087,11 +2089,10 @@ class DesignMixin:
         )
 
         # ═══ Phase 4 → exit: BACKTEST_AND_VERIFICATION → ∅ ════════════
-        # Terminal transition out of the last named phase. ``to_phase``
-        # is ``None``; ``spec_hash``/``code_hash`` must match the values
-        # emitted on the previous two boundaries within this design
-        # attempt — the integration test in
-        # ``test_strategy_lab_phase_transitions.py`` asserts this.
+        # Terminal transition out of the last named phase (``to_phase`` is
+        # ``None``), hashed from the post-alignment state — so neither hash
+        # is guaranteed to match every earlier boundary. ``PhaseTransition``'s
+        # Invariants in ``phases.py`` own the carve-out list.
         _emit_phase_transition(
             emit,
             from_phase=Phase.BACKTEST_AND_VERIFICATION,

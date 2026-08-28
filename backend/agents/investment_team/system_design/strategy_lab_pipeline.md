@@ -21,13 +21,15 @@ flowchart LR
     E -->|market data OK| F[paper_trading_complete]
     E -->|no market data| S3[paper_trading_skipped<br/>reason=no_market_data]
     E -->|exception| X[paper_trading_failed]
-    F --> Z[complete]
-    S1 --> Z
-    S2 --> Z
-    S3 --> Z
-    S4 --> Z
-    X --> Z
 ```
+
+> **`complete` is not the terminal node of this flow.** It is emitted by
+> `RecordAssemblyMixin` at the end of the *design attempt* — i.e. before
+> `analyzing` hands off to the finalize step — so it fires **earlier** than
+> every `paper_trading*` event above, not after them. A client must not treat
+> `complete` as "paper trading finished": at that point
+> `paper_trading_status` / `paper_trading_verdict` are not yet set, which is
+> why they are absent from its payload in the table below.
 
 The `aligning` phase audits whether the executed trade ledger actually
 implements the strategy specification. Each iteration of the alignment
@@ -35,10 +37,17 @@ loop now runs a two-step inner check:
 
 1. `DeterministicAlignmentChecker` (in
    `strategy_lab/quality_gates/alignment_checks.py`) evaluates the
-   trade ledger against the structured `StrategySpec` across six
+   trade ledger against the structured `StrategySpec` across seven
    per-rule checks (universe, side, sizing ±1%, stop-loss compliance,
-   take-profit compliance, and entry-signal correlation with optional
-   near-miss adjudication). Output is a list of
+   take-profit compliance, entry-signal correlation with optional
+   near-miss adjudication, and signal-exit correlation for specs with a
+   `SignalExitRule`). The stop-loss/take-profit checks are
+   informational-only — every finding they emit is hardcoded
+   `passed=True` (a stop/take-profit is a trigger, not a price cap, so a
+   fill landing past the nominal threshold is expected, not a
+   misalignment); real engine-side firing is verified separately by
+   `ExitRuleConformanceGate`. The other five checks can fail and drive
+   the `aligned`/`misaligned` verdict below. Output is a list of
    `AlignmentFinding` rows that ride on `BacktestRecord.alignment_findings`
    plus matching `QualityGateResult` rows on the existing
    `quality_gate_results` stream.
@@ -48,20 +57,26 @@ loop now runs a two-step inner check:
    sandbox re-executes the proposal, and the loop iterates.
 
 The re-execution loop and its cap remain intentional and unchanged:
-the cap (`MAX_ALIGNMENT_ROUNDS = 10`) prevents runaway iterations while
+the cap (`MAX_ALIGNMENT_ROUNDS` in `strategy_lab/orchestrator_alignment.py`,
+resolved from `STRATEGY_LAB_MAX_ALIGNMENT_ROUNDS`, default 10) prevents runaway iterations while
 still giving the system room to correct genuine code defects across
 multiple rounds. The loop exits as soon as the gate reports aligned,
 no further fix is proposed, or the cap is hit. Entry-signal predicate
-misses within `STRATEGY_LAB_ALIGNMENT_NEAR_MISS_PCT` (default 1%
-relative) route through `TradeAlignmentAgent.adjudicate_near_miss`, a
-single-shot yes/no LLM call; tolerance `0` disables that adjudicator
-entirely. See `strategy_lab/quality_gates/alignment_checks.py`,
+misses within the `STRATEGY_LAB_ALIGNMENT_NEAR_MISS_PCT` tolerance route
+through `TradeAlignmentAgent.adjudicate_near_miss`, a single-shot yes/no
+LLM call (default and disable semantics: that env var's entry in
+`strategy_lab/README.md`). See `strategy_lab/quality_gates/alignment_checks.py`,
 `strategy_lab/agents/alignment.py`, and
 `strategy_lab/orchestrator.py::run_cycle` (Phase 2.5).
 
-The pipeline lives in
-[`api/main.py::_run_one_strategy_lab_cycle`](../api/main.py) and
-[`strategy_lab/temporal/workflows.py::StrategyLabBatchWorkflow`](../strategy_lab/temporal/workflows.py).
+Under the current Temporal-only dispatch the pipeline runs through
+[`strategy_lab/temporal/workflows.py`](../strategy_lab/temporal/workflows.py)
+(`StrategyLabBatchWorkflow` fanning out per-cycle `StrategyLabCycleWorkflow`
+children) with the whole per-attempt pipeline inside
+`run_design_attempt_activity`
+([`strategy_lab/temporal/activities.py`](../strategy_lab/temporal/activities.py));
+`api/main.py::_run_one_strategy_lab_cycle` is the thread-era equivalent, kept
+for tests.
 
 ## Winner label vs publishable gate
 
@@ -79,7 +94,9 @@ look-ahead) still runs and records its findings on `acceptance_reason` and
 the gate timeline — those findings surface as narrative caveats — but they
 never flip `is_winning`.
 
-The **publishable gate** is the paper-trading decision:
+The **publishable gate** decides whether paper trading is attempted at all —
+it is computed entirely from pre-paper-trading criteria and is final at
+`complete`-event time, not an outcome paper trading produces:
 
 ```python
 is_publishable = (
@@ -102,21 +119,55 @@ the joined failing gate codes (veto order: `exit_rule_conformance_failed`,
 
 ## Phase events
 
-Every cycle emits phase events via the `on_phase(phase, data)` callback.
-The strategy-lab worker forwards them as SSE `progress` events. The
-canonical list is:
+Every cycle emits phase events via the `on_phase(phase, data)` callback. The
+table below documents the primary pipeline phase names in that raw
+`on_phase` contract — not the set a browser receives. Two additional names,
+`telemetry` and `phase_transition` (see below), are also emitted and are
+deliberately unmapped; an `on_phase` implementation must tolerate any unknown
+phase name rather than assert on a fixed set. Two filters sit between the raw
+callback and a live subscriber under the current Temporal-only dispatch:
+
+- `run_design_attempt_activity`'s progress callback publishes through
+  `_PROGRESS_PHASE_MAP` (`temporal/activities.py`), which maps the
+  orchestrator's internal names (`designing`, `design_review`,
+  `design_repair`, `coding`, `backtesting`, `aligning`, `analyzing`,
+  `complete`) onto the UI's four-entry stepper — `ideating`, `coding`,
+  `backtesting`, `analyzing`. An unmapped phase is not published at all.
+- `finalize_cycle_record_activity` calls `_finalize_strategy_lab_cycle_record`
+  with `on_phase=None`. That shared function (also used by the thread-mode
+  path below) is where every `paper_trading*` emit lives, so under
+  Temporal-only dispatch those calls become no-ops and the rows reach no
+  subscriber; they are genuinely live — not merely reserved names — when
+  `_run_one_strategy_lab_cycle` (thread mode) supplies a real `on_phase`.
+  (`complete` is not emitted there — it comes from `RecordAssemblyMixin` inside
+  `run_design_attempt_activity`, and *is* published, relabelled `analyzing`.)
+
+So a Temporal-dispatched subscriber sees only those four names. Note also
+that `fetching_data` is emitted as a `sub_phase` of `backtesting`
+(`emit("backtesting", {"sub_phase": "fetching_data"})`), not as a top-level
+phase, and that `telemetry` and `phase_transition` are emitted as well —
+deliberately unmapped, so an `on_phase` implementation must tolerate them
+rather than assert on an unknown name. The rows below document the raw
+internal `on_phase(phase, data)` payload — the contract every
+`_run_design_attempt` caller sees — not the further-filtered wire event a
+live SSE subscriber gets: `_design_attempt_progress_checkpoint`
+(`temporal/activities.py`) additionally whitelists `data`'s keys to
+`_PROGRESS_EVENT_FIELDS` before publishing, which drops fields like
+`rounds`/`round` shown below.
 
 | Phase | When emitted | Data fields |
 |---|---|---|
-| `ideating` | Start of cycle; also on re-ideation retry | `{ retry?, excluded? }` |
-| `fetching_data` | After ideation, before backtest | `{ strategy: {asset_class, hypothesis}, retry? }` |
-| `aligning` | Trade-alignment audit and problem-solving loop | `{ sub_phase, alignment_round, trades_count?, issues_count?, issues_preview?, findings_count?, findings_preview?, changes_made?, predicted_aligned_after_fix? }` |
-| `analyzing` | After backtest, before narrative | `{ strategy, metrics }` |
+| `designing` / `design_review` | Design-round lifecycle and design-review-round lifecycle, respectively — both raw phases collapse to `_PROGRESS_PHASE_MAP`'s `ideating` at the wire boundary; no raw phase is itself named `ideating` | Both carry `{ sub_phase, ... }`. Known `designing` payloads: `started` (no extra fields), `budget_exhausted` (+ `calls_made`/`rounds`), `ready` (+ `rounds`), `round_completed` (+ `round`/`ready: false`), `synthesized` (+ `strategy` preview, once design converges), `aborted` (+ `reason`). Known `design_review` payloads: `started` (+ `round`), `completed` (+ `round`/`ready`/`issue_count`/`regressed_count`), `skipped` (+ `round`/`reason`/`regressed_count`), `stalled` (+ `round`) — this list is representative, not exhaustive; treat any unlisted `sub_phase` as opaque. There is no `retry`/`excluded` key. `rounds`/`round` are dropped by the wire-event field whitelist noted above. |
+| `design_repair` | The mechanical-repair pass (see `strategy_lab/README.md`) — also collapses to `ideating` at the wire boundary | `{ round, actions, now_ready }` — no `sub_phase` key, unlike every other raw phase in this table. `actions` is a list of `{ rule, field, before, after, reason }`. |
+| `coding` | Refinement-round lifecycle (`_run_synthesis_loop`/`_refine_or_exhaust`: start, completion, failure, stall, refining, refined), a critical-anomaly redesign hand-off, a budget-exhaustion abort, and every zero-trade-repair outcome — reaches a subscriber unchanged as the public `coding` step, its own `_PROGRESS_PHASE_MAP` entry (not folded into `ideating`) | `{ sub_phase, refinement_round, ... }`. Known `sub_phase` values: `started`, `completed` (+ `checks_passed`/`checks_total`), `failed`, `stalled`, `refining`, `refined`, `routed_to_redesign`, `aborted` (+ `reason`), and the `zero_trade_repair_*` family (`started`/`committed`/`rejected`/`skipped`) — this list is representative, not exhaustive; treat any unlisted `sub_phase` as opaque. |
+| `backtesting` | Spans market-data fetch, sandbox execution (including re-execution from refinement or trade-alignment), and walk-forward verification — several sub-phases share this one raw phase name | `{ sub_phase, ... }`. Known `sub_phase` payloads: `fetching_data` (no extra fields), `data_loaded` (+ `symbols_count`/`bars_count`), `running_code` (+ `refinement_round` from the refinement loop, or + `alignment_round`/`trigger` from the trade-alignment loop — different fields depending on caller), `completed` (+ `trades_count`/`execution_time`), `walk_forward_started` (no extra fields), `walk_forward_completed` (+ `deflated_sharpe`/`oos_sharpe`/`is_oos_degradation_pct`/`oos_trade_count`/`n_trials`/`acceptance_reason`) — this list is representative, not exhaustive; treat any unlisted `sub_phase` as opaque. |
+| `aligning` | Trade-alignment audit and problem-solving loop | `{ sub_phase, alignment_round, ... }`. Known `sub_phase` payloads: `evaluating` (+ `trades_count`), `aligned` (no extra fields), `not_aligned` (+ `issues_count`/`issues_preview`/`findings_count`/`findings_preview`), `no_proposed_fix` / `max_rounds_reached` (no extra fields), `refining_code` (+ `predicted_aligned_after_fix`), `rejected_unsafe_code` (+ `details`), `re_execution_failed` (+ `error_type`), `anomaly_detected` (+ `details`, and `execution_diagnostics` when non-empty), `refined` (+ `changes_made`/`trades_count`) — this list is representative, not exhaustive; treat any unlisted `sub_phase` as opaque. |
+| `analyzing` | Around the narrative draft | `{ sub_phase: "draft" }` always fires first (when there are trades to analyse). `{ sub_phase: "completed", is_winning }` fires only when `AnalysisAgent.run` returns successfully — on an exception, `_run_analysis_phase` falls back to an auto-summary and `completed` is never emitted for that attempt; the next event a raw `on_phase` consumer sees is `complete` from record assembly. |
 | `paper_trading` | Entering the paper-trading step (publishable winners only) | `{ strategy }` |
 | `paper_trading_complete` | Paper trading finished successfully | `{ session_id, verdict, trade_count }` |
 | `paper_trading_skipped` | Paper trading did not run | `{ reason, detail? }` |
 | `paper_trading_failed` | Paper trading raised an exception (non-fatal) | `{ detail }` |
-| `complete` | Cycle fully persisted | `{ record_id, is_winning, is_publishable, metrics, paper_trading_status, paper_trading_verdict }` |
+| `complete` | Design attempt finished and the record assembled (emitted by `RecordAssemblyMixin`, before the finalize/persist step) | Normal: `{ record_id, is_winning, is_publishable, metrics, refinement_rounds, alignment_rounds, trades_aligned, phase_back_count }`. Short-circuit: `{ record_id, is_winning: false, is_publishable: false, metrics, refinement_rounds, short_circuit: <status string>, phase_back_count }` — `alignment_rounds`/`trades_aligned` are omitted, not `false`, and `short_circuit` carries the short-circuit status string (e.g. `"failed: spec_unimplementable"`), not a boolean. `_build_short_circuit_record` always hardcodes `metrics` from an empty trade list regardless of how far the attempt progressed: a budget trip inside `_orchestrate_refinement_and_alignment` reaches this same short-circuit path *after* real sandbox executions already produced real trades, and those trades are discarded, not summarized — this is the common short-circuit payload, not one reserved for attempts that never reached a backtest. |
 
 UI clients should treat unknown phase names as opaque and ignore them.
 

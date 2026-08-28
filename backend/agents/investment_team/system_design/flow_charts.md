@@ -8,8 +8,10 @@ investment team:
 3. [Promotion-gate decision tree](#3-promotion-gate-decision-tree) (flowchart)
 4. [Orchestrator workflow mode](#4-orchestrator-workflow-mode) (state diagram)
 
-Line references point to [`api/main.py`](../api/main.py),
-[`agents.py`](../agents.py), and [`orchestrator.py`](../orchestrator.py).
+Line references point to [`agents.py`](../agents.py) and
+[`orchestrator.py`](../orchestrator.py). Endpoints in
+[`api/main.py`](../api/main.py) are cited by route path rather than line —
+that file changes several times a day, and the route path never goes stale.
 
 ---
 
@@ -28,7 +30,7 @@ sequenceDiagram
     participant LLM as LLM Service
     participant Store as _PersistentDict
 
-    UI->>API: POST /advisor/sessions (L1981)
+    UI->>API: POST /advisor/sessions
     API->>FA: start_session() (agents.py:433)
     FA->>FA: create AdvisorSession<br/>topic = GREETING
     FA-->>API: session + opening question
@@ -36,7 +38,7 @@ sequenceDiagram
     API-->>UI: StartAdvisorSessionResponse
 
     loop While session.status == active
-        UI->>API: POST /advisor/sessions/{id}/messages (L1997)
+        UI->>API: POST /advisor/sessions/{id}/messages
         API->>Store: load session
         API->>FA: handle_message(session, user_msg) (agents.py:449)
         FA->>FA: _extract_topic_data(current_topic, msg)<br/>(regex-heavy, agents.py:615-881)
@@ -51,7 +53,7 @@ sequenceDiagram
         API-->>UI: SendAdvisorMessageResponse
     end
 
-    UI->>API: POST /advisor/sessions/{id}/complete (L2033)
+    UI->>API: POST /advisor/sessions/{id}/complete
     API->>FA: build_ips(session) (agents.py:509)
     FA->>FA: CollectedProfileData → InvestmentProfile → IPS
     FA-->>API: IPS
@@ -78,92 +80,142 @@ sequenceDiagram
 ## 2. Strategy Lab batch run flow
 
 The long-running flow kicked off by `POST /strategy-lab/run`. The API returns
-immediately with a `run_id`; the worker thread runs the per-cycle loop and
-publishes SSE events that the UI subscribes to.
+immediately with a `run_id`; a durable Temporal workflow runs the batch/cycle
+loop and best-effort-publishes SSE events that the UI subscribes to. Strategy
+Lab is **Temporal-only** — there is no thread-mode fallback (see
+[`architecture.md`](./architecture.md)§7).
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Client
     participant API as api/main.py
-    participant Worker as _strategy_lab_worker<br/>(daemon thread)
-    participant MLDP as FreeTierMarketDataProvider
+    participant BatchWF as StrategyLabBatchWorkflow
+    participant CycleWF as StrategyLabCycleWorkflow<br/>(child, per cycle)
     participant SIE as SignalIntelligenceExpert
-    participant SIA as StrategyIdeationAgent
-    participant BTA as BacktestingAgent
-    participant MDS as MarketDataService
+    participant Attempt as run_design_attempt_activity<br/>(runs the WHOLE per-attempt pipeline)
+    participant Finalize as finalize_cycle_record_activity
+    participant PTA as PaperTradingAgent
     participant LLM as LLM Service
     participant Store as _PersistentDict
+    participant RunStore as investment_strategy_lab_runs<br/>(direct JobServiceClient)
     participant Bus as job_event_bus
 
-    Client->>API: POST /strategy-lab/run (L1251)
-    API->>API: allocate run_id, init state
-    API->>Store: _active_runs[run_id] persisted
-    API->>Worker: spawn thread(_strategy_lab_worker, L1083)
+    Client->>API: POST /strategy-lab/run
+    API->>BatchWF: start_workflow (503 if Temporal unreachable)
     API-->>Client: StrategyLabRunStartResponse (run_id)
 
     opt Real-time subscription
-        Client->>API: GET /strategy-lab/runs/{run_id}/stream (L1550)
+        Client->>API: GET /strategy-lab/runs/{run_id}/stream
         API->>Bus: subscribe(run_id)
     end
 
-    Worker->>MLDP: fetch_context()<br/>(Frankfurter + FRED + CoinGecko)
-    MLDP-->>Worker: MarketLabContext
-    Worker->>Store: load prior StrategyLabRecords
-
-    loop for each cycle in batch
-        alt Signal expert enabled
-            Worker->>SIE: produce_signal_brief(priors, context)
-            SIE->>LLM: complete_json(temp=0.58)
+    loop for each batch
+        BatchWF->>SIE: compute_signal_brief_activity<br/>(dispatched unconditionally, once per batch —<br/>see architecture.md §7 for the resume caveat)
+        opt STRATEGY_LAB_SIGNAL_EXPERT_ENABLED (default true)
+            SIE->>LLM: Agent(prompt) — Strands path,<br/>not .complete_json
             LLM-->>SIE: SignalIntelligenceBriefV1
-            SIE-->>Worker: brief
         end
+        SIE-->>BatchWF: brief, or null +<br/>skipped_reason=signal_expert_disabled
 
-        Worker->>SIA: ideate_strategy(brief, priors)
-        SIA->>LLM: complete_json(temp=0.85)
-        LLM-->>SIA: StrategySpec (creative)
-        SIA-->>Worker: strategy
+        loop wave of cycles (bounded parallelism)
+            loop start every cycle in the wave, before awaiting any
+                BatchWF->>CycleWF: start_child_workflow(cycle_input incl. brief)
+            end
 
-        Worker->>BTA: run_backtest(strategy, config)
-        BTA->>MDS: fetch OHLCV per symbol
-        MDS-->>BTA: bars
-        loop per qualifying bar
-            BTA->>LLM: complete_json(temp=0.2)
-            LLM-->>BTA: enter/exit/hold decision
+            loop design-re-entry (bounded, on spec-implementability failure)
+                CycleWF->>Attempt: run_design_attempt_activity
+                Attempt->>LLM: design ↔ review (DesignAgent/DesignReviewAgent)
+                LLM-->>Attempt: converged spec
+                Attempt->>Attempt: compile_strategy() deterministically<br/>synthesizes code for the default DSL path<br/>(no LLM call), or CodeSynthesisAgent for<br/>a custom-code spec
+                opt validation-gate failure (safety/conformance checks)
+                    Attempt->>LLM: RefinementAgent (no execution<br/>attempted this round — validation runs<br/>before execute)
+                end
+                Attempt->>Attempt: execute strategy_code in the<br/>sandboxed TradingService — trade ledger<br/>is engine output, not an LLM response
+                opt execution error, anomaly, or zero-trade result
+                    alt zero-trade classified ENTRY_WITH_NO_EXIT
+                        Note over Attempt: raises SpecImplementabilityError internally — no<br/>LLM call — exits are engine-owned, only a spec<br/>rewrite can fix it
+                        Attempt-->>CycleWF: caught inside the activity, returns<br/>&#123;kind: "reentry", ...&#125; — not an exception<br/>across the activity boundary — consumed by<br/>the design-re-entry loop above
+                    else other execution error, anomaly, or zero-trade category
+                        Attempt->>LLM: RefinementAgent, or<br/>ZeroTradeRepairAgent for a zero-trade<br/>result — either may trigger a re-execution
+                    end
+                end
+                alt execution succeeded with a non-empty trade ledger
+                    Attempt->>Attempt: DeterministicAlignmentChecker audits the<br/>trade ledger — a clean pass synthesizes the<br/>report locally, no LLM call
+                    opt near-miss adjudication or a misaligned fix
+                        Attempt->>LLM: TradeAlignmentAgent<br/>(adjudicate_near_miss, or<br/>propose_code_fix — may re-execute<br/>a committed fix)
+                    end
+                    Attempt->>LLM: AnalysisAgent (after the deterministic<br/>verification gates)
+                else execution failed, or refinement exhausted with no trades
+                    Note over Attempt: alignment and AnalysisAgent are both<br/>skipped — neither runs without a<br/>successful execution and a trade ledger
+                end
+                Attempt-->>CycleWF: record | reentry | skipped
+            end
+
+            CycleWF-->>BatchWF: cycle result (per child)
+            Note over BatchWF,CycleWF: asyncio.gather() barrier — every child in the<br/>wave settles before any of them is finalized
+            loop finalize each settled cycle, in cycle-index order
+                BatchWF->>Finalize: finalize_cycle_record_activity
+                opt publishable winner AND paper_trading_enabled
+                    Finalize->>PTA: run_session(strategy)
+                    PTA-->>Finalize: PaperTradingSession
+                    Finalize->>Store: persist PaperTradingSession
+                end
+                Finalize->>Store: persist StrategyLabRecord + StrategySpec +<br/>BacktestRecord (_persist_strategy_lab_record —<br/>three writes, one call)
+                BatchWF->>Bus: publish_run_event_activity (best-effort)
+                Bus-->>Client: SSE event
+            end
         end
-        BTA-->>Worker: BacktestResult + trades
-
-        Worker->>SIA: _analyze_strategy(win/lose)
-        SIA->>LLM: complete_json(temp=0.35)
-        LLM-->>SIA: draft narrative
-        Worker->>SIA: _self_review_analysis(draft)
-        SIA->>LLM: complete_json(temp=0.15)
-        LLM-->>SIA: validated narrative
-        SIA-->>Worker: narrative
-
-        Worker->>Store: persist StrategyLabRecord
-        Worker->>Bus: publish(run_id, cycle_complete event)
-        Bus-->>Client: SSE event
     end
 
-    Worker->>Store: mark run complete
-    Worker->>Bus: publish(run_id, run_complete)
+    BatchWF->>RunStore: persist_run_state_activity — writes the terminal<br/>status: completed, completed_with_errors, or whatever<br/>external_terminal_status_activity reported between waves<br/>(cancelled / failed / interrupted)
+    BatchWF->>Bus: publish_run_event_activity — terminal event shape from<br/>_terminal_sse_event: type=complete, type=cancelled,<br/>or type=error (failed / interrupted)
     Bus-->>Client: SSE event (close)
 ```
 
 **Key notes**
 
-- The per-bar LLM call inside `BacktestingAgent.run_backtest` is expensive —
-  it's the CRITICAL-1 issue in
-  [`../ARCHITECTURE_REVIEW.md`](../ARCHITECTURE_REVIEW.md). The long-term plan
-  is rule compilation + batched Tier-2 evaluation.
-- Worker state lives in both an in-memory `_active_runs` dict **and** the
-  `_PersistentDict` bucket so restarts can reload in-flight runs via
-  `_load_run_from_job_service`.
-- `STRATEGY_LAB_SIGNAL_EXPERT_ENABLED` toggles the signal-expert step off for
-  A/B comparison or cost control.
-- Polling clients can use `GET /strategy-lab/runs/{run_id}/status` (L1534)
-  instead of SSE.
+- `run_design_attempt_activity` runs the *entire* per-attempt pipeline
+  (design ↔ review, code synthesis, refinement, trade alignment,
+  verification, analysis, and record assembly) as a **single** Temporal
+  activity — durability applies at attempt granularity, not per inner phase.
+  See [`generation_pipeline.md`](./generation_pipeline.md) for what actually
+  happens inside it, including the quality-gates catalog.
+- There is no per-bar LLM call anywhere in this flow: the prior LLM-per-bar
+  backtest path has been fully removed (`api/main.py::_run_real_data_backtest`
+  now raises if a strategy has no compiled/synthesized `strategy_code`).
+  Backtests execute deterministically through the sandboxed engine
+  (`trading_service/`), the same execution path Strategy Lab and paper
+  trading both use.
+- Two market-data dependencies are folded inside the activities above rather
+  than drawn as participants. `compute_signal_brief_activity` builds a
+  `MarketLabContext` through `FreeTierMarketDataProvider.fetch_context(...)`
+  and reads the prior `StrategyLabRecord`s before the LLM call — every step is
+  fail-open, not as an error, but the two failure modes are not the same:
+  `FreeTierMarketDataProvider()` construction failing (a config/init problem)
+  nulls the brief with `skipped_reason="provider_init_failed"`; an ordinary
+  fetch/feed outage in `fetch_context(...)` after successful construction
+  instead degrades to `MarketLabContext(degraded=True, degraded_reason=...)`
+  and still proceeds to call `SignalIntelligenceExpert` — so a market-data
+  outage typically still returns a real (degraded-input) brief, not a null
+  one. The `execute strategy_code` step fetches OHLCV through
+  `MarketDataService` (see [`market_data_flow.md`](./market_data_flow.md)).
+- `_active_runs` is an in-memory read cache. All four **GET** surfaces —
+  `/strategy-lab/runs`, `.../runs/{id}/status`, `/strategy-lab/jobs`, and
+  `.../runs/{id}/stream` (for its connect-time snapshot, via
+  `run_in_threadpool`) — call `_reconcile_run_progress` first, so they recover
+  from a restart or a stale cache. The `resume` and `restart` endpoints do **not**: they read
+  `_get_run_state`'s process-local snapshot and compute the resume offset
+  straight from its counters, so on a multi-replica deployment a resume can
+  act on stale progress. Reconciliation also no-ops once the in-memory status
+  is already terminal.
+- `STRATEGY_LAB_SIGNAL_EXPERT_ENABLED` (default true) doesn't skip the
+  activity — the workflow always dispatches it. The gate is inside
+  `_compute_signal_brief_snapshot`, which returns a null brief with
+  `skipped_reason="signal_expert_disabled"`, so the LLM call is what's
+  actually avoided.
+- Polling clients can use `GET /strategy-lab/runs/{run_id}/status`
+  instead of SSE — both surfaces read the same reconciled data.
 
 ---
 
@@ -178,17 +230,17 @@ the `escalation` queue in
 
 ```mermaid
 flowchart TD
-    START([POST /promotions/decide<br/>L719]) --> G1{Gate 1<br/>Separation of duties<br/>proposer_id ≠ approver.agent_id?}
+    START([POST /promotions/decide]) --> G1{Gate 1<br/>Separation of duties<br/>proposer_id ≠ approver.agent_id?}
     G1 -- No --> REJ1[outcome = reject<br/>gate: separation_of_duties = fail]
     G1 -- Yes --> G2{Gate 2<br/>Risk veto?}
     G2 -- Yes --> REJ2[outcome = reject<br/>gate: risk_veto = fail]
     G2 -- No --> G3{Gate 3<br/>ValidationReport<br/>complete &<br/>all required passed?}
     G3 -- No --> REV[outcome = revise<br/>gate: validation = fail]
     G3 -- Yes --> G4{Gate 4<br/>IPS.live_trading_enabled?}
-    G4 -- No --> PAP1[outcome = paper<br/>gate: ips_live = warn]
+    G4 -- No --> PAP1[outcome = paper<br/>gate: ips_permission = warn]
     G4 -- Yes --> G5{Gate 5<br/>IPS.human_approval_required_for_live<br/>&amp; human_live_approval?}
     G5 -- approval pending --> PAP2[outcome = paper<br/>gate: human_approval = warn]
-    G5 -- approval granted<br/>or not required --> LIVE[outcome = live<br/>gate: live_promote = pass]
+    G5 -- approval granted<br/>or not required --> LIVE[outcome = live<br/>gate: human_approval = pass]
 
     REJ1 --> ESC[[Enqueue to escalation queue<br/>priority=high<br/>orchestrator.py L113-117]]
     REJ2 --> ESC
@@ -220,7 +272,7 @@ transitions defined on the orchestrator but only exercised by tests).
 
 ```mermaid
 stateDiagram-v2
-    [*] --> monitor_only : WorkflowState() default<br/>(orchestrator.py:50)<br/>instantiated at api/main.py:78
+    [*] --> monitor_only : WorkflowState() default<br/>(orchestrator.py:50)<br/>instantiated at module import in api/main.py
 
     monitor_only --> monitor_only : GET /workflow/status<br/>(read-only)
 
@@ -248,11 +300,11 @@ stateDiagram-v2
 **Key notes**
 
 - **Current behavior.** `_workflow_state = WorkflowState()` is created once
-  at module import ([`api/main.py`](../api/main.py):78) and the dataclass
+  at module import in [`api/main.py`](../api/main.py) and the dataclass
   default pins `mode = WorkflowMode.MONITOR_ONLY`
   ([`orchestrator.py`](../orchestrator.py):50). `GET /workflow/status`
-  ([`api/main.py`](../api/main.py):756) and `GET /workflow/queues`
-  ([`api/main.py`](../api/main.py):767) are the only endpoints that touch
+  and `GET /workflow/queues`
+  (both in [`api/main.py`](../api/main.py)) are the only endpoints that touch
   it, and both are read-only.
 - **What is defined but not called.** `InvestmentTeamOrchestrator.bootstrap`
   ([`orchestrator.py`](../orchestrator.py):69-71) (which would copy

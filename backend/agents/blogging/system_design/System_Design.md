@@ -390,8 +390,8 @@ All pipeline outputs are written to `work_dir/{job_id}/` as versioned artifacts.
 | Artifact | `producer_phase` | `producer_agent` | Format | Purpose |
 |----------|-----------------|------------------|--------|---------|
 | `brand_spec_prompt.md` | `draft_initial` | Pipeline (brand load) | Markdown | Brand and style rules (single source of truth) |
-| `research_packet.md` | `research` | BlogResearchAgent | Markdown | Compiled research document. **Legacy slot**: declared in `ARTIFACT_NAMES` but not currently written by the v2 pipeline, since research is skipped |
-| `allowed_claims.json` | `planning` | BlogPlanningAgent | JSON | Evidence-backed claims for the fact-check gate / validators (`read_artifact`'d by `BlogFactCheckAgent`/`run_validators_from_work_dir`). **Interim producer**: the module docstring in `blog_research_agent/allowed_claims.py` designates `BlogResearchAgent` as the intended producer, but since research is skipped (see above), planning derives claims from its own content plan with no reference list instead — see Architecture.md Note 4 |
+| `research_packet.md` | `research` | BlogResearchAgent | Markdown | Compiled research document, written by `run_planning()` ahead of content planning. Not yet fed into `PlanningInput.research_digest` (still defaults to `""`) — that wiring is a separate follow-up |
+| `allowed_claims.json` | `planning` | BlogPlanningAgent | JSON | Evidence-backed claims for the fact-check gate / validators (`read_artifact`'d by `BlogFactCheckAgent`/`run_validators_from_work_dir`). **Interim producer**: the module docstring in `blog_research_agent/allowed_claims.py` designates `BlogResearchAgent` as the intended producer, but extraction isn't yet wired to the research call above — planning derives claims from its own content plan with no reference list instead — see Architecture.md Note 4 |
 | `content_plan.json` | `planning` | BlogPlanningAgent | JSON | Structured plan (machine-readable) |
 | `content_plan.md` | `planning` | BlogPlanningAgent | Markdown | Human-readable plan with analysis |
 | `content_brief.md` | `planning` | BlogPlanningAgent | Markdown | Title choices + outline |

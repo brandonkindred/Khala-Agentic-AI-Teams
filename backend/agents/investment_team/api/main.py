@@ -554,6 +554,91 @@ def _validate_advisory_result(
     return result
 
 
+def _extract_promotion_decision_result(
+    result: Any, strategy_id: str
+) -> tuple[PromotionDecision, list[str], QueueItem | None]:
+    """Validate and extract a promotion advisory result without mutating state.
+
+    Preconditions:
+        ``result`` is the raw value returned by the promotion advisory workflow;
+        ``strategy_id`` identifies the strategy for validation logging.
+    Postconditions:
+        Returns the validated decision, audit-log entries, and optional queue
+        item. Raises the promotion route's existing ``HTTPException`` responses
+        for malformed data, and never mutates ``_workflow_state``.
+    """
+    validated = _validate_advisory_result(
+        result,
+        {},
+        log_message="Invalid advisory response for strategy %s promotion: %r",
+        log_args=(strategy_id, result),
+    )
+    if "decision" not in validated or validated["decision"] is None:
+        raise HTTPException(
+            status_code=502,
+            detail="Promotion decision result is missing required 'decision' field",
+        )
+
+    decision_data = _validate_advisory_result(
+        validated,
+        {"decision": dict},
+        log_message="Invalid advisory decision for strategy %s promotion: %r",
+        log_args=(strategy_id, validated["decision"]),
+    )["decision"]
+    try:
+        decision = PromotionDecision.model_validate(decision_data)
+    except ValidationError as exc:
+        raise HTTPException(status_code=500, detail=f"Invalid decision payload: {exc}") from exc
+
+    audit_entries = validated.get("audit_log_appended") or []
+    if not isinstance(audit_entries, list) or not all(
+        isinstance(entry, str) for entry in audit_entries
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail="Promotion decision result has invalid 'audit_log_appended' entries",
+        )
+
+    escalation = validated.get("escalation_enqueued")
+    if escalation is None:
+        return decision, audit_entries, None
+    if not isinstance(escalation, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="Promotion decision result has invalid 'escalation_enqueued' payload",
+        )
+
+    queue_name = escalation.get("queue")
+    payload_id = escalation.get("payload_id")
+    priority = escalation.get("priority")
+    if not isinstance(queue_name, str) or not queue_name:
+        raise HTTPException(
+            status_code=502,
+            detail="Promotion decision result has invalid escalation queue name",
+        )
+    if queue_name not in _workflow_state.queues:
+        raise HTTPException(status_code=502, detail=f"Unknown escalation queue '{queue_name}'")
+    if not isinstance(payload_id, str) or not payload_id:
+        raise HTTPException(
+            status_code=502,
+            detail="Promotion decision result has invalid escalation payload_id",
+        )
+    if not isinstance(priority, str) or not priority:
+        raise HTTPException(
+            status_code=502,
+            detail="Promotion decision result has invalid escalation priority",
+        )
+    return (
+        decision,
+        audit_entries,
+        QueueItem(
+            queue=queue_name,
+            payload_id=payload_id,
+            priority=priority,
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Strategy Lab run tracking models
 # ---------------------------------------------------------------------------
@@ -1747,75 +1832,11 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
         key=request.strategy_id,
     )
 
-    # Validate the entire result up front — decision, audit-log shape, and
-    # escalation queue item — before mutating any shared _workflow_state, so
-    # a malformed activity result never leaves the audit log or queues
-    # partially updated.
-    if not isinstance(result, dict):
-        logger.error(
-            "Invalid advisory response for strategy %s promotion: %r", request.strategy_id, result
-        )
-        raise HTTPException(
-            status_code=502,
-            detail="Advisory execution returned unexpected response structure",
-        )
-    if "decision" not in result or result["decision"] is None:
-        raise HTTPException(
-            status_code=502,
-            detail="Promotion decision result is missing required 'decision' field",
-        )
-    decision_data = result["decision"]
-    if not isinstance(decision_data, dict):
-        logger.error(
-            "Invalid advisory decision for strategy %s promotion: %r",
-            request.strategy_id,
-            decision_data,
-        )
-        raise HTTPException(
-            status_code=502,
-            detail="Advisory execution returned unexpected response structure",
-        )
-    try:
-        decision = PromotionDecision.model_validate(decision_data)
-    except ValidationError as exc:
-        raise HTTPException(status_code=500, detail=f"Invalid decision payload: {exc}") from exc
-
-    audit_entries = result.get("audit_log_appended") or []
-    if not isinstance(audit_entries, list) or not all(isinstance(e, str) for e in audit_entries):
-        raise HTTPException(
-            status_code=502,
-            detail="Promotion decision result has invalid 'audit_log_appended' entries",
-        )
-
-    escalation = result.get("escalation_enqueued")
-    queue_item: QueueItem | None = None
-    if escalation is not None:
-        if not isinstance(escalation, dict):
-            raise HTTPException(
-                status_code=502,
-                detail="Promotion decision result has invalid 'escalation_enqueued' payload",
-            )
-        queue_name = escalation.get("queue")
-        payload_id = escalation.get("payload_id")
-        priority = escalation.get("priority")
-        if not isinstance(queue_name, str) or not queue_name:
-            raise HTTPException(
-                status_code=502,
-                detail="Promotion decision result has invalid escalation queue name",
-            )
-        if queue_name not in _workflow_state.queues:
-            raise HTTPException(status_code=502, detail=f"Unknown escalation queue '{queue_name}'")
-        if not isinstance(payload_id, str) or not payload_id:
-            raise HTTPException(
-                status_code=502,
-                detail="Promotion decision result has invalid escalation payload_id",
-            )
-        if not isinstance(priority, str) or not priority:
-            raise HTTPException(
-                status_code=502,
-                detail="Promotion decision result has invalid escalation priority",
-            )
-        queue_item = QueueItem(queue=queue_name, payload_id=payload_id, priority=priority)
+    # Extract the entire result before mutating shared state, so a malformed
+    # activity result never leaves the audit log or queues partially updated.
+    decision, audit_entries, queue_item = _extract_promotion_decision_result(
+        result, request.strategy_id
+    )
 
     with _lock:
         _workflow_state.audit_log.extend(audit_entries)

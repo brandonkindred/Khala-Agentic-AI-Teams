@@ -36,12 +36,23 @@ flowchart TB
       IC[InvestmentCommitteeAgent<br/>L303-407]
     end
 
-    subgraph lab_agents[Strategy Lab Agents — agents/]
-      SIE[SignalIntelligenceExpert<br/>signal_intelligence_agent.py]
-      SIA[StrategyIdeationAgent<br/>strategy_ideation_agent.py]
-      BTA[BacktestingAgent<br/>backtesting_agent.py]
-      PTA[PaperTradingAgent<br/>paper_trading_agent.py]
-      TSE[TradeSimulationEngine<br/>trade_simulator.py]
+    subgraph lab_agents[Strategy Lab Pipeline Agents — strategy_lab/agents/]
+      DA[DesignAgent]
+      DRA[DesignReviewAgent]
+      CSA[CodeSynthesisAgent]
+      RFA[RefinementAgent]
+      TAA[TradeAlignmentAgent]
+      ANA[AnalysisAgent]
+      ZTRA[ZeroTradeRepairAgent]
+    end
+
+    subgraph lab_gates[Quality Gates — strategy_lab/quality_gates/]
+      QG[SpecReadinessGate · CodeSafetyChecker<br/>CodeConformanceGate · PredicateConformanceGate<br/>PredicateReachabilityProbe · BacktestAnomalyDetector<br/>AcceptanceGate · ExitRuleConformanceGate<br/>TargetSymbolCoverageGate · 5 more realism gates<br/>DeterministicAlignmentChecker · ConvergenceTracker<br/>StrategySpecValidator]
+    end
+
+    subgraph batch_agents[Batch-level Agents — investment_team/]
+      SIE[SignalIntelligenceExpert<br/>signal_intelligence_agent.py<br/>runs once per batch, not per cycle — see §7]
+      PTA["PaperTradingAgent<br/>paper_trading_agent.py<br/>run_session — reached from Finalize, or via<br/>PaperTradingWorkflow for the standalone<br/>endpoint; never inside orchestrator.py"]
     end
 
     subgraph orch[Orchestration — orchestrator.py]
@@ -50,14 +61,17 @@ flowchart TB
     end
 
     subgraph worker[Strategy Lab Dispatch — Temporal-only]
-      Worker[_dispatch_strategy_lab_run<br/>api/main.py — StrategyLabBatchWorkflow<br/>+ child StrategyLabCycleWorkflow per cycle]
-      Cycle[strategy_lab/temporal/activities.py<br/>fine-grained per-side-effect activities]
+      BatchWF[StrategyLabBatchWorkflow<br/>strategy_lab/temporal/workflows.py<br/>wave/batch fan-out, 1 signal-brief call<br/>per batch — see §7]
+      CycleWF[StrategyLabCycleWorkflow<br/>child workflow per cycle<br/>outer design-re-entry loop only]
+      DesignAttempt["run_design_attempt_activity<br/>runs StrategyLabOrchestrator._run_design_attempt unmodified:<br/>design+review → synthesis → refinement/alignment →<br/>verification/analysis → record assembly — all in ONE activity"]
+      Finalize[finalize_cycle_record_activity<br/>signal-brief attach + paper-trade + persist]
       EventBus[job_event_bus.py<br/>SSE fan-out + job-service reconciliation]
     end
 
     subgraph persistence[Persistence]
-      PDict[_PersistentDict<br/>dict-like wrapper<br/>api/main.py L85]
+      PDict[_PersistentDict<br/>dict-like wrapper<br/>api/main.py — search for<br/>class _PersistentDict]
       Buckets[(_profiles, _proposals,<br/>_strategies, _validations,<br/>_backtests, _strategy_lab_records,<br/>_paper_trading_sessions,<br/>_advisor_sessions)]
+      RunStore[(investment_strategy_lab_runs<br/>run-state store — direct JobServiceClient,<br/>bypasses _PersistentDict)]
     end
 
     subgraph tools[Tool Agents]
@@ -99,14 +113,23 @@ flowchart TB
   SharedEP --> PGate
   SharedEP --> ORCH
 
-  LabEP --> Worker
-  Worker --> Cycle
-  Cycle --> SIE
-  Cycle --> SIA
-  Cycle --> BTA
-  BTA --> TSE
-  LabEP --> PTA
-  PTA --> TSE
+  LabEP --> BatchWF
+  BatchWF --> SIE
+  BatchWF --> CycleWF
+  CycleWF --> DesignAttempt
+  DesignAttempt --> DA
+  DesignAttempt --> DRA
+  DesignAttempt --> CSA
+  DesignAttempt --> RFA
+  DesignAttempt --> TAA
+  DesignAttempt --> ANA
+  DesignAttempt --> ZTRA
+  DesignAttempt --> QG
+  CycleWF -->|"assembled record"| BatchWF
+  BatchWF -->|"after awaiting the wave's child workflows"| Finalize
+  Finalize --> PTA
+  LabEP -.->|"POST /strategy-lab/paper-trade — standalone,<br/>bypasses BatchWF/Finalize"| PTWF["PaperTradingWorkflow<br/>→ run_paper_trading_activity"]
+  PTWF --> PTA
 
   ORCH --> PG
   ORCH --> PGate
@@ -120,12 +143,17 @@ flowchart TB
   FA --> LLM
   IC --> LLM
   SIE --> LLM
-  SIA --> LLM
-  BTA --> LLM
+  DA --> LLM
+  DRA --> LLM
+  CSA --> LLM
+  RFA --> LLM
+  TAA --> LLM
+  ANA --> LLM
+  ZTRA --> LLM
   PTA --> LLM
 
   SIE --> MLDP
-  BTA --> MDS
+  DesignAttempt --> MDS
   PTA --> MDS
 
   MDS --> YF
@@ -139,11 +167,15 @@ flowchart TB
   AdvisorEP --> PDict
   LabEP --> PDict
   SharedEP --> PDict
-  Worker --> PDict
+  BatchWF -->|"progress writes<br/>(persist_run_state_activity)"| RunStore
+  DesignAttempt -->|"design-attempt checkpoint"| RunStore
+  Finalize --> PDict
   PDict --> Buckets
   Buckets --> JS
+  RunStore --> JS
 
-  Worker --> EventBus
+  BatchWF -.->|"publish_run_event_activity<br/>(skipped/finalized/terminal events)"| EventBus
+  DesignAttempt -.->|"direct job_event_bus.publish<br/>(in-process, best-effort progress)"| EventBus
   EventBus -->|"SSE /strategy-lab/runs/{id}/stream"| UI
 ```
 
@@ -157,20 +189,24 @@ passes validation is only promotable to paper/live when it is evaluated against
 a specific client's IPS. Keeping both tracks in one package lets
 `PromotionGateAgent` depend on both `StrategySpec` (lab side) and `IPS`
 (advisor side) without cross-team imports. This framing is authoritative in
-[`../README.md`](../README.md):1-56.
+[`../README.md`](../README.md)'s "Two tracks" section.
 
 ### 2. IPS-first, hard-constraint model
 
 `PolicyGuardianAgent` ([`agents.py`](../agents.py):49-103) treats IPS caps
 (per-position, asset-class, speculative sleeve) and explicit permissions
-(options, crypto, live trading) as **hard constraints** — not soft scores.
+(options, crypto) as **hard constraints** — not soft scores. Live-trading
+permission is not checked here at all; it is handled later and more softly, by
+`PromotionGateAgent`'s Gate 4 (`../README.md`'s "Universal promotion
+checklist"), which records a `WARN` and downgrades the outcome to `paper`
+rather than rejecting.
 When a proposal is run through `POST /proposals/{proposal_id}/validate`
-([`api/main.py`](../api/main.py):534-555) the guardian returns a structured
+(`validate_proposal` in [`api/main.py`](../api/main.py)) the guardian returns a structured
 list of violations that the caller is expected to gate on before acting.
 
 **Scope of enforcement (today).** The guardian is only invoked by the
 proposal-validation endpoint. It is **not** automatically applied by
-`POST /memos` ([`api/main.py`](../api/main.py):783-793) — that endpoint calls
+`POST /memos` (`create_memo` in [`api/main.py`](../api/main.py)) — that endpoint calls
 `InvestmentCommitteeAgent.draft_memo` directly — nor by `POST /promotions/decide`,
 which consumes a `ValidationReport` rather than a `PortfolioProposal`. In
 practice, enforcement is the caller's responsibility: validate the proposal
@@ -204,13 +240,14 @@ See [`flow_charts.md`](./flow_charts.md) for the decision tree.
 ### 5. Safe-by-default workflow mode
 
 The API module constructs a single process-wide `WorkflowState()` at
-import time ([`api/main.py`](../api/main.py):78). `WorkflowState` is a
+import time (`_workflow_state = WorkflowState()` in
+[`api/main.py`](../api/main.py)). `WorkflowState` is a
 dataclass whose `mode` field defaults to `WorkflowMode.MONITOR_ONLY`
 ([`orchestrator.py`](../orchestrator.py):50), so the running system always
 boots in `monitor_only` regardless of any user's `IPS.default_mode`. The only
 endpoints that expose the workflow state are the read-only
-`GET /workflow/status` ([`api/main.py`](../api/main.py):756) and
-`GET /workflow/queues` ([`api/main.py`](../api/main.py):767).
+`GET /workflow/status` and `GET /workflow/queues`
+(both in [`api/main.py`](../api/main.py) — grep the route path).
 
 **What is designed but not wired.** `InvestmentTeamOrchestrator.bootstrap`
 ([`orchestrator.py`](../orchestrator.py):69-71) — which would copy
@@ -232,8 +269,8 @@ raise the mode) is tracked in
 Unlike teams that own a Postgres schema via `shared.postgres`, the investment
 team persists **everything** through the job service:
 
-- `_PersistentDict` ([`api/main.py`](../api/main.py):85) presents a dict-like
-  interface backed by `JobServiceClient`.
+- `_PersistentDict` (`api/main.py` — search for `class _PersistentDict`)
+  presents a dict-like interface backed by `JobServiceClient`.
 - Separate logical buckets per artifact type: `investment_profiles`,
   `investment_proposals`, `investment_strategies`, `investment_validations`,
   `investment_backtests`, `investment_strategy_lab_records`,
@@ -242,25 +279,65 @@ team persists **everything** through the job service:
 
 Trade-off: the team does **not** publish a `shared.postgres` `SCHEMA` constant
 — artifact storage is opaque to the job DB. Operators cleaning up strategy-lab
-data query the `jobs` table directly (see
-[`../README.md`](../README.md):77-86) or use `DELETE /strategy-lab/storage`.
+data query the `jobs` table directly (see "Clearing strategy lab data in
+Postgres directly" in [`../README.md`](../README.md)) or use
+`DELETE /strategy-lab/storage`.
 
 ### 7. Temporal-only dispatch (thread-based worker retired)
 
-A strategy-lab run is a long-running, multi-cycle loop (signal → ideation →
-backtest → analysis → self-review). The Phase 3 migration tracked in
-[`../ARCHITECTURE_REVIEW.md`](../ARCHITECTURE_REVIEW.md) is complete: the old
-in-process daemon-thread worker (`_strategy_lab_worker`) has been removed, and
-`run_strategy_lab` / `resume_strategy_lab_run` / `restart_strategy_lab_run` now
-dispatch exclusively through `_dispatch_strategy_lab_run`
-([`api/main.py`](../api/main.py)), which starts the durable
-`StrategyLabBatchWorkflow` — a parent workflow that fans each batch's cycles
-out as `StrategyLabCycleWorkflow` **child workflows**, reproducing the old
-thread-mode per-wave concurrency on Temporal's `strategy-lab-queue`
+A strategy-lab run is a long-running, multi-cycle loop. The Phase 3 migration
+tracked in [`../ARCHITECTURE_REVIEW.md`](../ARCHITECTURE_REVIEW.md) is
+complete: the old in-process daemon-thread worker (`_strategy_lab_worker`) has
+been removed, and `run_strategy_lab` / `resume_strategy_lab_run` /
+`restart_strategy_lab_run` now dispatch exclusively through
+`_dispatch_strategy_lab_run` ([`strategy_lab/orchestrator_api.py`](../strategy_lab/orchestrator_api.py),
+imported into `api/main.py`), which starts
+the durable `StrategyLabBatchWorkflow` — a parent workflow that refreshes a
+**per-batch signal-intelligence brief** at the top of every batch iteration
+(one `compute_signal_brief_activity` call via `SignalIntelligenceExpert` per
+`batch_idx`, shared by every cycle within that one batch — not recomputed
+per cycle). A single workflow invocation with `batch_count > 1` therefore
+computes a fresh brief for each batch by design (each later batch sees every
+strategy from the batches before it, per the brief's own "batch N sees
+batches 1..N-1" framing) — this is normal, not a resume artifact. A mid-batch
+resume via `start_cycle_offset` is a separate case where even one batch's
+own brief can be recomputed mid-flight: the resumed invocation re-runs
+`compute_signal_brief_activity` (which reads all currently-persisted
+records) before starting that batch's remaining cycles, so cycles within
+what looks like a single logical batch can still see different briefs if a
+resume landed inside it. The workflow then fans that
+batch's cycles out as `StrategyLabCycleWorkflow` **child workflows**,
+reproducing the old thread-mode per-wave concurrency on Temporal's
+`strategy-lab-queue`
 ([`strategy_lab/temporal/workflows.py`](../strategy_lab/temporal/workflows.py)).
-Each cycle's side effects (LLM calls, backtests, market-data fetches,
-job-service writes) run as fine-grained activities in
-[`strategy_lab/temporal/activities.py`](../strategy_lab/temporal/activities.py).
+
+`StrategyLabCycleWorkflow` itself only durability-wraps the *outer*
+design-re-entry loop (retry a spec-implementability failure into a fresh
+design attempt, up to `MAX_DESIGN_REENTRIES` times). The entire *inner*
+per-attempt pipeline — design ↔ review, code synthesis, refinement, trade
+alignment, verification, analysis, and record assembly — runs unmodified
+inside a **single** activity, `run_design_attempt_activity`
+([`strategy_lab/temporal/activities.py`](../strategy_lab/temporal/activities.py)),
+which is a thin wrapper around `StrategyLabOrchestrator._run_design_attempt` —
+"thin" meaning the pipeline logic inside that call is untouched; the wrapper
+itself adds cooperative-cancellation heartbeating, checkpoint-based state
+reseeding, and mapping any non-control-flow exception to Temporal's
+`ApplicationError`. Temporal durability therefore applies at the *attempt* granularity, not at
+each internal phase; a design-attempt checkpoint taken at the design/synthesis
+boundary inside that same activity lets a crash-and-retry resume past a
+completed design phase instead of re-paying for it (see
+[`../strategy_lab/README.md`](../strategy_lab/README.md#design-attempt-checkpointing),
+and the repo-root
+[`ADR-012-strategy-lab-design-attempt-checkpoint-contract.md`](../../../../system_design/adr/ADR-012-strategy-lab-design-attempt-checkpoint-contract.md)
+for the full contract).
+Once a cycle produces a record, `finalize_cycle_record_activity` runs the
+post-`run_cycle` tail — attaching the batch's signal brief and running
+`PaperTradingAgent` for publishable winners — delegating to the same
+`_finalize_strategy_lab_cycle_record` helper the (now-removed) thread-mode
+path used. See
+[`generation_pipeline.md`](./generation_pipeline.md) for the full inner-loop
+mechanics: the design ↔ review loop, the compiled-DSL-vs-custom-code fork, the
+refinement/alignment loops, and the ~20-gate quality-gates catalog.
 
 There is **no in-process fallback**: `_require_temporal()` raises `HTTPException(503)`
 for these endpoints when `TEMPORAL_ADDRESS` is unset / no worker is connected.
@@ -279,12 +356,27 @@ via `_load_run_from_job_service`.
 subscribes to a per-run topic in
 [`api/job_event_bus.py`](../api/job_event_bus.py) (queue-per-subscriber
 fan-out) and drains it as an HTTP SSE stream to the Angular UI. Since the
-Temporal migration (§7), the workflow/activities don't push into this bus
-directly — the connect-time snapshot is instead reconciled live from the
-durable job-service record via `_reconcile_run_progress`, so a client always
-sees current progress at connect time and on each subsequent poll. A polling
-fallback (`GET /strategy-lab/runs/{run_id}/status`) exposes the same
-reconciled data and is what the UI relies on for updates mid-stream.
+Temporal migration (§7), progress reaches this bus two ways: most of it
+persists to the durable job-service record first, with the connect-time
+snapshot reconciled live from that record via `_reconcile_run_progress` so
+a client always sees current progress at connect time and on each
+subsequent poll; separately, two call sites publish directly and
+best-effort, in-process, without going through that record —
+`run_design_attempt_activity`'s own progress callback (every sub-cycle
+phase update it forwards through `_PROGRESS_PHASE_MAP`, which collapses the
+orchestrator's internal phase names onto the UI's four-entry stepper — the
+full name inventory and mapping live in
+[`strategy_lab_pipeline.md`](./strategy_lab_pipeline.md)'s "Phase events"
+section) and `publish_run_event_activity`
+(the batch workflow's skipped/finalized/terminal events). Reconciliation is
+state catch-up, not event catch-up: `_STRATEGY_LAB_PROGRESS_FIELDS` includes
+`current_cycle`, but nothing in the Temporal-only dispatch path ever writes
+it to anything but `None` in the persisted record, so a missed direct-publish
+phase update — or the exact skipped/finalized/terminal event shape — isn't
+replayable from polling; a client only recovers the coarser batch/wave
+counters and terminal status the durable record does carry. A polling
+fallback (`GET /strategy-lab/runs/{run_id}/status`) exposes that same
+reconciled state and is what the UI relies on for updates mid-stream.
 
 ### 9. Market data is tiered by free vs pay
 
@@ -307,10 +399,93 @@ prompt-side data shape without destabilizing the backtester.
 
 ### 10. LLM access goes through the shared service
 
-Every agent takes an `LLMClient` from `backend/agents/llm_service/` and calls
-`.complete_json(...)`. Provider (Ollama vs Claude), base URL, and model are
-selected by `LLM_PROVIDER`, `LLM_BASE_URL`, and `LLM_MODEL` — the same
-environment variables used by every other Khala team.
+Most agents take an `LLMClient` from `backend/agents/llm_service/` and call
+`.complete_json(...)`. Strategy Lab is the exception across the board, via
+two different paths. `DesignAgent`, `DesignReviewAgent`, `RefinementAgent`,
+`CodeSynthesisAgent`, `TradeAlignmentAgent`, `AnalysisAgent`, and
+`ZeroTradeRepairAgent` build a Strands `Model` via this team's own
+`model_factory.get_strands_model` (see below — this is the one that rejects
+`LLM_PROVIDER=dummy`). `CodeSynthesisAgent`, `TradeAlignmentAgent`,
+`AnalysisAgent`, and `ZeroTradeRepairAgent` are always invoked as
+`Agent(prompt)` (via the shared `run_single_shot_agent` runner).
+`DesignAgent`, `DesignReviewAgent`, and `RefinementAgent` are conditional: on
+the default `ollama`/`runpod` path (provider-enforced schema-conformant
+decoding available), `_structured_output.invoke_structured_with_schema` takes
+the model's `.client` and calls `complete`/`complete_json` directly, never
+constructing an `Agent`; they fall back to `Agent(prompt)` (via
+`run_json_with_parse_retry`) only when the active provider can't do that
+(`bedrock`). `SignalIntelligenceExpert` and `PaperTradingAgent` are
+Strands-backed too, but through the platform-wide
+`llm_service.get_strands_model` — the same centralized provider-list
+resolution (and `dummy` support) every `LLMClient`-based agent gets — not
+this team's `model_factory`. So `LLM_PROVIDER=dummy` is only unsafe for the
+seven `model_factory`-routed agents above; `SignalIntelligenceExpert` and
+`PaperTradingAgent` work fine with it. Platform-wide, provider/base-URL/model resolve from the
+Postgres-backed ordered provider list (`/llm-config` UI → `llm_provider_configs`)
+— per the root `CLAUDE.md`, the sole source of LLM resolution, with
+`LLM_PROVIDER=dummy` as the only env override.
+
+**`LLM_PROVIDER` is load-bearing for Strategy Lab's Strands agents.**
+`DesignAgent`, `DesignReviewAgent`, and the shared agent runners build their
+model through `strategy_lab/agents/model_factory.py::get_strands_model`, which
+branches on `resolve_provider()`:
+
+- **`ollama` (the default)** — routes to `llm_service.strands_adapter`, which
+  resolves the client through the provider list. On the normal (no explicit
+  `timeout`) call, `model_factory` does not forward its own
+  `resolve_model()`/`resolve_base_url()` values, but `LLM_MODEL`/`LLM_BASE_URL`
+  still apply *downstream*: `llm_service.factory` falls back to them whenever
+  the selected provider-list entry leaves `model` or `base_url` blank. So they
+  behave exactly as the platform-wide rule says — blank-entry defaults, not a
+  provider selector. One latent exception: if a caller passes an explicit
+  `timeout`, `model_factory` builds its own `OllamaLLMClient` from
+  `resolve_model()`/`resolve_base_url()` and hands it to the adapter, bypassing
+  the provider list's model/base-URL entirely. No production caller does this
+  today — but adding one would silently make `LLM_MODEL` authoritative.
+- **`bedrock`** — constructs a `BedrockModel` directly from `resolve_model()`,
+  bypassing the provider list entirely. `LLM_MODEL` *is* live here.
+- **`dummy`** — **raises** (`"LLM_PROVIDER=dummy is not supported for Strands
+  agents"`), so the platform-wide dry-run switch does not work for this team.
+- anything else — raises as an unsupported provider.
+
+Strategy Lab's own
+agents route through an additional shared fault-tolerance envelope on top of
+this (`strategy_lab/agents/_llm_envelope.py` — per-call timeout, retries,
+backoff, total wall-time budget); see
+[`../strategy_lab/README.md`](../strategy_lab/README.md) for that layer.
+
+### 11. The per-attempt pipeline is a 5-mixin, 4-phase state machine
+
+`StrategyLabOrchestrator` (`strategy_lab/orchestrator.py`) is deliberately
+**not** a Strands `Agent` — the flow must not be skippable, so it's plain
+Python control flow that calls into agents and gates, never an LLM deciding
+what to call next. The class is composed from five mixins, each owning one
+slice of the pipeline and resolved via MRO on the final class:
+
+| Mixin | Owns |
+|---|---|
+| `DesignMixin` (`orchestrator_design.py`) | The DESIGN ↔ DESIGN_REVIEW loop and the whole-attempt sequencer (`_run_design_attempt`) |
+| `SynthesisMixin` (`orchestrator_synthesis.py`) | Pre-synthesis validation and the bounded code-refinement loop |
+| `AlignmentMixin` (`orchestrator_alignment.py`) | The post-backtest trade-alignment audit/fix loop |
+| `VerificationMixin` (`orchestrator_verification.py`) | Walk-forward acceptance, exit-rule conformance, realism gates, publication veto |
+| `RecordAssemblyMixin` (`orchestrator_record_assembly.py`) | Building the final `StrategyLabRecord`, happy-path or short-circuit |
+
+`_orchestrator_helpers.py` is the dependency-free base every mixin builds on
+— shared outcome dataclasses and the copy-on-entry/commit-on-completion
+`_DriftCollector` that isolates one design attempt's spec/code drift from the
+next. This split is a straight, behavior-preserving relocation of a former
+~3500-line god-class; see
+[`../strategy_lab/MIXIN_BOUNDARIES.md`](../strategy_lab/MIXIN_BOUNDARIES.md)
+for the full boundary rationale and
+[`../strategy_lab/RETRY_STATE_ISOLATION.md`](../strategy_lab/RETRY_STATE_ISOLATION.md)
+for how the drift collector composes with attempt-to-attempt retry isolation.
+Each attempt moves through four phases tracked by `strategy_lab/phases.py`
+(`DESIGN → DESIGN_REVIEW → CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION`), with
+every transition carrying SHA-256 hashes of the spec and code so drift across
+a phase boundary is detectable. Full mechanics — the design↔review loop,
+mechanical-repair pre-flight, compiled-DSL-vs-custom-code fork, refinement and
+alignment loops, and the ~20-gate `quality_gates/` catalog — are documented in
+[`generation_pipeline.md`](./generation_pipeline.md), not repeated here.
 
 ## Environment variables consumed by this team
 
@@ -322,8 +497,18 @@ environment variables used by every other Khala team.
 | `STRATEGY_LAB_MARKET_DATA_CACHE_TTL_SEC` | Snapshot cache TTL (default 120.0) |
 | `STRATEGY_LAB_MARKET_DATA_PROVIDER` | Provider key (only `free_tier` is implemented) |
 | `STRATEGY_LAB_SIGNAL_EXPERT_ENABLED` | Toggles the signal-intelligence step |
-| `LLM_PROVIDER` / `LLM_BASE_URL` / `LLM_MODEL` | Shared LLM client config |
+| `LLM_PROVIDER` | For the seven `model_factory`-routed Strategy Lab agents (design/review/refinement/synthesis/alignment/analysis/zero-trade-repair): must be `ollama` or `bedrock`; `dummy` and any other value raise (see §10). `SignalIntelligenceExpert`/`PaperTradingAgent` route through the platform-wide resolver instead and support `dummy` like any other agent. Platform-wide, it is only load-bearing as an env override when set to `dummy` (all other provider/base-URL/model resolution comes from the provider list) |
+| `LLM_BASE_URL` / `LLM_MODEL` | Blank-provider-list-entry defaults (applied by `llm_service.factory`). `LLM_MODEL` additionally selects the live model on the `bedrock` branch (see §10) |
 | `POSTGRES_HOST` (+ friends) | Enables job-service persistence (required for non-trivial use) |
+
+This table covers only the batch-level / market-data / platform vars this team
+consumes — they are read across `api/main.py`, `market_data_service.py`,
+`market_lab_data/free_tier.py`, and the shared `llm_service` / `shared.postgres`
+modules, not all in one place. The much larger `STRATEGY_LAB_*`
+surface tuning the design/review loop, code synthesis, refinement, alignment,
+and the LLM fault-tolerance envelope is documented exhaustively — and kept
+current — in [`../strategy_lab/README.md`](../strategy_lab/README.md#environment-variables),
+the canonical home for those knobs.
 
 ## Known issues & roadmap
 

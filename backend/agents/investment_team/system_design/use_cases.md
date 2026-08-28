@@ -35,7 +35,9 @@ flowchart LR
       UC3([Review IPS draft])
       UC4([Finalize IPS])
       UC5([Upsert profile directly])
+      UC29([Get profile / IPS])
       UC6([Create portfolio proposal])
+      UC30([Get proposal])
       UC7([Validate proposal<br/>against IPS])
       UC8([Request investment<br/>committee memo])
     end
@@ -48,6 +50,7 @@ flowchart LR
       UC13([Decide promotion<br/>6-gate checklist])
       UC14([View workflow status])
       UC15([View workflow queues])
+      UC31([Health check])
     end
 
     subgraph lab_uc[Strategy Lab track]
@@ -72,7 +75,9 @@ flowchart LR
   EndUser --> UC3
   EndUser --> UC4
   EndUser --> UC5
+  EndUser --> UC29
   EndUser --> UC6
+  EndUser --> UC30
   EndUser --> UC7
   EndUser --> UC8
   EndUser --> UC17
@@ -88,6 +93,7 @@ flowchart LR
 
   Ops --> UC14
   Ops --> UC15
+  Ops --> UC31
   Ops --> UC18
   Ops --> UC19
   Ops --> UC20
@@ -139,7 +145,7 @@ flowchart LR
 |---|---|---|---|
 | Create strategy spec | `POST /strategies` | — | `investment_strategies` |
 | Validate strategy | `POST /strategies/{id}/validate` | `ValidationAgent.checklist_failures` ([`agents.py`](../agents.py):106) | `investment_validations` |
-| Run backtest | `POST /backtests` | `BacktestingAgent.run_backtest` | `investment_backtests` |
+| Run backtest | `POST /backtests` | `_run_real_data_backtest` — sandboxed execution of `strategy.strategy_code`; the legacy LLM-per-bar path has been removed | `investment_backtests` |
 | List backtests | `GET /backtests` | — (read-only) | `investment_backtests` |
 | Decide promotion | `POST /promotions/decide` | `InvestmentTeamOrchestrator.promotion_decision` → `PromotionGateAgent.decide` ([`orchestrator.py`](../orchestrator.py):92, [`agents.py`](../agents.py):131) | audit log + escalation queue on reject/revise |
 | View workflow status | `GET /workflow/status` | `InvestmentTeamOrchestrator` | — |
@@ -150,9 +156,9 @@ flowchart LR
 
 | Use case | Endpoint | Agent(s) | Persists to |
 |---|---|---|---|
-| Run strategy lab batch | `POST /strategy-lab/run` | `StrategyLabBatchWorkflow` → `SignalIntelligenceExpert` → `StrategyIdeationAgent` → `BacktestingAgent` | `investment_strategy_lab_records` |
+| Run strategy lab batch | `POST /strategy-lab/run` | `StrategyLabBatchWorkflow` → `SignalIntelligenceExpert` (once/batch — a mid-batch resume can re-run it; see `architecture.md` §7) → `StrategyLabCycleWorkflow` → `run_design_attempt_activity` (`DesignAgent`/`DesignReviewAgent`/`CodeSynthesisAgent`/`RefinementAgent`/`TradeAlignmentAgent`/`AnalysisAgent`/`ZeroTradeRepairAgent` + quality gates — see [`generation_pipeline.md`](./generation_pipeline.md)) → `finalize_cycle_record_activity` (`PaperTradingAgent`) | `investment_strategy_lab_records` + `investment_strategies` + `investment_backtests` (every finalized cycle, via `_persist_strategy_lab_record`) + `investment_paper_trading_sessions` (successful integrated paper trades) |
 | Stream run progress | `GET /strategy-lab/runs/{id}/stream` | `job_event_bus` subscription | — |
-| Poll run status | `GET /strategy-lab/runs/{id}/status` | `_active_runs` + `_load_run_from_job_service` | — |
+| Poll run status | `GET /strategy-lab/runs/{id}/status` | `_reconcile_run_progress` → `_active_runs`, falling back to `_load_run_from_job_service` | — |
 | Resume paused run | `POST /strategy-lab/runs/{id}/resume` | `StrategyLabBatchWorkflow` | `investment_strategy_lab_records` |
 | Restart failed run | `POST /strategy-lab/runs/{id}/restart` | `StrategyLabBatchWorkflow` | `investment_strategy_lab_records` |
 | List active runs | `GET /strategy-lab/runs` | `_active_runs` | — |
@@ -160,13 +166,14 @@ flowchart LR
 | List lab jobs | `GET /strategy-lab/jobs` | — (read-only) | `investment_strategy_lab_records` |
 | Delete lab record | `DELETE /strategy-lab/records/{id}` | — | `investment_strategy_lab_records` + linked strategies / backtests / paper sessions |
 | Purge lab storage | `DELETE /strategy-lab/storage` | — | all strategy-lab buckets |
-| Run paper-trading session | `POST /strategy-lab/paper-trade` | `PaperTradingAgent.run_paper_trading` | `investment_paper_trading_sessions` |
+| Run paper-trading session | `POST /strategy-lab/paper-trade` | `PaperTradingWorkflow` → `run_paper_trading_activity` → `PaperTradingAgent.run_session` | `investment_paper_trading_sessions` |
 | List paper sessions | `GET /strategy-lab/paper-trade/results` | — (read-only) | `investment_paper_trading_sessions` |
 | Get paper session detail | `GET /strategy-lab/paper-trade/{session_id}` | — (read-only) | `investment_paper_trading_sessions` |
 
 ## Profile requirement per use case
 
-Matches the authoritative list in [`../README.md`](../README.md):58-76.
+Matches the authoritative list under "HTTP endpoints — profile requirement" in
+[`../README.md`](../README.md).
 
 **Requires `user_id` / IPS loaded from store:**
 `POST /profiles`, `GET /profiles/{user_id}`,
