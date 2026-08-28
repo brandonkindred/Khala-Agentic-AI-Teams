@@ -124,7 +124,7 @@ class BlogPlanCriticAgent(_BlogAgentBase):
             build_prompt=build_user_prompt,
             system_prompt=PLAN_CRITIC_SYSTEM,
             context_tokens=resolve_model_context_tokens(self._model),
-            extra_prompt_reserve_chars=len(strict_json_suffix),
+            extra_prompt_reserve_bytes=len(strict_json_suffix.encode("utf-8")),
         )
 
         if on_llm_request:

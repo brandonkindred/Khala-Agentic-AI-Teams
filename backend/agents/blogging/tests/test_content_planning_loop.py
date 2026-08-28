@@ -26,6 +26,7 @@ from agents.blogging.shared.content_planning_loop import (
 )
 from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
 from agents.blogging.shared.errors import PlanningError
+from agents.blogging.shared.prompt_budget import fit_optional_text_to_prompt
 
 from ._content_plan_test_utils import make_content_plan, make_requirements_analysis
 
@@ -164,6 +165,22 @@ def test_build_refine_plan_prompt_includes_previous_plan_and_feedback() -> None:
     out = build_refine_plan_prompt(inp, prev, "fix gaps")
     assert "fix gaps" in out
     assert "PREVIOUS PLAN" in out
+
+
+def test_optional_prompt_text_uses_utf8_bytes_for_unicode_budget() -> None:
+    text = "😀😀"
+    base = "prompt:"
+    context_tokens = 4_000 + len(base.encode("utf-8")) + 4
+
+    prompt, fitted = fit_optional_text_to_prompt(
+        text,
+        build_prompt=lambda optional: base + optional,
+        system_prompt="",
+        context_tokens=context_tokens,
+    )
+
+    assert fitted == "😀"
+    assert prompt == "prompt:😀"
 
 
 def test_complete_plan_json_first_attempt_success() -> None:

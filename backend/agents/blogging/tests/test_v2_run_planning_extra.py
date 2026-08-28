@@ -308,8 +308,8 @@ def test_run_planning_keeps_academic_only_research_digest(monkeypatch) -> None:
     assert planning_digests == [compiled_doc]
 
 
-def test_run_planning_caps_research_digest(monkeypatch) -> None:
-    """Oversized research is capped for the smaller planner/critic context."""
+def test_run_planning_preserves_planners_larger_research_budget(monkeypatch) -> None:
+    """The shared digest uses the planner budget, not a smaller critic budget."""
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.blog_research_agent.models import (
         ResearchAgentOutput,
@@ -322,7 +322,7 @@ def test_run_planning_caps_research_digest(monkeypatch) -> None:
 
     ppr = _make_planning_result()
     oversized_document = "x" * 200_001
-    compacted_digest = "y" * 3_000
+    compacted_digest = "y" * 7_000
     planning_digests: list[str] = []
     compaction_calls: list[tuple] = []
 
@@ -383,10 +383,10 @@ def test_run_planning_caps_research_digest(monkeypatch) -> None:
         job_updater=None,
     )
 
-    # The 8k-token critic is smaller than the 12k planner, leaving 2k characters
-    # after the shared 6k reserve. An oversized compaction response is hard-capped.
-    assert planning_digests == [compacted_digest[:2_000]]
-    assert compaction_calls == [(oversized_document, 2_000, planning_client, "research digest")]
+    # The 12k planner retains its 6k-character initial budget. The 8k critic no
+    # longer permanently discards evidence before per-prompt fitting occurs.
+    assert planning_digests == [compacted_digest[:6_000]]
+    assert compaction_calls == [(oversized_document, 6_000, planning_client, "research digest")]
 
 
 def test_research_digest_budget_uses_smallest_failover_context() -> None:

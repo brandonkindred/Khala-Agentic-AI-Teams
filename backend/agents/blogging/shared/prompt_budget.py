@@ -38,26 +38,26 @@ def fit_optional_text_to_prompt(
     build_prompt: Callable[[str], str],
     system_prompt: str,
     context_tokens: int,
-    extra_prompt_reserve_chars: int = 0,
+    extra_prompt_reserve_bytes: int = 0,
     response_reserve_tokens: int = DEFAULT_RESPONSE_RESERVE_TOKENS,
 ) -> tuple[str, str]:
     """Build a prompt with as much optional text as its concrete context permits.
 
-    The calculation deliberately treats every character as a token. This is
-    conservative for ordinary prose and remains safe for poorly tokenizing web
-    content. The prompt without the optional text, the system prompt, retry
-    instructions, and a response allowance are all charged before any of ``text``
-    is admitted.
+    The fallback calculation deliberately treats every UTF-8 byte as a token.
+    This remains conservative when emoji, uncommon scripts, or mixed-language
+    web content require multiple tokens per Python character. The prompt without
+    the optional text, the system prompt, retry instructions, and a response
+    allowance are all charged before any of ``text`` is admitted.
     """
     normalized = (text or "").strip()
     empty_prompt = build_prompt("")
-    available_chars = max(
+    available_bytes = max(
         0,
         int(context_tokens)
         - int(response_reserve_tokens)
-        - len(system_prompt or "")
-        - len(empty_prompt)
-        - max(0, int(extra_prompt_reserve_chars)),
+        - len((system_prompt or "").encode("utf-8"))
+        - len(empty_prompt.encode("utf-8"))
+        - max(0, int(extra_prompt_reserve_bytes)),
     )
-    fitted = normalized[:available_chars]
+    fitted = normalized.encode("utf-8")[:available_bytes].decode("utf-8", errors="ignore")
     return build_prompt(fitted), fitted

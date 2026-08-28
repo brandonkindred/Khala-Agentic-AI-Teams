@@ -271,7 +271,7 @@ def run_content_planning_loop(
                 build_prompt=build_prompt,
                 system_prompt=system,
                 context_tokens=planner_context_tokens,
-                extra_prompt_reserve_chars=len(retry_suffix),
+                extra_prompt_reserve_bytes=len(retry_suffix.encode("utf-8")),
             )
 
         data, pr = complete_plan_json_fn(

@@ -512,10 +512,6 @@ def run_planning(
 
     planning_client = planning_llm_client(llm_client)
     plan_critic = _build_plan_critic_agent(llm_client)
-    digest_consumers = [planning_client]
-    critic_client = getattr(plan_critic, "_model", None)
-    if critic_client is not None:
-        digest_consumers.append(critic_client)
 
     # The research agent emits a human-readable fallback document even when no web
     # references or academic papers were found.  That artifact remains useful for
@@ -526,7 +522,10 @@ def run_planning(
     digest_llm = (
         planning_client.client if isinstance(planning_client, LLMClientModel) else planning_client
     )
-    digest_max_chars = _research_digest_max_chars_for_consumers(*digest_consumers)
+    # Preserve all evidence the planner can accept. The planning loop and critic
+    # independently fit this shared digest to each of their concrete prompts, so
+    # constraining it here to a smaller critic would discard planner-usable evidence.
+    digest_max_chars = _research_digest_max_chars_for_consumers(planning_client)
     research_digest = build_research_digest(
         research_output.compiled_document
         if research_output.references or research_output.academic_papers
