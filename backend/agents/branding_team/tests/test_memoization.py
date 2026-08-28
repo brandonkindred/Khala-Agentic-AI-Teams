@@ -381,7 +381,11 @@ def test_non_allowlisted_mission_field_change_does_not_change_hash() -> None:
             "company_description",
             {"company_description": "A completely different value proposition"},
         ),
-        (BrandPhase.CHANNEL_ACTIVATION, "desired_voice", {"desired_voice": "Bold and unmistakable"}),
+        (
+            BrandPhase.CHANNEL_ACTIVATION,
+            "desired_voice",
+            {"desired_voice": "Bold and unmistakable"},
+        ),
         (BrandPhase.GOVERNANCE, "company_name", {"company_name": "Different Co"}),
     ],
 )
