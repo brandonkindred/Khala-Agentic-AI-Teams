@@ -4,10 +4,9 @@ Defines one immutable checkpoint variant per pipeline stage boundary —
 ``DESIGN``, ``REVIEW``, ``SYNTHESIS``, ``REFINEMENT``, ``ALIGNMENT`` — capturing
 what has converged at that boundary so a crash mid-attempt can resume from the
 latest converged boundary instead of re-deriving upstream work from scratch
-*within that same design attempt*. This is pure data-model design: no
-orchestrator wiring, no capture points, no consumption. Capturing instances of
-these models at actual pipeline stage boundaries, and consuming them to skip
-stages on resume, are separate, later pieces of work.
+*within that same design attempt*. The shared orchestrator path now captures
+instances at the five stage boundaries; consuming them to skip stages on
+resume remains a separate, later piece of work.
 
 This family generalizes, and is additive alongside, ``DesignAttemptCheckpoint``
 (``..models``, documented by
@@ -50,12 +49,11 @@ across this model's review history. Fields with no such precedent — anything
 that only exists as a local variable or a runtime side effect somewhere
 inside ``_run_design_attempt``/``_synthesize_initial_code``/
 ``_run_trade_alignment_loop`` and has never before been captured into a
-checkpoint DTO — are deliberately left to whichever future issue actually
-implements capture points and consumption; this issue is pure data-model
-design and has no capture points to observe those effects from (see above).
-Nailing down such a field's shape without that implementation to inform it
-would be guessing, not modeling. This is not a gap to keep finding instances
-of; it is this family's stated scope boundary.**
+checkpoint DTO — remain deliberately outside this model family. The capture
+implementation snapshots exactly this established contract; adding a new
+field shape without a prior contract would still be guessing, not modeling.
+This is not a gap to keep finding instances of; it is this family's stated
+scope boundary.**
 """
 
 from __future__ import annotations
@@ -332,13 +330,11 @@ class AlignmentCheckpoint(PipelineCheckpoint):
     of these have any precedent anywhere in this codebase to generalize a
     field shape from (unlike ``spec_history``/``code_history``/``gate_timeline``/
     ``budget_calls``/``gate_results``, all of which mirror an existing,
-    already-established ``DesignAttemptCheckpoint`` field). This issue is
-    pure data-model design with no capture points yet; nailing down these
-    fields' representation without a capture-point implementation to inform
-    it would be guessing. That decision belongs to the sibling issue that
-    actually wires ``_run_trade_alignment_loop`` to a checkpoint, the same
-    way ADR-012 left its own storage-key shape to its implementation
-    sub-issue.
+    already-established ``DesignAttemptCheckpoint`` field). The capture path
+    therefore snapshots the fields this model declares and does not invent
+    representations for those runtime-only values. Any future consumer that
+    proves one is resume-critical must first define its durable contract
+    explicitly.
 
     Postconditions:
       - ``stage`` is always ``PipelineStage.ALIGNMENT`` — enforced by

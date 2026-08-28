@@ -35,8 +35,9 @@ import _finalize_loop_telemetry`` keeps working for existing call sites.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Type
 
 from ..models import (
     BacktestConfig,
@@ -53,10 +54,60 @@ from ._orchestrator_helpers import (
     _DesignPersistContext,
     _DriftCollector,
 )
+from .agents._llm_budget import active_budget
 from .alignment_findings import AlignmentFinding
+from .checkpoints import AnyPipelineCheckpoint, PipelineCheckpoint
+from .phases import hash_code, hash_spec
 from .quality_gates.models import QualityGateResult
 
 PhaseCallback = Callable[[str, Dict[str, Any]], None]
+
+
+@dataclass
+class PipelineCheckpointCapture:
+    """Attempt-local sink and identity shared by every checkpoint boundary.
+
+    Thread mode and Temporal mode both pass this same value object through the
+    shared orchestrator path.  The capture sites only append immutable
+    ``PipelineCheckpoint`` models; deciding whether or how to resume from the
+    captured list belongs to the follow-up resume-wiring work.
+
+    Preconditions:
+      - ``run_id`` and ``cycle_scope`` are non-empty stable identifiers for the
+        current cycle; ``generation`` is the active positive fencing generation.
+    Postconditions:
+      - ``record`` appends exactly one checkpoint and never interprets it.
+    """
+
+    run_id: str
+    cycle_scope: str
+    generation: int
+    checkpoints: List[AnyPipelineCheckpoint] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.run_id:
+            raise ValueError("checkpoint capture run_id must be non-empty")
+        if not self.cycle_scope:
+            raise ValueError("checkpoint capture cycle_scope must be non-empty")
+        if self.generation < 1:
+            raise ValueError("checkpoint capture generation must be positive")
+
+    def record(self, checkpoint: AnyPipelineCheckpoint) -> None:
+        self.checkpoints.append(checkpoint)
+
+
+def _design_context_to_checkpoint(context: _DesignPersistContext) -> Dict[str, Any]:
+    """Return a detached, JSON-shaped design-context snapshot."""
+
+    return {
+        "rounds": context.rounds,
+        "critiques": [
+            critique.model_dump(mode="json") if hasattr(critique, "model_dump") else critique
+            for critique in context.critiques
+        ],
+        "stop_reason": context.stop_reason,
+        "loop_telemetry": dict(context.loop_telemetry),
+    }
 
 
 def _finalize_loop_telemetry(
@@ -121,6 +172,61 @@ def _finalize_loop_telemetry(
 
 class RecordAssemblyMixin:
     """Record-assembly cluster mixed into ``StrategyLabOrchestrator``."""
+
+    def _capture_pipeline_checkpoint(
+        self,
+        checkpoint_type: Type[PipelineCheckpoint],
+        *,
+        capture: Optional[PipelineCheckpointCapture],
+        design_attempt: int,
+        spec: StrategySpec,
+        code: str,
+        rationale: str,
+        design_context: _DesignPersistContext,
+        all_gate_results: List[QualityGateResult],
+        drift_collector: _DriftCollector,
+        **stage_fields: Any,
+    ) -> Optional[AnyPipelineCheckpoint]:
+        """Snapshot one converged pipeline boundary into its stage DTO.
+
+        Pre: ``checkpoint_type`` is one of the five concrete checkpoint
+        subclasses; all inputs describe the same boundary and attempt.
+        Post: when ``capture`` is present, appends one detached checkpoint with
+        current artefact hashes, budget usage, gates, and drift histories.
+        Returns that checkpoint.  When capture is disabled, returns ``None``.
+
+        The deep copies are intentional: the checkpoint models are shallowly
+        frozen, while ``StrategySpec`` and history entries remain mutable.  A
+        later stage mutating the live spec must not retroactively change an
+        earlier boundary snapshot or invalidate its stored hash.
+        """
+
+        if capture is None:
+            return None
+
+        budget = active_budget()
+        if "code" in checkpoint_type.model_fields:
+            stage_fields.setdefault("code", code)
+        checkpoint = checkpoint_type(
+            run_id=capture.run_id,
+            cycle_scope=capture.cycle_scope,
+            design_attempt=design_attempt,
+            generation=capture.generation,
+            spec_hash=hash_spec(spec),
+            code_hash=hash_code(code),
+            captured_at=datetime.now(timezone.utc).isoformat(),
+            budget_calls=budget.calls_made if budget is not None else 0,
+            gate_results=tuple(g.model_dump(mode="json") for g in all_gate_results),
+            spec_history=tuple(r.model_copy(deep=True) for r in drift_collector.spec_history),
+            code_history=tuple(r.model_copy(deep=True) for r in drift_collector.code_history),
+            gate_timeline=tuple(r.model_copy(deep=True) for r in drift_collector.gate_timeline),
+            spec=spec.model_copy(deep=True),
+            rationale=rationale,
+            design_context=_design_context_to_checkpoint(design_context),
+            **stage_fields,
+        )
+        capture.record(checkpoint)
+        return checkpoint
 
     def _assemble_record(
         self,

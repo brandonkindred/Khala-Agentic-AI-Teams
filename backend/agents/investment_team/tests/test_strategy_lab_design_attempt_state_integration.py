@@ -19,7 +19,13 @@ import pytest
 
 from investment_team.models import BacktestResult, StrategyLabRecord
 from investment_team.strategy_lab._orchestrator_helpers import _DesignAttemptState
-from investment_team.strategy_lab.phases import PHASE_TRANSITION_EVENT_NAME, Phase
+from investment_team.strategy_lab.checkpoints import PipelineStage
+from investment_team.strategy_lab.phases import (
+    PHASE_TRANSITION_EVENT_NAME,
+    Phase,
+    hash_code,
+    hash_spec,
+)
 
 from ._walk_forward_test_helpers import (
     StubMarketDataService,
@@ -208,3 +214,49 @@ def test_phase_transitions_stable_on_converged_cycle(monkeypatch: pytest.MonkeyP
     ]
     assert record.backtest.status == "completed"
     assert record.is_winning is True
+
+
+def test_converged_cycle_captures_all_five_pipeline_stage_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared thread-mode path captures one immutable checkpoint after
+    each converged design, review, synthesis, refinement, and alignment stage.
+
+    The checkpoints remain inert: ``run_cycle`` completes normally and merely
+    exposes the snapshots for the later resume-wiring stories.
+    """
+
+    orch = orchestrator(StubMarketDataService())
+    wire_run_cycle_stubs(orch, monkeypatch, alignment_aligned=True)
+
+    record = orch.run_cycle(
+        prior_records=[],
+        config=_config(walk_forward_enabled=False),
+    )
+
+    checkpoints = orch.pipeline_checkpoints
+    assert [checkpoint.stage for checkpoint in checkpoints] == list(PipelineStage)
+    assert {checkpoint.design_attempt for checkpoint in checkpoints} == {0}
+    assert len({checkpoint.run_id for checkpoint in checkpoints}) == 1
+    assert len({checkpoint.cycle_scope for checkpoint in checkpoints}) == 1
+    assert {checkpoint.generation for checkpoint in checkpoints} == {1}
+
+    design, review, synthesis, refinement, alignment = checkpoints
+    assert design.code_hash == review.code_hash == hash_code("")
+    assert (
+        synthesis.code_hash
+        == refinement.code_hash
+        == alignment.code_hash
+        == hash_code(record.strategy_code)
+    )
+    assert review.review_rounds_completed == record.design_rounds
+    assert refinement.refinement_rounds_completed == record.refinement_rounds
+    assert alignment.alignment_rounds_completed == 0
+
+    # The frozen DTO contains detached payload objects.  Mutating the live
+    # record after completion cannot rewrite an earlier checkpoint in place.
+    captured_hypothesis = design.spec.hypothesis
+    record.strategy.hypothesis = "changed after capture"
+    assert design.spec.hypothesis == captured_hypothesis
+    assert design.spec_hash == hash_spec(design.spec)
+    assert design.spec_hash != hash_spec(record.strategy)

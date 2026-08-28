@@ -45,6 +45,7 @@ lives in that cluster. See ``MIXIN_BOUNDARIES.md`` for the full audit.
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
@@ -120,7 +121,7 @@ from .exceptions import SpecImplementabilityError
 from .market_regime import RegimeSummary, compute_regime_summary
 from .orchestrator_alignment import AlignmentMixin
 from .orchestrator_design import DesignMixin
-from .orchestrator_record_assembly import RecordAssemblyMixin
+from .orchestrator_record_assembly import PipelineCheckpointCapture, RecordAssemblyMixin
 from .orchestrator_synthesis import SynthesisMixin
 from .orchestrator_verification import VerificationMixin
 from .phases import hash_code, hash_metrics_and_trades
@@ -271,6 +272,9 @@ class StrategyLabOrchestrator(
         # each ``_run_design_attempt`` and tripped when any phase hits
         # ``_SPEC_MUTATION_TRIP_THRESHOLD``.
         self._consecutive_spec_mutation_rounds: Dict[str, int] = {}
+        # Populated afresh by ``run_cycle``.  Capture is inert in this issue:
+        # the thread-mode re-entry loop does not inspect this list yet.
+        self.pipeline_checkpoints: List[Any] = []
 
     def _readiness_price_provider(self, symbol: str, asset_class: str) -> float:
         """Recent-close lookup wired into ``SpecReadinessGate.Rule 5``.
@@ -559,6 +563,19 @@ class StrategyLabOrchestrator(
         """
         emit = on_phase or (lambda phase, data: None)
 
+        # Thread mode has no durable run/workflow identity at this layer, so
+        # mint one attempt-family scope for the cycle.  Temporal supplies its
+        # real run/cycle/fencing identity to the same capture path in the
+        # activity adapter.
+        checkpoint_scope = f"thread-cycle-{uuid.uuid4().hex}"
+        self.pipeline_checkpoints = []
+        checkpoint_capture = PipelineCheckpointCapture(
+            run_id=checkpoint_scope,
+            cycle_scope=checkpoint_scope,
+            generation=1,
+            checkpoints=self.pipeline_checkpoints,
+        )
+
         # Gather convergence directives once — appended to on loopback.
         directives: List[str] = gather_convergence_directives(self.convergence_tracker)
 
@@ -615,6 +632,7 @@ class StrategyLabOrchestrator(
                         drift_collector=attempt_drift,
                         cumulative_gate_results=cumulative_gate_results,
                         regime_summary=regime_summary,
+                        checkpoint_capture=checkpoint_capture,
                     )
                 except SpecImplementabilityError as exc:
                     last_evidence = exc.evidence
