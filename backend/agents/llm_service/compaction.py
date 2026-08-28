@@ -174,7 +174,9 @@ def _get_model_chunk_chars(llm: "LLMClient") -> int:
     else:
         ctx = llm.get_max_context_tokens() if hasattr(llm, "get_max_context_tokens") else 16384
     available = ctx - _PROMPT_OVERHEAD_TOKENS - _RESPONSE_RESERVE_TOKENS
-    return max(4000, int(available * _CHUNK_CHARS_PER_TOKEN))
+    # Zero means even the fixed prompt/response reserves cannot fit. Callers must
+    # skip LLM compaction rather than overriding the model limit with a size floor.
+    return max(0, int(available * _CHUNK_CHARS_PER_TOKEN))
 
 
 def _split_into_chunks(text: str, chunk_chars: int) -> List[str]:
@@ -422,6 +424,12 @@ def _compact_uncached(
 
     try:
         chunk_chars = _get_model_chunk_chars(llm)
+        if chunk_chars <= 0:
+            logger.warning(
+                "Skipping compaction for %s: model context cannot fit prompt/response reserves",
+                content_description,
+            )
+            return text, False
 
         # If the text fits in one compaction call, do it directly.
         if len(text) <= chunk_chars:

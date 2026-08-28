@@ -245,8 +245,8 @@ def test_empty_compaction_returns_raw_and_is_not_cached() -> None:
 
 
 def test_chunked_success_is_cached() -> None:
-    # ctx forces chunk_chars down to the 4000 floor, so a 9000-char input splits.
-    client = _CountingClient(result="PART", ctx=1000)
+    # 16k context minus the fixed 12k reserves leaves 4k chunks, so 9k splits.
+    client = _CountingClient(result="PART", ctx=16_000)
     text = "c" * 9000
     first = compact_text(text, 2000, client, "existing codebase")
     calls_after_first = client.calls
@@ -258,7 +258,7 @@ def test_chunked_success_is_cached() -> None:
 
 def test_chunked_partial_failure_returns_original_and_is_not_cached() -> None:
     text = "d" * 4000 + "FAILME" + "d" * 4000
-    client = _CountingClient(result="PART", ctx=1000, fail_on="FAILME")
+    client = _CountingClient(result="PART", ctx=16_000, fail_on="FAILME")
     # Any degraded chunk must return the full original — never a truncated join.
     assert compact_text(text, 2000, client, "existing codebase") == text
     calls_after_first = client.calls
@@ -269,7 +269,7 @@ def test_chunked_partial_failure_returns_original_and_is_not_cached() -> None:
 
 def test_chunked_empty_chunk_returns_original_and_is_not_cached() -> None:
     text = "d" * 4000 + "EMPTYME" + "d" * 4000
-    client = _CountingClient(result="PART", ctx=1000, empty_on="EMPTYME")
+    client = _CountingClient(result="PART", ctx=16_000, empty_on="EMPTYME")
     assert compact_text(text, 2000, client, "existing codebase") == text
     calls_after_first = client.calls
     # An empty compaction for any chunk marks the aggregate un-cacheable.
@@ -406,9 +406,18 @@ def test_chunk_size_uses_smallest_failover_context() -> None:
         def get_min_context_tokens(self):
             return 16_000
 
-    # 16k context minus the 12k prompt/response reserve reaches the 4k floor.
+    # 16k context minus the 12k prompt/response reserve leaves a safe 4k chunk.
     # Using only the preferred provider would incorrectly allow an 88k chunk.
     assert _get_model_chunk_chars(_FailoverLikeClient()) == 4_000
+
+
+def test_compaction_skips_llm_when_context_cannot_fit_reserves() -> None:
+    client = _CountingClient(result="must not be used", ctx=2_048)
+    original = "x" * 10_000
+
+    assert _get_model_chunk_chars(client) == 0
+    assert compact_text(original, 100, client, "small-context research") == original
+    assert client.calls == 0
 
 
 def test_cache_size_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
