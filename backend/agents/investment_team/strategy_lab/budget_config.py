@@ -173,7 +173,17 @@ class StrategyLabBudgetConfig:
     - ``design_self_revision_rounds`` — ``STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS``
       (default ``1``). Cap on internal design self-revision rounds.
     - ``design_max_llm_calls`` — ``STRATEGY_LAB_DESIGN_MAX_LLM_CALLS``
-      (default ``120``). Per-cycle hard cap on total design-phase LLM calls.
+      (default ``120``). Cap enforced by ``LLMCallBudget`` across the
+      *entire* design attempt — design, refinement, trade-alignment, and
+      zero-trade repair all charge against it, not the design phase alone.
+      Not a hard ceiling on a cycle's total charged calls: a Temporal
+      activity retry after the design-phase checkpoint reseeds the budget
+      from the checkpoint's boundary-time count, so post-checkpoint charges
+      (refinement/alignment/repair) are not recorded anywhere the retry can
+      see and are re-issued — a cycle can exceed this value across retries
+      even though each individual counter stays within it. See
+      ``agents/_llm_budget.py``'s ``LLMCallBudget``/``use_budget``
+      docstrings for the exact enforcement and retry-reseed contract.
     - ``refinement_parse_retries`` — ``STRATEGY_LAB_REFINEMENT_PARSE_RETRIES``
       (default ``2``). Re-prompt budget when a refinement response carries no
       recoverable JSON object.
@@ -295,8 +305,14 @@ class StrategyLabBudgetConfig:
             enforced by ``__post_init__`` regardless of construction path.
         Postconditions:
             Returns a positive ``int``. Purely informational — this method
-            does not enforce any cap itself; ``design_max_llm_calls`` remains
-            the actually-enforced per-cycle ceiling.
+            does not enforce any cap itself; ``design_max_llm_calls`` is the
+            cap each ``LLMCallBudget`` instance enforces — not a hard
+            ceiling on a cycle's total charged calls across Temporal
+            activity retries (see ``LLMCallBudget``'s docstring). This
+            return value models the design phase only — it does not include
+            refinement, trade-alignment, or zero-trade-repair calls, all of
+            which also charge against the same cap, so it understates the
+            true worst-case call count against ``design_max_llm_calls``.
         """
         revise_calls = (self.design_parse_retries + 1) * (1 + self.design_self_revision_rounds) + 2
         per_round_calls = revise_calls + 1

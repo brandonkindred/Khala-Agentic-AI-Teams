@@ -166,13 +166,35 @@ class PhaseTransition(BaseModel):
       - The event is immutable (Pydantic ``frozen=True``).
 
     Invariants:
+      - Both hashes are **boundary snapshots**: each records the spec/code as
+        of the moment its own transition fired. Neither is pinned for the
+        remainder of the attempt, so comparing hashes across two transitions
+        detects drift only where the carve-outs below do not apply.
       - ``spec_hash`` is stable from the ``DESIGN_REVIEW → CODE_SYNTHESIS``
-        transition onward for any given design attempt: the spec is frozen
-        post-design (with a tighten-only ``risk_limits`` carve-out documented
-        in ``_orchestrator_helpers._merge_risk_limits_tighten_only``).
-      - ``code_hash`` is stable from the ``CODE_SYNTHESIS →
-        BACKTEST_AND_VERIFICATION`` transition onward for any given design
-        attempt: code is not regenerated past the synthesis loop.
+        transition onward for any given design attempt, with three carve-outs.
+        All three land on the following transition — they run after the
+        ``DESIGN_REVIEW → CODE_SYNTHESIS`` emit and before the
+        ``CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION`` emit — though only
+        (1) and (2) are inside ``_run_synthesis_loop``; (3) fires earlier, in
+        ``_synthesize_initial_code``:
+          1. a tighten-only ``risk_limits`` update from refinement
+             (``_orchestrator_helpers._merge_risk_limits_tighten_only``);
+          2. a zero-trade repair committing a whitelisted ``risk_limits``
+             update verbatim (``zero_trade_repair._apply_zero_trade_spec_updates``)
+             — deliberately not tighten-only: a loosening is the sanctioned
+             fix when over-tight limits caused the zero-trade outcome (the
+             repair prompt gates it on that diagnosis; the committed spec is
+             re-validated for range, then must survive a fresh backtest);
+          3. ``_synthesize_initial_code`` flipping ``requires_custom_code``
+             to ``True`` on a ``CompilerError`` fallback (``hash_spec``
+             excludes only ``strategy_code``, not ``requires_custom_code``).
+      - ``code_hash`` at the ``CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION``
+        transition already reflects the refinement loop, which runs *before*
+        that emit. Between that boundary and the terminal transition only
+        the trade-alignment loop runs; it may commit a rewritten baseline
+        (``_commit_alignment_proposal``), which the terminal emit picks up
+        because it is reached with the post-alignment ``_DesignAttemptState``.
+        An alignment-driven rewrite is expected behaviour, not drift.
     """
 
     model_config = ConfigDict(frozen=True)

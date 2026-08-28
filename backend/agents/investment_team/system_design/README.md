@@ -43,10 +43,18 @@ with implementation detail for individual Strategy Lab capabilities:
   (context snapshot, historical OHLCV, streaming registry), provider-selection
   precedence + geo-failover, how a source is retrieved and streamed into the
   engine, and the four-step fill-price-from-bar derivation.
-- **[`strategy_lab_pipeline.md`](./strategy_lab_pipeline.md)** — full per-cycle
-  pipeline shape (`ideating → fetching_data → analyzing → paper_trading? →
-  complete`), the complete list of SSE phase events, the winner gate, and the
-  paper-trade skip/failure paths.
+- **[`strategy_lab_pipeline.md`](./strategy_lab_pipeline.md)** — the per-cycle
+  pipeline as a narrative of stages (ideate → fetch data → backtest → align →
+  analyze → optionally paper-trade), the winner gate, and the paper-trade
+  skip/failure paths. Its "Phase events" section owns the `on_phase` callback
+  contract and the mapping onto the four names a subscriber actually receives
+  — including which rows reach no subscriber at all.
+- **[`generation_pipeline.md`](./generation_pipeline.md)** — what actually
+  happens *inside* "ideating" and "backtest" above: the 4-phase contract, the
+  design ↔ review loop, the compiled-DSL-vs-custom-code fork, the refinement
+  and trade-alignment loops, the full quality-gates catalog, and the
+  batch/Temporal activity mapping. Read this after `strategy_lab_pipeline.md`
+  for the mechanism behind the wire-level phase events.
 - **[`paper_trading_integration.md`](./paper_trading_integration.md)** —
   paper trading as an integrated cycle step: winner gate, request-level
   configuration, failure contract, and linkage between `StrategyLabRecord` and
@@ -61,18 +69,28 @@ with implementation detail for individual Strategy Lab capabilities:
 
 | Concept | Source |
 |---|---|
-| Two-track API, all 30+ endpoints | [`api/main.py`](../api/main.py) (2063 lines) |
-| Core agents (Advisor, PolicyGuardian, ValidationAgent, PromotionGate, InvestmentCommittee) | [`agents.py`](../agents.py) (933 lines) |
-| Strategy Lab agents (SignalIntelligenceExpert, StrategyIdeationAgent, BacktestingAgent, PaperTradingAgent, TradeSimulationEngine) | [`agents/`](../agents/) |
-| Orchestrator state machine, 6 queues, promotion entry point | [`orchestrator.py`](../orchestrator.py) (133 lines) |
-| Pydantic domain models (profile, IPS, strategy, backtest, promotion, advisor, paper trading) | [`models.py`](../models.py) (477 lines) |
-| Strategy Lab batch workflow + per-cycle loop | [`strategy_lab/temporal/workflows.py`](../strategy_lab/temporal/workflows.py) `StrategyLabBatchWorkflow`, [`api/main.py`](../api/main.py) `_run_one_strategy_lab_cycle` |
+| Two-track API, all 30+ endpoints | [`api/main.py`](../api/main.py) |
+| Core agents (Advisor, PolicyGuardian, ValidationAgent, PromotionGate, InvestmentCommittee) | [`agents.py`](../agents.py) |
+| Batch-level Strategy Lab agents (once-per-batch signal brief, post-cycle paper trading) | [`signal_intelligence_agent.py::SignalIntelligenceExpert`](../signal_intelligence_agent.py), [`paper_trading_agent.py::PaperTradingAgent`](../paper_trading_agent.py) |
+| Strategy generation pipeline agents (design, review, code synthesis, refinement, alignment, analysis) | [`strategy_lab/agents/`](../strategy_lab/agents/) — see [`generation_pipeline.md`](./generation_pipeline.md) |
+| 4-phase contract + drift-hash tracking | [`strategy_lab/phases.py`](../strategy_lab/phases.py) |
+| Orchestrator per-attempt pipeline (5-mixin composition) | [`strategy_lab/orchestrator.py`](../strategy_lab/orchestrator.py) + `strategy_lab/orchestrator_{design,synthesis,alignment,verification,record_assembly}.py` |
+| Quality gates (readiness, safety, conformance, acceptance, realism, alignment) | [`strategy_lab/quality_gates/`](../strategy_lab/quality_gates/) — full catalog in [`generation_pipeline.md`](./generation_pipeline.md) |
+| Deterministic DSL-to-code compiler | [`strategy_lab/synthesis/compiler.py::compile_strategy`](../strategy_lab/synthesis/compiler.py) |
+| Streaming indicator evaluation for synthesis-time checks; legacy/test-only `TradeRecord` converter (`trade_builder.py`, not on the production path) | [`strategy_lab/executor/`](../strategy_lab/executor/) |
+| Factor/genome DSL and compiler | [`strategy_lab/factors/`](../strategy_lab/factors/) |
+| Canonical streaming indicator implementations | [`strategy_lab/indicators/`](../strategy_lab/indicators/) |
+| Zero/low-trade backtest diagnostics (static + runtime AST probing) | [`strategy_lab/coverage_probe/`](../strategy_lab/coverage_probe/) |
+| Investment Team orchestrator (Advisor track) state machine, 6 queues, promotion entry point | [`orchestrator.py`](../orchestrator.py) |
+| Pydantic domain models (profile, IPS, strategy, backtest, promotion, advisor, paper trading) | [`models.py`](../models.py) |
+| Strategy Lab batch/cycle workflows | [`strategy_lab/temporal/workflows.py`](../strategy_lab/temporal/workflows.py) `StrategyLabBatchWorkflow` / `StrategyLabCycleWorkflow` |
+| Strategy Lab durable activities (per-attempt pipeline, signal brief, finalize/paper-trade) | [`strategy_lab/temporal/activities.py`](../strategy_lab/temporal/activities.py) — table in [`generation_pipeline.md`](./generation_pipeline.md) |
 | SSE fan-out for run progress | [`api/job_event_bus.py`](../api/job_event_bus.py) |
-| Persistence wrapper over Khala job service | [`api/main.py`](../api/main.py) `_PersistentDict` (line 85) |
+| Persistence wrapper over Khala job service | [`api/main.py`](../api/main.py) — search for `class _PersistentDict` |
 | Multi-provider OHLCV fetcher | [`market_data_service.py`](../market_data_service.py) |
 | Strategy Lab market snapshot (Frankfurter / FRED / yfinance) | [`market_lab_data/free_tier.py`](../market_lab_data/free_tier.py) |
 | Streaming provider registry (Binance / Coinbase / Alpaca / OANDA + paid) | [`trading_service/providers/`](../trading_service/providers/) |
-| Mode-agnostic trading engine + fill simulator | [`trading_service/service.py`](../trading_service/service.py), [`trading_service/engine/`](../trading_service/engine/) |
+| Mode-agnostic trading engine — production predicate dispatch (`_EngineEntryDispatcher`/`_EngineExitDispatcher`) + `FillSimulator`, the actual production `TradeRecord` builder | [`trading_service/service.py`](../trading_service/service.py), [`trading_service/engine/`](../trading_service/engine/) |
 | QuantConnect / TradingView browser automation | [`tool_agents/web_interfaces/coordinator.py`](../tool_agents/web_interfaces/coordinator.py) |
 | Catalog of core + specialist desk agents | [`agent_catalog.py`](../agent_catalog.py) |
 | Unified-API mount point | [`backend/unified_api/config.py`](../../../unified_api/config.py) |

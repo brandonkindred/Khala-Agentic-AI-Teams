@@ -1,6 +1,14 @@
 # PR 2 — Live Data Feed & Paper Trading Cut-over
 
-**Status:** Spec (pre-implementation) · **Author:** Trading Service ·
+> **HISTORICAL — this spec has shipped.** Kept for its design rationale, not
+> as a statement of current state. In particular, the "PR 3 remains the
+> cleanup" work it defers below is **done**: `TradeSimulationEngine` and
+> `SandboxRunner` no longer exist. See
+> [`trade_record_schema.md`](./trade_record_schema.md) for the current
+> execution path, and note that `trade_simulator.py` itself survives — it
+> still owns the `compute_metrics` estimator.
+
+**Status:** Shipped (historical spec) · **Author:** Trading Service ·
 **Target branch:** `claude/gifted-kalam` · **Depends on:** PR 1
 (`8be4481 investment_team: unified streaming Trading Service`)
 
