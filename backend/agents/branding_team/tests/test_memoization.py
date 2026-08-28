@@ -371,6 +371,46 @@ def test_non_allowlisted_mission_field_change_does_not_change_hash() -> None:
     assert baseline == changed
 
 
+@pytest.mark.parametrize(
+    "phase,non_allowlisted_field,override",
+    [
+        (BrandPhase.STRATEGIC_CORE, "desired_voice", {"desired_voice": "Bold and unmistakable"}),
+        (BrandPhase.NARRATIVE_MESSAGING, "target_audience", {"target_audience": "SMB owners"}),
+        (
+            BrandPhase.VISUAL_IDENTITY,
+            "company_description",
+            {"company_description": "A completely different value proposition"},
+        ),
+        (BrandPhase.CHANNEL_ACTIVATION, "desired_voice", {"desired_voice": "Bold and unmistakable"}),
+        (BrandPhase.GOVERNANCE, "company_name", {"company_name": "Different Co"}),
+    ],
+)
+def test_non_allowlisted_field_change_is_stable_for_each_phases_real_allowlist(
+    phase: BrandPhase, non_allowlisted_field: str, override: dict
+) -> None:
+    """For each of the 5 phases' *final, configured* ``_PHASE_SPEC`` mission
+    field allowlists (not a synthetic allowlist), a change to a field the
+    phase does not depend on must not change ``phase_input_hash`` -- this is
+    the regression guard that the epic's cross-phase-cascade fix actually
+    holds for the allowlists shipped in ``orchestrator.py``, not just for the
+    mechanism in the abstract."""
+    mission_fields = _PHASE_SPEC[phase].mission_fields
+    assert mission_fields is not None, (
+        f"{phase} has no configured mission_fields allowlist -- this test's premise "
+        "(a non-allowlisted field must not affect the hash) is meaningless against the "
+        "None/hash-everything fallback"
+    )
+    assert non_allowlisted_field not in mission_fields, (
+        f"{non_allowlisted_field!r} is on {phase}'s real allowlist -- pick a different "
+        "field for this parametrization so the test actually exercises exclusion"
+    )
+
+    baseline = phase_input_hash(phase, make_mission(), {}, None, mission_fields)
+    changed = phase_input_hash(phase, make_mission(**override), {}, None, mission_fields)
+
+    assert baseline == changed
+
+
 def test_explicit_empty_mission_fields_excludes_every_mission_field() -> None:
     """``mission_fields=frozenset()`` deliberately means "no mission field is
     relevant" and must differ from the ``None``/omitted default -- the
