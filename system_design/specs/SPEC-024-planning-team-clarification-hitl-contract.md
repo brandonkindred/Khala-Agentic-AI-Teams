@@ -99,8 +99,10 @@ synthesis → **document_production** → sub_agent_provisioning → finalize. N
 - Thread-mode (non-Temporal) pause behavior — `shared/temporal/checkpoints.py`'s `wait_for_input`/
   `submit_input` already cover that path per `shared/temporal/README.md`; this spec covers only
   the Temporal-native signal.
-- UI/REST surface changes beyond noting that the existing `SubmitAnswersRequest.resume_token`
-  field already accommodates this contract.
+- The full REST/UI surface (routes, request validation) beyond the one field this spec's contract
+  requires exposing — see §4.1's `resume_token`-delivery requirement below; that field's existence
+  is in scope precisely because without it a polling client has no way to learn the token
+  `SubmitAnswersRequest.resume_token` asks it to echo back.
 
 ---
 
@@ -121,6 +123,20 @@ Payload: `{"resume_token": str, "answers": list[dict]}`, where each `answers` el
 `{"question_id": str, "selected_option_id": Optional[str], "other_text": Optional[str]}` —
 **extended** with a plural field, `"selected_option_ids": List[str]` (default `[]`), required for
 `allow_multiple=True` questions (below).
+
+**Contract requirement — a polling client must be able to learn the `resume_token` in the first
+place.** `SubmitAnswersRequest.resume_token` (`shared/hitl/models.py:80-96`) is where the client
+*sends* the token back, but Planning's current client-facing status surface —
+`PlanningStatusResponse` (`planning_team/models.py:120-131`) and `get_status`
+(`api/main.py:318-329`) — exposes only `pending_questions`/`waiting_for_answers`, with no field
+carrying the token itself; the paused activity's `resume_token` (§4.1's payload above) is consumed
+entirely inside `PlanningWorkflow`/the job record today. Without a client-visible field, no caller
+can ever populate `SubmitAnswersRequest.resume_token` correctly. This mirrors the coding team's own
+`StatusResponse.resume_token` (`software_engineering_team/api/coding_team_models.py:106-112`) —
+required here for the same reason. **Contract requirement:** extend `PlanningStatusResponse` with
+`resume_token: Optional[str] = None`, populated (from the job record's persisted `resume_token`)
+whenever `waiting_for_answers` is `True`, `None` otherwise — the client-visible half of the same
+pause envelope §4.3.1 already persists server-side.
 
 **Contract requirement — carry every selection, not just one.** PRA's own `OpenQuestion`
 (`product_requirements_analysis_agent/models.py:78`, mirrored in
@@ -400,30 +416,43 @@ PRA-side idempotency as the complete fix, tracked as an open item alongside the 
 `wait_condition` risk already carried in this
 section (below).
 
-**Contract requirement — the activity must actually be retryable (past the submission step).**
-`PlanningWorkflow`'s current
+**Contract requirement — the activity must actually be retryable (past the submission step), under
+a *bounded* policy specifically.** `PlanningWorkflow`'s current
 `workflow.execute_activity(document_production_activity, ..., retry_policy=NO_RETRY)`
 (`temporal/workflows.py:189-195`) means a worker crash mid-activity fails the whole workflow rather
 than letting Temporal re-invoke the activity — unlike the coding team, whose
 `workflow.execute_activity(run_pipeline_activity, request, start_to_close_timeout=activity_timeout)`
 (`temporal/coding_team_workflow.py:546-551, 574-578`) passes **no** `retry_policy` override at all,
-so it runs under the SDK's default retryable policy. Because this contract makes the activity
-idempotent on re-entry — past the submission step above — via the eager checkpoint and
-`_check_pending_pause_reentry` (§5), the rest of `document_production_activity` must adopt the same
-posture: #7445-B must either drop the `NO_RETRY` override for this activity (matching the coding
-team default) or apply an explicit bounded retry policy no more restrictive than `SAFE_RETRY`
-(`temporal/workflows.py:53-54`, already used by every other retryable phase in this same workflow)
-— for the activity that owns `wait_pra`/pause/resume. Blanket `NO_RETRY` must not remain on *that*
-activity once the pause contract lands — otherwise Temporal never exercises the "pre-work activity
-retry" reentry path this spec (§5) requires it to handle correctly.
+so it runs under the SDK's unbounded default retryable policy. Because this contract makes the
+activity idempotent on re-entry — past the submission step above — via the eager checkpoint and
+`_check_pending_pause_reentry` (§5), the rest of `document_production_activity` must adopt a
+retryable posture too — but **must use `SAFE_RETRY` (`temporal/workflows.py:53-54`) specifically,
+not the SDK's unbounded default**, unlike the coding team's activity. This is a deliberate
+divergence, not an oversight: every `planning_team` activity, this one included, runs through the
+`_guarded` wrapper (`temporal/activities.py:69-118`, thin over
+`shared.temporal.activity_helpers.guarded`), whose contract requires `max_attempts` to be an
+explicit finite value *matching the phase's own Temporal `RetryPolicy`* (`activities.py:87-88`) —
+it uses that number to decide `is_final_attempt` and mark the job FAILED only on the truly last
+attempt. An unbounded default policy has no finite `max_attempts` to hand `_guarded`: passing
+`RETRYABLE_MAX_ATTEMPTS` (or any other finite guess) while Temporal itself retries without limit
+would mark the job FAILED after that many attempts even though Temporal keeps trying past it — a
+false-terminal failure — while no finite value can correctly represent "unlimited" to `_guarded`
+either way. `SAFE_RETRY`'s existing finite `maximum_attempts` (already used, and already correctly
+paired with `_guarded`, by every other retryable phase in this same workflow) is required; the
+coding team's unbounded-default choice does not transfer here because
+`software_engineering_team`'s activities have no equivalent `_guarded`-style finite-attempt-count
+contract to violate. Blanket `NO_RETRY` must not remain on `document_production_activity` once the
+pause contract lands, but the replacement must be `SAFE_RETRY`, not "no override at all."
 
 **Naming, to keep the two activities and their retry policies straight:** this contract splits what
 was one `document_production_activity` into two Temporal activities scheduled separately by
 `PlanningWorkflow`: a small `document_production_pra_submit_activity` (illustrative name — #7445-B
-picks the actual one) that does only `run_pra(...)` + the eager checkpoint write, scheduled with
-`retry_policy=NO_RETRY`; and `document_production_activity` itself, which always starts by loading
+picks the actual one) that takes the same `job_id`/`context` the current single activity does
+(§5's precondition — it needs `repo_path`/`spec_content` to call `run_pra`) and does only
+`run_pra(...)` + the eager checkpoint write, scheduled with `retry_policy=NO_RETRY`; and `document_production_activity` itself, which always starts by loading
 the checkpoint (never calling `run_pra` directly), then runs `wait_pra`/pause/resume/finalize under
-`SAFE_RETRY` (or the SDK default). The workflow calls the submit activity once per job (a no-op
+`SAFE_RETRY` (specifically — not the SDK default; see the `_guarded`-compatibility requirement
+below). The workflow calls the submit activity once per job (a no-op
 skip if a checkpoint already exists — safe to call again on workflow-level retry, since it just
 re-checks the checkpoint) before entering the `document_production_activity` retry/continuation
 loop of §4.3.
@@ -546,9 +575,10 @@ The only Planning-specific pieces are:
    currently runs entirely under `NO_RETRY`. This contract splits its PRA-facing work into two
    Temporal activities — a new `document_production_pra_submit_activity` that stays `NO_RETRY`
    (submission has no idempotency key to make it safely retryable) and
-   `document_production_activity` itself, which drops `NO_RETRY` in favor of `SAFE_RETRY` (matching
-   the coding team's default-retryable posture for `run_pipeline_activity`) because it never
-   submits, only polls/pauses/resumes against an already-checkpointed job. Planning's current
+   `document_production_activity` itself, which drops `NO_RETRY` in favor of `SAFE_RETRY`
+   specifically (not the coding team's unbounded default — `_guarded`'s finite-`max_attempts`
+   contract requires a bounded policy, §4.3.1) because it never submits, only
+   polls/pauses/resumes against an already-checkpointed job. Planning's current
    blanket `NO_RETRY` is the outlier; a single blanket policy is not the fix, a split one is.
 
 No divergent mechanism is introduced anywhere in this design.
@@ -560,7 +590,16 @@ No divergent mechanism is introduced anywhere in this design.
 The primitive #7445-B builds must satisfy:
 
 **`document_production_pra_submit_activity` (§4.3.1 — separately scheduled, `NO_RETRY`)**
-- *Preconditions:* Called with the Planning `job_id`; the `"planning_team"`-namespaced job record
+- *Preconditions:* Called with the Planning `job_id` **and** the post-synthesis `context`
+  (specifically `repo_path` and the synthesized spec content) — the same inputs
+  `document_production_activity` receives today (`temporal/activities.py:286-289`). `run_pra`
+  requires `repo_path`/`spec_content` (`adapters/product_analysis.py:33-48`); at the point this
+  activity runs, that content exists only in the workflow's in-memory `context` threaded from the
+  synthesis phase (`temporal/workflows.py:176-181`), not yet durably written anywhere the submit
+  activity could otherwise read it from — the job record at this point carries `repo_path` but not
+  the synthesized spec (`DocumentProductionAgent.run` is what writes `initial_spec.md`, and it
+  hasn't run yet). The workflow must pass `context` (or the specific `repo_path`/`spec_content`
+  fields) into this activity's call, not just `job_id`. The `"planning_team"`-namespaced job record
   is readable; scheduled by the workflow with `retry_policy=NO_RETRY`.
 - *Postconditions:* Checks `load_checkpoint("planning_team", job_id, "document_production_pra")`
   first. If present, returns immediately (no-op — a prior successful run already submitted). If
@@ -589,8 +628,9 @@ The primitive #7445-B builds must satisfy:
   `load_checkpoint(...)` for `"document_production_pra"` already returns a checkpoint (the workflow
   only enters this activity after `document_production_pra_submit_activity` above has completed) —
   when `False`, no checkpoint precondition applies, since PRA (and this whole pause contract) never
-  engages; runs under a retry policy other than `NO_RETRY` (§4.3.1 — `SAFE_RETRY` or the SDK
-  default).
+  engages; runs under `SAFE_RETRY` specifically (§4.3.1 — not `NO_RETRY`, and not the SDK's
+  unbounded default, which is incompatible with the `_guarded` wrapper's finite-`max_attempts`
+  contract).
 - *Postconditions:* Loads the checkpoint and calls `wait_pra(job_id=<checkpointed pra_job_id>,
   ...)` directly. This activity **never** calls `run_pra` itself, under any circumstance.
 - *Invariants:* Every entry (fresh call, Temporal retry, or workflow-driven resume) reuses the
