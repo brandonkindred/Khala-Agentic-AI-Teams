@@ -353,18 +353,25 @@ making the gap worse and say plainly what closes it.
 
 **Contract requirement given that constraint:** until PRA supports an idempotency key, the PRA
 *submission* itself (`run_pra(...)` through the eager `save_checkpoint` write, and nothing else)
-must run as its own narrowly-scoped step under **`NO_RETRY`** — not the bounded/default retry
-policy recommended below for the rest of the activity. A crash in that narrow window fails the
-workflow cleanly (loud, visible, needing a human/operator to reconcile or restart the job) rather
-than silently duplicating a PRA job. Everything *after* a checkpoint exists — `wait_pra` polling,
-pause, resume, and the rest of `document_production_activity` — is safe to retry freely, because
-those steps only ever consult the checkpoint and never resubmit. Whether this narrow step is its
-own separately-scheduled Temporal activity (cleanest: its `NO_RETRY` failure surfaces as a distinct,
-diagnosable workflow-task error) or an in-process code path inside the same activity function
-guarded by application-level "do not retry past this point" logic is an implementation choice for
-#7445-B; the contract only fixes the retry-policy asymmetry (retryable after the checkpoint exists,
-not retryable for the submission step itself) and flags PRA-side idempotency as the complete fix,
-tracked as an open item alongside the unbounded-`wait_condition` risk already carried in this
+must be its own **separately-scheduled Temporal activity**, executed via its own
+`workflow.execute_activity(..., retry_policy=NO_RETRY)` call — not the bounded/default retry
+policy recommended below for the rest of the activity. This must be a genuinely distinct
+`execute_activity` invocation, not an in-process "do not retry past this point" guard inside the
+larger `document_production_activity` function: Temporal attaches a retry policy to an entire
+`execute_activity` command, not to a region of code within one activity function, so if
+`document_production_activity` as a whole runs under the permissive policy §4.3.1 requires for
+`wait_pra`/pause/resume, a worker crash between `run_pra()` returning and the checkpoint write is
+retried under that *same* permissive policy regardless of any in-process guard — the guard cannot
+stop Temporal's own retry of the whole function from the top. Only a separate `NO_RETRY` activity
+for the submission step actually gets Temporal to treat that step as non-retryable. A crash in that
+narrow window then fails the workflow cleanly (loud, visible, needing a human/operator to reconcile
+or restart the job) rather than silently duplicating a PRA job. Everything *after* a checkpoint
+exists — `wait_pra` polling, pause, resume, and the rest of `document_production_activity` — is
+safe to retry freely in its own (different) activity invocation, because those steps only ever
+consult the checkpoint and never resubmit. The contract fixes the retry-policy asymmetry (a
+dedicated `NO_RETRY` submission activity vs. a retryable activity for everything after) and flags
+PRA-side idempotency as the complete fix, tracked as an open item alongside the unbounded-
+`wait_condition` risk already carried in this
 section (below).
 
 **Contract requirement — the activity must actually be retryable (past the submission step).**
@@ -379,19 +386,28 @@ idempotent on re-entry — past the submission step above — via the eager chec
 `_check_pending_pause_reentry` (§5), the rest of `document_production_activity` must adopt the same
 posture: #7445-B must either drop the `NO_RETRY` override for this activity (matching the coding
 team default) or apply an explicit bounded retry policy no more restrictive than `SAFE_RETRY`
-(`temporal/workflows.py:53-54`, already used by every other retryable phase in this same workflow).
-Blanket `NO_RETRY` for the whole activity must not remain once the pause contract lands —
-otherwise Temporal never exercises the "pre-work activity retry" reentry path this spec (§5)
-requires the activity to handle correctly — but the narrow PRA-submission step above is the one
-deliberate exception, kept at `NO_RETRY` until PRA supports an idempotency key.
+(`temporal/workflows.py:53-54`, already used by every other retryable phase in this same workflow)
+— for the activity that owns `wait_pra`/pause/resume. Blanket `NO_RETRY` must not remain on *that*
+activity once the pause contract lands — otherwise Temporal never exercises the "pre-work activity
+retry" reentry path this spec (§5) requires it to handle correctly.
 
-**Postcondition this adds to §5:** every entry into `document_production_activity` — fresh run,
-Temporal-driven retry, or workflow-driven resume — must consult the PRA checkpoint before calling
-`run_pra`, and must never call it a second time once a checkpoint for this job exists; the PRA
-submission step itself (through the checkpoint write) runs under `NO_RETRY`; everything after a
-checkpoint exists runs under a retry policy that actually permits Temporal to re-invoke it after a
-worker crash (not `NO_RETRY`), since retry-then-reentry is the mechanism this contract relies on
-for crash recovery there.
+**Naming, to keep the two activities and their retry policies straight:** this contract splits what
+was one `document_production_activity` into two Temporal activities scheduled separately by
+`PlanningWorkflow`: a small `document_production_pra_submit_activity` (illustrative name — #7445-B
+picks the actual one) that does only `run_pra(...)` + the eager checkpoint write, scheduled with
+`retry_policy=NO_RETRY`; and `document_production_activity` itself, which always starts by loading
+the checkpoint (never calling `run_pra` directly), then runs `wait_pra`/pause/resume/finalize under
+`SAFE_RETRY` (or the SDK default). The workflow calls the submit activity once per job (a no-op
+skip if a checkpoint already exists — safe to call again on workflow-level retry, since it just
+re-checks the checkpoint) before entering the `document_production_activity` retry/continuation
+loop of §4.3.
+
+**Postcondition this adds to §5:** `document_production_pra_submit_activity` runs under
+`NO_RETRY` and either finds an existing checkpoint (no-op) or performs exactly one `run_pra` call
+followed immediately by the checkpoint write; `document_production_activity` never calls `run_pra`
+itself, only `load_checkpoint`, and runs under a retry policy that actually permits Temporal to
+re-invoke it after a worker crash (not `NO_RETRY`), since retry-then-reentry past the checkpoint is
+the mechanism this contract relies on for crash recovery there.
 
 ### 4.3.2 Rollout compatibility for the activity signature change
 
@@ -478,11 +494,14 @@ The only Planning-specific pieces are:
    rounds within one activity run, so the persisted `submitted_answers` must be scoped per
    `resume_token` rather than accumulated into one undifferentiated list — otherwise a later
    round's callback can resubmit an earlier round's already-consumed answers.
-6. **A retry-policy correction, not an addition** (§4.3.1): `document_production_activity`
-   currently runs under `NO_RETRY`; this contract requires dropping that override (or replacing it
-   with `SAFE_RETRY`) so it matches the coding team's own default-retryable posture for
-   `run_pipeline_activity` — Planning's current setting is the outlier, not the coding-team
-   pattern.
+6. **A retry-policy split, not a blanket correction** (§4.3.1): `document_production_activity`
+   currently runs entirely under `NO_RETRY`. This contract splits its PRA-facing work into two
+   Temporal activities — a new `document_production_pra_submit_activity` that stays `NO_RETRY`
+   (submission has no idempotency key to make it safely retryable) and
+   `document_production_activity` itself, which drops `NO_RETRY` in favor of `SAFE_RETRY` (matching
+   the coding team's default-retryable posture for `run_pipeline_activity`) because it never
+   submits, only polls/pauses/resumes against an already-checkpointed job. Planning's current
+   blanket `NO_RETRY` is the outlier; a single blanket policy is not the fix, a split one is.
 
 No divergent mechanism is introduced anywhere in this design.
 
@@ -492,20 +511,32 @@ No divergent mechanism is introduced anywhere in this design.
 
 The primitive #7445-B builds must satisfy:
 
+**`document_production_pra_submit_activity` (§4.3.1 — separately scheduled, `NO_RETRY`)**
+- *Preconditions:* Called with the Planning `job_id`; the `"planning_team"`-namespaced job record
+  is readable; scheduled by the workflow with `retry_policy=NO_RETRY`.
+- *Postconditions:* Checks `load_checkpoint("planning_team", job_id, "document_production_pra")`
+  first. If present, returns immediately (no-op — a prior successful run already submitted). If
+  absent, calls `run_pra(...)` and, immediately upon receiving the external `pra_job_id`, persists
+  `save_checkpoint("planning_team", job_id, "document_production_pra", {"pra_job_id": ...})` as its
+  own atomic write, then returns.
+- *Invariants:* `run_pra` is called at most once per Planning `job_id`, ever, *when this activity
+  itself does not crash between the two steps*; a crash in that narrow window is the one residual
+  risk this spec cannot close without PRA-side idempotency (§5's open risks, below) — `NO_RETRY`
+  ensures that crash fails the workflow loudly rather than Temporal silently retrying into a
+  duplicate submission.
+
 **`document_production_activity` (entry — every invocation, paused or not)**
 - *Preconditions:* Called with a `request` dict optionally carrying `acknowledged_resume_token`
   (subject to the `workflow.patched` rollout gate, §4.3.2); the `"planning_team"`-namespaced job
-  record for `request["job_id"]` is readable; runs under a retry policy other than `NO_RETRY`
-  (§4.3.1 — `SAFE_RETRY` or the SDK default).
-- *Postconditions:* Before ever calling `run_pra(...)`, the activity checks
-  `load_checkpoint("planning_team", job_id, "document_production_pra")`. If present, it calls
-  `wait_pra(job_id=<checkpointed pra_job_id>, ...)` directly. If absent, it calls `run_pra(...)`
-  and, immediately upon receiving the external `pra_job_id` — before `wait_pra` is invoked —
-  persists `save_checkpoint("planning_team", job_id, "document_production_pra", {"pra_job_id":
-  ...})` as its own atomic write.
-- *Invariants:* `run_pra` is called at most once per Planning `job_id`, ever — every subsequent
-  entry (fresh call, Temporal retry, or workflow-driven resume) is required to find the checkpoint
-  and reuse it.
+  record for `request["job_id"]` is readable, and `load_checkpoint(...)` for
+  `"document_production_pra"` already returns a checkpoint (the workflow only enters this activity
+  after `document_production_pra_submit_activity` above has completed); runs under a retry policy
+  other than `NO_RETRY` (§4.3.1 — `SAFE_RETRY` or the SDK default).
+- *Postconditions:* Loads the checkpoint and calls `wait_pra(job_id=<checkpointed pra_job_id>,
+  ...)` directly. This activity **never** calls `run_pra` itself, under any circumstance.
+- *Invariants:* Every entry (fresh call, Temporal retry, or workflow-driven resume) reuses the
+  checkpointed `pra_job_id` unconditionally; retrying this activity can never trigger a second PRA
+  submission, because the only code path that submits lives in the other, `NO_RETRY` activity.
 
 **`document_production_activity` (paused-return path)**
 - *Preconditions:* PRA reports unanswered `OpenQuestion`s and no matching persisted pause is being
