@@ -30,6 +30,34 @@ from a *prior* attempt's partial convergence would require an explicit
 amendment to that isolation contract (to define which stages, if any, survive
 the failure that caused re-entry) and is out of scope for this family.
 
+A cross-attempt amendment was attempted once (resuming attempt ``N+1`` from
+attempt ``N``'s ``ReviewCheckpoint``/``SynthesisCheckpoint`` via
+``_run_design_attempt``'s ``resume_spec``/``resume_design_context``/
+``resume_code`` parameters) and reverted: every current
+``SpecImplementabilityError`` raise site downstream of a checkpoint
+(``orchestrator_synthesis.py``'s ``ENTRY_WITH_NO_EXIT`` redesign-required
+raise; ``_apply_updates``'s stray-key-mutation and risk-limits-loosening
+trips in ``orchestrator.py``) exists specifically *because* the checkpointed
+spec needs a design-level revision that refinement cannot make on its own —
+that is the whole documented purpose of this exception (see its own
+docstring: raised when "the refinement loop cannot make the spec
+implementable"). Resuming with that same, unrevised spec therefore either
+guarantees (``ENTRY_WITH_NO_EXIT``, a deterministic re-check against
+unchanged code and market data) or makes likely (the two mutation-trip
+sites, since an LLM refinement agent that just tried the same disallowed
+change would plausibly try it again) the identical failure recurring on
+every subsequent attempt, burning the whole re-entry budget with no chance
+of recovery — worse than the full-restart behavior it was meant to
+optimize, which gives every re-entry a fresh, potentially-corrected spec.
+No currently-existing raise site is a case where the spec is *not*
+implicated (the one raise site that clearly isn't spec-implicated — an
+unsupported ``asset_class`` rejected at spec-build time, in
+``orchestrator_design.py`` — fires before any checkpoint exists, so it was
+never reachable via cross-attempt resume either way). A future attempt at
+this amendment needs either a signal distinguishing "this failure doesn't
+implicate the spec" (none exists today) or a raise site that is provably
+not spec-implicated before it can be sound.
+
 Serialization relies entirely on Pydantic's built-in ``model_dump(mode="json")``
 / ``model_validate`` — the same mechanism already proven for
 ``DesignAttemptCheckpoint`` and ``phases.PhaseTransition`` to round-trip
@@ -401,7 +429,9 @@ def parse_checkpoint(raw: dict[str, Any]) -> AnyPipelineCheckpoint:
 # computation to actually skip stages in a new attempt -- the "never
 # cross-attempt" *behavioral* invariant therefore still holds today. Consuming
 # the determination is deliberately out of scope here and belongs to a later,
-# separate change.
+# separate change. (A first attempt at consuming it was made and reverted --
+# see the module docstring's "cross-attempt amendment was attempted once"
+# paragraph for why.)
 # ---------------------------------------------------------------------------
 
 
