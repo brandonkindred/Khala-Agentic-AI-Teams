@@ -118,7 +118,28 @@ def submit_answers(self, payload: dict[str, Any]) -> None:
 
 Payload: `{"resume_token": str, "answers": list[dict]}`, where each `answers` element is
 `AnswerSubmission`-shaped (`backend/shared/hitl/models.py:70-77`):
-`{"question_id": str, "selected_option_id": Optional[str], "other_text": Optional[str]}`.
+`{"question_id": str, "selected_option_id": Optional[str], "other_text": Optional[str]}` —
+**extended** with a plural field, `"selected_option_ids": List[str]` (default `[]`), required for
+`allow_multiple=True` questions (below).
+
+**Contract requirement — carry every selection, not just one.** PRA's own `OpenQuestion`
+(`product_requirements_analysis_agent/models.py:78`, mirrored in
+`planning_team/models.py:224`) sets `allow_multiple=True` on some questions, and Planning's own
+`AnsweredQuestion` model already has both `selected_option_id` *and* `selected_option_ids: List[str]`
+(`planning_team/models.py:241-242`) for exactly this reason. `shared/hitl/models.py`'s
+`AnswerSubmission`, reused verbatim above, currently has **only** the singular field — reusing it
+as-is for Planning would silently drop every selection but one on a multi-select question. This
+contract requires extending `AnswerSubmission` with an optional `selected_option_ids: List[str] =
+Field(default_factory=list)`, populated instead of (not in addition to, for that question)
+`selected_option_id` when the source question has `allow_multiple=True`. This is not
+Planning-specific scope creep: PRA's own answers-submission route
+(`software_engineering_team/api/routes/product_analysis.py:283`) forwards only
+`selected_option_id` today, from the same shared model — so this gap already exists for any
+`allow_multiple` PRA question, coding-team or Planning. #7445-B/#7446 must land the
+`AnswerSubmission` field addition *and* the corresponding pass-through at
+`api/routes/product_analysis.py:283` together; shipping Planning's pause primitive without it would
+build a new, correctly-plumbed pause/resume path on top of a wire format that still can't carry a
+multi-select answer through to PRA.
 
 **Why the same name, not `planning_submit_answers` or similar:** `backend/shared/hitl/models.py`
 was deliberately built as a cross-team superset so both teams share one vocabulary. A single
@@ -317,27 +338,60 @@ pre-existing PRA `job_id` and skip submission when one is supplied (implementati
 #7445-B; the contract here is only that resubmission must not happen, ever, once a checkpoint
 exists).
 
-**Contract requirement — the activity must actually be retryable.** `PlanningWorkflow`'s current
+**Residual risk this alone does not close — the crash window between `run_pra` returning and the
+checkpoint write landing.** Writing the checkpoint "immediately after `run_pra` returns" narrows
+the unprotected window to a single in-process gap, but does not eliminate it: a worker can still
+die after `run_pra(...)` has created the external job and before `save_checkpoint(...)` durably
+persists its id. `run_product_analysis` (`adapters/product_analysis.py:33-48`) is a plain POST with
+no idempotency key and no reconciliation lookup, so on retry the activity finds no checkpoint and
+submits a second PRA job — genuinely indistinguishable, from Planning's side, from a first
+submission. **Closing this completely requires PRA's own `/product-analysis/run` endpoint to accept
+a client-supplied idempotency key** (or expose a way to look up an existing job by one), which is
+outside `planning_team`'s boundary and this spec's stated scope — it is software_engineering_team's
+endpoint. This spec cannot mandate a fix on the other side of that boundary; it can only avoid
+making the gap worse and say plainly what closes it.
+
+**Contract requirement given that constraint:** until PRA supports an idempotency key, the PRA
+*submission* itself (`run_pra(...)` through the eager `save_checkpoint` write, and nothing else)
+must run as its own narrowly-scoped step under **`NO_RETRY`** — not the bounded/default retry
+policy recommended below for the rest of the activity. A crash in that narrow window fails the
+workflow cleanly (loud, visible, needing a human/operator to reconcile or restart the job) rather
+than silently duplicating a PRA job. Everything *after* a checkpoint exists — `wait_pra` polling,
+pause, resume, and the rest of `document_production_activity` — is safe to retry freely, because
+those steps only ever consult the checkpoint and never resubmit. Whether this narrow step is its
+own separately-scheduled Temporal activity (cleanest: its `NO_RETRY` failure surfaces as a distinct,
+diagnosable workflow-task error) or an in-process code path inside the same activity function
+guarded by application-level "do not retry past this point" logic is an implementation choice for
+#7445-B; the contract only fixes the retry-policy asymmetry (retryable after the checkpoint exists,
+not retryable for the submission step itself) and flags PRA-side idempotency as the complete fix,
+tracked as an open item alongside the unbounded-`wait_condition` risk already carried in this
+section (below).
+
+**Contract requirement — the activity must actually be retryable (past the submission step).**
+`PlanningWorkflow`'s current
 `workflow.execute_activity(document_production_activity, ..., retry_policy=NO_RETRY)`
 (`temporal/workflows.py:189-195`) means a worker crash mid-activity fails the whole workflow rather
 than letting Temporal re-invoke the activity — unlike the coding team, whose
 `workflow.execute_activity(run_pipeline_activity, request, start_to_close_timeout=activity_timeout)`
 (`temporal/coding_team_workflow.py:546-551, 574-578`) passes **no** `retry_policy` override at all,
 so it runs under the SDK's default retryable policy. Because this contract makes the activity
-idempotent on re-entry via the eager checkpoint (above) and `_check_pending_pause_reentry` (§5),
-`document_production_activity` must adopt the same posture: #7445-B must either drop the
-`NO_RETRY` override for this activity (matching the coding team default) or apply an explicit
-bounded retry policy no more restrictive than `SAFE_RETRY` (`temporal/workflows.py:53-54`, already
-used by every other retryable phase in this same workflow). `NO_RETRY` must not remain on this
-activity once the pause contract lands — otherwise Temporal itself never exercises the
-"pre-work activity retry" reentry path this spec (§5) requires the activity to handle correctly.
+idempotent on re-entry — past the submission step above — via the eager checkpoint and
+`_check_pending_pause_reentry` (§5), the rest of `document_production_activity` must adopt the same
+posture: #7445-B must either drop the `NO_RETRY` override for this activity (matching the coding
+team default) or apply an explicit bounded retry policy no more restrictive than `SAFE_RETRY`
+(`temporal/workflows.py:53-54`, already used by every other retryable phase in this same workflow).
+Blanket `NO_RETRY` for the whole activity must not remain once the pause contract lands —
+otherwise Temporal never exercises the "pre-work activity retry" reentry path this spec (§5)
+requires the activity to handle correctly — but the narrow PRA-submission step above is the one
+deliberate exception, kept at `NO_RETRY` until PRA supports an idempotency key.
 
 **Postcondition this adds to §5:** every entry into `document_production_activity` — fresh run,
 Temporal-driven retry, or workflow-driven resume — must consult the PRA checkpoint before calling
-`run_pra`, and must never call it a second time once a checkpoint for this job exists; the activity
-must run under a retry policy that actually permits Temporal to re-invoke it after a worker crash
-(not `NO_RETRY`), since retry-then-reentry is the mechanism this contract relies on for crash
-recovery.
+`run_pra`, and must never call it a second time once a checkpoint for this job exists; the PRA
+submission step itself (through the checkpoint write) runs under `NO_RETRY`; everything after a
+checkpoint exists runs under a retry policy that actually permits Temporal to re-invoke it after a
+worker crash (not `NO_RETRY`), since retry-then-reentry is the mechanism this contract relies on
+for crash recovery there.
 
 ### 4.3.2 Rollout compatibility for the activity signature change
 
@@ -362,6 +416,23 @@ recorded before this feature ships) and the new `request`-dict call (for new/pat
 exactly mirroring how `_PER_PHASE_PATCH` already lets old and new histories coexist during a
 rollout. This is not a new mechanism to invent — it is the existing rollout tool for this exact
 class of problem, reused a second time in the same workflow.
+
+**`workflow.patched` alone is not sufficient — the activity worker needs its own compatibility
+path.** `workflow.patched` only governs what a *workflow* schedules on replay; it says nothing
+about the activity *worker* process. During a rolling deploy, an activity task already enqueued
+under the old three-positional-arg shape (scheduled by an old-code workflow execution before the
+new worker version rolled out) can be picked up by a worker that has already registered the new
+dict-only `document_production_activity` implementation — invocation fails before any workflow
+code (patched or not) gets a chance to run, and under the activity's current `NO_RETRY` (§4.3.1)
+that failure fails the whole workflow. **Contract requirement:** the activity function itself must
+accept both call shapes — either a compatibility decoder at the top of
+`document_production_activity` that detects the old three-positional-arg invocation and normalizes
+it into the same `request` dict the rest of the function expects, or registering the new dict-based
+behavior under a distinct `@activity.defn(name=...)` (e.g. `planning_document_production_v2`) while
+the old name/signature stays registered and callable until the task queue has drained of old-shape
+tasks. `workflow.patched` and this activity-level decoding are both required, addressing two
+different compatibility surfaces (workflow replay vs. activity worker invocation) — neither
+substitutes for the other.
 
 ### 4.4 Explicit hitl.py / pause_cycle.py reuse statement
 
@@ -483,10 +554,19 @@ The primitive #7445-B builds must satisfy:
   matching entry (if any) is applied — the dict cannot grow unbounded across a long-running
   workflow's many pause rounds.
 
-**Open risk, carried over from `hitl_pause_resume_contract.md` §4 (not resolved by this spec):**
-`workflow.wait_condition` here is unbounded — no timeout and no reconciliation against job-record
-cancellation. #7445-B inherits this exact caveat from the coding-team implementation; it is not a
-new gap introduced by Planning reuse, and remains open future work for both teams alike.
+**Open risks, not resolved by this spec:**
+1. *Carried over from `hitl_pause_resume_contract.md` §4:* `workflow.wait_condition` here is
+   unbounded — no timeout and no reconciliation against job-record cancellation. #7445-B inherits
+   this exact caveat from the coding-team implementation; it is not a new gap introduced by
+   Planning reuse, and remains open future work for both teams alike.
+2. *New to this spec, cross-team:* PRA submission (`run_pra`/`run_product_analysis`) has no
+   idempotency key, so a worker crash in the narrow window between `run_pra` returning and the
+   checkpoint write landing (§4.3.1) can still produce a duplicate external PRA job — mitigated
+   here by keeping that narrow step `NO_RETRY`, but not eliminated. Full closure requires
+   `software_engineering_team`'s `/product-analysis/run` endpoint to accept a client-supplied
+   idempotency key or equivalent reconciliation lookup; that is outside `planning_team`'s boundary
+   and this spec's stated scope, and is flagged here as a prerequisite for fully retryable PRA
+   submission rather than something #7445-B can close alone.
 
 ---
 
