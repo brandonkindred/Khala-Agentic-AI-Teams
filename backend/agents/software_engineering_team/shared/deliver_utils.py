@@ -63,12 +63,18 @@ def _cleanup_inline_merge_failure(
 ) -> None:
     """Return to development and remove the feature branch after a failed inline merge.
 
+    By the time this runs, the branch may carry a delivery commit that never
+    made it into ``DEVELOPMENT_BRANCH`` (write/gate/autofix/merge all fail
+    *after* the initial commit) -- a plain ``git branch -d`` refuses to delete
+    such an unmerged branch, so this force-deletes it; the whole point of this
+    cleanup is discarding the abandoned branch, commits included.
+
     Best-effort: failures from ``checkout_branch``/``delete_branch`` themselves are
     not surfaced here, matching this function's other cleanup calls.
     """
     ops.checkout_branch(repo_path, DEVELOPMENT_BRANCH)
     if branch_name:
-        ops.delete_branch(repo_path, branch_name)
+        ops.delete_branch(repo_path, branch_name, force=True)
 
 
 def prepare_handoff_branch(

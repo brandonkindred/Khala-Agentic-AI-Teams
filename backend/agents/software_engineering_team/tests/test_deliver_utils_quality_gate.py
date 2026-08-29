@@ -218,6 +218,7 @@ class TestDeliverInlineMergeQualityGate:
         assert checkout_calls[-1][1] == (tmp_path, DEVELOPMENT_BRANCH)
         delete_calls = [c for c in ops.calls if c[0] == "delete_branch"]
         assert delete_calls[-1][1] == (tmp_path, "feature/t1")
+        assert delete_calls[-1][2] == {"force": True}
 
     def test_gate_pass_sweeps_autofix_commit_before_merge(self, tmp_path: Path) -> None:
         """The gate must run against the final delivered file state -- i.e.
@@ -298,6 +299,7 @@ class TestDeliverInlineMergeQualityGate:
         assert checkout_calls[-1][1] == (tmp_path, DEVELOPMENT_BRANCH)
         delete_calls = [c for c in ops.calls if c[0] == "delete_branch"]
         assert delete_calls[-1][1] == (tmp_path, "feature/t1")
+        assert delete_calls[-1][2] == {"force": True}
 
     def test_no_verifier_or_linter_preserves_pre_fix_merge_behavior(self, tmp_path: Path) -> None:
         ops = _RecordingOps()
@@ -342,6 +344,7 @@ class TestDeliverInlineMergeFailureCleanup:
         assert result.summary == "Write failed: disk full"
         delete_calls = [c for c in ops.calls if c[0] == "delete_branch"]
         assert delete_calls[-1][1] == (tmp_path, "feature/t1")
+        assert delete_calls[-1][2] == {"force": True}
         checkout_calls = [c for c in ops.calls if c[0] == "checkout_branch"]
         assert checkout_calls[-1][1] == (tmp_path, DEVELOPMENT_BRANCH)
 
@@ -364,6 +367,7 @@ class TestDeliverInlineMergeFailureCleanup:
         assert "abort_merge" in ops.names()
         delete_calls = [c for c in ops.calls if c[0] == "delete_branch"]
         assert delete_calls[-1][1] == (tmp_path, "feature/t1")
+        assert delete_calls[-1][2] == {"force": True}
         checkout_calls = [c for c in ops.calls if c[0] == "checkout_branch"]
         assert checkout_calls[-1][1] == (tmp_path, DEVELOPMENT_BRANCH)
         # abort_merge must run before the branch is discarded and development restored.
@@ -385,3 +389,7 @@ class TestDeliverInlineMergeFailureCleanup:
 
         assert result.merged is True
         assert ops.names().count("delete_branch") == 1
+        # The branch was already merged into development by this point, so the
+        # success path keeps using the safe (non-force) delete.
+        delete_calls = [c for c in ops.calls if c[0] == "delete_branch"]
+        assert delete_calls[-1][2] == {}

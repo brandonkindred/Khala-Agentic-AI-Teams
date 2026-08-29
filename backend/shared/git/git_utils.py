@@ -724,12 +724,19 @@ def abort_merge(repo_path: str | Path) -> Tuple[bool, str]:
     return True, "Merge aborted"
 
 
-def delete_branch(repo_path: str | Path, branch: str) -> Tuple[bool, str]:
-    """Delete the branch (must not be checked out). Returns (success, message)."""
+def delete_branch(repo_path: str | Path, branch: str, *, force: bool = False) -> Tuple[bool, str]:
+    """Delete the branch (must not be checked out). Returns (success, message).
+
+    ``force=False`` (default) uses ``git branch -d``, which refuses to delete a
+    branch with commits not reachable from another ref. ``force=True`` uses
+    ``-D`` instead, for callers intentionally discarding an abandoned branch
+    (e.g. cleanup after a failed delivery) regardless of unmerged commits.
+    """
     path = Path(repo_path).resolve()
     if not (path / ".git").exists():
         return False, "Not a git repository"
-    code, out = _run_git(path, ["git", "branch", "-d", branch])
+    flag = "-D" if force else "-d"
+    code, out = _run_git(path, ["git", "branch", flag, branch])
     if code != 0:
         return False, f"Failed to delete branch {branch}: {out}"
     return True, f"Deleted branch {branch}"
