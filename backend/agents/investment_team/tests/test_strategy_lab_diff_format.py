@@ -172,6 +172,51 @@ def test_spec_int_vs_float_type_change_is_reported_as_changed():
     assert "changed: entry_rules.threshold" in result
 
 
+def test_spec_bool_vs_int_type_change_inside_list_is_reported_as_changed():
+    previous_spec = {"entry_rules": {"flags": [True, False]}}
+    current_spec = {"entry_rules": {"flags": [1, False]}}
+
+    result = diff_spec_or_full(previous_spec, current_spec)
+
+    assert "changed: entry_rules.flags" in result
+
+
+def test_spec_int_vs_float_type_change_inside_nested_dict_in_list_is_reported_as_changed():
+    previous_spec = {"entry_rules": {"legs": [{"weight": 1}]}}
+    current_spec = {"entry_rules": {"legs": [{"weight": 1.0}]}}
+
+    result = diff_spec_or_full(previous_spec, current_spec)
+
+    assert "changed: entry_rules.legs" in result
+
+
+def test_spec_list_length_change_is_reported_as_changed():
+    previous_spec = {"entry_rules": {"flags": [True]}}
+    current_spec = {"entry_rules": {"flags": [True, False]}}
+
+    result = diff_spec_or_full(previous_spec, current_spec)
+
+    assert "changed: entry_rules.flags" in result
+
+
+def test_spec_dict_key_set_change_inside_list_is_reported_as_changed():
+    previous_spec = {"entry_rules": {"legs": [{"weight": 1}]}}
+    current_spec = {"entry_rules": {"legs": [{"weight": 1, "side": "long"}]}}
+
+    result = diff_spec_or_full(previous_spec, current_spec)
+
+    assert "changed: entry_rules.legs" in result
+
+
+def test_spec_identical_lists_are_not_reported_as_changed():
+    previous_spec = {"entry_rules": {"flags": [True, False], "legs": [{"weight": 1}]}}
+    current_spec = {"entry_rules": {"flags": [True, False], "legs": [{"weight": 1}]}}
+
+    result = diff_spec_or_full(previous_spec, current_spec)
+
+    assert "changed:" not in result
+
+
 def test_spec_near_total_rewrite_falls_back_to_full_json():
     previous_spec = {f"field_{i}": f"old_value_{i}" for i in range(30)}
     current_spec = {f"field_{i}": f"totally_different_value_{i}_xyz" for i in range(30)}

@@ -72,19 +72,40 @@ def _leaf_lines(kind: str, path: str, value: Any) -> list[str]:
 
 
 def _values_differ(prev_value: Any, curr_value: Any) -> bool:
-    """Report whether two JSON leaf values differ, honoring JSON type distinctions.
+    """Report whether two JSON values differ, honoring JSON type distinctions at every level.
 
     Preconditions: ``prev_value`` and ``curr_value`` are JSON-serializable
-    non-dict values (not both dicts — dicts are recursed into by the caller
-    before reaching this check). Lists/arrays are compared as leaf values.
+    values (not both dicts at the top level — dicts are recursed into by
+    :func:`_walk_dict_diff`, keeping key-level paths, before reaching this
+    check; a dict nested inside a list is compared here instead, since a
+    list element has no dotted-path key of its own).
 
     Postconditions: returns ``True`` whenever the values would serialize to
-    different JSON representations. Plain ``!=`` treats ``True == 1`` and
-    ``1 == 1.0``, which would silently hide a JSON type change (e.g. a bool
-    field becoming an int); this additionally treats differing Python types
-    as a difference even when ``==`` would call the values equal.
+    different JSON representations, at any depth. Plain ``!=`` treats
+    ``True == 1`` and ``1 == 1.0`` as equal — including when they appear as
+    list elements, since list equality delegates elementwise to ``==`` —
+    which would silently hide a JSON type change. This instead compares
+    types at every level: mismatched top-level types differ immediately;
+    matching lists are compared elementwise (differing lengths differ, then
+    each pair is compared recursively via this same function); matching
+    dicts are compared key-by-key (differing key sets differ, then each
+    shared key's value is compared recursively); any other matching type
+    falls back to ``!=``. Never mutates either input.
     """
-    return type(prev_value) is not type(curr_value) or prev_value != curr_value
+    if type(prev_value) is not type(curr_value):
+        return True
+    if isinstance(prev_value, list):
+        if len(prev_value) != len(curr_value):
+            return True
+        return any(
+            _values_differ(prev_item, curr_item)
+            for prev_item, curr_item in zip(prev_value, curr_value)
+        )
+    if isinstance(prev_value, dict):
+        if set(prev_value) != set(curr_value):
+            return True
+        return any(_values_differ(prev_value[key], curr_value[key]) for key in prev_value)
+    return prev_value != curr_value
 
 
 def _walk_dict_diff(previous: dict[str, Any], current: dict[str, Any], path: str) -> list[str]:
