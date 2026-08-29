@@ -180,6 +180,29 @@ class TestRunningReviewForPrUnit:
         # Must not raise despite the job-service failure.
         assert pr_review._running_review_for_pr("acme", "widgets", 7) is None
 
+    def test_stale_child_job_is_excluded_not_marked_failed(self, monkeypatch) -> None:
+        """A child implementation job (address_comments._dispatch_implementation)
+        carries the same PR-identifying github_context as its parent but is
+        never independently heartbeated, so it would look stale even while its
+        durable workflow legitimately keeps running (a long activity, a HITL
+        pause). It must be excluded from the scan entirely — never inspected
+        for liveness, never destructively marked failed — with the parent
+        alone deciding admission."""
+        stale_child = _job(job_id="job-1:comment:2", heartbeat_delta=_STALE_S + 60)
+        stale_child["parent_job_id"] = "job-1"
+        live_parent = _job(job_id="job-1", heartbeat_delta=0.0)
+        # Newest-first order (child created after its parent), matching the
+        # real /jobs ordering the finding described.
+        monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [stale_child, live_parent])
+        job_updates: List[Dict[str, Any]] = []
+        monkeypatch.setattr(
+            main, "update_job", lambda job_id, **kw: job_updates.append({"job_id": job_id, **kw})
+        )
+        monkeypatch.setattr(main, "update_review", lambda *a, **kw: None)
+
+        assert pr_review._running_review_for_pr("acme", "widgets", 7) == "job-1"
+        assert job_updates == []  # the stale child was never touched
+
 
 # ---------------------------------------------------------------------------
 # _running_sibling_on_checkout

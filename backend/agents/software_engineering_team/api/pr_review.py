@@ -112,6 +112,12 @@ def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[st
         zombie running review; a failure to mark it never propagates. Only review
         jobs carry ``pr_number`` in ``github_context`` (issue runs carry
         ``issue_number``), so matching on it never collides with an issue run.
+        A job carrying ``parent_job_id`` (an address-comments child implementation
+        job) is EXCLUDED from the scan entirely, live-heartbeat check included —
+        it carries the same PR-identifying ``github_context`` as its parent but
+        is never independently heartbeated, so treating it as a candidate here
+        would eventually mark a still-running child ``failed`` as a false
+        zombie. Only the parent job represents this PR's admission state.
         Raises only if the job-service scan itself fails.
 
     Cross-worker by construction: the scan reads the shared central job service (the same
@@ -124,6 +130,17 @@ def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[st
     ever grows materially.
     """
     for j in _main.list_jobs(active_only=True):
+        if (j or {}).get("parent_job_id"):
+            # A child implementation job (address_comments._dispatch_implementation)
+            # carries the SAME PR-identifying github_context as its parent for
+            # traceability, but it is never independently heartbeated — only the
+            # parent runs a continuous BackgroundHeartbeat — so a child legitimately
+            # blocked for a while (a long activity, a HITL pause) would otherwise
+            # look heartbeat-stale here and get destructively marked failed by the
+            # zombie-cleanup branch below, corrupting a durable workflow that is
+            # still actually running. The parent alone represents this PR's
+            # review/address-comments run for admission purposes.
+            continue
         ctx = (j or {}).get("github_context") or {}
         try:
             stored_pr = int(ctx.get("pr_number"))
