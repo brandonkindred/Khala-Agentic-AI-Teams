@@ -216,6 +216,7 @@ class TestDeliverInlineMergeQualityGate:
         assert "commit_working_tree" not in ops.names()
         checkout_calls = [c for c in ops.calls if c[0] == "checkout_branch"]
         assert checkout_calls[-1][1] == (tmp_path, DEVELOPMENT_BRANCH)
+        assert checkout_calls[-1][2] == {"force": True}
         delete_calls = [c for c in ops.calls if c[0] == "delete_branch"]
         assert delete_calls[-1][1] == (tmp_path, "feature/t1")
         assert delete_calls[-1][2] == {"force": True}
@@ -297,6 +298,7 @@ class TestDeliverInlineMergeQualityGate:
         assert "commit_working_tree" in ops.names()
         checkout_calls = [c for c in ops.calls if c[0] == "checkout_branch"]
         assert checkout_calls[-1][1] == (tmp_path, DEVELOPMENT_BRANCH)
+        assert checkout_calls[-1][2] == {"force": True}
         delete_calls = [c for c in ops.calls if c[0] == "delete_branch"]
         assert delete_calls[-1][1] == (tmp_path, "feature/t1")
         assert delete_calls[-1][2] == {"force": True}
@@ -347,6 +349,7 @@ class TestDeliverInlineMergeFailureCleanup:
         assert delete_calls[-1][2] == {"force": True}
         checkout_calls = [c for c in ops.calls if c[0] == "checkout_branch"]
         assert checkout_calls[-1][1] == (tmp_path, DEVELOPMENT_BRANCH)
+        assert checkout_calls[-1][2] == {"force": True}
 
     def test_merge_failure_aborts_merge_and_deletes_feature_branch(self, tmp_path: Path) -> None:
         ops = _RecordingOps(merge_result=(False, "conflict"))
@@ -370,6 +373,7 @@ class TestDeliverInlineMergeFailureCleanup:
         assert delete_calls[-1][2] == {"force": True}
         checkout_calls = [c for c in ops.calls if c[0] == "checkout_branch"]
         assert checkout_calls[-1][1] == (tmp_path, DEVELOPMENT_BRANCH)
+        assert checkout_calls[-1][2] == {"force": True}
         # abort_merge must run before the branch is discarded and development restored.
         assert ops.names().index("abort_merge") < ops.names().index("delete_branch")
 
@@ -390,6 +394,8 @@ class TestDeliverInlineMergeFailureCleanup:
         assert result.merged is True
         assert ops.names().count("delete_branch") == 1
         # The branch was already merged into development by this point, so the
-        # success path keeps using the safe (non-force) delete.
+        # success path keeps using the safe (non-force) delete/checkout.
         delete_calls = [c for c in ops.calls if c[0] == "delete_branch"]
         assert delete_calls[-1][2] == {}
+        checkout_calls = [c for c in ops.calls if c[0] == "checkout_branch"]
+        assert checkout_calls[-1][2] == {}

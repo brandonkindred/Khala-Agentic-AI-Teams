@@ -398,6 +398,35 @@ def test_delete_branch_not_a_repo(tmp_path) -> None:
     assert ok is False
 
 
+def test_checkout_branch_default_uses_plain_checkout(monkeypatch, _fake_git_repo) -> None:
+    from shared.git import git_utils
+
+    captured_cmds = []
+    monkeypatch.setattr(
+        git_utils,
+        "_run_git",
+        lambda path, cmd, *a, **kw: (captured_cmds.append(cmd), (0, ""))[1],
+    )
+    git_utils.checkout_branch(_fake_git_repo, "development")
+    assert captured_cmds[-1] == ["git", "checkout", "development"]
+
+
+def test_checkout_branch_force_uses_force_flag(monkeypatch, _fake_git_repo) -> None:
+    """force=True must add ``-f`` so uncommitted tracked-file changes don't
+    block restoring to a known-good branch during cleanup."""
+    from shared.git import git_utils
+
+    captured_cmds = []
+    monkeypatch.setattr(
+        git_utils,
+        "_run_git",
+        lambda path, cmd, *a, **kw: (captured_cmds.append(cmd), (0, ""))[1],
+    )
+    ok, _ = git_utils.checkout_branch(_fake_git_repo, "development", force=True)
+    assert ok is True
+    assert captured_cmds[-1] == ["git", "checkout", "-f", "development"]
+
+
 def test_delete_branch_default_uses_safe_delete_flag(monkeypatch, _fake_git_repo) -> None:
     """Default (force=False) must use ``-d``, which git refuses for unmerged branches."""
     from shared.git import git_utils
