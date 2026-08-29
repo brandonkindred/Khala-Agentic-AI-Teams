@@ -116,6 +116,7 @@ from .agents.refinement import (
 from .agents.zero_trade_repair import ZeroTradeRepairAgent
 from .alignment_findings import AlignmentFinding
 from .budget_config import StrategyLabBudgetConfig
+from .checkpoints import PipelineStage, determine_resume_stage, find_latest_checkpoint_for_attempt
 from .cycle_control import gather_convergence_directives, require_short_circuit_inputs
 from .exceptions import SpecImplementabilityError
 from .market_regime import RegimeSummary, compute_regime_summary
@@ -569,6 +570,12 @@ class StrategyLabOrchestrator(
         # activity adapter.
         checkpoint_scope = f"thread-cycle-{uuid.uuid4().hex}"
         self.pipeline_checkpoints = []
+        # Set on each re-entry below to the stage a subsequent attempt could
+        # resume from, per the just-failed attempt's captured checkpoints (or
+        # ``None`` for "no usable checkpoint" / full restart). Computed for
+        # introspection/testing only -- nothing yet reads it to change what
+        # this method actually does on re-entry.
+        self.last_resume_determination: Optional[PipelineStage] = None
         checkpoint_capture = PipelineCheckpointCapture(
             run_id=checkpoint_scope,
             cycle_scope=checkpoint_scope,
@@ -647,6 +654,19 @@ class StrategyLabOrchestrator(
                     # its diagnostics. The next attempt's ``snapshot`` is still a
                     # fresh empty child, so this does not contaminate it.
                     drift_collector.merge(attempt_drift)
+                    # Look up the most recent checkpoint captured for the
+                    # attempt that just failed, and determine the resume
+                    # point it implies. This computation is not yet acted on:
+                    # the loop below always re-enters ``_run_design_attempt``
+                    # from the top, exactly as before.
+                    resume_checkpoint = find_latest_checkpoint_for_attempt(
+                        self.pipeline_checkpoints,
+                        run_id=checkpoint_scope,
+                        cycle_scope=checkpoint_scope,
+                        design_attempt=design_attempt,
+                        generation=1,
+                    )
+                    self.last_resume_determination = determine_resume_stage(resume_checkpoint)
                     if design_attempt >= MAX_DESIGN_REENTRIES:
                         break
                     emit(

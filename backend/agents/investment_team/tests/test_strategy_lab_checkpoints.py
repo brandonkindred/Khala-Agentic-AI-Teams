@@ -26,6 +26,8 @@ from investment_team.strategy_lab.checkpoints import (
     RefinementCheckpoint,
     ReviewCheckpoint,
     SynthesisCheckpoint,
+    determine_resume_stage,
+    find_latest_checkpoint_for_attempt,
     parse_checkpoint,
 )
 
@@ -478,3 +480,105 @@ def test_pipeline_checkpoint_base_class_still_constructible_directly() -> None:
         code_hash=_EMPTY_CODE_HASH,
     )
     assert cp.stage == PipelineStage.DESIGN
+
+
+# ---------------------------------------------------------------------------
+# Resume-point determination: find_latest_checkpoint_for_attempt /
+# determine_resume_stage
+# ---------------------------------------------------------------------------
+
+_STAGE_TO_NEXT_STAGE = [
+    (_build_design_checkpoint, PipelineStage.REVIEW),
+    (_build_review_checkpoint, PipelineStage.SYNTHESIS),
+    (_build_synthesis_checkpoint, PipelineStage.REFINEMENT),
+    (_build_refinement_checkpoint, PipelineStage.ALIGNMENT),
+    (_build_alignment_checkpoint, None),
+]
+
+
+@pytest.mark.parametrize(
+    "build,expected_next_stage", _STAGE_TO_NEXT_STAGE, ids=_STAGE_CHECKPOINT_IDS
+)
+def test_determine_resume_stage_from_each_stage(
+    build: Callable[..., PipelineCheckpoint], expected_next_stage: PipelineStage | None
+) -> None:
+    """One case per pipeline stage boundary: the first non-converged stage is
+    the stage immediately after the checkpoint's own stage, except at the
+    last stage (alignment), where there is nothing left to resume into."""
+    cp = build()
+    assert determine_resume_stage(cp) == expected_next_stage
+
+
+def test_determine_resume_stage_with_no_checkpoint_signals_full_restart() -> None:
+    assert determine_resume_stage(None) is None
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        lambda design_cp, review_cp: [design_cp, review_cp],
+        lambda design_cp, review_cp: [review_cp, design_cp],
+    ],
+    ids=["forward_order", "reverse_order"],
+)
+def test_find_latest_checkpoint_for_attempt_returns_most_converged_match(
+    order: Callable[[DesignCheckpoint, ReviewCheckpoint], list[PipelineCheckpoint]],
+) -> None:
+    """When multiple stages were captured for the same attempt, the
+    furthest-along one is returned regardless of input order -- e.g. a design
+    checkpoint and a review checkpoint always resolve to the review
+    checkpoint as the most-converged valid one, whichever comes first in the
+    input. Selection is by stage, not by list position."""
+    design_cp = _build_design_checkpoint()
+    review_cp = _build_review_checkpoint()
+    found = find_latest_checkpoint_for_attempt(
+        order(design_cp, review_cp),
+        run_id="run-1",
+        cycle_scope="cycle-scope-1",
+        design_attempt=0,
+        generation=1,
+    )
+    assert found is review_cp
+
+
+def test_find_latest_checkpoint_for_attempt_returns_none_when_no_match() -> None:
+    assert (
+        find_latest_checkpoint_for_attempt(
+            [],
+            run_id="run-1",
+            cycle_scope="cycle-scope-1",
+            design_attempt=0,
+            generation=1,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "mismatch_kwargs",
+    [
+        {"run_id": "some-other-run"},
+        {"cycle_scope": "some-other-cycle-scope"},
+        {"design_attempt": 99},
+        {"generation": 2},
+    ],
+    ids=["run_id", "cycle_scope", "design_attempt", "generation"],
+)
+def test_find_latest_checkpoint_for_attempt_excludes_invalid_checkpoints(
+    mismatch_kwargs: Dict[str, Any],
+) -> None:
+    """A checkpoint that fails its validity invariants for this lookup (wrong
+    run_id, cycle_scope, design_attempt, or a stale generation) is excluded --
+    the lookup falls back to 'no usable checkpoint' rather than reusing it."""
+    cp = _build_alignment_checkpoint()
+    found = find_latest_checkpoint_for_attempt(
+        [cp],
+        **{
+            "run_id": "run-1",
+            "cycle_scope": "cycle-scope-1",
+            "design_attempt": 0,
+            "generation": 1,
+            **mismatch_kwargs,
+        },
+    )
+    assert found is None

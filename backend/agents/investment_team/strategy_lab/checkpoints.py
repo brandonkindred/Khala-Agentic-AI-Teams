@@ -59,7 +59,7 @@ scope boundary.**
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Iterable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -387,3 +387,91 @@ def parse_checkpoint(raw: dict[str, Any]) -> AnyPipelineCheckpoint:
     stage = PipelineStage(raw["stage"])
     checkpoint_cls = _CHECKPOINT_CLASSES_BY_STAGE[stage]
     return checkpoint_cls.model_validate(raw)
+
+
+# ---------------------------------------------------------------------------
+# Resume-point determination.
+#
+# The module docstring above documents this family as same-attempt-only and
+# states that letting a *new* attempt resume from a *prior* attempt's partial
+# convergence "would require an explicit amendment to that isolation
+# contract." The two functions below are the first piece of that amendment,
+# built incrementally: they only *compute* where a subsequent attempt could
+# resume from. Nothing in this module, or in any caller yet, acts on that
+# computation to actually skip stages in a new attempt -- the "never
+# cross-attempt" *behavioral* invariant therefore still holds today. Consuming
+# the determination is deliberately out of scope here and belongs to a later,
+# separate change.
+# ---------------------------------------------------------------------------
+
+
+def find_latest_checkpoint_for_attempt(
+    checkpoints: Iterable[AnyPipelineCheckpoint],
+    *,
+    run_id: str,
+    cycle_scope: str,
+    design_attempt: int,
+    generation: int,
+) -> AnyPipelineCheckpoint | None:
+    """Return the most-converged valid checkpoint captured for one attempt.
+
+    Preconditions:
+      - ``run_id``/``cycle_scope``/``design_attempt``/``generation`` identify
+        exactly the attempt to look up, using the same identity/versioning
+        fields every checkpoint carries (see ``PipelineCheckpoint``'s own
+        docstring: an attempt's identity is ``(run_id, cycle_scope,
+        design_attempt)``, disambiguated further by ``generation``).
+
+    Postconditions:
+      - Checkpoints in ``checkpoints`` whose ``run_id``, ``cycle_scope``,
+        ``design_attempt``, or ``generation`` don't match the given values
+        are excluded -- this is what makes a checkpoint from a different run
+        or attempt, or a stale-generation checkpoint, invalid for this
+        lookup, per ``PipelineCheckpoint``'s identity fields and its "never
+        survives a generation bump" invariant.
+      - Among the remaining matches, returns the one whose ``stage`` is
+        furthest along ``PIPELINE_STAGES`` -- the most-converged valid
+        checkpoint for the attempt, since a checkpoint at stage ``S`` implies
+        every stage before ``S`` has already converged.
+      - Returns ``None`` when no checkpoint in ``checkpoints`` matches.
+    """
+    matches = [
+        cp
+        for cp in checkpoints
+        if cp.run_id == run_id
+        and cp.cycle_scope == cycle_scope
+        and cp.design_attempt == design_attempt
+        and cp.generation == generation
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda cp: PIPELINE_STAGES.index(cp.stage))
+
+
+def determine_resume_stage(checkpoint: AnyPipelineCheckpoint | None) -> PipelineStage | None:
+    """Determine the first non-converged stage to resume from, given a checkpoint.
+
+    Preconditions:
+      - ``checkpoint`` is either ``None`` (no usable checkpoint was found for
+        the attempt) or a checkpoint already validated as usable by the
+        caller, e.g. via ``find_latest_checkpoint_for_attempt``.
+
+    Postconditions:
+      - Returns ``None`` when ``checkpoint`` is ``None`` -- signals "no usable
+        checkpoint", i.e. a full restart from the top of the pipeline.
+      - Returns ``None`` when ``checkpoint.stage`` is ``PipelineStage.ALIGNMENT``
+        (the last stage): there is no stage after the last one to resume into.
+        This is a distinct condition from the no-checkpoint case above --
+        "every stage already converged" rather than "nothing converged" --
+        but both currently collapse to the same ``None`` signal, since no
+        caller yet distinguishes them.
+      - Otherwise returns ``PIPELINE_STAGES[idx + 1]``, where ``idx`` is
+        ``checkpoint.stage``'s position in ``PIPELINE_STAGES`` -- the first
+        stage not yet known to have converged.
+    """
+    if checkpoint is None:
+        return None
+    idx = PIPELINE_STAGES.index(checkpoint.stage)
+    if idx + 1 >= len(PIPELINE_STAGES):
+        return None
+    return PIPELINE_STAGES[idx + 1]
