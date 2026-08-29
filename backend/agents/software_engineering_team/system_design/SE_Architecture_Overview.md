@@ -122,7 +122,6 @@ flowchart LR
         CR["CodeReviewAgent"]
         QA["QAExpertAgent"]
         BFS["BuildFixSpecialist"]
-        PS["ProblemSolverAgent"]
     end
 
     OrchestratorAgents --> CodingTeam

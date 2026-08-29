@@ -440,7 +440,6 @@ software_engineering_team/
 ├── accessibility_agent/   # WCAG 2.2 review of frontend code
 ├── linting_tool_agent/    # Detects/runs project linters, produces fixes
 ├── build_fix_specialist/  # Resolves build failures
-├── problem_solver_agent/  # Generic error-resolution agent used by worker workflows
 │
 │  # --- Integration / release ---
 ├── integration_team/      # Integration Agent (backend/frontend API-contract alignment)
