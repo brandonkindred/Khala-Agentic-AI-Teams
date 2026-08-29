@@ -611,3 +611,43 @@ def test_pr_publish_activity_pushes_existing_head_and_completes_child(
     assert store.cleared_markers == [("/repo", 7)]
     assert out["status"] == "completed"
     assert out["github_pr_url"] == "https://example/pull/7"
+
+
+def test_pr_publish_activity_partial_failure_ends_completed_with_failures(
+    monkeypatch: pytest.MonkeyPatch, api: Any
+) -> None:
+    """A run with a failed task in task_graph_snapshot still pushes the
+    branch (partial progress lands), but its terminal status is
+    "completed_with_failures", NOT "completed" — mirroring
+    _publish_merged_work's failed = _failed_tasks(...) check for the
+    issue-driven flow. _dispatch_implementation only treats an exact
+    "completed" status as success, so this keeps the review thread open
+    for retry instead of replying to and resolving over unfinished work."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_pr_publish_activity,
+    )
+
+    store, _ = _install(
+        monkeypatch,
+        api,
+        "job-1",
+        task_graph_snapshot=[{"id": "t1", "title": "x", "status": "failed"}],
+    )
+    monkeypatch.setattr(api, "_fast_forward", lambda path, branch, source: (True, None))
+    monkeypatch.setattr(api, "_push_branch", lambda path, remote, branch, token: (True, None))
+
+    out = github_pr_publish_activity(
+        {
+            "job_id": "job-1",
+            "owner": "acme",
+            "repo": "widgets",
+            "repo_path": "/repo",
+            "pr_number": 7,
+            "pr_url": "https://example/pull/7",
+            "integration_branch": "feature/pr-7",
+            "remote": "origin",
+        }
+    )
+
+    assert out["status"] == "completed_with_failures"
+    assert store.cleared_markers == [("/repo", 7)]

@@ -61,6 +61,31 @@ WAITING_FOR_REVIEW_LABEL = "waiting for review"
 _KHALA_COMMENT_MARKER = "<!-- khala-generated -->"
 
 
+def _is_khala_authored(comment: ReviewComment, authenticated_login: str) -> bool:
+    """True iff ``comment`` is trustworthy as Khala's own generated reply.
+
+    Preconditions:
+        - ``authenticated_login`` is the GitHub login the request's token
+          authenticates as (:meth:`GitHubClient.get_authenticated_login`), or
+          ``""`` when it could not be resolved.
+    Postconditions:
+        - Returns True only when BOTH ``comment.body`` carries
+          ``_KHALA_COMMENT_MARKER`` AND ``comment.author`` case-insensitively
+          matches ``authenticated_login`` (GitHub logins are
+          case-insensitive). ``_KHALA_COMMENT_MARKER`` is a public literal
+          string in ``body`` that any commenter could include, accidentally
+          or deliberately, so it is never trusted as provenance on its own.
+        - Returns False whenever ``authenticated_login`` is empty (identity
+          could not be resolved) — fails closed to "not Khala's" rather than
+          matching an unauthenticated marker against nothing.
+    """
+    if not authenticated_login:
+        return False
+    if _KHALA_COMMENT_MARKER not in (comment.body or ""):
+        return False
+    return (comment.author or "").casefold() == authenticated_login.casefold()
+
+
 # ---------------------------------------------------------------------------
 # LLM schemas — triage a comment, then score candidate solutions
 # ---------------------------------------------------------------------------
@@ -193,9 +218,14 @@ def _unresolved_comments(
           a duplicate implementation workflow per extra message. Comments Khala
           did not itself author whose thread GitHub reports as UNRESOLVED are
           eligible — EXCEPT a thread that already carries a Khala-generated
-          reply ANYWHERE in it (the marker is only ever on Khala's own reply,
-          which need not be the thread's root — see ``retry_resolve_thread_ids``
-          below): such a thread's fix was already implemented and published, so
+          reply ANYWHERE in it. A comment counts as Khala's own reply only when
+          BOTH its ``body`` carries the marker AND its ``author`` matches the
+          token's own authenticated login (:meth:`GitHubClient.get_authenticated_login`,
+          resolved once per call) — the marker alone is a public literal string
+          any commenter could include, accidentally or deliberately, so body
+          content is never trusted as provenance on its own. A trusted marked
+          reply need not be the thread's root — see ``retry_resolve_thread_ids``
+          below: such a thread's fix was already implemented and published, so
           it is excluded from ``comments`` even via its unmarked root, rather
           than being re-triaged into a duplicate implementation run.
         - ``retry_resolve_thread_ids`` lists the id of every UNRESOLVED thread
@@ -221,6 +251,26 @@ def _unresolved_comments(
     # so the caller aborts instead of misclassifying resolved comments as unresolved.
     threads = client.list_review_threads(owner, repo, pr_number)
 
+    # The marker is a public literal string in `body` — anyone who can comment
+    # on the PR could include it, accidentally or deliberately — so it is only
+    # trusted as proof of Khala's own authorship when it ALSO carries Khala's
+    # authenticated identity. Resolved once per call; best-effort (matching
+    # pr_review._fetch_pr_metadata's _get_login): a failure degrades to "",
+    # which _is_khala_authored never matches, failing closed to "not Khala's"
+    # (worst case: a redundant re-triage of an already-fixed comment) rather
+    # than trusting an unauthenticated marker.
+    try:
+        authenticated_login = client.get_authenticated_login()
+    except Exception as e:  # noqa: BLE001 - best-effort; never blocks the run
+        logger.warning(
+            "address-comments: could not resolve authenticated login for %s/%s#%s: %s",
+            owner,
+            repo,
+            pr_number,
+            scrub_token_from_text(str(e)),
+        )
+        authenticated_login = ""
+
     thread_by_comment: Dict[int, ReviewThread] = {}
     resolved_ids: set[int] = set()
     for thread in threads:
@@ -237,7 +287,7 @@ def _unresolved_comments(
     # loop happens to reach first.
     marked_thread_ids: set[str] = set()
     for comment in all_comments:
-        if _KHALA_COMMENT_MARKER in (comment.body or ""):
+        if _is_khala_authored(comment, authenticated_login):
             thread = thread_by_comment.get(comment.id)
             if thread is not None:
                 marked_thread_ids.add(thread.id)
@@ -246,7 +296,7 @@ def _unresolved_comments(
     retry_resolve_thread_ids: List[str] = []
     seen_thread_ids: set[str] = set()
     for comment in all_comments:
-        if _KHALA_COMMENT_MARKER in (comment.body or ""):
+        if _is_khala_authored(comment, authenticated_login):
             continue
         if comment.id not in thread_by_comment:
             raise ReviewThreadsUnavailableError(
@@ -301,13 +351,28 @@ def _read_cited_code(client: Any, owner: str, repo: str, comment: ReviewComment,
     return content or ""
 
 
+class TriageUnavailableError(RuntimeError):
+    """Raised when the triage LLM call itself fails (e.g. an LLM outage).
+
+    Distinct from a genuine ``raises_issue=False`` verdict: the comment was
+    never actually analyzed, so it must not be conflated with "not an issue"
+    (which _handle_comment/_run_address_comments treat as a clean, countable
+    success that can move the PR to "waiting for review" and reclaim the
+    checkout).
+    """
+
+
 def _triage_comment(comment: ReviewComment, cited_code: str) -> CommentTriage:
     """Ask the LLM whether the comment raises a real issue or is a false positive.
 
     Postconditions:
-        - Returns a :class:`CommentTriage`. Any LLM error degrades to a
-          conservative verdict (``raises_issue=False``) so the flow skips a
-          comment it could not analyze rather than acting on a guess.
+        - Returns a :class:`CommentTriage` reflecting the LLM's actual verdict.
+        - Raises :class:`TriageUnavailableError` on any LLM failure — it never
+          fabricates a ``raises_issue=False`` verdict to paper over an outage.
+          The comment was never analyzed, so it must surface as a FAILED
+          outcome (via ``_handle_comment``'s outer exception handler), not a
+          false "not an issue" success that could leave the underlying
+          problem unaddressed while the PR is reported ready for review.
     """
     prompt = (
         "## Review comment\n"
@@ -327,17 +392,10 @@ def _triage_comment(comment: ReviewComment, cited_code: str) -> CommentTriage:
             system_prompt=_TRIAGE_SYSTEM_PROMPT,
             agent_key="code_review",
         )
-    except Exception as e:  # noqa: BLE001 - degrade to "skip" on any LLM failure
-        logger.warning(
-            "address-comments: triage LLM call failed for comment %s: %s",
-            comment.id,
-            scrub_token_from_text(str(e)),
-        )
-        return CommentTriage(
-            raises_issue=False,
-            is_false_positive=False,
-            issue_summary="Could not analyze this comment (triage unavailable).",
-        )
+    except Exception as e:  # noqa: BLE001 - convert to a distinguishable failure
+        raise TriageUnavailableError(
+            f"triage LLM call failed for comment {comment.id}: {scrub_token_from_text(str(e))}"
+        ) from e
 
 
 def _plan_resolution(comment: ReviewComment, cited_code: str) -> Optional[IssueResolutionPlan]:

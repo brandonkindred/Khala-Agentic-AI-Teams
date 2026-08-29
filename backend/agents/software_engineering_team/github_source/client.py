@@ -196,6 +196,14 @@ class ReviewComment:
     ``line`` is ``None`` for a file-level comment: GitHub's read-back payload
     for one omits ``line``/``position`` entirely (there is no ``subject_type``
     echo to check instead).
+
+    ``author`` is the commenter's GitHub login (``""`` if GitHub omitted
+    ``user``, e.g. a deleted account). Callers that trust a marker string in
+    ``body`` (e.g. ``KHALA_COMMENT_MARKER``) as proof Khala itself posted a
+    comment MUST also check ``author`` against the authenticated identity
+    (:meth:`GitHubClient.get_authenticated_login`) — the marker is a public,
+    literal string in ``body`` and anyone who can comment on the PR can
+    include it, accidentally or deliberately.
     """
 
     id: int
@@ -203,6 +211,7 @@ class ReviewComment:
     line: Optional[int]
     body: str
     html_url: str
+    author: str = ""
 
 
 @dataclass(frozen=True)
@@ -392,6 +401,7 @@ def _review_comment_from_payload(payload: dict[str, Any]) -> ReviewComment:
         line=payload.get("line"),
         body=payload.get("body") or "",
         html_url=payload.get("html_url") or "",
+        author=(payload.get("user") or {}).get("login") or "",
     )
 
 

@@ -261,6 +261,18 @@ def github_pr_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
     Unlike :func:`github_publish_activity`, this does not create or update a PR
     from issue metadata. It fast-forwards the existing PR head from the coding
     team's development branch and pushes that same head branch.
+
+    Postconditions:
+        - The job's terminal status is ``"completed"`` only when every task in
+          ``task_graph_snapshot`` landed; a run with any ``failed`` task ends
+          ``"completed_with_failures"`` instead — mirroring
+          ``_publish_merged_work``'s ``failed = _failed_tasks(...)`` check for
+          the issue-driven flow. Some tasks may have merged while others
+          failed; the branch is still pushed (partial progress is real
+          progress), but the caller (``_dispatch_implementation``) only treats
+          an exact ``"completed"`` status as success, so a partial result
+          raises there and the review thread is left open for retry rather
+          than being replied to and resolved over unfinished work.
     """
     token = _require_activity_github_token(request)
     missing = [f for f in _PR_PUBLISH_REQUIRED_FIELDS if not request.get(f)]
@@ -268,6 +280,7 @@ def github_pr_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"github_pr_publish_activity missing required fields: {missing!r}")
 
     from software_engineering_team.api import coding_team_main as _main
+    from software_engineering_team.models import JobStatus
 
     job_id = request["job_id"]
     repo_path = request["repo_path"]
@@ -281,14 +294,22 @@ def github_pr_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
     if not push_ok:
         raise RuntimeError(f"git push failed: {push_err}")
 
+    failed = _main._failed_tasks(_main.get_job(job_id) or {})
+    status = JobStatus.COMPLETED_WITH_FAILURES.value if failed else JobStatus.COMPLETED.value
+    status_text = (
+        f"Published fix to PR #{request['pr_number']} with {len(failed)} failed task(s)"
+        if failed
+        else f"Published fix to PR #{request['pr_number']}"
+    )
+
     # The branch is now durable on the existing PR. Clear the prep marker and
     # make the child job terminal before the parent resolves the review thread.
     _main._clear_active_issue_if_matches(repo_path, request["pr_number"])
     _main.update_job(
         job_id,
-        status="completed",
+        status=status,
         phase="completed",
-        status_text=f"Published fix to PR #{request['pr_number']}",
+        status_text=status_text,
         github_pr_url=request.get("pr_url"),
         integration_branch=branch,
     )

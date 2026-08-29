@@ -252,6 +252,7 @@ class _FakeClient:
         self.resolved: list[str] = []
         self.resolve_result = True  # what resolve_review_thread returns
         self.labels_set: list[list[str]] = []
+        self.authenticated_login = "khala-bot"
         self.pr = PullRequestDetail(
             number=7,
             html_url="https://example/pull/7",
@@ -277,6 +278,9 @@ class _FakeClient:
     def get_pull_request(self, _o: str, _r: str, _n: int) -> PullRequestDetail:
         return self.pr
 
+    def get_authenticated_login(self) -> str:
+        return self.authenticated_login
+
     def list_review_comments(self, _o: str, _r: str, _n: int) -> list[ReviewComment]:
         return list(self.review_comments)
 
@@ -300,10 +304,10 @@ class _FakeClient:
 
 
 def _comment(
-    cid: int, body: str = "This has a bug", path: str = "a.py", line: int = 2
+    cid: int, body: str = "This has a bug", path: str = "a.py", line: int = 2, author: str = ""
 ) -> ReviewComment:
     return ReviewComment(
-        id=cid, path=path, line=line, body=body, html_url=f"https://example/c/{cid}"
+        id=cid, path=path, line=line, body=body, html_url=f"https://example/c/{cid}", author=author
     )
 
 
@@ -391,7 +395,7 @@ class TestUnresolvedComments:
         fake.review_comments = [
             _comment(1),
             _comment(2),
-            _comment(3, body="ack <!-- khala-generated -->"),
+            _comment(3, body="ack <!-- khala-generated -->", author="khala-bot"),
         ]
         fake.threads = [
             ReviewThread(id="T1", is_resolved=True, comment_ids=(1,)),
@@ -460,7 +464,7 @@ class TestUnresolvedComments:
         ac, fake = address_env["ac"], address_env["fake"]
         fake.review_comments = [
             _comment(2, body="please fix this"),
-            _comment(3, body="Addressed by the SE team. <!-- khala-generated -->"),
+            _comment(3, body="Addressed by the SE team. <!-- khala-generated -->", author="khala-bot"),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
 
@@ -477,13 +481,89 @@ class TestUnresolvedComments:
         ac, fake = address_env["ac"], address_env["fake"]
         fake.review_comments = [
             _comment(2, body="please fix this"),
-            _comment(3, body="Addressed by the SE team. <!-- khala-generated -->"),
+            _comment(3, body="Addressed by the SE team. <!-- khala-generated -->", author="khala-bot"),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=True, comment_ids=(2, 3))]
 
         unresolved, _by_comment, retry_resolve = ac.unresolved_comments(fake, "o", "r", 7)
 
         assert unresolved == []
+        assert retry_resolve == []
+
+
+# ---------------------------------------------------------------------------
+# _is_khala_authored
+# ---------------------------------------------------------------------------
+
+
+class TestIsKhalaAuthored:
+    def test_marker_and_matching_author_is_trusted(self, address_env) -> None:
+        ac = address_env["ac"]
+        comment = _comment(1, body="fixed. <!-- khala-generated -->", author="khala-bot")
+        assert ac._is_khala_authored(comment, "khala-bot") is True
+
+    def test_author_comparison_is_case_insensitive(self, address_env) -> None:
+        ac = address_env["ac"]
+        comment = _comment(1, body="fixed. <!-- khala-generated -->", author="Khala-Bot")
+        assert ac._is_khala_authored(comment, "khala-bot") is True
+
+    def test_marker_without_matching_author_is_not_trusted(self, address_env) -> None:
+        """The core exploit this guards against: any commenter can include the
+        public marker string in their own comment body."""
+        ac = address_env["ac"]
+        comment = _comment(1, body="fixed. <!-- khala-generated -->", author="some-rando")
+        assert ac._is_khala_authored(comment, "khala-bot") is False
+
+    def test_matching_author_without_marker_is_not_trusted(self, address_env) -> None:
+        ac = address_env["ac"]
+        comment = _comment(1, body="just a normal reply", author="khala-bot")
+        assert ac._is_khala_authored(comment, "khala-bot") is False
+
+    def test_unresolved_authenticated_login_fails_closed(self, address_env) -> None:
+        """When the authenticated login could not be resolved (""), nothing is
+        ever trusted as Khala's own — the safe failure mode is a redundant
+        re-triage, never trusting an unauthenticated marker."""
+        ac = address_env["ac"]
+        comment = _comment(1, body="fixed. <!-- khala-generated -->", author="khala-bot")
+        assert ac._is_khala_authored(comment, "") is False
+
+
+class TestUnresolvedCommentsMarkerAuthentication:
+    def test_marker_from_a_different_author_is_not_treated_as_khalas(
+        self, address_env
+    ) -> None:
+        """Fresh evidence: a non-Khala comment containing the literal marker
+        string must not suppress triage/implementation of its thread."""
+        ac, fake = address_env["ac"], address_env["fake"]
+        fake.review_comments = [
+            _comment(2, body="please fix this. <!-- khala-generated -->", author="some-rando"),
+        ]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))]
+
+        unresolved, _by_comment, retry_resolve = ac.unresolved_comments(fake, "o", "r", 7)
+
+        assert [c.id for c in unresolved] == [2]
+        assert retry_resolve == []
+
+    def test_login_resolution_failure_degrades_to_untrusted_not_re_triage_skip(
+        self, address_env
+    ) -> None:
+        """A best-effort failure to resolve the authenticated login must not
+        crash the run; it just means no marker is trusted this run."""
+        ac, fake = address_env["ac"], address_env["fake"]
+
+        def _boom() -> str:
+            raise RuntimeError("network blip")
+
+        fake.get_authenticated_login = _boom  # type: ignore[assignment]
+        fake.review_comments = [
+            _comment(2, body="Addressed. <!-- khala-generated -->", author="khala-bot"),
+        ]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))]
+
+        unresolved, _by_comment, retry_resolve = ac.unresolved_comments(fake, "o", "r", 7)
+
+        assert [c.id for c in unresolved] == [2]
         assert retry_resolve == []
 
 
@@ -518,7 +598,49 @@ class TestPrHeadRemote:
 # ---------------------------------------------------------------------------
 
 
+class TestTriageComment:
+    def test_llm_failure_raises_triage_unavailable_not_a_fabricated_verdict(
+        self, address_env, monkeypatch
+    ) -> None:
+        """An LLM outage must surface as TriageUnavailableError, never a
+        fabricated raises_issue=False verdict indistinguishable from a
+        genuine "not an issue" analysis."""
+        ac = address_env["ac"]
+
+        def _boom(*_a, **_kw):
+            raise RuntimeError("LLM outage")
+
+        monkeypatch.setattr(ac._main, "generate_structured", _boom)
+
+        with pytest.raises(ac.TriageUnavailableError):
+            ac._triage_comment(_comment(2), "code")
+
+
 class TestHandleComment:
+    def test_triage_outage_records_failed_not_not_an_issue(
+        self, address_env, monkeypatch
+    ) -> None:
+        """A triage-LLM outage must be recorded as a FAILED comment outcome
+        (work still owed, thread stays open), never as the same "not_an_issue"
+        success a genuine non-issue verdict produces — a false success there
+        could leave the underlying problem unaddressed while the PR is
+        reported ready for review and its checkout reclaimed."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+
+        def _boom(*_a, **_kw):
+            raise RuntimeError("LLM outage")
+
+        monkeypatch.setattr(ac._main, "generate_structured", _boom)
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+
+        outcome = ac._handle_comment(
+            fake, "parent", req, _comment(2), thread, "feature", "main", fake.pr.html_url, "origin", "tok"
+        )
+
+        assert outcome.outcome == "failed"
+        assert fake.replies == []
+        assert fake.resolved == []
+
     def test_real_issue_waits_for_publish_then_replies_and_resolves(
         self, address_env, monkeypatch
     ) -> None:
@@ -718,7 +840,7 @@ class TestRunAddressComments:
         _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
         fake.review_comments = [
             _comment(2, body="please fix this"),
-            _comment(3, body="Addressed by the SE team. <!-- khala-generated -->"),
+            _comment(3, body="Addressed by the SE team. <!-- khala-generated -->", author="khala-bot"),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
 
