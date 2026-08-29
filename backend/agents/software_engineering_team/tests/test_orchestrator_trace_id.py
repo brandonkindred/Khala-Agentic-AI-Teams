@@ -84,7 +84,6 @@ def test_run_orchestrator_binds_same_trace_id_across_all_four_phases(tmp_path: P
         "frontend_code_v2": MagicMock(),
         "git_setup": MagicMock(),
         "integration": MagicMock(),
-        "acceptance_verifier": MagicMock(),
         "qa": MagicMock(),
         "security": MagicMock(),
         "accessibility": MagicMock(),
