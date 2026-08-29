@@ -433,7 +433,6 @@ software_engineering_team/
 │   └── tool_agents/       # Stateless subprocess wrappers (repo nav, IaC validate, policy, CI/CD lint, dry-run)
 │
 │  # --- Quality gates (cross-cutting; invoked inside per-task workflows) ---
-├── quality_gates/         # Protocols + re-exports for the cross-cutting review agents
 ├── code_review_agent/     # Chunk Reviewer + Coordinator for large code; single-call for small
 ├── qa_agent/
 ├── security_agent/

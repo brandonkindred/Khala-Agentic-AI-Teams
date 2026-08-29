@@ -668,7 +668,6 @@ flowchart TB
     SWTeam --> swBackendV2["codegen_team/\n(config-driven 7-phase team,\nstack: backend|frontend, backend has\n8 tool agents; both stacks share one\nphase implementation via shared/v2_team_config.py)"]
     SWTeam --> swFrontend["frontend_team/\n(12 agents)"]
     SWTeam --> swDevops["devops_team/\n(9 agents + 5 tool agents)"]
-    SWTeam --> swQuality["quality_gates/"]
     SWTeam --> swIntegration["integration_team/"]
     SWTeam --> swShared["shared/\n(LLM, models, git, utils)"]
     SWTeam --> swTests["tests/"]
