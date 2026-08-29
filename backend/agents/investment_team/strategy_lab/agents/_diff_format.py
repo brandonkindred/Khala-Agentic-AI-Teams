@@ -116,7 +116,14 @@ def _walk_dict_diff(previous: dict[str, Any], current: dict[str, Any], path: str
 
     Preconditions: ``previous`` and ``current`` are dicts; ``path`` is the
     dotted key-path prefix accumulated from enclosing dict levels (``""`` at
-    the top level).
+    the top level). No key anywhere in ``previous`` or ``current`` (at any
+    nesting level) contains a ``.`` or a newline — the rendered path joins
+    keys with ``.`` and lines are newline-separated, so a key containing
+    either would collide with that encoding and could make two distinct
+    diffs render identically. This holds for this module's actual caller,
+    :func:`diff_spec_or_full`, whose dicts come from a Pydantic model's
+    ``model_dump()`` and so have Python-identifier keys; a caller passing
+    dicts with keys of unconstrained shape violates this precondition.
 
     Postconditions: returns a list of human-readable lines, one per leaf-level
     difference, each prefixed with ``added:``, ``removed:``, or ``changed:``,
@@ -172,6 +179,10 @@ def diff_spec_or_full(previous_spec: dict[str, Any] | None, current_spec: dict[s
     Preconditions: ``current_spec`` is a JSON-serializable dict (the current
     round's strategy spec); ``previous_spec`` is either ``None`` (no prior
     round exists) or a JSON-serializable dict (the previous round's spec).
+    No key anywhere in either dict, at any nesting level, contains a ``.``
+    or a newline (see :func:`_walk_dict_diff`) — true for a Pydantic
+    ``model_dump()``, the expected source of both dicts, whose keys are
+    Python identifiers.
 
     Postconditions: returns a structural diff string (one ``added:``/
     ``removed:``/``changed:`` line per differing key, recursing into nested
