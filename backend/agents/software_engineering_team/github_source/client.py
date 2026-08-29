@@ -75,6 +75,7 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
           id
           isResolved
           comments(first: 100) {
+            pageInfo { hasNextPage }
             nodes { databaseId }
           }
         }

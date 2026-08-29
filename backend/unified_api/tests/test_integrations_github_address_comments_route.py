@@ -239,7 +239,7 @@ def test_409_and_no_checkout_touched_when_already_running(mock_cfg, mock_cred, m
     assert len(fake.calls) == 1
     url, params = fake.calls[0]
     assert url == "http://coding:8103/pulls/7/address-comments/running"
-    assert params == {"owner": "acme", "repo": "widget"}
+    assert params == {"owner": "acme", "repo": "widget", "repo_path": "/tmp/x"}
 
 
 @patch(f"{_M}._ensure_repo_clone", return_value=None)

@@ -3016,10 +3016,12 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
           checkout, and per-PR namespacing keeps concurrent address-comments jobs on
           different PRs of the same repo from racing on the same working tree.
         - Before touching that checkout, checks the coding-team service's own
-          best-effort admission pre-check (``GET .../address-comments/running``)
-          and raises 409 immediately when a job is already running for this PR
-          — never mutating the checkout underneath a job that may be actively
-          committing/pushing to it.
+          best-effort admission pre-check (``GET .../address-comments/running``,
+          passed this ``repo_path``) and raises 409 immediately when a job is
+          already running for this PR OR for a DIFFERENT PR sharing this SAME
+          checkout (an operator-pinned ``repo_path`` is shared, unnamespaced,
+          across every PR of that repo) — never mutating the checkout
+          underneath a job that may be actively committing/pushing to it.
         - The admission pre-check, the clone/fetch, and the forward to the
           coding-team's admitting ``POST`` all run under ONE exclusive lock on
           this checkout (:func:`clone_lock_path`), held for the request's whole
@@ -3078,7 +3080,10 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
             coding_team_url,
             f"pulls/{pr_number}/address-comments/running",
             method="GET",
-            params={"owner": owner, "repo": repo},
+            # repo_path lets the pre-check also catch a DIFFERENT PR's job already
+            # active on this SAME checkout (operator-pinned repo_path is shared,
+            # unnamespaced, across every PR) — not just a job for this exact PR.
+            params={"owner": owner, "repo": repo, "repo_path": repo_path},
             log_prefix="github address-comments admission check",
             timeout_detail="Coding team service timed out while checking for a running job.",
             generic_failure_detail="Coding team service failed the admission pre-check.",

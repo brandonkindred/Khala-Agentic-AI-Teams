@@ -90,6 +90,22 @@ class TestListReviewThreads:
         assert threads[0].is_resolved is True
         assert threads[1].comment_ids == (2, 3)
 
+    def test_query_requests_comments_page_info(self) -> None:
+        """A thread with >100 comments must be detectable as incomplete: the
+        query itself has to request `comments`' `pageInfo { hasNextPage }`, or
+        GitHub never returns it and the parser's fail-closed check (which reads
+        exactly that field) can never fire — silently truncating the thread."""
+        captured: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured["query"] = json.loads(req.content)["query"]
+            return httpx.Response(200, json=_threads_response(nodes=[]))
+
+        _client_with(handler).list_review_threads("o", "r", 7)
+        comments_block = captured["query"].split("comments(first: 100)", 1)[1]
+        assert "pageInfo" in comments_block.split("nodes", 1)[0]
+        assert "hasNextPage" in comments_block.split("nodes", 1)[0]
+
     def test_paginates(self) -> None:
         calls: list[Optional[str]] = []
 
@@ -1386,3 +1402,33 @@ class TestAddressCommentsAdmissionRoute:
             "/pulls/7/address-comments/running", params={"owner": "o", "repo": "r"}
         )
         assert len(route_env["jobs"].list_jobs()) == before
+
+    def test_repo_path_catches_sibling_job_on_different_pr(self, route_env) -> None:
+        """An operator-pinned repo_path is shared, unnamespaced, across every PR
+        of that repo, so a job active for a DIFFERENT PR on the SAME checkout
+        must be reported too — not just an exact PR-number match."""
+        route_env["jobs"].create_job(
+            "sibling-job",
+            status="running",
+            repo_path="/shared/checkout",
+            github_context={"owner": "o", "repo": "r", "pr_number": 99},
+        )
+        resp = route_env["client"].get(
+            "/pulls/7/address-comments/running",
+            params={"owner": "o", "repo": "r", "repo_path": "/shared/checkout"},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"running_job_id": "sibling-job"}
+
+    def test_omitting_repo_path_skips_the_sibling_checkout_check(self, route_env) -> None:
+        route_env["jobs"].create_job(
+            "sibling-job",
+            status="running",
+            repo_path="/shared/checkout",
+            github_context={"owner": "o", "repo": "r", "pr_number": 99},
+        )
+        resp = route_env["client"].get(
+            "/pulls/7/address-comments/running", params={"owner": "o", "repo": "r"}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"running_job_id": None}

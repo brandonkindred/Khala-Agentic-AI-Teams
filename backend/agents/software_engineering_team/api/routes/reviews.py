@@ -424,6 +424,7 @@ def get_address_comments_running(
     pr_number: int,
     owner: str = Query(..., min_length=1),
     repo: str = Query(..., min_length=1),
+    repo_path: Optional[str] = Query(default=None),
 ) -> AddressCommentsAdmissionResponse:
     """Lightweight pre-check: is a review/address-comments job already running for this PR?
 
@@ -442,16 +443,26 @@ def get_address_comments_running(
           address-comments job for ``owner/repo#pr_number`` (heartbeat-checked,
           same definition :func:`_running_review_for_pr` uses for the POST
           route's own admission), or ``running_job_id=None`` when none is
-          running. Read-only: takes no lock, creates no job. Best-effort only
-          — a job can start or finish between this call returning and the
-          caller's next action, the same TOCTOU window every other admission
-          check in this codebase already lives with; callers needing a
-          stronger guarantee must still rely on the POST route's own
-          admission lock as the authority.
+          running.
+        - When ``repo_path`` is given, ALSO checks for another active job (any
+          PR) already using that SAME checkout (:func:`_running_sibling_on_checkout`)
+          and returns its job_id too if found — an operator-pinned ``repo_path``
+          is shared, unnamespaced, across every PR of that repo, so the plain
+          PR-scoped check above cannot see a DIFFERENT PR's job already working
+          that same checkout. Omitting ``repo_path`` skips this half of the check.
+        - Read-only: takes no lock, creates no job. Best-effort only — a job can
+          start or finish between this call returning and the caller's next
+          action, the same TOCTOU window every other admission check in this
+          codebase already lives with; callers needing a stronger guarantee
+          must still rely on the POST route's own admission lock as the
+          authority.
     """
-    return AddressCommentsAdmissionResponse(
-        running_job_id=_main._running_review_for_pr(owner, repo, pr_number)
-    )
+    running_job_id = _main._running_review_for_pr(owner, repo, pr_number)
+    if running_job_id is None and repo_path:
+        sibling = _main._running_sibling_on_checkout(repo_path, "<admission-precheck>")
+        if sibling is not None:
+            running_job_id = sibling.get("job_id")
+    return AddressCommentsAdmissionResponse(running_job_id=running_job_id)
 
 
 @router.get("/reviews", response_model=List[ReviewRunItem])
