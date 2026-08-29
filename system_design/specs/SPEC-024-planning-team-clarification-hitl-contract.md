@@ -206,6 +206,22 @@ while result.get("outcome") == "paused":
   Temporal retried the activity after it persisted-but-not-yet-returned the pause); re-emit the
   exact same `{"outcome": "paused", ...}` payload unchanged, doing no new PRA work.
 
+**Answers must be persisted before the signal, not carried by it.** The `submit_answers` payload
+(§4.1) is the *wake-up*, not the sole record of the answer — mirroring
+`coding_team_hitl.submit_pending_answers` (`api/routes/coding_team_hitl.py:20-71`) exactly: that
+route calls `_main.store_append_submitted_answers(job_id, answers)` (persisting the validated
+`AnswerSubmission` list to the job record) *before* it calls `signal_workflow_sync(..., "submit_answers",
+{"resume_token": resume_token, "answers": answers})`. The workflow-side loop in this section
+deliberately drops `self._submitted_answers` after `wait_condition` returns (it only forwards
+`acknowledged_resume_token`, matching `CodingTeamWorkflow.run` field-for-field) — the resumed
+activity is expected to read the answers back from the job record, not from the signal payload.
+Planning's answer-submission path (whatever replaces the currently-stubbed `POST
+/{job_id}/answers`, `api/main.py:389-424`) MUST perform the same "persist-then-signal" write —
+appending to a `submitted_answers` job-record field — before delivering the `submit_answers`
+signal; this is a required part of the contract, not an implementation detail #7445-B is free to
+skip. Without it, `resolve_pra_answers(..., answer_callback=<from job record>)` on resume has
+nothing to read and the resume path silently regresses to auto-answering.
+
 **Recommended extraction (decision for #7445-B, not mandated here):** `mint_resume_token` and
 `_check_pending_pause_reentry` have no coding-team-specific logic — they operate purely on a job
 record dict and a resume token. #7445-B should consider extracting them from
@@ -214,6 +230,38 @@ record dict and a resume token. #7445-B should consider extracting them from
 duplicating it or reaching across team boundaries into `software_engineering_team`. This spec does
 not mandate the extraction's exact shape — only that Planning's implementation must not diverge in
 behavior from what's documented in §4.4 below, however the code ends up organized.
+
+### 4.3.1 Checkpointing the external PRA run before pausing
+
+The coding team's pause cycle unwinds a stack frame entirely internal to the activity's own
+process — nothing external needs to be told "this is still the same run." Planning's clarification
+gate is different: `document_production_activity` → `run_document_production` →
+`DocumentProductionAgent.run` (`agents/document_production/agent.py:91-94`) calls
+`job_id = run_pra(repo_path=..., spec_content=...)` to **submit a new external Product Requirements
+Analysis job**, then `wait_pra(job_id=job_id, answer_callback=...)` polls it. If
+`document_production_activity` is simply re-invoked from the top on resume — the way
+`run_pipeline_activity` is for the coding team — it re-executes `run_document_production` from
+scratch, which calls `run_pra(...)` again: a **second** external PRA job is submitted, the
+original (already-answered) PRA job is stranded, and PRA-side side effects are duplicated. This is
+a real gap the coding-team pattern does not have to solve and this contract must.
+
+**Contract requirement:** before the activity unwinds via the pause signal (§4.1), it must persist
+a checkpoint carrying the external PRA job id — using the already-sanctioned, currently-unused
+`shared/temporal/checkpoints.py` helpers (`shared/temporal/README.md` §"Checkpoints and
+human-in-the-loop": `save_checkpoint(team, job_id, phase, payload)` /
+`load_checkpoint(team, job_id, phase)`), e.g.
+`save_checkpoint("planning", job_id, "document_production_pra", {"pra_job_id": job_id})`, written
+atomically with (or immediately before) the pause envelope in §4.1. On resume,
+`document_production_activity` must `load_checkpoint(...)` for this phase and, when a checkpoint
+is present, call `wait_pra(job_id=<checkpointed pra_job_id>, answer_callback=...)` directly —
+**never** call `run_pra(...)` again for a resumed run. This requires `run_document_production` /
+`DocumentProductionAgent.run` to accept an optional pre-existing PRA `job_id` and skip submission
+when one is supplied (implementation shape for #7445-B; the contract here is only that resubmission
+must not happen).
+
+**Postcondition this adds to §5:** a resumed `document_production_activity` invocation must reuse
+the checkpointed external PRA job id and must not call `run_pra` a second time for the same
+clarification round.
 
 ### 4.4 Explicit hitl.py / pause_cycle.py reuse statement
 
@@ -230,6 +278,9 @@ This design reuses, unmodified in behavior:
   needed, only new writers.
 - The `submit_answers` signal name and payload shape (§4.1).
 - The workflow-side wait/buffer state machine (§4.2), copied field-for-field.
+- The persist-then-signal answer-submission pattern from
+  `coding_team_hitl.submit_pending_answers` (`api/routes/coding_team_hitl.py:20-71`): append
+  validated answers to the job record, then signal — never the reverse, never signal-only (§4.3).
 
 The only Planning-specific pieces are:
 1. **Which activity calls the pause cycle** — `document_production_activity`
@@ -241,6 +292,13 @@ The only Planning-specific pieces are:
    implementation detail for #7445-B, not a contract decision.
 3. **One new `pause_kind` value** (`"planning_clarification"`) rather than reusing one of the
    coding team's three — see §4.1's rationale.
+4. **An added external-job checkpoint** (§4.3.1): the coding team's pause has no equivalent,
+   because its pause boundary never crosses into a separate external job. Planning's does (PRA), so
+   this contract adds `save_checkpoint`/`load_checkpoint` (`shared/temporal/checkpoints.py`) around
+   the PRA job id specifically to prevent resubmission on resume. This is a genuine addition to the
+   coding-team pattern, not a divergence from it — it uses machinery the platform already documents
+   as the sanctioned tool for exactly this ("phase boundaries inside an activity so a retried
+   workflow can skip completed phases").
 
 No divergent mechanism is introduced anywhere in this design.
 
@@ -266,15 +324,18 @@ The primitive #7445-B builds must satisfy:
 
 **`document_production_activity` (resume path)**
 - *Preconditions:* `request["acknowledged_resume_token"]` equals the job record's persisted
-  `resume_token`, and the job record's `pending_questions` all have corresponding entries in the
-  answers the workflow previously accepted via `submit_answers`.
+  `resume_token`; the job record's `submitted_answers` (persisted by the answer-submission path
+  *before* it signaled — §4.3) cover every question in `pending_questions`; a PRA-job-id checkpoint
+  for this clarification round is present (§4.3.1).
 - *Postconditions:* The pause envelope (`waiting_for_answers`, `resume_token`, `pause_kind`,
   `pause_context`, `pending_questions`) is atomically cleared from the job record; PRA continues
-  past the clarification point using the now-resolved answers; the activity proceeds to its normal
-  terminal return shape.
+  past the clarification point using the job record's persisted `submitted_answers` (never the
+  signal payload directly) fed through `resolve_pra_answers(..., answer_callback=<from job
+  record>)`; `wait_pra` is resumed against the checkpointed external PRA job id — `run_pra` is not
+  called again; the activity proceeds to its normal terminal return shape.
 - *Invariants:* A resume is applied at most once per `resume_token` — re-invocation with the same
   already-consumed token must not re-apply answers or re-run already-completed work (idempotent
-  resume).
+  resume). No resume path may submit a second external PRA job for the same clarification round.
 
 **`PlanningWorkflow.submit_answers` (signal handler)**
 - *Preconditions:* None on the caller — a signal handler must accept any payload without raising
@@ -303,15 +364,18 @@ new gap introduced by Planning reuse, and remains open future work for both team
 - `backend/agents/software_engineering_team/system_design/hitl_pause_resume_contract.md` — the
   detailed contract doc for the coding-team primitive being reused.
 - `backend/agents/software_engineering_team/hitl.py`, `pause_cycle.py`,
-  `temporal/coding_team_workflow.py` — the implementation being mirrored.
+  `temporal/coding_team_workflow.py`, `api/routes/coding_team_hitl.py` — the implementation being
+  mirrored, including the persist-then-signal answer-submission route (§4.3).
 - `backend/shared/hitl/models.py` — the shared `PendingQuestion`/`AnswerSubmission`/
   `SubmitAnswersRequest` schemas this contract reuses.
-- `backend/shared/temporal/README.md` (`checkpoints.py`) — sanctioned thread-mode equivalent
+- `backend/shared/temporal/README.md` / `checkpoints.py` — `save_checkpoint`/`load_checkpoint`
+  (used in §4.3.1 for the PRA-job checkpoint) and the sanctioned thread-mode equivalent
   (`wait_for_input`/`submit_input`), out of scope here but the natural companion for non-Temporal
   callers.
 - `backend/agents/planning_team/orchestrator.py`, `models.py`, `temporal/workflows.py`,
-  `temporal/activities.py`, `api/main.py`, `job_store.py` — the Planning-side files this contract
-  will be implemented against in #7445-B/#7446.
+  `temporal/activities.py`, `api/main.py`, `job_store.py`,
+  `agents/document_production/agent.py`, `phases/document_production.py` — the Planning-side files
+  this contract will be implemented against in #7445-B/#7446.
 - Integration tests demonstrating the exact signal/wait pattern end-to-end (worth mirroring for
   Planning's own test suite in #7445-B):
   `backend/agents/software_engineering_team/tests/test_coding_team_temporal_workflow.py`
