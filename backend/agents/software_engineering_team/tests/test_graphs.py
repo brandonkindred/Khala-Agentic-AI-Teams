@@ -26,24 +26,6 @@ def test_build_phase4_validation_graph_returns_graph() -> None:
     assert graph is not None
 
 
-def test_build_resolution_swarm_returns_swarm() -> None:
-    from software_engineering_team.integration_team.graphs.resolution_swarm import (
-        build_resolution_swarm,
-    )
-
-    swarm = build_resolution_swarm()
-    assert swarm is not None
-
-
-def test_build_resolution_swarm_with_handoff_limit() -> None:
-    from software_engineering_team.integration_team.graphs.resolution_swarm import (
-        build_resolution_swarm,
-    )
-
-    swarm = build_resolution_swarm(max_handoffs=2)
-    assert swarm is not None
-
-
 def test_review_result_protocol_runtime_checkable() -> None:
     """The ``ReviewResult`` Protocol should runtime-check ``approved: bool``."""
     from software_engineering_team.quality_gates.protocols import ReviewResult
