@@ -19,9 +19,9 @@ propagates that context into every worker thread by default
 (``propagate_context=True``), so every actual LLM call made anywhere in the
 run sees the same ``job_id`` without any function signature changing. A call
 made with no attribution bound (``job_id == ""`` — a caller that never wired
-one, e.g. most existing tests and non-job-tracked callers like
-``acceptance_verifier_agent``) is a no-op: nothing to attribute the entry to,
-and no ``code_review_runs`` row exists for it to attach to anyway. Scope:
+one, e.g. most existing tests and other non-job-tracked callers) is a no-op:
+nothing to attribute the entry to, and no ``code_review_runs`` row exists
+for it to attach to anyway. Scope:
 ``llm_attribution`` is a contextvar, so it does not cross the Temporal
 activity boundary — only the in-process coordinator path records a
 transcript today (the GitHub PR review flow, the sole caller with a

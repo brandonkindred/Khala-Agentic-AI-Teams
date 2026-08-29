@@ -150,7 +150,7 @@ These are the gates run by the default v2 execution path (`codegen_team`, for bo
 Build verification (lint + build) is a single CI-owned gate that runs once, before
 Code Review; the Code Review phase itself does not re-run lint or build checks.
 
-There is no separate acceptance-verifier or DbC gate inside this per-microtask loop; `AcceptanceVerifierAgent`/`DbcCommentsAgent` have no production caller anywhere in the pipeline today. The per-task review gate above this loop is `TechLeadAgent.run_code_review` (the coding-team swarm's sole merge-gate) — see the higher-level Tech Lead review step in [Flow](#flow) below.
+There is no separate DbC gate inside this per-microtask loop; `DbcCommentsAgent` has no production caller anywhere in the pipeline today. The per-task review gate above this loop is `TechLeadAgent.run_code_review` (the coding-team swarm's sole merge-gate) — see the higher-level Tech Lead review step in [Flow](#flow) below.
 
 Data and control-flow dependencies among the build/code-review/security/QA
 gates specifically, and which of them are safe to parallelize vs. require a
@@ -357,7 +357,7 @@ Spec → Project Planning → Architecture + Tech Lead (alignment loop)
          ↓
     [Backend Worker]     [Frontend Worker]
     (run_workflow)       (run_workflow)
-    Build → CodeReview → AcceptanceVerifier → Security → QA → DBC → Merge
+    Build → CodeReview → Security → QA → DBC → Merge
          ↓                      ↓
     Integration Agent (backend + frontend contract alignment)
          ↓
@@ -439,7 +439,6 @@ software_engineering_team/
 ├── qa_agent/
 ├── security_agent/
 ├── accessibility_agent/   # WCAG 2.2 review of frontend code
-├── acceptance_verifier_agent/
 ├── linting_tool_agent/    # Detects/runs project linters, produces fixes
 ├── build_fix_specialist/  # Resolves build failures
 ├── problem_solver_agent/  # Generic error-resolution agent used by worker workflows
