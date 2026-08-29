@@ -132,6 +132,29 @@ or a **new** one — and for a new batch, raise a fresh
 `wait_for_planning_answers`) rather than reusing the one-shot resolved
 callback for the rest of the phase.
 
+## Open problem for the deferred wiring work: a rejected submission looks the same as success
+
+`build_temporal_planning_answer_callback`'s resolved callback validates only
+that `question_id` is a `str` that matches a pending question — it does not
+(and, being generic/PRA-agnostic, should not) validate `selected_option_id`
+or `other_text` against whatever the eventual submission endpoint expects. A
+malformed `submit_planning_answers` signal (e.g. `selected_option_id: []`)
+therefore passes through unchanged, and PRA's actual submission endpoint
+(`SubmitAnswersRequest` at `POST .../product-analysis/{job_id}/answers`,
+called via `submit_product_analysis_answers`) will reject it with a 422 —
+which `post_json` (`shared/http/job_polling.py`) turns into a plain `None`
+return, indistinguishable from any other transient failure.
+
+`_on_poll`'s `if answers: submit_product_analysis_answers(...)` only checks
+that the callback returned a non-empty list, not that the submission it
+triggered actually succeeded — so a rejected, malformed answer batch is
+silently dropped and PRA just keeps polling until its own `total_timeout`,
+exactly the same silent-hang failure mode as the multi-round gap above. The
+deferred wiring must check `submit_product_analysis_answers`'s return value
+and treat a `None` (rejected/failed submission) as still-unanswered — re-
+raising a pause for the same batch — rather than treating "the callback
+returned something" as proof the human's answer was actually accepted.
+
 ## Why a mixin, not an inline copy per workflow
 
 The coding team's implementation lives inline inside `CodingTeamWorkflow`
