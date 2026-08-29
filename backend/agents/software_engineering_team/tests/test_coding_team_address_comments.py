@@ -764,6 +764,39 @@ class TestHandleComment:
         assert fake.replies == []  # never replied — a reply would mask the feedback
         assert fake.resolved == []  # never resolved
 
+    def test_in_place_edit_of_triaged_comment_prevents_resolution(
+        self, address_env, monkeypatch
+    ) -> None:
+        """GitHub retains a comment's id across an edit, so a reviewer who edits
+        the ALREADY-triaged comment in place (rather than posting a reply) must
+        still be caught: an id-only freshness check would see no id greater
+        than the snapshot and silently resolve over the edited feedback."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+        # The live comment 2 now has a different body than what was triaged —
+        # simulating an in-place edit while the implementation workflow ran.
+        fake.review_comments = [_comment(2, body="actually this is a bigger problem than I thought")]
+        fake.threads = [thread]
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2, body="This has a bug"),  # the snapshot triage saw
+            thread,
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "failed"
+        assert fake.replies == []
+        assert fake.resolved == []  # never resolved
+
     def test_real_issue_on_fork_pr_pushes_to_fork_remote(self, address_env, monkeypatch) -> None:
         """A fork-opened PR's implementation workflow is dispatched with the fork's
         clone URL as the remote, not "origin" (the base repo)."""

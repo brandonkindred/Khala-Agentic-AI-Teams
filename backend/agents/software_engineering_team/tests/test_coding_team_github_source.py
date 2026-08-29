@@ -1408,6 +1408,39 @@ def _post_run_from_github_then_run_legacy_hooks(patched_app, json: dict[str, Any
 _post_run_from_github_and_run_hooks = _post_run_from_github_then_run_legacy_hooks
 
 
+class TestCheckoutRunningRoute:
+    """GET /checkout/running: the generic checkout-wide admission pre-check
+    run_github_issue relies on (it has no PR-scoped admission of its own to
+    piggyback on, unlike address_github_pr_comments)."""
+
+    def test_reports_none_when_nothing_running(self, patched_app) -> None:
+        resp = patched_app["client"].get(
+            "/checkout/running", params={"repo_path": "/tmp/nonexistent-checkout"}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"running_job_id": None}
+
+    def test_reports_running_sibling_job(self, patched_app) -> None:
+        patched_app["jobs"].create_job(
+            "sibling-job",
+            status="running",
+            repo_path=patched_app["repo_path"],
+            github_context={"owner": "o", "repo": "r", "issue_number": 5},
+        )
+        resp = patched_app["client"].get(
+            "/checkout/running", params={"repo_path": patched_app["repo_path"]}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"running_job_id": "sibling-job"}
+
+    def test_is_read_only_and_creates_no_job(self, patched_app) -> None:
+        before = len(patched_app["jobs"].list_jobs())
+        patched_app["client"].get(
+            "/checkout/running", params={"repo_path": patched_app["repo_path"]}
+        )
+        assert len(patched_app["jobs"].list_jobs()) == before
+
+
 class TestEndpointHappyPath:
     def test_run_from_github_starts_coding_team_workflow(self, patched_app, monkeypatch) -> None:
         import software_engineering_team.api.routes.github as gh_routes

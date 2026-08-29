@@ -7,10 +7,11 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.coding_team_models import (
+    AddressCommentsAdmissionResponse,
     RunFromGitHubRequest,
     RunFromGitHubResponse,
 )
@@ -161,3 +162,30 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
             detail="Temporal dispatch failed (worker unavailable); job marked failed. Retry.",
         ) from e
     return RunFromGitHubResponse(job_id=job_id, issue_number=issue.number, issue_url=issue.html_url)
+
+
+@router.get("/checkout/running", response_model=AddressCommentsAdmissionResponse)
+def get_checkout_running(repo_path: str = Query(..., min_length=1)) -> AddressCommentsAdmissionResponse:
+    """Lightweight pre-check: is ANY active job (issue run or PR remediation) already using this checkout?
+
+    Generic counterpart to ``GET /pulls/{pr_number}/address-comments/running``'s
+    ``repo_path`` half-check, usable by any caller that owns a shared, mutable
+    checkout resource before touching it — e.g. the unified API's
+    ``run_github_issue``, which (unlike ``address_github_pr_comments``) has no
+    PR-scoped admission of its own to piggyback on.
+
+    Preconditions:
+        - ``repo_path`` is non-empty.
+    Postconditions:
+        - Returns the job_id of a live, non-terminal job (any kind) using this
+          EXACT checkout (:func:`_running_sibling_on_checkout`, canonical-path
+          compared), or ``running_job_id=None`` when none is running. Read-only:
+          takes no lock, creates no job. Best-effort only — the same TOCTOU
+          window every other admission pre-check in this codebase already lives
+          with; a caller needing a stronger guarantee must still rely on the
+          eventual admitting route's own checks as the authority.
+    """
+    sibling = _main._running_sibling_on_checkout(repo_path, "<admission-precheck>")
+    return AddressCommentsAdmissionResponse(
+        running_job_id=sibling.get("job_id") if sibling is not None else None
+    )

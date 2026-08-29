@@ -600,6 +600,7 @@ def _thread_has_new_reviewer_feedback(
     pr_number: int,
     thread_id: str,
     since_comment_id: int,
+    since_comment_body: str = "",
 ) -> bool:
     """True iff ``thread_id`` now carries reviewer feedback newer than ``since_comment_id``.
 
@@ -613,15 +614,23 @@ def _thread_has_new_reviewer_feedback(
     Preconditions:
         - ``since_comment_id`` is the id of the comment this run triaged/replied
           to (the thread's representative comment at snapshot time).
+        - ``since_comment_body`` is that same comment's body at snapshot time
+          (optional — omitting it disables the in-place-edit check below).
     Postconditions:
         - Returns True when the thread's CURRENT comment set (re-fetched live)
-          contains an id greater than ``since_comment_id`` that is not Khala's
-          own authenticated reply — i.e. genuine new reviewer feedback the
-          triage that ran never saw. Returns False when no such comment exists,
-          or when the thread itself can no longer be found (nothing left to
-          protect). Fails OPEN (returns True) on any error: resolving a thread
-          whose freshness could not be verified risks silently hiding real
-          feedback, which is worse than a redundant re-check on the next run.
+          contains EITHER (a) an id greater than ``since_comment_id`` that is
+          not Khala's own authenticated reply — genuine new reviewer feedback
+          the triage that ran never saw — OR (b) a live comment with id EQUAL
+          to ``since_comment_id`` whose body no longer matches
+          ``since_comment_body`` — GitHub retains a comment's id across an
+          edit, so a reviewer who edits the ALREADY-triaged comment in place
+          (rather than posting a reply) would otherwise be invisible to the
+          id-only check and get silently resolved over. Returns False when
+          neither is found, or when the thread itself can no longer be found
+          (nothing left to protect). Fails OPEN (returns True) on any error:
+          resolving a thread whose freshness could not be verified risks
+          silently hiding real feedback, which is worse than a redundant
+          re-check on the next run.
     """
     try:
         authenticated_login = client.get_authenticated_login()
@@ -634,6 +643,10 @@ def _thread_has_new_reviewer_feedback(
             return False
         all_comments = client.list_review_comments(owner, repo, pr_number)
         comments_by_id = {c.id: c for c in all_comments}
+        if since_comment_body:
+            live_snapshot = comments_by_id.get(since_comment_id)
+            if live_snapshot is not None and (live_snapshot.body or "") != since_comment_body:
+                return True
         for cid in fresh_thread.comment_ids:
             if cid <= since_comment_id:
                 continue
@@ -693,7 +706,7 @@ def _reply_and_resolve(
           message.
     """
     if thread is not None and _thread_has_new_reviewer_feedback(
-        client, request.owner, request.repo, request.pr_number, thread.id, comment.id
+        client, request.owner, request.repo, request.pr_number, thread.id, comment.id, comment.body
     ):
         logger.info(
             "address-comments: skipping reply/resolve on thread %s — newer "

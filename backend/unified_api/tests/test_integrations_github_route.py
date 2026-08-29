@@ -78,17 +78,22 @@ class _FakeAsyncClient:
 
     ``calls`` records every ``post`` as a ``(url, json_payload)`` tuple; use
     ``last_payload()`` to read the JSON body of the most recent request rather
-    than indexing the tuple structure directly. ``get`` handles the
+    than indexing the tuple structure directly. ``get`` handles both the
     ``_assert_pat_can_reach_repo`` reachability probe (any ``/repos/...`` URL),
     answering with ``repo_access_status`` (200 by default, i.e. "reachable") so
-    routes that don't exercise that gate are unaffected; the probe's own calls
-    are recorded separately in ``repo_checks``, not ``calls``.
+    routes that don't exercise that gate are unaffected — the probe's own calls
+    are recorded separately in ``repo_checks``, not ``calls`` — and the
+    ``GET .../checkout/running`` admission pre-check, answering
+    ``checkout_running_job_id`` (``None`` by default, i.e. nothing running).
     """
 
-    def __init__(self, *, result=None, exc=None, repo_access_status=200):
+    def __init__(
+        self, *, result=None, exc=None, repo_access_status=200, checkout_running_job_id=None
+    ):
         self._result = result
         self._exc = exc
         self._repo_access_status = repo_access_status
+        self._checkout_running_job_id = checkout_running_job_id
         self.calls = []
         self.repo_checks = []
 
@@ -103,6 +108,8 @@ class _FakeAsyncClient:
         return False
 
     async def get(self, url, params=None, headers=None):
+        if url.endswith("/checkout/running"):
+            return _FakeResp(200, json_data={"running_job_id": self._checkout_running_job_id})
         self.repo_checks.append(url)
         return _FakeResp(self._repo_access_status, json_data={"full_name": "acme/widget"})
 
@@ -189,9 +196,33 @@ def test_run_issue_returns_502_on_clone_failure(mock_cfg, mock_status, mock_clon
     mock_cfg.return_value = dict(_GH_CFG)
     mock_clone.return_value = "git executable not found on the server; install git in the API image."
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
-    resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
+    fake = _FakeAsyncClient(result=_ok_resp())
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
     assert resp.status_code == 502
     assert "git executable not found" in resp.json()["detail"]
+
+
+@patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
+@patch(f"{_M}._ensure_repo_clone", return_value=None)
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta")
+def test_run_issue_409_and_no_checkout_touched_when_already_running(
+    mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch
+):
+    """run_github_issue has no PR-scoped admission of its own to piggyback on
+    (unlike address_github_pr_comments), so it relies entirely on the generic
+    GET /checkout/running pre-check: when a job is already active on this
+    checkout, the route must reject with 409 and never touch the checkout."""
+    mock_cfg.return_value = dict(_GH_CFG)
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(result=_ok_resp(), checkout_running_job_id="existing-job")
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
+    assert resp.status_code == 409
+    assert "existing-job" in resp.json()["detail"]
+    mock_clone.assert_not_called()
+    assert fake.calls == []  # never forwarded to run-from-github
 
 
 # ---------------------------------------------------------------------------
@@ -491,6 +522,26 @@ def test_ensure_repo_clone_fetch_success_on_existing_checkout(tmp_path):
     assert err is None
 
 
+def test_ensure_repo_clone_fetch_targets_origin_only(tmp_path):
+    """Never "--all": a fork PR's branch prep can register a temporary named
+    remote (khala-pr-head) that persists on a long-lived operator-pinned
+    checkout. If that fork later becomes inaccessible, "--all" would make
+    every future clone-or-fetch on this checkout fail here, before branch
+    prep (which fetches whichever remote it actually needs itself) even
+    runs."""
+    repo = tmp_path / "checkout"
+    (repo / ".git").mkdir(parents=True)
+    url_check = subprocess.CompletedProcess(
+        args=["git"], returncode=0, stdout="https://github.com/acme/widget\n", stderr=""
+    )
+    fetch_ok = subprocess.CompletedProcess(args=["git"], returncode=0, stdout="", stderr="")
+    with patch(f"{_M}.subprocess.run", side_effect=[url_check, fetch_ok]) as mock_run:
+        err = _ensure_repo_clone(str(repo), "acme", "widget", "tok")
+    assert err is None
+    fetch_call_args = mock_run.call_args_list[1].args[0]
+    assert fetch_call_args == ["git", "-C", str(repo), "fetch", "origin"]
+
+
 def test_ensure_repo_clone_fetch_failure_scrubs_token(tmp_path):
     repo = tmp_path / "checkout"
     (repo / ".git").mkdir(parents=True)
@@ -672,6 +723,7 @@ def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_c
         "widget",
         "ghp_token",
         platform_owned=True,
+        hold_lock=False,
     )
 
 
@@ -699,6 +751,7 @@ def test_run_issue_targets_body_supplied_repo(mock_cfg, mock_cred, mock_clone, m
         "thing",
         "ghp_token",
         platform_owned=True,
+        hold_lock=False,
     )
 
 
@@ -732,7 +785,9 @@ def test_run_issue_operator_override_disables_cleanup(mock_cfg, mock_cred, mock_
     # Cloning is not skipped for an override — it runs once against the pinned
     # path, and platform_owned=False so it does NOT require a sibling lock (the
     # operator's parent dir may be read-only).
-    mock_clone.assert_called_once_with("/srv/checkout", "acme", "widget", "ghp_token", platform_owned=False)
+    mock_clone.assert_called_once_with(
+        "/srv/checkout", "acme", "widget", "ghp_token", platform_owned=False, hold_lock=False
+    )
 
 
 # ---------------------------------------------------------------------------

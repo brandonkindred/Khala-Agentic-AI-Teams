@@ -2674,8 +2674,18 @@ def _ensure_repo_clone(
                         f"(remote origin: {_redact_url_userinfo(url_out)})"
                     )
 
+                # Fetch only "origin", never "--all": a fork PR's branch prep
+                # registers a temporary named remote (khala-pr-head, see
+                # _ensure_named_remote) that can persist on a long-lived
+                # operator-pinned checkout after that run finishes. If the
+                # fork is later deleted or becomes inaccessible, "--all" would
+                # make EVERY future clone-or-fetch on this checkout fail here
+                # — before branch prep even runs — over a remote nothing
+                # currently needs fetched this early. Branch prep does its own
+                # explicit `git fetch -- <remote> <branch>` for whichever
+                # remote (origin or a fork) it actually needs.
                 result = subprocess.run(
-                    ["git", "-C", repo_path, "fetch", "--all"],
+                    ["git", "-C", repo_path, "fetch", "origin"],
                     capture_output=True,
                     text=True,
                     timeout=120,
@@ -2829,6 +2839,17 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
           middleware, so the browser receives it without an ``Access-Control-Allow-Origin``
           header, drops the response, and the UI can only report an opaque
           "0 Unknown Error" — useless for diagnosis.
+        - Before touching the checkout, checks the coding-team service's
+          generic ``GET /checkout/running`` pre-check (any active job, any
+          kind, on this ``repo_path``) and raises 409 immediately when one is
+          found — this route has no PR-scoped admission of its own to
+          piggyback on (unlike ``address_github_pr_comments``), so without
+          this an issue run on an operator-pinned ``repo_path`` could clone/
+          fetch against a PR-remediation job's live working tree. The
+          admission pre-check, clone/fetch, and forward all run under ONE
+          exclusive lock on the checkout (:func:`clone_lock_path`), same
+          pattern and same lock file `address_github_pr_comments` uses, so
+          the two routes correctly serialize against each other too.
     """
     # Centralized validation (enabled + PAT + target repo), which also maps an
     # unreachable credential store to a 503 rather than a misleading "not configured".
@@ -2845,40 +2866,93 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
     # published to a PR; an operator-managed override is never auto-cleaned.
     repo_path = _resolve_repo_path(cfg, owner, repo, issue_number=body.issue_number)
     cleanup_checkout_on_success = not _repo_path_override(cfg, owner, repo)
+    platform_owned = cleanup_checkout_on_success
 
     loop = asyncio.get_running_loop()
-    clone_err = await loop.run_in_executor(
-        None,
-        functools.partial(
-            _ensure_repo_clone, repo_path, owner, repo, token, platform_owned=cleanup_checkout_on_success
-        ),
-    )
-    if clone_err:
-        logger.warning("github run-issue: repository preparation failed: %s", clone_err)
-        raise HTTPException(status_code=502, detail=clone_err)
+    lock_path = clone_lock_path(repo_path)
+    lock_cm = flock_lock(lock_path)
+    lock_held = False
+    try:
+        # flock_lock requires its parent dir to already exist; mkdir(exist_ok=True)
+        # on an existing parent is a no-op needing no write permission, so this
+        # stays safe for an operator path under a read-only parent.
+        await loop.run_in_executor(
+            None, functools.partial(lock_path.parent.mkdir, parents=True, exist_ok=True)
+        )
+        await loop.run_in_executor(None, lock_cm.__enter__)
+        lock_held = True
+    except OSError as e:
+        if platform_owned:
+            raise HTTPException(
+                status_code=502, detail=f"could not acquire clone lock for {owner}/{repo}: {e}"
+            ) from e
+        # Best-effort for an operator-pinned path: degrade to no additional
+        # locking rather than failing an otherwise-valid request, matching
+        # address_github_pr_comments' identical fallback.
+        logger.warning(
+            "github run-issue: could not acquire serialization lock for pinned checkout %s: %s",
+            repo_path,
+            e,
+        )
 
-    payload: dict[str, Any] = {
-        "owner": owner,
-        "repo": repo,
-        "repo_path": repo_path,
-        "issue_number": body.issue_number,
-        "github_token": token,
-        "cleanup_checkout_on_success": cleanup_checkout_on_success,
-    }
-    if body.base_branch:
-        payload["base_branch"] = body.base_branch
+    try:
+        running = await _forward_to_coding_team(
+            coding_team_url,
+            "checkout/running",
+            method="GET",
+            params={"repo_path": repo_path},
+            log_prefix="github run-issue admission check",
+            timeout_detail="Coding team service timed out while checking for a running job.",
+            generic_failure_detail="Coding team service failed the admission pre-check.",
+        )
+        running_job_id = running.get("running_job_id") if isinstance(running, dict) else None
+        if running_job_id:
+            raise HTTPException(
+                status_code=409,
+                detail=f"job {running_job_id} already running on checkout {repo_path}",
+            )
 
-    # connect fast-fails an unreachable service; the longer read budget covers the
-    # coding team's synchronous GitHub API round-trips inside /run-from-github.
-    data = await _forward_to_coding_team(
-        coding_team_url,
-        "run-from-github",
-        json_body=payload,
-        log_prefix="github run-issue",
-        timeout_detail="Coding team service timed out while starting the job.",
-        # e.g. "issue blocked by sub-issues", "no ready issues" for 4xx.
-        generic_failure_detail="Failed to start the coding job.",
-    )
+        clone_err = await loop.run_in_executor(
+            None,
+            functools.partial(
+                _ensure_repo_clone,
+                repo_path,
+                owner,
+                repo,
+                token,
+                platform_owned=platform_owned,
+                hold_lock=False,
+            ),
+        )
+        if clone_err:
+            logger.warning("github run-issue: repository preparation failed: %s", clone_err)
+            raise HTTPException(status_code=502, detail=clone_err)
+
+        payload: dict[str, Any] = {
+            "owner": owner,
+            "repo": repo,
+            "repo_path": repo_path,
+            "issue_number": body.issue_number,
+            "github_token": token,
+            "cleanup_checkout_on_success": cleanup_checkout_on_success,
+        }
+        if body.base_branch:
+            payload["base_branch"] = body.base_branch
+
+        # connect fast-fails an unreachable service; the longer read budget covers the
+        # coding team's synchronous GitHub API round-trips inside /run-from-github.
+        data = await _forward_to_coding_team(
+            coding_team_url,
+            "run-from-github",
+            json_body=payload,
+            log_prefix="github run-issue",
+            timeout_detail="Coding team service timed out while starting the job.",
+            # e.g. "issue blocked by sub-issues", "no ready issues" for 4xx.
+            generic_failure_detail="Failed to start the coding job.",
+        )
+    finally:
+        if lock_held:
+            await loop.run_in_executor(None, lock_cm.__exit__, None, None, None)
     try:
         return RunGitHubIssueResponse(
             job_id=data["job_id"],
