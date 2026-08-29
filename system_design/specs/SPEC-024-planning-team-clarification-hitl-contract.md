@@ -227,9 +227,11 @@ while result.get("outcome") == "paused":
 `document_production_activity` becomes idempotent on re-entry using
 `_check_pending_pause_reentry` (`pause_cycle.py:142-177`) unchanged:
 - No persisted pause on the job record → proceed normally.
-- `acknowledged_resume_token` matches the persisted token → genuine resume; clear the pause
-  envelope, apply the now-answered questions via `resolve_pra_answers(..., answer_callback=<from
-  job record>)`, and continue past the point PRA raised them.
+- `acknowledged_resume_token` matches the persisted token → genuine resume; **apply the
+  now-answered questions first** via `resolve_pra_answers(..., answer_callback=<from job record>)`
+  and confirm PRA has durably accepted them, **then** clear the pause envelope (never the reverse —
+  see the crash-safe ordering requirement below, normatively defined in §5's resume-path
+  postconditions), and continue past the point PRA raised them.
 - Token missing/mismatched but a pause is persisted → this is a pre-work activity retry (e.g.
   Temporal retried the activity after it persisted-but-not-yet-returned the pause); re-emit the
   exact same `{"outcome": "paused", ...}` payload unchanged, doing no new PRA work.
@@ -460,15 +462,24 @@ deterministically against a worker that has since deployed the new dict-based ca
 requires the *same sequence of commands* on replay, and a changed argument shape for the same
 activity name is exactly the kind of non-deterministic edit `workflow.patched` exists to guard.
 
-**Contract requirement:** gate the signature change behind `workflow.patched(...)`, the same
-mechanism `PlanningWorkflow` already uses for its own prior migration (`_PER_PHASE_PATCH`,
-`temporal/workflows.py:122-140` — "A `PlanningWorkflow` execution started before the per-phase
-migration... replays the legacy single-activity path via the `workflow.patched` gate"). A new
-patch marker (e.g. `_CLARIFICATION_PAUSE_PATCH`) selects between the old call shape (for histories
-recorded before this feature ships) and the new `request`-dict call (for new/patched executions),
-exactly mirroring how `_PER_PHASE_PATCH` already lets old and new histories coexist during a
-rollout. This is not a new mechanism to invent — it is the existing rollout tool for this exact
-class of problem, reused a second time in the same workflow.
+**Contract requirement:** gate the *entire new command sequence* — not just the argument shape —
+behind `workflow.patched(...)`, the same mechanism `PlanningWorkflow` already uses for its own
+prior migration (`_PER_PHASE_PATCH`, `temporal/workflows.py:122-140` — "A `PlanningWorkflow`
+execution started before the per-phase migration... replays the legacy single-activity path via
+the `workflow.patched` gate"). This must cover more than the argument shape: this contract also
+*inserts a brand-new command* — the `document_production_pra_submit_activity` call (§4.3.1) —
+*before* the existing `document_production_activity` call. Temporal replay requires the exact same
+sequence of commands a history originally recorded; a history that scheduled
+`planning_document_production` directly (no submit-activity command before it) diverges from a
+replay that now schedules a new activity command first, **even if `document_production_activity`
+itself is called with its old argument shape** on that branch. So the single new patch marker (e.g.
+`_CLARIFICATION_PAUSE_PATCH`) must gate the *whole* new sequence: on `not workflow.patched(...)`,
+skip `document_production_pra_submit_activity` entirely and call `document_production_activity`
+exactly as today (old args, no resume loop); on the patched branch, schedule the submit activity
+first, then run the new `request`-dict call and retry/continuation loop of §4.3. This exactly
+mirrors `_PER_PHASE_PATCH`'s own legacy branch, which replays its entire old single-activity
+sequence rather than cherry-picking pieces of the new one — reused a second time in the same
+workflow, not invented anew.
 
 **`workflow.patched` alone is not sufficient — the activity worker needs its own compatibility
 path.** `workflow.patched` only governs what a *workflow* schedules on replay; it says nothing
@@ -553,14 +564,23 @@ The primitive #7445-B builds must satisfy:
   is readable; scheduled by the workflow with `retry_policy=NO_RETRY`.
 - *Postconditions:* Checks `load_checkpoint("planning_team", job_id, "document_production_pra")`
   first. If present, returns immediately (no-op — a prior successful run already submitted). If
-  absent, calls `run_pra(...)` and, immediately upon receiving the external `pra_job_id`, persists
+  absent, calls `run_pra(...)`. **`run_pra`/`run_product_analysis` returns `None` when the
+  Software Engineering service is unconfigured or the submission POST fails
+  (`adapters/product_analysis.py:33-48`) — this activity must treat a `None`/falsy return as a
+  failure and raise, not persist a checkpoint with `pra_job_id: None` and return successfully.** A
+  raised exception here fails this `NO_RETRY` activity (and, per the workflow's own error handling,
+  the workflow) loudly and visibly, which is the correct outcome: `document_production_activity`'s
+  precondition requires a checkpoint carrying a *usable* `pra_job_id` before it will ever call
+  `wait_pra`, and there is no defined no-PRA fallback for a job that requested
+  `use_product_analysis=True` but got no PRA job — that is an operational failure to surface, not
+  paper over. Only on a genuine successful `pra_job_id`, immediately persist
   `save_checkpoint("planning_team", job_id, "document_production_pra", {"pra_job_id": ...})` as its
-  own atomic write, then returns.
+  own atomic write, then return.
 - *Invariants:* `run_pra` is called at most once per Planning `job_id`, ever, *when this activity
   itself does not crash between the two steps*; a crash in that narrow window is the one residual
   risk this spec cannot close without PRA-side idempotency (§5's open risks, below) — `NO_RETRY`
   ensures that crash fails the workflow loudly rather than Temporal silently retrying into a
-  duplicate submission.
+  duplicate submission. A checkpoint is never persisted with a `None`/falsy `pra_job_id`.
 
 **`document_production_activity` (entry — every invocation, paused or not)**
 - *Preconditions:* Called with a `request` dict optionally carrying `acknowledged_resume_token`
