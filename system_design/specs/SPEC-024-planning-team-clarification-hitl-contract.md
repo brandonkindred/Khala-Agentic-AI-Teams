@@ -5,7 +5,7 @@
 | **Status**   | Proposed (design only — no production code in this story)             |
 | **Author**   | Platform Engineering                                                  |
 | **Created**  | 2026-08-29                                                            |
-| **Priority** | P0 (blocks #7445-B / #7445-C)                                         |
+| **Priority** | P0 (blocks #7445-B / #7446)                                           |
 | **Scope**    | `planning_team` Temporal workflow/activity boundary only; defines the contract, does not implement it |
 
 > **Story note.** This spec is the output of issue #7451, the first story in the #7445 sequence
@@ -622,9 +622,20 @@ The primitive #7445-B builds must satisfy:
   duplicate submission. A checkpoint is never persisted with a `None`/falsy `pra_job_id`.
 
 **`document_production_activity` (entry — every invocation, paused or not)**
-- *Preconditions:* Called with a `request` dict optionally carrying `acknowledged_resume_token`
-  (subject to the `workflow.patched` rollout gate, §4.3.2); the `"planning_team"`-namespaced job
-  record for `request["job_id"]` is readable; **when `request["use_product_analysis"]` is `True`**,
+- *Preconditions:* **On the patched branch** (`workflow.patched(_CLARIFICATION_PAUSE_PATCH)` is
+  `True`, §4.3.2), called with a `request` dict optionally carrying `acknowledged_resume_token`.
+  **On the legacy branch** (`not workflow.patched(...)` — a `PlanningWorkflow` execution whose
+  history predates this feature), called with the original three positional args (`job_id`,
+  `repo_path`, ... — `temporal/workflows.py:189-191`'s current shape), never a `request` dict, and
+  never with `acknowledged_resume_token` (the legacy branch skips
+  `document_production_pra_submit_activity` and the retry/continuation loop entirely — §4.3.2 — so
+  this precondition holds trivially there: there is no pause to resume from). The activity
+  implementation must decode/normalize both call shapes into one internal `request`-dict-equivalent
+  before proceeding, per §4.3.2's activity-level compatibility requirement. In all cases: the
+  `"planning_team"`-namespaced job record for the job is readable; **when
+  `request["use_product_analysis"]` is `True`** (patched branch only — the legacy branch's
+  `use_product_analysis` positional arg governs identically, just without this contract's pause
+  machinery),
   `load_checkpoint(...)` for `"document_production_pra"` already returns a checkpoint (the workflow
   only enters this activity after `document_production_pra_submit_activity` above has completed) —
   when `False`, no checkpoint precondition applies, since PRA (and this whole pause contract) never
