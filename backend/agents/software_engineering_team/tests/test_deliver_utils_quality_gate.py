@@ -155,10 +155,13 @@ class TestRunPreMergeQualityGate:
 class _RecordingOps:
     """Wraps a literal ``DeliverGitOps`` to record call order/args for assertions."""
 
-    def __init__(self, *, merge_result=(True, ""), commit_result=(True, "")) -> None:
+    def __init__(
+        self, *, merge_result=(True, ""), commit_result=(True, ""), write_result=(True, "")
+    ) -> None:
         self.calls: list[tuple[str, tuple, dict]] = []
         self._merge_result = merge_result
         self._commit_result = commit_result
+        self._write_result = write_result
 
     def _track(self, name, fn):
         def _wrapped(*args, **kwargs):
@@ -179,7 +182,9 @@ class _RecordingOps:
             ),
             delete_branch=self._track("delete_branch", lambda *a, **k: True),
             merge_branch=self._track("merge_branch", lambda *a, **k: self._merge_result),
-            write_agent_output=self._track("write_agent_output", lambda *a, **k: (True, "")),
+            write_agent_output=self._track(
+                "write_agent_output", lambda *a, **k: self._write_result
+            ),
         )
 
     def names(self) -> list[str]:
@@ -211,6 +216,8 @@ class TestDeliverInlineMergeQualityGate:
         assert "commit_working_tree" not in ops.names()
         checkout_calls = [c for c in ops.calls if c[0] == "checkout_branch"]
         assert checkout_calls[-1][1] == (tmp_path, DEVELOPMENT_BRANCH)
+        delete_calls = [c for c in ops.calls if c[0] == "delete_branch"]
+        assert delete_calls[-1][1] == (tmp_path, "feature/t1")
 
     def test_gate_pass_sweeps_autofix_commit_before_merge(self, tmp_path: Path) -> None:
         """The gate must run against the final delivered file state -- i.e.
@@ -289,6 +296,8 @@ class TestDeliverInlineMergeQualityGate:
         assert "commit_working_tree" in ops.names()
         checkout_calls = [c for c in ops.calls if c[0] == "checkout_branch"]
         assert checkout_calls[-1][1] == (tmp_path, DEVELOPMENT_BRANCH)
+        delete_calls = [c for c in ops.calls if c[0] == "delete_branch"]
+        assert delete_calls[-1][1] == (tmp_path, "feature/t1")
 
     def test_no_verifier_or_linter_preserves_pre_fix_merge_behavior(self, tmp_path: Path) -> None:
         ops = _RecordingOps()
@@ -306,3 +315,73 @@ class TestDeliverInlineMergeQualityGate:
 
         assert result.merged is True
         assert "merge_branch" in ops.names()
+
+
+class TestDeliverInlineMergeFailureCleanup:
+    """The feature branch created for an inline merge must not be left orphaned
+    on any failure path -- mirroring ``DocumentationAgent._cleanup_branch``'s
+    always-delete-on-failure behavior and this module's own
+    ``_cleanup_handoff_failure`` (used by ``prepare_handoff_branch``).
+    """
+
+    def test_write_failure_deletes_feature_branch(self, tmp_path: Path) -> None:
+        ops = _RecordingOps(write_result=(False, "disk full"))
+
+        result = deliver_inline_merge(
+            task_id="t1",
+            repo_path=tmp_path,
+            deliver_files={"a.py": "x"},
+            summary="impl",
+            task_title="Title",
+            commit_msg_template="[{scope}] {summary}",
+            ops=ops.as_deliver_git_ops(),
+            logger=_logger(),
+        )
+
+        assert result.merged is False
+        assert result.summary == "Write failed: disk full"
+        delete_calls = [c for c in ops.calls if c[0] == "delete_branch"]
+        assert delete_calls[-1][1] == (tmp_path, "feature/t1")
+        checkout_calls = [c for c in ops.calls if c[0] == "checkout_branch"]
+        assert checkout_calls[-1][1] == (tmp_path, DEVELOPMENT_BRANCH)
+
+    def test_merge_failure_aborts_merge_and_deletes_feature_branch(self, tmp_path: Path) -> None:
+        ops = _RecordingOps(merge_result=(False, "conflict"))
+
+        result = deliver_inline_merge(
+            task_id="t1",
+            repo_path=tmp_path,
+            deliver_files={"a.py": "x"},
+            summary="impl",
+            task_title="Title",
+            commit_msg_template="[{scope}] {summary}",
+            ops=ops.as_deliver_git_ops(),
+            logger=_logger(),
+        )
+
+        assert result.merged is False
+        assert result.summary == "Merge failed: conflict"
+        assert "abort_merge" in ops.names()
+        delete_calls = [c for c in ops.calls if c[0] == "delete_branch"]
+        assert delete_calls[-1][1] == (tmp_path, "feature/t1")
+        checkout_calls = [c for c in ops.calls if c[0] == "checkout_branch"]
+        assert checkout_calls[-1][1] == (tmp_path, DEVELOPMENT_BRANCH)
+        # abort_merge must run before the branch is discarded and development restored.
+        assert ops.names().index("abort_merge") < ops.names().index("delete_branch")
+
+    def test_success_path_still_deletes_branch_exactly_once(self, tmp_path: Path) -> None:
+        ops = _RecordingOps()
+
+        result = deliver_inline_merge(
+            task_id="t1",
+            repo_path=tmp_path,
+            deliver_files={"a.py": "x"},
+            summary="impl",
+            task_title="Title",
+            commit_msg_template="[{scope}] {summary}",
+            ops=ops.as_deliver_git_ops(),
+            logger=_logger(),
+        )
+
+        assert result.merged is True
+        assert ops.names().count("delete_branch") == 1
