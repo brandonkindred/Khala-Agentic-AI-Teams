@@ -700,9 +700,24 @@ The primitive #7445-B builds must satisfy:
   resumed round's answer_callback never returns an answer belonging to a different `resume_token`.
   Because this activity is retryable (§4.3.1), a retry that lands *after* step (1) but before step
   (2) must not resubmit the answers blindly — it must first reconcile against PRA's current
-  `pending_questions` (a status GET) and treat "the target question ids are no longer pending" as
-  "already applied," proceeding straight to step (2), rather than re-POSTing and risking PRA
-  rejecting an already-resolved id as a fresh submission.
+  `pending_questions` (a status GET). **This reconciliation must compare full question identity
+  (`id` *and* `question_text` together), never `id` alone.** PRA's own question parser falls back
+  to a positional `q{index}` id when a question's own `id` is missing
+  (`product_requirements_analysis_agent/question_processing.py:773,805,821`), and PRA's answers
+  route validates only `id` membership in the *current* `pending_questions`
+  (`api/routes/product_analysis.py:262-275`) — it has no per-round or version identifier. So a
+  retry that checks only "is `q0` still pending" cannot tell "PRA already applied my answer and
+  moved on" apart from "PRA advanced to an unrelated later round that happens to reuse `q0` for a
+  different question" — reconciling by id alone risks silently applying round *N*'s stale answer
+  content to round *N+1*'s differently-scoped question, which PRA's id-only validation would
+  accept without complaint. Comparing the *full* `(id, question_text)` pair against what this pause
+  round persisted removes the ambiguity: a match means "PRA is still waiting on exactly this
+  question, safe to (re-)submit"; no match (the id is gone, or present with different
+  `question_text`) means "PRA has moved past this round already — do not submit stale content,"
+  proceeding straight to step (2) instead. This is the same class of already-flagged limitation as
+  the PRA-idempotency open risk (§5, below): Planning's contract can defend against confusion here,
+  but a durable PRA-side round/version identifier would close the gap more completely than any
+  reconciliation Planning does on its own — out of `planning_team`'s boundary, as before.
 
 **Ordering requirement this adds to §4.3:** clearing the local pause envelope / marking a batch
 consumed must never happen *before* PRA has durably applied that batch. Because `submit_answers`
