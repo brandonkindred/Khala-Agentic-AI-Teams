@@ -373,7 +373,19 @@ class DesignAgent:
         formatting pair of provider calls (see :meth:`_invoke_and_parse` /
         :meth:`_structured_preflight`) charged as two budget units up front,
         not one.
+
+        Resets ``_previous_round_spec`` to ``None`` on every call: ``run()``
+        always starts a fresh spec lineage (a new ``strategy_id``, and
+        potentially a different pinned asset category), and this instance can
+        be reused across multiple design attempts within one
+        ``StrategyLabOrchestrator.run_cycle()`` call (e.g. after a prior
+        attempt raised ``SpecImplementabilityError`` and
+        ``_run_design_attempt`` re-entered with a new lineage on the same
+        ``self.design_agent``). Without this reset, the new lineage's first
+        ``revise()`` call would diff against an unrelated prior attempt's
+        spec.
         """
+        self._previous_round_spec = None
         prior_text = (
             format_prior_results(prior_records)
             if prior_records

@@ -182,6 +182,61 @@ def test_round_over_round_state_diffs_against_immediately_prior_round() -> None:
     assert "changed: hypothesis: 'h1' -> 'h2'" not in round3_prompt
 
 
+def test_run_resets_previous_round_spec_for_a_new_lineage() -> None:
+    """A fresh run() call must not let a new lineage diff against a prior attempt's spec.
+
+    ``StrategyLabOrchestrator`` reuses one ``DesignAgent`` instance across
+    multiple design attempts within a single ``run_cycle()`` call (e.g. after
+    a prior attempt raised ``SpecImplementabilityError`` and
+    ``_run_design_attempt`` re-entered with a new ``strategy_id``). Without
+    resetting ``_previous_round_spec`` in ``run()``, the new lineage's first
+    ``revise()`` call would diff against the unrelated prior attempt's spec.
+    """
+    import os
+
+    stale_spec = _spec(
+        strategy_id="prior-attempt", entry_rules=_big_entry_rules(), hypothesis="stale"
+    )
+    seed_revised_dict = {"entry_rules": _big_entry_rules(), "hypothesis": "stale-revised"}
+    generated_dict = {"entry_rules": _big_entry_rules(), "hypothesis": "fresh-lineage"}
+    revised_dict = {"entry_rules": _big_entry_rules(), "hypothesis": "fresh-lineage-revised"}
+
+    class _CapturingDesignAgentWithRun(_CapturingDesignAgent):
+        def _self_review(self, strategy_dict: Dict[str, Any]) -> SpecCritique:  # pragma: no cover
+            raise AssertionError("self-review should not be reached in this test")
+
+    agent = _CapturingDesignAgentWithRun(
+        scripted_dicts=[seed_revised_dict, generated_dict, revised_dict]
+    )
+    # Seed stale diff state, as if a prior design attempt's revise() had run
+    # on this same (reused) instance.
+    agent.revise(stale_spec, _critique(), skip_self_review=True)
+    assert agent._previous_round_spec is not None
+
+    original = os.environ.get("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED")
+    os.environ["STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED"] = "false"
+    try:
+        agent.run(prior_records=[])
+    finally:
+        if original is None:
+            os.environ.pop("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", None)
+        else:
+            os.environ["STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED"] = original
+
+    assert agent._previous_round_spec is None
+
+    fresh_spec = _spec(
+        strategy_id="new-attempt", entry_rules=_big_entry_rules(), hypothesis="fresh-lineage"
+    )
+    agent.revise(fresh_spec, _critique(), skip_self_review=True)
+
+    revise_prompt = agent.captured_prompts[-1]
+    full_json = fresh_spec.model_dump_json(indent=2, exclude={"strategy_code"})
+    assert f"```json\n{full_json}\n```" in revise_prompt
+    assert "structural diff" not in revise_prompt
+    assert "stale" not in revise_prompt
+
+
 def test_failed_revise_invocation_does_not_advance_diff_state() -> None:
     """A failed revise() call must not corrupt the next round's diff base."""
     spec = _spec()
