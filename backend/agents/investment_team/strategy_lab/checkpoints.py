@@ -19,16 +19,29 @@ same-attempt scenario, so a crash during synthesis, refinement, or alignment
 can also resume without redoing the stages already converged in the current
 attempt. Nothing here changes ``DesignAttemptCheckpoint`` or its ADR.
 
-**Same-attempt only — this is not a cross-attempt re-entry mechanism.** A
-checkpoint captured for ``design_attempt=N`` is never read while running
-``design_attempt=N+1``. When ``SpecImplementabilityError`` triggers a design
-re-entry, the new attempt starts fresh with none of this family's
-checkpoints consulted, exactly as ``RETRY_STATE_ISOLATION.md`` requires for
-every other kind of attempt-local state: a failed attempt's mutations must
-never leak into the next attempt's reasoning. Letting a *new* attempt resume
-from a *prior* attempt's partial convergence would require an explicit
-amendment to that isolation contract (to define which stages, if any, survive
-the failure that caused re-entry) and is out of scope for this family.
+**Same-attempt, plus one narrow, explicit cross-attempt exception.** A
+checkpoint captured for ``design_attempt=N`` is, with one exception, never
+read while running ``design_attempt=N+1``: when ``SpecImplementabilityError``
+triggers a design re-entry, the new attempt starts fresh with none of this
+family's checkpoints consulted, exactly as ``RETRY_STATE_ISOLATION.md``
+requires for every other kind of attempt-local state -- a failed attempt's
+mutations must never leak into the next attempt's reasoning.
+
+The one exception: ``run_cycle``'s re-entry branch *does* let attempt
+``N+1`` consume attempt ``N``'s **``ReviewCheckpoint``** -- and only that
+stage -- because ``_run_design_attempt``'s pre-existing ``resume_spec``/
+``resume_design_context`` parameters (ADR-012) already know how to skip
+straight to synthesis given exactly a ``ReviewCheckpoint``'s payload
+(``spec``/``rationale``/``design_context``), and a checkpoint at REVIEW
+means DESIGN+REVIEW converged before the failure that caused re-entry, so
+nothing about the converged spec caused that failure. ``DesignCheckpoint``,
+``SynthesisCheckpoint``, ``RefinementCheckpoint``, and ``AlignmentCheckpoint``
+remain strictly same-attempt: no attempt's synthesized code, refinement
+progress, or alignment progress is ever consulted by a later attempt, since
+``_run_design_attempt`` has no resume parameter that could accept them
+without inventing a new, undocumented contract. Extending this exception to
+those stages would need its own resume parameter and its own explicit
+amendment here -- it is not implied by the REVIEW case above.
 
 Serialization relies entirely on Pydantic's built-in ``model_dump(mode="json")``
 / ``model_validate`` — the same mechanism already proven for
@@ -159,14 +172,23 @@ class PipelineCheckpoint(BaseModel):
         identically-shaped ``design_context: Dict[str, Any]`` field.
 
     Invariants:
-      - **Never cross-attempt.** A checkpoint captured while running
-        ``design_attempt=N`` is never read or considered while running
-        ``design_attempt=N+1`` — a design re-entry (``SpecImplementabilityError``)
-        starts a fresh attempt with its own fresh state, exactly as
-        ``RETRY_STATE_ISOLATION.md`` already requires for other attempt-local
-        state. This family's resume scenario is strictly same-attempt crash
-        recovery (see the module docstring); it is never a mechanism for a
-        new attempt to reuse a prior attempt's partial convergence.
+      - **Cross-attempt only for a REVIEW-stage checkpoint, via
+        ``run_cycle``'s resume wiring; never otherwise.** A ``DesignCheckpoint``/
+        ``SynthesisCheckpoint``/``RefinementCheckpoint``/``AlignmentCheckpoint``
+        captured while running ``design_attempt=N`` is never read or
+        considered while running ``design_attempt=N+1`` — a design re-entry
+        (``SpecImplementabilityError``) starts a fresh attempt with its own
+        fresh state for those four stages, exactly as ``RETRY_STATE_ISOLATION.md``
+        already requires for other attempt-local state. A ``ReviewCheckpoint``
+        is the one documented exception (see the module docstring's "one
+        narrow, explicit cross-attempt exception"): ``run_cycle`` may hand its
+        ``spec``/``rationale``/``design_context`` to ``design_attempt=N+1`` as
+        ``_run_design_attempt``'s ``resume_spec``/``resume_design_context``,
+        skipping a re-run of DESIGN+REVIEW for that next attempt. This is
+        still strictly same-attempt crash recovery for every other checkpoint
+        subclass (see the module docstring); it is never a mechanism for a
+        new attempt to reuse a prior attempt's synthesized code, refinement
+        progress, or alignment progress.
       - **Never survives a generation bump.** A checkpoint minted under an
         older fencing generation is stale the instant a restart mints a new
         one (``restart_strategy_lab_run``'s full-reset semantics) — the same
@@ -392,16 +414,19 @@ def parse_checkpoint(raw: dict[str, Any]) -> AnyPipelineCheckpoint:
 # ---------------------------------------------------------------------------
 # Resume-point determination.
 #
-# The module docstring above documents this family as same-attempt-only and
-# states that letting a *new* attempt resume from a *prior* attempt's partial
-# convergence "would require an explicit amendment to that isolation
-# contract." The two functions below are the first piece of that amendment,
-# built incrementally: they only *compute* where a subsequent attempt could
-# resume from. Nothing in this module, or in any caller yet, acts on that
-# computation to actually skip stages in a new attempt -- the "never
-# cross-attempt" *behavioral* invariant therefore still holds today. Consuming
-# the determination is deliberately out of scope here and belongs to a later,
-# separate change.
+# The module docstring above documents this family as same-attempt-only, with
+# one narrow exception. The two functions below *compute* where a subsequent
+# attempt could resume from -- that computation is now consumed by
+# ``orchestrator.run_cycle``'s ``except SpecImplementabilityError`` branch,
+# but only for the one actionable case: when the result is
+# ``PipelineStage.SYNTHESIS`` (i.e. the located checkpoint's ``stage`` is
+# ``PipelineStage.REVIEW``), ``run_cycle`` hands that ``ReviewCheckpoint``'s
+# state to the next ``design_attempt`` via ``_run_design_attempt``'s
+# ``resume_spec``/``resume_design_context``. Every other result (``REVIEW``,
+# ``REFINEMENT``, ``ALIGNMENT``, or ``None``) has no matching resume
+# parameter on ``_run_design_attempt`` yet and is left for a future,
+# separately-scoped amendment -- the "never cross-attempt" invariant still
+# holds for those four checkpoint stages today.
 # ---------------------------------------------------------------------------
 
 

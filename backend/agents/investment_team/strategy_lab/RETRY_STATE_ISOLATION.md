@@ -103,6 +103,51 @@ read/resume-on-crash wiring into `run_design_attempt_activity`, and cleanup on t
 have all now landed (see the `DesignAttemptCheckpoint`/`persist_design_attempt_checkpoint`/
 `load_design_attempt_checkpoint`/`delete_design_attempt_checkpoint` row below).
 
+## Cross-attempt resume from a REVIEW checkpoint
+
+`checkpoints.py`'s `PipelineCheckpoint` family (`DesignCheckpoint`/`ReviewCheckpoint`/
+`SynthesisCheckpoint`/`RefinementCheckpoint`/`AlignmentCheckpoint`) is a third kind of
+checkpoint, distinct from both the drift/gate isolation above and `ADR-012`'s
+`DesignAttemptCheckpoint`: one immutable snapshot per pipeline-stage boundary within a design
+attempt, captured unconditionally (design, review, synthesis, refinement, alignment) so a
+consumer can determine the most-converged boundary an attempt reached
+(`find_latest_checkpoint_for_attempt` + `determine_resume_stage`).
+
+For four of those five stages, the isolation contract above is absolute: a `DesignCheckpoint`,
+`SynthesisCheckpoint`, `RefinementCheckpoint`, or `AlignmentCheckpoint` captured for
+`design_attempt=N` is never read while running `design_attempt=N+1` — same-attempt-only, no
+exceptions.
+
+**`ReviewCheckpoint` is the one deliberate exception.** `run_cycle`'s
+`except SpecImplementabilityError` branch looks up the just-failed attempt's most-converged
+checkpoint; when that checkpoint is a `ReviewCheckpoint` (i.e. `determine_resume_stage` returns
+`PipelineStage.SYNTHESIS`), the *next* `design_attempt` is entered with `_run_design_attempt`'s
+pre-existing `resume_spec`/`resume_rationale`/`resume_design_context` parameters (the same ones
+`ADR-012`'s same-attempt crash recovery already uses) populated from that checkpoint, skipping a
+re-run of DESIGN+REVIEW for the new attempt. This is sound specifically because:
+
+- A `ReviewCheckpoint` means DESIGN+REVIEW **converged** for that evidence chain before the
+  failure that triggered re-entry happened — the failure was downstream (synthesis, refinement,
+  alignment, or verification), so nothing about the converged spec caused it.
+- Nothing else crosses the boundary: the new attempt still gets its own fresh, empty
+  `attempt_drift` (`drift_collector.snapshot()` at the top of every loop iteration, unconditionally)
+  and its own fresh attempt-scoped caches — only `spec`/`rationale`/`design_context` are seeded
+  from the checkpoint, exactly the same three values `resume_spec`/`resume_rationale`/
+  `resume_design_context` already accept for same-attempt resume. No attempt's synthesized code,
+  refinement progress, or alignment progress ever crosses into the next attempt.
+- The LLM budget needs no re-seeding here (unlike `ADR-012`'s per-activity resume): thread mode's
+  `llm_budget` is bound once via `use_budget(...)` around the *entire* re-entry loop, so it
+  already reflects every call made so far regardless of which attempt resumes.
+- Any other determination (`REVIEW`, `REFINEMENT`, `ALIGNMENT`, or `None`) has no matching resume
+  parameter on `_run_design_attempt` today and falls back to a full restart, unchanged from
+  before this exception existed. A malformed `ReviewCheckpoint.design_context` payload (should
+  one ever occur) also fails open to a full restart rather than propagating an exception out of
+  `run_cycle`.
+
+See `checkpoints.py`'s module docstring (the "one narrow, explicit cross-attempt exception"
+section) and `PipelineCheckpoint`'s own Invariants for the authoritative statement of this
+scope boundary.
+
 ## Locked in by
 
 | Contract | Tests |
@@ -113,3 +158,4 @@ have all now landed (see the `DesignAttemptCheckpoint`/`persist_design_attempt_c
 | Rejected alignment proposal preserves known-good state | `tests/test_strategy_lab_alignment.py` |
 | Intra-attempt checkpoint write/read scoping (`cycle_scope`-disambiguated, generation-fenced), checkpoint-resume skips Phase 1 and never double-charges the LLM budget | `tests/test_strategy_lab_temporal_activities.py`, `tests/test_strategy_lab_phase_transitions.py` |
 | Checkpoint cleanup fires on every terminal outcome (record, reentry, skipped, non-retryable error), never on cancellation or a retryable error, and is unconditionally best-effort (a delete failure never discards a real outcome) | `tests/test_strategy_lab_temporal_activities.py` |
+| Cross-attempt resume from a `ReviewCheckpoint` skips DESIGN+REVIEW on the next attempt; every other checkpoint stage (or a missing/malformed checkpoint) falls back to a full restart; evidence-chain integrity holds on a resumed run | `tests/test_strategy_lab_cross_attempt_resume.py` |

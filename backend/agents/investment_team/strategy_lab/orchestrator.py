@@ -122,7 +122,11 @@ from .exceptions import SpecImplementabilityError
 from .market_regime import RegimeSummary, compute_regime_summary
 from .orchestrator_alignment import AlignmentMixin
 from .orchestrator_design import DesignMixin
-from .orchestrator_record_assembly import PipelineCheckpointCapture, RecordAssemblyMixin
+from .orchestrator_record_assembly import (
+    PipelineCheckpointCapture,
+    RecordAssemblyMixin,
+    _design_context_from_checkpoint,
+)
 from .orchestrator_synthesis import SynthesisMixin
 from .orchestrator_verification import VerificationMixin
 from .phases import hash_code, hash_metrics_and_trades
@@ -549,9 +553,16 @@ class StrategyLabOrchestrator(
             boundaries actually reached.
           - On ``SpecImplementabilityError`` from a downstream phase,
             ``run_cycle`` wraps ``_run_design_attempt`` in an outer retry
-            loop bounded by :data:`MAX_DESIGN_REENTRIES`, re-firing the
-            full transition sequence with ``attempt`` incremented. On
-            exhaustion, persists a short-circuit record with
+            loop bounded by :data:`MAX_DESIGN_REENTRIES`, re-entering with
+            ``attempt`` incremented. When the just-failed attempt's most
+            recent checkpoint converged through ``PipelineStage.REVIEW``
+            (``self.last_resume_determination is PipelineStage.SYNTHESIS``),
+            the next attempt resumes from that checkpoint's spec/rationale/
+            design_context and skips DESIGN+REVIEW entirely (so only the
+            CODE_SYNTHESIS and BACKTEST_AND_VERIFICATION boundary events
+            fire for that attempt, not the full four) -- otherwise the next
+            attempt re-fires the full transition sequence from DESIGN, as
+            before. On exhaustion, persists a short-circuit record with
             ``status='failed: spec_unimplementable'``.
 
         Invariants:
@@ -572,9 +583,12 @@ class StrategyLabOrchestrator(
         self.pipeline_checkpoints = []
         # Set on each re-entry below to the stage a subsequent attempt could
         # resume from, per the just-failed attempt's captured checkpoints (or
-        # ``None`` for "no usable checkpoint" / full restart). Computed for
-        # introspection/testing only -- nothing yet reads it to change what
-        # this method actually does on re-entry.
+        # ``None`` for "no usable checkpoint" / full restart). When this is
+        # ``PipelineStage.SYNTHESIS`` (the failed attempt's checkpoint
+        # converged through REVIEW), the loop below actually resumes the next
+        # attempt from synthesis via ``resume_spec``/``resume_design_context``
+        # -- the one boundary ``_run_design_attempt`` knows how to skip into.
+        # Every other value still falls back to a full restart, unchanged.
         self.last_resume_determination: Optional[PipelineStage] = None
         checkpoint_capture = PipelineCheckpointCapture(
             run_id=checkpoint_scope,
@@ -621,6 +635,19 @@ class StrategyLabOrchestrator(
         # Fail-open: ``None`` when disabled or on data failure — the designer
         # simply omits the regime section then.
         regime_summary = self._compute_regime_summary()
+        # Cross-attempt resume state for the *next* loop iteration, set by the
+        # except-block below when the just-failed attempt's latest checkpoint
+        # is usable, reset to "no resume" (full restart) every time otherwise.
+        # ``_run_design_attempt``'s only resume boundary is Phase 1
+        # (DESIGN+REVIEW) -- see ``resume_spec``/``resume_design_context`` --
+        # so this is populated only when the failed attempt's checkpoint
+        # converged through REVIEW (``last_resume_determination is
+        # PipelineStage.SYNTHESIS``); every other determination has no
+        # matching resume parameter yet and falls back to full restart,
+        # exactly as before this change.
+        pending_resume_spec: Optional[StrategySpec] = None
+        pending_resume_rationale: Optional[str] = None
+        pending_resume_design_context: Optional[_DesignPersistContext] = None
         with use_budget(llm_budget):
             for design_attempt in range(MAX_DESIGN_REENTRIES + 1):
                 # Copy-on-entry: hand this attempt a clean child collector so
@@ -640,6 +667,9 @@ class StrategyLabOrchestrator(
                         cumulative_gate_results=cumulative_gate_results,
                         regime_summary=regime_summary,
                         checkpoint_capture=checkpoint_capture,
+                        resume_spec=pending_resume_spec,
+                        resume_rationale=pending_resume_rationale,
+                        resume_design_context=pending_resume_design_context,
                     )
                 except SpecImplementabilityError as exc:
                     last_evidence = exc.evidence
@@ -656,9 +686,7 @@ class StrategyLabOrchestrator(
                     drift_collector.merge(attempt_drift)
                     # Look up the most recent checkpoint captured for the
                     # attempt that just failed, and determine the resume
-                    # point it implies. This computation is not yet acted on:
-                    # the loop below always re-enters ``_run_design_attempt``
-                    # from the top, exactly as before.
+                    # point it implies.
                     resume_checkpoint = find_latest_checkpoint_for_attempt(
                         self.pipeline_checkpoints,
                         run_id=checkpoint_scope,
@@ -667,6 +695,41 @@ class StrategyLabOrchestrator(
                         generation=1,
                     )
                     self.last_resume_determination = determine_resume_stage(resume_checkpoint)
+                    # Default: no usable checkpoint for the next attempt --
+                    # full restart, unchanged from today's behavior. Only
+                    # overridden below when the determination is actionable.
+                    pending_resume_spec = None
+                    pending_resume_rationale = None
+                    pending_resume_design_context = None
+                    if self.last_resume_determination is PipelineStage.SYNTHESIS:
+                        # ``resume_checkpoint`` is necessarily a
+                        # ``ReviewCheckpoint`` here: ``determine_resume_stage``
+                        # only returns SYNTHESIS when ``resume_checkpoint.stage
+                        # is PipelineStage.REVIEW``. Its spec/rationale/
+                        # design_context are self-sufficient to resume straight
+                        # into synthesis on the next attempt -- design+review
+                        # already converged for this evidence chain, and the
+                        # failure that triggered this re-entry happened
+                        # downstream of that boundary, so nothing about the
+                        # converged spec caused it.
+                        try:
+                            reconstructed_context = _design_context_from_checkpoint(
+                                resume_checkpoint.design_context
+                            )
+                        except (ValueError, TypeError) as context_exc:
+                            # Fail open to full restart on any malformed
+                            # checkpoint payload -- never fabricate resume
+                            # state or crash the cycle over it.
+                            logger.warning(
+                                "Discarding unusable REVIEW checkpoint for design_attempt=%d "
+                                "resume (design_context reconstruction failed): %s",
+                                design_attempt,
+                                context_exc,
+                            )
+                        else:
+                            pending_resume_spec = resume_checkpoint.spec
+                            pending_resume_rationale = resume_checkpoint.rationale
+                            pending_resume_design_context = reconstructed_context
                     if design_attempt >= MAX_DESIGN_REENTRIES:
                         break
                     emit(
