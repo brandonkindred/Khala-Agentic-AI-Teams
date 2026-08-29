@@ -190,6 +190,15 @@ def test_spec_int_vs_float_type_change_inside_nested_dict_in_list_is_reported_as
     assert "changed: entry_rules.legs" in result
 
 
+def test_spec_signed_zero_change_is_reported_as_changed():
+    previous_spec = {"entry_rules": {"expected_return": -0.0}}
+    current_spec = {"entry_rules": {"expected_return": 0.0}}
+
+    result = diff_spec_or_full(previous_spec, current_spec)
+
+    assert "changed: entry_rules.expected_return" in result
+
+
 def test_spec_list_length_change_is_reported_as_changed():
     previous_spec = {"entry_rules": {"flags": [True]}}
     current_spec = {"entry_rules": {"flags": [True, False]}}

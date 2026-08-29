@@ -82,15 +82,18 @@ def _values_differ(prev_value: Any, curr_value: Any) -> bool:
 
     Postconditions: returns ``True`` whenever the values would serialize to
     different JSON representations, at any depth. Plain ``!=`` treats
-    ``True == 1`` and ``1 == 1.0`` as equal — including when they appear as
-    list elements, since list equality delegates elementwise to ``==`` —
-    which would silently hide a JSON type change. This instead compares
-    types at every level: mismatched top-level types differ immediately;
-    matching lists are compared elementwise (differing lengths differ, then
-    each pair is compared recursively via this same function); matching
-    dicts are compared key-by-key (differing key sets differ, then each
-    shared key's value is compared recursively); any other matching type
-    falls back to ``!=``. Never mutates either input.
+    ``True == 1``, ``1 == 1.0``, and ``-0.0 == 0.0`` as equal — including
+    when they appear as list elements, since list equality delegates
+    elementwise to ``==`` — which would silently hide a JSON-representation
+    change. This instead compares types at every level: mismatched
+    top-level types differ immediately; matching lists are compared
+    elementwise (differing lengths differ, then each pair is compared
+    recursively via this same function); matching dicts are compared
+    key-by-key (differing key sets differ, then each shared key's value is
+    compared recursively); any other matching type is compared by its
+    canonical JSON encoding (``json.dumps``) rather than ``!=``, so a signed-
+    zero change (``-0.0`` vs ``0.0``) is caught even though ``==`` would
+    call them equal. Never mutates either input.
     """
     if type(prev_value) is not type(curr_value):
         return True
@@ -105,7 +108,7 @@ def _values_differ(prev_value: Any, curr_value: Any) -> bool:
         if set(prev_value) != set(curr_value):
             return True
         return any(_values_differ(prev_value[key], curr_value[key]) for key in prev_value)
-    return prev_value != curr_value
+    return json.dumps(prev_value) != json.dumps(curr_value)
 
 
 def _walk_dict_diff(previous: dict[str, Any], current: dict[str, Any], path: str) -> list[str]:
