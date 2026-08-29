@@ -705,15 +705,18 @@ class TestHandleComment:
     ) -> None:
         """A reviewer's follow-up feedback posted while the implementation
         workflow was running — after `comment` was snapshotted as this run's
-        representative comment, before this call resolves the thread — must
-        leave the thread unresolved so it is re-triaged next run, instead of
-        being silently hidden by an unconditional resolve."""
+        representative comment, before this call would reply/resolve — must
+        skip BOTH the reply and the resolve, leaving the thread exactly as
+        found so the next run's latest-message check correctly sees the human
+        feedback (not a just-posted Khala reply) as the thread's live latest
+        message and re-triages it, instead of the reply itself masking that
+        feedback behind the resolve-only retry path."""
         ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
         _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
         thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 6))
         # comment 6 simulates feedback that landed after comment 2 was
         # snapshotted — reflected here as the "live" state _reply_and_resolve
-        # re-fetches right before resolving.
+        # re-fetches before doing anything.
         fake.review_comments = [_comment(2), _comment(6, body="wait, this is still broken")]
         fake.threads = [thread]
 
@@ -732,7 +735,7 @@ class TestHandleComment:
         )
 
         assert outcome.outcome == "failed"
-        assert fake.replies and fake.replies[0][0] == 2  # still replied
+        assert fake.replies == []  # never replied — a reply would mask the feedback
         assert fake.resolved == []  # never resolved
 
     def test_real_issue_on_fork_pr_pushes_to_fork_remote(self, address_env, monkeypatch) -> None:
@@ -1101,6 +1104,28 @@ class TestRunAddressComments:
         final = [u for u in address_env["job_updates"] if u.get("status") == "completed"]
         assert final and final[-1]["review_summary"]["counts"]["resolved"] == 1
 
+    def test_marks_waiting_for_review_on_retry_only_success(self, address_env) -> None:
+        """A run consisting SOLELY of successful resolve-only retries (no fresh
+        unresolved comments to triage) still did real work — the resolve
+        mutation that a previous run's reply left pending — and must be
+        labelled waiting-for-review too, not just a run with fresh `outcomes`."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        # Latest message in the thread is already Khala's own reply, so this
+        # routes entirely through retry_resolve_thread_ids; `unresolved`/
+        # `outcomes` stay empty.
+        fake.review_comments = [
+            _comment(2, body="please fix this"),
+            _comment(
+                3, body="Addressed by the SE team. <!-- khala-generated -->", author="khala-bot"
+            ),
+        ]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
+
+        ac._run_address_comments("job1", req, "tok")
+
+        assert fake.resolved == ["T2"]
+        assert fake.labels_set and ac.WAITING_FOR_REVIEW_LABEL in fake.labels_set[-1]
+
     def test_does_not_mark_waiting_for_review_when_a_comment_fails(
         self, address_env, monkeypatch
     ) -> None:
@@ -1143,6 +1168,9 @@ class TestRunAddressComments:
 
         final = [u for u in address_env["job_updates"] if u.get("status") == "completed"]
         assert final and final[-1]["review_summary"]["total_comments"] == 0
+        # A true no-op run (no comments, no retries) never did any work — must
+        # NOT be labelled waiting-for-review just because "nothing failed".
+        assert fake.labels_set == []
 
     def test_github_failure_marks_job_failed(self, address_env, monkeypatch) -> None:
         ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]

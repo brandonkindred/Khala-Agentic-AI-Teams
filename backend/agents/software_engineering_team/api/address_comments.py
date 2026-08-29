@@ -669,15 +669,32 @@ def _reply_and_resolve(
           outcome, since every triaged comment came from a known thread).
         - Returns True when BOTH the reply and (if attempted) the resolution
           succeeded; False otherwise. Never raises.
-        - Before resolving, re-checks the thread's LIVE state
-          (:func:`_thread_has_new_reviewer_feedback`): a reviewer may have
-          posted follow-up feedback on this thread while this comment's
-          implementation workflow was running (between when ``comment`` was
-          snapshotted and now). When newer, non-Khala feedback is found, the
-          thread is left UNRESOLVED (this call reports failure) so the next
-          run re-triages it via ``_unresolved_comments`` rather than silently
-          hiding that feedback in a resolved thread.
+        - Checks the thread's LIVE state (:func:`_thread_has_new_reviewer_feedback`)
+          BEFORE posting anything: a reviewer may have posted follow-up feedback
+          on this thread while this comment's implementation workflow was
+          running (between when ``comment`` was snapshotted and now). When
+          newer, non-Khala feedback is found, this call posts NEITHER the reply
+          NOR the resolution and reports failure — the check must run before the
+          reply, not just before the resolve: a reply posted first would itself
+          become the thread's new latest message, and since it carries Khala's
+          own marker, the NEXT run's ``_unresolved_comments`` would then route
+          the thread down the resolve-only retry path — never re-triaging the
+          human feedback that prompted skipping the resolve in the first place.
+          Leaving the thread exactly as found lets the next run's latest-message
+          check correctly see the human's feedback as the thread's live latest
+          message.
     """
+    if thread is not None and _thread_has_new_reviewer_feedback(
+        client, request.owner, request.repo, request.pr_number, thread.id, comment.id
+    ):
+        logger.info(
+            "address-comments: skipping reply/resolve on thread %s — newer "
+            "reviewer feedback appeared since comment %s was triaged",
+            thread.id,
+            comment.id,
+        )
+        return False
+
     reply_target_id = thread.comment_ids[0] if thread is not None and thread.comment_ids else comment.id
     replied = False
     try:
@@ -698,18 +715,7 @@ def _reply_and_resolve(
 
     resolved = True
     if thread is not None:
-        if _thread_has_new_reviewer_feedback(
-            client, request.owner, request.repo, request.pr_number, thread.id, comment.id
-        ):
-            logger.info(
-                "address-comments: leaving thread %s unresolved — newer reviewer "
-                "feedback appeared since comment %s was triaged",
-                thread.id,
-                comment.id,
-            )
-            resolved = False
-        else:
-            resolved = client.resolve_review_thread(thread.id)
+        resolved = client.resolve_review_thread(thread.id)
 
     return replied and resolved
 
@@ -996,8 +1002,12 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
             all_succeeded = retry_resolve_ok and all(o.outcome != "failed" for o in outcomes)
             # Move the PR to "waiting for review" only on a fully successful run —
             # a failed comment or a still-open retried thread means work is owed,
-            # so the PR is not yet ready for another look.
-            if outcomes and all_succeeded:
+            # so the PR is not yet ready for another look. A run consisting SOLELY
+            # of successful resolve-only retries (outcomes empty, retry_resolve_
+            # thread_ids non-empty) still did real work and must be labelled too —
+            # only a true no-op run (neither outcomes nor retries) skips this,
+            # matching the original intent for a PR that never had comments.
+            if (outcomes or retry_resolve_thread_ids) and all_succeeded:
                 _mark_waiting_for_review(client, owner, repo, pr_number)
 
         # Drop the per-PR clone only on a clean completion (nothing failed, no
