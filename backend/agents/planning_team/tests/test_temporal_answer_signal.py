@@ -125,6 +125,32 @@ def test_submit_answers_early_buffering_first_submission_per_token_wins() -> Non
     assert wf._buffered_signals == {"tok-1": first}
 
 
+def test_submit_answers_payload_annotation_survives_temporal_type_conversion() -> None:
+    """The ``payload`` parameter must stay annotated ``Any`` -- Temporal's data
+    converter type-checks a signal argument against its annotation *before*
+    the handler body runs. A ``Dict``-shaped annotation would make
+    ``value_to_type`` raise ``TypeError`` for a non-dict wire payload (e.g. a
+    bare string), which fails the workflow task outright and, since Temporal
+    replays history, would fail identically on every future replay --
+    permanently stranding the workflow, defeating this handler's own
+    isinstance-based fail-closed design. This drives the real Temporal
+    converter (not a fake) against the handler's live type hint to prove a
+    non-dict payload converts cleanly instead of raising."""
+    import typing
+
+    from temporalio.converter import value_to_type
+
+    hints = typing.get_type_hints(PlanningAnswerSignalMixin.submit_planning_answers)
+    payload_hint = hints["payload"]
+
+    # Must not raise -- a Dict[str, Any] annotation would raise TypeError here.
+    assert value_to_type(payload_hint, "not-a-dict") == "not-a-dict"
+    assert value_to_type(payload_hint, {"resume_token": "tok-1", "answers": []}) == {
+        "resume_token": "tok-1",
+        "answers": [],
+    }
+
+
 def test_submit_answers_does_not_buffer_mismatched_token_while_a_pause_is_active() -> None:
     wf = _Workflow()
     wf._active_resume_token = "current-token"

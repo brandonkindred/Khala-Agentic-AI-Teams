@@ -137,7 +137,7 @@ class PlanningAnswerSignalMixin:
         self._buffered_signals: Dict[str, List[Dict[str, Any]]] = {}
 
     @workflow.signal(name=SUBMIT_PLANNING_ANSWERS_SIGNAL)
-    def submit_planning_answers(self, payload: Dict[str, Any]) -> None:
+    def submit_planning_answers(self, payload: Any) -> None:
         """Deliver a human answer batch for the current (or next) pause.
 
         Preconditions:
@@ -146,8 +146,13 @@ class PlanningAnswerSignalMixin:
               a precondition an external, unvalidated signal cannot guarantee.
               A well-formed payload is a dict shaped
               ``{"resume_token": str, "answers": list}``, per
-              ``system_design/planning_hitl_temporal_contract.md``. A malformed
-              payload must not raise: an unhandled exception here fails the
+              ``system_design/planning_hitl_temporal_contract.md``. The
+              parameter is typed ``Any``, not ``Dict[str, Any]``, deliberately:
+              Temporal's data converter type-checks a signal argument against
+              its annotation *before* the handler body runs, so a ``Dict``
+              annotation would raise ``TypeError`` for a non-dict payload
+              during argument conversion — never reaching the ``isinstance``
+              guard below — and an unhandled exception here fails the
               workflow task and, since Temporal replays history, would fail
               identically on every future replay, permanently stranding the
               workflow.
