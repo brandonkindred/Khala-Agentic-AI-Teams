@@ -1,7 +1,7 @@
 """
 Minimal shared contract for quality-gate review results.
 
-For future consistency across Code Review, QA, Security, Accessibility, Acceptance Verifier.
+For future consistency across Code Review, QA, Security, Accessibility.
 Existing agents use different attribute names for issues (issues, bugs_found, vulnerabilities)
 but all have approved: bool. New agents should prefer the approved + issues pattern.
 """
