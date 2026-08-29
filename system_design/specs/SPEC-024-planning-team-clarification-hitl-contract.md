@@ -204,6 +204,13 @@ in §6) and Planning's clarification gate has no property that would require a d
 
 ```python
 while result.get("outcome") == "paused":
+    resume_token = result.get("resume_token")
+    if not isinstance(resume_token, str) or not resume_token:
+        # Mirrors CodingTeamWorkflow.run's own guard (temporal/coding_team_workflow.py:552-563):
+        # a paused result is contractually guaranteed to carry a resume_token; fail fast and
+        # deterministically here rather than let wait_condition's predicate become permanently
+        # unsatisfiable.
+        raise ValueError(f"Paused activity result missing a valid resume_token: {result!r}")
     self._active_resume_token = resume_token
     self._submitted_answers = self._buffered_signals.pop(resume_token, None)
     self._buffered_signals.clear()
@@ -242,6 +249,23 @@ appending to a `submitted_answers` job-record field — before delivering the `s
 signal; this is a required part of the contract, not an implementation detail #7445-B is free to
 skip. Without it, `resolve_pra_answers(..., answer_callback=<from job record>)` on resume has
 nothing to read and the resume path silently regresses to auto-answering.
+
+**The persist step must be first-write-wins, not last-write-wins.** Two clients can race to submit
+answers for the same `resume_token` (a stale UI retry, a double-click, a legitimate second
+attempt). The workflow's signal handler already commits to "first submission wins, everything else
+for that token is ignored" (§4.2) — but that rule lives entirely in workflow memory (`_submitted_answers`,
+set once). If the job-record write is a blind overwrite, a slower client's write can land *after*
+a faster client's signal already woke the workflow, so the resumed activity re-reads a batch that
+does not correspond to whichever signal the workflow actually accepted — the two "first" decisions
+(signal-layer, store-layer) can disagree. **Contract requirement:** the job-record write for a
+given `resume_token`'s answer batch must be an atomic compare-and-set / write-once operation —
+only the first successful write for that token is retained; every subsequent write attempt for an
+already-populated token must be rejected (and its signal, if the client sends one anyway, is
+already a harmless no-op on the workflow side per §4.2's duplicate-token rule). This makes "which
+batch does the resumed activity read" and "which submission attempt actually won" the same
+question by construction, regardless of which client's `submit_answers` signal happens to reach
+the workflow first — the workflow's signal-acceptance order need not (and cannot, without this)
+be made to agree with the store's write order any other way.
 
 **Persisted answers must be scoped to the active question round, not accumulated across rounds.**
 Unlike the coding team's single Tech-Lead clarify loop, a single `document_production_activity`
@@ -402,6 +426,19 @@ skip if a checkpoint already exists — safe to call again on workflow-level ret
 re-checks the checkpoint) before entering the `document_production_activity` retry/continuation
 loop of §4.3.
 
+**Conditional on `use_product_analysis` — none of this pause machinery applies when PRA is
+disabled.** `document_production_activity`'s existing `use_product_analysis: bool` parameter
+(`temporal/activities.py:289`) already lets a caller opt out of PRA entirely; when `False`,
+`run_document_production` never calls `run_pra`/`wait_pra` at all (`phases/document_production.py:147-159`
+passes `run_pra=None`, and `DocumentProductionAgent.run`'s `if use_product_analysis and run_pra and
+wait_pra:` guard, `agent.py:91`, is simply never true). The workflow must call
+`document_production_pra_submit_activity` **only when `use_product_analysis` is `True`** for this
+job — calling it unconditionally would submit an external PRA job for a caller that explicitly
+opted out. Symmetrically, `document_production_activity`'s own precondition that a checkpoint
+already exists (§5) applies only on the `use_product_analysis=True` path; when `False`, there is no
+checkpoint to load, no `wait_pra` to resume, and no pause round ever begins — the activity runs
+exactly as it does today, unaffected by this contract.
+
 **Postcondition this adds to §5:** `document_production_pra_submit_activity` runs under
 `NO_RETRY` and either finds an existing checkpoint (no-op) or performs exactly one `run_pra` call
 followed immediately by the checkpoint write; `document_production_activity` never calls `run_pra`
@@ -528,10 +565,12 @@ The primitive #7445-B builds must satisfy:
 **`document_production_activity` (entry — every invocation, paused or not)**
 - *Preconditions:* Called with a `request` dict optionally carrying `acknowledged_resume_token`
   (subject to the `workflow.patched` rollout gate, §4.3.2); the `"planning_team"`-namespaced job
-  record for `request["job_id"]` is readable, and `load_checkpoint(...)` for
-  `"document_production_pra"` already returns a checkpoint (the workflow only enters this activity
-  after `document_production_pra_submit_activity` above has completed); runs under a retry policy
-  other than `NO_RETRY` (§4.3.1 — `SAFE_RETRY` or the SDK default).
+  record for `request["job_id"]` is readable; **when `request["use_product_analysis"]` is `True`**,
+  `load_checkpoint(...)` for `"document_production_pra"` already returns a checkpoint (the workflow
+  only enters this activity after `document_production_pra_submit_activity` above has completed) —
+  when `False`, no checkpoint precondition applies, since PRA (and this whole pause contract) never
+  engages; runs under a retry policy other than `NO_RETRY` (§4.3.1 — `SAFE_RETRY` or the SDK
+  default).
 - *Postconditions:* Loads the checkpoint and calls `wait_pra(job_id=<checkpointed pra_job_id>,
   ...)` directly. This activity **never** calls `run_pra` itself, under any circumstance.
 - *Invariants:* Every entry (fresh call, Temporal retry, or workflow-driven resume) reuses the
@@ -558,19 +597,33 @@ The primitive #7445-B builds must satisfy:
   `resume_token`; the job record's answer store (persisted by the answer-submission path *before*
   it signaled — §4.3) carries a batch tagged with that same `resume_token` covering every question
   in `pending_questions`; a PRA-job-id checkpoint for this job is present (§4.3.1).
-- *Postconditions:* The pause envelope (`waiting_for_answers`, `resume_token`, `pause_kind`,
-  `pause_context`, `pending_questions`) is atomically cleared from the job record; PRA continues
-  past the clarification point using **only** the answer batch tagged with the resumed
-  `resume_token` (never the full accumulated answer history, never the signal payload directly)
-  fed through `resolve_pra_answers(..., answer_callback=<from job record, filtered to this
-  round>)`; that consumed batch is marked consumed (or moved into `resolved_questions`) so a later
-  round's callback never sees it again; `wait_pra` is resumed against the checkpointed external PRA
-  job id — `run_pra` is not called again; the activity proceeds to its normal terminal return
-  shape (or pauses again, for the next round, per the paused-return path above).
+- *Postconditions, in this order (§4.3's ordering requirement below):* (1) the answer batch tagged
+  with the resumed `resume_token` — never the full accumulated answer history, never the signal
+  payload directly — is submitted to PRA via `submit_product_analysis_answers`/`answer_callback`;
+  (2) only once that submission is confirmed applied does the activity atomically clear the pause
+  envelope (`waiting_for_answers`, `resume_token`, `pause_kind`, `pause_context`,
+  `pending_questions`) *and* mark that batch consumed (or move it into `resolved_questions`) in one
+  job-record update; (3) `wait_pra` resumes polling against the checkpointed external PRA job id —
+  `run_pra` is not called again; the activity proceeds to its normal terminal return shape (or
+  pauses again, for the next round, per the paused-return path above).
 - *Invariants:* A resume is applied at most once per `resume_token` — re-invocation with the same
   already-consumed token must not re-apply answers or re-run already-completed work (idempotent
   resume). No resume path may submit a second external PRA job for the same Planning job. A
   resumed round's answer_callback never returns an answer belonging to a different `resume_token`.
+  Because this activity is retryable (§4.3.1), a retry that lands *after* step (1) but before step
+  (2) must not resubmit the answers blindly — it must first reconcile against PRA's current
+  `pending_questions` (a status GET) and treat "the target question ids are no longer pending" as
+  "already applied," proceeding straight to step (2), rather than re-POSTing and risking PRA
+  rejecting an already-resolved id as a fresh submission.
+
+**Ordering requirement this adds to §4.3:** clearing the local pause envelope / marking a batch
+consumed must never happen *before* PRA has durably applied that batch. Because `submit_answers`
+(§4.3) already establishes that the job record's answer batch — not the workflow's in-memory
+`_submitted_answers` — is the durable source of truth, and because a worker crash between "PRA
+applied the answer" and "the pause envelope is cleared" is recoverable (retry re-checks PRA per the
+reconciliation invariant above and finds it already applied), the reverse ordering is not: clearing
+the envelope first and then crashing before PRA sees the answer would leave PRA still waiting with
+no persisted pause to resume from, silently hanging the job.
 
 **`PlanningWorkflow.submit_answers` (signal handler)**
 - *Preconditions:* None on the caller — a signal handler must accept any payload without raising
