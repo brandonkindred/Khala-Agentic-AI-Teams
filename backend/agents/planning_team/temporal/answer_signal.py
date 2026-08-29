@@ -89,7 +89,12 @@ def build_temporal_planning_answer_callback(
           in ``submitted_answers`` (a malformed signal's ``answers`` list is
           validated as a list, not as a list-of-dicts) is skipped rather than
           raising — fails closed instead of an ``AttributeError`` surfacing
-          from a resumed activity.
+          from a resumed activity. Matching requires both ``id``/``question_id``
+          to be ``str`` (the codebase's own convention for these fields,
+          e.g. ``resolve_pra_answers``) rather than merely hashable — a
+          malformed signal could otherwise supply an unhashable
+          ``question_id`` (e.g. a list) and crash the set-membership test
+          instead of simply never matching.
     """
     assert isinstance(resume_token, str) and resume_token, (
         "build_temporal_planning_answer_callback requires a non-empty resume_token"
@@ -105,8 +110,16 @@ def build_temporal_planning_answer_callback(
     resolved = list(submitted_answers)
 
     def _resolved_cb(questions: list) -> list:
-        question_ids = {q.get("id") for q in questions if isinstance(q, dict)}
-        return [a for a in resolved if isinstance(a, dict) and a.get("question_id") in question_ids]
+        question_ids = {
+            q.get("id") for q in questions if isinstance(q, dict) and isinstance(q.get("id"), str)
+        }
+        return [
+            a
+            for a in resolved
+            if isinstance(a, dict)
+            and isinstance(a.get("question_id"), str)
+            and a.get("question_id") in question_ids
+        ]
 
     return _resolved_cb
 

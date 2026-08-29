@@ -307,6 +307,37 @@ def test_callback_ignores_malformed_question_entries() -> None:
     assert result == [{"question_id": "q1", "selected_option_id": "opt-a"}]
 
 
+def test_callback_skips_answer_with_unhashable_question_id() -> None:
+    """A malformed signal could supply a non-str (e.g. unhashable list)
+    question_id -- a plain `in question_ids` set-membership test would raise
+    TypeError on that. Requiring a str question_id rejects it instead of
+    crashing the resumed activity."""
+    cb = build_temporal_planning_answer_callback(
+        "tok-1",
+        submitted_answers=[
+            {"question_id": [], "selected_option_id": "opt-a"},
+            {"question_id": "q1", "selected_option_id": "opt-b"},
+        ],
+    )
+
+    result = cb([{"id": "q1"}])
+
+    assert result == [{"question_id": "q1", "selected_option_id": "opt-b"}]
+
+
+def test_callback_skips_question_with_non_str_id() -> None:
+    """A question entry with a non-str (e.g. unhashable list) id must not
+    crash building the question_ids set, and must never match anything."""
+    cb = build_temporal_planning_answer_callback(
+        "tok-1",
+        submitted_answers=[{"question_id": "q1", "selected_option_id": "opt-a"}],
+    )
+
+    result = cb([{"id": []}, {"id": "q1"}])
+
+    assert result == [{"question_id": "q1", "selected_option_id": "opt-a"}]
+
+
 def test_callback_skips_malformed_submitted_answer_entries() -> None:
     """A malformed signal can smuggle a non-dict entry into ``submitted_answers``
     (submit_planning_answers only validates ``answers`` is a list, not a
