@@ -17,8 +17,6 @@ from pydantic import ValidationError
 
 from investment_team.models import CodeRevision, GateEvent, SpecRevision, StrategySpec
 from investment_team.strategy_lab import phases
-from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
-from investment_team.strategy_lab.agents.design_review import SpecCritique
 from investment_team.strategy_lab.checkpoints import (
     PIPELINE_STAGES,
     AlignmentCheckpoint,
@@ -31,10 +29,6 @@ from investment_team.strategy_lab.checkpoints import (
     determine_resume_stage,
     find_latest_checkpoint_for_attempt,
     parse_checkpoint,
-)
-from investment_team.strategy_lab.orchestrator_record_assembly import (
-    _design_context_from_checkpoint,
-    _design_context_to_checkpoint,
 )
 
 _EMPTY_CODE_HASH = phases.hash_code(None)
@@ -588,65 +582,3 @@ def test_find_latest_checkpoint_for_attempt_excludes_invalid_checkpoints(
         },
     )
     assert found is None
-
-
-# ---------------------------------------------------------------------------
-# _design_context_to_checkpoint / _design_context_from_checkpoint round trip
-#
-# These back run_cycle's cross-attempt REVIEW-checkpoint resume (see
-# checkpoints.py's "one narrow, explicit cross-attempt exception" and
-# RETRY_STATE_ISOLATION.md): reconstructing a live _DesignPersistContext
-# (with real SpecCritique instances) from a ReviewCheckpoint's JSON-shaped
-# design_context payload.
-# ---------------------------------------------------------------------------
-
-
-def _design_persist_context() -> _DesignPersistContext:
-    return _DesignPersistContext(
-        rounds=2,
-        critiques=[
-            SpecCritique(ready=False, rationale="needs work"),
-            SpecCritique(ready=True, rationale="looks good"),
-        ],
-        stop_reason="ready",
-        loop_telemetry={"design_calls": 2},
-    )
-
-
-def test_design_context_round_trips_through_checkpoint_shape() -> None:
-    original = _design_persist_context()
-    reconstructed = _design_context_from_checkpoint(_design_context_to_checkpoint(original))
-
-    assert reconstructed.rounds == original.rounds
-    assert reconstructed.stop_reason == original.stop_reason
-    assert reconstructed.loop_telemetry == original.loop_telemetry
-    assert len(reconstructed.critiques) == len(original.critiques)
-    assert all(isinstance(c, SpecCritique) for c in reconstructed.critiques)
-    assert [c.model_dump() for c in reconstructed.critiques] == [
-        c.model_dump() for c in original.critiques
-    ]
-
-
-@pytest.mark.parametrize("missing_key", ["rounds", "critiques", "stop_reason", "loop_telemetry"])
-def test_design_context_from_checkpoint_rejects_missing_key(missing_key: str) -> None:
-    payload = _design_context_to_checkpoint(_design_persist_context())
-    del payload[missing_key]
-    with pytest.raises(ValueError):
-        _design_context_from_checkpoint(payload)
-
-
-@pytest.mark.parametrize(
-    "key,bad_value",
-    [
-        ("rounds", "not-an-int"),
-        ("rounds", True),  # bool is a subclass of int -- must still be rejected
-        ("critiques", "not-a-list"),
-        ("stop_reason", 123),
-        ("loop_telemetry", ["not", "a", "dict"]),
-    ],
-)
-def test_design_context_from_checkpoint_rejects_malformed_value(key: str, bad_value: Any) -> None:
-    payload = _design_context_to_checkpoint(_design_persist_context())
-    payload[key] = bad_value
-    with pytest.raises(TypeError):
-        _design_context_from_checkpoint(payload)

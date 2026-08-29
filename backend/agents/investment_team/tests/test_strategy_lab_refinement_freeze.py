@@ -483,13 +483,14 @@ def test_run_cycle_reroutes_then_short_circuits_on_persistent_loosening(
         d for phase, d in emitted if phase == "designing" and d.get("sub_phase") == "loopback"
     ]
     assert len(loopback_events) == MAX_DESIGN_REENTRIES
-    # Every re-entry's most-converged checkpoint is a SynthesisCheckpoint
+    assert orch.design_agent.call_count == MAX_DESIGN_REENTRIES + 1  # type: ignore[attr-defined]
+    # The most-converged checkpoint per failed attempt is a SynthesisCheckpoint
     # (the loosening trip fires from inside the refinement loop, after
-    # synthesis already converged via the ``compile_strategy`` stub), so
-    # cross-attempt resume kicks in on every re-entry: the design agent runs
-    # only once, for attempt 0 -- attempts 1..MAX_DESIGN_REENTRIES resume
-    # straight into refinement instead of re-running DESIGN+REVIEW+SYNTHESIS.
-    assert orch.design_agent.call_count == 1  # type: ignore[attr-defined]
+    # synthesis already converged via the ``compile_strategy`` stub) --
+    # ``last_resume_determination`` reflects that correctly, but is purely
+    # computed for introspection: nothing consumes it, so every re-entry
+    # still re-runs DESIGN+REVIEW+SYNTHESIS from scratch (see
+    # ``checkpoints.py``'s "cross-attempt amendment was attempted once" note).
     assert orch.last_resume_determination is PipelineStage.REFINEMENT
     assert record.backtest.status == "failed: spec_unimplementable"
     # Short-circuit records must populate ``acceptance_reason`` so a
@@ -569,13 +570,14 @@ def test_run_cycle_reroutes_on_stray_key_threshold(
     for ev in loopback_events:
         assert "consecutive mutation attempts" in ev["evidence"]
         assert ev["failure_phase"] == "execution"
-    # Every re-entry's most-converged checkpoint is a SynthesisCheckpoint
+    assert orch.design_agent.call_count == MAX_DESIGN_REENTRIES + 1  # type: ignore[attr-defined]
+    # The most-converged checkpoint per failed attempt is a SynthesisCheckpoint
     # (the threshold trip fires from inside the refinement loop, after
-    # synthesis already converged via the ``compile_strategy`` stub), so
-    # cross-attempt resume kicks in on every re-entry: the design agent runs
-    # only once, for attempt 0 -- attempts 1..MAX_DESIGN_REENTRIES resume
-    # straight into refinement instead of re-running DESIGN+REVIEW+SYNTHESIS.
-    assert orch.design_agent.call_count == 1  # type: ignore[attr-defined]
+    # synthesis already converged via the ``compile_strategy`` stub) --
+    # ``last_resume_determination`` reflects that correctly, but is purely
+    # computed for introspection: nothing consumes it, so every re-entry
+    # still re-runs DESIGN+REVIEW+SYNTHESIS from scratch (see
+    # ``checkpoints.py``'s "cross-attempt amendment was attempted once" note).
     assert orch.last_resume_determination is PipelineStage.REFINEMENT
     assert record.backtest.status == "failed: spec_unimplementable"
     assert "spec_unimplementable" in record.backtest.status
