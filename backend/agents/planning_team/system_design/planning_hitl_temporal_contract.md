@@ -106,6 +106,32 @@ calling both from inside one activity invocation of `document_production_activit
 as today) and re-enter `wait_pra` against that same `job_id` on resume, not
 re-run `DocumentProductionAgent.run` from its start.
 
+## Open problem for the deferred wiring work: PRA asks more than once
+
+PRA's own review loop (`software_engineering_team/product_requirements_analysis_agent/agent.py`,
+`while iteration < max_iterations`) can raise more than one distinct
+clarification round before completing — each round has its own, unrelated
+`pending_questions` batch. `wait_for_product_analysis_completion`
+(`planning_team/adapters/product_analysis.py`'s `_on_poll`) calls
+`answer_callback(pending)` again on every poll while `waiting_for_answers`
+stays true, which includes a second (or third) round with brand-new question
+IDs.
+
+A single `submitted_answers=<...>` "resolved" callback built once in step 4
+above cannot serve more than one round: called again with a later round's
+(different) question IDs, `build_temporal_planning_answer_callback`'s filter
+correctly finds no match and returns `[]` — by design, it never fabricates an
+answer for an unmatched question. But `_on_poll` treats an empty return as
+"nothing to submit yet" (`if answers: submit_product_analysis_answers(...)`)
+and just keeps polling, so the workflow never re-pauses for that second
+round; PRA's own `total_timeout` eventually expires the whole wait silently
+instead. The deferred wiring must therefore detect, on each `answer_callback`
+invocation, whether the current `questions` batch is the one already resolved
+or a **new** one — and for a new batch, raise a fresh
+`PlanningAnswerPauseSignal` with a new `resume_token` (re-arming
+`wait_for_planning_answers`) rather than reusing the one-shot resolved
+callback for the rest of the phase.
+
 ## Why a mixin, not an inline copy per workflow
 
 The coding team's implementation lives inline inside `CodingTeamWorkflow`
