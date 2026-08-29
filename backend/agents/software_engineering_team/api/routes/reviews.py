@@ -311,7 +311,7 @@ def post_address_comments(
                         "only open PRs can be addressed."
                     ),
                 )
-            unresolved, _threads = _address.unresolved_comments(
+            unresolved, _threads, _retry_resolve = _address.unresolved_comments(
                 client, request.owner, request.repo, pr_number
             )
         except ReviewThreadsUnavailableError as e:

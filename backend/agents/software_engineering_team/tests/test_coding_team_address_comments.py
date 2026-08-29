@@ -325,6 +325,10 @@ def address_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(_main, "update_review", lambda job_id, **kw: None)
     monkeypatch.setattr(_main, "create_job", lambda **kw: child_jobs.append(kw))
     monkeypatch.setattr(_main, "encrypt_token", lambda token: "encrypted-token")
+    # The real heartbeat_job hits the job service; _run_address_comments now
+    # heartbeats continuously (see the P1 fix for the admission-guard race), so
+    # every test that reaches it would otherwise pay a real network call.
+    monkeypatch.setattr(_main, "heartbeat_job", lambda job_id: None)
 
     def _execute(*args, **kwargs):
         executions.append({"args": args, "kwargs": kwargs})
@@ -394,9 +398,10 @@ class TestUnresolvedComments:
             ReviewThread(id="T2", is_resolved=False, comment_ids=(2,)),
         ]
         # Exercise the PUBLIC entry point the route depends on.
-        unresolved, by_comment = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, by_comment, retry_resolve = ac.unresolved_comments(fake, "o", "r", 7)
         assert [c.id for c in unresolved] == [2]
         assert by_comment[2].id == "T2"
+        assert retry_resolve == []
 
     def test_fails_closed_when_thread_state_unavailable(self, address_env) -> None:
         ac, fake = address_env["ac"], address_env["fake"]
@@ -427,11 +432,12 @@ class TestUnresolvedComments:
         fake.threads = [
             ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4)),
         ]
-        unresolved, by_comment = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, by_comment, retry_resolve = ac.unresolved_comments(fake, "o", "r", 7)
         assert [c.id for c in unresolved] == [2]
         # The thread map still covers every message's id (callers only look up
         # ids drawn from `unresolved`, so the extra entries are harmless).
         assert {by_comment[2].id, by_comment[3].id, by_comment[4].id} == {"T2"}
+        assert retry_resolve == []
 
     def test_multiple_distinct_threads_each_keep_their_root(self, address_env) -> None:
         ac, fake = address_env["ac"], address_env["fake"]
@@ -440,8 +446,45 @@ class TestUnresolvedComments:
             ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3)),
             ReviewThread(id="T5", is_resolved=False, comment_ids=(5,)),
         ]
-        unresolved, _by_comment = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, _by_comment, _retry_resolve = ac.unresolved_comments(fake, "o", "r", 7)
         assert [c.id for c in unresolved] == [2, 5]
+
+    def test_thread_with_marked_reply_excluded_even_via_unmarked_root(
+        self, address_env
+    ) -> None:
+        """A thread whose root comment carries no marker but whose LATER reply
+        does (Khala already replied) must never surface via its unmarked root —
+        the whole thread is excluded from `unresolved`, and since it is still
+        unresolved (the resolve mutation failed previously), its id is reported
+        for a resolve-only retry."""
+        ac, fake = address_env["ac"], address_env["fake"]
+        fake.review_comments = [
+            _comment(2, body="please fix this"),
+            _comment(3, body="Addressed by the SE team. <!-- khala-generated -->"),
+        ]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
+
+        unresolved, _by_comment, retry_resolve = ac.unresolved_comments(fake, "o", "r", 7)
+
+        assert unresolved == []
+        assert retry_resolve == ["T2"]
+
+    def test_thread_with_marked_reply_that_is_already_resolved_is_not_retried(
+        self, address_env
+    ) -> None:
+        """An already-resolved thread with a Khala reply needs no retry — it's
+        just an ordinary resolved thread, not a pending resolve-retry."""
+        ac, fake = address_env["ac"], address_env["fake"]
+        fake.review_comments = [
+            _comment(2, body="please fix this"),
+            _comment(3, body="Addressed by the SE team. <!-- khala-generated -->"),
+        ]
+        fake.threads = [ReviewThread(id="T2", is_resolved=True, comment_ids=(2, 3))]
+
+        unresolved, _by_comment, retry_resolve = ac.unresolved_comments(fake, "o", "r", 7)
+
+        assert unresolved == []
+        assert retry_resolve == []
 
 
 # ---------------------------------------------------------------------------
@@ -615,6 +658,114 @@ class TestHandleComment:
 
 
 class TestRunAddressComments:
+    def test_cleans_up_checkout_on_full_success_when_flagged(
+        self, address_env, monkeypatch
+    ) -> None:
+        """cleanup_checkout_on_success=True reclaims the per-PR checkout once
+        every comment is handled without failure — mirrors the issue-driven
+        flow's cleanup, since the address-comments checkout otherwise leaks
+        indefinitely on every successfully addressed PR."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        req = req.model_copy(update={"cleanup_checkout_on_success": True})
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        fake.review_comments = [_comment(2)]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))]
+        cleaned: list[str] = []
+        monkeypatch.setattr(ac._main, "_cleanup_issue_checkout", cleaned.append)
+
+        ac._run_address_comments("job1", req, "tok")
+
+        assert cleaned == [req.repo_path]
+
+    def test_does_not_clean_up_when_a_comment_fails(self, address_env, monkeypatch) -> None:
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        req = req.model_copy(update={"cleanup_checkout_on_success": True})
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        monkeypatch.setattr(
+            address_env["main"],
+            "execute_coding_team_workflow",
+            lambda *_a, **_kw: {"status": "failed"},
+        )
+        fake.review_comments = [_comment(2)]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))]
+        cleaned: list[str] = []
+        monkeypatch.setattr(ac._main, "_cleanup_issue_checkout", cleaned.append)
+
+        ac._run_address_comments("job1", req, "tok")
+
+        assert cleaned == []
+
+    def test_does_not_clean_up_when_flag_is_unset(self, address_env, monkeypatch) -> None:
+        """Default (unset) cleanup_checkout_on_success never removes the checkout
+        — matches an operator-managed repo_path override."""
+        ac, req = address_env["ac"], address_env["request"]
+        assert req.cleanup_checkout_on_success is False
+        _stub_triage(monkeypatch, ac, raises_issue=False, is_false_positive=False)
+        cleaned: list[str] = []
+        monkeypatch.setattr(ac._main, "_cleanup_issue_checkout", cleaned.append)
+
+        ac._run_address_comments("job1", req, "tok")
+
+        assert cleaned == []
+
+    def test_retries_resolve_for_thread_with_existing_khala_reply(
+        self, address_env, monkeypatch
+    ) -> None:
+        """A thread that already carries a Khala reply (but GitHub still
+        reports it unresolved) gets ONLY a resolve retry — no triage, no
+        implementation dispatch, no second reply."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        fake.review_comments = [
+            _comment(2, body="please fix this"),
+            _comment(3, body="Addressed by the SE team. <!-- khala-generated -->"),
+        ]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
+
+        ac._run_address_comments("job1", req, "tok")
+
+        assert fake.resolved == ["T2"]
+        assert fake.replies == []
+        assert address_env["executions"] == []
+        assert address_env["child_jobs"] == []
+        final = [u for u in address_env["job_updates"] if u.get("status") == "completed"]
+        # No CommentOutcome was produced for the retried thread; an empty run
+        # summary still completes the job rather than hanging it open.
+        assert final and final[-1]["review_summary"]["counts"] == {}
+
+    def test_run_wraps_body_in_liveness_heartbeat(self, address_env, monkeypatch) -> None:
+        """_run_address_comments must hold a continuous heartbeat for the job while
+        it runs — a single comment's implementation can now block for hours (see
+        execute_coding_team_workflow's reattach_on_timeout) — mirroring
+        _run_pr_review's review_hb, asserted via a recording stand-in."""
+        import shared.concurrency
+
+        ac, req = address_env["ac"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=False, is_false_positive=False)
+        seen: dict[str, Any] = {}
+
+        class _RecordingHB:
+            def __init__(self, beat, interval, **kw):
+                seen["interval"] = interval
+                seen["kwargs"] = kw
+                seen["beat"] = beat
+
+            def __enter__(self):
+                seen["entered"] = True
+                return self
+
+            def __exit__(self, *exc):
+                seen["exited"] = True
+                return False
+
+        monkeypatch.setattr(shared.concurrency, "BackgroundHeartbeat", _RecordingHB)
+
+        ac._run_address_comments("job1", req, "tok")
+
+        assert seen["entered"] and seen["exited"]
+        assert seen["interval"] == ac._main._REVIEW_HEARTBEAT_INTERVAL_S
+        seen["beat"]()  # must not raise; touches the job's liveness stamp
+
     def test_completes_and_marks_waiting_for_review(self, address_env, monkeypatch) -> None:
         ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
         _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)

@@ -2664,6 +2664,23 @@ class TestEphemeralCheckoutCleanup:
         api._cleanup_issue_checkout(str(target))
         assert not target.exists()
 
+    def test_cleanup_helper_removes_per_pr_directory(
+        self, patched_app, tmp_path, monkeypatch
+    ) -> None:
+        """A real per-PR checkout (the address-comments flow's pr-{N} shape) under
+        an ephemeral root is removed, same as a per-issue checkout."""
+        api = patched_app["api"]
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+        monkeypatch.delenv("AGENT_CACHE", raising=False)
+        target = tmp_path / "pr-42"  # the auto-derived per-PR shape
+        target.mkdir()
+        (target / ".git").mkdir()
+        (target / "file.txt").write_text("x", encoding="utf-8")
+        assert api._is_ephemeral_checkout_path(str(target)) is True
+        api._cleanup_issue_checkout(str(target))
+        assert not target.exists()
+
     def test_cleanup_refuses_repo_level_path_under_root(
         self, patched_app, tmp_path, monkeypatch
     ) -> None:

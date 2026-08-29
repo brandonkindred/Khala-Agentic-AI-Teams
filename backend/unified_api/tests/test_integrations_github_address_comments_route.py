@@ -111,6 +111,31 @@ def test_success_proxies_with_token_and_path(mock_cfg, mock_cred, mock_path, moc
     assert sent["repo_path"] == "/tmp/acme_widget/pr-7"
     # The checkout is materialized (cloned/fetched) before the job is forwarded.
     mock_clone.assert_called_once_with("/tmp/acme_widget/pr-7", "acme", "widget", "ghp", platform_owned=True)
+    # Platform-owned (no repo_path override) → the coding team is told it may
+    # reclaim the per-PR checkout once every comment is handled successfully.
+    assert sent["cleanup_checkout_on_success"] is True
+
+
+@patch(f"{_M}._ensure_repo_clone", return_value=None)
+@patch(f"{_M}._resolve_repo_path", return_value="/srv/pinned-checkout")
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(
+    f"{_M}.get_github_config_meta",
+    return_value={**_GH_CFG, "repo_path": "/srv/pinned-checkout"},
+)
+def test_operator_pinned_checkout_is_never_cleaned_up(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch):
+    """An operator-pinned repo_path override must never be flagged for cleanup —
+    it isn't per-PR-namespaced and the operator manages its lifecycle."""
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103/")
+    fake = _FakeAsyncClient(result=_FakeResp(200, _OK))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_URL, json={})
+    assert resp.status_code == 200
+    _url, sent = fake.calls[0]
+    assert sent["cleanup_checkout_on_success"] is False
+    mock_clone.assert_called_once_with(
+        "/srv/pinned-checkout", "acme", "widget", "ghp", platform_owned=False
+    )
 
 
 @patch(f"{_M}._ensure_repo_clone", return_value="git clone failed: boom")

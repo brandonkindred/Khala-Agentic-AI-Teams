@@ -25,6 +25,7 @@ from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.clone_workspace import (
     clone_lock_path,
     is_per_issue_dir,
+    is_per_pr_dir,
     is_within_ephemeral_workspace,
 )
 from software_engineering_team.github_source import (
@@ -184,14 +185,16 @@ def _clear_active_issue_if_matches(repo_path: str, issue_number: int) -> None:
 
 
 def _is_deletable_per_issue(target: Path) -> bool:
-    """True iff *target* is an ephemeral per-issue git checkout safe to delete.
+    """True iff *target* is an ephemeral per-issue OR per-PR git checkout safe to delete.
 
     The three content conditions (2–4) shared by the resolve-time gate in
     ``_ephemeral_checkout_target`` and the under-lock re-validation in
     ``_cleanup_issue_checkout``: strictly under an ephemeral workspace root, an
-    ``issue-{N}`` per-issue final component, and carrying a ``.git`` entry. It
-    does NOT resolve or re-check the symlink-root condition (1) — callers pass an
-    already-resolved, non-symlink ``Path``.
+    ``issue-{N}`` per-issue OR ``pr-{N}`` per-PR (the address-comments flow's
+    namespacing — see ``unified_api``'s ``_resolve_repo_path``) final component,
+    and carrying a ``.git`` entry. It does NOT resolve or re-check the
+    symlink-root condition (1) — callers pass an already-resolved, non-symlink
+    ``Path``.
 
     Preconditions:
         - ``target`` is an already-resolved path (symlink-collapsed).
@@ -201,7 +204,7 @@ def _is_deletable_per_issue(target: Path) -> bool:
     """
     return (
         is_within_ephemeral_workspace(target)
-        and is_per_issue_dir(target.name)
+        and (is_per_issue_dir(target.name) or is_per_pr_dir(target.name))
         and (target / ".git").exists()
     )
 
@@ -226,11 +229,11 @@ def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
        root or shallow system dir like ``/`` or ``/data`` is excluded because it
        is not under a workspace root), even if a caller sets the cleanup flag and
        points ``repo_path`` at someone else's repo;
-    3. its final component is the auto-derived ``issue-{N}`` per-issue shape
-       (``is_per_issue_dir``) — so a repo-level checkout that merely sits under an
-       ephemeral root (e.g. the PR-review path ``.../github_workspaces/owner/repo``)
-       is never deleted, matching the contract that only per-issue clones are
-       reclaimed;
+    3. its final component is the auto-derived ``issue-{N}`` per-issue OR
+       ``pr-{N}`` per-PR shape (``is_per_issue_dir``/``is_per_pr_dir``) — so a
+       repo-level checkout that merely sits under an ephemeral root (e.g. the
+       PR-review path ``.../github_workspaces/owner/repo``) is never deleted,
+       matching the contract that only per-issue/per-PR clones are reclaimed;
     4. it is actually a git checkout (carries a ``.git`` entry).
 
     Preconditions:
@@ -358,11 +361,13 @@ def _locked_rmtree(target: Path, repo_path: str) -> None:
 
 
 def _cleanup_issue_checkout(repo_path: str) -> None:
-    """Remove a platform-owned, ephemeral per-issue checkout after clean success.
+    """Remove a platform-owned, ephemeral per-issue OR per-PR checkout after clean success.
 
     Only called once the job has completed with every task merged and the work
-    published to a PR, so the local clone holds nothing the remote does not. The
-    folder is recreated by the caller's clone-or-fetch on a later run.
+    published to a PR (issue-driven flow) or every unresolved comment
+    successfully handled (the address-comments flow's per-PR checkout — see
+    ``is_per_pr_dir``), so the local clone holds nothing the remote does not.
+    The folder is recreated by the caller's clone-or-fetch on a later run.
 
     Concurrency:
         The ``rmtree`` runs while holding the SAME sibling ``flock`` that

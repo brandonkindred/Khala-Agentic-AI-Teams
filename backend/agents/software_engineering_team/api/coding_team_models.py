@@ -267,6 +267,14 @@ class AddressCommentsRequest(BaseModel):
     github_token: Optional[str] = Field(
         default=None, description="Overrides GITHUB_TOKEN env var for this request."
     )
+    cleanup_checkout_on_success: bool = Field(
+        default=False,
+        description=(
+            "When true, the per-PR checkout at repo_path is platform-owned and ephemeral: "
+            "delete it after every unresolved comment is handled without failure. "
+            "Defaults to false so an operator-managed checkout is never removed."
+        ),
+    )
 
 
 class AddressCommentsResponse(BaseModel):

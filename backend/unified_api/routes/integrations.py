@@ -3021,6 +3021,7 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
         "repo_path": repo_path,
         "pr_number": pr_number,
         "github_token": token,
+        "cleanup_checkout_on_success": platform_owned,
     }
     if body.base_branch:
         payload["base_branch"] = body.base_branch

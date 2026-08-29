@@ -177,22 +177,32 @@ class CommentOutcome(BaseModel):
 
 def _unresolved_comments(
     client: Any, owner: str, repo: str, pr_number: int
-) -> tuple[List[ReviewComment], Dict[int, ReviewThread]]:
+) -> tuple[List[ReviewComment], Dict[int, ReviewThread], List[str]]:
     """Return the PR's unresolved review comments plus a comment-id → thread map.
 
     Preconditions:
         - ``client`` is a live :class:`GitHubClient`; ``pr_number`` names an open PR.
     Postconditions:
-        - Returns ``(comments, thread_by_comment_id)`` where ``comments`` has AT
-          MOST ONE entry per unresolved thread — its earliest (root) comment in
-          GitHub's response order — even when the thread also carries replies;
-          a thread's replies share the same underlying issue as its root, and
-          the reply/resolve/publish flow operates on the thread as a whole, so
-          handling every message in a multi-comment thread separately would
-          triage the same issue repeatedly and could dispatch a duplicate
-          implementation workflow per extra message. Comments Khala did not
-          itself author (marker check) whose thread GitHub reports as
-          UNRESOLVED are eligible.
+        - Returns ``(comments, thread_by_comment_id, retry_resolve_thread_ids)``.
+        - ``comments`` has AT MOST ONE entry per unresolved thread — its earliest
+          (root) comment in GitHub's response order — even when the thread also
+          carries replies; a thread's replies share the same underlying issue as
+          its root, and the reply/resolve/publish flow operates on the thread as
+          a whole, so handling every message in a multi-comment thread
+          separately would triage the same issue repeatedly and could dispatch
+          a duplicate implementation workflow per extra message. Comments Khala
+          did not itself author whose thread GitHub reports as UNRESOLVED are
+          eligible — EXCEPT a thread that already carries a Khala-generated
+          reply ANYWHERE in it (the marker is only ever on Khala's own reply,
+          which need not be the thread's root — see ``retry_resolve_thread_ids``
+          below): such a thread's fix was already implemented and published, so
+          it is excluded from ``comments`` even via its unmarked root, rather
+          than being re-triaged into a duplicate implementation run.
+        - ``retry_resolve_thread_ids`` lists the id of every UNRESOLVED thread
+          that already carries a Khala-generated reply — i.e. the reply landed
+          but the resolve mutation that should have followed it failed (or
+          hasn't run yet). The caller retries ONLY the resolve step for these,
+          never re-triage/re-implementation.
         - ``thread_by_comment_id`` maps EVERY comment id appearing in ANY thread
           GitHub returned (resolved threads included) to its owning
           :class:`ReviewThread`. Callers only look up ids drawn from ``comments``,
@@ -219,7 +229,21 @@ def _unresolved_comments(
             if thread.is_resolved:
                 resolved_ids.add(cid)
 
+    # A thread already carrying a Khala-generated reply must never be
+    # re-triaged, even when that reply is not the thread's earliest message
+    # (so the plain per-comment marker check on the loop below would miss it
+    # via an unmarked root). Scan every comment up front — independent of
+    # response order — so detection never depends on which message the main
+    # loop happens to reach first.
+    marked_thread_ids: set[str] = set()
+    for comment in all_comments:
+        if _KHALA_COMMENT_MARKER in (comment.body or ""):
+            thread = thread_by_comment.get(comment.id)
+            if thread is not None:
+                marked_thread_ids.add(thread.id)
+
     unresolved: List[ReviewComment] = []
+    retry_resolve_thread_ids: List[str] = []
     seen_thread_ids: set[str] = set()
     for comment in all_comments:
         if _KHALA_COMMENT_MARKER in (comment.body or ""):
@@ -239,8 +263,14 @@ def _unresolved_comments(
             # root comment: same conversation, handled once via the root.
             continue
         seen_thread_ids.add(thread.id)
+        if thread.id in marked_thread_ids:
+            # Already replied to (by Khala) but GitHub still reports this
+            # thread unresolved — the resolve mutation failed previously.
+            # Retry resolving it; never re-triage a fix that already landed.
+            retry_resolve_thread_ids.append(thread.id)
+            continue
         unresolved.append(comment)
-    return unresolved, thread_by_comment
+    return unresolved, thread_by_comment, retry_resolve_thread_ids
 
 
 # ---------------------------------------------------------------------------
@@ -691,7 +721,7 @@ def _start_address_comments_thread(
 
 def unresolved_comments(
     client: Any, owner: str, repo: str, pr_number: int
-) -> tuple[List[ReviewComment], Dict[int, ReviewThread]]:
+) -> tuple[List[ReviewComment], Dict[int, ReviewThread], List[str]]:
     """Public entry point for :func:`_unresolved_comments` (see its contract)."""
     return _unresolved_comments(client, owner, repo, pr_number)
 
@@ -710,6 +740,14 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
         - On an error that prevents the flow from running (e.g. the initial GitHub
           reads fail), the job ends ``failed`` with a scrubbed error. Per-comment
           failures are recorded as outcomes and do NOT fail the job.
+        - Runs a continuous background heartbeat for the job's whole duration (see
+          ``_REVIEW_HEARTBEAT_INTERVAL_S``), matching the ordinary PR-review
+          worker: ``_dispatch_implementation`` can now block for hours waiting on
+          — and reattaching to — a single comment's implementation workflow (see
+          ``execute_coding_team_workflow``'s ``reattach_on_timeout``), and without
+          a continuous beat ``_running_review_for_pr`` would see this job's
+          heartbeat go stale and admit a duplicate run on the same per-PR
+          checkout while this one is still legitimately working.
         - NEVER raises — the daemon thread cannot leave a job wedged.
     """
     owner, repo, pr_number = request.owner, request.repo, request.pr_number
@@ -726,10 +764,46 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
             status_text="Addressing unresolved review comments",
         )
 
-        with _main.GitHubClient(token=token) as client:
+        # Continuous liveness beat for the admission guard (mirrors
+        # _run_pr_review's review_hb): job updates only land at phase
+        # transitions, and dispatching one comment's implementation can block
+        # for a very long time — without this, a perfectly healthy run would
+        # look heartbeat-stale to _running_review_for_pr. The context manager
+        # guarantees the beat stops on every exit path; on_error keeps a
+        # job-service blip from killing the beat thread (or the run).
+        from shared.concurrency import BackgroundHeartbeat  # noqa: I001, PLC0415 - keep module import light
+
+        address_hb = BackgroundHeartbeat(
+            lambda: _main.heartbeat_job(job_id),
+            _main._REVIEW_HEARTBEAT_INTERVAL_S,
+            name=f"address-comments-heartbeat-{job_id}",
+            beat_first=True,
+            on_error=lambda exc: logger.warning(
+                "address-comments heartbeat error for job %s: %s",
+                job_id,
+                scrub_token_from_text(str(exc)),
+            ),
+        )
+        with address_hb, _main.GitHubClient(token=token) as client:
             pr = client.get_pull_request(owner, repo, pr_number)
             pr_remote = _pr_head_remote(owner, repo, pr)
-            unresolved, thread_by_comment = _unresolved_comments(client, owner, repo, pr_number)
+            unresolved, thread_by_comment, retry_resolve_thread_ids = _unresolved_comments(
+                client, owner, repo, pr_number
+            )
+
+            # A thread already carrying a Khala-generated reply was already
+            # implemented and published; only the resolve mutation is retried
+            # here — never re-triage/re-implement it. resolve_review_thread is
+            # itself best-effort (never raises, returns False on failure), so
+            # a still-failing retry just leaves the thread open for the next
+            # run to retry again.
+            retry_resolve_ok = True
+            for thread_id in retry_resolve_thread_ids:
+                if not client.resolve_review_thread(thread_id):
+                    retry_resolve_ok = False
+                    logger.warning(
+                        "address-comments: retry-resolve failed for thread %s", thread_id
+                    )
 
             outcomes: List[CommentOutcome] = []
             for comment in unresolved:
@@ -747,11 +821,23 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                 )
                 outcomes.append(outcome)
 
-            # Move the PR to "waiting for review" only when every comment was handled
-            # without failure — a failed comment means work is still owed, so the PR
-            # is not yet ready for another look.
-            if outcomes and all(o.outcome != "failed" for o in outcomes):
+            # Every comment handled without failure AND every retry-resolve
+            # succeeded: nothing is still owed to the reviewer.
+            all_succeeded = retry_resolve_ok and all(o.outcome != "failed" for o in outcomes)
+            # Move the PR to "waiting for review" only on a fully successful run —
+            # a failed comment or a still-open retried thread means work is owed,
+            # so the PR is not yet ready for another look.
+            if outcomes and all_succeeded:
                 _mark_waiting_for_review(client, owner, repo, pr_number)
+
+        # Drop the per-PR clone only on a clean completion (nothing failed, no
+        # unresolved comments left owed) — mirrors the issue-driven flow's
+        # _publish_merged_work: cleanup runs BEFORE the terminal status update
+        # so the job stays in list_jobs(active_only=True) during the rmtree,
+        # and a quick same-PR retry is rejected by the admission guard instead
+        # of racing a fresh clone into a directory mid-rmtree.
+        if all_succeeded and request.cleanup_checkout_on_success:
+            _main._cleanup_issue_checkout(request.repo_path)
 
         summary = _build_summary(outcomes)
         _main.update_job(
