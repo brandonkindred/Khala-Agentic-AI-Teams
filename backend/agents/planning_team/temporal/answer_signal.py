@@ -149,6 +149,7 @@ class PlanningAnswerSignalMixin:
     """
 
     def __init__(self) -> None:
+        super().__init__()
         self._active_resume_token: Optional[str] = None
         self._submitted_answers: Optional[List[Dict[str, Any]]] = None
         self._buffered_signals: Dict[str, List[Dict[str, Any]]] = {}
