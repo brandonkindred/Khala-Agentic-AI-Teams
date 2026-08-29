@@ -85,7 +85,11 @@ def build_temporal_planning_answer_callback(
           ``questions``' ``id`` values, preserving ``submitted_answers``'
           order. Never fabricates an answer for a question with no matching
           entry, and never returns a default — a question with no matching
-          submitted answer is simply absent from the result.
+          submitted answer is simply absent from the result. A non-dict entry
+          in ``submitted_answers`` (a malformed signal's ``answers`` list is
+          validated as a list, not as a list-of-dicts) is skipped rather than
+          raising — fails closed instead of an ``AttributeError`` surfacing
+          from a resumed activity.
     """
     assert isinstance(resume_token, str) and resume_token, (
         "build_temporal_planning_answer_callback requires a non-empty resume_token"
@@ -102,7 +106,7 @@ def build_temporal_planning_answer_callback(
 
     def _resolved_cb(questions: list) -> list:
         question_ids = {q.get("id") for q in questions if isinstance(q, dict)}
-        return [a for a in resolved if a.get("question_id") in question_ids]
+        return [a for a in resolved if isinstance(a, dict) and a.get("question_id") in question_ids]
 
     return _resolved_cb
 

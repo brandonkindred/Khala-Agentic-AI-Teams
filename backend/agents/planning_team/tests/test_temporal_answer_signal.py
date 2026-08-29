@@ -305,3 +305,19 @@ def test_callback_ignores_malformed_question_entries() -> None:
     result = cb(["not-a-dict", {"id": "q1"}])
 
     assert result == [{"question_id": "q1", "selected_option_id": "opt-a"}]
+
+
+def test_callback_skips_malformed_submitted_answer_entries() -> None:
+    """A malformed signal can smuggle a non-dict entry into ``submitted_answers``
+    (submit_planning_answers only validates ``answers`` is a list, not a
+    list-of-dicts) -- the resolved callback must skip it rather than crash
+    with AttributeError on ``a.get(...)``, matching this primitive's fail-
+    closed contract."""
+    cb = build_temporal_planning_answer_callback(
+        "tok-1",
+        submitted_answers=["bad", {"question_id": "q1", "selected_option_id": "opt-a"}],
+    )
+
+    result = cb([{"id": "q1"}])
+
+    assert result == [{"question_id": "q1", "selected_option_id": "opt-a"}]
