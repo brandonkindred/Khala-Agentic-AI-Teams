@@ -327,7 +327,6 @@ AGENT_DEFAULT_MODELS: dict[str, str] = {
     "qa_test_strategy": "deepseek-v4-pro:cloud",
     "security_planning": "deepseek-v4-pro:cloud",
     "observability": "deepseek-v4-pro:cloud",
-    "acceptance_verifier": "deepseek-v4-pro:cloud",
     "documentation": "deepseek-v4-pro:cloud",
     "qa": "deepseek-v4-pro:cloud",
     "security": "deepseek-v4-pro:cloud",
