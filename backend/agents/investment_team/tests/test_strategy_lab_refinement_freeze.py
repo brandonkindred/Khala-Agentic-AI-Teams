@@ -32,6 +32,7 @@ from investment_team.models import (
 )
 from investment_team.strategy_lab import orchestrator as orchestrator_module
 from investment_team.strategy_lab.agents.refinement import RefinementAgent
+from investment_team.strategy_lab.checkpoints import PipelineStage
 from investment_team.strategy_lab.exceptions import SpecImplementabilityError
 from investment_team.strategy_lab.orchestrator import (
     MAX_DESIGN_REENTRIES,
@@ -483,6 +484,14 @@ def test_run_cycle_reroutes_then_short_circuits_on_persistent_loosening(
     ]
     assert len(loopback_events) == MAX_DESIGN_REENTRIES
     assert orch.design_agent.call_count == MAX_DESIGN_REENTRIES + 1  # type: ignore[attr-defined]
+    # The most-converged checkpoint per failed attempt is a SynthesisCheckpoint
+    # (the loosening trip fires from inside the refinement loop, after
+    # synthesis already converged via the ``compile_strategy`` stub) --
+    # ``last_resume_determination`` reflects that correctly, but is purely
+    # computed for introspection: nothing consumes it, so every re-entry
+    # still re-runs DESIGN+REVIEW+SYNTHESIS from scratch (see
+    # ``checkpoints.py``'s "cross-attempt amendment was attempted once" note).
+    assert orch.last_resume_determination is PipelineStage.REFINEMENT
     assert record.backtest.status == "failed: spec_unimplementable"
     # Short-circuit records must populate ``acceptance_reason`` so a
     # reader of the persisted record sees the rejection cause without
@@ -562,6 +571,14 @@ def test_run_cycle_reroutes_on_stray_key_threshold(
         assert "consecutive mutation attempts" in ev["evidence"]
         assert ev["failure_phase"] == "execution"
     assert orch.design_agent.call_count == MAX_DESIGN_REENTRIES + 1  # type: ignore[attr-defined]
+    # The most-converged checkpoint per failed attempt is a SynthesisCheckpoint
+    # (the threshold trip fires from inside the refinement loop, after
+    # synthesis already converged via the ``compile_strategy`` stub) --
+    # ``last_resume_determination`` reflects that correctly, but is purely
+    # computed for introspection: nothing consumes it, so every re-entry
+    # still re-runs DESIGN+REVIEW+SYNTHESIS from scratch (see
+    # ``checkpoints.py``'s "cross-attempt amendment was attempted once" note).
+    assert orch.last_resume_determination is PipelineStage.REFINEMENT
     assert record.backtest.status == "failed: spec_unimplementable"
     assert "spec_unimplementable" in record.backtest.status
     # PR #573 round-5 Note 2: short-circuit records must populate
