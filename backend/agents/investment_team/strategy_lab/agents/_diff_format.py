@@ -125,8 +125,16 @@ def _walk_dict_diff(previous: dict[str, Any], current: dict[str, Any], path: str
     result carries enough information to reconstruct the changed leaves
     without needing the full JSON. A nested dict present under the same key
     on both sides is recursed into rather than reported as a single
-    ``changed`` line, so only genuine leaf differences are listed. Returns an
-    empty list when ``previous == current``. Never mutates either input.
+    ``changed`` line, so only genuine leaf differences are listed — *unless*
+    one side of that shared key is ``{}`` and the other is not, in which case
+    recursing would emit the same per-leaf ``added:``/``removed:`` lines as
+    the key being wholly absent from that side (there is no dotted-path leaf
+    to name the empty container itself), losing whether the key still exists
+    as ``{}`` or is gone entirely; that case is reported instead as one
+    ``changed: {key_path}: {} -> ...`` (or ``... -> {}``) line, distinct from
+    both the recursed leaf lines and from :func:`_leaf_lines`'s
+    ``added:``/``removed:`` output for a wholly absent key. Returns an empty
+    list when ``previous == current``. Never mutates either input.
     """
     lines: list[str] = []
     all_keys = sorted(set(previous) | set(current))
@@ -144,7 +152,14 @@ def _walk_dict_diff(previous: dict[str, Any], current: dict[str, Any], path: str
         prev_value = previous[key]
         curr_value = current[key]
         if isinstance(prev_value, dict) and isinstance(curr_value, dict):
-            lines.extend(_walk_dict_diff(prev_value, curr_value, key_path))
+            if not prev_value and not curr_value:
+                continue
+            if not curr_value:
+                lines.append(f"changed: {key_path}: {prev_value!r} -> {{}}")
+            elif not prev_value:
+                lines.append(f"changed: {key_path}: {{}} -> {curr_value!r}")
+            else:
+                lines.extend(_walk_dict_diff(prev_value, curr_value, key_path))
         elif _values_differ(prev_value, curr_value):
             lines.append(f"changed: {key_path}: {prev_value!r} -> {curr_value!r}")
 

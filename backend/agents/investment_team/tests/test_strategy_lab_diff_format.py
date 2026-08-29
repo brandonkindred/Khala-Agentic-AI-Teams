@@ -154,6 +154,54 @@ def test_spec_added_empty_dict_reports_a_single_line():
     assert "added: exit_rules: {}" in result
 
 
+def test_spec_key_wholly_removed_differs_from_key_emptied_to_dict():
+    previous_spec = {"entry_rules": {"threshold": 0.5}, "exit_rules": {"trailing_stop": 0.05}}
+    current_wholly_removed = {"entry_rules": {"threshold": 0.5}}
+    current_emptied = {"entry_rules": {"threshold": 0.5}, "exit_rules": {}}
+
+    result_wholly_removed = diff_spec_or_full(previous_spec, current_wholly_removed)
+    result_emptied = diff_spec_or_full(previous_spec, current_emptied)
+
+    assert result_wholly_removed != result_emptied
+    assert "removed: exit_rules.trailing_stop: 0.05" in result_wholly_removed
+    assert "changed: exit_rules:" in result_emptied
+    assert "{}" in result_emptied
+
+
+def test_spec_key_wholly_added_differs_from_key_populated_from_empty():
+    current_spec = {"entry_rules": {"threshold": 0.5}, "exit_rules": {"trailing_stop": 0.05}}
+    previous_wholly_absent = {"entry_rules": {"threshold": 0.5}}
+    previous_empty = {"entry_rules": {"threshold": 0.5}, "exit_rules": {}}
+
+    result_wholly_absent = diff_spec_or_full(previous_wholly_absent, current_spec)
+    result_from_empty = diff_spec_or_full(previous_empty, current_spec)
+
+    assert result_wholly_absent != result_from_empty
+    assert "added: exit_rules.trailing_stop: 0.05" in result_wholly_absent
+    assert "changed: exit_rules:" in result_from_empty
+    assert "{}" in result_from_empty
+
+
+def test_spec_equal_nested_dicts_are_not_reported_as_changed():
+    previous_spec = {"entry_rules": {"threshold": 0.5}, "exit_rules": {"trailing_stop": 0.05}}
+    current_spec = {"entry_rules": {"threshold": 0.5}, "exit_rules": {"trailing_stop": 0.05}}
+
+    result = diff_spec_or_full(previous_spec, current_spec)
+
+    assert "changed:" not in result
+    assert "added:" not in result
+    assert "removed:" not in result
+
+
+def test_spec_both_sides_empty_dict_is_not_reported_as_changed():
+    previous_spec = {"entry_rules": {"threshold": 0.5}, "exit_rules": {}}
+    current_spec = {"entry_rules": {"threshold": 0.5}, "exit_rules": {}}
+
+    result = diff_spec_or_full(previous_spec, current_spec)
+
+    assert "exit_rules" not in result
+
+
 def test_spec_bool_vs_int_type_change_is_reported_as_changed():
     previous_spec = {"entry_rules": {"active": True}}
     current_spec = {"entry_rules": {"active": 1}}
