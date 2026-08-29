@@ -1142,9 +1142,18 @@ class GitHubClient(_GitHubHttpMixin):
               Raises ``ValueError`` for an empty ``body`` (rather than sending a
               request GitHub would reject with an opaque 422) and
               ``GitHubAPIError`` on any non-2xx response.
+            - Posts ``body`` with :data:`KHALA_COMMENT_MARKER` appended when not
+              already present (matching :meth:`add_issue_comment`/
+              :meth:`create_issue`'s provenance convention) so a caller that
+              later re-reads review comments (e.g. ``_unresolved_comments``'s
+              marker check) can recognize — and skip — Khala's own reply even
+              if a subsequent step (like resolving the thread) failed and the
+              same comment is re-triaged on a retry.
         """
         if not body:
             raise ValueError("reply_to_review_comment requires a non-empty 'body'")
+        if KHALA_COMMENT_MARKER not in body:
+            body = f"{body}\n\n{KHALA_COMMENT_MARKER}"
         r = self._check(
             self._request(
                 "POST",

@@ -1152,3 +1152,119 @@ class TestFastForwardWithCheckedOutBranch:
         ok, err = api._fast_forward(clone, "--evil", "development")
         assert ok is False
         assert "unsafe" in (err or "")
+
+
+# ---------------------------------------------------------------------------
+# Fork-PR remote resolution (_ensure_named_remote)
+#
+# A fork-opened PR's remote is a bare clone URL (see
+# address_comments._pr_head_remote), not a configured git remote name like
+# "origin". `git fetch -- <url> <branch>` only populates FETCH_HEAD — it does
+# NOT create the refs/remotes/{name}/{branch} tracking ref that
+# _prepare_issue_branch/_push_branch build via plain string interpolation.
+# _ensure_named_remote registers such a URL as a real local remote first.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fork_pair(repo_pair, tmp_path):
+    """(remote, clone, fork): a third repo cloned from repo_pair's remote,
+    simulating a contributor's fork, with a "feature" branch (the PR head)
+    carrying a commit that exists ONLY in the fork."""
+    remote, clone = repo_pair
+    fork = str(tmp_path / "fork")
+    r = subprocess.run(["git", "clone", "-q", remote, fork], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    _must(fork, "config", "commit.gpgsign", "false")
+    _must(fork, "checkout", "-q", "-b", "feature")
+    _commit_file(fork, "fork_only.txt", "from the fork\n", "fork-only commit")
+    return remote, clone, fork
+
+
+class TestEnsureNamedRemote:
+    def test_plain_name_passes_through_unchanged(self, api, repo_pair) -> None:
+        """A plain remote name (e.g. "origin") is returned as-is — no remote
+        is registered, no git call beyond the string check."""
+        _, clone = repo_pair
+        name, err = api._ensure_named_remote(clone, "origin")
+        assert (name, err) == ("origin", None)
+        assert "khala-pr-head" not in _must(clone, "remote").split()
+
+    def test_url_registers_named_remote(self, api, fork_pair) -> None:
+        _, clone, fork = fork_pair
+        fork_url = f"file://{fork}"
+
+        name, err = api._ensure_named_remote(clone, fork_url)
+
+        assert (name, err) == ("khala-pr-head", None)
+        assert _must(clone, "remote", "get-url", "khala-pr-head") == fork_url
+
+    def test_repeated_calls_with_same_url_are_idempotent(self, api, fork_pair) -> None:
+        """A retry on the same checkout (the child job re-dispatching after a
+        transient failure) must not error just because the remote already
+        exists from the first attempt."""
+        _, clone, fork = fork_pair
+        fork_url = f"file://{fork}"
+
+        first = api._ensure_named_remote(clone, fork_url)
+        second = api._ensure_named_remote(clone, fork_url)
+
+        assert first == ("khala-pr-head", None)
+        assert second == ("khala-pr-head", None)
+
+    def test_set_url_updates_an_existing_registration(self, api, fork_pair, tmp_path) -> None:
+        """A different fork URL registered under the same fixed name overwrites
+        the previous one via `remote set-url` (the `remote add` fallback path)."""
+        _, clone, fork = fork_pair
+        fork_url = f"file://{fork}"
+        api._ensure_named_remote(clone, fork_url)
+
+        fork2 = str(tmp_path / "fork2")
+        r = subprocess.run(["git", "clone", "-q", fork, fork2], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        fork2_url = f"file://{fork2}"
+
+        name, err = api._ensure_named_remote(clone, fork2_url)
+
+        assert (name, err) == ("khala-pr-head", None)
+        assert _must(clone, "remote", "get-url", "khala-pr-head") == fork2_url
+
+
+class TestPrepareIssueBranchFromFork:
+    def test_integration_branch_fetched_from_fork_default_branch_from_origin(
+        self, api, fork_pair
+    ) -> None:
+        """The PR head (integration_branch) is fetched from the fork; the base
+        (default_branch) is still resolved from "origin" — the two must stay
+        decoupled so a fork's stale/absent main is never mistaken for the seed."""
+        remote, clone, fork = fork_pair
+        fork_url = f"file://{fork}"
+        fork_feature_tip = _must(fork, "rev-parse", "feature")
+        origin_main_tip = _must(remote, "rev-parse", "main")
+
+        ok, err, _notes = api._prepare_issue_branch(
+            clone, fork_url, "main", "feature", None, issue_number=None
+        )
+
+        assert ok is True, err
+        assert _must(clone, "rev-parse", "khala-pr-head/feature") == fork_feature_tip
+        assert "fork_only.txt" in _must(
+            clone, "ls-tree", "-r", "--name-only", "khala-pr-head/feature"
+        )
+        assert _must(clone, "rev-parse", "origin/main") == origin_main_tip
+
+
+class TestPushBranchToFork:
+    def test_pushes_to_the_registered_fork_remote(self, api, fork_pair) -> None:
+        remote, clone, fork = fork_pair
+        fork_url = f"file://{fork}"
+        # A branch name absent from the fork, so --force-with-lease has no
+        # existing remote-tracking state to worry about.
+        _must(clone, "checkout", "-q", "-b", "khala-fix", "origin/main")
+        _commit_file(clone, "fix.py", "x = 1\n", "the fix")
+
+        ok, err = api._push_branch(clone, fork_url, "khala-fix")
+
+        assert ok is True, err
+        assert _must(fork, "log", "-1", "--format=%s", "khala-fix") == "the fix"
+        assert _must(clone, "remote", "get-url", "khala-pr-head") == fork_url

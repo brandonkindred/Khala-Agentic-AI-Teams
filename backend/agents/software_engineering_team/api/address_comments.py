@@ -183,9 +183,16 @@ def _unresolved_comments(
     Preconditions:
         - ``client`` is a live :class:`GitHubClient`; ``pr_number`` names an open PR.
     Postconditions:
-        - Returns ``(comments, thread_by_comment_id)`` where ``comments`` are the
-          review comments whose thread GitHub reports as UNRESOLVED and which Khala
-          did not itself author (marker check), in GitHub's response order.
+        - Returns ``(comments, thread_by_comment_id)`` where ``comments`` has AT
+          MOST ONE entry per unresolved thread — its earliest (root) comment in
+          GitHub's response order — even when the thread also carries replies;
+          a thread's replies share the same underlying issue as its root, and
+          the reply/resolve/publish flow operates on the thread as a whole, so
+          handling every message in a multi-comment thread separately would
+          triage the same issue repeatedly and could dispatch a duplicate
+          implementation workflow per extra message. Comments Khala did not
+          itself author (marker check) whose thread GitHub reports as
+          UNRESOLVED are eligible.
         - ``thread_by_comment_id`` maps EVERY comment id appearing in ANY thread
           GitHub returned (resolved threads included) to its owning
           :class:`ReviewThread`. Callers only look up ids drawn from ``comments``,
@@ -213,6 +220,7 @@ def _unresolved_comments(
                 resolved_ids.add(cid)
 
     unresolved: List[ReviewComment] = []
+    seen_thread_ids: set[str] = set()
     for comment in all_comments:
         if _KHALA_COMMENT_MARKER in (comment.body or ""):
             continue
@@ -225,6 +233,12 @@ def _unresolved_comments(
             )
         if comment.id in resolved_ids:
             continue
+        thread = thread_by_comment[comment.id]
+        if thread.id in seen_thread_ids:
+            # A later message (a reply) in a thread already represented by its
+            # root comment: same conversation, handled once via the root.
+            continue
+        seen_thread_ids.add(thread.id)
         unresolved.append(comment)
     return unresolved, thread_by_comment
 

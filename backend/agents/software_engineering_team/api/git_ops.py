@@ -753,6 +753,50 @@ def _merge_recovered_wip(
     )
 
 
+# Name a fork's clone URL is registered under once it has been added as a local
+# git remote (see _ensure_named_remote). Fixed rather than per-fork: the
+# per-PR checkout isolation (unified_api's pr-{N} namespacing) already
+# guarantees at most one PR's head repository is ever relevant to a given
+# checkout, so there is never more than one fork remote to register at a time.
+_FORK_REMOTE_NAME = "khala-pr-head"
+
+
+def _ensure_named_remote(repo_path: str, remote: str) -> Tuple[str, Optional[str]]:
+    """Resolve ``remote`` to a git remote NAME safe for ``{name}/{branch}`` refs.
+
+    ``git fetch -- <repository> <branch>`` with a bare URL as ``<repository>``
+    only populates ``FETCH_HEAD`` — unlike fetching a CONFIGURED remote by
+    name, it does not create the ``refs/remotes/{name}/{branch}`` tracking ref
+    that ``_prepare_issue_branch`` (and ``_push_branch``'s ``--set-upstream``)
+    build via plain string interpolation. A fork-opened PR's remote (see
+    ``address_comments._pr_head_remote``) is such a URL, so it must be
+    registered as a real local remote before it is used that way.
+
+    Preconditions:
+        - ``repo_path`` is a git checkout the caller can write to.
+    Postconditions:
+        - When ``remote`` is already a plain name (no ``"://"``, e.g.
+          ``"origin"``), returns ``(remote, None)`` unchanged — no git call is
+          made, so the common (non-fork) path is a pure no-op.
+        - When ``remote`` is a URL, registers it as a durable local remote
+          named ``_FORK_REMOTE_NAME`` — ``git remote add`` on first use,
+          falling back to ``git remote set-url`` when it is already
+          registered (idempotent across retries on the same checkout) — and
+          returns ``(_FORK_REMOTE_NAME, None)``.
+        - On a git failure returns ``(remote, error)``: the original value is
+          returned unchanged (never a name that failed to register) alongside
+          a message describing the failure.
+    """
+    if "://" not in remote:
+        return remote, None
+    rc, msg = _main._git(repo_path, "remote", "add", _FORK_REMOTE_NAME, remote)
+    if rc != 0:
+        rc, msg = _main._git(repo_path, "remote", "set-url", _FORK_REMOTE_NAME, remote)
+        if rc != 0:
+            return remote, f"could not register fork remote {_FORK_REMOTE_NAME!r}: {msg}"
+    return _FORK_REMOTE_NAME, None
+
+
 def _prepare_issue_branch(
     repo_path: str,
     remote: str,
@@ -791,6 +835,18 @@ def _prepare_issue_branch(
     if not _is_safe_ref(integration_branch):
         return False, f"unsafe integration_branch ref: {integration_branch!r}", notes
 
+    # A fork PR's remote is a bare URL (see _pr_head_remote); resolve it to a
+    # registered local remote NAME before it is used to build {remote}/{branch}
+    # refs below — a URL used directly there would silently never resolve.
+    # is_fork_remote tracks whether resolution actually rewrote the value (a
+    # URL was given), as opposed to a plain name (e.g. "origin", or an
+    # operator's custom remote name) passing through unchanged.
+    original_remote = remote
+    remote, remote_err = _ensure_named_remote(repo_path, remote)
+    if remote_err:
+        return False, remote_err, notes
+    is_fork_remote = remote != original_remote
+
     marker = _read_active_issue(repo_path)
 
     status_ok, dirty, listing = _main._working_tree_dirty(repo_path)
@@ -822,12 +878,19 @@ def _prepare_issue_branch(
     # needs the credential. The clone was authenticated transiently by the
     # unified API; that auth is not persisted, so we re-supply it per fetch.
     auth_env = _git_auth_env(token) if token else None
-    rc, msg = _main._git(repo_path, "fetch", "--", remote, default_branch, env=auth_env)
+    # default_branch always lives in the checkout's own "origin" — the PR's (or
+    # issue's) BASE repository, which unified_api's _ensure_repo_clone always
+    # clones from — so a resolved FORK remote (only ever relevant to
+    # integration_branch, the PR's head) must not be used to fetch it too.
+    # Every non-fork caller keeps its prior behaviour exactly: `remote` is
+    # "origin" (or an operator's custom remote name) for both fetches, unchanged.
+    default_branch_remote = "origin" if is_fork_remote else remote
+    rc, msg = _main._git(repo_path, "fetch", "--", default_branch_remote, default_branch, env=auth_env)
     if rc != 0:
         return False, msg, notes
     # The issue branch may exist remotely from a previous job that pushed
     # before dying; fetch it as a continuation candidate (absence is fine).
-    base_ref = f"{remote}/{default_branch}"
+    base_ref = f"{default_branch_remote}/{default_branch}"
     remote_issue_ref = f"{remote}/{integration_branch}"
     rc_issue_fetch, issue_fetch_msg = _main._git(
         repo_path, "fetch", "--", remote, integration_branch, env=auth_env
@@ -932,6 +995,13 @@ def _push_branch(
 ) -> Tuple[bool, Optional[str]]:
     if not _is_safe_ref(branch):
         return False, f"unsafe branch name: {branch!r}"
+    # A bare URL pushes fine directly, but --set-upstream (-u) below has
+    # nothing to name the tracking branch after without a registered remote;
+    # resolve it the same way _prepare_issue_branch does, so a fork PR's
+    # remote behaves identically to "origin" here too.
+    remote, remote_err = _ensure_named_remote(repo_path, remote)
+    if remote_err:
+        return False, remote_err
     # Push is a network op against the (HTTPS) origin; supply the transient
     # credential so the PR branch actually lands instead of hanging on an auth
     # prompt until the timeout (GIT_TERMINAL_PROMPT=0 turns that into a fast

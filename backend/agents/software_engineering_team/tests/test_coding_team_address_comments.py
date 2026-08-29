@@ -25,6 +25,7 @@ from software_engineering_team.github_source import (
     ReviewThread,
     ReviewThreadsUnavailableError,
 )
+from software_engineering_team.github_source.client import KHALA_COMMENT_MARKER
 
 from .test_coding_team_github_source import _stub_heavy_modules
 
@@ -173,7 +174,26 @@ class TestReplyToReviewComment:
         )
         assert out["id"] == 9
         assert captured["url"].endswith("/pulls/7/comments/42/replies")
-        assert captured["body"] == {"body": "done"}
+        # KHALA_COMMENT_MARKER is appended (matching add_issue_comment /
+        # create_issue's provenance convention) so a later triage pass can
+        # recognize and skip Khala's own reply, e.g. after a resolve failure.
+        assert captured["body"] == {"body": f"done\n\n{KHALA_COMMENT_MARKER}"}
+
+    def test_marker_not_duplicated_when_already_present(self) -> None:
+        captured: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(req.content)
+            return httpx.Response(201, json={"id": 9, "html_url": "https://example/c/9"})
+
+        _client_with(handler).reply_to_review_comment(
+            owner="o",
+            repo="r",
+            number=7,
+            comment_id=42,
+            body=f"done\n\n{KHALA_COMMENT_MARKER}",
+        )
+        assert captured["body"]["body"].count(KHALA_COMMENT_MARKER) == 1
 
     def test_empty_body_raises_value_error(self) -> None:
         client = _client_with(lambda _r: httpx.Response(201, json={}))
@@ -396,6 +416,32 @@ class TestUnresolvedComments:
 
         with pytest.raises(ReviewThreadsUnavailableError):
             ac.unresolved_comments(fake, "o", "r", 7)
+
+    def test_thread_with_root_and_replies_yields_one_comment(self, address_env) -> None:
+        """A thread's root comment plus its replies all map to the same thread
+        (GitHub's REST listing returns every message); only the root is
+        returned so the conversation is triaged/handled once, not once per
+        message."""
+        ac, fake = address_env["ac"], address_env["fake"]
+        fake.review_comments = [_comment(2), _comment(3), _comment(4)]
+        fake.threads = [
+            ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4)),
+        ]
+        unresolved, by_comment = ac.unresolved_comments(fake, "o", "r", 7)
+        assert [c.id for c in unresolved] == [2]
+        # The thread map still covers every message's id (callers only look up
+        # ids drawn from `unresolved`, so the extra entries are harmless).
+        assert {by_comment[2].id, by_comment[3].id, by_comment[4].id} == {"T2"}
+
+    def test_multiple_distinct_threads_each_keep_their_root(self, address_env) -> None:
+        ac, fake = address_env["ac"], address_env["fake"]
+        fake.review_comments = [_comment(2), _comment(3), _comment(5)]
+        fake.threads = [
+            ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3)),
+            ReviewThread(id="T5", is_resolved=False, comment_ids=(5,)),
+        ]
+        unresolved, _by_comment = ac.unresolved_comments(fake, "o", "r", 7)
+        assert [c.id for c in unresolved] == [2, 5]
 
 
 # ---------------------------------------------------------------------------

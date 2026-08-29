@@ -79,11 +79,13 @@ from software_engineering_team.api.coding_team_state import (  # noqa: F401
     _validate_answers,
 )
 from software_engineering_team.api.git_ops import (  # noqa: F401
+    _FORK_REMOTE_NAME,
     ACTIVE_ISSUE_CONFIG_KEY,
     RESCUE_BRANCH_PREFIX,
     _cleanup_issue_checkout,
     _clear_active_issue,
     _clear_active_issue_if_matches,
+    _ensure_named_remote,
     _ephemeral_checkout_target,
     _fast_forward,
     _git,
