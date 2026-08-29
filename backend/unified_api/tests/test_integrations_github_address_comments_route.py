@@ -127,7 +127,9 @@ def test_success_proxies_with_token_and_path(mock_cfg, mock_cred, mock_path, moc
     assert sent["github_token"] == "ghp"
     assert sent["repo_path"] == "/tmp/acme_widget/pr-7"
     # The checkout is materialized (cloned/fetched) before the job is forwarded.
-    mock_clone.assert_called_once_with("/tmp/acme_widget/pr-7", "acme", "widget", "ghp", platform_owned=True)
+    mock_clone.assert_called_once_with(
+        "/tmp/acme_widget/pr-7", "acme", "widget", "ghp", platform_owned=True, hold_lock=False
+    )
     # Platform-owned (no repo_path override) → the coding team is told it may
     # reclaim the per-PR checkout once every comment is handled successfully.
     assert sent["cleanup_checkout_on_success"] is True
@@ -151,7 +153,7 @@ def test_operator_pinned_checkout_is_never_cleaned_up(mock_cfg, mock_cred, mock_
     _url, sent = fake.calls[1]
     assert sent["cleanup_checkout_on_success"] is False
     mock_clone.assert_called_once_with(
-        "/srv/pinned-checkout", "acme", "widget", "ghp", platform_owned=False
+        "/srv/pinned-checkout", "acme", "widget", "ghp", platform_owned=False, hold_lock=False
     )
 
 
@@ -251,3 +253,80 @@ def test_admission_check_timeout_never_touches_checkout(mock_cfg, mock_cred, moc
         resp = client.post(_URL, json={})
     assert resp.status_code == 504
     mock_clone.assert_not_called()
+
+
+class _SpyLock:
+    """Stand-in for shared.concurrency.flock_lock: records enter/exit order and
+    can be made to fail acquisition."""
+
+    events: list[str] = []
+
+    def __init__(self, path, *, fail: bool = False):
+        self._fail = fail
+
+    def __enter__(self):
+        if self._fail:
+            raise OSError("lock busy")
+        _SpyLock.events.append("enter")
+        return self
+
+    def __exit__(self, *exc_info):
+        _SpyLock.events.append("exit")
+        return False
+
+
+@patch(f"{_M}.flock_lock", lambda p: _SpyLock(p))
+@patch(f"{_M}._ensure_repo_clone", return_value=None)
+@patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget/pr-7")
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_checkout_lock_held_around_the_whole_flow(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch):
+    """The admission pre-check, clone/fetch, and forward POST all run under one
+    lock on the checkout — closing the window where two simultaneous requests
+    could each observe "nothing running" and then both mutate the checkout."""
+    _SpyLock.events = []
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103/")
+    fake = _FakeAsyncClient(result=_FakeResp(200, _OK))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_URL, json={})
+    assert resp.status_code == 200
+    # Entered once before any coding-team call, exited once after the POST.
+    assert _SpyLock.events == ["enter", "exit"]
+    mock_clone.assert_called_once_with(
+        "/tmp/acme_widget/pr-7", "acme", "widget", "ghp", platform_owned=True, hold_lock=False
+    )
+
+
+@patch(f"{_M}.flock_lock", lambda p: _SpyLock(p, fail=True))
+@patch(f"{_M}._ensure_repo_clone", return_value=None)
+@patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget/pr-7")
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_502_when_platform_owned_lock_acquisition_fails(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103/")
+    resp = client.post(_URL, json={})
+    assert resp.status_code == 502
+    assert "clone lock" in resp.json()["detail"]
+    mock_clone.assert_not_called()
+
+
+@patch(f"{_M}.flock_lock", lambda p: _SpyLock(p, fail=True))
+@patch(f"{_M}._ensure_repo_clone", return_value=None)
+@patch(f"{_M}._resolve_repo_path", return_value="/srv/pinned-checkout")
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(
+    f"{_M}.get_github_config_meta",
+    return_value={**_GH_CFG, "repo_path": "/srv/pinned-checkout"},
+)
+def test_operator_pinned_lock_failure_degrades_gracefully(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch):
+    """An operator-pinned path may live under a parent this service cannot
+    write; failing to acquire the (best-effort) serialization lock there must
+    not fail an otherwise-valid request."""
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103/")
+    fake = _FakeAsyncClient(result=_FakeResp(200, _OK))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_URL, json={})
+    assert resp.status_code == 200
+    mock_clone.assert_called_once_with(
+        "/srv/pinned-checkout", "acme", "widget", "ghp", platform_owned=False, hold_lock=False
+    )

@@ -596,20 +596,31 @@ def _reply_and_resolve(
     thread: Optional[ReviewThread],
     reply_body: str,
 ) -> bool:
-    """Reply to a review comment and resolve its thread.
+    """Reply to a review comment's thread and resolve it.
 
     Postconditions:
-        - Posts a threaded reply under ``comment`` and, when ``thread`` is known,
-          resolves it. Returns True when BOTH the reply and (if attempted) the
-          resolution succeeded; False otherwise. Never raises.
+        - Posts a threaded reply and, when ``thread`` is known, resolves it.
+          The reply targets the thread's ROOT comment
+          (``thread.comment_ids[0]``, not ``comment.id``) when a thread is
+          known: GitHub's create-reply endpoint requires the top-level
+          comment id, and ``comment`` here may be a reviewer's later
+          follow-up (``_unresolved_comments`` surfaces a thread's LATEST
+          message, which is only sometimes its root) — replying against a
+          non-root id would either be rejected by GitHub or land outside the
+          expected thread. Falls back to ``comment.id`` only when no thread
+          is known (should not normally happen for a real/false-positive
+          outcome, since every triaged comment came from a known thread).
+        - Returns True when BOTH the reply and (if attempted) the resolution
+          succeeded; False otherwise. Never raises.
     """
+    reply_target_id = thread.comment_ids[0] if thread is not None and thread.comment_ids else comment.id
     replied = False
     try:
         client.reply_to_review_comment(
             owner=request.owner,
             repo=request.repo,
             number=request.pr_number,
-            comment_id=comment.id,
+            comment_id=reply_target_id,
             body=scrub_token_from_text(reply_body),
         )
         replied = True
@@ -875,6 +886,20 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
 
             outcomes: List[CommentOutcome] = []
             for comment in unresolved:
+                # Refresh PR metadata before each comment: an earlier comment's
+                # real-issue workflow may have already pushed a new head commit,
+                # and grounding this comment's triage on the stale `pr.head_sha`
+                # captured before the loop would cite code from before that push.
+                # Best-effort — a refresh failure degrades to the last known `pr`
+                # rather than failing comments that haven't even started yet.
+                try:
+                    pr = client.get_pull_request(owner, repo, pr_number)
+                except Exception as e:  # noqa: BLE001 - refresh is best-effort
+                    logger.warning(
+                        "address-comments: could not refresh PR metadata before comment %s: %s",
+                        comment.id,
+                        scrub_token_from_text(str(e)),
+                    )
                 outcome = _handle_comment(
                     client,
                     job_id,

@@ -2603,7 +2603,15 @@ def _remote_matches(remote_url: str, owner: str, repo: str) -> bool:
     return got_owner.casefold() == owner.casefold() and got_repo.casefold() == repo.casefold()
 
 
-def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, platform_owned: bool = True) -> str | None:
+def _ensure_repo_clone(
+    repo_path: str,
+    owner: str,
+    repo: str,
+    token: str,
+    *,
+    platform_owned: bool = True,
+    hold_lock: bool = True,
+) -> str | None:
     """Clone or fetch the repository.
 
     Auth is passed via ``GIT_CONFIG_*`` environment variables so the token
@@ -2631,6 +2639,13 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, pla
           doesn't apply) and may live under a parent the service cannot write,
           where creating a sibling lock would wrongly fail an otherwise-valid
           fetch.
+        - ``hold_lock`` (platform-owned only) controls whether this call acquires
+          the sibling lock itself. Pass False when the caller already holds that
+          SAME lock (:func:`clone_lock_path` on this ``repo_path``) around a wider
+          critical section — re-acquiring it here via a second file descriptor
+          would self-deadlock (``flock`` mutual exclusion is per open file
+          description, not per process/thread, so a second ``open()`` of the same
+          path blocks against the first even within one process).
     """
     env = _git_auth_env(token)
     path = Path(repo_path)
@@ -2691,6 +2706,11 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, pla
 
     # Operator-pinned checkout: fetch directly, no sibling lock (see Postconditions).
     if not platform_owned:
+        return _clone_or_fetch()
+
+    # A caller already holding this checkout's lock around a wider critical
+    # section (see `hold_lock`'s contract above) must not have it re-acquired here.
+    if not hold_lock:
         return _clone_or_fetch()
 
     # Platform-owned per-issue checkout: serialize via an exclusive flock on a
@@ -2999,30 +3019,25 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
           best-effort admission pre-check (``GET .../address-comments/running``)
           and raises 409 immediately when a job is already running for this PR
           — never mutating the checkout underneath a job that may be actively
-          committing/pushing to it. This narrows, but (being a TOCTOU check) does
-          not eliminate, the race against a job admitted after the check
-          returns; the coding-team service's own admission lock remains the
-          authority and still rejects that case with 409 downstream.
+          committing/pushing to it.
+        - The admission pre-check, the clone/fetch, and the forward to the
+          coding-team's admitting ``POST`` all run under ONE exclusive lock on
+          this checkout (:func:`clone_lock_path`), held for the request's whole
+          duration. This closes the window where two simultaneous requests could
+          each observe "nothing running" and then both mutate the shared checkout
+          concurrently. For an operator-pinned ``repo_path`` (shared, unnamespaced,
+          across every PR of that repo) the SAME lock file naturally serializes
+          every PR's request through this route, not just same-PR requests;
+          acquiring it there is best-effort (the path may live under a parent this
+          service cannot write) and degrades to no additional locking on failure,
+          same as this route's pre-existing operator-pinned behavior. The lock
+          still cannot reach into the coding-team service's own long-running
+          remediation once this request returns — the coding-team service's own
+          admission lock remains the authority for that window.
     """
     cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, None, body.owner, body.repo)
 
     coding_team_url = _require_coding_team_url()
-
-    running = await _forward_to_coding_team(
-        coding_team_url,
-        f"pulls/{pr_number}/address-comments/running",
-        method="GET",
-        params={"owner": owner, "repo": repo},
-        log_prefix="github address-comments admission check",
-        timeout_detail="Coding team service timed out while checking for a running job.",
-        generic_failure_detail="Coding team service failed the admission pre-check.",
-    )
-    running_job_id = running.get("running_job_id") if isinstance(running, dict) else None
-    if running_job_id:
-        raise HTTPException(
-            status_code=409,
-            detail=f"job {running_job_id} already running for {owner}/{repo}#{pr_number}",
-        )
 
     repo_path = _resolve_repo_path(cfg, owner, repo, pr_number=pr_number)
     # An operator-pinned repo_path override is not per-PR-namespaced and is never
@@ -3031,33 +3046,86 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
     platform_owned = not _repo_path_override(cfg, owner, repo)
 
     loop = asyncio.get_running_loop()
-    clone_err = await loop.run_in_executor(
-        None,
-        functools.partial(_ensure_repo_clone, repo_path, owner, repo, token, platform_owned=platform_owned),
-    )
-    if clone_err:
-        logger.warning("github address-comments: repository preparation failed: %s", clone_err)
-        raise HTTPException(status_code=502, detail=clone_err)
+    lock_path = clone_lock_path(repo_path)
+    lock_cm = flock_lock(lock_path)
+    lock_held = False
+    try:
+        # flock_lock requires its parent dir to already exist; mkdir(exist_ok=True)
+        # on an existing parent is a no-op needing no write permission, so this
+        # stays safe for an operator path under a read-only parent.
+        await loop.run_in_executor(
+            None, functools.partial(lock_path.parent.mkdir, parents=True, exist_ok=True)
+        )
+        await loop.run_in_executor(None, lock_cm.__enter__)
+        lock_held = True
+    except OSError as e:
+        if platform_owned:
+            raise HTTPException(
+                status_code=502, detail=f"could not acquire clone lock for {owner}/{repo}: {e}"
+            ) from e
+        # Best-effort for an operator-pinned path (see Postconditions): degrade to
+        # no additional locking rather than failing an otherwise-valid request.
+        logger.warning(
+            "github address-comments: could not acquire serialization lock for pinned checkout %s: %s",
+            repo_path,
+            e,
+        )
 
-    payload: dict[str, Any] = {
-        "owner": owner,
-        "repo": repo,
-        "repo_path": repo_path,
-        "pr_number": pr_number,
-        "github_token": token,
-        "cleanup_checkout_on_success": platform_owned,
-    }
-    if body.base_branch:
-        payload["base_branch"] = body.base_branch
+    try:
+        running = await _forward_to_coding_team(
+            coding_team_url,
+            f"pulls/{pr_number}/address-comments/running",
+            method="GET",
+            params={"owner": owner, "repo": repo},
+            log_prefix="github address-comments admission check",
+            timeout_detail="Coding team service timed out while checking for a running job.",
+            generic_failure_detail="Coding team service failed the admission pre-check.",
+        )
+        running_job_id = running.get("running_job_id") if isinstance(running, dict) else None
+        if running_job_id:
+            raise HTTPException(
+                status_code=409,
+                detail=f"job {running_job_id} already running for {owner}/{repo}#{pr_number}",
+            )
 
-    data = await _forward_to_coding_team(
-        coding_team_url,
-        f"pulls/{pr_number}/address-comments",
-        json_body=payload,
-        log_prefix="github address-comments",
-        timeout_detail="Coding team service timed out while starting the comment-addressing job.",
-        generic_failure_detail="Failed to start addressing the PR comments.",
-    )
+        clone_err = await loop.run_in_executor(
+            None,
+            functools.partial(
+                _ensure_repo_clone,
+                repo_path,
+                owner,
+                repo,
+                token,
+                platform_owned=platform_owned,
+                hold_lock=False,
+            ),
+        )
+        if clone_err:
+            logger.warning("github address-comments: repository preparation failed: %s", clone_err)
+            raise HTTPException(status_code=502, detail=clone_err)
+
+        payload: dict[str, Any] = {
+            "owner": owner,
+            "repo": repo,
+            "repo_path": repo_path,
+            "pr_number": pr_number,
+            "github_token": token,
+            "cleanup_checkout_on_success": platform_owned,
+        }
+        if body.base_branch:
+            payload["base_branch"] = body.base_branch
+
+        data = await _forward_to_coding_team(
+            coding_team_url,
+            f"pulls/{pr_number}/address-comments",
+            json_body=payload,
+            log_prefix="github address-comments",
+            timeout_detail="Coding team service timed out while starting the comment-addressing job.",
+            generic_failure_detail="Failed to start addressing the PR comments.",
+        )
+    finally:
+        if lock_held:
+            await loop.run_in_executor(None, lock_cm.__exit__, None, None, None)
     try:
         return AddressPrCommentsResponse(
             job_id=data["job_id"],

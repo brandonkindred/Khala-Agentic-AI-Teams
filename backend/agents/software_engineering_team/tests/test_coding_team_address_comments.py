@@ -779,6 +779,40 @@ class TestHandleComment:
         assert fake.replies[0][0] == 2
         assert fake.resolved == ["T2"]
 
+    def test_reply_targets_thread_root_not_a_later_representative_comment(
+        self, address_env, monkeypatch
+    ) -> None:
+        """When the representative comment is a reviewer follow-up (a reply, not
+        the thread's root — as `_unresolved_comments` now surfaces for a thread
+        with newer feedback), the reply must still target the thread's ROOT
+        comment id: GitHub's create-reply endpoint requires the top-level
+        comment id, so replying against a non-root id would be rejected or land
+        outside the thread."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=True)
+        # Root is comment 2; comment 4 (a later reply in the same thread) is the
+        # representative comment being handled.
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4))
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(4, body="this fix is incomplete"),
+            thread,
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "false_positive"
+        assert len(fake.replies) == 1
+        assert fake.replies[0][0] == 2  # thread.comment_ids[0], not comment.id (4)
+        assert fake.resolved == ["T2"]
+
     def test_real_issue_does_not_reply_or_resolve_until_workflow_succeeds(
         self, address_env, monkeypatch
     ) -> None:
@@ -871,6 +905,43 @@ class TestHandleComment:
 
 
 class TestRunAddressComments:
+    def test_refreshes_pr_head_sha_before_each_comment(self, address_env, monkeypatch) -> None:
+        """An earlier comment's real-issue workflow can push a new head commit;
+        every subsequent comment's cited-code grounding must use the FRESH head
+        SHA, not the single `pr.head_sha` captured before the loop, or a later
+        verdict/plan would be grounded against stale code."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=False, is_false_positive=False)
+        fake.review_comments = [_comment(2), _comment(5)]
+        fake.threads = [
+            ReviewThread(id="T2", is_resolved=False, comment_ids=(2,)),
+            ReviewThread(id="T5", is_resolved=False, comment_ids=(5,)),
+        ]
+
+        pr_shas = ["sha1", "sha2", "sha3"]
+        call_count = {"n": 0}
+
+        def _get_pr(_o: str, _r: str, _n: int) -> PullRequestDetail:
+            idx = min(call_count["n"], len(pr_shas) - 1)
+            call_count["n"] += 1
+            return replace(fake.pr, head_sha=pr_shas[idx])
+
+        monkeypatch.setattr(fake, "get_pull_request", _get_pr)
+
+        refs_used: list[str] = []
+
+        def _get_file_contents(_o: str, _r: str, _p: str, ref: str) -> str:
+            refs_used.append(ref)
+            return fake.file_contents
+
+        monkeypatch.setattr(fake, "get_file_contents", _get_file_contents)
+
+        ac._run_address_comments("job1", req, "tok")
+
+        # First get_pull_request call (index 0 -> sha1) is the pre-loop fetch;
+        # each comment then gets its own refresh (sha2, sha3) before triage.
+        assert refs_used == ["sha2", "sha3"]
+
     def test_cleans_up_checkout_on_full_success_when_flagged(
         self, address_env, monkeypatch
     ) -> None:
