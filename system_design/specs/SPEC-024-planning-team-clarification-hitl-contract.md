@@ -278,12 +278,29 @@ does not correspond to whichever signal the workflow actually accepted — the t
 (signal-layer, store-layer) can disagree. **Contract requirement:** the job-record write for a
 given `resume_token`'s answer batch must be an atomic compare-and-set / write-once operation —
 only the first successful write for that token is retained; every subsequent write attempt for an
-already-populated token must be rejected (and its signal, if the client sends one anyway, is
-already a harmless no-op on the workflow side per §4.2's duplicate-token rule). This makes "which
-batch does the resumed activity read" and "which submission attempt actually won" the same
-question by construction, regardless of which client's `submit_answers` signal happens to reach
-the workflow first — the workflow's signal-acceptance order need not (and cannot, without this)
-be made to agree with the store's write order any other way.
+already-populated token from *different* content must be rejected (and its signal, if the client
+sends one anyway, is already a harmless no-op on the workflow side per §4.2's duplicate-token
+rule). This makes "which batch does the resumed activity read" and "which submission attempt
+actually won" the same question by construction, regardless of which client's `submit_answers`
+signal happens to reach the workflow first — the workflow's signal-acceptance order need not (and
+cannot, without this) be made to agree with the store's write order any other way.
+
+**A rejected write must not strand the winner's own retry.** The write and the signal are two
+separate operations (§4.3's persist-then-signal ordering); a client can have its write succeed and
+then have `signal_workflow_sync` itself fail (a transient Temporal outage, a network blip) *before*
+the signal is delivered — the answer is durable, but the workflow is still asleep. If that same
+client retries its whole submission and the write-once rule above rejects it outright (because the
+token is already populated — by its own prior write), a client that gives up on rejection strands
+the job forever: durable answer, no signal, no further retry. **Contract requirement:** the
+write-once check must compare the retry's content against what's already persisted for that token
+— identical content (the winner retrying its own submission) is not a conflict and must be treated
+as a no-op *on the write* that proceeds straight to (re-)delivering the signal; only genuinely
+different content for an already-populated token is rejected. Practically, this means the
+answer-submission route always attempts to (re-)signal after the write step, whether that write
+step performed a fresh write or recognized its own prior one — never conditioning "do we signal"
+on "did this specific call perform the write." Re-signaling an already-applied token is safe
+regardless: §4.2's signal handler ignores a signal that doesn't match an active pause and, once
+consumed, ignores a duplicate for the same token.
 
 **Persisted answers must be scoped to the active question round, not accumulated across rounds.**
 Unlike the coding team's single Tech-Lead clarify loop, a single `document_production_activity`
