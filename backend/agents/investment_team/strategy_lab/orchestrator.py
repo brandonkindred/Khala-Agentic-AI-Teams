@@ -560,9 +560,25 @@ class StrategyLabOrchestrator(
             the next attempt resumes from that checkpoint's spec/rationale/
             design_context and skips DESIGN+REVIEW entirely (so only the
             CODE_SYNTHESIS and BACKTEST_AND_VERIFICATION boundary events
-            fire for that attempt, not the full four) -- otherwise the next
-            attempt re-fires the full transition sequence from DESIGN, as
-            before. On exhaustion, persists a short-circuit record with
+            fire for that attempt, not the full four). When it converged
+            through ``PipelineStage.SYNTHESIS`` instead
+            (``self.last_resume_determination is PipelineStage.REFINEMENT``
+            -- the common real-world case, since every current downstream
+            ``SpecImplementabilityError`` raiser fires from the
+            refinement/evaluation loop, after synthesis already converged),
+            the next attempt additionally reuses that checkpoint's code and
+            skips the ``_synthesize_initial_code`` call itself -- the
+            CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION boundary event still
+            fires for that attempt (it is emitted by the refinement/alignment
+            orchestration that still runs, not by the synthesis step being
+            skipped), so two boundary events fire rather than the full four:
+            CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION and
+            BACKTEST_AND_VERIFICATION → ``None``. Any other determination
+            (a DESIGN-only checkpoint, a REFINEMENT/ALIGNMENT-stage
+            checkpoint, or no checkpoint at all) has no matching resume
+            parameter and the next attempt re-fires the full transition
+            sequence from DESIGN, as before this change. On exhaustion,
+            persists a short-circuit record with
             ``status='failed: spec_unimplementable'``.
 
         Invariants:
@@ -583,12 +599,16 @@ class StrategyLabOrchestrator(
         self.pipeline_checkpoints = []
         # Set on each re-entry below to the stage a subsequent attempt could
         # resume from, per the just-failed attempt's captured checkpoints (or
-        # ``None`` for "no usable checkpoint" / full restart). When this is
-        # ``PipelineStage.SYNTHESIS`` (the failed attempt's checkpoint
-        # converged through REVIEW), the loop below actually resumes the next
-        # attempt from synthesis via ``resume_spec``/``resume_design_context``
-        # -- the one boundary ``_run_design_attempt`` knows how to skip into.
-        # Every other value still falls back to a full restart, unchanged.
+        # ``None`` for "no usable checkpoint" / full restart). The loop below
+        # actually resumes the next attempt when this is
+        # ``PipelineStage.SYNTHESIS`` (checkpoint converged through REVIEW --
+        # resumes into synthesis via ``resume_spec``/``resume_design_context``)
+        # or ``PipelineStage.REFINEMENT`` (checkpoint converged through
+        # SYNTHESIS -- additionally resumes past synthesis via
+        # ``resume_code``, the common real-world case). Every other value
+        # (a DESIGN-only checkpoint, a REFINEMENT/ALIGNMENT-stage checkpoint,
+        # or no checkpoint) has no matching resume parameter and falls back
+        # to a full restart, unchanged.
         self.last_resume_determination: Optional[PipelineStage] = None
         checkpoint_capture = PipelineCheckpointCapture(
             run_id=checkpoint_scope,
@@ -638,16 +658,26 @@ class StrategyLabOrchestrator(
         # Cross-attempt resume state for the *next* loop iteration, set by the
         # except-block below when the just-failed attempt's latest checkpoint
         # is usable, reset to "no resume" (full restart) every time otherwise.
-        # ``_run_design_attempt``'s only resume boundary is Phase 1
-        # (DESIGN+REVIEW) -- see ``resume_spec``/``resume_design_context`` --
-        # so this is populated only when the failed attempt's checkpoint
-        # converged through REVIEW (``last_resume_determination is
-        # PipelineStage.SYNTHESIS``); every other determination has no
-        # matching resume parameter yet and falls back to full restart,
-        # exactly as before this change.
+        # ``_run_design_attempt`` has two resume boundaries -- Phase 1
+        # (DESIGN+REVIEW, via resume_spec/resume_design_context) and,
+        # additionally, Phase 1b (CODE SYNTHESIS, via resume_code) -- so this
+        # is populated when the failed attempt's checkpoint converged through
+        # REVIEW (``last_resume_determination is PipelineStage.SYNTHESIS``,
+        # skips Phase 1 only) or through SYNTHESIS
+        # (``last_resume_determination is PipelineStage.REFINEMENT``, skips
+        # Phase 1 AND 1b). Every other determination (a DESIGN-only
+        # checkpoint, a REFINEMENT/ALIGNMENT-stage checkpoint, or no
+        # checkpoint at all) has no matching resume parameter and falls back
+        # to full restart, unchanged from before this change -- in
+        # particular, no checkpoint model in this family carries the
+        # trade-alignment runtime inputs (executed trades, backtest metrics,
+        # market data) a resume past ALIGNMENT would need, so that boundary
+        # structurally cannot be added without a new checkpoint field, which
+        # is out of this family's stated scope (see checkpoints.py).
         pending_resume_spec: Optional[StrategySpec] = None
         pending_resume_rationale: Optional[str] = None
         pending_resume_design_context: Optional[_DesignPersistContext] = None
+        pending_resume_code: Optional[str] = None
         with use_budget(llm_budget):
             for design_attempt in range(MAX_DESIGN_REENTRIES + 1):
                 # Copy-on-entry: hand this attempt a clean child collector so
@@ -670,6 +700,7 @@ class StrategyLabOrchestrator(
                         resume_spec=pending_resume_spec,
                         resume_rationale=pending_resume_rationale,
                         resume_design_context=pending_resume_design_context,
+                        resume_code=pending_resume_code,
                     )
                 except SpecImplementabilityError as exc:
                     last_evidence = exc.evidence
@@ -701,17 +732,23 @@ class StrategyLabOrchestrator(
                     pending_resume_spec = None
                     pending_resume_rationale = None
                     pending_resume_design_context = None
-                    if self.last_resume_determination is PipelineStage.SYNTHESIS:
+                    pending_resume_code = None
+                    if self.last_resume_determination in (
+                        PipelineStage.SYNTHESIS,
+                        PipelineStage.REFINEMENT,
+                    ):
                         # ``resume_checkpoint`` is necessarily a
-                        # ``ReviewCheckpoint`` here: ``determine_resume_stage``
-                        # only returns SYNTHESIS when ``resume_checkpoint.stage
-                        # is PipelineStage.REVIEW``. Its spec/rationale/
-                        # design_context are self-sufficient to resume straight
-                        # into synthesis on the next attempt -- design+review
+                        # ``ReviewCheckpoint`` (determination SYNTHESIS) or a
+                        # ``SynthesisCheckpoint`` (determination REFINEMENT)
+                        # here: ``determine_resume_stage`` only returns one of
+                        # these two when ``resume_checkpoint.stage`` is
+                        # REVIEW or SYNTHESIS respectively. Either payload's
+                        # spec/rationale/design_context are self-sufficient to
+                        # resume the next attempt past that boundary -- it
                         # already converged for this evidence chain, and the
                         # failure that triggered this re-entry happened
-                        # downstream of that boundary, so nothing about the
-                        # converged spec caused it.
+                        # downstream of it, so nothing about the converged
+                        # state caused it.
                         try:
                             reconstructed_context = _design_context_from_checkpoint(
                                 resume_checkpoint.design_context
@@ -721,8 +758,9 @@ class StrategyLabOrchestrator(
                             # checkpoint payload -- never fabricate resume
                             # state or crash the cycle over it.
                             logger.warning(
-                                "Discarding unusable REVIEW checkpoint for design_attempt=%d "
+                                "Discarding unusable %s checkpoint for design_attempt=%d "
                                 "resume (design_context reconstruction failed): %s",
+                                resume_checkpoint.stage.value,
                                 design_attempt,
                                 context_exc,
                             )
@@ -730,6 +768,10 @@ class StrategyLabOrchestrator(
                             pending_resume_spec = resume_checkpoint.spec
                             pending_resume_rationale = resume_checkpoint.rationale
                             pending_resume_design_context = reconstructed_context
+                            if self.last_resume_determination is PipelineStage.REFINEMENT:
+                                # A SynthesisCheckpoint additionally carries
+                                # the converged code -- skip Phase 1b too.
+                                pending_resume_code = resume_checkpoint.code
                     if design_attempt >= MAX_DESIGN_REENTRIES:
                         break
                     emit(
@@ -975,6 +1017,36 @@ class StrategyLabOrchestrator(
             reason="initial code synthesis",
         )
 
+        return self._finalize_synthesized_code(
+            spec=spec, code=code, config=config, design_context=design_context, emit=emit
+        )
+
+    def _finalize_synthesized_code(
+        self,
+        *,
+        spec: StrategySpec,
+        code: str,
+        config: BacktestConfig,
+        design_context: _DesignPersistContext,
+        emit: PhaseCallback,
+    ) -> _CodeSynthesisPhaseResult:
+        """Shared tail for synthesis-phase output, however ``code`` was obtained.
+
+        Used both by :meth:`_synthesize_initial_code` (code freshly compiled
+        or LLM-synthesized this attempt) and by :meth:`_run_design_attempt`'s
+        cross-attempt resume path (code carried over from a prior attempt's
+        ``SynthesisCheckpoint`` -- see ``checkpoints.py``'s documented
+        REVIEW/SYNTHESIS cross-attempt exception) -- both cases need the
+        identical post-code bookkeeping: stamp the spec, snapshot the
+        pre-refinement baseline, normalize fees, announce the boundary.
+
+        Pre: ``code`` is a non-empty, already-decided strategy-code string
+        (this method makes no compilation/synthesis decision of its own).
+        Post: ``spec.strategy_code`` is set, ``original_spec``/``original_code``
+        are snapshotted pre-refinement, generic fee defaults are overridden
+        per asset class, the ``synthesized`` event is emitted, and a
+        ``_CodeSynthesisPhaseResult`` with ``record=None`` is returned.
+        """
         spec.strategy_code = code
         # ``original_spec`` / ``original_code`` are snapshotted after the
         # design loop converges but before the refinement loop mutates

@@ -1,18 +1,26 @@
-"""Cross-attempt resume: ``run_cycle`` consuming a REVIEW checkpoint.
+"""Cross-attempt resume: ``run_cycle`` consuming a REVIEW or SYNTHESIS checkpoint.
 
 Companion to ``test_strategy_lab_checkpoint_crash_resumption.py`` (same-attempt
 Temporal crash recovery via ``ADR-012``'s ``DesignAttemptCheckpoint``) and
 ``test_strategy_lab_checkpoints.py`` (pure data-model coverage of the
 ``PipelineCheckpoint`` family and ``determine_resume_stage``/
-``find_latest_checkpoint_for_attempt``). This file exercises the one narrow
-cross-attempt exception documented in ``checkpoints.py`` and
+``find_latest_checkpoint_for_attempt``). This file exercises the two narrow
+cross-attempt exceptions documented in ``checkpoints.py`` and
 ``RETRY_STATE_ISOLATION.md``: when a failed design attempt's most-converged
 checkpoint is a ``ReviewCheckpoint``, ``run_cycle``'s
 ``except SpecImplementabilityError`` branch resumes the next attempt straight
 into synthesis via ``_run_design_attempt``'s existing ``resume_spec``/
-``resume_rationale``/``resume_design_context`` parameters -- and every other
-case (no checkpoint, an earlier-stage checkpoint, or a malformed one) falls
-back to the pre-existing full-restart behavior.
+``resume_rationale``/``resume_design_context`` parameters; when it is a
+``SynthesisCheckpoint``, the next attempt additionally resumes straight into
+refinement via ``resume_code`` -- the case that actually fires on real
+phase-backs, since every current production ``SpecImplementabilityError``
+raiser fires from inside the refinement loop, after synthesis has already
+converged (see ``test_strategy_lab_refinement_freeze.py``'s
+``test_run_cycle_reroutes_on_stray_key_threshold`` /
+``test_run_cycle_reroutes_then_short_circuits_on_persistent_loosening`` for
+the realistic, non-injected end-to-end regression coverage of that path).
+Every other case (no checkpoint, a DESIGN-only checkpoint, or a malformed
+payload) falls back to the pre-existing full-restart behavior.
 """
 
 from __future__ import annotations
@@ -224,3 +232,92 @@ def test_resume_fails_open_to_full_restart_on_malformed_checkpoint(
         (Phase.BACKTEST_AND_VERIFICATION.value, None, 1),
     ]
     assert record.backtest.status.startswith("failed")
+
+
+def test_resume_skips_design_review_and_synthesis_when_synthesis_checkpoint_converged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Attempt 0 converges through synthesis then fails downstream of it
+    (the realistic shape: every production ``SpecImplementabilityError``
+    raiser fires from inside the refinement loop); attempt 1 resumes
+    straight into refinement, skipping DESIGN+REVIEW+CODE_SYNTHESIS
+    entirely -- not just DESIGN+REVIEW.
+    """
+    orch = StrategyLabOrchestrator()
+    _stub_pipeline_for_happy_path(monkeypatch, orch)
+    design_run_calls = _wrap_with_call_counter(monkeypatch, orch.design_agent, "run")
+    synthesize_calls = _wrap_with_call_counter(monkeypatch, orch, "_synthesize_initial_code")
+
+    real_refine_align = orch._orchestrate_refinement_and_alignment
+
+    def _refine_align_raise_on_first_attempt(**kwargs: Any) -> Any:
+        if kwargs["design_attempt"] == 0:
+            raise SpecImplementabilityError(
+                "forced fail at refinement boundary",
+                failure_phase="refinement",
+                last_spec=kwargs["spec"],
+                last_code=kwargs["code"],
+            )
+        return real_refine_align(**kwargs)
+
+    monkeypatch.setattr(
+        orch, "_orchestrate_refinement_and_alignment", _refine_align_raise_on_first_attempt
+    )
+
+    transitions, record = _drive_cycle(orch)
+
+    # Phase 1 (DESIGN + REVIEW) and Phase 1b (CODE SYNTHESIS) both ran for
+    # real exactly once -- attempt 1 never re-invoked either.
+    assert design_run_calls["n"] == 1
+    assert synthesize_calls["n"] == 1
+
+    # The failed attempt's checkpoint converged through SYNTHESIS, so the
+    # resumed attempt skips synthesis too.
+    assert orch.last_resume_determination is PipelineStage.REFINEMENT
+
+    # Attempt 0 crosses all the way to CODE_SYNTHESIS before failing;
+    # attempt 1 resumes straight past DESIGN+REVIEW+CODE_SYNTHESIS (no
+    # DESIGN/DESIGN_REVIEW transitions fire for it) but the
+    # CODE_SYNTHESIS -> BACKTEST_AND_VERIFICATION boundary still fires --
+    # that transition is emitted by _orchestrate_refinement_and_alignment
+    # itself (still called on resume), not by the synthesis step being
+    # skipped.
+    seq = [(t["from_phase"], t["to_phase"], t["attempt"]) for t in transitions]
+    assert seq == [
+        (Phase.DESIGN.value, Phase.DESIGN_REVIEW.value, 0),
+        (Phase.DESIGN_REVIEW.value, Phase.CODE_SYNTHESIS.value, 0),
+        (Phase.CODE_SYNTHESIS.value, Phase.BACKTEST_AND_VERIFICATION.value, 1),
+        (Phase.BACKTEST_AND_VERIFICATION.value, None, 1),
+    ]
+
+    # Evidence-chain integrity: the resumed attempt's own SynthesisCheckpoint
+    # carries the same spec and code the failed attempt's did -- resume did
+    # not fabricate or corrupt the code it skipped re-deriving.
+    synthesis_checkpoints = [
+        c for c in orch.pipeline_checkpoints if c.stage is PipelineStage.SYNTHESIS
+    ]
+    assert len(synthesis_checkpoints) == 2
+    assert synthesis_checkpoints[0].design_attempt == 0
+    assert synthesis_checkpoints[1].design_attempt == 1
+    assert synthesis_checkpoints[1].code == synthesis_checkpoints[0].code
+    assert synthesis_checkpoints[1].code_hash == synthesis_checkpoints[0].code_hash
+    assert synthesis_checkpoints[1].spec_hash == synthesis_checkpoints[0].spec_hash
+
+    assert record.backtest.status.startswith("failed")
+
+
+def test_run_design_attempt_rejects_resume_code_without_resume_spec() -> None:
+    """``resume_code`` without ``resume_spec`` is an invalid combination --
+    there is no boundary that skips synthesis but not design+review.
+    """
+    orch = StrategyLabOrchestrator()
+    with pytest.raises(ValueError, match="resume_code requires resume_spec"):
+        orch._run_design_attempt(
+            prior_records=[],
+            config=_config(),
+            signal_briefs=None,
+            emit=lambda *_a, **_kw: None,
+            exclude_asset_classes=None,
+            directives=[],
+            resume_code="# some code",
+        )
