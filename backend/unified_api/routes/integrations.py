@@ -3029,8 +3029,10 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
           across every PR of that repo) the SAME lock file naturally serializes
           every PR's request through this route, not just same-PR requests;
           acquiring it there is best-effort (the path may live under a parent this
-          service cannot write) and degrades to no additional locking on failure,
-          same as this route's pre-existing operator-pinned behavior. The lock
+          service cannot write) and degrades to no additional locking on the
+          ``OSError`` that failure mode raises (:func:`flock_lock`'s complete
+          raise contract — mkdir/open/flock failures only), same as this
+          route's pre-existing operator-pinned behavior. The lock
           still cannot reach into the coding-team service's own long-running
           remediation once this request returns — the coding-team service's own
           admission lock remains the authority for that window.

@@ -1945,7 +1945,7 @@ describe('CodingTeamPageComponent', () => {
   // -------------------------------------------------------------------------
   describe('Pull Requests tab', () => {
     /** Expand a repo, switch to the pulls tab, and render. */
-    async function openPullsForRepo(): Promise<void> {
+    function openPullsForRepo(): void {
       component.toggleRepo(component.repos[0]);
       showView('pulls');
     }
@@ -1953,7 +1953,7 @@ describe('CodingTeamPageComponent', () => {
     it('auto-loads the expanded repo\'s open PRs when the tab opens', async () => {
       integrationsSpy.getGitHubPullRequests.mockReturnValue(of([ghPull(1), ghPull(2)]));
       await setup();
-      await openPullsForRepo();
+      openPullsForRepo();
       expect(integrationsSpy.getGitHubPullRequests).toHaveBeenCalledWith({ owner: 'acme', repo: 'widgets' });
       expect(component.pulls.length).toBe(2);
       expect(component.pullsLoaded).toBe(true);
@@ -1962,7 +1962,7 @@ describe('CodingTeamPageComponent', () => {
     it('renders a row with a play_arrow "Address comments" button per PR', async () => {
       integrationsSpy.getGitHubPullRequests.mockReturnValue(of([ghPull(7)]));
       await setup();
-      await openPullsForRepo();
+      openPullsForRepo();
       const el: HTMLElement = fixture.nativeElement;
       expect(el.querySelectorAll('.pull-row').length).toBe(1);
       const icons = Array.from(el.querySelectorAll('.pull-row__actions mat-icon')).map((i) => i.textContent?.trim());
@@ -1980,14 +1980,14 @@ describe('CodingTeamPageComponent', () => {
     it('shows an empty state when the repo has no open PRs', async () => {
       integrationsSpy.getGitHubPullRequests.mockReturnValue(of([]));
       await setup();
-      await openPullsForRepo();
+      openPullsForRepo();
       expect(fixture.nativeElement.querySelector('.pulls-panel__empty')).not.toBeNull();
     });
 
     it('surfaces a load error in an inline banner', async () => {
       integrationsSpy.getGitHubPullRequests.mockReturnValue(throwError(() => ({ error: { detail: 'boom' } })));
       await setup();
-      await openPullsForRepo();
+      openPullsForRepo();
       expect(component.pullError).toBe('boom');
     });
 
@@ -1997,7 +1997,7 @@ describe('CodingTeamPageComponent', () => {
         of({ job_id: 'a1', pr_number: 7, pr_url: 'u', unresolved_comment_count: 2, status: 'pending', message: '' }),
       );
       await setup();
-      await openPullsForRepo();
+      openPullsForRepo();
       component.addressPrComments(ghPull(7));
       expect(integrationsSpy.addressPrComments).toHaveBeenCalledWith(7, { owner: 'acme', repo: 'widgets' });
       expect(notificationsSpy.saved).toHaveBeenCalled();
@@ -2009,7 +2009,7 @@ describe('CodingTeamPageComponent', () => {
       // Never-completing observable so the in-flight flag stays set.
       integrationsSpy.addressPrComments.mockReturnValue(new Subject());
       await setup();
-      await openPullsForRepo();
+      openPullsForRepo();
       component.addressPrComments(ghPull(7));
       component.addressPrComments(ghPull(7));
       expect(integrationsSpy.addressPrComments).toHaveBeenCalledTimes(1);
@@ -2020,7 +2020,7 @@ describe('CodingTeamPageComponent', () => {
       integrationsSpy.getGitHubPullRequests.mockReturnValue(of([ghPull(7)]));
       integrationsSpy.addressPrComments.mockReturnValue(throwError(() => ({ error: { detail: 'nope' } })));
       await setup();
-      await openPullsForRepo();
+      openPullsForRepo();
       component.addressPrComments(ghPull(7));
       expect(component.pullError).toBe('nope');
       expect(component.isAddressingPr(ghPull(7))).toBe(false);

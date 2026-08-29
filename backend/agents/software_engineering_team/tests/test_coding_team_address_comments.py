@@ -290,7 +290,9 @@ class _FakeClient:
     def get_file_contents(self, _o: str, _r: str, _p: str, _ref: str) -> Optional[str]:
         return self.file_contents
 
-    def reply_to_review_comment(self, *, owner, repo, number, comment_id, body) -> dict[str, Any]:
+    def reply_to_review_comment(
+        self, *, owner: str, repo: str, number: int, comment_id: int, body: str
+    ) -> dict[str, Any]:
         self.replies.append((comment_id, body))
         return {"id": comment_id, "html_url": "https://example/reply"}
 
@@ -298,7 +300,15 @@ class _FakeClient:
         self.resolved.append(thread_id)
         return self.resolve_result
 
-    def update_issue(self, _o: str, _r: str, _n: int, *, labels=None, body=None) -> Any:
+    def update_issue(
+        self,
+        _o: str,
+        _r: str,
+        _n: int,
+        *,
+        labels: Optional[list[str]] = None,
+        body: Optional[str] = None,
+    ) -> None:
         self.labels_set.append(list(labels or []))
         return None
 
@@ -1053,8 +1063,11 @@ class TestRunAddressComments:
         assert address_env["executions"] == []
         assert address_env["child_jobs"] == []
         final = [u for u in address_env["job_updates"] if u.get("status") == "completed"]
-        # No CommentOutcome was produced for the retried thread; an empty run
-        # summary still completes the job rather than hanging it open.
+        # A resolve-only retry never produces a CommentOutcome (it has only a
+        # thread_id, not the comment metadata CommentOutcome requires), so it's
+        # intentionally invisible to counts/total_comments — see _build_summary's
+        # docstring. The real work is still surfaced via the waiting-for-review
+        # label instead (see test_marks_waiting_for_review_on_retry_only_success).
         assert final and final[-1]["review_summary"]["counts"] == {}
 
     def test_run_wraps_body_in_liveness_heartbeat(self, address_env, monkeypatch) -> None:

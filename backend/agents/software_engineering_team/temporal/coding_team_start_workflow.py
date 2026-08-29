@@ -94,9 +94,12 @@ def execute_coding_team_workflow(
           ``address_comments._dispatch_implementation``), which can afford to
           keep blocking — there is no request deadline to respect here.
     """
-    assert job_id, "execute_coding_team_workflow requires a non-empty job_id"
-    assert repo_path, "execute_coding_team_workflow requires a non-empty repo_path"
-    assert "token" not in github, "github workflow payload must not include a token"
+    if not job_id:
+        raise ValueError("execute_coding_team_workflow requires a non-empty job_id")
+    if not repo_path:
+        raise ValueError("execute_coding_team_workflow requires a non-empty repo_path")
+    if "token" in github:
+        raise ValueError("github workflow payload must not include a token")
     payload: Dict[str, Any] = {
         "job_id": job_id,
         "repo_path": repo_path,

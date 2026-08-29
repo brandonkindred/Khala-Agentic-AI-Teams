@@ -269,10 +269,11 @@ def github_pr_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
           ``_publish_merged_work``'s ``failed = _failed_tasks(...)`` check for
           the issue-driven flow. Some tasks may have merged while others
           failed; the branch is still pushed (partial progress is real
-          progress), but the caller (``_dispatch_implementation``) only treats
-          an exact ``"completed"`` status as success, so a partial result
-          raises there and the review thread is left open for retry rather
-          than being replied to and resolved over unfinished work.
+          progress).
+        - Returns the job row (:func:`_main.get_job`) after that status update;
+          when the job service does not return one, falls back to a dict
+          carrying the SAME just-computed ``status``/``status_text`` (never a
+          hardcoded ``"completed"``, which would misreport a partial run).
     """
     token = _require_activity_github_token(request)
     missing = [f for f in _PR_PUBLISH_REQUIRED_FIELDS if not request.get(f)]
@@ -313,7 +314,7 @@ def github_pr_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
         github_pr_url=request.get("pr_url"),
         integration_branch=branch,
     )
-    return _main.get_job(job_id) or {"job_id": job_id, "status": "completed"}
+    return _main.get_job(job_id) or {"job_id": job_id, "status": status, "status_text": status_text}
 
 
 _FAILURE_NOTICE_REQUIRED_FIELDS = ("job_id", "owner", "repo", "number", "message", "kind")

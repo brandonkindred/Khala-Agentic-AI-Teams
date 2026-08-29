@@ -61,7 +61,10 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
 # threads; addressing unresolved comments needs the thread node ``id`` too so the
 # thread can be resolved via the ``resolveReviewThread`` mutation, and the per-thread
 # comment ids so a REST reply can be posted to the right comment. Kept separate from
-# ``_REVIEW_THREADS_QUERY`` so that query's minimal shape (and its tests) are unchanged.
+# ``_REVIEW_THREADS_QUERY`` (which also independently gained a nested-page-detection
+# ``pageInfo { hasNextPage }`` inside ``comments`` — the two queries are not identical
+# in shape, only distinct in PURPOSE: this one needs the thread ``id`` and per-comment
+# ``databaseId``, the other needs neither).
 _REVIEW_THREADS_FULL_QUERY = """
 query($owner: String!, $repo: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $repo) {

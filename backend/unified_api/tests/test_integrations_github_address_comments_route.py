@@ -255,11 +255,14 @@ def test_admission_check_timeout_never_touches_checkout(mock_cfg, mock_cred, moc
     mock_clone.assert_not_called()
 
 
-class _SpyLock:
-    """Stand-in for shared.concurrency.flock_lock: records enter/exit order and
-    can be made to fail acquisition."""
+_lock_events: list[str] = []
 
-    events: list[str] = []
+
+class _SpyLock:
+    """Stand-in for shared.concurrency.flock_lock: records enter/exit order (in
+    the module-level ``_lock_events`` list — tests must ``.clear()`` it, not
+    reassign it, since each instance appends to that same shared record) and
+    can be made to fail acquisition."""
 
     def __init__(self, path, *, fail: bool = False):
         self._fail = fail
@@ -267,11 +270,11 @@ class _SpyLock:
     def __enter__(self):
         if self._fail:
             raise OSError("lock busy")
-        _SpyLock.events.append("enter")
+        _lock_events.append("enter")
         return self
 
     def __exit__(self, *exc_info):
-        _SpyLock.events.append("exit")
+        _lock_events.append("exit")
         return False
 
 
@@ -284,14 +287,14 @@ def test_checkout_lock_held_around_the_whole_flow(mock_cfg, mock_cred, mock_path
     """The admission pre-check, clone/fetch, and forward POST all run under one
     lock on the checkout — closing the window where two simultaneous requests
     could each observe "nothing running" and then both mutate the checkout."""
-    _SpyLock.events = []
+    _lock_events.clear()
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103/")
     fake = _FakeAsyncClient(result=_FakeResp(200, _OK))
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
         resp = client.post(_URL, json={})
     assert resp.status_code == 200
     # Entered once before any coding-team call, exited once after the POST.
-    assert _SpyLock.events == ["enter", "exit"]
+    assert _lock_events == ["enter", "exit"]
     mock_clone.assert_called_once_with(
         "/tmp/acme_widget/pr-7", "acme", "widget", "ghp", platform_owned=True, hold_lock=False
     )

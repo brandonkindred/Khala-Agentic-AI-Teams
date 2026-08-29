@@ -257,7 +257,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   pullsLoaded = false;
   pullError: string | null = null;
   /** PRs whose "address comments" job is currently being started, keyed by `owner/repo#number`
-   * (see {@link issueRunKey}) so a double-click can't submit the same PR twice and identical PR
+   * (see {@link prAddressKey}) so a double-click can't submit the same PR twice and identical PR
    * numbers across repos never collide. */
   private readonly addressingPrs = new Set<string>();
   // "Latest wins" guard so a slow PR load superseded by a newer one (repo switch) is discarded.

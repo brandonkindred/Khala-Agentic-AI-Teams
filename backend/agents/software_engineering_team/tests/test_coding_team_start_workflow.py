@@ -115,3 +115,23 @@ def test_execute_coding_team_workflow_waits_for_terminal_result(monkeypatch):
     # caller reattaches to the same still-running workflow rather than giving
     # up after one wait window (see runner.execute_workflow_sync's docstring).
     assert captured["reattach_on_timeout"] is True
+
+
+def test_execute_coding_team_workflow_requires_job_id(monkeypatch):
+    monkeypatch.setattr(sw, "execute_workflow_sync", lambda *a, **k: {"status": "completed"})
+    with pytest.raises(ValueError, match="non-empty job_id"):
+        sw.execute_coding_team_workflow("", "/repo", {"x": 1}, {})
+
+
+def test_execute_coding_team_workflow_requires_repo_path(monkeypatch):
+    monkeypatch.setattr(sw, "execute_workflow_sync", lambda *a, **k: {"status": "completed"})
+    with pytest.raises(ValueError, match="non-empty repo_path"):
+        sw.execute_coding_team_workflow("job-7", "", {"x": 1}, {})
+
+
+def test_execute_coding_team_workflow_rejects_plaintext_token(monkeypatch):
+    # Preconditions must be enforced reliably (not via `assert`, which is
+    # stripped under python -O) since this rejects a real secret-leak risk.
+    monkeypatch.setattr(sw, "execute_workflow_sync", lambda *a, **k: {"status": "completed"})
+    with pytest.raises(ValueError, match="must not include a token"):
+        sw.execute_coding_team_workflow("job-7", "/repo", {"x": 1}, {"token": "ghp_secret"})

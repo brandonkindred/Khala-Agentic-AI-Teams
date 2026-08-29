@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -188,8 +188,8 @@ class CommentOutcome(BaseModel):
     path: str
     line: Optional[int] = None
     html_url: str = ""
-    outcome: str = Field(
-        description="One of: 'resolved' (real issue fixed, pushed, replied to, and thread "
+    outcome: Literal["resolved", "false_positive", "not_an_issue", "failed"] = Field(
+        description="'resolved' (real issue fixed, pushed, replied to, and thread "
         "resolved), 'false_positive', 'not_an_issue', or 'failed'."
     )
     detail: str = ""
@@ -274,10 +274,10 @@ def _unresolved_comments(
         )
         authenticated_login = ""
 
-    thread_by_comment: Dict[int, ReviewThread] = {}
+    thread_by_comment_id: Dict[int, ReviewThread] = {}
     for thread in threads:
         for cid in thread.comment_ids:
-            thread_by_comment[cid] = thread
+            thread_by_comment_id[cid] = thread
 
     # Group every comment by its owning thread, preserving GitHub's
     # chronological response order, so we can tell whether a thread's LATEST
@@ -286,7 +286,7 @@ def _unresolved_comments(
     # never silently discarded just because the thread once carried a reply).
     thread_messages: Dict[str, List[ReviewComment]] = {}
     for comment in all_comments:
-        thread = thread_by_comment.get(comment.id)
+        thread = thread_by_comment_id.get(comment.id)
         if thread is None:
             if _is_khala_authored(comment, authenticated_login):
                 # Khala's own reply is a best-effort lookup only; an orphaned
@@ -323,7 +323,7 @@ def _unresolved_comments(
         # feedback a reviewer posted after an earlier Khala reply in the same
         # thread. Either way it is the current concern to triage.
         unresolved.append(latest)
-    return unresolved, thread_by_comment, retry_resolve_thread_ids
+    return unresolved, thread_by_comment_id, retry_resolve_thread_ids
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +578,10 @@ def _dispatch_implementation(
             "remote": pr_remote,
         },
     )
+    # Only an EXACT "completed" counts as success here — github_pr_publish_activity
+    # reports "completed_with_failures" when some tasks landed but others didn't,
+    # and that partial result must still leave the review thread open for retry
+    # rather than being replied to and resolved over unfinished work.
     if result.get("status") != JobStatus.COMPLETED.value:
         status = result.get("status") or result.get("outcome") or "unknown"
         raise RuntimeError(f"implementation workflow did not complete successfully: {status}")
@@ -668,7 +672,11 @@ def _reply_and_resolve(
           is known (should not normally happen for a real/false-positive
           outcome, since every triaged comment came from a known thread).
         - Returns True when BOTH the reply and (if attempted) the resolution
-          succeeded; False otherwise. Never raises.
+          succeeded; False otherwise. Never raises. The resolve is attempted
+          ONLY when the reply itself succeeded — resolving after a failed
+          reply would close the thread with no explanatory comment ever
+          posted, and since a resolved thread is never re-triaged, the
+          reviewer's concern would be silently dropped.
         - Checks the thread's LIVE state (:func:`_thread_has_new_reviewer_feedback`)
           BEFORE posting anything: a reviewer may have posted follow-up feedback
           on this thread while this comment's implementation workflow was
@@ -714,8 +722,22 @@ def _reply_and_resolve(
         )
 
     resolved = True
-    if thread is not None:
-        resolved = client.resolve_review_thread(thread.id)
+    if replied and thread is not None:
+        try:
+            resolved = client.resolve_review_thread(thread.id)
+        except Exception as e:  # noqa: BLE001 - resolve is best-effort; honor "never raises"
+            logger.warning(
+                "address-comments: failed to resolve thread %s: %s",
+                thread.id,
+                scrub_token_from_text(str(e)),
+            )
+            resolved = False
+    elif thread is not None:
+        # The reply failed: resolving now would close the thread with no
+        # explanatory comment ever posted, and the next run would never
+        # re-triage an already-resolved thread. Report failure without
+        # attempting the resolve.
+        resolved = False
 
     return replied and resolved
 
@@ -948,7 +970,7 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
         with address_hb, _main.GitHubClient(token=token) as client:
             pr = client.get_pull_request(owner, repo, pr_number)
             pr_remote = _pr_head_remote(owner, repo, pr)
-            unresolved, thread_by_comment, retry_resolve_thread_ids = _unresolved_comments(
+            unresolved, thread_by_comment_id, retry_resolve_thread_ids = _unresolved_comments(
                 client, owner, repo, pr_number
             )
 
@@ -987,7 +1009,7 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                     job_id,
                     request,
                     comment,
-                    thread_by_comment.get(comment.id),
+                    thread_by_comment_id.get(comment.id),
                     pr.head,
                     pr.head_sha,
                     pr.base,
@@ -1062,6 +1084,15 @@ def _build_summary(outcomes: List[CommentOutcome]) -> Dict[str, Any]:
         - Returns a dict carrying per-outcome counts, a human ``status_text``, and
           the serialized per-comment outcome list, suitable for the UI's status/
           review-summary rendering.
+        - Deliberately covers ``outcomes`` only: a successful resolve-only retry
+          (see ``retry_resolve_thread_ids`` in ``_unresolved_comments``) never
+          produces a ``CommentOutcome`` — a retry has only a ``thread_id``, not
+          the comment metadata (path/line/html_url) ``CommentOutcome`` requires —
+          so it is invisible to ``counts``/``total_comments`` here even though it
+          did real work. That real work is still surfaced separately: a
+          successful retry-only run still moves the PR to "waiting for review"
+          (see ``_run_address_comments``'s ``all_succeeded``/``retry_resolve_ok``
+          handling).
     """
     counts: Dict[str, int] = {}
     for o in outcomes:

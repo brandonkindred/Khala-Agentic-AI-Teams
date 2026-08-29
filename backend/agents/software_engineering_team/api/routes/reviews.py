@@ -420,7 +420,11 @@ def post_address_comments(
     "/pulls/{pr_number}/address-comments/running",
     response_model=AddressCommentsAdmissionResponse,
 )
-def get_address_comments_running(pr_number: int, owner: str, repo: str) -> AddressCommentsAdmissionResponse:
+def get_address_comments_running(
+    pr_number: int,
+    owner: str = Query(..., min_length=1),
+    repo: str = Query(..., min_length=1),
+) -> AddressCommentsAdmissionResponse:
     """Lightweight pre-check: is a review/address-comments job already running for this PR?
 
     Lets a caller that owns a shared, mutable resource for the PR (the unified
