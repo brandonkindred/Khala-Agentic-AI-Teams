@@ -700,6 +700,41 @@ class TestHandleComment:
         assert fake.replies and fake.replies[0][0] == 2
         assert fake.resolved == ["T2"]
 
+    def test_new_reviewer_feedback_during_workflow_prevents_resolution(
+        self, address_env, monkeypatch
+    ) -> None:
+        """A reviewer's follow-up feedback posted while the implementation
+        workflow was running — after `comment` was snapshotted as this run's
+        representative comment, before this call resolves the thread — must
+        leave the thread unresolved so it is re-triaged next run, instead of
+        being silently hidden by an unconditional resolve."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 6))
+        # comment 6 simulates feedback that landed after comment 2 was
+        # snapshotted — reflected here as the "live" state _reply_and_resolve
+        # re-fetches right before resolving.
+        fake.review_comments = [_comment(2), _comment(6, body="wait, this is still broken")]
+        fake.threads = [thread]
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "failed"
+        assert fake.replies and fake.replies[0][0] == 2  # still replied
+        assert fake.resolved == []  # never resolved
+
     def test_real_issue_on_fork_pr_pushes_to_fork_remote(self, address_env, monkeypatch) -> None:
         """A fork-opened PR's implementation workflow is dispatched with the fork's
         clone URL as the remote, not "origin" (the base repo)."""
@@ -1171,6 +1206,29 @@ class TestAddressCommentsRoute:
         assert body["unresolved_comment_count"] == 1
         assert route_env["started"]  # background hook launched
         assert route_env["jobs"].get_job(body["job_id"])["github_token_encrypted"] == "ciphertext"
+
+    def test_409_when_sibling_job_running_on_same_checkout_different_pr(
+        self, route_env
+    ) -> None:
+        """An operator-pinned repo_path is shared (unnamespaced) across every PR
+        of that repo. A job already active for a DIFFERENT PR on the SAME
+        checkout must block admission — the PR-scoped running-job check alone
+        would miss this, since it only matches this exact PR number."""
+        route_env["jobs"].create_job(
+            "sibling-job",
+            status="running",
+            repo_path=route_env["repo_path"],
+            github_context={"owner": "o", "repo": "r", "pr_number": 99},
+        )
+
+        resp = route_env["client"].post(
+            "/pulls/7/address-comments",
+            json={"owner": "o", "repo": "r", "repo_path": route_env["repo_path"], "pr_number": 7},
+        )
+
+        assert resp.status_code == 409
+        assert "sibling-job" in resp.json()["detail"]
+        assert route_env["started"] == []  # never launched
 
     def test_path_pr_number_wins_over_body(self, route_env) -> None:
         resp = route_env["client"].post(

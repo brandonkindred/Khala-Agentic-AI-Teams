@@ -290,9 +290,13 @@ def post_address_comments(
           for the PR). Returns the job id, PR URL, and the count of unresolved comments
           the job will work through. Poll ``GET /status/{job_id}`` for progress.
         - A 400 is returned when the PR is not open; a 409 when a job is already
-          running for the PR; a 502 for a GitHub API error, including when the PR's
-          review-thread state cannot be reliably retrieved (the flow fails closed
-          rather than acting on unknown state).
+          running for the PR, OR when another active job (any PR) is already using
+          the SAME ``request.repo_path`` — the latter matters for an operator-pinned
+          checkout, which is shared (unnamespaced) across every PR of that repo, so
+          two DIFFERENT PRs' jobs would otherwise race on the same working tree for
+          each job's entire run, not just at admission. A 502 for a GitHub API error,
+          including when the PR's review-thread state cannot be reliably retrieved
+          (the flow fails closed rather than acting on unknown state).
     """
     # The path is authoritative; keep the body consistent so downstream code (which
     # reads request.pr_number) and the job's github_context agree with the URL.
@@ -336,6 +340,24 @@ def post_address_comments(
                 status_code=409,
                 detail=(
                     f"job {running} already running for {request.owner}/{request.repo}#{pr_number}"
+                ),
+            )
+        # An operator-pinned repo_path is shared (unnamespaced) across every PR
+        # of that repo, so the PR-scoped check above cannot see a running job
+        # for a DIFFERENT PR on the SAME checkout. `_running_sibling_on_checkout`
+        # closes that: no sentinel job_id exists yet to exclude, so pass one no
+        # active job could ever carry. Checking this inside the SAME admission
+        # lock — before the job (and its non-terminal job-store row) exists —
+        # means once a job IS created here, this same check blocks a sibling
+        # for that job's ENTIRE run, not just a momentary admission window.
+        sibling = _main._running_sibling_on_checkout(request.repo_path, "<not-yet-created>")
+        if sibling is not None:
+            sib_ctx = sibling.get("github_context") or {}
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"job {sibling.get('job_id')} (PR #{sib_ctx.get('pr_number', '?')}) is still "
+                    f"running on checkout {request.repo_path}; retry after it finishes"
                 ),
             )
 

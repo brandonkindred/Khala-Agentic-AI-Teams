@@ -589,6 +589,63 @@ def _dispatch_implementation(
 # ---------------------------------------------------------------------------
 
 
+def _thread_has_new_reviewer_feedback(
+    client: Any,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    thread_id: str,
+    since_comment_id: int,
+) -> bool:
+    """True iff ``thread_id`` now carries reviewer feedback newer than ``since_comment_id``.
+
+    A long-running implementation workflow can take minutes to hours; a reviewer
+    may post follow-up feedback (e.g. "this fix is incomplete") on the same
+    thread while it runs — after the representative comment was snapshotted but
+    before the thread is resolved. Re-checking live state here, right before
+    resolving, catches that window; ``_unresolved_comments``'s own latest-message
+    check only catches it on the NEXT run.
+
+    Preconditions:
+        - ``since_comment_id`` is the id of the comment this run triaged/replied
+          to (the thread's representative comment at snapshot time).
+    Postconditions:
+        - Returns True when the thread's CURRENT comment set (re-fetched live)
+          contains an id greater than ``since_comment_id`` that is not Khala's
+          own authenticated reply — i.e. genuine new reviewer feedback the
+          triage that ran never saw. Returns False when no such comment exists,
+          or when the thread itself can no longer be found (nothing left to
+          protect). Fails OPEN (returns True) on any error: resolving a thread
+          whose freshness could not be verified risks silently hiding real
+          feedback, which is worse than a redundant re-check on the next run.
+    """
+    try:
+        authenticated_login = client.get_authenticated_login()
+    except Exception:  # noqa: BLE001 - best-effort; missing identity fails open below
+        authenticated_login = ""
+    try:
+        threads = client.list_review_threads(owner, repo, pr_number)
+        fresh_thread = next((t for t in threads if t.id == thread_id), None)
+        if fresh_thread is None:
+            return False
+        all_comments = client.list_review_comments(owner, repo, pr_number)
+        comments_by_id = {c.id: c for c in all_comments}
+        for cid in fresh_thread.comment_ids:
+            if cid <= since_comment_id:
+                continue
+            newer = comments_by_id.get(cid)
+            if newer is not None and not _is_khala_authored(newer, authenticated_login):
+                return True
+        return False
+    except Exception as e:  # noqa: BLE001 - fail open: never resolve on unverifiable state
+        logger.warning(
+            "address-comments: could not recheck thread %s for new feedback before resolving: %s",
+            thread_id,
+            scrub_token_from_text(str(e)),
+        )
+        return True
+
+
 def _reply_and_resolve(
     client: Any,
     request: AddressCommentsRequest,
@@ -612,6 +669,14 @@ def _reply_and_resolve(
           outcome, since every triaged comment came from a known thread).
         - Returns True when BOTH the reply and (if attempted) the resolution
           succeeded; False otherwise. Never raises.
+        - Before resolving, re-checks the thread's LIVE state
+          (:func:`_thread_has_new_reviewer_feedback`): a reviewer may have
+          posted follow-up feedback on this thread while this comment's
+          implementation workflow was running (between when ``comment`` was
+          snapshotted and now). When newer, non-Khala feedback is found, the
+          thread is left UNRESOLVED (this call reports failure) so the next
+          run re-triages it via ``_unresolved_comments`` rather than silently
+          hiding that feedback in a resolved thread.
     """
     reply_target_id = thread.comment_ids[0] if thread is not None and thread.comment_ids else comment.id
     replied = False
@@ -633,7 +698,18 @@ def _reply_and_resolve(
 
     resolved = True
     if thread is not None:
-        resolved = client.resolve_review_thread(thread.id)
+        if _thread_has_new_reviewer_feedback(
+            client, request.owner, request.repo, request.pr_number, thread.id, comment.id
+        ):
+            logger.info(
+                "address-comments: leaving thread %s unresolved — newer reviewer "
+                "feedback appeared since comment %s was triaged",
+                thread.id,
+                comment.id,
+            )
+            resolved = False
+        else:
+            resolved = client.resolve_review_thread(thread.id)
 
     return replied and resolved
 
