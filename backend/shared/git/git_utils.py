@@ -213,15 +213,24 @@ def create_feature_branch(
     return True, branch_name
 
 
-def checkout_branch(repo_path: str | Path, branch: str) -> Tuple[bool, str]:
-    """Checkout the given branch. Returns (success, message)."""
+def checkout_branch(repo_path: str | Path, branch: str, *, force: bool = False) -> Tuple[bool, str]:
+    """Checkout the given branch. Returns (success, message).
+
+    ``force=False`` (default) is a plain checkout, which git refuses when it
+    would overwrite uncommitted tracked-file changes (beyond the disposable-file
+    allowlist already handled below). ``force=True`` adds ``-f``, discarding
+    such local modifications -- for callers restoring to a known-good branch
+    after abandoning the current one (e.g. cleanup after a failed delivery),
+    where the dirty state itself is being thrown away.
+    """
     path = Path(repo_path).resolve()
     if not (path / ".git").exists():
         return False, "Not a git repository"
-    code, out = _run_git(path, ["git", "checkout", branch])
+    cmd = ["git", "checkout", "-f", branch] if force else ["git", "checkout", branch]
+    code, out = _run_git(path, cmd)
     if code != 0:
         if _clear_disposable_files_if_blocking(path, out):
-            code, out = _run_git(path, ["git", "checkout", branch])
+            code, out = _run_git(path, cmd)
         if code != 0:
             return False, f"Failed to checkout {branch}: {out}"
     return True, f"Checked out {branch}"
@@ -724,12 +733,19 @@ def abort_merge(repo_path: str | Path) -> Tuple[bool, str]:
     return True, "Merge aborted"
 
 
-def delete_branch(repo_path: str | Path, branch: str) -> Tuple[bool, str]:
-    """Delete the branch (must not be checked out). Returns (success, message)."""
+def delete_branch(repo_path: str | Path, branch: str, *, force: bool = False) -> Tuple[bool, str]:
+    """Delete the branch (must not be checked out). Returns (success, message).
+
+    ``force=False`` (default) uses ``git branch -d``, which refuses to delete a
+    branch with commits not reachable from another ref. ``force=True`` uses
+    ``-D`` instead, for callers intentionally discarding an abandoned branch
+    (e.g. cleanup after a failed delivery) regardless of unmerged commits.
+    """
     path = Path(repo_path).resolve()
     if not (path / ".git").exists():
         return False, "Not a git repository"
-    code, out = _run_git(path, ["git", "branch", "-d", branch])
+    flag = "-D" if force else "-d"
+    code, out = _run_git(path, ["git", "branch", flag, branch])
     if code != 0:
         return False, f"Failed to delete branch {branch}: {out}"
     return True, f"Deleted branch {branch}"
