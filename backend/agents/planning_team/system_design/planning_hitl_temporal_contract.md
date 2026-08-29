@@ -75,11 +75,36 @@ workflow class.
    is not None)`. No timeout: the predicate is satisfied only by a real,
    token-matched `submit_planning_answers` signal — the workflow never
    silently proceeds with a default answer.
-4. Once the signal lands, the workflow re-invokes Planning's phase with a
-   fresh callback built via `build_temporal_planning_answer_callback(resume_token,
-   submitted_answers=<the resolved answers>)`, which this time simply
-   filters and returns them (by `question_id`), matching the shape thread
-   mode already produces.
+4. Once the signal lands, the workflow resumes with a fresh callback built via
+   `build_temporal_planning_answer_callback(resume_token,
+   submitted_answers=<the resolved answers>)`, which this time simply filters
+   and returns them (by `question_id`), matching the shape thread mode
+   already produces.
+
+## Open problem for the deferred wiring work: re-invoking the phase is not enough
+
+Naively "re-invoking Planning's phase" in step 4 above does **not** work for
+`document_production_activity`'s PRA path, and the deferred wiring work
+(#7446) must not implement it that way. `DocumentProductionAgent.run`
+(`planning_team/agents/document_production/agent.py`) calls
+`run_pra(...)` to mint a PRA `job_id` first, and only *then* calls
+`wait_pra(job_id=job_id, answer_callback=answer_callback)` — `answer_callback`
+is invoked from inside `wait_pra`'s polling loop, after the PRA job already
+exists. `PlanningAnswerPauseSignal` is raised from inside that callback, so
+unwinding out of the activity loses the only handle to that job: its
+`resume_token`/`pending_questions` payload carries no PRA `job_id`. Restarting
+the whole phase on resume calls `run_pra` again, minting a **second** PRA job
+(whose generated questions may not even share the first job's question IDs),
+while the original PRA job is left paused/polling forever with no one left to
+answer it.
+
+The deferred wiring must instead preserve enough state across the pause to
+resume against the **original** PRA job — e.g. include the PRA `job_id` in
+the pause payload (requires splitting `run_pra` and `wait_pra` into separate
+activities so the workflow can hold the `job_id` between them, rather than
+calling both from inside one activity invocation of `document_production_activity`
+as today) and re-enter `wait_pra` against that same `job_id` on resume, not
+re-run `DocumentProductionAgent.run` from its start.
 
 ## Why a mixin, not an inline copy per workflow
 
