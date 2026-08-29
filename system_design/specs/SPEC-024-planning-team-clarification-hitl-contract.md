@@ -246,22 +246,49 @@ original (already-answered) PRA job is stranded, and PRA-side side effects are d
 a real gap the coding-team pattern does not have to solve and this contract must.
 
 **Contract requirement:** before the activity unwinds via the pause signal (§4.1), it must persist
-a checkpoint carrying the external PRA job id — using the already-sanctioned, currently-unused
-`shared/temporal/checkpoints.py` helpers (`shared/temporal/README.md` §"Checkpoints and
-human-in-the-loop": `save_checkpoint(team, job_id, phase, payload)` /
-`load_checkpoint(team, job_id, phase)`), e.g.
-`save_checkpoint("planning", job_id, "document_production_pra", {"pra_job_id": job_id})`, written
-atomically with (or immediately before) the pause envelope in §4.1. On resume,
-`document_production_activity` must `load_checkpoint(...)` for this phase and, when a checkpoint
-is present, call `wait_pra(job_id=<checkpointed pra_job_id>, answer_callback=...)` directly —
-**never** call `run_pra(...)` again for a resumed run. This requires `run_document_production` /
-`DocumentProductionAgent.run` to accept an optional pre-existing PRA `job_id` and skip submission
-when one is supplied (implementation shape for #7445-B; the contract here is only that resubmission
-must not happen).
+a checkpoint carrying the external PRA job id, in the **same atomic job-record update** as the
+pause envelope — not as two sequential writes. `shared/temporal/checkpoints.py`'s `save_checkpoint`
+(`shared/temporal/README.md` §"Checkpoints and human-in-the-loop") issues its own independent
+`update_job` call, so calling it separately from (even immediately before) the pause-envelope write
+is **not** sufficient: a process death between the two writes leaves the PRA job checkpointed but
+`waiting_for_answers` still `False`, and `_check_pending_pause_reentry` reads that as "no persisted
+pause → proceed normally" — the pause is silently dropped and the checkpoint stranded. The contract
+therefore requires the checkpoint's `checkpoints` field to be included in the exact same
+`update_job(...)` call that writes `waiting_for_answers`/`resume_token`/`pause_kind`/
+`pause_context`/`pending_questions` (§5), e.g. (illustrative, not the literal call —
+`save_checkpoint`'s own separate-write form must not be used here):
+
+```python
+mgr.update_job(
+    planning_job_id,
+    checkpoints={"document_production_pra": {"payload": {"pra_job_id": pra_job_id}, ...}},
+    waiting_for_answers=True,
+    resume_token=resume_token,
+    pause_kind="planning_clarification",
+    pause_context=None,
+    pending_questions=pending_questions,
+)
+```
+
+Note the two distinct ids: `planning_job_id` (the Planning job this activity/workflow is running
+for — what `job_id`/`load_checkpoint`/`save_checkpoint` key on) and `pra_job_id` (the external PRA
+job id returned by `run_pra(...)`, carried only inside the checkpoint payload). The checkpoint must
+be read via the Planning job-store's own team namespace, `"planning_team"` — matching
+`get_job_service_client(team="planning_team")` in `planning_team/shared/job_store.py:25` — **not**
+`"planning"`; using the wrong team argument addresses a different job-service partition and the
+checkpoint would never be visible from the Planning job record `load_checkpoint` reads on resume.
+
+On resume, `document_production_activity` must `load_checkpoint("planning_team", planning_job_id,
+"document_production_pra")` and, when a checkpoint is present, call `wait_pra(job_id=<checkpointed
+pra_job_id>, answer_callback=...)` directly — **never** call `run_pra(...)` again for a resumed
+run. This requires `run_document_production` / `DocumentProductionAgent.run` to accept an optional
+pre-existing PRA `job_id` and skip submission when one is supplied (implementation shape for
+#7445-B; the contract here is only that resubmission must not happen).
 
 **Postcondition this adds to §5:** a resumed `document_production_activity` invocation must reuse
-the checkpointed external PRA job id and must not call `run_pra` a second time for the same
-clarification round.
+the checkpointed external PRA job id (read from the `"planning_team"` namespace) and must not call
+`run_pra` a second time for the same clarification round; the checkpoint and the pause envelope
+must land in one atomic job-record update, never two sequential ones.
 
 ### 4.4 Explicit hitl.py / pause_cycle.py reuse statement
 
@@ -313,10 +340,12 @@ The primitive #7445-B builds must satisfy:
   the job record for `request["job_id"]` is readable.
 - *Postconditions:* If PRA raises unanswered `OpenQuestion`s and no matching persisted pause is
   being resumed, the activity persists `{waiting_for_answers: True, resume_token, pause_kind:
-  "planning_clarification", pause_context: None, pending_questions}` to the job record in one
-  atomic update, then returns (does not raise) `{"outcome": "paused", "job_id", "resume_token",
-  "pause_kind", "pause_context", "pending_questions"}` — no further job-store read or blocking call
-  past that point.
+  "planning_clarification", pause_context: None, pending_questions, checkpoints:
+  {"document_production_pra": {"payload": {"pra_job_id": ...}}}}` to the `"planning_team"`-namespaced
+  job record in **one** atomic `update_job` call (§4.3.1 — the checkpoint and the pause envelope
+  are never two sequential writes), then returns (does not raise) `{"outcome": "paused", "job_id",
+  "resume_token", "pause_kind", "pause_context", "pending_questions"}` — no further job-store read
+  or blocking call past that point.
 - *Invariants:* The activity never blocks waiting for a human answer. It is safe to call multiple
   times for the same `job_id`/pause round: a call that finds a persisted pause whose token does not
   match `acknowledged_resume_token` re-emits the same paused payload unchanged, performing no new
