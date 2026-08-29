@@ -40,6 +40,7 @@ from ..budget_config import StrategyLabBudgetConfig
 from ..market_regime import RegimeSummary, regime_to_prompt_block
 from . import _structured_output as so
 from ._agent_runner import run_json_with_parse_retry
+from ._diff_format import diff_spec_or_full
 from ._llm_budget import DesignBudgetExhausted, charge_active_budget
 from ._llm_envelope import run_structured_agent
 from ._parse_helpers import (
@@ -242,13 +243,47 @@ Concretely (a representative example — the schema above is authoritative):
 """
 
 
+# Wired into the "## Current Specification" prompt section: the first
+# revise() call on a fresh DesignAgent (no previous round to diff against)
+# always renders the full spec JSON, byte-identical to the original
+# hardcoded template, so every existing single-round test is unaffected.
+# Rounds after the first render a compact structural diff against the
+# previous round's spec when diff_spec_or_full finds one smaller than the
+# full JSON; otherwise (near-total rewrite) it still falls back to the full
+# spec. This preamble is what lets the model tell the two shapes apart
+# without a wrapper key in the JSON response schema.
+_DIFF_SPEC_SECTION_PREAMBLE = (
+    "This is a structural diff (added/removed/changed keys) against the "
+    "previous round's specification, not the full spec. Apply it on top of "
+    "what you already know of the current spec, then respond with the "
+    "complete revised specification."
+)
+
+
+def _render_spec_section(full_json: str, diffed: str, *, is_diff: bool) -> str:
+    """Render the "## Current Specification" section body: full JSON, or an explained diff.
+
+    Preconditions: ``full_json`` is the current round's spec rendered as
+    JSON; ``diffed`` is the result of diffing the current round's spec dict
+    against the previous round's (see :func:`diff_spec_or_full`); ``is_diff``
+    is ``True`` iff ``diffed`` is an actual diff (i.e. ``diffed != full_json``).
+
+    Postconditions: when ``is_diff`` is ``False``, returns a fenced JSON
+    block wrapping ``full_json`` verbatim — byte-identical to the original
+    hardcoded template. When ``is_diff`` is ``True``, returns ``diffed``
+    fenced as a ``diff`` block, preceded by an explanatory line so the model
+    does not mistake it for the full spec.
+    """
+    if not is_diff:
+        return f"```json\n{full_json}\n```"
+    return f"{_DIFF_SPEC_SECTION_PREAMBLE}\n\n```diff\n{diffed}\n```"
+
+
 _REVISION_USER_TEMPLATE = """\
 Revise the following strategy specification to address every issue raised by the design reviewer.
 
 ## Current Specification (the spec under review)
-```json
-{prior_spec_json}
-```
+{spec_section}
 
 ## Latest Review (must address every issue)
 Ready: {ready}
@@ -291,7 +326,24 @@ class DesignAgent:
             is stripped on the way out.
       Invariant — neither method emits code. Rule shapes that fail
             structured-DSL validation surface as :class:`StrategySpecParseError`.
+      Invariant — ``_previous_round_spec`` tracks the ``prior_spec`` argument
+            of the most recent successful :meth:`revise` call, so consecutive
+            calls on one instance diff round-over-round (mirrors
+            ``RefinementAgent._previous_round_code``). This is only
+            meaningful across the sequential external revise rounds of a
+            *single* design-review cycle — callers must not share one
+            instance across unrelated strategies or call ``revise`` out of
+            round order. ``StrategyLabOrchestrator`` satisfies this: it
+            constructs one ``DesignAgent`` per orchestrator (one per
+            strategy run) and calls ``revise`` sequentially as
+            design-review rounds progress.
     """
+
+    def __init__(self) -> None:
+        # Round-over-round diff state for external revise() calls — see
+        # class Invariants. ``None`` until the first successful ``revise()``
+        # call completes its prompt build.
+        self._previous_round_spec: Optional[Dict[str, Any]] = None
 
     def run(
         self,
@@ -321,7 +373,19 @@ class DesignAgent:
         formatting pair of provider calls (see :meth:`_invoke_and_parse` /
         :meth:`_structured_preflight`) charged as two budget units up front,
         not one.
+
+        Resets ``_previous_round_spec`` to ``None`` on every call: ``run()``
+        always starts a fresh spec lineage (a new ``strategy_id``, and
+        potentially a different pinned asset category), and this instance can
+        be reused across multiple design attempts within one
+        ``StrategyLabOrchestrator.run_cycle()`` call (e.g. after a prior
+        attempt raised ``SpecImplementabilityError`` and
+        ``_run_design_attempt`` re-entered with a new lineage on the same
+        ``self.design_agent``). Without this reset, the new lineage's first
+        ``revise()`` call would diff against an unrelated prior attempt's
+        spec.
         """
+        self._previous_round_spec = None
         prior_text = (
             format_prior_results(prior_records)
             if prior_records
@@ -411,13 +475,32 @@ class DesignAgent:
         includes the current ``critique``) is forwarded into the internal
         self-review pre-flight so a self-revision cannot regress a fix an
         earlier external round extracted.
+
+        The "## Current Specification" prompt section sends ``prior_spec``
+        in full on the first ``revise()`` call on this instance (no
+        previous round to diff against). On later calls, it sends a
+        compact structural diff against the ``prior_spec`` argument of this
+        instance's last *successful* ``revise()`` call — whichever of the
+        diff or the full spec renders shorter — falling back to the full
+        spec otherwise. State only advances past a successful call, so a
+        failed call never corrupts the next round's diff base (mirrors
+        :meth:`RefinementAgent.run`).
         """
-        spec_json = prior_spec.model_dump_json(indent=2, exclude={"strategy_code"})
+        current_dict = prior_spec.model_dump(exclude={"strategy_code"})
+        full_json = prior_spec.model_dump_json(indent=2, exclude={"strategy_code"})
+        diffed = diff_spec_or_full(self._previous_round_spec, current_dict)
+        is_diff = diffed != json.dumps(current_dict, indent=2, sort_keys=True)
+        diff_section = _render_spec_section(full_json, diffed, is_diff=True)
+        full_section = _render_spec_section(full_json, diffed, is_diff=False)
+        spec_section = (
+            diff_section if is_diff and len(diff_section) < len(full_section) else full_section
+        )
+
         issues_block = _format_issues(critique)
         prior_critiques_block = format_prior_critiques(prior_critiques)
 
         user_prompt = _REVISION_USER_TEMPLATE.format(
-            prior_spec_json=spec_json,
+            spec_section=spec_section,
             ready=str(critique.ready).lower(),
             rationale=critique.rationale or "(no rationale supplied)",
             issues_block=issues_block,
@@ -428,6 +511,11 @@ class DesignAgent:
         )
 
         strategy_dict, rationale = self._invoke_and_parse(_get_design_system_prompt(), user_prompt)
+        # Advance the round-over-round diff state only after a successful
+        # invocation: if the call above raises, the caller may retry with
+        # the same prior_spec; the next round must still diff against the
+        # last *successful* round's spec, not against prior_spec itself.
+        self._previous_round_spec = current_dict
         # Thread the external critique lineage AND the regression notice into the
         # internal self-review so a self-revision cannot regress a fix (or undo a
         # prior-round defect the ledger is keeping fixed) that an earlier external
@@ -685,6 +773,11 @@ class DesignAgent:
 
         max_revisions = _design_self_revision_rounds()
         revisions_done = 0
+        # Round-over-round diff state for this self-revision loop only —
+        # local to this call, distinct from ``self._previous_round_spec``
+        # (which tracks the external revise() lineage). ``None`` until the
+        # first self-revision in this loop completes.
+        previous_self_revision_spec: Optional[Dict[str, Any]] = None
         # audits == revisions + 1; ``range`` is a hard ceiling on top of the
         # explicit ``revisions_done`` guard below.
         for _ in range(max_revisions + 1):
@@ -722,12 +815,22 @@ class DesignAgent:
             # uses so the LLM sees a familiar prompt shape, and thread the
             # external critique lineage so the self-revision cannot regress a
             # fix an earlier external round already extracted. Build the
-            # ``prior_spec_json`` directly from the dict (no need to round-trip
-            # through ``StrategySpec`` construction).
-            spec_json = json.dumps(strategy_dict, indent=2, sort_keys=True)
+            # spec section directly from the dict (no need to round-trip
+            # through ``StrategySpec`` construction) — the first self-revision
+            # in this loop sends the full spec (no previous self-revision
+            # round yet); later ones send a diff against the immediately
+            # prior self-revision round, mirroring :meth:`revise`.
+            full_json = json.dumps(strategy_dict, indent=2, sort_keys=True)
+            diffed = diff_spec_or_full(previous_self_revision_spec, strategy_dict)
+            is_diff = diffed != full_json
+            diff_section = _render_spec_section(full_json, diffed, is_diff=True)
+            full_section = _render_spec_section(full_json, diffed, is_diff=False)
+            spec_section = (
+                diff_section if is_diff and len(diff_section) < len(full_section) else full_section
+            )
             issues_block = _format_issues(critique)
             revision_prompt = _REVISION_USER_TEMPLATE.format(
-                prior_spec_json=spec_json,
+                spec_section=spec_section,
                 ready="false",
                 rationale=critique.rationale or "(self-review flagged issues)",
                 issues_block=issues_block,
@@ -741,7 +844,7 @@ class DesignAgent:
             )
 
             try:
-                strategy_dict, rationale = self._invoke_and_parse(
+                new_strategy_dict, rationale = self._invoke_and_parse(
                     _get_design_system_prompt(), revision_prompt
                 )
             except DesignBudgetExhausted:
@@ -761,6 +864,12 @@ class DesignAgent:
                 )
                 return strategy_dict, rationale
 
+            # Advance the loop-local diff state only after a successful
+            # invocation, and only to the pre-revision spec — the next
+            # iteration's diff base is what this round revised *from*, not
+            # what it revised *to*.
+            previous_self_revision_spec = strategy_dict
+            strategy_dict = new_strategy_dict
             revisions_done += 1
 
         # Unreachable in practice: the ``revisions_done >= max_revisions`` guard

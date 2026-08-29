@@ -121,9 +121,7 @@ flowchart LR
     subgraph ReviewAgents["Review Agents"]
         CR["CodeReviewAgent"]
         QA["QAExpertAgent"]
-        AV["AcceptanceVerifierAgent"]
         BFS["BuildFixSpecialist"]
-        PS["ProblemSolverAgent"]
     end
 
     OrchestratorAgents --> CodingTeam

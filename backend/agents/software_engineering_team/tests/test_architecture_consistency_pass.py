@@ -695,7 +695,7 @@ def test_returns_empty_for_non_code_review_profile() -> None:
     """Only the default CODE_REVIEW profile runs this pass. The other profiles
     (ACCEPTANCE, SPEC_CONFORMANCE, ...) expect every issue to be attributable to
     a specific criterion/requirement, which an architecture/refactor finding
-    never is -- e.g. AcceptanceVerifierAgent treats any unattributed issue as an
+    never is -- a per-criterion acceptance gate treats any unattributed issue as an
     unmet criterion, so this pass could otherwise spuriously fail acceptance
     verification even when every criterion is satisfied."""
     from code_review_agent.models import CodeReviewInput
