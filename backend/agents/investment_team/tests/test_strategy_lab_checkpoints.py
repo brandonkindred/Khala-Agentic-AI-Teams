@@ -513,14 +513,26 @@ def test_determine_resume_stage_with_no_checkpoint_signals_full_restart() -> Non
     assert determine_resume_stage(None) is None
 
 
-def test_find_latest_checkpoint_for_attempt_returns_most_converged_match() -> None:
+@pytest.mark.parametrize(
+    "order",
+    [
+        lambda design_cp, review_cp: [design_cp, review_cp],
+        lambda design_cp, review_cp: [review_cp, design_cp],
+    ],
+    ids=["forward_order", "reverse_order"],
+)
+def test_find_latest_checkpoint_for_attempt_returns_most_converged_match(
+    order: Callable[[DesignCheckpoint, ReviewCheckpoint], list[PipelineCheckpoint]],
+) -> None:
     """When multiple stages were captured for the same attempt, the
-    furthest-along one is returned -- e.g. a design checkpoint followed by a
-    review checkpoint means review is the most-converged valid checkpoint."""
+    furthest-along one is returned regardless of input order -- e.g. a design
+    checkpoint and a review checkpoint always resolve to the review
+    checkpoint as the most-converged valid one, whichever comes first in the
+    input. Selection is by stage, not by list position."""
     design_cp = _build_design_checkpoint()
     review_cp = _build_review_checkpoint()
     found = find_latest_checkpoint_for_attempt(
-        [design_cp, review_cp],
+        order(design_cp, review_cp),
         run_id="run-1",
         cycle_scope="cycle-scope-1",
         design_attempt=0,
