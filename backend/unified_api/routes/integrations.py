@@ -2995,10 +2995,34 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
           (API-only), this flow implements and pushes fixes, so it needs a real local
           checkout, and per-PR namespacing keeps concurrent address-comments jobs on
           different PRs of the same repo from racing on the same working tree.
+        - Before touching that checkout, checks the coding-team service's own
+          best-effort admission pre-check (``GET .../address-comments/running``)
+          and raises 409 immediately when a job is already running for this PR
+          — never mutating the checkout underneath a job that may be actively
+          committing/pushing to it. This narrows, but (being a TOCTOU check) does
+          not eliminate, the race against a job admitted after the check
+          returns; the coding-team service's own admission lock remains the
+          authority and still rejects that case with 409 downstream.
     """
     cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, None, body.owner, body.repo)
 
     coding_team_url = _require_coding_team_url()
+
+    running = await _forward_to_coding_team(
+        coding_team_url,
+        f"pulls/{pr_number}/address-comments/running",
+        method="GET",
+        params={"owner": owner, "repo": repo},
+        log_prefix="github address-comments admission check",
+        timeout_detail="Coding team service timed out while checking for a running job.",
+        generic_failure_detail="Coding team service failed the admission pre-check.",
+    )
+    running_job_id = running.get("running_job_id") if isinstance(running, dict) else None
+    if running_job_id:
+        raise HTTPException(
+            status_code=409,
+            detail=f"job {running_job_id} already running for {owner}/{repo}#{pr_number}",
+        )
 
     repo_path = _resolve_repo_path(cfg, owner, repo, pr_number=pr_number)
     # An operator-pinned repo_path override is not per-PR-namespaced and is never

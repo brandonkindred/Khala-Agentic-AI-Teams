@@ -428,22 +428,22 @@ class TestUnresolvedComments:
 
     def test_thread_with_root_and_replies_yields_one_comment(self, address_env) -> None:
         """A thread's root comment plus its replies all map to the same thread
-        (GitHub's REST listing returns every message); only the root is
-        returned so the conversation is triaged/handled once, not once per
-        message."""
+        (GitHub's REST listing returns every message); only the LATEST message
+        is returned so the conversation is triaged/handled once (using its
+        most current concern), not once per message."""
         ac, fake = address_env["ac"], address_env["fake"]
         fake.review_comments = [_comment(2), _comment(3), _comment(4)]
         fake.threads = [
             ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4)),
         ]
         unresolved, by_comment, retry_resolve = ac.unresolved_comments(fake, "o", "r", 7)
-        assert [c.id for c in unresolved] == [2]
+        assert [c.id for c in unresolved] == [4]
         # The thread map still covers every message's id (callers only look up
         # ids drawn from `unresolved`, so the extra entries are harmless).
         assert {by_comment[2].id, by_comment[3].id, by_comment[4].id} == {"T2"}
         assert retry_resolve == []
 
-    def test_multiple_distinct_threads_each_keep_their_root(self, address_env) -> None:
+    def test_multiple_distinct_threads_each_keep_their_latest(self, address_env) -> None:
         ac, fake = address_env["ac"], address_env["fake"]
         fake.review_comments = [_comment(2), _comment(3), _comment(5)]
         fake.threads = [
@@ -451,11 +451,9 @@ class TestUnresolvedComments:
             ReviewThread(id="T5", is_resolved=False, comment_ids=(5,)),
         ]
         unresolved, _by_comment, _retry_resolve = ac.unresolved_comments(fake, "o", "r", 7)
-        assert [c.id for c in unresolved] == [2, 5]
+        assert [c.id for c in unresolved] == [3, 5]
 
-    def test_thread_with_marked_reply_excluded_even_via_unmarked_root(
-        self, address_env
-    ) -> None:
+    def test_thread_with_marked_reply_excluded_even_via_unmarked_root(self, address_env) -> None:
         """A thread whose root comment carries no marker but whose LATER reply
         does (Khala already replied) must never surface via its unmarked root —
         the whole thread is excluded from `unresolved`, and since it is still
@@ -464,7 +462,9 @@ class TestUnresolvedComments:
         ac, fake = address_env["ac"], address_env["fake"]
         fake.review_comments = [
             _comment(2, body="please fix this"),
-            _comment(3, body="Addressed by the SE team. <!-- khala-generated -->", author="khala-bot"),
+            _comment(
+                3, body="Addressed by the SE team. <!-- khala-generated -->", author="khala-bot"
+            ),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
 
@@ -472,6 +472,28 @@ class TestUnresolvedComments:
 
         assert unresolved == []
         assert retry_resolve == ["T2"]
+
+    def test_reviewer_feedback_after_khala_reply_is_re_triaged_not_discarded(
+        self, address_env
+    ) -> None:
+        """A reviewer who posts NEW feedback after Khala's generated reply
+        (e.g. "this fix is incomplete") must have that feedback re-triaged,
+        never silently discarded in favor of auto-resolving the thread just
+        because it once carried a Khala reply."""
+        ac, fake = address_env["ac"], address_env["fake"]
+        fake.review_comments = [
+            _comment(2, body="please fix this"),
+            _comment(
+                3, body="Addressed by the SE team. <!-- khala-generated -->", author="khala-bot"
+            ),
+            _comment(4, body="this fix is incomplete, the null case is still broken"),
+        ]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4))]
+
+        unresolved, _by_comment, retry_resolve = ac.unresolved_comments(fake, "o", "r", 7)
+
+        assert [c.id for c in unresolved] == [4]
+        assert retry_resolve == []
 
     def test_thread_with_marked_reply_that_is_already_resolved_is_not_retried(
         self, address_env
@@ -481,7 +503,9 @@ class TestUnresolvedComments:
         ac, fake = address_env["ac"], address_env["fake"]
         fake.review_comments = [
             _comment(2, body="please fix this"),
-            _comment(3, body="Addressed by the SE team. <!-- khala-generated -->", author="khala-bot"),
+            _comment(
+                3, body="Addressed by the SE team. <!-- khala-generated -->", author="khala-bot"
+            ),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=True, comment_ids=(2, 3))]
 
@@ -529,9 +553,7 @@ class TestIsKhalaAuthored:
 
 
 class TestUnresolvedCommentsMarkerAuthentication:
-    def test_marker_from_a_different_author_is_not_treated_as_khalas(
-        self, address_env
-    ) -> None:
+    def test_marker_from_a_different_author_is_not_treated_as_khalas(self, address_env) -> None:
         """Fresh evidence: a non-Khala comment containing the literal marker
         string must not suppress triage/implementation of its thread."""
         ac, fake = address_env["ac"], address_env["fake"]
@@ -617,9 +639,7 @@ class TestTriageComment:
 
 
 class TestHandleComment:
-    def test_triage_outage_records_failed_not_not_an_issue(
-        self, address_env, monkeypatch
-    ) -> None:
+    def test_triage_outage_records_failed_not_not_an_issue(self, address_env, monkeypatch) -> None:
         """A triage-LLM outage must be recorded as a FAILED comment outcome
         (work still owed, thread stays open), never as the same "not_an_issue"
         success a genuine non-issue verdict produces — a false success there
@@ -634,7 +654,17 @@ class TestHandleComment:
         thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
 
         outcome = ac._handle_comment(
-            fake, "parent", req, _comment(2), thread, "feature", "main", fake.pr.html_url, "origin", "tok"
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
         )
 
         assert outcome.outcome == "failed"
@@ -649,7 +679,17 @@ class TestHandleComment:
         thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
 
         outcome = ac._handle_comment(
-            fake, "parent", req, _comment(2), thread, "feature", "main", fake.pr.html_url, "origin", "tok"
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
         )
 
         assert outcome.outcome == "resolved"
@@ -674,6 +714,7 @@ class TestHandleComment:
             _comment(2),
             thread,
             "feature",
+            "sha1",
             "main",
             fake.pr.html_url,
             "https://github.com/contributor/r.git",
@@ -694,7 +735,17 @@ class TestHandleComment:
         thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
 
         outcome = ac._handle_comment(
-            fake, "parent", req, _comment(2), thread, "feature", "main", fake.pr.html_url, None, "tok"
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            None,
+            "tok",
         )
 
         assert outcome.outcome == "failed"
@@ -709,7 +760,17 @@ class TestHandleComment:
         thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
 
         outcome = ac._handle_comment(
-            fake, "parent", req, _comment(2), thread, "feature", "main", fake.pr.html_url, "origin", "tok"
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
         )
 
         assert outcome.outcome == "false_positive"
@@ -731,7 +792,17 @@ class TestHandleComment:
         thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
 
         outcome = ac._handle_comment(
-            fake, "parent", req, _comment(2), thread, "feature", "main", fake.pr.html_url, "origin", "tok"
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
         )
 
         assert outcome.outcome == "failed"
@@ -747,7 +818,17 @@ class TestHandleComment:
         thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
 
         outcome = ac._handle_comment(
-            fake, "parent", req, _comment(2), thread, "feature", "main", fake.pr.html_url, "origin", "tok"
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
         )
 
         # Must NOT falsely report a handled false positive when the thread stays open.
@@ -758,7 +839,17 @@ class TestHandleComment:
         _stub_triage(monkeypatch, ac, raises_issue=False, is_false_positive=False)
 
         outcome = ac._handle_comment(
-            fake, "parent", req, _comment(2), None, "feature", "main", fake.pr.html_url, "origin", "tok"
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            None,
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
         )
 
         assert outcome.outcome == "not_an_issue"
@@ -840,7 +931,9 @@ class TestRunAddressComments:
         _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
         fake.review_comments = [
             _comment(2, body="please fix this"),
-            _comment(3, body="Addressed by the SE team. <!-- khala-generated -->", author="khala-bot"),
+            _comment(
+                3, body="Addressed by the SE team. <!-- khala-generated -->", author="khala-bot"
+            ),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
 
@@ -983,9 +1076,7 @@ class TestAddressCommentsRoute:
         monkeypatch.setattr(_main, "encrypt_token", lambda token: "ciphertext")
         started: list[tuple] = []
         # The route calls the PUBLIC entry point; patch that.
-        monkeypatch.setattr(
-            ac, "start_address_comments_thread", lambda *a, **kw: started.append(a)
-        )
+        monkeypatch.setattr(ac, "start_address_comments_thread", lambda *a, **kw: started.append(a))
 
         from fastapi.testclient import TestClient
 
@@ -1034,9 +1125,18 @@ class TestAddressCommentsRoute:
     def test_rejects_closed_pr_with_400(self, route_env) -> None:
         fake = route_env["fake"]
         fake.pr = PullRequestDetail(
-            number=7, html_url="https://example/pull/7", head="feature", base="main",
-            head_sha="sha1", title="t", body="b", draft=False, author="alice",
-            state="closed", updated_at="", labels=(),
+            number=7,
+            html_url="https://example/pull/7",
+            head="feature",
+            base="main",
+            head_sha="sha1",
+            title="t",
+            body="b",
+            draft=False,
+            author="alice",
+            state="closed",
+            updated_at="",
+            labels=(),
         )
         resp = route_env["client"].post(
             "/pulls/7/address-comments",
@@ -1078,3 +1178,41 @@ class TestAddressCommentsRoute:
         assert resp.status_code == 500
         jobs = route_env["jobs"].list_jobs()
         assert jobs[-1]["status"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Route: GET /pulls/{pr_number}/address-comments/running
+# ---------------------------------------------------------------------------
+
+
+class TestAddressCommentsAdmissionRoute:
+    """The lightweight pre-check a caller (the unified API) uses to avoid
+    touching a PR's shared checkout when a job is already running for it."""
+
+    # Reuses TestAddressCommentsRoute's fixture body directly (a fixture defined
+    # on one test class isn't visible to another).
+    route_env = TestAddressCommentsRoute.route_env
+
+    def test_reports_none_when_nothing_running(self, route_env) -> None:
+        resp = route_env["client"].get(
+            "/pulls/7/address-comments/running", params={"owner": "o", "repo": "r"}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"running_job_id": None}
+
+    def test_reports_running_job_id(self, route_env, monkeypatch) -> None:
+        from software_engineering_team.api import coding_team_main as _main
+
+        monkeypatch.setattr(_main, "_running_review_for_pr", lambda *_a, **_kw: "job-abc")
+        resp = route_env["client"].get(
+            "/pulls/7/address-comments/running", params={"owner": "o", "repo": "r"}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"running_job_id": "job-abc"}
+
+    def test_is_read_only_and_creates_no_job(self, route_env) -> None:
+        before = len(route_env["jobs"].list_jobs())
+        route_env["client"].get(
+            "/pulls/7/address-comments/running", params={"owner": "o", "repo": "r"}
+        )
+        assert len(route_env["jobs"].list_jobs()) == before

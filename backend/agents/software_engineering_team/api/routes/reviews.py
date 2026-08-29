@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from software_engineering_team.api import address_comments as _address
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.coding_team_models import (
+    AddressCommentsAdmissionResponse,
     AddressCommentsRequest,
     AddressCommentsResponse,
     CreateEnhancedIssuesRequest,
@@ -390,6 +391,40 @@ def post_address_comments(
         pr_url=pr.html_url,
         unresolved_comment_count=len(unresolved),
         created_at=created_at,
+    )
+
+
+@router.get(
+    "/pulls/{pr_number}/address-comments/running",
+    response_model=AddressCommentsAdmissionResponse,
+)
+def get_address_comments_running(pr_number: int, owner: str, repo: str) -> AddressCommentsAdmissionResponse:
+    """Lightweight pre-check: is a review/address-comments job already running for this PR?
+
+    Lets a caller that owns a shared, mutable resource for the PR (the unified
+    API's local git checkout) skip touching that resource when a job is
+    already in flight, rather than discovering the conflict only after the
+    ``POST`` route's own admission check rejects the request with 409 — by
+    which point an unguarded caller may already have mutated the checkout
+    (e.g. ``git fetch``) concurrently with the running job's own git
+    operations on it.
+
+    Preconditions:
+        - ``owner``/``repo`` are non-empty repository coordinates.
+    Postconditions:
+        - Returns the job_id of a live, non-terminal review or
+          address-comments job for ``owner/repo#pr_number`` (heartbeat-checked,
+          same definition :func:`_running_review_for_pr` uses for the POST
+          route's own admission), or ``running_job_id=None`` when none is
+          running. Read-only: takes no lock, creates no job. Best-effort only
+          — a job can start or finish between this call returning and the
+          caller's next action, the same TOCTOU window every other admission
+          check in this codebase already lives with; callers needing a
+          stronger guarantee must still rely on the POST route's own
+          admission lock as the authority.
+    """
+    return AddressCommentsAdmissionResponse(
+        running_job_id=_main._running_review_for_pr(owner, repo, pr_number)
     )
 
 

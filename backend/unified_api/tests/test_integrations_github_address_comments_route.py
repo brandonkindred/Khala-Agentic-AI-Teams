@@ -43,10 +43,20 @@ class _FakeResp:
         return self._json
 
 
+_NOT_RUNNING = _FakeResp(200, {"running_job_id": None})
+
+
 class _FakeAsyncClient:
-    def __init__(self, *, result=None, exc=None):
+    """Fake httpx.AsyncClient. GET (the admission pre-check) defaults to "no job
+    running" so tests that only configure POST behavior are unaffected by the
+    extra pre-check call; pass `get_result`/`get_exc` to simulate the pre-check
+    itself failing or reporting a running job."""
+
+    def __init__(self, *, result=None, exc=None, get_result=None, get_exc=None):
         self._result = result
         self._exc = exc
+        self._get_result = get_result if get_result is not None else _NOT_RUNNING
+        self._get_exc = get_exc
         self.calls = []
 
     async def __aenter__(self):
@@ -54,6 +64,12 @@ class _FakeAsyncClient:
 
     async def __aexit__(self, *exc_info):
         return False
+
+    async def get(self, url, params=None):
+        self.calls.append((url, params))
+        if self._get_exc is not None:
+            raise self._get_exc
+        return self._get_result
 
     async def post(self, url, json=None):
         self.calls.append((url, json))
@@ -104,7 +120,8 @@ def test_success_proxies_with_token_and_path(mock_cfg, mock_cred, mock_path, moc
     assert body["job_id"] == "j1"
     assert body["unresolved_comment_count"] == 3
     # Proxied to the coding-team endpoint with the PR-number-scoped path.
-    url, sent = fake.calls[0]
+    # calls[0] is the admission pre-check GET, calls[1] is the actual POST.
+    url, sent = fake.calls[1]
     assert url == "http://coding:8103/pulls/7/address-comments"
     assert sent["pr_number"] == 7
     assert sent["github_token"] == "ghp"
@@ -131,7 +148,7 @@ def test_operator_pinned_checkout_is_never_cleaned_up(mock_cfg, mock_cred, mock_
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
         resp = client.post(_URL, json={})
     assert resp.status_code == 200
-    _url, sent = fake.calls[0]
+    _url, sent = fake.calls[1]
     assert sent["cleanup_checkout_on_success"] is False
     mock_clone.assert_called_once_with(
         "/srv/pinned-checkout", "acme", "widget", "ghp", platform_owned=False
@@ -144,7 +161,9 @@ def test_operator_pinned_checkout_is_never_cleaned_up(mock_cfg, mock_cred, mock_
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_502_when_clone_fails(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
-    resp = client.post(_URL, json={})
+    fake = _FakeAsyncClient()
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_URL, json={})
     assert resp.status_code == 502
     assert resp.json()["detail"] == "git clone failed: boom"
 
@@ -193,3 +212,42 @@ def test_502_on_malformed_success_body(mock_cfg, mock_cred, mock_path, mock_clon
     fake = _FakeAsyncClient(result=_FakeResp(200, {"unexpected": "shape"}))
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
         assert client.post(_URL, json={}).status_code == 502
+
+
+@patch(f"{_M}._ensure_repo_clone", return_value=None)
+@patch(f"{_M}._resolve_repo_path", return_value="/tmp/x")
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_409_and_no_checkout_touched_when_already_running(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch):
+    """The admission pre-check must run BEFORE the checkout is cloned/fetched:
+    when a job is already running for this PR, the route must reject with 409
+    and never call _ensure_repo_clone — otherwise a concurrent git fetch could
+    race the running job's own git operations on the same shared checkout."""
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(
+        result=_FakeResp(200, _OK),
+        get_result=_FakeResp(200, {"running_job_id": "existing-job"}),
+    )
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_URL, json={})
+    assert resp.status_code == 409
+    assert "existing-job" in resp.json()["detail"]
+    mock_clone.assert_not_called()
+    # Only the admission pre-check GET happened — never the address-comments POST.
+    assert len(fake.calls) == 1
+    url, params = fake.calls[0]
+    assert url == "http://coding:8103/pulls/7/address-comments/running"
+    assert params == {"owner": "acme", "repo": "widget"}
+
+
+@patch(f"{_M}._ensure_repo_clone", return_value=None)
+@patch(f"{_M}._resolve_repo_path", return_value="/tmp/x")
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_admission_check_timeout_never_touches_checkout(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(get_exc=httpx.ReadTimeout("slow"))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_URL, json={})
+    assert resp.status_code == 504
+    mock_clone.assert_not_called()

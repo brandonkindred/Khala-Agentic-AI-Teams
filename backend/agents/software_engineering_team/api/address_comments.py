@@ -209,30 +209,33 @@ def _unresolved_comments(
         - ``client`` is a live :class:`GitHubClient`; ``pr_number`` names an open PR.
     Postconditions:
         - Returns ``(comments, thread_by_comment_id, retry_resolve_thread_ids)``.
-        - ``comments`` has AT MOST ONE entry per unresolved thread — its earliest
-          (root) comment in GitHub's response order — even when the thread also
-          carries replies; a thread's replies share the same underlying issue as
-          its root, and the reply/resolve/publish flow operates on the thread as
-          a whole, so handling every message in a multi-comment thread
-          separately would triage the same issue repeatedly and could dispatch
-          a duplicate implementation workflow per extra message. Comments Khala
-          did not itself author whose thread GitHub reports as UNRESOLVED are
-          eligible — EXCEPT a thread that already carries a Khala-generated
-          reply ANYWHERE in it. A comment counts as Khala's own reply only when
-          BOTH its ``body`` carries the marker AND its ``author`` matches the
-          token's own authenticated login (:meth:`GitHubClient.get_authenticated_login`,
-          resolved once per call) — the marker alone is a public literal string
-          any commenter could include, accidentally or deliberately, so body
-          content is never trusted as provenance on its own. A trusted marked
-          reply need not be the thread's root — see ``retry_resolve_thread_ids``
-          below: such a thread's fix was already implemented and published, so
-          it is excluded from ``comments`` even via its unmarked root, rather
-          than being re-triaged into a duplicate implementation run.
+        - ``comments`` has AT MOST ONE entry per unresolved thread — its LATEST
+          message in GitHub's response order — even when the thread carries
+          multiple messages; a thread's replies share the same underlying issue,
+          and the reply/resolve/publish flow operates on the thread as a whole,
+          so handling every message separately would triage the same issue
+          repeatedly and could dispatch a duplicate implementation workflow per
+          extra message. Comments Khala did not itself author whose thread
+          GitHub reports as UNRESOLVED are eligible — EXCEPT a thread whose
+          LATEST message is Khala's own generated reply (see
+          ``retry_resolve_thread_ids`` below). A comment counts as Khala's own
+          reply only when BOTH its ``body`` carries the marker AND its
+          ``author`` matches the token's own authenticated login
+          (:meth:`GitHubClient.get_authenticated_login`, resolved once per
+          call) — the marker alone is a public literal string any commenter
+          could include, accidentally or deliberately, so body content is
+          never trusted as provenance on its own. Using the LATEST message
+          (rather than always the thread's root) is deliberate: when a
+          reviewer posts NEW feedback after Khala's reply (e.g. "this fix is
+          incomplete"), that feedback is the current concern and must be
+          re-triaged, never silently discarded in favor of auto-resolving on
+          a stale root just because the thread once carried a Khala reply.
         - ``retry_resolve_thread_ids`` lists the id of every UNRESOLVED thread
-          that already carries a Khala-generated reply — i.e. the reply landed
-          but the resolve mutation that should have followed it failed (or
-          hasn't run yet). The caller retries ONLY the resolve step for these,
-          never re-triage/re-implementation.
+          whose LATEST message is a Khala-generated reply — i.e. the reply
+          landed, no reviewer has said anything since, but the resolve
+          mutation that should have followed it failed (or hasn't run yet).
+          The caller retries ONLY the resolve step for these, never
+          re-triage/re-implementation.
         - ``thread_by_comment_id`` maps EVERY comment id appearing in ANY thread
           GitHub returned (resolved threads included) to its owning
           :class:`ReviewThread`. Callers only look up ids drawn from ``comments``,
@@ -272,54 +275,54 @@ def _unresolved_comments(
         authenticated_login = ""
 
     thread_by_comment: Dict[int, ReviewThread] = {}
-    resolved_ids: set[int] = set()
     for thread in threads:
         for cid in thread.comment_ids:
             thread_by_comment[cid] = thread
-            if thread.is_resolved:
-                resolved_ids.add(cid)
 
-    # A thread already carrying a Khala-generated reply must never be
-    # re-triaged, even when that reply is not the thread's earliest message
-    # (so the plain per-comment marker check on the loop below would miss it
-    # via an unmarked root). Scan every comment up front — independent of
-    # response order — so detection never depends on which message the main
-    # loop happens to reach first.
-    marked_thread_ids: set[str] = set()
+    # Group every comment by its owning thread, preserving GitHub's
+    # chronological response order, so we can tell whether a thread's LATEST
+    # message is Khala's own reply (safe to only retry the resolve mutation)
+    # or a reviewer's follow-up feedback posted after it (must be re-triaged,
+    # never silently discarded just because the thread once carried a reply).
+    thread_messages: Dict[str, List[ReviewComment]] = {}
     for comment in all_comments:
-        if _is_khala_authored(comment, authenticated_login):
-            thread = thread_by_comment.get(comment.id)
-            if thread is not None:
-                marked_thread_ids.add(thread.id)
-
-    unresolved: List[ReviewComment] = []
-    retry_resolve_thread_ids: List[str] = []
-    seen_thread_ids: set[str] = set()
-    for comment in all_comments:
-        if _is_khala_authored(comment, authenticated_login):
-            continue
-        if comment.id not in thread_by_comment:
+        thread = thread_by_comment.get(comment.id)
+        if thread is None:
+            if _is_khala_authored(comment, authenticated_login):
+                # Khala's own reply is a best-effort lookup only; an orphaned
+                # reply here (a gap in the thread listing) never blocks the
+                # run — it is never itself a candidate for triage.
+                continue
             raise ReviewThreadsUnavailableError(
                 owner,
                 repo,
                 pr_number,
                 f"review comment {comment.id} has no discoverable thread",
             )
-        if comment.id in resolved_ids:
-            continue
-        thread = thread_by_comment[comment.id]
-        if thread.id in seen_thread_ids:
-            # A later message (a reply) in a thread already represented by its
-            # root comment: same conversation, handled once via the root.
+        thread_messages.setdefault(thread.id, []).append(comment)
+
+    unresolved: List[ReviewComment] = []
+    retry_resolve_thread_ids: List[str] = []
+    seen_thread_ids: set[str] = set()
+    for thread in threads:
+        if thread.is_resolved or thread.id in seen_thread_ids:
             continue
         seen_thread_ids.add(thread.id)
-        if thread.id in marked_thread_ids:
-            # Already replied to (by Khala) but GitHub still reports this
-            # thread unresolved — the resolve mutation failed previously.
-            # Retry resolving it; never re-triage a fix that already landed.
+        messages = thread_messages.get(thread.id) or []
+        if not messages:
+            continue
+        latest = messages[-1]
+        if _is_khala_authored(latest, authenticated_login):
+            # Nothing has been said since Khala's reply — the fix already
+            # landed but GitHub still reports the thread unresolved, so the
+            # resolve mutation failed previously. Retry resolving it only;
+            # never re-triage a fix that already landed.
             retry_resolve_thread_ids.append(thread.id)
             continue
-        unresolved.append(comment)
+        # `latest` is either the thread's only message so far, or newer
+        # feedback a reviewer posted after an earlier Khala reply in the same
+        # thread. Either way it is the current concern to triage.
+        unresolved.append(latest)
     return unresolved, thread_by_comment, retry_resolve_thread_ids
 
 
@@ -667,6 +670,7 @@ def _handle_comment(
     comment: ReviewComment,
     thread: Optional[ReviewThread],
     pr_head: str,
+    pr_head_sha: str,
     pr_base: str,
     pr_url: str,
     pr_remote: Optional[str],
@@ -689,7 +693,13 @@ def _handle_comment(
         outcome="failed",
     )
     try:
-        cited_code = _read_cited_code(client, request.owner, request.repo, comment, pr_head)
+        # _read_cited_code's own contract calls for the PR head SHA (resolvable
+        # via the base repo's contents API regardless of which repository the
+        # branch itself lives in), NOT the branch short name (pr_head): for a
+        # fork-opened PR, `pr_head` names a branch that may not exist in the
+        # base repo at all, or may coincidentally collide with an unrelated
+        # branch there, either way grounding triage on the wrong (or no) code.
+        cited_code = _read_cited_code(client, request.owner, request.repo, comment, pr_head_sha)
         triage = _triage_comment(comment, cited_code)
 
         if not triage.raises_issue:
@@ -872,6 +882,7 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                     comment,
                     thread_by_comment.get(comment.id),
                     pr.head,
+                    pr.head_sha,
                     pr.base,
                     pr.html_url,
                     pr_remote,
@@ -946,8 +957,8 @@ def _build_summary(outcomes: List[CommentOutcome]) -> Dict[str, Any]:
         counts[o.outcome] = counts.get(o.outcome, 0) + 1
     total = len(outcomes)
     # "Handled" = everything the job acted on without failing.
-    handled = counts.get("resolved", 0) + counts.get("false_positive", 0) + counts.get(
-        "not_an_issue", 0
+    handled = (
+        counts.get("resolved", 0) + counts.get("false_positive", 0) + counts.get("not_an_issue", 0)
     )
     status_text = (
         f"Handled {handled}/{total} unresolved comment(s)"

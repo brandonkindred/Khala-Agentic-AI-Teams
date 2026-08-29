@@ -293,6 +293,21 @@ class AddressCommentsResponse(BaseModel):
     created_at: Optional[datetime] = None
 
 
+class AddressCommentsAdmissionResponse(BaseModel):
+    """Response for ``GET /pulls/{pr_number}/address-comments/running``: a
+    lightweight, best-effort admission pre-check so a caller (the unified API)
+    can avoid touching a PR's shared checkout when a job is already running
+    for it. Not a substitute for the authoritative admission lock the
+    ``POST`` route still takes — a race between this check and a concurrent
+    admission remains possible, same as any other TOCTOU pre-check."""
+
+    running_job_id: Optional[str] = Field(
+        default=None,
+        description="job_id of the live, non-terminal address-comments/review job for this "
+        "PR, or null when none is running.",
+    )
+
+
 class ReviewRunItem(BaseModel):
     """One persisted code-review run for a pull request (GET /reviews)."""
 
