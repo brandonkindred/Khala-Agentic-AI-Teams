@@ -574,7 +574,16 @@ class StrategyLabOrchestrator(
         # resume from, per the just-failed attempt's captured checkpoints (or
         # ``None`` for "no usable checkpoint" / full restart). Computed for
         # introspection/testing only -- nothing yet reads it to change what
-        # this method actually does on re-entry.
+        # this method actually does on re-entry. (A first attempt at
+        # consuming it -- resuming with the checkpoint's spec/code across
+        # attempts -- was tried and reverted: every current
+        # ``SpecImplementabilityError`` raise site downstream of a
+        # checkpoint specifically signals that the checkpointed spec needs a
+        # design-level revision, so reusing it unrevised across attempts
+        # either guarantees or makes likely the identical failure recurring,
+        # burning the re-entry budget with no chance of recovery instead of
+        # giving each attempt a fresh, potentially-corrected spec. See
+        # ``checkpoints.py``'s module docstring for the full analysis.)
         self.last_resume_determination: Optional[PipelineStage] = None
         checkpoint_capture = PipelineCheckpointCapture(
             run_id=checkpoint_scope,
