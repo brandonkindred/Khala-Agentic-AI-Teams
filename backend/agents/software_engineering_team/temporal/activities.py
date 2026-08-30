@@ -20,6 +20,7 @@ from shared.temporal.activity_utils import is_last_attempt
 from software_engineering_team.shared.job_store import (
     JOB_STATUS_FAILED,
     JOB_STATUS_RUNNING,
+    add_pending_questions,
     update_job,
 )
 
@@ -493,22 +494,31 @@ def plan_project_activity(
     repo_path: str,
     spec_parse_result: Dict[str, Any],
     trace_id: str = "",
+    resume_token: Optional[str] = None,
+    submitted_answers: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Phase 2: Run Planning workflow.
 
-    Returns PlanResult as a dict. ``trace_id`` (workflow-supplied, or freshly
-    generated when blank) is bound for the duration of this activity — see
-    ``parse_spec_activity`` for why it must be passed explicitly here rather than
-    inherited via contextvars.
+    Returns PlanResult as a dict, or a ``{"outcome": "paused", ...}`` dict when Planning
+    raises a clarification question (see ``_plan_project_activity_body``). ``trace_id``
+    (workflow-supplied, or freshly generated when blank) is bound for the duration of this
+    activity — see ``parse_spec_activity`` for why it must be passed explicitly here rather
+    than inherited via contextvars. ``resume_token``/``submitted_answers`` are supplied by
+    the calling workflow when re-invoking this activity after a prior pause was resolved by
+    a ``submit_planning_answers`` signal; omitted on a fresh (unpaused) invocation.
     """
     with bind_trace_id(trace_id or new_trace_id()):
-        return _plan_project_activity_body(job_id, repo_path, spec_parse_result)
+        return _plan_project_activity_body(
+            job_id, repo_path, spec_parse_result, resume_token, submitted_answers
+        )
 
 
 def _plan_project_activity_body(
     job_id: str,
     repo_path: str,
     spec_parse_result: Dict[str, Any],
+    resume_token: Optional[str] = None,
+    submitted_answers: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Body of :func:`plan_project_activity`, run inside its ``bind_trace_id`` block.
 
@@ -522,8 +532,61 @@ def _plan_project_activity_body(
         ``spec_data.spec_content`` via the LLM — avoids a second, nondeterministic parse and
         an unnecessary spec-intake LLM dependency; required for the sprint path, where
         ``spec_data.spec_content`` is synthesized Markdown, not LLM-parseable prose.
+
+        When Planning raises a clarification question and ``submitted_answers`` is ``None``
+        (a fresh pause, not a resume), this never reaches Planning's own success/failure
+        branches: it persists the questions (mirroring thread-mode's
+        ``orchestrator._build_planning_answer_callback``) and returns
+        ``{"outcome": "paused", "resume_token": ..., "pending_questions": ...}`` instead of a
+        ``PlanResult``, so the calling workflow can durably wait for a
+        ``submit_planning_answers`` signal (via ``PlanningAnswerSignalMixin``) instead of this
+        activity blocking. Matches thread-mode's invariant that Planning is never silently
+        auto-answered (``auto_answer_questions=False`` in both modes) via a durable signal
+        instead of a blocking poll loop.
     """
+    from planning_team.temporal.answer_signal import (
+        PlanningAnswerPauseSignal,
+        build_temporal_planning_answer_callback,
+    )
+    from software_engineering_team.pause_cycle import (
+        _check_pending_pause_reentry,
+        mint_resume_token,
+    )
+    from software_engineering_team.shared.job_store import get_job
     from software_engineering_team.temporal.phase_models import PlanResult, SpecParseResult
+
+    # Re-entry check (mirrors the coding team's own pattern, coding_team_orchestrator.py
+    # ~lines 814-846): tell a genuine resume (resume_token matches a persisted, unresolved
+    # pause) apart from a pre-work Temporal activity retry of the SAME original invocation
+    # (a prior attempt already persisted the pause via add_pending_questions below, but its
+    # completion was lost before Temporal recorded it) apart from "no pause outstanding"
+    # (proceed normally). Must run before any Planning work: a retry must never re-run
+    # Planning and mint a second, different resume_token -- that would strand whichever
+    # token the user was already shown and duplicate the persisted pending_questions.
+    existing = get_job(job_id) or {}
+    reentry = _check_pending_pause_reentry(existing, resume_token)
+    if reentry is not None:
+        if not reentry["consume"]:
+            return {
+                "outcome": "paused",
+                "resume_token": reentry["resume_token"],
+                "pending_questions": reentry["pending_questions"],
+            }
+        # Consume: atomically clear the pause envelope (sole responsibility of this
+        # activity, never the answers-submission route) before continuing normally --
+        # otherwise a client polling status after the job completes would still see a
+        # stale "waiting_for_answers" pause pointing at an already-resolved token.
+        update_job(
+            job_id,
+            waiting_for_answers=False,
+            pending_questions=[],
+            resume_token=None,
+        )
+
+    resume_token = resume_token or mint_resume_token(job_id)
+    answer_callback = build_temporal_planning_answer_callback(
+        resume_token, submitted_answers=submitted_answers
+    )
 
     try:
         from software_engineering_team.orchestrator import _check_cancellation, _get_agents
@@ -571,6 +634,8 @@ def _plan_project_activity_body(
             llm=get_client("project_planning"),
             job_updater=_planning_updater,
             run_architecture_fn=_run_architecture,
+            answer_callback=answer_callback,
+            auto_answer_questions=False,
         )
         if not planning_result.get("success"):
             err = planning_result.get("failure_reason") or "Planning failed"
@@ -598,6 +663,21 @@ def _plan_project_activity_body(
             spec_content_for_planning=spec_content_for_planning,
             requirements_title=adapter_result.requirements.title,
         ).model_dump()
+
+    except PlanningAnswerPauseSignal as exc:
+        from software_engineering_team.orchestrator import _structure_planning_questions
+
+        structured = _structure_planning_questions(exc.pending_questions, source="planning")
+        # resume_token is persisted in the SAME atomic write as waiting_for_answers/
+        # pending_questions (add_pending_questions' resume_token param) so a client polling
+        # POST /run-team/{job_id}/answers between two separate writes can never observe a
+        # pause with no token to key its Temporal-native-vs-thread-mode decision on.
+        add_pending_questions(job_id, structured, resume_token=exc.resume_token)
+        return {
+            "outcome": "paused",
+            "resume_token": exc.resume_token,
+            "pending_questions": structured,
+        }
 
     except Exception as e:
         logger.exception(
