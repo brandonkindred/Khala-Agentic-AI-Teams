@@ -157,6 +157,20 @@ Planning-specific scope creep: PRA's own answers-submission route
 build a new, correctly-plumbed pause/resume path on top of a wire format that still can't carry a
 multi-select answer through to PRA.
 
+**The shared validator needs the same fix, not just the model.** Adding the field to
+`AnswerSubmission` is necessary but not sufficient: `shared.hitl.validation.validate_answers`
+(`shared/hitl/validation.py:81-118`, the coding team's own answer-validation entry point, and the
+natural one for Planning's answer-submission route to reuse rather than duplicate) checks only
+`a.selected_option_id`/`a.other_text` and — at line 100 — rejects any answer where both are falsy
+as "not a decision," with no awareness of `selected_option_ids` at all; its returned dict
+(`validation.py:110-118`) doesn't carry the plural field either, so even an answer that somehow
+passed validation would have its multi-select content silently dropped before it ever reaches the
+job store. **Contract requirement:** `validate_answers` must recognize a populated
+`selected_option_ids` as a valid decision (validating each id against the question's own options,
+mirroring the singular-field check at lines 92-99), and must include `selected_option_ids` in the
+dict it returns. Without this, every compliant multi-select submission — through the coding team's
+existing route or any Planning route that reuses this validator — is rejected with a 400.
+
 **Why the same name, not `planning_submit_answers` or similar:** `backend/shared/hitl/models.py`
 was deliberately built as a cross-team superset so both teams share one vocabulary. A single
 signal name across teams means any future workflow that hosts both a coding-team-style gate and a
@@ -494,6 +508,27 @@ itself, only `load_checkpoint`, and runs under a retry policy that actually perm
 re-invoke it after a worker crash (not `NO_RETRY`), since retry-then-reentry past the checkpoint is
 the mechanism this contract relies on for crash recovery there.
 
+**The pause signal must be caught inside `_guarded`'s `work` callable, never let reach `_guarded`
+itself.** Every `planning_team` activity, `document_production_activity` included, runs its actual
+work through `_guarded(job_id, phase, ..., work, max_attempts=...)`
+(`temporal/activities.py:69-118`), which wraps `work()` in `try: ... except Exception as exc: if
+is_final_attempt(max_attempts): fail_job(...); raise` (`shared/temporal/activity_helpers.py:139-146`).
+`_ActivityPauseSignal` (§4.4) is itself an `Exception` subclass. If the pause is reached on this
+activity's *final* `SAFE_RETRY` attempt (a genuinely reachable state — a couple of earlier attempts
+failed transiently, then the next attempt hits a clarification question) and the signal is left to
+propagate *out of* `work()` before being caught — e.g., caught only at the outer activity-function
+level, around the `_guarded(...)` call itself — `_guarded`'s own `except Exception` intercepts it
+first: `is_final_attempt` is true, so it calls `fail_job` (marking the Planning job **FAILED**,
+client-visibly terminal) before re-raising. An outer catch would still convert the re-raised signal
+into a normal `{"outcome": "paused", ...}` return, so the workflow proceeds as if paused — but the
+job record has already been marked FAILED as a side effect, producing a client-visible
+contradiction (terminal-FAILED job, workflow still actively running a pause/resume cycle).
+**Contract requirement:** the `_ActivityPauseSignal` catch (or PRA's own `answer_callback`
+mechanism reaching the same effect) must sit *inside* the callable passed as `work` to `_guarded` —
+converting it to the `{"outcome": "paused", ...}` value there, as a normal return, so it never
+becomes an `Exception` `_guarded` itself observes. This is a placement requirement on the
+implementation, not a behavior change to `_guarded` itself; `_guarded` needs no modification.
+
 ### 4.3.2 Rollout compatibility for the activity signature change
 
 `document_production_activity` is currently called with three positional args —
@@ -548,8 +583,11 @@ substitutes for the other.
 
 This design reuses, unmodified in behavior:
 - The `_ActivityPauseSignal`-style unwind: an internal control-flow signal raised deep inside the
-  document-production call path, caught at the activity function's own boundary and translated
-  into the `{"outcome": "paused", ...}` return value — never propagated further.
+  document-production call path, caught **inside the `_guarded`-wrapped `work`/`_work` callable
+  itself** — not merely "at the activity function's own boundary" as a loose description might
+  suggest — and translated into the `{"outcome": "paused", ...}` return value there, before
+  `_guarded` ever sees an exception (§4.3.1's `_guarded`-interaction requirement below spells out
+  why this placement specifically is load-bearing).
 - `mint_resume_token`'s exact format and one-mint-per-pause-round rule.
 - `_check_pending_pause_reentry`'s three-way classification (no pause / consume / re-emit
   unchanged).
@@ -718,6 +756,18 @@ The primitive #7445-B builds must satisfy:
   the PRA-idempotency open risk (§5, below): Planning's contract can defend against confusion here,
   but a durable PRA-side round/version identifier would close the gap more completely than any
   reconciliation Planning does on its own — out of `planning_team`'s boundary, as before.
+
+**A failed status read is not confirmation.** `get_product_analysis_status` returns `None` on
+*any* GET failure (`adapters/product_analysis.py:51-58` — "Returns `None` on failure"), not only
+when the job or question is genuinely gone. Treating "no match" (§5's reconciliation rule above) as
+proof PRA already applied the answer would misinterpret a transient status-read failure — after an
+ambiguous prior POST — as confirmation, clearing the local pause envelope and consuming the durable
+answer batch while PRA may still be sitting there waiting for it, with nothing left locally to
+retry from. **Contract requirement:** reconciliation must distinguish "the status call itself
+failed" from "the status call succeeded and the question is structurally absent/mismatched." Only
+the latter is treated as confirmation (proceed to step (2)); a `None`/failed status response, or
+any other structurally invalid response, must cause the activity to raise (so `SAFE_RETRY`
+re-attempts the whole reconciliation later) rather than proceed as if confirmed.
 
 **Ordering requirement this adds to §4.3:** clearing the local pause envelope / marking a batch
 consumed must never happen *before* PRA has durably applied that batch. Because `submit_answers`
