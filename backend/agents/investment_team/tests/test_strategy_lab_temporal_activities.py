@@ -1810,6 +1810,82 @@ def test_run_design_attempt_activity_without_cross_attempt_resume_params_forward
     assert captured["resume_design_context"] is None
 
 
+def test_run_design_attempt_activity_cross_attempt_resume_fails_open_on_empty_design_context(
+    monkeypatch,
+):
+    """A ``resume_spec`` present without a valid ``resume_design_context``
+    (empty dict, or missing entirely) must never adopt ``resume_spec`` alone
+    -- that would skip Phase 1 with a blank context and fail identically on
+    every retry, the exact crash loop ADR-012's own guard exists to avoid.
+    Fails open to "no resume" (full restart) instead."""
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_attempt(self, **kwargs):
+        captured.update(kwargs)
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    out = act.run_design_attempt_activity(
+        _run_design_attempt_params(
+            resume_spec=_spec_dict(strategy_id="strat-resumed"),
+            resume_rationale="carried forward from checkpoint",
+            resume_design_context={},
+        )
+    )
+
+    assert out["kind"] == "record"
+    assert captured["resume_spec"] is None
+    assert captured["resume_rationale"] is None
+    assert captured["resume_design_context"] is None
+
+
+def test_run_design_attempt_activity_cross_attempt_resume_fails_open_on_malformed_spec(
+    monkeypatch,
+):
+    """A malformed ``resume_spec`` payload (fails ``StrategySpec`` validation)
+    must never crash the activity outright -- fails open to "no resume"
+    (full restart) instead, mirroring the ADR-012 same-attempt checkpoint's
+    own fail-open contract."""
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_attempt(self, **kwargs):
+        captured.update(kwargs)
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    out = act.run_design_attempt_activity(
+        _run_design_attempt_params(
+            resume_spec={"missing": "required fields"},
+            resume_rationale="carried forward from checkpoint",
+            resume_design_context={
+                "rounds": 2,
+                "critiques": [],
+                "stop_reason": "ready",
+                "loop_telemetry": {},
+            },
+        )
+    )
+
+    assert out["kind"] == "record"
+    assert captured["resume_spec"] is None
+    assert captured["resume_rationale"] is None
+    assert captured["resume_design_context"] is None
+
+
 def test_run_design_attempt_activity_malformed_checkpoint_gate_results_falls_back_to_scratch(
     monkeypatch,
 ):

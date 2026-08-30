@@ -33,6 +33,9 @@ from investment_team.tests.strategy_lab_temporal_fixtures import (
     WF_CONFIG as _WF_CONFIG,
 )
 from investment_team.tests.strategy_lab_temporal_fixtures import (
+    checkpoint_json as _checkpoint_json,
+)
+from investment_team.tests.strategy_lab_temporal_fixtures import (
     config_dict as _config_dict,
 )
 from investment_team.tests.strategy_lab_temporal_fixtures import (
@@ -227,34 +230,17 @@ async def test_replay_after_reentry_budget_exhausted_is_deterministic() -> None:
 def _review_checkpoint_json(**overrides: Any) -> Dict[str, Any]:
     """A real ``ReviewCheckpoint``'s wire (``model_dump(mode="json")``) form.
 
-    Mirrors ``test_strategy_lab_temporal_workflows.py``'s own ``_checkpoint_json``
-    helper, kept local to this file rather than imported across test modules
-    since only the one ``ReviewCheckpoint`` shape is needed here.
+    Thin wrapper over the shared ``checkpoint_json`` fixture builder
+    (``strategy_lab_temporal_fixtures.py``, also used by
+    ``test_strategy_lab_temporal_workflows.py``) supplying the specific
+    ``run_id``/``cycle_scope``/history this replay test needs, so checkpoint
+    fixture construction stays in one place.
     """
-    from investment_team.models import StrategySpec
-    from investment_team.strategy_lab import phases
     from investment_team.strategy_lab.checkpoints import ReviewCheckpoint
 
-    spec = StrategySpec(
-        strategy_id="strat-1",
-        authored_by="DesignAgent",
-        asset_class="stocks",
-        hypothesis="test hypothesis",
-        signal_definition="test signal",
-        timeframe="1d",
-    )
     base: Dict[str, Any] = {
         "run_id": "replay-test-run-1",
         "cycle_scope": "replay-test-run-1-0",
-        "design_attempt": 0,
-        "generation": 1,
-        "spec_hash": phases.hash_spec(spec),
-        "code_hash": phases.hash_code(None),
-        "captured_at": "2026-08-27T00:00:00Z",
-        "budget_calls": 5,
-        "gate_results": [],
-        "spec": spec,
-        "rationale": "because",
         "design_context": {
             "rounds": 1,
             "critiques": [],
@@ -276,7 +262,7 @@ def _review_checkpoint_json(**overrides: Any) -> Dict[str, Any]:
         ],
     }
     base.update(overrides)
-    return ReviewCheckpoint(**base).model_dump(mode="json")
+    return _checkpoint_json(ReviewCheckpoint, **base)
 
 
 @pytest.mark.integration
