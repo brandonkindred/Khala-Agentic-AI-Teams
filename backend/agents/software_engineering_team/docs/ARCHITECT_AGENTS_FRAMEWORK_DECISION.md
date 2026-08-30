@@ -66,8 +66,9 @@ a development agent's `run_workflow`. It is used by exactly four
 orchestrators, all inside `software_engineering_team/`:
 `BackendCodeV2TeamLead`, `FrontendCodeV2TeamLead`,
 `AIAgentDevelopmentTeamLead` (a complete but currently dormant team with no
-production consumer), and `DevOpsTeamLeadAgent` (which also layers
-LangGraph graphs on top of it for its gate pipeline). This team's own
+production consumer), and `DevOpsTeamLeadAgent` (which also fans out design
+and validation steps via `shared.concurrency.parallel_map` for its gate
+pipeline). This team's own
 README already documents these as **deliberately different shapes**, not
 convergent drift (`README.md`, "Sub-team shapes (deliberate, not drift)").
 `BaseTeamLead` has no analog for cross-call session/conversation
