@@ -124,6 +124,7 @@ from software_engineering_team.api.pr_review import (  # noqa: F401
     _REVIEW_HEARTBEAT_INTERVAL_S,
     ReviewCode,
     _build_review_code,
+    _checkout_admission,
     _infer_review_language,
     _pr_review_admission,
     _review_author,

@@ -316,7 +316,7 @@ def post_address_comments(
                         "only open PRs can be addressed."
                     ),
                 )
-            unresolved, _threads, _retry_resolve = _address.unresolved_comments(
+            unresolved, _threads, _retry_resolve, _history = _address.unresolved_comments(
                 client, request.owner, request.repo, pr_number
             )
         except ReviewThreadsUnavailableError as e:
@@ -346,66 +346,72 @@ def post_address_comments(
         # of that repo, so the PR-scoped check above cannot see a running job
         # for a DIFFERENT PR on the SAME checkout. `_running_sibling_on_checkout`
         # closes that: no sentinel job_id exists yet to exclude, so pass one no
-        # active job could ever carry. Checking this inside the SAME admission
-        # lock — before the job (and its non-terminal job-store row) exists —
-        # means once a job IS created here, this same check blocks a sibling
+        # active job could ever carry. But the outer `_pr_review_admission` lock
+        # alone is keyed per-PR, so it does NOT serialize this scan against a
+        # concurrent request for a DIFFERENT PR sharing the same checkout — both
+        # could take their own per-PR lock, both see nothing running yet, and
+        # both admit a job onto the same checkout. `_checkout_admission`, keyed
+        # by the checkout path itself, closes that: nested inside the SAME
+        # admission section — before the job (and its non-terminal job-store
+        # row) exists — so once a job IS created here, this blocks a sibling
         # for that job's ENTIRE run, not just a momentary admission window.
-        sibling = _main._running_sibling_on_checkout(request.repo_path, "<not-yet-created>")
-        if sibling is not None:
-            sib_ctx = sibling.get("github_context") or {}
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"job {sibling.get('job_id')} (PR #{sib_ctx.get('pr_number', '?')}) is still "
-                    f"running on checkout {request.repo_path}; retry after it finishes"
-                ),
-            )
+        with _main._checkout_admission(request.repo_path):
+            sibling = _main._running_sibling_on_checkout(request.repo_path, "<not-yet-created>")
+            if sibling is not None:
+                sib_ctx = sibling.get("github_context") or {}
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"job {sibling.get('job_id')} (PR #{sib_ctx.get('pr_number', '?')}) is still "
+                        f"running on checkout {request.repo_path}; retry after it finishes"
+                    ),
+                )
 
-        job_id = str(uuid.uuid4())
-        _main.create_job(job_id=job_id, repo_path=request.repo_path)
-        job_fields: dict[str, Any] = {
-            "github_context": {
-                "owner": request.owner,
-                "repo": request.repo,
-                "pr_number": pr_number,
-                "pr_url": pr.html_url,
-            },
-        }
-        # Temporal GitHub activities run outside this request and resolve their
-        # credential from the durable job record. Persist ciphertext only, matching
-        # /run-from-github; never put the plaintext PAT in a workflow payload.
-        encrypted = _main.encrypt_token(token)
-        if encrypted:
-            job_fields["github_token_encrypted"] = encrypted
-        _main.update_job(job_id, **job_fields)
-        try:
-            created_at = _main.record_review_start(
-                job_id, request.owner, request.repo, pr_number, pr.html_url, _main._review_author()
-            )
-            _address.start_address_comments_thread(job_id, request, token)
-        except Exception as e:
-            # Creation is not transactional across the job service, review store,
-            # and Python thread launcher. Terminalize whatever was persisted so a
-            # half-started job cannot block the PR admission guard indefinitely.
-            error = f"Could not start address-comments worker: {scrub_token_from_text(str(e))}"
+            job_id = str(uuid.uuid4())
+            _main.create_job(job_id=job_id, repo_path=request.repo_path)
+            job_fields: dict[str, Any] = {
+                "github_context": {
+                    "owner": request.owner,
+                    "repo": request.repo,
+                    "pr_number": pr_number,
+                    "pr_url": pr.html_url,
+                },
+            }
+            # Temporal GitHub activities run outside this request and resolve their
+            # credential from the durable job record. Persist ciphertext only, matching
+            # /run-from-github; never put the plaintext PAT in a workflow payload.
+            encrypted = _main.encrypt_token(token)
+            if encrypted:
+                job_fields["github_token_encrypted"] = encrypted
+            _main.update_job(job_id, **job_fields)
             try:
-                _main.update_job(
-                    job_id,
-                    status="failed",
-                    phase="completed",
-                    status_text="Failed to start address-comments worker",
-                    error=error,
+                created_at = _main.record_review_start(
+                    job_id, request.owner, request.repo, pr_number, pr.html_url, _main._review_author()
                 )
-                _main.update_review(
-                    job_id,
-                    status="failed",
-                    status_text="Failed to start address-comments worker",
-                    error=error,
-                    completed=True,
-                )
-            except Exception:
-                logger.exception("Could not terminalize address-comments job %s", job_id)
-            raise HTTPException(status_code=500, detail=error) from e
+                _address.start_address_comments_thread(job_id, request, token)
+            except Exception as e:
+                # Creation is not transactional across the job service, review store,
+                # and Python thread launcher. Terminalize whatever was persisted so a
+                # half-started job cannot block the PR admission guard indefinitely.
+                error = f"Could not start address-comments worker: {scrub_token_from_text(str(e))}"
+                try:
+                    _main.update_job(
+                        job_id,
+                        status="failed",
+                        phase="completed",
+                        status_text="Failed to start address-comments worker",
+                        error=error,
+                    )
+                    _main.update_review(
+                        job_id,
+                        status="failed",
+                        status_text="Failed to start address-comments worker",
+                        error=error,
+                        completed=True,
+                    )
+                except Exception:
+                    logger.exception("Could not terminalize address-comments job %s", job_id)
+                raise HTTPException(status_code=500, detail=error) from e
 
     return AddressCommentsResponse(
         job_id=job_id,

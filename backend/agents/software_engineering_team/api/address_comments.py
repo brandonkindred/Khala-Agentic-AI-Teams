@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -202,13 +202,14 @@ class CommentOutcome(BaseModel):
 
 def _unresolved_comments(
     client: Any, owner: str, repo: str, pr_number: int
-) -> tuple[List[ReviewComment], Dict[int, ReviewThread], List[str]]:
+) -> tuple[List[ReviewComment], Dict[int, ReviewThread], List[Tuple[str, int]], Dict[int, List[ReviewComment]]]:
     """Return the PR's unresolved review comments plus a comment-id → thread map.
 
     Preconditions:
         - ``client`` is a live :class:`GitHubClient`; ``pr_number`` names an open PR.
     Postconditions:
-        - Returns ``(comments, thread_by_comment_id, retry_resolve_thread_ids)``.
+        - Returns ``(comments, thread_by_comment_id, retry_resolve_threads,
+          thread_history_by_comment_id)``.
         - ``comments`` has AT MOST ONE entry per unresolved thread — its LATEST
           message in GitHub's response order — even when the thread carries
           multiple messages; a thread's replies share the same underlying issue,
@@ -218,7 +219,7 @@ def _unresolved_comments(
           extra message. Comments Khala did not itself author whose thread
           GitHub reports as UNRESOLVED are eligible — EXCEPT a thread whose
           LATEST message is Khala's own generated reply (see
-          ``retry_resolve_thread_ids`` below). A comment counts as Khala's own
+          ``retry_resolve_threads`` below). A comment counts as Khala's own
           reply only when BOTH its ``body`` carries the marker AND its
           ``author`` matches the token's own authenticated login
           (:meth:`GitHubClient.get_authenticated_login`, resolved once per
@@ -230,12 +231,16 @@ def _unresolved_comments(
           incomplete"), that feedback is the current concern and must be
           re-triaged, never silently discarded in favor of auto-resolving on
           a stale root just because the thread once carried a Khala reply.
-        - ``retry_resolve_thread_ids`` lists the id of every UNRESOLVED thread
-          whose LATEST message is a Khala-generated reply — i.e. the reply
-          landed, no reviewer has said anything since, but the resolve
-          mutation that should have followed it failed (or hasn't run yet).
-          The caller retries ONLY the resolve step for these, never
-          re-triage/re-implementation.
+        - ``retry_resolve_threads`` lists ``(thread_id, khala_reply_comment_id)``
+          for every UNRESOLVED thread whose LATEST message is a Khala-generated
+          reply — i.e. the reply landed, no reviewer has said anything since
+          (as of THIS snapshot), but the resolve mutation that should have
+          followed it failed (or hasn't run yet). The caller retries ONLY the
+          resolve step for these, never re-triage/re-implementation — but must
+          still re-check the thread's LIVE state immediately before resolving
+          (:func:`_thread_has_new_reviewer_feedback` with ``khala_reply_comment_id``
+          as ``since_comment_id``), since a reviewer can post a follow-up in the
+          window between this snapshot and the retry loop actually running.
         - ``thread_by_comment_id`` maps EVERY comment id appearing in ANY thread
           GitHub returned (resolved threads included) to its owning
           :class:`ReviewThread`. Callers only look up ids drawn from ``comments``,
@@ -243,6 +248,14 @@ def _unresolved_comments(
           narrowed to the unresolved subset. If a REST review comment has no
           discoverable thread, thread state is incomplete and the function fails
           closed rather than guessing that the comment is unresolved.
+        - ``thread_history_by_comment_id`` maps each ``comments`` entry's id to
+          its thread's FULL message list in chronological order (root through
+          the returned latest message, Khala's own prior replies included).
+          A thread's latest message alone can be a context-dependent follow-up
+          ("this is still broken", "use the other approach") that is
+          unintelligible without the root concern and any earlier response —
+          triage/planning ground their prompt on this full history, not the
+          latest message in isolation.
         - Fails closed: :meth:`GitHubClient.list_review_threads` raises
           :class:`ReviewThreadsUnavailableError` when thread state is unknown or
           incomplete, and this function lets that propagate rather than treating
@@ -302,7 +315,8 @@ def _unresolved_comments(
         thread_messages.setdefault(thread.id, []).append(comment)
 
     unresolved: List[ReviewComment] = []
-    retry_resolve_thread_ids: List[str] = []
+    retry_resolve_threads: List[Tuple[str, int]] = []
+    thread_history_by_comment_id: Dict[int, List[ReviewComment]] = {}
     seen_thread_ids: set[str] = set()
     for thread in threads:
         if thread.is_resolved or thread.id in seen_thread_ids:
@@ -316,14 +330,17 @@ def _unresolved_comments(
             # Nothing has been said since Khala's reply — the fix already
             # landed but GitHub still reports the thread unresolved, so the
             # resolve mutation failed previously. Retry resolving it only;
-            # never re-triage a fix that already landed.
-            retry_resolve_thread_ids.append(thread.id)
+            # never re-triage a fix that already landed. The reply's own id
+            # travels with the thread id so the caller can re-verify
+            # freshness immediately before resolving.
+            retry_resolve_threads.append((thread.id, latest.id))
             continue
         # `latest` is either the thread's only message so far, or newer
         # feedback a reviewer posted after an earlier Khala reply in the same
         # thread. Either way it is the current concern to triage.
         unresolved.append(latest)
-    return unresolved, thread_by_comment_id, retry_resolve_thread_ids
+        thread_history_by_comment_id[latest.id] = messages
+    return unresolved, thread_by_comment_id, retry_resolve_threads, thread_history_by_comment_id
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +371,24 @@ def _read_cited_code(client: Any, owner: str, repo: str, comment: ReviewComment,
     return content or ""
 
 
+def _format_thread_history(thread_history: List[ReviewComment]) -> str:
+    """Render a thread's messages as a chronological conversation transcript.
+
+    Postconditions:
+        - Returns one "Reviewer:" or "Khala:" labelled paragraph per message,
+          oldest first (a message counts as Khala's own when its body carries
+          ``_KHALA_COMMENT_MARKER`` — a display heuristic only, not the
+          authenticated-author check :func:`_is_khala_authored` performs for
+          security-relevant decisions). A single-message ``thread_history``
+          still renders correctly (just that one message).
+    """
+    lines = []
+    for msg in thread_history:
+        speaker = "Khala" if _KHALA_COMMENT_MARKER in (msg.body or "") else "Reviewer"
+        lines.append(f"{speaker}: {msg.body}")
+    return "\n\n".join(lines)
+
+
 class TriageUnavailableError(RuntimeError):
     """Raised when the triage LLM call itself fails (e.g. an LLM outage).
 
@@ -365,9 +400,14 @@ class TriageUnavailableError(RuntimeError):
     """
 
 
-def _triage_comment(comment: ReviewComment, cited_code: str) -> CommentTriage:
+def _triage_comment(
+    comment: ReviewComment, cited_code: str, thread_history: List[ReviewComment]
+) -> CommentTriage:
     """Ask the LLM whether the comment raises a real issue or is a false positive.
 
+    Preconditions:
+        - ``thread_history`` is ``comment``'s owning thread's full chronological
+          message list (see ``_handle_comment``'s precondition) — never empty.
     Postconditions:
         - Returns a :class:`CommentTriage` reflecting the LLM's actual verdict.
         - Raises :class:`TriageUnavailableError` on any LLM failure — it never
@@ -381,11 +421,14 @@ def _triage_comment(comment: ReviewComment, cited_code: str) -> CommentTriage:
         "## Review comment\n"
         f"File: {comment.path or '(none)'}\n"
         f"Line: {comment.line if comment.line is not None else '(file-level)'}\n\n"
-        f"{comment.body}\n\n"
+        "## Discussion thread (oldest to newest; the LAST message is the current concern "
+        "to triage — earlier messages are context, e.g. what a short follow-up like "
+        "\"still broken\" or \"use the other approach\" is referring to)\n"
+        f"{_format_thread_history(thread_history)}\n\n"
         "## Cited file content (may be empty if unavailable)\n"
         f"{cited_code[:20000] if cited_code else '(unavailable)'}\n\n"
-        "Decide whether this comment raises a real, actionable issue, and whether that "
-        "issue is a false positive given the actual code. Respond as JSON."
+        "Decide whether the thread's LAST message raises a real, actionable issue, and "
+        "whether that issue is a false positive given the actual code. Respond as JSON."
     )
     try:
         return _main.generate_structured(
@@ -401,9 +444,14 @@ def _triage_comment(comment: ReviewComment, cited_code: str) -> CommentTriage:
         ) from e
 
 
-def _plan_resolution(comment: ReviewComment, cited_code: str) -> Optional[IssueResolutionPlan]:
+def _plan_resolution(
+    comment: ReviewComment, cited_code: str, thread_history: List[ReviewComment]
+) -> Optional[IssueResolutionPlan]:
     """Produce requirements, top-3 scored solutions, and a plan for the best one.
 
+    Preconditions:
+        - ``thread_history`` is ``comment``'s owning thread's full chronological
+          message list (see ``_handle_comment``'s precondition) — never empty.
     Postconditions:
         - Returns an :class:`IssueResolutionPlan` whose ``candidate_solutions`` are
           sorted best-first by :attr:`SolutionCandidate.score`, or ``None`` when the
@@ -414,12 +462,15 @@ def _plan_resolution(comment: ReviewComment, cited_code: str) -> Optional[IssueR
         "## Real issue raised by a review comment\n"
         f"File: {comment.path or '(none)'}\n"
         f"Line: {comment.line if comment.line is not None else '(file-level)'}\n\n"
-        f"{comment.body}\n\n"
+        "## Discussion thread (oldest to newest; the LAST message is the issue to resolve — "
+        "earlier messages give it context)\n"
+        f"{_format_thread_history(thread_history)}\n\n"
         "## Cited file content (may be empty if unavailable)\n"
         f"{cited_code[:20000] if cited_code else '(unavailable)'}\n\n"
-        "Identify the resolution requirements, the top THREE candidate solutions (each scored "
-        "1-10 on requirement fit, computational performance, memory usage, and inverted code "
-        "complexity), and a concrete implementation plan for the best-scoring one. Respond as JSON."
+        "Identify the resolution requirements for the thread's LAST message, the top THREE "
+        "candidate solutions (each scored 1-10 on requirement fit, computational performance, "
+        "memory usage, and inverted code complexity), and a concrete implementation plan for "
+        "the best-scoring one. Respond as JSON."
     )
     try:
         plan = _main.generate_structured(
@@ -797,6 +848,7 @@ def _handle_comment(
     request: AddressCommentsRequest,
     comment: ReviewComment,
     thread: Optional[ReviewThread],
+    thread_history: List[ReviewComment],
     pr_head: str,
     pr_head_sha: str,
     pr_base: str,
@@ -806,6 +858,12 @@ def _handle_comment(
 ) -> CommentOutcome:
     """Run the full triage → implement → publish → reply → resolve flow.
 
+    Preconditions:
+        - ``thread_history`` is ``comment``'s owning thread's full message list
+          in chronological order (root through ``comment`` itself), or at
+          minimum ``[comment]`` when no fuller history is available — never
+          empty, so triage/planning always have at least the comment itself
+          to ground on.
     Postconditions:
         - Returns the :class:`CommentOutcome` recording what happened:
           ``not_an_issue`` (skipped), ``false_positive`` (replied and thread
@@ -828,7 +886,7 @@ def _handle_comment(
         # base repo at all, or may coincidentally collide with an unrelated
         # branch there, either way grounding triage on the wrong (or no) code.
         cited_code = _read_cited_code(client, request.owner, request.repo, comment, pr_head_sha)
-        triage = _triage_comment(comment, cited_code)
+        triage = _triage_comment(comment, cited_code, thread_history)
 
         if not triage.raises_issue:
             base.outcome = "not_an_issue"
@@ -850,9 +908,29 @@ def _handle_comment(
             return base
 
         # Real issue: requirements → top-3 scored solutions → plan the best one.
-        plan = _plan_resolution(comment, cited_code)
+        plan = _plan_resolution(comment, cited_code, thread_history)
         if plan is None:
             base.detail = "Could not produce a resolution plan."
+            return base
+
+        # Re-check the thread's LIVE state right before dispatching the
+        # implementation workflow — not just before the reply/resolve step
+        # that follows it. Triage and planning above can themselves take a
+        # while (LLM round-trips), and a reviewer may post a follow-up (e.g.
+        # a different desired approach) on this same thread in that window.
+        # _reply_and_resolve's own freshness check runs too late to prevent
+        # this: by then the workflow would have already implemented and
+        # pushed a fix for the stale snapshot. Skip dispatch entirely here so
+        # nothing lands on the PR branch for an already-superseded concern;
+        # the thread stays open and the next run's _unresolved_comments picks
+        # up the reviewer's actual latest message.
+        if thread is not None and _thread_has_new_reviewer_feedback(
+            client, request.owner, request.repo, request.pr_number, thread.id, comment.id, comment.body
+        ):
+            base.detail = (
+                "Newer reviewer feedback appeared on this thread before implementation "
+                "was dispatched; skipped to avoid pushing a fix for a superseded comment."
+            )
             return base
 
         child_job_id = _dispatch_implementation(
@@ -983,18 +1061,35 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
         with address_hb, _main.GitHubClient(token=token) as client:
             pr = client.get_pull_request(owner, repo, pr_number)
             pr_remote = _pr_head_remote(owner, repo, pr)
-            unresolved, thread_by_comment_id, retry_resolve_thread_ids = _unresolved_comments(
-                client, owner, repo, pr_number
+            unresolved, thread_by_comment_id, retry_resolve_threads, thread_history_by_comment_id = (
+                _unresolved_comments(client, owner, repo, pr_number)
             )
 
             # A thread already carrying a Khala-generated reply was already
             # implemented and published; only the resolve mutation is retried
-            # here — never re-triage/re-implement it. resolve_review_thread is
+            # here — never re-triage/re-implement it. But the snapshot backing
+            # `retry_resolve_threads` can go stale between when it was taken
+            # and this loop actually running (an earlier retry/comment in this
+            # same run can take a while), so re-verify the thread's LIVE state
+            # right before resolving — the same freshness check `_reply_and_
+            # resolve` runs before a fresh reply — rather than blindly
+            # resolving over a reviewer's follow-up. resolve_review_thread is
             # itself best-effort (never raises, returns False on failure), so
             # a still-failing retry just leaves the thread open for the next
             # run to retry again.
             retry_resolve_ok = True
-            for thread_id in retry_resolve_thread_ids:
+            for thread_id, khala_reply_id in retry_resolve_threads:
+                if _thread_has_new_reviewer_feedback(
+                    client, owner, repo, pr_number, thread_id, khala_reply_id
+                ):
+                    logger.info(
+                        "address-comments: skipping resolve-retry on thread %s — newer "
+                        "reviewer feedback appeared since generated reply %s was snapshotted",
+                        thread_id,
+                        khala_reply_id,
+                    )
+                    retry_resolve_ok = False
+                    continue
                 if not client.resolve_review_thread(thread_id):
                     retry_resolve_ok = False
                     logger.warning(
@@ -1023,6 +1118,7 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                     request,
                     comment,
                     thread_by_comment_id.get(comment.id),
+                    thread_history_by_comment_id.get(comment.id, [comment]),
                     pr.head,
                     pr.head_sha,
                     pr.base,
@@ -1042,7 +1138,7 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
             # thread_ids non-empty) still did real work and must be labelled too —
             # only a true no-op run (neither outcomes nor retries) skips this,
             # matching the original intent for a PR that never had comments.
-            if (outcomes or retry_resolve_thread_ids) and all_succeeded:
+            if (outcomes or retry_resolve_threads) and all_succeeded:
                 _mark_waiting_for_review(client, owner, repo, pr_number)
 
         # Drop the per-PR clone only on a clean completion (nothing failed, no
@@ -1098,7 +1194,7 @@ def _build_summary(outcomes: List[CommentOutcome]) -> Dict[str, Any]:
           the serialized per-comment outcome list, suitable for the UI's status/
           review-summary rendering.
         - Deliberately covers ``outcomes`` only: a successful resolve-only retry
-          (see ``retry_resolve_thread_ids`` in ``_unresolved_comments``) never
+          (see ``retry_resolve_threads`` in ``_unresolved_comments``) never
           produces a ``CommentOutcome`` — a retry has only a ``thread_id``, not
           the comment metadata (path/line/html_url) ``CommentOutcome`` requires —
           so it is invisible to ``counts``/``total_comments`` here even though it

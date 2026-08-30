@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+import contextlib
 import json
 from dataclasses import replace
 from typing import Any, Callable, Optional
@@ -428,7 +429,7 @@ class TestUnresolvedComments:
             ReviewThread(id="T2", is_resolved=False, comment_ids=(2,)),
         ]
         # Exercise the PUBLIC entry point the route depends on.
-        unresolved, by_comment, retry_resolve = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
         assert [c.id for c in unresolved] == [2]
         assert by_comment[2].id == "T2"
         assert retry_resolve == []
@@ -462,7 +463,7 @@ class TestUnresolvedComments:
         fake.threads = [
             ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4)),
         ]
-        unresolved, by_comment, retry_resolve = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
         assert [c.id for c in unresolved] == [4]
         # The thread map still covers every message's id (callers only look up
         # ids drawn from `unresolved`, so the extra entries are harmless).
@@ -476,7 +477,7 @@ class TestUnresolvedComments:
             ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3)),
             ReviewThread(id="T5", is_resolved=False, comment_ids=(5,)),
         ]
-        unresolved, _by_comment, _retry_resolve = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, _by_comment, _retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
         assert [c.id for c in unresolved] == [3, 5]
 
     def test_thread_with_marked_reply_excluded_even_via_unmarked_root(self, address_env) -> None:
@@ -494,10 +495,10 @@ class TestUnresolvedComments:
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
 
-        unresolved, _by_comment, retry_resolve = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, _by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
 
         assert unresolved == []
-        assert retry_resolve == ["T2"]
+        assert retry_resolve == [("T2", 3)]
 
     def test_reviewer_feedback_after_khala_reply_is_re_triaged_not_discarded(
         self, address_env
@@ -516,7 +517,7 @@ class TestUnresolvedComments:
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4))]
 
-        unresolved, _by_comment, retry_resolve = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, _by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
 
         assert [c.id for c in unresolved] == [4]
         assert retry_resolve == []
@@ -535,7 +536,7 @@ class TestUnresolvedComments:
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=True, comment_ids=(2, 3))]
 
-        unresolved, _by_comment, retry_resolve = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, _by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
 
         assert unresolved == []
         assert retry_resolve == []
@@ -588,7 +589,7 @@ class TestUnresolvedCommentsMarkerAuthentication:
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))]
 
-        unresolved, _by_comment, retry_resolve = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, _by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
 
         assert [c.id for c in unresolved] == [2]
         assert retry_resolve == []
@@ -609,7 +610,7 @@ class TestUnresolvedCommentsMarkerAuthentication:
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))]
 
-        unresolved, _by_comment, retry_resolve = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, _by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
 
         assert [c.id for c in unresolved] == [2]
         assert retry_resolve == []
@@ -661,7 +662,7 @@ class TestTriageComment:
         monkeypatch.setattr(ac._main, "generate_structured", _boom)
 
         with pytest.raises(ac.TriageUnavailableError):
-            ac._triage_comment(_comment(2), "code")
+            ac._triage_comment(_comment(2), "code", [_comment(2)])
 
 
 class TestHandleComment:
@@ -685,6 +686,7 @@ class TestHandleComment:
             req,
             _comment(2),
             thread,
+            [_comment(2)],
             "feature",
             "sha1",
             "main",
@@ -710,6 +712,7 @@ class TestHandleComment:
             req,
             _comment(2),
             thread,
+            [_comment(2)],
             "feature",
             "sha1",
             "main",
@@ -752,6 +755,7 @@ class TestHandleComment:
             req,
             _comment(2),
             thread,
+            [_comment(2)],
             "feature",
             "sha1",
             "main",
@@ -785,6 +789,7 @@ class TestHandleComment:
             req,
             _comment(2, body="This has a bug"),  # the snapshot triage saw
             thread,
+            [_comment(2, body="This has a bug")],  # the snapshot triage saw
             "feature",
             "sha1",
             "main",
@@ -810,6 +815,7 @@ class TestHandleComment:
             req,
             _comment(2),
             thread,
+            [_comment(2)],
             "feature",
             "sha1",
             "main",
@@ -837,6 +843,7 @@ class TestHandleComment:
             req,
             _comment(2),
             thread,
+            [_comment(2)],
             "feature",
             "sha1",
             "main",
@@ -862,6 +869,7 @@ class TestHandleComment:
             req,
             _comment(2),
             thread,
+            [_comment(2)],
             "feature",
             "sha1",
             "main",
@@ -897,6 +905,7 @@ class TestHandleComment:
             req,
             _comment(4, body="this fix is incomplete"),
             thread,
+            [_comment(4, body="this fix is incomplete")],
             "feature",
             "sha1",
             "main",
@@ -928,6 +937,7 @@ class TestHandleComment:
             req,
             _comment(2),
             thread,
+            [_comment(2)],
             "feature",
             "sha1",
             "main",
@@ -954,6 +964,7 @@ class TestHandleComment:
             req,
             _comment(2),
             thread,
+            [_comment(2)],
             "feature",
             "sha1",
             "main",
@@ -975,6 +986,7 @@ class TestHandleComment:
             req,
             _comment(2),
             None,
+            [_comment(2)],
             "feature",
             "sha1",
             "main",
@@ -990,7 +1002,7 @@ class TestHandleComment:
     def test_solution_candidates_ranked_best_first(self, address_env, monkeypatch) -> None:
         ac = address_env["ac"]
         _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
-        plan = ac._plan_resolution(_comment(2), "code")
+        plan = ac._plan_resolution(_comment(2), "code", [_comment(2)])
         assert plan is not None
         # "A" (sum 30) must rank ahead of "B" (sum 20).
         assert plan.candidate_solutions[0].summary == "A"
@@ -1188,6 +1200,126 @@ class TestRunAddressComments:
         assert fake.resolved == ["T2"]
         assert fake.labels_set and ac.WAITING_FOR_REVIEW_LABEL in fake.labels_set[-1]
 
+    def test_retry_resolve_revalidates_freshness_before_resolving(self, address_env) -> None:
+        """A reviewer's follow-up posted in the window between the
+        `_unresolved_comments` snapshot (which routed this thread to the
+        resolve-only retry path because its LATEST message was Khala's own
+        reply at snapshot time) and the retry loop actually resolving it must
+        NOT be silently resolved over — the retry loop must re-check live
+        state immediately before each resolve, the same way a fresh
+        reply/resolve already does."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        fake.review_comments = [
+            _comment(2, body="please fix this"),
+            _comment(
+                3, body="Addressed by the SE team. <!-- khala-generated -->", author="khala-bot"
+            ),
+        ]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4))]
+
+        # The snapshot (_unresolved_comments' own list_review_comments call) sees
+        # only [2, 3] — comment 4 lands only on SUBSEQUENT calls, simulating a
+        # reviewer posting a follow-up after the run's snapshot was taken but
+        # before the retry-resolve loop re-checks the thread.
+        calls = {"n": 0}
+        snapshot_comments = list(fake.review_comments)
+        live_comments = [*snapshot_comments, _comment(4, body="still broken")]
+
+        def _list_comments(_o: str, _r: str, _n: int):
+            calls["n"] += 1
+            return list(snapshot_comments if calls["n"] == 1 else live_comments)
+
+        fake.list_review_comments = _list_comments  # type: ignore[assignment]
+
+        ac._run_address_comments("job1", req, "tok")
+
+        assert fake.resolved == []  # never resolved over the newer feedback
+        # A run that skipped a stale retry did NOT fully succeed this round —
+        # never labelled ready while a reviewer's follow-up is still unaddressed.
+        assert fake.labels_set == []
+
+    def test_dispatch_time_freshness_check_blocks_stale_implementation(
+        self, address_env, monkeypatch
+    ) -> None:
+        """A reviewer's follow-up posted while triage/planning (LLM round-trips)
+        were running — after `comment` was snapshotted, before the
+        implementation workflow would be dispatched — must prevent the
+        workflow from ever being dispatched: `_reply_and_resolve`'s own
+        freshness check alone runs too late, since by then the workflow would
+        already have implemented and pushed a fix for the stale snapshot."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 6))
+        # comment 6 simulates feedback that landed after comment 2 was
+        # snapshotted as this run's representative comment.
+        fake.review_comments = [_comment(2), _comment(6, body="use the other approach instead")]
+        fake.threads = [thread]
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            [_comment(2)],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "failed"
+        assert "superseded" in outcome.detail
+        assert address_env["child_jobs"] == []  # implementation never dispatched
+        assert address_env["executions"] == []
+        assert fake.replies == []
+        assert fake.resolved == []
+
+    def test_triage_and_plan_prompts_include_full_thread_history(
+        self, address_env, monkeypatch
+    ) -> None:
+        """A short context-dependent follow-up ("still broken") is unintelligible
+        in isolation — triage and planning must ground on the thread's full
+        conversation (root concern + any earlier reply), not just the latest
+        message, so the LLM can tell what "still" refers to."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 6))
+        root = _comment(2, body="This null-check is missing entirely")
+        follow_up = _comment(6, body="still broken")
+        fake.review_comments = [root, follow_up]
+        fake.threads = [thread]
+
+        seen_prompts: list[str] = []
+
+        def _gen(prompt, *, schema, **kw):
+            seen_prompts.append(prompt)
+            if schema is ac.CommentTriage:
+                return ac.CommentTriage(raises_issue=False, is_false_positive=False, issue_summary="s")
+            return ac.IssueResolutionPlan(chosen_plan="p")
+
+        monkeypatch.setattr(ac._main, "generate_structured", _gen)
+
+        ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            follow_up,
+            thread,
+            [root, follow_up],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert len(seen_prompts) == 1  # triage only — raises_issue=False short-circuits planning
+        assert "This null-check is missing entirely" in seen_prompts[0]
+        assert "still broken" in seen_prompts[0]
+
     def test_does_not_mark_waiting_for_review_when_a_comment_fails(
         self, address_env, monkeypatch
     ) -> None:
@@ -1319,6 +1451,42 @@ class TestAddressCommentsRoute:
         assert resp.status_code == 409
         assert "sibling-job" in resp.json()["detail"]
         assert route_env["started"] == []  # never launched
+
+    def test_checkout_admission_lock_wraps_sibling_scan_and_job_creation(
+        self, route_env, monkeypatch
+    ) -> None:
+        """The sibling-checkout scan and the job it admits must run inside ONE
+        checkout-keyed lock — not just the per-PR `_pr_review_admission` lock,
+        which alone would let two DIFFERENT PRs sharing the same operator-pinned
+        repo_path both pass the scan (neither job exists yet) before either
+        creates its job, admitting a race onto the same checkout."""
+        from software_engineering_team.api import coding_team_main as _main
+
+        events: list[str] = []
+        orig_create_job = _main.create_job
+
+        @contextlib.contextmanager
+        def _recording_admission(repo_path: str):
+            assert repo_path == route_env["repo_path"]
+            events.append("enter")
+            yield
+            events.append("exit")
+
+        def _recording_create_job(**kw):
+            events.append("create_job")
+            return orig_create_job(**kw)
+
+        monkeypatch.setattr(_main, "_checkout_admission", _recording_admission)
+        monkeypatch.setattr(_main, "create_job", _recording_create_job)
+
+        resp = route_env["client"].post(
+            "/pulls/7/address-comments",
+            json={"owner": "o", "repo": "r", "repo_path": route_env["repo_path"], "pr_number": 7},
+        )
+
+        assert resp.status_code == 200
+        # create_job must run strictly BETWEEN the lock's enter and exit.
+        assert events == ["enter", "create_job", "exit"]
 
     def test_path_pr_number_wins_over_body(self, route_env) -> None:
         resp = route_env["client"].post(

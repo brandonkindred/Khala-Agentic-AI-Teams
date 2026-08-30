@@ -528,6 +528,44 @@ def _pr_review_admission(owner: str, repo: str, pr_number: int):
         yield
 
 
+# Serializes checkout-wide admission (the `_running_sibling_on_checkout` scan plus the
+# job creation that follows it) keyed by the checkout path itself, not by PR — closing
+# the gap `_pr_review_admission` alone leaves open: that lock is keyed per-PR, so two
+# DIFFERENT PRs sharing the same operator-pinned repo_path each take their OWN per-PR
+# lock, each run the sibling scan seeing nothing yet (neither job exists), and both
+# proceed to admit a job onto the same checkout concurrently. Same process-lock +
+# Postgres-advisory-lock mechanism as `_pr_review_admission`, just keyed differently.
+_CHECKOUT_ADMISSION_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _checkout_admission(repo_path: str):
+    """Mutual exclusion for checkout-wide admission (sibling scan + job creation).
+
+    Preconditions:
+        - ``repo_path`` is the checkout path about to be scanned via
+          :func:`_running_sibling_on_checkout` and then, if free, used by a job
+          this call site is about to create.
+    Postconditions:
+        - Serializes callers keyed on ``repo_path``'s CANONICAL form
+          (:func:`os.path.realpath`), so two different spellings of the same
+          checkout (e.g. a trailing slash, a symlink) still serialize against
+          each other, matching how :func:`_running_sibling_on_checkout` itself
+          compares paths. Delegates to :func:`advisory_lock` — see its
+          docstring for the full locking contract (degradation, invariants,
+          exception behavior). A caller that also holds a per-PR
+          :func:`_pr_review_admission` lock must acquire this one INSIDE it
+          (this call site is the only one nesting both today, so lock
+          ordering is trivially consistent).
+    """
+    with advisory_lock(
+        _CHECKOUT_ADMISSION_LOCK,
+        "coding_team_checkout_admission",
+        os.path.realpath(repo_path),
+    ):
+        yield
+
+
 def _start_pr_review_thread(job_id: str, request: ReviewPrRequest, token: str) -> None:
     """Spawn the PR-review hook in a background thread.
 
