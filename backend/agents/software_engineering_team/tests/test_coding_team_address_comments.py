@@ -1305,6 +1305,61 @@ class TestRunAddressComments:
         # But the run as a whole did NOT declare success over the new thread.
         assert fake.labels_set == []
 
+    def test_relist_ignores_a_known_unchanged_not_an_issue_comment(
+        self, address_env, monkeypatch
+    ) -> None:
+        """A comment triaged as `not_an_issue` is NEVER resolved (there's
+        nothing to fix or reply to), so it legitimately reappears in the
+        final re-list every time. That is expected, not "still owed" — it
+        must not block the run from succeeding, or a PR containing any
+        question/acknowledgement could never reach waiting-for-review and
+        every future run would re-triage the same non-issue forever."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=False, is_false_positive=False)
+        fake.review_comments = [_comment(2, body="just a question")]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))]
+
+        ac._run_address_comments("job1", req, "tok")
+
+        assert fake.resolved == []  # nothing to resolve for a non-issue
+        assert fake.replies == []
+        final = [u for u in address_env["job_updates"] if u.get("status") == "completed"]
+        assert final and final[-1]["review_summary"]["counts"]["not_an_issue"] == 1
+        # The run still succeeded: the unresolved not_an_issue comment is a
+        # KNOWN, UNCHANGED one this run itself triaged, not new/edited feedback.
+        assert fake.labels_set and ac.WAITING_FOR_REVIEW_LABEL in fake.labels_set[-1]
+
+    def test_relist_still_blocks_when_a_not_an_issue_comment_is_edited(
+        self, address_env, monkeypatch
+    ) -> None:
+        """A reviewer editing a comment this run already triaged as
+        `not_an_issue` — while an EARLIER comment's workflow was still
+        running — must still block success and get re-triaged: only an
+        UNCHANGED known non-issue is exempted from the re-list check."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=False, is_false_positive=False)
+        fake.review_comments = [_comment(2, body="just a question")]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))]
+
+        real_unresolved_comments = ac._unresolved_comments
+        calls = {"n": 0}
+
+        def _stub(client, owner, repo, pr_number):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_unresolved_comments(client, owner, repo, pr_number)
+            # The final re-list sees the SAME comment id, but its live body
+            # has changed since this run triaged it.
+            edited = _comment(2, body="actually, please also check the edge case")
+            thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+            return [edited], {2: thread}, [], {2: [edited]}
+
+        monkeypatch.setattr(ac, "_unresolved_comments", _stub)
+
+        ac._run_address_comments("job1", req, "tok")
+
+        assert fake.labels_set == []  # the edited feedback still blocks success
+
     def test_dispatch_time_freshness_check_blocks_stale_implementation(
         self, address_env, monkeypatch
     ) -> None:

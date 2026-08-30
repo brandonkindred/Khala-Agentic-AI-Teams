@@ -1149,11 +1149,29 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                 # over feedback that was never triaged. Re-list live state as
                 # the actual authority for "nothing left owed" before labelling
                 # the PR ready or reclaiming its checkout.
+                #
+                # A comment this run deliberately triaged as `not_an_issue` is
+                # NEVER resolved (there is nothing to fix or reply to), so it
+                # legitimately reappears in the fresh re-list every time —
+                # that is expected, not "still owed", and must not block
+                # success (or the PR could never reach waiting-for-review, and
+                # every future run would re-triage the same non-issue
+                # forever). Only count a fresh-unresolved comment as blocking
+                # when it is NOT one of this run's own known non-issues with
+                # an UNCHANGED body — a reviewer editing that comment (or
+                # posting genuinely new feedback) still blocks, same as ever.
+                not_an_issue_ids = {o.comment_id for o in outcomes if o.outcome == "not_an_issue"}
+                triaged_bodies = {c.id: c.body for c in unresolved}
                 try:
                     fresh_unresolved, _tbc, fresh_retry, _hist = _unresolved_comments(
                         client, owner, repo, pr_number
                     )
-                    all_succeeded = not fresh_unresolved and not fresh_retry
+                    blocking = [
+                        c
+                        for c in fresh_unresolved
+                        if not (c.id in not_an_issue_ids and c.body == triaged_bodies.get(c.id))
+                    ]
+                    all_succeeded = not blocking and not fresh_retry
                 except Exception as e:  # noqa: BLE001 - fail closed: unverifiable state must not read as success
                     logger.warning(
                         "address-comments: could not re-list unresolved threads before "
