@@ -95,72 +95,96 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
         request.repo,
     )
 
-    job_id = str(uuid.uuid4())
-    _main.create_job(job_id=job_id, repo_path=request.repo_path, plan_input=plan.model_dump())
-    job_fields: Dict[str, Any] = {
-        "github_context": {
-            "owner": request.owner,
-            "repo": request.repo,
-            "issue_number": issue.number,
-            "issue_url": issue.html_url,
-            "base_branch": request.base_branch,
-            "remote": request.remote,
-            # Persisted so a resume reconstructs the SAME cleanup decision the
-            # fresh run made; without it a resumed job would default to False and
-            # leak its ephemeral per-issue checkout on clean completion.
-            "cleanup_checkout_on_success": request.cleanup_checkout_on_success,
-        },
-    }
-    # Persist the token (encrypted) so a resume after the orchestrator thread dies (server restart,
-    # different worker process) can re-drive the GitHub publish flow. In the standard deployment the
-    # token is a per-request PAT from the credential store and the coding-team container has no
-    # GITHUB_TOKEN env, so without this the job could never resume. Only OPAQUE CIPHERTEXT is stored
-    # — never a usable PAT — because the raw job record is echoed verbatim by the generic
-    # GET /api/jobs/{team} route. When no encryption key is configured the token is not persisted
-    # and resume falls back to GITHUB_TOKEN env (or refuses); we never store plaintext.
-    encrypted = encrypt_token(token)
-    if encrypted:
-        job_fields["github_token_encrypted"] = encrypted
-    _main.update_job(job_id, **job_fields)
+    # An operator-pinned repo_path is shared (unnamespaced) across every issue/PR
+    # of that repo, so the issue-scoped check above cannot see a running job for
+    # a DIFFERENT issue or PR (e.g. an address-comments remediation) on the SAME
+    # checkout. `_checkout_admission`, keyed by the checkout path itself, closes
+    # that gap — nested here, around job creation, exactly like
+    # `address_github_pr_comments`'s own admission section — so this route and
+    # that one serialize against each other regardless of which one is admitted
+    # first.
+    with _main._checkout_admission(request.repo_path):
+        sibling = _main._running_sibling_on_checkout(request.repo_path)
+        if sibling is not None:
+            sib_ctx = sibling.get("github_context") or {}
+            if "pr_number" in sib_ctx:
+                sib_label = f"PR #{sib_ctx.get('pr_number')}"
+            else:
+                sib_label = f"issue #{sib_ctx.get('issue_number', '?')}"
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"job {sibling.get('job_id')} ({sib_label}) is still "
+                    f"running on checkout {request.repo_path}; retry after it finishes"
+                ),
+            )
 
-    base = request.base_branch or default_branch
-    if not base:
-        raise HTTPException(
-            status_code=500,
-            detail="unable to resolve base branch for GitHub-issue run",
-        )
-    integration_branch = f"khala/issue-{issue.number}"
-    try:
-        start_coding_team_workflow(
-            job_id,
-            request.repo_path,
-            plan.model_dump(),
-            github={
+        job_id = str(uuid.uuid4())
+        _main.create_job(job_id=job_id, repo_path=request.repo_path, plan_input=plan.model_dump())
+        job_fields: Dict[str, Any] = {
+            "github_context": {
                 "owner": request.owner,
                 "repo": request.repo,
                 "issue_number": issue.number,
-                "issue_title": issue.title,
+                "issue_url": issue.html_url,
+                "base_branch": request.base_branch,
                 "remote": request.remote,
-                "base": base,
-                "integration_branch": integration_branch,
+                # Persisted so a resume reconstructs the SAME cleanup decision the
+                # fresh run made; without it a resumed job would default to False and
+                # leak its ephemeral per-issue checkout on clean completion.
                 "cleanup_checkout_on_success": request.cleanup_checkout_on_success,
             },
-        )
-    except Exception as e:
-        # Dispatch failed (worker not ready, start timeout, bad config). Mark
-        # the freshly-created row failed so it is not orphaned in 'pending',
-        # and surface a retryable error instead of an opaque 500.
-        logger.exception("Coding team Temporal dispatch failed: %s", e)
-        _main.update_job(
-            job_id,
-            status=JobStatus.FAILED.value,
-            error=f"Temporal dispatch failed: {e}",
-            current_activity=None,
-        )
-        raise HTTPException(
-            status_code=503,
-            detail="Temporal dispatch failed (worker unavailable); job marked failed. Retry.",
-        ) from e
+        }
+        # Persist the token (encrypted) so a resume after the orchestrator thread dies (server restart,
+        # different worker process) can re-drive the GitHub publish flow. In the standard deployment the
+        # token is a per-request PAT from the credential store and the coding-team container has no
+        # GITHUB_TOKEN env, so without this the job could never resume. Only OPAQUE CIPHERTEXT is stored
+        # — never a usable PAT — because the raw job record is echoed verbatim by the generic
+        # GET /api/jobs/{team} route. When no encryption key is configured the token is not persisted
+        # and resume falls back to GITHUB_TOKEN env (or refuses); we never store plaintext.
+        encrypted = encrypt_token(token)
+        if encrypted:
+            job_fields["github_token_encrypted"] = encrypted
+        _main.update_job(job_id, **job_fields)
+
+        base = request.base_branch or default_branch
+        if not base:
+            raise HTTPException(
+                status_code=500,
+                detail="unable to resolve base branch for GitHub-issue run",
+            )
+        integration_branch = f"khala/issue-{issue.number}"
+        try:
+            start_coding_team_workflow(
+                job_id,
+                request.repo_path,
+                plan.model_dump(),
+                github={
+                    "owner": request.owner,
+                    "repo": request.repo,
+                    "issue_number": issue.number,
+                    "issue_title": issue.title,
+                    "remote": request.remote,
+                    "base": base,
+                    "integration_branch": integration_branch,
+                    "cleanup_checkout_on_success": request.cleanup_checkout_on_success,
+                },
+            )
+        except Exception as e:
+            # Dispatch failed (worker not ready, start timeout, bad config). Mark
+            # the freshly-created row failed so it is not orphaned in 'pending',
+            # and surface a retryable error instead of an opaque 500.
+            logger.exception("Coding team Temporal dispatch failed: %s", e)
+            _main.update_job(
+                job_id,
+                status=JobStatus.FAILED.value,
+                error=f"Temporal dispatch failed: {e}",
+                current_activity=None,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Temporal dispatch failed (worker unavailable); job marked failed. Retry.",
+            ) from e
     return RunFromGitHubResponse(job_id=job_id, issue_number=issue.number, issue_url=issue.html_url)
 
 

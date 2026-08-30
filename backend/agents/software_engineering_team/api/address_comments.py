@@ -1411,18 +1411,42 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                 # every future run would re-triage the same non-issue
                 # forever). Only count a fresh-unresolved comment as blocking
                 # when it is NOT one of this run's own known non-issues with
-                # an UNCHANGED body — a reviewer editing that comment (or
-                # posting genuinely new feedback) still blocks, same as ever.
+                # an UNCHANGED thread history — comparing just the latest
+                # message's body is not enough: a reviewer can edit or delete
+                # an EARLIER message in the thread (changing the context the
+                # `not_an_issue` verdict was actually grounded on) without
+                # touching the latest message's id or body at all. Compare
+                # the full history snapshotted at triage time against a fresh
+                # snapshot, the same way the implementation and false-positive
+                # paths already do via `_thread_has_new_reviewer_feedback`.
                 not_an_issue_ids = {o.comment_id for o in outcomes if o.outcome == "not_an_issue"}
-                triaged_bodies = {c.id: c.body for c in unresolved}
+                triaged_histories = {
+                    c.id: thread_history_by_comment_id.get(c.id, [c])
+                    for c in unresolved
+                    if c.id in not_an_issue_ids
+                }
+
+                def _history_unchanged(
+                    comment: ReviewComment,
+                    fresh_history_by_comment_id: Dict[int, List[ReviewComment]],
+                ) -> bool:
+                    triaged = triaged_histories.get(comment.id)
+                    fresh = fresh_history_by_comment_id.get(comment.id)
+                    if triaged is None or fresh is None:
+                        return False
+                    return [(m.id, m.body) for m in triaged] == [(m.id, m.body) for m in fresh]
+
                 try:
-                    fresh_unresolved, _tbc, fresh_retry, _hist = _unresolved_comments(
-                        client, owner, repo, pr_number
+                    fresh_unresolved, _tbc, fresh_retry, fresh_history_by_comment_id = (
+                        _unresolved_comments(client, owner, repo, pr_number)
                     )
                     blocking = [
                         c
                         for c in fresh_unresolved
-                        if not (c.id in not_an_issue_ids and c.body == triaged_bodies.get(c.id))
+                        if not (
+                            c.id in not_an_issue_ids
+                            and _history_unchanged(c, fresh_history_by_comment_id)
+                        )
                     ]
                     all_succeeded = not blocking and not fresh_retry
                 except Exception as e:  # noqa: BLE001 - fail closed: unverifiable state must not read as success

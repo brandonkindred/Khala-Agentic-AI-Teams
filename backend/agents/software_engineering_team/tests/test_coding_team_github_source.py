@@ -2556,12 +2556,16 @@ class TestStatusResponseSurfacing:
 
 
 class TestBusyCheckoutGuard:
-    """Auto-recovery must never mutate a sibling job's live working tree:
-    prep on a checkout with another non-terminal job fails fast (the old
-    dirty-guard behavior for the live case), while crashed-job leftovers
-    (no running sibling) still recover."""
+    """A checkout with another non-terminal job on it must never be admitted
+    onto by a second job — the route's own checkout-wide admission (mirroring
+    `address_github_pr_comments`) now blocks with 409 before a job row is
+    even created, rather than creating one and detecting the conflict later
+    during branch prep (the old post-hoc dirty-guard behavior). Crashed-job
+    leftovers (no running sibling) still recover during prep, unaffected."""
 
-    def test_running_sibling_on_same_checkout_fails_job(self, patched_app, monkeypatch) -> None:
+    def test_running_sibling_on_same_checkout_blocks_admission(
+        self, patched_app, monkeypatch
+    ) -> None:
         from software_engineering_team.job_store import create_job, update_job
 
         api = patched_app["api"]
@@ -2579,12 +2583,14 @@ class TestBusyCheckoutGuard:
         monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
-        resp = _post_run_from_github_and_run_hooks(patched_app, _body(3, repo_path=repo_path))
-        assert resp.status_code == 200
-        job = patched_app["jobs"].get_job(resp.json()["job_id"])
-        assert job["status"] == "failed"
-        assert "busy" in (job["error"] or "").lower()
-        assert prep_calls == []  # the sibling's tree was never touched
+        jobs_before = len(patched_app["jobs"].list_jobs())
+        resp = patched_app["client"].post("/run-from-github", json=_body(3, repo_path=repo_path))
+        assert resp.status_code == 409
+        assert "sibling-1" in resp.json()["detail"]
+        # No new job row was ever created for the blocked request, and the
+        # sibling's own working tree was never touched.
+        assert len(patched_app["jobs"].list_jobs()) == jobs_before
+        assert prep_calls == []
 
     def test_sibling_under_alias_spelling_still_blocks(self, patched_app, monkeypatch) -> None:
         """The guard compares canonical paths: a sibling registered under a
@@ -2610,11 +2616,11 @@ class TestBusyCheckoutGuard:
         monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
-        resp = _post_run_from_github_and_run_hooks(patched_app, _body(3, repo_path=repo_path))
-        assert resp.status_code == 200
-        job = patched_app["jobs"].get_job(resp.json()["job_id"])
-        assert job["status"] == "failed"
-        assert "busy" in (job["error"] or "").lower()
+        jobs_before = len(patched_app["jobs"].list_jobs())
+        resp = patched_app["client"].post("/run-from-github", json=_body(3, repo_path=repo_path))
+        assert resp.status_code == 409
+        assert "sibling-3" in resp.json()["detail"]
+        assert len(patched_app["jobs"].list_jobs()) == jobs_before
         assert prep_calls == []
 
     def test_terminal_sibling_does_not_block(self, patched_app, monkeypatch) -> None:
@@ -2631,6 +2637,30 @@ class TestBusyCheckoutGuard:
         assert resp.status_code == 200
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
+
+    def test_running_pr_remediation_sibling_blocks_issue_admission(self, patched_app) -> None:
+        """The exact cross-route race this admission check exists for: an
+        address-comments remediation job (identified by `pr_number`, not
+        `issue_number`, in its github_context) already running on a shared,
+        operator-pinned checkout must block a direct `/run-from-github` for
+        an unrelated issue on that same checkout."""
+        from software_engineering_team.job_store import create_job, update_job
+
+        repo_path = patched_app["repo_path"]
+        create_job(job_id="pr-sibling", repo_path=repo_path, plan_input=None)
+        update_job(
+            "pr-sibling",
+            status="running",
+            github_context={"owner": "o", "repo": "r", "pr_number": 42},
+        )
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        patched_app["set_github"](client)
+        jobs_before = len(patched_app["jobs"].list_jobs())
+        resp = patched_app["client"].post("/run-from-github", json=_body(3, repo_path=repo_path))
+        assert resp.status_code == 409
+        assert "pr-sibling" in resp.json()["detail"]
+        assert "PR #42" in resp.json()["detail"]
+        assert len(patched_app["jobs"].list_jobs()) == jobs_before
 
 
 class TestPublishWindowLiveness:

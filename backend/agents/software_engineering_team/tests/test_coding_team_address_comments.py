@@ -1390,6 +1390,42 @@ class TestRunAddressComments:
         # KNOWN, UNCHANGED one this run itself triaged, not new/edited feedback.
         assert fake.labels_set and ac.WAITING_FOR_REVIEW_LABEL in fake.labels_set[-1]
 
+    def test_relist_still_blocks_when_an_earlier_history_message_is_edited(
+        self, address_env, monkeypatch
+    ) -> None:
+        """The not_an_issue verdict can be grounded on the thread's FULL
+        history, not just its latest message. A reviewer editing an EARLIER
+        message — while this run's triage was in flight — changes that
+        context without touching the latest message's id or body at all, so
+        comparing bodies alone would wrongly treat the thread as unchanged
+        and let a stale verdict block a re-triage."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=False, is_false_positive=False)
+        root = _comment(2, body="is this actually a problem?")
+        follow_up = _comment(3, body="just a question")
+        fake.review_comments = [root, follow_up]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
+
+        real_unresolved_comments = ac._unresolved_comments
+        calls = {"n": 0}
+
+        def _stub(client, owner, repo, pr_number):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_unresolved_comments(client, owner, repo, pr_number)
+            # The final re-list sees the SAME latest comment (id 3, unchanged
+            # body), but the thread's root message was edited in the window
+            # since triage ran.
+            edited_root = _comment(2, body="wait, this needs a null check")
+            thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))
+            return [follow_up], {2: thread, 3: thread}, [], {3: [edited_root, follow_up]}
+
+        monkeypatch.setattr(ac, "_unresolved_comments", _stub)
+
+        ac._run_address_comments("job1", req, "tok")
+
+        assert fake.labels_set == []  # the edited earlier message still blocks success
+
     def test_relist_still_blocks_when_a_not_an_issue_comment_is_edited(
         self, address_env, monkeypatch
     ) -> None:
